@@ -1,0 +1,48 @@
+DRAG COEFFICIENT DATA PROVENANCE AND LICENSE
+
+The drag coefficient tables (g1.csv, g7.csv, g1.npy, g7.npy) contain data 
+originally measured by:
+- US Army Ballistic Research Laboratory
+- Aberdeen Proving Ground, Maryland
+- Published via Winchester-Western Division, Olin Mathieson Chemical Corporation, 1965
+- Refined through work of Robert L. McCoy and others at BRL
+
+STATUS: PUBLIC DOMAIN
+
+As work of the US Government, these measurements are in the public domain.
+No copyright or license restrictions apply to the drag coefficient values themselves.
+
+The data represents physical measurements of drag forces on standard reference 
+projectiles and are scientific facts not subject to copyright protection.
+
+ATTRIBUTION (appreciated but not required):
+"Drag data courtesy of US Army Ballistic Research Laboratory, Aberdeen Proving Ground"
+
+ACADEMIC CITATION:
+McCoy, R.L. (1981). "McDrag - A Computer Program for Estimating the Drag 
+Coefficients of Projectiles." Technical Report ARBRL-TR-02293, Army Ballistic 
+Research Lab, Aberdeen Proving Ground, MD.
+
+Original data: Lowry, E.D. (1965). "Exterior Ballistic Tables Based on 
+Numerical Integration." Winchester-Western Division, Olin Mathieson Chemical 
+Corporation.
+
+DATA DESCRIPTION:
+- G1: Standard projectile with 2 caliber radius ogival-head, flat base
+- G7: Standard projectile with 7 caliber radius ogival-head, boat tail base
+- Format: Mach number, drag coefficient (Cd)
+- Atmosphere: ICAO Standard Atmosphere
+
+FORMAT AND ARRANGEMENT:
+While the drag coefficient values are public domain, any specific formatting,
+arrangement, or software implementation may have separate licensing. The CSV and
+NPY file formats used here are provided without restriction.
+
+HISTORICAL NOTE:
+These drag functions have been the industry standard for external ballistics
+calculations since 1965. They are used universally in ballistics software,
+firing tables, and trajectory calculations worldwide.
+
+NO WARRANTY:
+This data is provided "as is" without warranty of any kind, express or implied.
+Users are responsible for validating the data for their specific applications.
