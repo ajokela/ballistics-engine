@@ -34,6 +34,8 @@ mod transonic_drag;
 mod reynolds;
 mod form_factor;
 mod monte_carlo;
+mod bc_estimation;
+mod cluster_bc;
 
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;

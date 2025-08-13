@@ -87,6 +87,26 @@ enum Commands {
         /// Show all trajectory points
         #[arg(long)]
         full: bool,
+        
+        /// Automatically zero to target distance (overrides --angle)
+        #[arg(long)]
+        auto_zero: Option<f64>,
+        
+        /// Sight height above bore for auto-zero
+        #[arg(long, default_value = "0.05")]
+        sight_height: f64,
+        
+        /// Enable velocity-based BC segmentation
+        #[arg(long)]
+        use_bc_segments: bool,
+        
+        /// Enable cluster-based BC degradation (overrides BC segments)
+        #[arg(long)]
+        use_cluster_bc: bool,
+        
+        /// Bullet cluster ID (0-3) for cluster BC
+        #[arg(long)]
+        bullet_cluster: Option<usize>,
     },
     
     /// Run Monte Carlo simulation
@@ -361,7 +381,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             velocity, angle, bc, mass, diameter, drag_model, 
             max_range, time_step, wind_speed, wind_direction,
             temperature, pressure, humidity, altitude,
-            output, full 
+            output, full, auto_zero, sight_height,
+            use_bc_segments, use_cluster_bc, bullet_cluster
         } => {
             // Convert inputs to metric
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
@@ -372,12 +393,41 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
             let pressure_metric = UnitConverter::pressure_to_metric(pressure, cli.units);
             let altitude_metric = UnitConverter::altitude_to_metric(altitude, cli.units);
+            let sight_height_metric = UnitConverter::distance_to_metric(sight_height, cli.units);
+            
+            // Calculate zero angle if auto-zero is specified
+            let launch_angle = if let Some(zero_distance) = auto_zero {
+                let zero_distance_metric = UnitConverter::distance_to_metric(zero_distance, cli.units);
+                
+                // Create inputs for zero calculation
+                let zero_inputs = BallisticInputs {
+                    muzzle_velocity: velocity_metric,
+                    ballistic_coefficient: bc,
+                    mass: mass_metric,
+                    diameter: diameter_metric,
+                    sight_height: sight_height_metric,
+                    ..Default::default()
+                };
+                
+                // Calculate zero angle
+                let zero_angle = ballistics_engine::calculate_zero_angle(
+                    zero_inputs,
+                    zero_distance_metric,
+                    0.0  // target height at zero distance
+                )?;
+                
+                // Convert to degrees for the trajectory function
+                zero_angle.to_degrees()
+            } else {
+                angle
+            };
             
             run_trajectory(
-                velocity_metric, angle, bc, mass_metric, diameter_metric, drag_model,
+                velocity_metric, launch_angle, bc, mass_metric, diameter_metric, drag_model,
                 max_range_metric, time_step, wind_speed_metric, wind_direction,
                 temperature_metric, pressure_metric, humidity, altitude_metric,
-                output, full, cli.units
+                output, full, cli.units, sight_height_metric,
+                use_bc_segments, use_cluster_bc, bullet_cluster
             )?;
         },
         
@@ -398,10 +448,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             target_distance, target_height, sight_height,
             output
         } => {
+            // Convert inputs to metric
+            let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
+            let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+            let target_distance_metric = UnitConverter::distance_to_metric(target_distance, cli.units);
+            let target_height_metric = UnitConverter::distance_to_metric(target_height, cli.units);
+            let sight_height_metric = UnitConverter::distance_to_metric(sight_height, cli.units);
+            
             run_zero_calculation(
-                velocity, bc, mass, diameter,
-                target_distance, target_height, sight_height,
-                output
+                velocity_metric, bc, mass_metric, diameter_metric,
+                target_distance_metric, target_height_metric, sight_height_metric,
+                output, cli.units
             )?;
         },
         
@@ -439,19 +497,64 @@ fn run_trajectory(
     output: OutputFormat,
     full: bool,
     units: UnitSystem,
+    sight_height: f64,
+    use_bc_segments: bool,
+    use_cluster_bc: bool,
+    bullet_cluster: Option<usize>,
 ) -> Result<(), Box<dyn Error>> {
-    // Create ballistic inputs
+    // Create ballistic inputs with all required fields
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+    
     let inputs = BallisticInputs {
+        // Core fields
         muzzle_velocity: velocity,
         launch_angle: angle.to_radians(),
         ballistic_coefficient: bc,
         mass,
         diameter,
-        drag_model: match drag_model {
-            DragModelArg::G1 => DragModel::G1,
-            DragModelArg::G7 => DragModel::G7,
-        },
-        ..Default::default()
+        drag_model: drag_model_enum,
+        sight_height,  // Use provided sight height
+        
+        // Duplicate fields for internal compatibility
+        altitude,
+        bc_type: drag_model_enum,
+        bc_value: bc,
+        caliber_inches: diameter / 0.0254,  // Convert meters to inches
+        weight_grains: mass / 0.00006479891,  // Convert kg to grains
+        bullet_diameter: diameter,  // Keep in meters
+        bullet_mass: mass,  // Keep in kg
+        bullet_length: diameter * 4.0,  // Approximate
+        muzzle_angle: angle.to_radians(),
+        target_distance: max_range,
+        temperature,
+        twist_rate: 12.0,  // Default 1:12" twist
+        is_twist_right: true,
+        shooting_angle: 0.0,
+        latitude: None,
+        ground_threshold: -10.0,
+        
+        // Advanced effects
+        enable_advanced_effects: false,
+        use_powder_sensitivity: false,
+        powder_temp_sensitivity: 0.0,
+        powder_temp: temperature,
+        tipoff_yaw: 0.0,
+        tipoff_decay_distance: 50.0,
+        use_bc_segments,
+        bc_segments: None,
+        bc_segments_data: None,
+        use_enhanced_spin_drift: false,
+        use_form_factor: false,
+        use_cluster_bc,
+        
+        // Optional data
+        bc_type_str: None,
+        bullet_model: None,
+        bullet_id: None,
+        bullet_cluster: bullet_cluster.map(|id| id.to_string()),
     };
     
     // Set up wind conditions
@@ -695,6 +798,7 @@ fn run_zero_calculation(
     target_height: f64,
     sight_height: f64,
     output: OutputFormat,
+    units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
     // Create ballistic inputs
     let inputs = BallisticInputs {
@@ -745,17 +849,28 @@ fn run_zero_calculation(
         },
         
         OutputFormat::Table => {
+            // Convert distances back to display units
+            let target_dist_display = UnitConverter::distance_from_metric(target_distance, units);
+            let target_height_display = UnitConverter::distance_from_metric(target_height, units);
+            let sight_height_display = UnitConverter::distance_from_metric(sight_height, units);
+            let max_ordinate_display = UnitConverter::distance_from_metric(trajectory.max_height, units);
+            
+            let dist_unit = match units {
+                UnitSystem::Metric => "m",
+                UnitSystem::Imperial => "yd",
+            };
+            
             println!("╔════════════════════════════════════════╗");
             println!("║          ZERO CALCULATION              ║");
             println!("╠════════════════════════════════════════╣");
-            println!("║ Target Distance:   {:>8.1} m          ║", target_distance);
-            println!("║ Target Height:     {:>8.2} m          ║", target_height);
-            println!("║ Sight Height:      {:>8.3} m          ║", sight_height);
+            println!("║ Target Distance:   {:>8.1} {:3}       ║", target_dist_display, dist_unit);
+            println!("║ Target Height:     {:>8.2} {:3}       ║", target_height_display, dist_unit);
+            println!("║ Sight Height:      {:>8.3} {:3}       ║", sight_height_display, dist_unit);
             println!("╠════════════════════════════════════════╣");
             println!("║ Zero Angle:        {:>8.4}°          ║", zero_angle.to_degrees());
             println!("║ Zero Angle (MOA):  {:>8.2} MOA        ║", zero_angle.to_degrees() * 60.0);
             println!("║ Zero Angle (mrad): {:>8.2} mrad       ║", zero_angle * 1000.0);
-            println!("║ Max Ordinate:      {:>8.3} m          ║", trajectory.max_height);
+            println!("║ Max Ordinate:      {:>8.3} {:3}       ║", max_ordinate_display, dist_unit);
             println!("╚════════════════════════════════════════╝");
         },
     }

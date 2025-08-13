@@ -4,9 +4,9 @@ use crate::constants::*;
 use crate::atmosphere::{get_local_atmosphere, get_direct_atmosphere};
 use crate::drag::get_drag_coefficient_full;
 use crate::spin_drift::{calculate_enhanced_spin_drift, apply_enhanced_spin_drift};
-// use crate::bc_estimation::BCSegmentEstimator;
+use crate::bc_estimation::BCSegmentEstimator;
 use crate::form_factor::apply_form_factor_to_drag;
-// use crate::cluster_bc::ClusterBCDegradation;
+use crate::cluster_bc::ClusterBCDegradation;
 
 // Physics constants
 const INCHES_PER_FOOT: f64 = 12.0;
@@ -186,12 +186,21 @@ pub fn compute_derivatives(
         if inputs.use_cluster_bc {
             // Apply cluster-based BC degradation
             let cluster_bc = ClusterBCDegradation::new();
+            
+            // Convert mass to grains and diameter to inches for cluster BC
+            let weight_grains = inputs.bullet_mass / GRAINS_TO_KG;
+            let caliber_inches = inputs.bullet_diameter / INCHES_TO_METERS;
+            
+            // Parse cluster ID if provided
+            let cluster_id = inputs.bullet_cluster.as_ref()
+                .and_then(|s| s.parse::<usize>().ok());
+            
             bc_val = cluster_bc.adjust_bc(
                 bc_used, 
                 v_rel_fps, 
-                inputs.bullet_diameter, 
-                inputs.bullet_mass,
-                inputs.bullet_cluster
+                caliber_inches,
+                weight_grains,
+                cluster_id
             );
         } else if inputs.use_bc_segments {
             // Use velocity-based segments if cluster BC is disabled
@@ -551,12 +560,13 @@ fn get_bc_for_velocity(velocity_fps: f64, inputs: &BallisticInputs, bc_used: f64
         };
         
         // Estimate segments based on bullet characteristics
+        let bc_type_str = inputs.bc_type_str.as_deref().unwrap_or("G1");
         let segments = BCSegmentEstimator::estimate_bc_segments(
             bc_used,
-            inputs.bullet_diameter,
-            inputs.bullet_mass,
+            inputs.caliber_inches,
+            inputs.weight_grains,
             &model,
-            inputs.bc_type_str(),
+            bc_type_str,
         );
         
         // Find appropriate segment for current velocity

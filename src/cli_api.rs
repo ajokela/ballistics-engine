@@ -33,25 +33,109 @@ impl From<&str> for BallisticsError {
 // Ballistic input parameters
 #[derive(Debug, Clone)]
 pub struct BallisticInputs {
+    // Core ballistics parameters
     pub muzzle_velocity: f64,      // m/s
-    pub launch_angle: f64,          // radians
+    pub launch_angle: f64,          // radians (same as muzzle_angle)
     pub ballistic_coefficient: f64,
     pub mass: f64,                  // kg
     pub diameter: f64,              // meters
     pub drag_model: DragModel,
     pub sight_height: f64,          // meters
+    
+    // Additional fields for compatibility
+    pub altitude: f64,              // meters
+    pub bc_type: DragModel,         // same as drag_model
+    pub bc_value: f64,              // same as ballistic_coefficient
+    pub caliber_inches: f64,        // diameter in inches
+    pub weight_grains: f64,         // mass in grains
+    pub bullet_diameter: f64,       // same as diameter
+    pub bullet_mass: f64,           // same as mass
+    pub bullet_length: f64,         // meters
+    pub muzzle_angle: f64,          // same as launch_angle
+    pub target_distance: f64,       // meters
+    pub temperature: f64,           // Celsius
+    pub twist_rate: f64,            // inches per turn
+    pub is_twist_right: bool,       // right-hand twist
+    pub shooting_angle: f64,        // uphill/downhill angle in radians
+    pub latitude: Option<f64>,      // degrees
+    pub ground_threshold: f64,      // meters below which to stop
+    
+    // Advanced effects flags
+    pub enable_advanced_effects: bool,
+    pub use_powder_sensitivity: bool,
+    pub powder_temp_sensitivity: f64,
+    pub powder_temp: f64,          // Celsius
+    pub tipoff_yaw: f64,            // radians
+    pub tipoff_decay_distance: f64, // meters
+    pub use_bc_segments: bool,
+    pub bc_segments: Option<Vec<(f64, f64)>>,  // Mach-BC pairs
+    pub bc_segments_data: Option<Vec<crate::BCSegmentData>>,  // Velocity-BC segments
+    pub use_enhanced_spin_drift: bool,
+    pub use_form_factor: bool,
+    pub use_cluster_bc: bool,
+    
+    // Additional data fields
+    pub bc_type_str: Option<String>,
+    pub bullet_model: Option<String>,
+    pub bullet_id: Option<String>,
+    pub bullet_cluster: Option<String>,
 }
 
 impl Default for BallisticInputs {
     fn default() -> Self {
+        let mass_kg = 0.01;
+        let diameter_m = 0.00762;
+        let bc = 0.5;
+        let launch_angle_rad = 0.0;
+        let drag_model = DragModel::G1;
+        
         Self {
+            // Core parameters
             muzzle_velocity: 800.0,
-            launch_angle: 0.0,
-            ballistic_coefficient: 0.5,
-            mass: 0.01,
-            diameter: 0.00762,
-            drag_model: DragModel::G1,
+            launch_angle: launch_angle_rad,
+            ballistic_coefficient: bc,
+            mass: mass_kg,
+            diameter: diameter_m,
+            drag_model,
             sight_height: 0.05,
+            
+            // Duplicate fields for compatibility
+            altitude: 0.0,
+            bc_type: drag_model,
+            bc_value: bc,
+            caliber_inches: diameter_m / 0.0254,  // Convert to inches
+            weight_grains: mass_kg / 0.00006479891,  // Convert to grains
+            bullet_diameter: diameter_m,
+            bullet_mass: mass_kg,
+            bullet_length: diameter_m * 4.0,  // Approximate
+            muzzle_angle: launch_angle_rad,
+            target_distance: 100.0,
+            temperature: 15.0,
+            twist_rate: 12.0,  // 1:12" typical
+            is_twist_right: true,
+            shooting_angle: 0.0,
+            latitude: None,
+            ground_threshold: -10.0,
+            
+            // Advanced effects (disabled by default)
+            enable_advanced_effects: false,
+            use_powder_sensitivity: false,
+            powder_temp_sensitivity: 0.0,
+            powder_temp: 15.0,
+            tipoff_yaw: 0.0,
+            tipoff_decay_distance: 50.0,
+            use_bc_segments: false,
+            bc_segments: None,
+            bc_segments_data: None,
+            use_enhanced_spin_drift: false,
+            use_form_factor: false,
+            use_cluster_bc: false,
+            
+            // Optional data
+            bc_type_str: None,
+            bullet_model: None,
+            bullet_id: None,
+            bullet_cluster: None,
         }
     }
 }
@@ -122,7 +206,16 @@ pub struct TrajectorySolver {
 }
 
 impl TrajectorySolver {
-    pub fn new(inputs: BallisticInputs, wind: WindConditions, atmosphere: AtmosphericConditions) -> Self {
+    pub fn new(mut inputs: BallisticInputs, wind: WindConditions, atmosphere: AtmosphericConditions) -> Self {
+        // Ensure duplicate fields are synchronized
+        inputs.bc_type = inputs.drag_model;
+        inputs.bc_value = inputs.ballistic_coefficient;
+        inputs.bullet_diameter = inputs.diameter;
+        inputs.bullet_mass = inputs.mass;
+        inputs.muzzle_angle = inputs.launch_angle;
+        inputs.caliber_inches = inputs.diameter / 0.0254;
+        inputs.weight_grains = inputs.mass / 0.00006479891;
+        
         Self {
             inputs,
             wind,
