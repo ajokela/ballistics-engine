@@ -97,7 +97,7 @@ pub fn calculate_pitch_damping_moment(
     velocity_mps: f64,
     air_density_kg_m3: f64,
     caliber_m: f64,
-    length_m: f64,
+    _length_m: f64,
     mach: f64,
     coeffs: &PitchDampingCoefficients,
 ) -> f64 {

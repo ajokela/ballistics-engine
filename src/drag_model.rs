@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "python", pyclass)]
+#[cfg_attr(feature = "python", pyclass(eq, eq_int))]
 pub enum DragModel {
     G1,
     G2,

@@ -100,7 +100,7 @@ pub fn fast_integrate(
     params: FastIntegrationParams,
 ) -> FastSolution {
     // Extract parameters
-    let mass_kg = inputs.bullet_mass * GRAINS_TO_KG;
+    let _mass_kg = inputs.bullet_mass * GRAINS_TO_KG;
     let bc = inputs.bc_value;
     let drag_model = &inputs.bc_type;
     
@@ -161,7 +161,7 @@ pub fn fast_integrate(
         let state = states[i];
         
         let pos = Vector3::new(state[0], state[1], state[2]);
-        let vel = Vector3::new(state[3], state[4], state[5]);
+        let _vel = Vector3::new(state[3], state[4], state[5]);
         
         // Check termination conditions
         if pos.x >= params.horiz {

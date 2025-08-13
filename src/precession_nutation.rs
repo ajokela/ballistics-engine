@@ -245,7 +245,7 @@ pub fn calculate_epicyclic_motion(
 /// Calculate the limit cycle yaw angle
 pub fn calculate_limit_cycle_yaw(
     velocity_mps: f64,
-    spin_rate_rad_s: f64,
+    _spin_rate_rad_s: f64,
     stability_factor: f64,
     crosswind_mps: f64,
 ) -> f64 {

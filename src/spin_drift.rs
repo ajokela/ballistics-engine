@@ -210,7 +210,7 @@ pub fn calculate_magnus_drift_component(
 /// Calculate pure gyroscopic drift (Poisson effect)
 pub fn calculate_gyroscopic_drift(
     stability_factor: f64,
-    yaw_rad: f64,
+    _yaw_rad: f64,
     velocity_mps: f64,
     time_s: f64,
     is_right_twist: bool,

@@ -327,7 +327,7 @@ mod tests {
 
 /// Python-exposed function for transonic drag correction
 #[pyfunction]
-#[pyo3(name = "transonic_correction_rust")]
+#[pyo3(name = "transonic_correction_rust", signature = (mach, base_cd, shape_str=None, include_wave_drag=None))]
 pub fn transonic_correction_py(
     mach: f64,
     base_cd: f64,

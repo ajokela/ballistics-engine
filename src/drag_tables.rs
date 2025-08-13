@@ -3,6 +3,7 @@ use once_cell::sync::Lazy;
 use crate::drag::DragTable;
 
 
+#[allow(dead_code)]
 pub static G1_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7, 0.725, 0.75, 0.775, 0.8, 0.825, 0.85, 0.875, 0.9, 0.925, 0.95, 0.975, 1.0, 1.025, 1.05, 1.075, 1.1, 1.125, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5, 1.55, 1.6, 1.65, 1.7, 1.75, 1.8, 1.85, 1.9, 1.95, 2.0, 2.05, 2.1, 2.15, 2.2, 2.25, 2.3, 2.35, 2.4, 2.45, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.0, 4.2, 4.4, 4.6, 4.8, 5.0],
@@ -10,6 +11,7 @@ pub static G1_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     )
 });
 
+#[allow(dead_code)]
 pub static G7_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.725, 0.75, 0.775, 0.8, 0.825, 0.85, 0.875, 0.9, 0.925, 0.95, 0.975, 1.0, 1.025, 1.05, 1.075, 1.1, 1.125, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.5, 1.55, 1.6, 1.65, 1.7, 1.75, 1.8, 1.85, 1.9, 1.95, 2.0, 2.05, 2.1, 2.15, 2.2, 2.25, 2.3, 2.35, 2.4, 2.45, 2.5, 2.55, 2.6, 2.65, 2.7, 2.75, 2.8, 2.85, 2.9, 2.95, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.0, 4.2, 4.4, 4.6, 4.8, 5.0],
@@ -18,6 +20,7 @@ pub static G7_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 });
 
 // G2 placeholder - add actual data
+#[allow(dead_code)]
 pub static G2_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
@@ -26,6 +29,7 @@ pub static G2_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 });
 
 // G5 placeholder - add actual data
+#[allow(dead_code)]
 pub static G5_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
@@ -34,6 +38,7 @@ pub static G5_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 });
 
 // G6 placeholder - add actual data
+#[allow(dead_code)]
 pub static G6_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
@@ -42,6 +47,7 @@ pub static G6_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 });
 
 // G8 placeholder - add actual data
+#[allow(dead_code)]
 pub static G8_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
@@ -50,6 +56,7 @@ pub static G8_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 });
 
 // GI placeholder - add actual data
+#[allow(dead_code)]
 pub static GI_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
@@ -58,6 +65,7 @@ pub static GI_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 });
 
 // GS placeholder - add actual data
+#[allow(dead_code)]
 pub static GS_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     DragTable::new(
         vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0],

@@ -385,6 +385,7 @@ fn extract_bc_segments_data(data: &Bound<'_, PyAny>) -> PyResult<Vec<BCSegmentDa
 }
 
 /// Get wind vector from Python wind sock object
+#[allow(dead_code)]
 fn get_wind_vector(wind_sock: &Bound<'_, PyAny>, range_m: f64) -> PyResult<Vector3<f64>> {
     let wind_vector_method = wind_sock.getattr("vector_for_range")?;
     let wind_result = wind_vector_method.call1((range_m,))?;
@@ -417,7 +418,8 @@ fn get_wind_vector(wind_sock: &Bound<'_, PyAny>, range_m: f64) -> PyResult<Vecto
 
 /// Internal ballistic inputs structure for Python integration
 #[derive(Debug, Clone)]
-struct InternalBallisticInputs {
+#[allow(dead_code)]
+pub(crate) struct InternalBallisticInputs {
     bc_value: f64,
     bc_type: DragModel,
     bullet_mass: f64,
@@ -885,6 +887,7 @@ fn sample_trajectory_rust(
 
 /// Python wrapper for Brent's method root finding
 #[pyfunction]
+#[allow(dead_code)]
 fn brent_root_find_rust(
     py: Python,
     func_name: String,
@@ -1030,6 +1033,7 @@ struct PyWindShearWindSock {
 #[pymethods]
 impl PyWindShearWindSock {
     #[new]
+    #[pyo3(signature = (segments, enable_shear, shear_model, shooter_altitude_m=None))]
     fn new(segments: Vec<(f64, f64, f64)>, enable_shear: bool, shear_model: String, shooter_altitude_m: Option<f64>) -> Self {
         let shear_profile = if enable_shear && shear_model != "none" {
             let mut profile = WindShearProfile::default();
@@ -1130,7 +1134,7 @@ fn fast_integrate_rust(
     dict.set_item("t", solution.t.to_pyarray_bound(py))?;
     
     // Convert y matrix (6 x n_points) to numpy array
-    let n_points = solution.t.len();
+    let _n_points = solution.t.len();
     // Convert the row-major solution.y to a 2D numpy array
     let y_array = numpy::PyArray2::from_vec2_bound(py, &solution.y).unwrap();
     dict.set_item("y", y_array)?;

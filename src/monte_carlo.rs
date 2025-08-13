@@ -258,13 +258,13 @@ pub fn monte_carlo_parallel(
 /// This function allows evaluating multiple Monte Carlo scenarios in parallel,
 /// useful for sensitivity analysis across different parameter combinations.
 #[pyfunction]
-#[pyo3(signature = (base_inputs_list, param_samples_list, param_names_list, runs_per_scenario, num_threads=None))]
+#[pyo3(signature = (base_inputs_list, param_samples_list, param_names_list, _runs_per_scenario, num_threads=None))]
 pub fn monte_carlo_batch(
     py: Python,
     base_inputs_list: Vec<Bound<'_, PyDict>>,
     param_samples_list: Vec<PyReadonlyArray2<f64>>,
     param_names_list: Vec<Vec<String>>,
-    runs_per_scenario: Vec<usize>,
+    _runs_per_scenario: Vec<usize>,
     num_threads: Option<usize>,
 ) -> PyResult<Vec<PyObject>> {
     // Configure thread pool with proper error handling

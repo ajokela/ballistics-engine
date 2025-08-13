@@ -10,7 +10,8 @@ keywords = ["ballistics", "trajectory", "physics", "simulation"]
 categories = ["science", "simulation"]
 
 [features]
-default = []
+default = ["python"]
+python = ["pyo3", "numpy"]
 
 [dependencies]
 nalgebra = "0.33"
@@ -26,9 +27,9 @@ thiserror = "1.0"
 rand = "0.8"
 rand_distr = "0.4"
 
-# Python support (always included for now)
-pyo3 = { version = "0.22" }
-numpy = "0.22"
+# Python support (optional)
+pyo3 = { version = "0.22", optional = true }
+numpy = { version = "0.22", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
