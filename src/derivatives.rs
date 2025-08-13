@@ -1,13 +1,12 @@
 use nalgebra::Vector3;
-use pyo3::prelude::*;
 use crate::InternalBallisticInputs as BallisticInputs;
 use crate::constants::*;
 use crate::atmosphere::{get_local_atmosphere, get_direct_atmosphere};
 use crate::drag::get_drag_coefficient_full;
 use crate::spin_drift::{calculate_enhanced_spin_drift, apply_enhanced_spin_drift};
-use crate::bc_estimation::BCSegmentEstimator;
+// use crate::bc_estimation::BCSegmentEstimator;
 use crate::form_factor::apply_form_factor_to_drag;
-use crate::cluster_bc::ClusterBCDegradation;
+// use crate::cluster_bc::ClusterBCDegradation;
 
 // Physics constants
 const INCHES_PER_FOOT: f64 = 12.0;
@@ -111,7 +110,7 @@ pub fn compute_derivatives(
     bc_used: f64,
     omega_vector: Option<Vector3<f64>>,
     time: f64,
-) -> PyResult<[f64; 6]> {
+) -> [f64; 6] {
     // Gravity acceleration vector
     let accel_gravity = Vector3::new(0.0, -G_ACCEL_MPS2, 0.0);
     
@@ -399,7 +398,7 @@ pub fn compute_derivatives(
     }
     
     // Return state derivatives: [velocity, acceleration]
-    Ok(derivatives)
+    derivatives
 }
 
 /// Calculate appropriate BC fallback based on available bullet parameters

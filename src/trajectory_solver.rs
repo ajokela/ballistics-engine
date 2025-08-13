@@ -314,13 +314,14 @@ pub fn post_process_trajectory(
     let mut wind_drift_m = final_z_m;
     if inputs.enable_advanced_effects {
         // Add spin drift using existing function
-        use crate::stability::compute_spin_drift;
-        wind_drift_m += compute_spin_drift(
-            final_time,
-            initial_conditions.stability_coefficient,
-            inputs.twist_rate,
-            inputs.is_twist_right,
-        );
+        // TODO: Re-enable when stability module is available
+        // use crate::stability::compute_spin_drift;
+        // wind_drift_m += compute_spin_drift(
+        //     final_time,
+        //     initial_conditions.stability_coefficient,
+        //     inputs.twist_rate,
+        //     inputs.is_twist_right,
+        // );
     }
     
     // Calculate final velocity and energy

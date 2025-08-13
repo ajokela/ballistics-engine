@@ -2,7 +2,6 @@
 use std::path::Path;
 use ndarray::ArrayD;
 use once_cell::sync::Lazy;
-use pyo3::prelude::*;
 use crate::DragModel;
 use crate::transonic_drag::{transonic_correction, get_projectile_shape, ProjectileShape};
 
@@ -645,9 +644,4 @@ pub fn interpolated_bc(mach: f64, segments: &[(f64, f64)]) -> f64 {
     }
 }
 
-/// Python-exposed function for BC interpolation
-#[pyfunction]
-#[pyo3(name = "interpolated_bc_rust")]
-pub fn interpolated_bc_py(mach: f64, segments: Vec<(f64, f64)>) -> PyResult<f64> {
-    Ok(interpolated_bc(mach, &segments))
-}
+// Removed Python-specific function

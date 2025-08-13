@@ -12,6 +12,10 @@ use std::error::Error;
 #[command(version = "0.1.0")]
 #[command(about = "High-performance ballistics trajectory calculator", long_about = None)]
 struct Cli {
+    /// Unit system for input/output (metric or imperial)
+    #[arg(short = 'u', long, default_value = "imperial", global = true)]
+    units: UnitSystem,
+    
     #[command(subcommand)]
     command: Commands,
 }
@@ -20,7 +24,7 @@ struct Cli {
 enum Commands {
     /// Calculate a single trajectory
     Trajectory {
-        /// Initial velocity (m/s)
+        /// Initial velocity (fps or m/s based on --units)
         #[arg(short = 'v', long)]
         velocity: f64,
         
@@ -32,11 +36,11 @@ enum Commands {
         #[arg(short = 'b', long)]
         bc: f64,
         
-        /// Mass (kg)
+        /// Mass (grains or kg based on --units)
         #[arg(short = 'm', long)]
         mass: f64,
         
-        /// Diameter (meters)
+        /// Diameter (inches or meters based on --units)
         #[arg(short = 'd', long)]
         diameter: f64,
         
@@ -44,7 +48,7 @@ enum Commands {
         #[arg(long, default_value = "g1")]
         drag_model: DragModelArg,
         
-        /// Maximum range (meters)
+        /// Maximum range (yards or meters based on --units)
         #[arg(long, default_value = "1000.0")]
         max_range: f64,
         
@@ -52,7 +56,7 @@ enum Commands {
         #[arg(long, default_value = "0.001")]
         time_step: f64,
         
-        /// Wind speed (m/s)
+        /// Wind speed (mph or m/s based on --units)
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
         
@@ -60,19 +64,19 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_direction: f64,
         
-        /// Temperature (Celsius)
-        #[arg(long, default_value = "15.0")]
+        /// Temperature (Fahrenheit or Celsius based on --units)
+        #[arg(long, default_value = "59.0")]
         temperature: f64,
         
-        /// Pressure (hPa)
-        #[arg(long, default_value = "1013.25")]
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long, default_value = "29.92")]
         pressure: f64,
         
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0")]
         humidity: f64,
         
-        /// Altitude (meters)
+        /// Altitude (feet or meters based on --units)
         #[arg(long, default_value = "0.0")]
         altitude: f64,
         
@@ -208,6 +212,14 @@ enum Commands {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum UnitSystem {
+    /// Metric units (m/s, kg, meters, Celsius)
+    Metric,
+    /// Imperial units (fps, grains, yards, Fahrenheit)
+    Imperial,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum DragModelArg {
     G1,
     G7,
@@ -257,6 +269,90 @@ struct MonteCarloResult {
     hit_probability: Option<f64>,
 }
 
+// Unit conversion functions
+struct UnitConverter;
+
+impl UnitConverter {
+    // Input conversions (to metric)
+    fn velocity_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 0.3048, // fps to m/s
+        }
+    }
+    
+    fn mass_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 0.00006479891, // grains to kg
+        }
+    }
+    
+    fn distance_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 0.9144, // yards to meters
+        }
+    }
+    
+    fn diameter_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 0.0254, // inches to meters
+        }
+    }
+    
+    fn wind_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 0.44704, // mph to m/s
+        }
+    }
+    
+    fn temperature_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => (val - 32.0) * 5.0 / 9.0, // Fahrenheit to Celsius
+        }
+    }
+    
+    fn pressure_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 33.8639, // inHg to hPa
+        }
+    }
+    
+    fn altitude_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 0.3048, // feet to meters
+        }
+    }
+    
+    // Output conversions (from metric)
+    fn velocity_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val / 0.3048, // m/s to fps
+        }
+    }
+    
+    fn distance_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val / 0.9144, // meters to yards
+        }
+    }
+    
+    fn energy_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 0.737562, // Joules to ft-lbs
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     
@@ -267,11 +363,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             temperature, pressure, humidity, altitude,
             output, full 
         } => {
+            // Convert inputs to metric
+            let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
+            let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+            let max_range_metric = UnitConverter::distance_to_metric(max_range, cli.units);
+            let wind_speed_metric = UnitConverter::wind_to_metric(wind_speed, cli.units);
+            let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
+            let pressure_metric = UnitConverter::pressure_to_metric(pressure, cli.units);
+            let altitude_metric = UnitConverter::altitude_to_metric(altitude, cli.units);
+            
             run_trajectory(
-                velocity, angle, bc, mass, diameter, drag_model,
-                max_range, time_step, wind_speed, wind_direction,
-                temperature, pressure, humidity, altitude,
-                output, full
+                velocity_metric, angle, bc, mass_metric, diameter_metric, drag_model,
+                max_range_metric, time_step, wind_speed_metric, wind_direction,
+                temperature_metric, pressure_metric, humidity, altitude_metric,
+                output, full, cli.units
             )?;
         },
         
@@ -332,6 +438,7 @@ fn run_trajectory(
     altitude: f64,
     output: OutputFormat,
     full: bool,
+    units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
     // Create ballistic inputs
     let inputs = BallisticInputs {
@@ -415,21 +522,36 @@ fn run_trajectory(
         },
         
         OutputFormat::Table => {
+            // Convert outputs to user's units
+            let range_display = UnitConverter::distance_from_metric(result.max_range, units);
+            let height_display = UnitConverter::distance_from_metric(result.max_height, units);
+            let velocity_display = UnitConverter::velocity_from_metric(result.impact_velocity, units);
+            let energy_display = UnitConverter::energy_from_metric(result.impact_energy, units);
+            
+            let (range_unit, velocity_unit, energy_unit) = match units {
+                UnitSystem::Metric => ("m", "m/s", "J"),
+                UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+            };
+            
             println!("╔════════════════════════════════════════╗");
             println!("║         TRAJECTORY RESULTS             ║");
             println!("╠════════════════════════════════════════╣");
-            println!("║ Max Range:         {:>8.2} m          ║", result.max_range);
-            println!("║ Max Height:        {:>8.2} m          ║", result.max_height);
+            println!("║ Max Range:         {:>8.2} {:3}       ║", range_display, range_unit);
+            println!("║ Max Height:        {:>8.2} {:3}       ║", height_display, range_unit);
             println!("║ Time of Flight:    {:>8.3} s          ║", result.time_of_flight);
-            println!("║ Impact Velocity:   {:>8.2} m/s        ║", result.impact_velocity);
-            println!("║ Impact Energy:     {:>8.2} J          ║", result.impact_energy);
+            println!("║ Impact Velocity:   {:>8.2} {:3}       ║", velocity_display, velocity_unit);
+            println!("║ Impact Energy:     {:>8.2} {:5}     ║", energy_display, energy_unit);
             println!("╚════════════════════════════════════════╝");
             
             if full && !result.points.is_empty() {
                 println!();
                 println!("Trajectory Points:");
+                let (dist_hdr, vel_hdr, energy_hdr) = match units {
+                    UnitSystem::Metric => ("(m)", "(m/s)", "(J)"),
+                    UnitSystem::Imperial => ("(yd)", "(fps)", "(ft-lb)"),
+                };
                 println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
-                println!("│ Time (s) │  X (m)   │  Y (m)   │ Vel(m/s) │ Energy(J)│");
+                println!("│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│", dist_hdr, dist_hdr, vel_hdr, energy_hdr);
                 println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
                 
                 let step = if result.points.len() > 20 {
@@ -440,9 +562,13 @@ fn run_trajectory(
                 
                 for (i, p) in result.points.iter().enumerate() {
                     if i % step == 0 || i == result.points.len() - 1 {
+                        let x_display = UnitConverter::distance_from_metric(p.position.x, units);
+                        let y_display = UnitConverter::distance_from_metric(p.position.y, units);
+                        let vel_display = UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
+                        let energy_display = UnitConverter::energy_from_metric(p.kinetic_energy, units);
+                        
                         println!("│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
-                            p.time, p.position.x, p.position.y, 
-                            p.velocity_magnitude, p.kinetic_energy);
+                            p.time, x_display, y_display, vel_display, energy_display);
                     }
                 }
                 println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");

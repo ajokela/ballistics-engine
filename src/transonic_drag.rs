@@ -3,7 +3,6 @@
 /// This module implements physics-based corrections for drag in the transonic regime
 /// (Mach 0.8-1.2) where shock waves significantly affect the drag coefficient.
 
-use pyo3::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProjectileShape {
@@ -325,37 +324,6 @@ mod tests {
     }
 }
 
-/// Python-exposed function for transonic drag correction
-#[pyfunction]
-#[pyo3(name = "transonic_correction_rust", signature = (mach, base_cd, shape_str=None, include_wave_drag=None))]
-pub fn transonic_correction_py(
-    mach: f64,
-    base_cd: f64,
-    shape_str: Option<&str>,
-    include_wave_drag: Option<bool>,
-) -> PyResult<f64> {
-    let shape = shape_str
-        .map(ProjectileShape::from_str)
-        .unwrap_or(ProjectileShape::Spitzer);
-    let include_wave = include_wave_drag.unwrap_or(true);
-    
-    Ok(transonic_correction(mach, base_cd, shape, include_wave))
-}
+// Removed Python-specific function
 
-/// Python-exposed function for projectile shape estimation
-#[pyfunction]
-#[pyo3(name = "get_projectile_shape_rust")]
-pub fn get_projectile_shape_py(
-    caliber: f64,
-    weight_grains: f64,
-    g_model: &str,
-) -> PyResult<String> {
-    let shape = get_projectile_shape(caliber, weight_grains, g_model);
-    let shape_str = match shape {
-        ProjectileShape::Spitzer => "spitzer",
-        ProjectileShape::RoundNose => "round_nose",
-        ProjectileShape::FlatBase => "flat_base",
-        ProjectileShape::BoatTail => "boat_tail",
-    };
-    Ok(shape_str.to_string())
-}
+// Removed Python-specific function

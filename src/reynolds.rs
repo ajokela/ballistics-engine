@@ -4,7 +4,6 @@
 //! increases. This module provides corrections based on Reynolds number to improve
 //! accuracy for subsonic projectiles and end-of-trajectory calculations.
 
-use pyo3::prelude::*;
 
 /// Flow regime classification based on Reynolds number
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -224,23 +223,4 @@ mod tests {
     }
 }
 
-/// Python-exposed function for applying Reynolds correction
-#[pyfunction]
-#[pyo3(name = "apply_reynolds_correction_rust")]
-pub fn apply_reynolds_correction_py(
-    base_cd: f64,
-    velocity_mps: f64,
-    diameter_inches: f64,
-    air_density_kg_m3: f64,
-    temperature_c: f64,
-    mach: f64,
-) -> PyResult<f64> {
-    Ok(apply_reynolds_correction(
-        base_cd,
-        velocity_mps,
-        diameter_inches,
-        air_density_kg_m3,
-        temperature_c,
-        mach,
-    ))
-}
+// Removed Python-specific function

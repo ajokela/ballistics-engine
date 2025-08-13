@@ -1,9 +1,5 @@
-/// Drag model enum that works in both Python and pure Rust contexts
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-
+/// Drag model enum
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "python", pyclass(eq, eq_int))]
 pub enum DragModel {
     G1,
     G2,
