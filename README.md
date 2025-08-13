@@ -4,7 +4,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 
 ## Features
 
-- **6DOF Trajectory Integration** - Full six degrees of freedom ballistic modeling
+- **4DOF Trajectory Integration** - Four degrees of freedom ballistic modeling (3D position + time)
 - **Advanced Drag Models** - Support for G1, G7, and custom drag curves with transonic corrections
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
