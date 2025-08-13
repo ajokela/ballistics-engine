@@ -1,4 +1,4 @@
-use crate::BallisticInputs;
+use crate::InternalBallisticInputs;
 use std::f64;
 
 // Constants for unit conversions
@@ -160,7 +160,7 @@ where
 }
 
 /// Calculate adjusted muzzle velocity for powder temperature sensitivity
-pub fn adjusted_muzzle_velocity(inputs: &BallisticInputs) -> f64 {
+pub fn adjusted_muzzle_velocity(inputs: &InternalBallisticInputs) -> f64 {
     let mut mv = inputs.muzzle_velocity;
     
     if inputs.use_powder_sensitivity {
@@ -173,8 +173,8 @@ pub fn adjusted_muzzle_velocity(inputs: &BallisticInputs) -> f64 {
 
 /// Calculate zero angle using Brent's method and Rust trajectory integration
 pub fn zero_angle(
-    inputs: &BallisticInputs,
-    trajectory_func: impl Fn(&BallisticInputs, f64) -> Result<f64, String> + Copy,
+    inputs: &InternalBallisticInputs,
+    trajectory_func: impl Fn(&InternalBallisticInputs, f64) -> Result<f64, String> + Copy,
 ) -> Result<AngleResult, String> {
     // Set up the target vertical position based on shooting angle
     let vert = if inputs.shooting_angle.abs() > 1e-6 {
@@ -233,9 +233,9 @@ pub fn zero_angle(
 
 /// Solve muzzle angle using Brent's method optimization
 pub fn solve_muzzle_angle(
-    inputs: &BallisticInputs,
+    inputs: &InternalBallisticInputs,
     zero_distance_los_m: f64,
-    trajectory_func: impl Fn(&BallisticInputs) -> Result<f64, String> + Copy, // Returns drop_m
+    trajectory_func: impl Fn(&InternalBallisticInputs) -> Result<f64, String> + Copy, // Returns drop_m
     angle_lower_deg: f64,
     angle_upper_deg: f64,
     rtol: f64,
@@ -340,8 +340,8 @@ mod tests {
     use super::*;
     use crate::DragModel;
     
-    fn create_test_inputs() -> BallisticInputs {
-        BallisticInputs {
+    fn create_test_inputs() -> InternalBallisticInputs {
+        InternalBallisticInputs {
             bc_value: 0.5,
             bc_type: DragModel::G1,
             bullet_mass: 168.0,

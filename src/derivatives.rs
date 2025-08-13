@@ -1,6 +1,6 @@
 use nalgebra::Vector3;
 use pyo3::prelude::*;
-use crate::BallisticInputs;
+use crate::InternalBallisticInputs as BallisticInputs;
 use crate::constants::*;
 use crate::atmosphere::{get_local_atmosphere, get_direct_atmosphere};
 use crate::drag::get_drag_coefficient_full;
@@ -479,6 +479,7 @@ pub fn interpolated_bc(mach: f64, segments: &[(f64, f64)], inputs: Option<&Balli
             let bc_type_str = match inputs.bc_type {
                 crate::DragModel::G1 => "G1",
                 crate::DragModel::G7 => "G7",
+                _ => "G1", // Default to G1 for other models
             };
             return calculate_bc_fallback(
                 Some(inputs.bullet_mass),

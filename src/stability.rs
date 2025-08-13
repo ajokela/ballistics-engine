@@ -1,4 +1,4 @@
-use crate::BallisticInputs;
+use crate::InternalBallisticInputs as BallisticInputs;
 
 /// Calculate the gyroscopic stability coefficient (SG) for the bullet.
 ///

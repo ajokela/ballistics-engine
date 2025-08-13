@@ -274,6 +274,7 @@ pub fn get_drag_coefficient(mach: f64, drag_model: &DragModel) -> f64 {
     match drag_model {
         DragModel::G1 => G1_DRAG_TABLE.interpolate(mach),
         DragModel::G7 => G7_DRAG_TABLE.interpolate(mach),
+        _ => G1_DRAG_TABLE.interpolate(mach), // Default to G1 for other models
     }
 }
 
@@ -299,6 +300,7 @@ pub fn get_drag_coefficient_with_transonic(
                     get_projectile_shape(cal, weight, match drag_model {
                         DragModel::G1 => "G1",
                         DragModel::G7 => "G7",
+                        _ => "G1", // Default to G1
                     })
                 } else {
                     ProjectileShape::Spitzer // Default

@@ -23,6 +23,8 @@ use nalgebra::Vector3;
 mod derivatives;
 mod atmosphere;
 mod drag;
+mod drag_model;
+mod drag_tables;
 mod stability;
 mod trajectory_solver;
 mod trajectory_sampling;
@@ -41,6 +43,7 @@ mod precession_nutation;
 mod aerodynamic_jump;
 mod monte_carlo;
 mod cluster_bc;
+mod cli_api;
 
 #[cfg(test)]
 mod drag_pure_test;
@@ -61,6 +64,15 @@ use aerodynamic_jump::calculate_aerodynamic_jump;
 use spin_decay::SpinDecayParameters;
 use bc_estimation::BCSegmentEstimator;
 use monte_carlo::{monte_carlo_parallel, monte_carlo_batch, monte_carlo_streaming};
+
+// Public API exports for CLI tool
+pub use drag_model::DragModel;
+pub use cli_api::{
+    BallisticInputs, TrajectorySolver, MonteCarloParams, MonteCarloResults,
+    WindConditions, AtmosphericConditions, TrajectoryResult, TrajectoryPoint,
+    run_monte_carlo, calculate_zero_angle, estimate_bc_from_trajectory,
+    BallisticsError
+};
 
 /// Rust implementation of the ballistics derivatives function
 #[pyfunction]
@@ -173,7 +185,7 @@ fn derivatives_rust(
 }
 
 /// Extract ballistic inputs from Python dictionary
-pub fn extract_ballistic_inputs(inputs: &Bound<'_, PyDict>) -> PyResult<BallisticInputs> {
+pub fn extract_ballistic_inputs(inputs: &Bound<'_, PyDict>) -> PyResult<InternalBallisticInputs> {
     let bc_value: f64 = inputs.get_item("bc_value")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing required field: bc_value"))?
         .extract()?;
@@ -280,7 +292,7 @@ pub fn extract_ballistic_inputs(inputs: &Bound<'_, PyDict>) -> PyResult<Ballisti
         }
     }).transpose()?;
     
-    Ok(BallisticInputs {
+    Ok(InternalBallisticInputs {
         bc_value,
         bc_type: bc_type_enum,
         bullet_mass,
@@ -403,9 +415,9 @@ fn get_wind_vector(wind_sock: &Bound<'_, PyAny>, range_m: f64) -> PyResult<Vecto
     Ok(wind_vector)
 }
 
-/// Ballistic inputs structure
+/// Internal ballistic inputs structure for Python integration
 #[derive(Debug, Clone)]
-pub struct BallisticInputs {
+struct InternalBallisticInputs {
     bc_value: f64,
     bc_type: DragModel,
     bullet_mass: f64,
@@ -460,31 +472,17 @@ pub struct BCSegmentData {
     pub bc_value: f64,
 }
 
-impl BallisticInputs {
+impl InternalBallisticInputs {
     /// Get bc_type as string for ML model
     pub fn bc_type_str(&self) -> &str {
         match self.bc_type {
             DragModel::G1 => "G1",
             DragModel::G7 => "G7",
+            _ => "G1", // Default to G1 for other models
         }
     }
 }
 
-/// Drag model enumeration
-#[derive(Debug, Clone)]
-pub enum DragModel {
-    G1,
-    G7,
-}
-
-impl std::fmt::Display for DragModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DragModel::G1 => write!(f, "G1"),
-            DragModel::G7 => write!(f, "G7"),
-        }
-    }
-}
 
 /// Python wrapper for drag coefficient calculation
 #[pyfunction]
@@ -932,7 +930,7 @@ fn zero_angle_simplified_rust(
     let ballistic_inputs = extract_ballistic_inputs(inputs)?;
     
     // Simple trajectory function for testing - returns height at target distance
-    let trajectory_func = |_inputs: &BallisticInputs, angle_rad: f64| -> Result<f64, String> {
+    let trajectory_func = |_inputs: &InternalBallisticInputs, angle_rad: f64| -> Result<f64, String> {
         // Simplified ballistic calculation for demonstration
         let target_distance_m = _inputs.target_distance * 0.9144; // yards to meters
         let muzzle_velocity_mps = _inputs.muzzle_velocity * 0.3048; // fps to mps
@@ -962,7 +960,7 @@ fn solve_muzzle_angle_rust(
     let ballistic_inputs = extract_ballistic_inputs(inputs)?;
     
     // Simple trajectory function that returns drop_m
-    let trajectory_func = |_inputs: &BallisticInputs| -> Result<f64, String> {
+    let trajectory_func = |_inputs: &InternalBallisticInputs| -> Result<f64, String> {
         // Simplified drop calculation for demonstration
         let target_distance_m = _inputs.target_distance * 0.9144; // yards to meters
         let muzzle_velocity_mps = _inputs.muzzle_velocity * 0.3048; // fps to mps

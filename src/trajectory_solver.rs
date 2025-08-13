@@ -1,4 +1,4 @@
-use crate::BallisticInputs;
+use crate::InternalBallisticInputs;
 use crate::constants::{FPS_TO_MPS, MPS_TO_FPS, GRAINS_TO_KG};
 use nalgebra::Vector3;
 
@@ -54,7 +54,7 @@ pub struct TrajectoryResult {
 
 /// Prepare initial conditions for trajectory solving
 pub fn prepare_initial_conditions(
-    inputs: &BallisticInputs,
+    inputs: &InternalBallisticInputs,
     zero_angle_rad: f64,
     atmo_params: (f64, f64, f64, f64),
     air_density: f64,
@@ -273,7 +273,7 @@ where
 pub fn post_process_trajectory(
     trajectory_points: &[(f64, [f64; 6])], // (time, state) pairs
     initial_conditions: &InitialConditions,
-    inputs: &BallisticInputs,
+    inputs: &InternalBallisticInputs,
     target_hit_time: Option<f64>,
     ground_hit_time: Option<f64>,
 ) -> Result<TrajectoryResult, String> {

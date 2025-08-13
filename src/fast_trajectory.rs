@@ -5,7 +5,7 @@
 
 use nalgebra::Vector3;
 use crate::{
-    BallisticInputs, DragModel, BCSegmentData,
+    InternalBallisticInputs as BallisticInputs, DragModel, BCSegmentData,
     atmosphere::get_local_atmosphere,
     drag::get_drag_coefficient,
     wind::WindSock,

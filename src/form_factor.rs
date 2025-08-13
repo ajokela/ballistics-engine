@@ -32,7 +32,8 @@ pub fn get_default_form_factor(bullet_name: &str, drag_model: &DragModel) -> f64
             } else {
                 1.05  // Default G7
             }
-        }
+        },
+        _ => 1.00  // Default form factor for other models
     }
 }
 

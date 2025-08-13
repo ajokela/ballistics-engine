@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use numpy::PyReadonlyArray2;
 
-use crate::BallisticInputs;
+use crate::InternalBallisticInputs as BallisticInputs;
 use crate::fast_trajectory::{fast_integrate, FastIntegrationParams};
 use crate::wind::WindSock;
 use crate::atmosphere::calculate_atmosphere;

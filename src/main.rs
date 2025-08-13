@@ -1,17 +1,735 @@
-//! Command-line interface for ballistics engine
+use ballistics_engine::{
+    BallisticInputs, TrajectorySolver, MonteCarloParams, 
+    WindConditions, AtmosphericConditions, DragModel
+};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Serialize, Deserialize};
+use std::error::Error;
 
-fn main() {
-    println!("Ballistics Engine v0.1.0");
-    println!();
-    println!("This is a high-performance ballistics trajectory engine.");
-    println!("Currently the library is designed to be used as a Rust library or Python module.");
-    println!();
-    println!("To use as a Rust library:");
-    println!("  Add to Cargo.toml: ballistics-engine = \"0.1\"");
-    println!();
-    println!("To use as a Python module:");
-    println!("  pip install ballistics-engine");
-    println!();
-    println!("For examples and documentation, see:");
-    println!("  https://github.com/yourusername/ballistics-engine");
+#[derive(Parser)]
+#[command(name = "ballistics")]
+#[command(author = "Ballistics Engine Team")]
+#[command(version = "0.1.0")]
+#[command(about = "High-performance ballistics trajectory calculator", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Calculate a single trajectory
+    Trajectory {
+        /// Initial velocity (m/s)
+        #[arg(short = 'v', long)]
+        velocity: f64,
+        
+        /// Launch angle (degrees)
+        #[arg(short = 'a', long, default_value = "0.0")]
+        angle: f64,
+        
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: f64,
+        
+        /// Mass (kg)
+        #[arg(short = 'm', long)]
+        mass: f64,
+        
+        /// Diameter (meters)
+        #[arg(short = 'd', long)]
+        diameter: f64,
+        
+        /// Drag model (G1, G7, Custom)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+        
+        /// Maximum range (meters)
+        #[arg(long, default_value = "1000.0")]
+        max_range: f64,
+        
+        /// Time step (seconds)
+        #[arg(long, default_value = "0.001")]
+        time_step: f64,
+        
+        /// Wind speed (m/s)
+        #[arg(long, default_value = "0.0")]
+        wind_speed: f64,
+        
+        /// Wind direction (degrees, 0=North, 90=East)
+        #[arg(long, default_value = "0.0")]
+        wind_direction: f64,
+        
+        /// Temperature (Celsius)
+        #[arg(long, default_value = "15.0")]
+        temperature: f64,
+        
+        /// Pressure (hPa)
+        #[arg(long, default_value = "1013.25")]
+        pressure: f64,
+        
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+        
+        /// Altitude (meters)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+        
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+        
+        /// Show all trajectory points
+        #[arg(long)]
+        full: bool,
+    },
+    
+    /// Run Monte Carlo simulation
+    MonteCarlo {
+        /// Base velocity (m/s)
+        #[arg(short = 'v', long)]
+        velocity: f64,
+        
+        /// Launch angle (degrees)
+        #[arg(short = 'a', long, default_value = "0.0")]
+        angle: f64,
+        
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: f64,
+        
+        /// Mass (kg)
+        #[arg(short = 'm', long)]
+        mass: f64,
+        
+        /// Diameter (meters)
+        #[arg(short = 'd', long)]
+        diameter: f64,
+        
+        /// Number of simulations
+        #[arg(short = 'n', long, default_value = "1000")]
+        num_sims: usize,
+        
+        /// Velocity standard deviation (m/s)
+        #[arg(long, default_value = "1.0")]
+        velocity_std: f64,
+        
+        /// Angle standard deviation (degrees)
+        #[arg(long, default_value = "0.1")]
+        angle_std: f64,
+        
+        /// BC standard deviation
+        #[arg(long, default_value = "0.01")]
+        bc_std: f64,
+        
+        /// Wind speed standard deviation (m/s)
+        #[arg(long, default_value = "1.0")]
+        wind_std: f64,
+        
+        /// Target distance (meters)
+        #[arg(long)]
+        target_distance: Option<f64>,
+        
+        /// Output format
+        #[arg(short = 'o', long, default_value = "summary")]
+        output: MonteCarloOutput,
+    },
+    
+    /// Calculate zero angle for a target
+    Zero {
+        /// Initial velocity (m/s)
+        #[arg(short = 'v', long)]
+        velocity: f64,
+        
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: f64,
+        
+        /// Mass (kg)
+        #[arg(short = 'm', long)]
+        mass: f64,
+        
+        /// Diameter (meters)
+        #[arg(short = 'd', long)]
+        diameter: f64,
+        
+        /// Target distance (meters)
+        #[arg(long)]
+        target_distance: f64,
+        
+        /// Target height (meters, negative for below)
+        #[arg(long, default_value = "0.0")]
+        target_height: f64,
+        
+        /// Sight height above bore (meters)
+        #[arg(long, default_value = "0.05")]
+        sight_height: f64,
+        
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+    
+    /// Estimate BC from trajectory data
+    EstimateBC {
+        /// Initial velocity (m/s)
+        #[arg(short = 'v', long)]
+        velocity: f64,
+        
+        /// Mass (kg)
+        #[arg(short = 'm', long)]
+        mass: f64,
+        
+        /// Diameter (meters)
+        #[arg(short = 'd', long)]
+        diameter: f64,
+        
+        /// Distance 1 (meters)
+        #[arg(long)]
+        distance1: f64,
+        
+        /// Drop at distance 1 (meters)
+        #[arg(long)]
+        drop1: f64,
+        
+        /// Distance 2 (meters)
+        #[arg(long)]
+        distance2: f64,
+        
+        /// Drop at distance 2 (meters)
+        #[arg(long)]
+        drop2: f64,
+        
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DragModelArg {
+    G1,
+    G7,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Csv,
+    Table,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum MonteCarloOutput {
+    Summary,
+    Full,
+    Statistics,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TrajectoryPoint {
+    time: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+    velocity: f64,
+    energy: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TrajectoryResult {
+    max_range: f64,
+    max_height: f64,
+    time_of_flight: f64,
+    impact_velocity: f64,
+    impact_energy: f64,
+    trajectory: Vec<TrajectoryPoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MonteCarloResult {
+    mean_range: f64,
+    std_range: f64,
+    mean_impact_velocity: f64,
+    std_impact_velocity: f64,
+    cep: f64,  // Circular Error Probable
+    hit_probability: Option<f64>,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    
+    match cli.command {
+        Commands::Trajectory { 
+            velocity, angle, bc, mass, diameter, drag_model, 
+            max_range, time_step, wind_speed, wind_direction,
+            temperature, pressure, humidity, altitude,
+            output, full 
+        } => {
+            run_trajectory(
+                velocity, angle, bc, mass, diameter, drag_model,
+                max_range, time_step, wind_speed, wind_direction,
+                temperature, pressure, humidity, altitude,
+                output, full
+            )?;
+        },
+        
+        Commands::MonteCarlo {
+            velocity, angle, bc, mass, diameter,
+            num_sims, velocity_std, angle_std, bc_std, wind_std,
+            target_distance, output
+        } => {
+            run_monte_carlo(
+                velocity, angle, bc, mass, diameter,
+                num_sims, velocity_std, angle_std, bc_std, wind_std,
+                target_distance, output
+            )?;
+        },
+        
+        Commands::Zero {
+            velocity, bc, mass, diameter,
+            target_distance, target_height, sight_height,
+            output
+        } => {
+            run_zero_calculation(
+                velocity, bc, mass, diameter,
+                target_distance, target_height, sight_height,
+                output
+            )?;
+        },
+        
+        Commands::EstimateBC {
+            velocity, mass, diameter,
+            distance1, drop1, distance2, drop2,
+            output
+        } => {
+            run_bc_estimation(
+                velocity, mass, diameter,
+                distance1, drop1, distance2, drop2,
+                output
+            )?;
+        },
+    }
+    
+    Ok(())
+}
+
+fn run_trajectory(
+    velocity: f64,
+    angle: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    drag_model: DragModelArg,
+    max_range: f64,
+    time_step: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
+    output: OutputFormat,
+    full: bool,
+) -> Result<(), Box<dyn Error>> {
+    // Create ballistic inputs
+    let inputs = BallisticInputs {
+        muzzle_velocity: velocity,
+        launch_angle: angle.to_radians(),
+        ballistic_coefficient: bc,
+        mass,
+        diameter,
+        drag_model: match drag_model {
+            DragModelArg::G1 => DragModel::G1,
+            DragModelArg::G7 => DragModel::G7,
+        },
+        ..Default::default()
+    };
+    
+    // Set up wind conditions
+    let wind = WindConditions {
+        speed: wind_speed,
+        direction: wind_direction.to_radians(),
+        ..Default::default()
+    };
+    
+    // Set up atmospheric conditions
+    let atmosphere = AtmosphericConditions {
+        temperature,
+        pressure,
+        humidity,
+        altitude,
+        ..Default::default()
+    };
+    
+    // Create solver
+    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    solver.set_max_range(max_range);
+    solver.set_time_step(time_step);
+    
+    // Solve trajectory
+    let result = solver.solve()?;
+    
+    // Format output
+    match output {
+        OutputFormat::Json => {
+            let trajectory_result = TrajectoryResult {
+                max_range: result.max_range,
+                max_height: result.max_height,
+                time_of_flight: result.time_of_flight,
+                impact_velocity: result.impact_velocity,
+                impact_energy: result.impact_energy,
+                trajectory: if full {
+                    result.points.into_iter().map(|p| TrajectoryPoint {
+                        time: p.time,
+                        x: p.position.x,
+                        y: p.position.y,
+                        z: p.position.z,
+                        velocity: p.velocity_magnitude,
+                        energy: p.kinetic_energy,
+                    }).collect()
+                } else {
+                    vec![]
+                },
+            };
+            println!("{}", serde_json::to_string_pretty(&trajectory_result)?);
+        },
+        
+        OutputFormat::Csv => {
+            if full {
+                println!("time,x,y,z,velocity,energy");
+                for p in result.points {
+                    println!("{:.4},{:.2},{:.2},{:.2},{:.2},{:.2}",
+                        p.time, p.position.x, p.position.y, p.position.z,
+                        p.velocity_magnitude, p.kinetic_energy);
+                }
+            } else {
+                println!("metric,value");
+                println!("max_range,{:.2}", result.max_range);
+                println!("max_height,{:.2}", result.max_height);
+                println!("time_of_flight,{:.4}", result.time_of_flight);
+                println!("impact_velocity,{:.2}", result.impact_velocity);
+                println!("impact_energy,{:.2}", result.impact_energy);
+            }
+        },
+        
+        OutputFormat::Table => {
+            println!("╔════════════════════════════════════════╗");
+            println!("║         TRAJECTORY RESULTS             ║");
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Max Range:         {:>8.2} m          ║", result.max_range);
+            println!("║ Max Height:        {:>8.2} m          ║", result.max_height);
+            println!("║ Time of Flight:    {:>8.3} s          ║", result.time_of_flight);
+            println!("║ Impact Velocity:   {:>8.2} m/s        ║", result.impact_velocity);
+            println!("║ Impact Energy:     {:>8.2} J          ║", result.impact_energy);
+            println!("╚════════════════════════════════════════╝");
+            
+            if full && !result.points.is_empty() {
+                println!();
+                println!("Trajectory Points:");
+                println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                println!("│ Time (s) │  X (m)   │  Y (m)   │ Vel(m/s) │ Energy(J)│");
+                println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+                
+                let step = if result.points.len() > 20 {
+                    result.points.len() / 20
+                } else {
+                    1
+                };
+                
+                for (i, p) in result.points.iter().enumerate() {
+                    if i % step == 0 || i == result.points.len() - 1 {
+                        println!("│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
+                            p.time, p.position.x, p.position.y, 
+                            p.velocity_magnitude, p.kinetic_energy);
+                    }
+                }
+                println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+            }
+        },
+    }
+    
+    Ok(())
+}
+
+fn run_monte_carlo(
+    velocity: f64,
+    angle: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    num_sims: usize,
+    velocity_std: f64,
+    angle_std: f64,
+    bc_std: f64,
+    wind_std: f64,
+    target_distance: Option<f64>,
+    output: MonteCarloOutput,
+) -> Result<(), Box<dyn Error>> {
+    // Create base inputs
+    let base_inputs = BallisticInputs {
+        muzzle_velocity: velocity,
+        launch_angle: angle.to_radians(),
+        ballistic_coefficient: bc,
+        mass,
+        diameter,
+        ..Default::default()
+    };
+    
+    // Set up Monte Carlo parameters
+    let mc_params = MonteCarloParams {
+        num_simulations: num_sims,
+        velocity_std_dev: velocity_std,
+        angle_std_dev: angle_std.to_radians(),
+        bc_std_dev: bc_std,
+        wind_speed_std_dev: wind_std,
+        target_distance,
+        ..Default::default()
+    };
+    
+    // Run Monte Carlo simulation
+    let results = ballistics_engine::run_monte_carlo(base_inputs, mc_params)?;
+    
+    // Calculate statistics
+    let mean_range = results.ranges.iter().sum::<f64>() / results.ranges.len() as f64;
+    let variance_range: f64 = results.ranges.iter()
+        .map(|r| (r - mean_range).powi(2))
+        .sum::<f64>() / results.ranges.len() as f64;
+    let std_range = variance_range.sqrt();
+    
+    let mean_velocity = results.impact_velocities.iter().sum::<f64>() / results.impact_velocities.len() as f64;
+    let variance_velocity: f64 = results.impact_velocities.iter()
+        .map(|v| (v - mean_velocity).powi(2))
+        .sum::<f64>() / results.impact_velocities.len() as f64;
+    let std_velocity = variance_velocity.sqrt();
+    
+    // Calculate CEP (simplified - actual CEP calculation would need lateral dispersion)
+    let cep = std_range * 1.1774; // Approximation for circular normal distribution
+    
+    // Calculate hit probability if target distance specified
+    let hit_probability = target_distance.map(|target| {
+        let hits = results.ranges.iter()
+            .filter(|r| (*r - target).abs() < 1.0) // Within 1m of target
+            .count();
+        hits as f64 / results.ranges.len() as f64
+    });
+    
+    match output {
+        MonteCarloOutput::Summary => {
+            println!("╔════════════════════════════════════════╗");
+            println!("║      MONTE CARLO RESULTS               ║");
+            println!("║      {} simulations                   ║", num_sims);
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Mean Range:        {:>8.2} m          ║", mean_range);
+            println!("║ Std Dev Range:     {:>8.2} m          ║", std_range);
+            println!("║ Mean Impact Vel:   {:>8.2} m/s        ║", mean_velocity);
+            println!("║ Std Dev Velocity:  {:>8.2} m/s        ║", std_velocity);
+            println!("║ CEP (approx):      {:>8.2} m          ║", cep);
+            if let Some(prob) = hit_probability {
+                println!("║ Hit Probability:   {:>8.1} %          ║", prob * 100.0);
+            }
+            println!("╚════════════════════════════════════════╝");
+        },
+        
+        MonteCarloOutput::Full => {
+            let mc_result = MonteCarloResult {
+                mean_range,
+                std_range,
+                mean_impact_velocity: mean_velocity,
+                std_impact_velocity: std_velocity,
+                cep,
+                hit_probability,
+            };
+            println!("{}", serde_json::to_string_pretty(&mc_result)?);
+        },
+        
+        MonteCarloOutput::Statistics => {
+            println!("range_min,range_max,range_mean,range_std,vel_min,vel_max,vel_mean,vel_std");
+            let range_min = results.ranges.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let range_max = results.ranges.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let vel_min = results.impact_velocities.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let vel_max = results.impact_velocities.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            
+            println!("{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
+                range_min, range_max, mean_range, std_range,
+                vel_min, vel_max, mean_velocity, std_velocity);
+        },
+    }
+    
+    Ok(())
+}
+
+fn run_zero_calculation(
+    velocity: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    target_distance: f64,
+    target_height: f64,
+    sight_height: f64,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Create ballistic inputs
+    let inputs = BallisticInputs {
+        muzzle_velocity: velocity,
+        ballistic_coefficient: bc,
+        mass,
+        diameter,
+        sight_height,
+        ..Default::default()
+    };
+    
+    // Calculate zero angle
+    let zero_angle = ballistics_engine::calculate_zero_angle(
+        inputs.clone(),
+        target_distance,
+        target_height
+    )?;
+    
+    // Calculate trajectory at zero angle to get additional info
+    let mut zeroed_inputs = inputs;
+    zeroed_inputs.launch_angle = zero_angle;
+    
+    let solver = TrajectorySolver::new(zeroed_inputs, Default::default(), Default::default());
+    let trajectory = solver.solve()?;
+    
+    match output {
+        OutputFormat::Json => {
+            let result = serde_json::json!({
+                "zero_angle_degrees": zero_angle.to_degrees(),
+                "zero_angle_moa": zero_angle.to_degrees() * 60.0,
+                "zero_angle_mrad": zero_angle * 1000.0,
+                "sight_adjustment_moa": (zero_angle.to_degrees() * 60.0) - (sight_height / target_distance * 3437.75),
+                "max_ordinate": trajectory.max_height,
+                "point_blank_range": trajectory.points.iter()
+                    .find(|p| p.position.y < -0.05)
+                    .map(|p| p.position.x)
+                    .unwrap_or(trajectory.max_range),
+            });
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        },
+        
+        OutputFormat::Csv => {
+            println!("metric,value,unit");
+            println!("zero_angle,{:.4},degrees", zero_angle.to_degrees());
+            println!("zero_angle_moa,{:.2},MOA", zero_angle.to_degrees() * 60.0);
+            println!("zero_angle_mrad,{:.2},mrad", zero_angle * 1000.0);
+            println!("max_ordinate,{:.3},meters", trajectory.max_height);
+        },
+        
+        OutputFormat::Table => {
+            println!("╔════════════════════════════════════════╗");
+            println!("║          ZERO CALCULATION              ║");
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Target Distance:   {:>8.1} m          ║", target_distance);
+            println!("║ Target Height:     {:>8.2} m          ║", target_height);
+            println!("║ Sight Height:      {:>8.3} m          ║", sight_height);
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Zero Angle:        {:>8.4}°          ║", zero_angle.to_degrees());
+            println!("║ Zero Angle (MOA):  {:>8.2} MOA        ║", zero_angle.to_degrees() * 60.0);
+            println!("║ Zero Angle (mrad): {:>8.2} mrad       ║", zero_angle * 1000.0);
+            println!("║ Max Ordinate:      {:>8.3} m          ║", trajectory.max_height);
+            println!("╚════════════════════════════════════════╝");
+        },
+    }
+    
+    Ok(())
+}
+
+fn run_bc_estimation(
+    velocity: f64,
+    mass: f64,
+    diameter: f64,
+    distance1: f64,
+    drop1: f64,
+    distance2: f64,
+    drop2: f64,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Create trajectory points for BC estimation
+    let points = vec![
+        (distance1, drop1),
+        (distance2, drop2),
+    ];
+    
+    // Estimate BC
+    let estimated_bc = ballistics_engine::estimate_bc_from_trajectory(
+        velocity,
+        mass,
+        diameter,
+        &points,
+    )?;
+    
+    // Verify the estimation by running a trajectory
+    let inputs = BallisticInputs {
+        muzzle_velocity: velocity,
+        ballistic_coefficient: estimated_bc,
+        mass,
+        diameter,
+        ..Default::default()
+    };
+    
+    let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+    let trajectory = solver.solve()?;
+    
+    // Find drops at the specified distances
+    let calc_drop1 = trajectory.points.iter()
+        .find(|p| p.position.x >= distance1)
+        .map(|p| -p.position.y)
+        .unwrap_or(0.0);
+    
+    let calc_drop2 = trajectory.points.iter()
+        .find(|p| p.position.x >= distance2)
+        .map(|p| -p.position.y)
+        .unwrap_or(0.0);
+    
+    let error1 = ((calc_drop1 - drop1) / drop1 * 100.0).abs();
+    let error2 = ((calc_drop2 - drop2) / drop2 * 100.0).abs();
+    
+    match output {
+        OutputFormat::Json => {
+            let result = serde_json::json!({
+                "estimated_bc": estimated_bc,
+                "verification": {
+                    "distance1_m": distance1,
+                    "actual_drop1_m": drop1,
+                    "calculated_drop1_m": calc_drop1,
+                    "error1_percent": error1,
+                    "distance2_m": distance2,
+                    "actual_drop2_m": drop2,
+                    "calculated_drop2_m": calc_drop2,
+                    "error2_percent": error2,
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        },
+        
+        OutputFormat::Csv => {
+            println!("metric,value");
+            println!("estimated_bc,{:.4}", estimated_bc);
+            println!("error_at_{}m_percent,{:.2}", distance1, error1);
+            println!("error_at_{}m_percent,{:.2}", distance2, error2);
+        },
+        
+        OutputFormat::Table => {
+            println!("╔════════════════════════════════════════╗");
+            println!("║         BC ESTIMATION RESULT           ║");
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Estimated BC:      {:>8.4}            ║", estimated_bc);
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Verification:                          ║");
+            println!("║ At {:.0}m:                             ║", distance1);
+            println!("║   Actual drop:     {:>8.3} m          ║", drop1);
+            println!("║   Calculated:      {:>8.3} m          ║", calc_drop1);
+            println!("║   Error:           {:>8.2} %          ║", error1);
+            println!("║ At {:.0}m:                             ║", distance2);
+            println!("║   Actual drop:     {:>8.3} m          ║", drop2);
+            println!("║   Calculated:      {:>8.3} m          ║", calc_drop2);
+            println!("║   Error:           {:>8.2} %          ║", error2);
+            println!("╚════════════════════════════════════════╝");
+        },
+    }
+    
+    Ok(())
 }
