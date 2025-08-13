@@ -1,171 +1,275 @@
 # Ballistics Engine CLI Tool
 
-A command-line interface for ballistics trajectory calculations.
+Comprehensive command-line interface for professional ballistics trajectory calculations with advanced drag modeling and automatic zeroing.
 
-## Building
-
-```bash
-# Build the standalone CLI
-rustc --edition 2021 \
-  -L target/debug/deps \
-  --extern clap=$(ls target/debug/deps/libclap-*.rlib | head -1) \
-  --extern serde=$(ls target/debug/deps/libserde-*.rlib | head -1) \
-  --extern serde_json=$(ls target/debug/deps/libserde_json-*.rlib | head -1) \
-  src/bin/ballistics_cli.rs \
-  -o ballistics-cli
-```
-
-## Usage
-
-### Basic Commands
+## Installation
 
 ```bash
-# Show help
-./ballistics-cli --help
+# Build from source
+cargo build --release
 
-# Show version and info
-./ballistics-cli info
+# Binary location
+./target/release/ballistics
 ```
+
+## Unit Systems
+
+The CLI supports two unit systems, selectable with the `--units` flag (default: Imperial)
+
+### Imperial Units (Default)
+- Velocity: feet per second (fps)
+- Mass: grains
+- Distance: yards
+- Diameter: inches
+- Temperature: Fahrenheit
+- Pressure: inHg
+
+### Metric Units
+- Velocity: meters per second (m/s)
+- Mass: grams
+- Distance: meters
+- Diameter: millimeters
+- Temperature: Celsius
+- Pressure: hPa
+
+## Commands
 
 ### Trajectory Calculation
 
-Calculate ballistic trajectories with various parameters:
+Calculate ballistic trajectories with advanced physics modeling:
 
 ```bash
-# Basic trajectory with default parameters
-./ballistics-cli trajectory -v 800 -a 45
+# Basic trajectory (Imperial - default)
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
 
-# Full example with all parameters
-./ballistics-cli trajectory \
-  -v 800        # Initial velocity (m/s)
-  -a 45         # Launch angle (degrees)
-  -b 0.5        # Ballistic coefficient
-  -m 0.02       # Mass (kg)
-  -d 0.00762    # Diameter (meters)
-  --max-time 10 # Maximum simulation time (seconds)
-  --time-step 0.01 # Integration time step (seconds)
-  -o table      # Output format (table/json/csv)
+# With automatic zeroing at 200 yards
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 200
+
+# Metric units
+./ballistics trajectory --units metric -v 823 -b 0.475 -m 10.9 -d 7.82
+
+# Full example with environmental conditions
+./ballistics trajectory \
+  -v 2700          # Velocity (fps)
+  -b 0.475         # Ballistic coefficient
+  -m 168           # Mass (grains)
+  -d 0.308         # Diameter (inches)
+  --drag-model g7  # G7 drag model
+  --auto-zero 200  # Zero at 200 yards
+  --max-range 1000 # Max range (yards)
+  --wind-speed 10  # Wind (mph)
+  --wind-direction 90 # Wind from right
+  --temperature 59 # Temp (°F)
+  --pressure 29.92 # Pressure (inHg)
+  --altitude 5000  # Altitude (feet)
+  --full          # Show all points
 ```
+
+#### Advanced BC Options
+
+```bash
+# Enable velocity-based BC segmentation
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --use-bc-segments \
+  --auto-zero 600
+
+# Enable cluster-based BC degradation (auto-detects bullet type)
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --use-cluster-bc \
+  --auto-zero 600
+
+# Manual cluster selection
+./ballistics trajectory -v 3000 -b 0.250 -m 55 -d 0.224 \
+  --use-cluster-bc \
+  --bullet-cluster 2  # Light Varmint cluster
+```
+
+### Zero Calculation
+
+Calculate sight adjustments for specific distances:
+
+```bash
+# Calculate zero for 200 yards
+./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 200
+
+# With custom sight height
+./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --target-distance 300 \
+  --sight-height 0.055  # 2.2 inches in yards
+
+# Metric
+./ballistics zero --units metric -v 823 -b 0.475 -m 10.9 -d 7.82 \
+  --target-distance 200  # 200 meters
+```
+
+Output provides:
+- Zero angle in degrees
+- MOA adjustment
+- Mrad adjustment
+- Maximum ordinate
 
 ### Monte Carlo Simulation
 
-Run statistical analysis with parameter variations:
+Statistical analysis with parameter variations:
 
 ```bash
-# Basic Monte Carlo simulation
-./ballistics-cli monte-carlo -v 800 -a 45 -n 1000
+# Basic Monte Carlo
+./ballistics monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 1000
 
-# With custom standard deviations
-./ballistics-cli monte-carlo \
-  -v 800        # Base velocity (m/s)
-  -a 45         # Base angle (degrees)
-  -n 1000       # Number of simulations
-  --velocity-std 10   # Velocity std dev (m/s)
-  --angle-std 1.0     # Angle std dev (degrees)
-  --bc-std 0.05       # BC std dev
-  -o summary    # Output format
+# With variations and target distance
+./ballistics monte-carlo \
+  -v 2700         # Base velocity (fps)
+  -b 0.475        # Base BC
+  -m 168          # Mass (grains)
+  -d 0.308        # Diameter (inches)
+  -n 1000         # Simulations
+  --velocity-std 10    # Velocity std dev
+  --angle-std 0.5      # Angle std dev
+  --bc-std 0.01        # BC std dev
+  --wind-std 2         # Wind std dev
+  --target-distance 600 # For hit probability
 ```
 
-#### Monte Carlo Output Formats
+### BC Estimation
 
-- **summary** (default): Formatted statistics table
-- **full**: Complete JSON output with all statistics
-- **statistics**: CSV format for data analysis
+Estimate ballistic coefficient from observed trajectory:
 
 ```bash
-# Summary output
-./ballistics-cli monte-carlo -v 700 -a 30 -n 500 -o summary
-
-# JSON output
-./ballistics-cli monte-carlo -v 700 -a 30 -n 500 -o full > monte_carlo.json
-
-# CSV statistics
-./ballistics-cli monte-carlo -v 700 -a 30 -n 500 -o statistics > stats.csv
+./ballistics estimate-bc \
+  -v 2700 -m 168 -d 0.308 \
+  --distance1 100 --drop1 0.0 \
+  --distance2 200 --drop2 0.023
 ```
 
-### Output Formats
+## Output Formats
 
-#### Table Format (default)
-Displays results in a formatted ASCII table:
+All commands support three output formats via `-o`:
+
+### Table Format (default)
 ```bash
-./ballistics-cli trajectory -v 800 -a 30 -o table
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o table
 ```
 
-#### JSON Format
-Outputs complete trajectory data as JSON:
+### JSON Format
 ```bash
-./ballistics-cli trajectory -v 800 -a 30 -o json > trajectory.json
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o json > trajectory.json
 ```
 
-#### CSV Format
-Outputs trajectory points as CSV for data analysis:
+### CSV Format
 ```bash
-./ballistics-cli trajectory -v 800 -a 30 -o csv > trajectory.csv
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o csv > trajectory.csv
 ```
 
-## Examples
-
-### Long Range Shot
-```bash
-./ballistics-cli trajectory -v 900 -a 35 -m 0.045 -b 0.7 --max-time 20
-```
-
-### High Angle Shot
-```bash
-./ballistics-cli trajectory -v 500 -a 70 -m 0.01 --time-step 0.001
-```
-
-### Monte Carlo Analysis
-```bash
-# Analyze precision at long range
-./ballistics-cli monte-carlo -v 850 -a 35 -n 1000 --velocity-std 5 --angle-std 0.2
-
-# High-precision system analysis
-./ballistics-cli monte-carlo -v 900 -a 30 -n 2000 --velocity-std 2 --angle-std 0.1 --bc-std 0.01
-```
-
-### Export for Analysis
-```bash
-# Generate CSV data for plotting
-./ballistics-cli trajectory -v 750 -a 45 --time-step 0.1 -o csv > data.csv
-
-# Generate JSON for programmatic processing
-./ballistics-cli trajectory -v 750 -a 45 -o json | jq '.max_range'
-```
-
-## Parameters
+## Parameters Reference
 
 ### Trajectory Command
 
-| Parameter | Short | Description | Default | Unit |
-|-----------|-------|-------------|---------|------|
-| velocity | -v | Initial muzzle velocity | Required | m/s |
-| angle | -a | Launch angle | 0.0 | degrees |
-| bc | -b | Ballistic coefficient | 0.5 | - |
-| mass | -m | Projectile mass | 0.01 | kg |
-| diameter | -d | Projectile diameter | 0.00762 | meters |
-| max-time | - | Maximum simulation time | 10.0 | seconds |
-| time-step | - | Integration time step | 0.01 | seconds |
-| output | -o | Output format (table/json/csv) | table | - |
+| Parameter | Description | Default | Imperial | Metric |
+|-----------|-------------|---------|----------|--------|
+| -v, --velocity | Muzzle velocity | Required | fps | m/s |
+| -a, --angle | Launch angle | 0.0° | degrees | degrees |
+| -b, --bc | Ballistic coefficient | Required | - | - |
+| -m, --mass | Projectile mass | Required | grains | grams |
+| -d, --diameter | Projectile diameter | Required | inches | mm |
+| --drag-model | Drag model (g1/g7) | g1 | - | - |
+| --auto-zero | Auto-zero distance | None | yards | meters |
+| --sight-height | Sight height above bore | 0.05 | yards | meters |
+| --max-range | Maximum range | 1000 | yards | meters |
+| --time-step | Integration time step | 0.001 | seconds | seconds |
+| --wind-speed | Wind speed | 0 | mph | m/s |
+| --wind-direction | Wind direction | 0° | degrees | degrees |
+| --temperature | Temperature | 59 | °F | °C |
+| --pressure | Barometric pressure | 29.92 | inHg | hPa |
+| --altitude | Altitude | 0 | feet | meters |
+| --use-bc-segments | Enable BC segmentation | false | - | - |
+| --use-cluster-bc | Enable cluster BC | false | - | - |
+| --bullet-cluster | Manual cluster (0-3) | Auto | - | - |
+| --full | Show all trajectory points | false | - | - |
 
-### Monte Carlo Command
+### Cluster Types
 
-| Parameter | Short | Description | Default | Unit |
-|-----------|-------|-------------|---------|------|
-| velocity | -v | Base velocity | Required | m/s |
-| angle | -a | Base launch angle | 0.0 | degrees |
-| bc | -b | Base ballistic coefficient | 0.5 | - |
-| mass | -m | Projectile mass | 0.01 | kg |
-| diameter | -d | Projectile diameter | 0.00762 | meters |
-| num-sims | -n | Number of simulations | 1000 | - |
-| velocity-std | - | Velocity standard deviation | 5.0 | m/s |
-| angle-std | - | Angle standard deviation | 0.5 | degrees |
-| bc-std | - | BC standard deviation | 0.02 | - |
-| output | -o | Output format (summary/full/statistics) | summary | - |
+| ID | Type | Examples | BC Characteristics |
+|----|------|----------|-------------------|
+| 0 | Standard Long-Range | .308 Match, .30-06 | Gradual degradation |
+| 1 | Low-Drag Specialty | 6.5mm VLD, 6mm BR | Maintains BC well |
+| 2 | Light Varmint | .223 55gr, .204 | Steep BC loss |
+| 3 | Heavy Magnums | .338 Lapua, .50 BMG | Moderate degradation |
+
+## Practical Examples
+
+### Hunting Zero at 200 Yards
+```bash
+# Calculate zero
+./ballistics zero -v 2650 -b 0.460 -m 180 -d 0.308 --target-distance 200
+
+# Verify with trajectory
+./ballistics trajectory -v 2650 -b 0.460 -m 180 -d 0.308 \
+  --auto-zero 200 --max-range 400 --full
+```
+
+### Long Range Precision
+```bash
+./ballistics trajectory \
+  -v 2850 -b 0.690 -m 230 -d 0.338 \
+  --drag-model g7 \
+  --use-bc-segments \
+  --auto-zero 100 \
+  --max-range 1500 \
+  --wind-speed 10 \
+  --wind-direction 270 \
+  --altitude 5000 \
+  --full
+```
+
+### Load Development Comparison
+```bash
+# Load 1: Higher velocity
+./ballistics monte-carlo -v 2750 -b 0.475 -m 168 -d 0.308 \
+  -n 1000 --velocity-std 15 --target-distance 600
+
+# Load 2: More consistent
+./ballistics monte-carlo -v 2680 -b 0.475 -m 168 -d 0.308 \
+  -n 1000 --velocity-std 8 --target-distance 600
+```
+
+### Varmint Trajectory with Cluster BC
+```bash
+./ballistics trajectory \
+  -v 3200 -b 0.242 -m 55 -d 0.224 \
+  --use-cluster-bc \
+  --bullet-cluster 2 \
+  --auto-zero 200 \
+  --max-range 500
+```
+
+## Advanced Features
+
+### Drag Models
+- **G1**: Standard projectile (most common)
+- **G7**: Boat-tail bullets (better for long range)
+- Full drag tables with Mach-indexed coefficients
+- Transonic corrections applied automatically
+- Reynolds number corrections for low velocities
+
+### BC Modeling
+- **BC Segmentation**: Velocity-dependent BC based on bullet type
+- **Cluster BC**: ML-based classification and degradation curves
+- **Form Factor**: Additional corrections for bullet shape
+- Automatic bullet type identification from parameters
+
+### Physics Engine
+- 4DOF trajectory integration (3D position + time)
+- Magnus effect for spin drift
+- Coriolis effect (with latitude input)
+- Variable atmospheric conditions
+- Wind profile with altitude effects
+- Ground impact detection
 
 ## Notes
 
-- The current implementation uses a simplified drag model
-- Atmospheric conditions are fixed at sea level standard atmosphere
-- The trajectory stops when the projectile hits the ground (y < 0)
-- All calculations use SI units internally
+- Default units are Imperial (fps, grains, yards)
+- All internal calculations use SI units for precision
+- BC values are dimensionless (same for G1 and G7)
+- Wind direction: 0° = headwind, 90° = from right, 180° = tailwind, 270° = from left
+- Trajectory stops at ground impact or max range
+- Sight height default is 1.8 inches (0.05 yards) above bore
