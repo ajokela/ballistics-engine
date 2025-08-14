@@ -28,7 +28,7 @@ fn test_cli_trajectory_basic() {
             "--bc", "0.475",
             "--mass", "168",
             "--diameter", "0.308",
-            "--max-time", "2"
+            "--max-range", "2000"
         ])
         .output()
         .expect("Failed to execute command");
@@ -107,7 +107,7 @@ fn test_cli_output_format_json() {
             "--bc", "0.475",
             "--mass", "168",
             "--diameter", "0.308",
-            "--max-time", "1",
+            "--max-range", "1000",
             "--output", "json"
         ])
         .output()
@@ -128,7 +128,7 @@ fn test_cli_output_format_csv() {
             "--bc", "0.245",
             "--mass", "168",
             "--diameter", "0.308",
-            "--max-time", "1",
+            "--max-range", "1000",
             "--output", "csv"
         ])
         .output()
