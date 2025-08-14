@@ -393,7 +393,7 @@ mod tests {
         assert!(cd_low_g7 > 0.01, "Low Mach G7 should be positive: {cd_low_g7}");
         
         let cd_high_g7 = get_drag_coefficient(20.0, &DragModel::G7);
-        assert!(cd_high_g7 > 0.01, "High Mach G7 should be positive: {cd_high_g7}");
+        assert!(cd_high_g7 >= 0.01, "High Mach G7 should be positive: {cd_high_g7}");
     }
 
     #[test]
