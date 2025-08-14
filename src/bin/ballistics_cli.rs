@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Serialize, Deserialize};
 use std::error::Error;
 use std::f64;
+use ballistics_engine::{cli_api::*, DragModel};
 
 #[derive(Parser)]
 #[command(name = "ballistics")]
@@ -29,25 +30,57 @@ enum Commands {
         #[arg(short = 'b', long, default_value = "0.5")]
         bc: f64,
         
-        /// Mass (kg)
-        #[arg(short = 'm', long, default_value = "0.01")]
+        /// Mass (grains)
+        #[arg(short = 'm', long, default_value = "168")]
         mass: f64,
         
-        /// Diameter (meters)
-        #[arg(short = 'd', long, default_value = "0.00762")]
+        /// Diameter (inches)
+        #[arg(short = 'd', long, default_value = "0.308")]
         diameter: f64,
         
-        /// Maximum time (seconds)
-        #[arg(long, default_value = "10.0")]
-        max_time: f64,
+        /// Drag model (g1, g7, etc.)
+        #[arg(long, default_value = "g1")]
+        drag_model: String,
+        
+        /// Maximum range (meters)
+        #[arg(long, default_value = "1000.0")]
+        max_range: f64,
+        
+        /// Wind speed (m/s)
+        #[arg(long, default_value = "0.0")]
+        wind_speed: f64,
+        
+        /// Wind direction (degrees, 0 = North, 90 = East)
+        #[arg(long, default_value = "0.0")]
+        wind_direction: f64,
+        
+        /// Temperature (Celsius)
+        #[arg(long, default_value = "15.0")]
+        temperature: f64,
+        
+        /// Pressure (hPa)
+        #[arg(long, default_value = "1013.25")]
+        pressure: f64,
+        
+        /// Humidity (percentage 0-100)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+        
+        /// Altitude (meters)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
         
         /// Time step (seconds)
-        #[arg(long, default_value = "0.01")]
+        #[arg(long, default_value = "0.001")]
         time_step: f64,
         
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
+        
+        /// Full output (show all trajectory points)
+        #[arg(long)]
+        full: bool,
     },
     
     /// Run Monte Carlo simulation
@@ -102,6 +135,7 @@ enum OutputFormat {
     Json,
     Csv,
     Table,
+    Full,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -149,15 +183,69 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     match cli.command {
         Commands::Trajectory { 
-            velocity, angle, bc, mass, diameter,
-            max_time, time_step, output 
+            velocity, angle, bc, mass, diameter, drag_model,
+            max_range, wind_speed, wind_direction,
+            temperature, pressure, humidity, altitude,
+            time_step, output, full
         } => {
-            let result = calculate_trajectory(
-                velocity, angle, bc, mass, diameter,
-                max_time, time_step
-            )?;
+            // Parse drag model
+            let drag_model_enum = match drag_model.to_lowercase().as_str() {
+                "g1" => DragModel::G1,
+                "g7" => DragModel::G7,
+                "g2" => DragModel::G2,
+                "g5" => DragModel::G5,
+                "g6" => DragModel::G6,
+                "g8" => DragModel::G8,
+                _ => {
+                    eprintln!("Invalid drag model: {}. Using G1.", drag_model);
+                    DragModel::G1
+                }
+            };
             
-            display_results(result, output)?;
+            // Convert units
+            let mass_kg = mass * 0.00006479891; // grains to kg
+            let diameter_m = diameter * 0.0254; // inches to meters
+            let angle_rad = angle.to_radians();
+            let wind_direction_rad = wind_direction.to_radians();
+            
+            // Create ballistic inputs
+            let inputs = BallisticInputs {
+                muzzle_velocity: velocity,
+                launch_angle: angle_rad,
+                ballistic_coefficient: bc,
+                mass: mass_kg,
+                diameter: diameter_m,
+                drag_model: drag_model_enum,
+                sight_height: 0.0,
+                altitude,
+                temperature,
+                ..Default::default()
+            };
+            
+            // Create wind conditions
+            let wind = WindConditions {
+                speed: wind_speed,
+                direction: wind_direction_rad,
+            };
+            
+            // Create atmospheric conditions
+            let atmosphere = AtmosphericConditions {
+                temperature,
+                pressure,
+                humidity,
+                altitude,
+            };
+            
+            // Create and configure solver
+            let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+            solver.set_max_range(max_range);
+            solver.set_time_step(time_step);
+            
+            // Solve trajectory
+            let result = solver.solve()?;
+            
+            // Display results
+            display_cli_results(result, output, full)?;
         },
         
         Commands::MonteCarlo {
@@ -191,7 +279,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn calculate_trajectory(
+fn calculate_trajectory_simple(
     velocity: f64,
     angle_deg: f64,
     bc: f64,
@@ -319,7 +407,7 @@ fn run_monte_carlo(
         let bc = rng.normal(base_bc, bc_std).max(0.01);
         
         // Run trajectory with varied parameters
-        match calculate_trajectory(velocity, angle, bc, base_mass, base_diameter, 20.0, 0.05) {
+        match calculate_trajectory_simple(velocity, angle, bc, base_mass, base_diameter, 20.0, 0.05) {
             Ok(result) => {
                 ranges.push(result.max_range);
                 max_heights.push(result.max_height);
@@ -419,17 +507,33 @@ fn display_monte_carlo_results(result: MonteCarloResult, format: MonteCarloOutpu
     Ok(())
 }
 
-fn display_results(result: TrajectoryResult, format: OutputFormat) -> Result<(), Box<dyn Error>> {
+fn display_cli_results(result: ballistics_engine::cli_api::TrajectoryResult, format: OutputFormat, full: bool) -> Result<(), Box<dyn Error>> {
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            // Convert to simplified format for JSON output
+            let simple_result = TrajectoryResult {
+                max_range: result.max_range,
+                max_height: result.max_height,
+                time_of_flight: result.time_of_flight,
+                impact_velocity: result.impact_velocity,
+                impact_energy: result.impact_energy,
+                trajectory: result.points.iter().map(|p| TrajectoryPoint {
+                    time: p.time,
+                    x: p.position.x,
+                    y: p.position.y,
+                    velocity: p.velocity_magnitude,
+                    energy: p.kinetic_energy,
+                }).collect(),
+            };
+            println!("{}", serde_json::to_string_pretty(&simple_result)?);
         },
         
         OutputFormat::Csv => {
-            println!("time,x,y,velocity,energy");
-            for p in &result.trajectory {
-                println!("{:.3},{:.2},{:.2},{:.2},{:.2}",
-                    p.time, p.x, p.y, p.velocity, p.energy);
+            println!("time,x,y,z,velocity,energy");
+            for p in &result.points {
+                println!("{:.3},{:.2},{:.2},{:.2},{:.2},{:.2}",
+                    p.time, p.position.x, p.position.y, p.position.z,
+                    p.velocity_magnitude, p.kinetic_energy);
             }
         },
         
@@ -444,19 +548,56 @@ fn display_results(result: TrajectoryResult, format: OutputFormat) -> Result<(),
             println!("║ Impact Energy:     {:>8.2} J          ║", result.impact_energy);
             println!("╚════════════════════════════════════════╝");
             
-            println!("\nTrajectory Points (every {:.1}s):", result.time_of_flight / 10.0);
-            println!("┌──────────┬──────────┬──────────┬──────────┐");
-            println!("│ Time (s) │  X (m)   │  Y (m)   │ Vel(m/s) │");
-            println!("├──────────┼──────────┼──────────┼──────────┤");
-            
-            let step = result.trajectory.len() / 10;
-            for (i, p) in result.trajectory.iter().enumerate() {
-                if i % step.max(1) == 0 || i == result.trajectory.len() - 1 {
-                    println!("│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
-                        p.time, p.x, p.y, p.velocity);
+            if full {
+                println!("\nFull Trajectory Points:");
+                println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                println!("│ Time (s) │  X (m)   │  Y (m)   │  Z (m)   │ Vel(m/s) │");
+                println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+                
+                for p in &result.points {
+                    println!("│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
+                        p.time, p.position.x, p.position.y, p.position.z, p.velocity_magnitude);
                 }
+                println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+            } else {
+                println!("\nTrajectory Points (every {:.1}s):", result.time_of_flight / 10.0);
+                println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                println!("│ Time (s) │  X (m)   │  Y (m)   │  Z (m)   │ Vel(m/s) │");
+                println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+                
+                let step = result.points.len() / 10;
+                for (i, p) in result.points.iter().enumerate() {
+                    if i % step.max(1) == 0 || i == result.points.len() - 1 {
+                        println!("│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
+                            p.time, p.position.x, p.position.y, p.position.z, p.velocity_magnitude);
+                    }
+                }
+                println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
             }
-            println!("└──────────┴──────────┴──────────┴──────────┘");
+        },
+        OutputFormat::Full => {
+            // Full detailed output
+            println!("╔════════════════════════════════════════╗");
+            println!("║      FULL TRAJECTORY ANALYSIS          ║");
+            println!("╠════════════════════════════════════════╣");
+            println!("║ SUMMARY                                ║");
+            println!("║ Max Range:         {:>8.2} m          ║", result.max_range);
+            println!("║ Max Height:        {:>8.2} m          ║", result.max_height);
+            println!("║ Time of Flight:    {:>8.3} s          ║", result.time_of_flight);
+            println!("║ Impact Velocity:   {:>8.2} m/s        ║", result.impact_velocity);
+            println!("║ Impact Energy:     {:>8.2} J          ║", result.impact_energy);
+            println!("║ Total Points:      {:>8}            ║", result.points.len());
+            println!("╠════════════════════════════════════════╣");
+            println!("║ COMPLETE TRAJECTORY DATA               ║");
+            println!("╚════════════════════════════════════════════╝");
+            
+            println!("\nDetailed trajectory points:");
+            println!("Time(s)\tX(m)\tY(m)\tZ(m)\tVel(m/s)\tKE(J)");
+            for p in &result.points {
+                println!("{:.4}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}",
+                    p.time, p.position.x, p.position.y, p.position.z,
+                    p.velocity_magnitude, p.kinetic_energy);
+            }
         },
     }
     

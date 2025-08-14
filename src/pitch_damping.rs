@@ -310,4 +310,193 @@ mod tests {
         // Should be negative (opposing motion)
         assert!(moment < 0.0);
     }
+    
+    #[test]
+    fn test_bullet_type_coefficients() {
+        let types = ["match_boat_tail", "match_flat_base", "vld", "hunting", "fmj", "unknown"];
+        
+        for bullet_type in &types {
+            let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
+            
+            // Check that subsonic is always stabilizing (negative)
+            assert!(coeffs.subsonic < 0.0);
+            
+            // Check that supersonic eventually stabilizes
+            assert!(coeffs.supersonic < 0.0);
+            
+            // Check that VLD is most stable
+            if *bullet_type == "vld" {
+                let default_coeffs = PitchDampingCoefficients::default();
+                assert!(coeffs.subsonic < default_coeffs.subsonic);
+            }
+        }
+    }
+    
+    #[test]
+    fn test_transonic_instability() {
+        let coeffs = PitchDampingCoefficients::from_bullet_type("hunting");
+        
+        // Check that transonic high can be destabilizing (positive)
+        assert!(coeffs.transonic_high > 0.0);
+        
+        // Check coefficient through transonic region
+        let mach_1_1 = calculate_pitch_damping_coefficient(1.1, &coeffs);
+        
+        // Should be transitioning toward destabilizing
+        assert!(mach_1_1 > coeffs.transonic_low);
+    }
+    
+    #[test]
+    fn test_transverse_moment_of_inertia() {
+        let mass_kg = 0.01134;  // 175 grains
+        let caliber_m = 0.00782; // .308"
+        let length_m = 0.033;    // 1.3"
+        
+        let i_cylinder = calculate_transverse_moment_of_inertia(mass_kg, caliber_m, length_m, "cylinder");
+        let i_ogive = calculate_transverse_moment_of_inertia(mass_kg, caliber_m, length_m, "ogive");
+        let i_boat_tail = calculate_transverse_moment_of_inertia(mass_kg, caliber_m, length_m, "boat_tail");
+        let i_unknown = calculate_transverse_moment_of_inertia(mass_kg, caliber_m, length_m, "unknown");
+        
+        // Check relative magnitudes
+        assert!(i_cylinder > i_ogive);
+        assert!(i_ogive > i_boat_tail);
+        assert_eq!(i_cylinder, i_unknown);
+        
+        // Check absolute values are reasonable
+        assert!(i_cylinder > 0.0);
+        assert!(i_cylinder < 1.0); // Should be small for a bullet
+    }
+    
+    #[test]
+    fn test_angular_acceleration() {
+        let moment = -0.001; // Small damping moment
+        let inertia = 0.0001; // Small inertia
+        
+        let accel = calculate_angular_acceleration(moment, inertia);
+        assert_eq!(accel, moment / inertia);
+        
+        // Test zero inertia
+        let accel_zero = calculate_angular_acceleration(moment, 0.0);
+        assert_eq!(accel_zero, 0.0);
+    }
+    
+    #[test]
+    fn test_damped_yaw_of_repose() {
+        let (yaw, convergence) = calculate_damped_yaw_of_repose(
+            2.5,      // stability factor
+            800.0,    // velocity m/s
+            19000.0,  // spin rate rad/s
+            10.0,     // wind velocity m/s
+            0.01,     // pitch rate rad/s
+            1.225,    // air density
+            0.308,    // caliber inches
+            1.3,      // length inches
+            175.0,    // mass grains
+            0.9,      // Mach
+            "match_boat_tail"
+        );
+        
+        // Should have non-zero yaw and convergence
+        assert!(yaw > 0.0);
+        assert!(yaw < 0.1); // Should be small angle
+        assert!(convergence > 0.0);
+        
+        // Test with no stability (Sg <= 1)
+        let (yaw_unstable, conv_unstable) = calculate_damped_yaw_of_repose(
+            0.9, 800.0, 19000.0, 10.0, 0.01, 1.225, 0.308, 1.3, 175.0, 0.9, "match_boat_tail"
+        );
+        assert_eq!(yaw_unstable, 0.0);
+        assert_eq!(conv_unstable, 0.0);
+    }
+    
+    #[test]
+    fn test_precession_with_damping() {
+        let precession = calculate_precession_with_damping(
+            0.01,    // yaw angle rad
+            19000.0, // spin rate rad/s
+            800.0,   // velocity m/s
+            -0.001,  // pitch damping moment
+            0.0001,  // transverse inertia
+            0.00005  // spin inertia
+        );
+        
+        assert!(precession > 0.0);
+        
+        // Test zero spin
+        let precession_zero = calculate_precession_with_damping(
+            0.01, 0.0, 800.0, -0.001, 0.0001, 0.00005
+        );
+        assert_eq!(precession_zero, 0.0);
+        
+        // Test zero velocity
+        let precession_no_vel = calculate_precession_with_damping(
+            0.01, 19000.0, 0.0, -0.001, 0.0001, 0.00005
+        );
+        assert_eq!(precession_no_vel, 0.0);
+    }
+    
+    #[test]
+    fn test_mach_interpolation() {
+        let coeffs = PitchDampingCoefficients::default();
+        
+        // Test smooth transition through Mach regimes
+        let mach_values = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5, 2.0];
+        let mut last_value = calculate_pitch_damping_coefficient(mach_values[0], &coeffs);
+        
+        for &mach in &mach_values[1..] {
+            let value = calculate_pitch_damping_coefficient(mach, &coeffs);
+            
+            // Check continuity (no huge jumps)
+            assert!((value - last_value).abs() < 1.0);
+            last_value = value;
+        }
+    }
+    
+    #[test]
+    fn test_pitch_damping_edge_cases() {
+        let coeffs = PitchDampingCoefficients::default();
+        
+        // Test zero pitch rate
+        let moment_zero_pitch = calculate_pitch_damping_moment(
+            0.0, 300.0, 1.225, 0.00782, 0.033, 0.87, &coeffs
+        );
+        assert_eq!(moment_zero_pitch, 0.0);
+        
+        // Test zero velocity
+        let moment_zero_vel = calculate_pitch_damping_moment(
+            0.1, 0.0, 1.225, 0.00782, 0.033, 0.87, &coeffs
+        );
+        assert_eq!(moment_zero_vel, 0.0);
+    }
+    
+    #[test]
+    fn test_default_implementation() {
+        let coeffs1 = PitchDampingCoefficients::default();
+        let coeffs2 = PitchDampingCoefficients::from_bullet_type("unknown");
+        
+        assert_eq!(coeffs1.subsonic, coeffs2.subsonic);
+        assert_eq!(coeffs1.transonic_low, coeffs2.transonic_low);
+        assert_eq!(coeffs1.transonic_high, coeffs2.transonic_high);
+        assert_eq!(coeffs1.supersonic, coeffs2.supersonic);
+    }
+    
+    #[test]
+    fn test_transonic_jump() {
+        let coeffs = PitchDampingCoefficients::from_bullet_type("hunting");
+        
+        // In transonic region, check for potential instability
+        let (yaw_subsonic, _) = calculate_damped_yaw_of_repose(
+            2.5, 250.0, 19000.0, 10.0, 0.01, 1.225,
+            0.308, 1.3, 175.0, 0.7, "hunting"
+        );
+        
+        let (yaw_transonic, _) = calculate_damped_yaw_of_repose(
+            2.5, 343.0, 19000.0, 10.0, 0.01, 1.225,
+            0.308, 1.3, 175.0, 1.0, "hunting"
+        );
+        
+        // Both should be valid but potentially different
+        assert!(yaw_subsonic > 0.0);
+        assert!(yaw_transonic > 0.0);
+    }
 }

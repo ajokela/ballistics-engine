@@ -313,4 +313,250 @@ mod tests {
         assert!(amp_1 < amp_0);
         assert!(amp_1 > 0.0);
     }
+    
+    #[test]
+    fn test_precession_edge_cases() {
+        // Test zero velocity
+        let freq_zero_vel = calculate_precession_frequency(
+            17522.0, 0.0, 6.94e-8, 9.13e-7, 0.002
+        );
+        assert_eq!(freq_zero_vel, 0.0);
+        
+        // Test zero transverse inertia
+        let freq_zero_inertia = calculate_precession_frequency(
+            17522.0, 850.0, 6.94e-8, 0.0, 0.002
+        );
+        assert_eq!(freq_zero_inertia, 0.0);
+        
+        // Test zero yaw angle (sin(0) = 0)
+        let freq_zero_yaw = calculate_precession_frequency(
+            17522.0, 850.0, 6.94e-8, 9.13e-7, 0.0
+        );
+        assert_eq!(freq_zero_yaw, 0.0);
+    }
+    
+    #[test]
+    fn test_nutation_edge_cases() {
+        // Test unstable projectile (Sg <= 1)
+        let freq_unstable = calculate_nutation_frequency(
+            17522.0, 6.94e-8, 9.13e-7, 0.9
+        );
+        assert_eq!(freq_unstable, 0.0);
+        
+        // Test marginally stable (Sg = 1)
+        let freq_marginal = calculate_nutation_frequency(
+            17522.0, 6.94e-8, 9.13e-7, 1.0
+        );
+        assert_eq!(freq_marginal, 0.0);
+        
+        // Test zero transverse inertia
+        let freq_zero_inertia = calculate_nutation_frequency(
+            17522.0, 6.94e-8, 0.0, 2.0
+        );
+        assert_eq!(freq_zero_inertia, 0.0);
+    }
+    
+    #[test]
+    fn test_nutation_amplitude_bounds() {
+        let initial = 0.5; // Large initial disturbance
+        let freq = 3000.0;
+        let spin = 17522.0;
+        
+        // Even with large initial disturbance, should be clamped
+        let amp = calculate_nutation_amplitude(initial, 0.0, freq, 0.05, spin);
+        assert!(amp <= 0.1); // Max 0.1 rad
+        
+        // Test zero frequency
+        let amp_zero_freq = calculate_nutation_amplitude(initial, 1.0, 0.0, 0.05, spin);
+        assert_eq!(amp_zero_freq, 0.0);
+        
+        // Test zero spin
+        let amp_zero_spin = calculate_nutation_amplitude(initial, 1.0, freq, 0.05, 0.0);
+        assert_eq!(amp_zero_spin, 0.0);
+    }
+    
+    #[test]
+    fn test_epicyclic_motion() {
+        let (pitch, yaw) = calculate_epicyclic_motion(
+            17522.0,  // spin rate
+            850.0,    // velocity
+            2.5,      // stability factor
+            0.1,      // time
+            0.01      // initial yaw
+        );
+        
+        // Should produce reasonable angles
+        assert!(pitch.abs() <= 0.01);
+        assert!(yaw.abs() <= 0.01);
+        
+        // Test unstable case
+        let (pitch_unstable, yaw_unstable) = calculate_epicyclic_motion(
+            17522.0, 850.0, 0.9, 0.1, 0.01
+        );
+        assert_eq!(pitch_unstable, 0.01);
+        assert_eq!(yaw_unstable, 0.01);
+    }
+    
+    #[test]
+    fn test_limit_cycle_yaw() {
+        // Test with crosswind
+        let yaw_wind = calculate_limit_cycle_yaw(
+            850.0,    // velocity
+            17522.0,  // spin rate
+            2.5,      // stability
+            10.0      // crosswind
+        );
+        
+        // Should be small but non-zero
+        assert!(yaw_wind > 0.0);
+        assert!(yaw_wind < 0.1);
+        
+        // Test without crosswind
+        let yaw_no_wind = calculate_limit_cycle_yaw(
+            850.0, 17522.0, 2.5, 0.0
+        );
+        assert!(yaw_no_wind > 0.0);
+        assert!(yaw_no_wind < yaw_wind);
+        
+        // Test unstable projectile
+        let yaw_unstable = calculate_limit_cycle_yaw(
+            850.0, 17522.0, 0.9, 0.0
+        );
+        assert_eq!(yaw_unstable, 0.01); // Fixed value for unstable
+    }
+    
+    #[test]
+    fn test_combined_angular_motion() {
+        let params = PrecessionNutationParams::default();
+        let initial_state = AngularState {
+            pitch_angle: 0.001,
+            yaw_angle: 0.002,
+            pitch_rate: 0.01,
+            yaw_rate: 0.01,
+            precession_angle: 0.0,
+            nutation_phase: 0.0,
+        };
+        
+        let new_state = calculate_combined_angular_motion(
+            &params,
+            &initial_state,
+            0.1,  // time
+            0.001, // dt
+            0.001  // initial disturbance
+        );
+        
+        // Check that nutation phase evolved (it always should with non-zero frequency)
+        // Precession might be very small with small yaw angles
+        assert!(new_state.nutation_phase != initial_state.nutation_phase || 
+                new_state.precession_angle != initial_state.precession_angle);
+        
+        // Check reasonable bounds
+        assert!(new_state.pitch_angle.abs() < 1.0);
+        assert!(new_state.yaw_angle.abs() < 1.0);
+    }
+    
+    #[test]
+    fn test_default_params() {
+        let params = PrecessionNutationParams::default();
+        
+        // Check reasonable default values
+        assert!(params.mass_kg > 0.0);
+        assert!(params.caliber_m > 0.0);
+        assert!(params.length_m > 0.0);
+        assert!(params.spin_rate_rad_s > 0.0);
+        assert!(params.spin_inertia > 0.0);
+        assert!(params.transverse_inertia > 0.0);
+        assert!(params.velocity_mps > 0.0);
+        assert!(params.air_density_kg_m3 > 0.0);
+        assert!(params.mach > 0.0);
+        assert!(params.nutation_damping_factor > 0.0);
+        assert!(params.nutation_damping_factor < 1.0); // Should be fraction
+    }
+    
+    #[test]
+    fn test_stability_effects() {
+        // High stability should give lower frequencies
+        let freq_high_stability = calculate_nutation_frequency(
+            17522.0, 6.94e-8, 9.13e-7, 5.0
+        );
+        
+        let freq_low_stability = calculate_nutation_frequency(
+            17522.0, 6.94e-8, 9.13e-7, 1.5
+        );
+        
+        // Higher stability gives higher nutation frequency
+        assert!(freq_high_stability > freq_low_stability);
+    }
+    
+    #[test]
+    fn test_damping_time_evolution() {
+        let initial = 0.01;
+        let freq = 3000.0;
+        let spin = 17522.0;
+        let damping = 0.1;
+        
+        // Sample at different times
+        let times = [0.0, 0.01, 0.02, 0.05, 0.1, 0.2];
+        let mut last_amp = initial;
+        
+        for &t in &times[1..] {
+            let amp = calculate_nutation_amplitude(initial, t, freq, damping, spin);
+            
+            // Should monotonically decrease
+            assert!(amp < last_amp);
+            assert!(amp >= 0.0);
+            last_amp = amp;
+        }
+    }
+    
+    #[test]
+    fn test_angular_state_evolution() {
+        let params = PrecessionNutationParams {
+            mass_kg: 0.01,
+            caliber_m: 0.008,
+            length_m: 0.03,
+            spin_rate_rad_s: 10000.0,
+            spin_inertia: 5e-8,
+            transverse_inertia: 8e-7,
+            velocity_mps: 800.0,
+            air_density_kg_m3: 1.2,
+            mach: 2.3,
+            pitch_damping_coeff: -0.5,
+            nutation_damping_factor: 0.08,
+        };
+        
+        let mut state = AngularState {
+            pitch_angle: 0.0,
+            yaw_angle: 0.005,
+            pitch_rate: 0.0,
+            yaw_rate: 0.0,
+            precession_angle: 0.0,
+            nutation_phase: 0.0,
+        };
+        
+        // Store initial state for comparison
+        let initial_phase = state.nutation_phase;
+        let initial_precession = state.precession_angle;
+        
+        // Evolve for several timesteps
+        let dt = 0.0001;
+        for i in 0..100 {
+            let time = i as f64 * dt;
+            state = calculate_combined_angular_motion(
+                &params,
+                &state,
+                time,
+                dt,
+                0.002
+            );
+        }
+        
+        // Should have evolved - at least one of these should change
+        assert!(state.precession_angle != initial_precession || 
+                state.nutation_phase != initial_phase);
+        
+        // Should remain bounded
+        assert!(state.yaw_angle.abs() < 0.1);
+        assert!(state.pitch_angle.abs() < 0.1);
+    }
 }

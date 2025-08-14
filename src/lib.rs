@@ -13,7 +13,7 @@ pub use cli_api::{
 
 // Module declarations
 mod drag_model;
-mod cli_api;
+pub mod cli_api;
 mod constants;
 mod drag;
 mod drag_tables;

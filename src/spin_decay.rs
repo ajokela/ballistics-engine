@@ -322,4 +322,163 @@ mod tests {
 
         assert!(spin_long_time >= initial_spin * 0.5);
     }
+    
+    #[test]
+    fn test_spin_damping_moment() {
+        let params = SpinDecayParameters::from_bullet_type("match");
+        
+        // Test with typical values
+        let moment = calculate_spin_damping_moment(
+            1000.0,  // spin rate rad/s
+            800.0,   // velocity m/s
+            1.225,   // air density
+            0.00782, // caliber in meters (.308")
+            0.033,   // length in meters
+            &params,
+        );
+        
+        // Moment should be positive (opposes spin)
+        assert!(moment > 0.0);
+        assert!(moment < 1.0); // Should be small for a bullet
+        
+        // Test zero spin
+        let zero_moment = calculate_spin_damping_moment(
+            0.0, 800.0, 1.225, 0.00782, 0.033, &params
+        );
+        assert_eq!(zero_moment, 0.0);
+        
+        // Test zero velocity
+        let zero_vel_moment = calculate_spin_damping_moment(
+            1000.0, 0.0, 1.225, 0.00782, 0.033, &params
+        );
+        assert_eq!(zero_vel_moment, 0.0);
+    }
+    
+    #[test]
+    fn test_spin_decay_rate() {
+        let params = SpinDecayParameters::from_bullet_type("fmj");
+        
+        let decay_rate = calculate_spin_decay_rate(
+            1000.0,  // spin rate rad/s
+            800.0,   // velocity m/s
+            1.225,   // air density
+            168.0,   // mass grains
+            0.308,   // caliber inches
+            1.2,     // length inches
+            &params,
+            "boat_tail",
+        );
+        
+        // Decay rate should be negative (spin decreases)
+        assert!(decay_rate < 0.0);
+        assert!(decay_rate > -1000.0); // Should be reasonable magnitude
+    }
+    
+    #[test]
+    fn test_different_bullet_types() {
+        // Test all bullet type parameters
+        let types = ["match", "hunting", "fmj", "cast", "unknown"];
+        
+        for bullet_type in &types {
+            let params = SpinDecayParameters::from_bullet_type(bullet_type);
+            assert!(params.surface_roughness > 0.0);
+            assert!(params.skin_friction_coefficient > 0.0);
+            assert!(params.form_factor > 0.0);
+        }
+    }
+    
+    #[test]
+    fn test_moment_of_inertia_shapes() {
+        let mass_kg = 0.01;
+        let caliber_m = 0.008;
+        let length_m = 0.03;
+        
+        let i_cylinder = calculate_moment_of_inertia(mass_kg, caliber_m, length_m, "cylinder");
+        let i_ogive = calculate_moment_of_inertia(mass_kg, caliber_m, length_m, "ogive");
+        let i_boat_tail = calculate_moment_of_inertia(mass_kg, caliber_m, length_m, "boat_tail");
+        let i_default = calculate_moment_of_inertia(mass_kg, caliber_m, length_m, "unknown");
+        
+        // Check relative magnitudes
+        assert!(i_cylinder > i_ogive);
+        assert!(i_ogive > i_boat_tail);
+        assert_eq!(i_cylinder, i_default); // Unknown defaults to cylinder
+        
+        // Check absolute values are reasonable
+        assert!(i_cylinder > 0.0);
+        assert!(i_boat_tail > 0.0);
+    }
+    
+    #[test]
+    fn test_spin_decay_correction_factor() {
+        let params = SpinDecayParameters::from_bullet_type("match");
+        
+        // At time zero, factor should be 1.0
+        let factor_t0 = calculate_spin_decay_correction_factor(
+            0.0, 800.0, 1.225, 175.0, 0.308, 1.3, Some(&params)
+        );
+        assert_eq!(factor_t0, 1.0);
+        
+        // After some time, factor should be less than 1.0 but greater than 0.5
+        let factor_t3 = calculate_spin_decay_correction_factor(
+            3.0, 800.0, 1.225, 175.0, 0.308, 1.3, Some(&params)
+        );
+        assert!(factor_t3 < 1.0);
+        assert!(factor_t3 > 0.5);
+        
+        // Factor should decrease with time
+        let factor_t1 = calculate_spin_decay_correction_factor(
+            1.0, 800.0, 1.225, 175.0, 0.308, 1.3, Some(&params)
+        );
+        let factor_t2 = calculate_spin_decay_correction_factor(
+            2.0, 800.0, 1.225, 175.0, 0.308, 1.3, Some(&params)
+        );
+        assert!(factor_t1 > factor_t2);
+        assert!(factor_t2 > factor_t3);
+    }
+    
+    #[test]
+    fn test_default_impl() {
+        let params1 = SpinDecayParameters::new();
+        let params2 = SpinDecayParameters::default();
+        
+        assert_eq!(params1.surface_roughness, params2.surface_roughness);
+        assert_eq!(params1.skin_friction_coefficient, params2.skin_friction_coefficient);
+        assert_eq!(params1.form_factor, params2.form_factor);
+    }
+    
+    #[test]
+    fn test_mass_factor_effects() {
+        let params = SpinDecayParameters::from_bullet_type("match");
+        
+        // Light bullet (55gr)
+        let spin_light = update_spin_rate(
+            1000.0, 2.0, 800.0, 1.225, 55.0, 0.224, 0.9, Some(&params)
+        );
+        
+        // Heavy bullet (300gr)
+        let spin_heavy = update_spin_rate(
+            1000.0, 2.0, 800.0, 1.225, 300.0, 0.338, 1.8, Some(&params)
+        );
+        
+        // Heavy bullet should retain more spin (decay less)
+        assert!(spin_heavy > spin_light);
+    }
+    
+    #[test]
+    fn test_velocity_factor_effects() {
+        let params = SpinDecayParameters::from_bullet_type("hunting");
+        
+        // Low velocity
+        let spin_low_vel = update_spin_rate(
+            1000.0, 2.0, 400.0, 1.225, 175.0, 0.308, 1.3, Some(&params)
+        );
+        
+        // High velocity
+        let spin_high_vel = update_spin_rate(
+            1000.0, 2.0, 1200.0, 1.225, 175.0, 0.308, 1.3, Some(&params)
+        );
+        
+        // Higher velocity should cause more decay (less spin remaining)
+        assert!(spin_low_vel > spin_high_vel);
+    }
 }

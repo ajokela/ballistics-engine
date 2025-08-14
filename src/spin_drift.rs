@@ -431,3 +431,102 @@ pub fn compute_enhanced_spin_drift_simple(
         is_twist_right,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_calculate_spin_rate() {
+        // Test with 1:10 twist at 800 m/s
+        let (rps, rad_s) = calculate_spin_rate(800.0, 10.0);
+        
+        // 800 m/s = 31496 in/s, divided by 10 = 3149.6 rps
+        assert!((rps - 3149.6).abs() < 1.0);
+        assert!((rad_s - rps * 2.0 * PI).abs() < 0.1);
+        
+        // Test with zero twist rate
+        let (rps_zero, rad_s_zero) = calculate_spin_rate(800.0, 0.0);
+        assert_eq!(rps_zero, 0.0);
+        assert_eq!(rad_s_zero, 0.0);
+    }
+    
+    #[test]
+    fn test_calculate_dynamic_stability() {
+        let sg = calculate_dynamic_stability(
+            168.0,  // grains
+            800.0,  // m/s
+            19792.0, // rad/s (from 1:10 twist)
+            0.308,  // inches
+            1.2,    // inches
+            1.225   // kg/m³
+        );
+        
+        // Should be > 1.0 for stable bullet
+        assert!(sg > 1.0);
+        assert!(sg < 10.0); // Reasonable upper bound
+    }
+    
+    #[test]
+    fn test_calculate_yaw_of_repose() {
+        let (yaw, _) = calculate_yaw_of_repose(
+            2.5,       // Sg
+            800.0,     // velocity m/s
+            19792.0,   // spin rate rad/s
+            10.0,      // crosswind m/s
+            0.0,       // pitch rate
+            1.225,     // air density
+            0.308,     // caliber
+            1.2,       // length
+            168.0,     // mass
+            2.33,      // mach
+            "match",   // bullet type
+            false      // use pitch damping
+        );
+        
+        // Should be small but non-zero
+        assert!(yaw.abs() > 0.0);
+        assert!(yaw.abs() < 0.1); // Less than ~6 degrees
+    }
+    
+    #[test]
+    fn test_enhanced_spin_drift_calculation() {
+        let components = calculate_enhanced_spin_drift(
+            168.0,  // mass grains
+            800.0,  // velocity m/s
+            10.0,   // twist rate inches
+            0.308,  // caliber inches
+            1.2,    // length inches
+            true,   // right twist
+            1.0,    // time s
+            1.225,  // air density
+            10.0,   // crosswind
+            0.0,    // pitch rate
+            false   // use pitch damping
+        );
+        
+        // Should produce non-zero drift
+        assert!(components.total_drift_m.abs() > 0.0);
+        assert!(components.spin_rate_rps > 0.0);
+        assert!(components.stability_factor > 0.0);
+    }
+    
+    #[test]
+    fn test_opposite_twist_directions() {
+        // Right twist
+        let right_drift = calculate_enhanced_spin_drift(
+            168.0, 800.0, 10.0, 0.308, 1.2, 
+            true, 1.0, 1.225, 0.0, 0.0, false
+        );
+        
+        // Left twist
+        let left_drift = calculate_enhanced_spin_drift(
+            168.0, 800.0, 10.0, 0.308, 1.2,
+            false, 1.0, 1.225, 0.0, 0.0, false
+        );
+        
+        // Should have opposite signs for gyroscopic component
+        assert!(right_drift.gyroscopic_component_m * left_drift.gyroscopic_component_m < 0.0);
+        assert!((right_drift.gyroscopic_component_m.abs() - left_drift.gyroscopic_component_m.abs()).abs() < 0.001);
+    }
+}
