@@ -73,6 +73,8 @@ pub struct BallisticInputs {
     pub use_enhanced_spin_drift: bool,
     pub use_form_factor: bool,
     pub use_cluster_bc: bool,
+    pub enable_wind_shear: bool,
+    pub wind_shear_model: String,
     
     // Additional data fields
     pub bc_type_str: Option<String>,
@@ -130,6 +132,8 @@ impl Default for BallisticInputs {
             use_enhanced_spin_drift: false,
             use_form_factor: false,
             use_cluster_bc: false,
+            enable_wind_shear: false,
+            wind_shear_model: "none".to_string(),
             
             // Optional data
             bc_type_str: None,

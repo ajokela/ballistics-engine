@@ -107,6 +107,52 @@ enum Commands {
         /// Bullet cluster ID (0-3) for cluster BC
         #[arg(long)]
         bullet_cluster: Option<usize>,
+        
+        // Advanced Physics Parameters
+        
+        /// Enable Magnus effect (requires twist-rate)
+        #[arg(long)]
+        enable_magnus: bool,
+        
+        /// Enable Coriolis effect (requires latitude)
+        #[arg(long)]
+        enable_coriolis: bool,
+        
+        /// Enable enhanced spin drift calculations
+        #[arg(long)]
+        enable_spin_drift: bool,
+        
+        /// Enable wind shear (altitude-dependent wind)
+        #[arg(long)]
+        enable_wind_shear: bool,
+        
+        /// Barrel twist rate (inches per turn, e.g., 10 for 1:10)
+        #[arg(long)]
+        twist_rate: Option<f64>,
+        
+        /// Right-hand twist (true) or left-hand (false)
+        #[arg(long, default_value = "true")]
+        twist_right: bool,
+        
+        /// Latitude for Coriolis effect (degrees, -90 to 90)
+        #[arg(long)]
+        latitude: Option<f64>,
+        
+        /// Shooting angle (degrees, positive = uphill, negative = downhill)
+        #[arg(long, default_value = "0.0")]
+        shooting_angle: f64,
+        
+        /// Enable powder temperature sensitivity
+        #[arg(long)]
+        use_powder_sensitivity: bool,
+        
+        /// Powder temperature sensitivity (fps per degree)
+        #[arg(long, default_value = "1.0")]
+        powder_temp_sensitivity: f64,
+        
+        /// Powder temperature
+        #[arg(long, default_value = "70.0")]
+        powder_temp: f64,
     },
     
     /// Run Monte Carlo simulation
@@ -382,7 +428,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_range, time_step, wind_speed, wind_direction,
             temperature, pressure, humidity, altitude,
             output, full, auto_zero, sight_height,
-            use_bc_segments, use_cluster_bc, bullet_cluster
+            use_bc_segments, use_cluster_bc, bullet_cluster,
+            enable_magnus, enable_coriolis, enable_spin_drift,
+            enable_wind_shear, twist_rate, twist_right, latitude,
+            shooting_angle, use_powder_sensitivity, 
+            powder_temp_sensitivity, powder_temp
         } => {
             // Convert inputs to metric
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
@@ -427,7 +477,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 max_range_metric, time_step, wind_speed_metric, wind_direction,
                 temperature_metric, pressure_metric, humidity, altitude_metric,
                 output, full, cli.units, sight_height_metric,
-                use_bc_segments, use_cluster_bc, bullet_cluster
+                use_bc_segments, use_cluster_bc, bullet_cluster,
+                enable_magnus, enable_coriolis, enable_spin_drift,
+                enable_wind_shear, twist_rate, twist_right, latitude,
+                shooting_angle, use_powder_sensitivity,
+                powder_temp_sensitivity, powder_temp
             )?;
         },
         
@@ -501,6 +555,17 @@ fn run_trajectory(
     use_bc_segments: bool,
     use_cluster_bc: bool,
     bullet_cluster: Option<usize>,
+    enable_magnus: bool,
+    enable_coriolis: bool,
+    enable_spin_drift: bool,
+    enable_wind_shear: bool,
+    twist_rate: Option<f64>,
+    twist_right: bool,
+    latitude: Option<f64>,
+    shooting_angle: f64,
+    use_powder_sensitivity: bool,
+    powder_temp_sensitivity: f64,
+    powder_temp: f64,
 ) -> Result<(), Box<dyn Error>> {
     // Create ballistic inputs with all required fields
     let drag_model_enum = match drag_model {
@@ -530,25 +595,30 @@ fn run_trajectory(
         muzzle_angle: angle.to_radians(),
         target_distance: max_range,
         temperature,
-        twist_rate: 12.0,  // Default 1:12" twist
-        is_twist_right: true,
-        shooting_angle: 0.0,
-        latitude: None,
+        twist_rate: twist_rate.unwrap_or(12.0),  // Default 1:12" twist if not specified
+        is_twist_right: twist_right,
+        shooting_angle: shooting_angle.to_radians(),
+        latitude,
         ground_threshold: -10.0,
         
-        // Advanced effects
-        enable_advanced_effects: false,
-        use_powder_sensitivity: false,
-        powder_temp_sensitivity: 0.0,
-        powder_temp: temperature,
+        // Advanced effects - now separately controlled
+        enable_advanced_effects: enable_magnus || enable_coriolis,  // Either one enables the system
+        use_powder_sensitivity,
+        powder_temp_sensitivity: if use_powder_sensitivity { 
+            UnitConverter::velocity_to_metric(powder_temp_sensitivity, units) / 
+            UnitConverter::temperature_to_metric(1.0, units) 
+        } else { 0.0 },
+        powder_temp: UnitConverter::temperature_to_metric(powder_temp, units),
         tipoff_yaw: 0.0,
         tipoff_decay_distance: 50.0,
         use_bc_segments,
         bc_segments: None,
         bc_segments_data: None,
-        use_enhanced_spin_drift: false,
+        use_enhanced_spin_drift: enable_spin_drift,
         use_form_factor: false,
         use_cluster_bc,
+        enable_wind_shear,
+        wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
         
         // Optional data
         bc_type_str: None,
