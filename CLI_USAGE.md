@@ -61,6 +61,7 @@ Calculate ballistic trajectories with advanced physics modeling:
   --wind-direction 90 # Wind from right
   --temperature 59 # Temp (°F)
   --pressure 29.92 # Pressure (inHg)
+  --humidity 50    # Humidity (%)
   --altitude 5000  # Altitude (feet)
   --full          # Show all points
 ```
@@ -180,6 +181,7 @@ All commands support three output formats via `-o`:
 | --wind-direction | Wind direction | 0° | degrees | degrees |
 | --temperature | Temperature | 59 | °F | °C |
 | --pressure | Barometric pressure | 29.92 | inHg | hPa |
+| --humidity | Relative humidity | 50 | % | % |
 | --altitude | Altitude | 0 | feet | meters |
 | --use-bc-segments | Enable BC segmentation | false | - | - |
 | --use-cluster-bc | Enable cluster BC | false | - | - |
@@ -242,6 +244,29 @@ All commands support three output formats via `-o`:
   --max-range 500
 ```
 
+### Extreme Weather Conditions
+```bash
+# Cold, low pressure, high humidity (poor conditions)
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 \
+  --temperature -10 \  # Very cold
+  --pressure 28.50 \   # Low pressure storm
+  --humidity 95 \      # Near saturation
+  --altitude 7000 \    # High altitude
+  --max-range 500
+
+# Hot, dry, high pressure (good conditions) 
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 \
+  --temperature 95 \   # Hot day
+  --pressure 30.50 \   # High pressure
+  --humidity 10 \      # Very dry
+  --altitude 0 \       # Sea level
+  --max-range 500
+```
+
 ## Advanced Features
 
 ### Drag Models
@@ -264,6 +289,17 @@ All commands support three output formats via `-o`:
 - Variable atmospheric conditions
 - Wind profile with altitude effects
 - Ground impact detection
+
+### Atmospheric Modeling
+- **Temperature Effects**: Affects air density and speed of sound
+- **Pressure Effects**: Direct impact on air density (drag)
+- **Humidity Effects**: 
+  - Humid air is less dense (reduces drag)
+  - Increases speed of sound slightly
+  - Uses Arden Buck equations for vapor pressure
+- **Altitude Effects**: Automatic pressure/density reduction with elevation
+- **ICAO Standard Atmosphere**: Full implementation up to 84km
+- **CIPM Formula**: Precise air density calculations with humidity
 
 ## Notes
 

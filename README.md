@@ -90,6 +90,7 @@ Calculate ballistic trajectory with environmental conditions:
   --wind-direction 90  # Wind from right (degrees)
   --temperature 59     # Temperature (Fahrenheit)
   --pressure 29.92    # Pressure (inHg)
+  --humidity 50       # Relative humidity (%)
   --altitude 0        # Altitude (feet)
   --full             # Show all trajectory points
 ```
@@ -231,6 +232,7 @@ Zero a hunting rifle at 200 yards with environmental conditions:
   --wind-speed 15 \
   --wind-direction 270 \
   --temperature 32 \
+  --humidity 30 \
   --altitude 5000 \
   --full
 ```

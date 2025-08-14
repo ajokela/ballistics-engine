@@ -342,25 +342,31 @@ mod tests {
     
     fn create_test_inputs() -> InternalBallisticInputs {
         InternalBallisticInputs {
+            // Core fields
+            muzzle_velocity: 823.0,  // 2700 fps in m/s
+            launch_angle: 0.0,
+            ballistic_coefficient: 0.5,
+            mass: 0.0109,  // 168 grains in kg
+            diameter: 0.00782,  // 0.308 inches in meters
+            drag_model: DragModel::G1,
+            sight_height: 0.05,
+            
+            // Duplicate fields for compatibility
             bc_value: 0.5,
             bc_type: DragModel::G1,
-            bullet_mass: 168.0,
-            muzzle_velocity: 2700.0,
+            bullet_mass: 168.0,  // in grains
             altitude: 0.0,
+            bc_type_str: Some("G1".to_string()),
             twist_rate: 10.0,
-            bullet_length: 1.3,
-            bullet_diameter: 0.308,
+            bullet_length: 1.3,  // in inches
+            bullet_diameter: 0.308,  // in inches
             tipoff_yaw: 0.0,
             tipoff_decay_distance: 20.0,
             ground_threshold: 0.0,
             bc_segments: None,
             target_distance: 500.0,
             muzzle_angle: 0.0,
-            wind_speed: 0.0,
-            wind_angle: 0.0,
-            temperature: 70.0,
-            pressure: 1013.25,
-            humidity: 0.0,
+            temperature: 21.1,  // 70°F in Celsius
             latitude: None,
             enable_advanced_effects: false,
             is_twist_right: true,
@@ -375,7 +381,6 @@ mod tests {
             bc_segments_data: None,
             use_enhanced_spin_drift: false,
             use_form_factor: false,
-            manufacturer: None,
             bullet_model: None,
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
@@ -421,7 +426,7 @@ mod tests {
         let inputs = create_test_inputs();
         
         let result = adjusted_muzzle_velocity(&inputs);
-        assert_eq!(result, 2700.0);
+        assert_eq!(result, 823.0);  // muzzle_velocity in m/s
     }
     
     #[test]
@@ -432,8 +437,8 @@ mod tests {
         inputs.temperature = 85.0; // 15 degrees above powder temp
         
         let result = adjusted_muzzle_velocity(&inputs);
-        // Should be 2700 * (1 + 1.0 * (85-70) / 15) = 2700 * (1 + 1) = 5400
-        assert!((result - 5400.0).abs() < 1e-6);
+        // Should be 823 * (1 + 1.0 * (85-70) / 15) = 823 * (1 + 1) = 1646
+        assert!((result - 1646.0).abs() < 1e-6);
     }
     
     #[test]
