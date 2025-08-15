@@ -1,8 +1,8 @@
 [package]
 name = "ballistics-engine"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-authors = ["Extracted from ballistics project"]
+authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ajokela/ballistics-engine"
@@ -44,7 +44,7 @@ path = "src/bin/ballistics_cli.rs"
 
 [lib]
 name = "ballistics_engine"
-crate-type = ["rlib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [profile.release]
 opt-level = 3

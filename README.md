@@ -4,7 +4,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 
 ## Features
 
-- **4DOF Trajectory Integration** - Four degrees of freedom ballistic modeling (3D position + time)
+- **Full 3D Trajectory Integration** - Six-state ballistic modeling with complete 3D position and velocity tracking
 - **Advanced Drag Models** - Support for G1, G7, and custom drag curves with transonic corrections
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
@@ -14,7 +14,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Wind Effects** - 3D wind calculations with shear modeling
 - **Monte Carlo Simulations** - Statistical analysis with parameter uncertainties
 - **BC Estimation** - Estimate ballistic coefficients from trajectory data
-- **Advanced Physics** - Magnus effect, spin drift, Coriolis, and more
+- **Advanced Physics** - Magnus effect, spin drift, Coriolis effect, gyroscopic precession, nutation, spin decay, pitch damping, and form factor corrections
 - **Multiple Output Formats** - JSON, CSV, and formatted tables
 
 ## Installation
@@ -203,6 +203,33 @@ Estimate ballistic coefficient from observed trajectory data:
   --distance1 100 --drop1 0.0   # First data point
   --distance2 200 --drop2 0.023  # Second data point
 ```
+
+## Physics Modeling
+
+The ballistics engine implements comprehensive physics modeling for accurate trajectory prediction:
+
+### Aerodynamic Effects
+- **Drag Modeling** - Multiple drag functions (G1-G8, JBM, custom curves) with transonic flow corrections
+- **Form Factor** - Projectile efficiency corrections based on shape and design
+- **Reynolds Number Effects** - Viscosity and flow regime corrections
+
+### Gyroscopic Effects  
+- **Spin Drift** - Lateral deviation due to gyroscopic and Magnus effects
+- **Precession** - Gyroscopic precession of spinning projectile
+- **Nutation** - Oscillatory motion superimposed on precession
+- **Spin Decay** - Reduction in spin rate over time due to aerodynamic damping
+- **Pitch Damping** - Aerodynamic moments opposing angular motion
+
+### Environmental Effects
+- **Coriolis Effect** - Earth's rotation influence on long-range trajectories
+- **Magnus Effect** - Force from spinning projectile in crossflow
+- **Wind Shear** - Altitude-dependent wind variations
+- **Atmospheric Stratification** - Density and sound speed variations with altitude
+
+### Stability Modeling
+- **Dynamic Stability** - Gyroscopic and aerodynamic stability calculations
+- **Yaw of Repose** - Equilibrium yaw angle in crosswind
+- **Limit Cycle Yaw** - Bounded oscillatory motion analysis
 
 ## Output Formats
 

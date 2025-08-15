@@ -7,13 +7,14 @@ pub use drag_model::DragModel;
 pub use cli_api::{
     BallisticInputs, TrajectorySolver, WindConditions, AtmosphericConditions,
     TrajectoryResult, TrajectoryPoint, MonteCarloParams, MonteCarloResults,
-    run_monte_carlo, calculate_zero_angle, estimate_bc_from_trajectory,
-    BallisticsError,
+    run_monte_carlo, calculate_zero_angle, calculate_zero_angle_with_conditions,
+    estimate_bc_from_trajectory, BallisticsError,
 };
 
 // Module declarations
 mod drag_model;
 pub mod cli_api;
+pub mod ffi;
 mod constants;
 mod drag;
 mod drag_tables;
@@ -36,6 +37,7 @@ mod form_factor;
 mod monte_carlo;
 mod bc_estimation;
 mod cluster_bc;
+mod stability;
 
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;

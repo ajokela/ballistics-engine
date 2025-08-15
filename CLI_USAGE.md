@@ -283,7 +283,7 @@ All commands support three output formats via `-o`:
 - Automatic bullet type identification from parameters
 
 ### Physics Engine
-- 4DOF trajectory integration (3D position + time)
+- Full 3D trajectory integration with six-state modeling
 - Magnus effect for spin drift
 - Coriolis effect (with latitude input)
 - Variable atmospheric conditions

@@ -440,20 +440,42 @@ pub fn calculate_zero_angle(
     target_distance: f64,
     target_height: f64,
 ) -> Result<f64, BallisticsError> {
+    calculate_zero_angle_with_conditions(
+        inputs,
+        target_distance,
+        target_height,
+        WindConditions::default(),
+        AtmosphericConditions::default(),
+    )
+}
+
+pub fn calculate_zero_angle_with_conditions(
+    inputs: BallisticInputs,
+    target_distance: f64,
+    target_height: f64,
+    wind: WindConditions,
+    atmosphere: AtmosphericConditions,
+) -> Result<f64, BallisticsError> {
     // Binary search for the angle that hits the target
-    let mut low_angle = -0.1; // radians
-    let mut high_angle = 0.1;  // radians
+    let mut low_angle = -0.2; // radians (about -11 degrees)
+    let mut high_angle = 0.2;  // radians (about 11 degrees)
     let tolerance = 0.00001;   // radians
     let max_iterations = 50;
     
-    for _ in 0..max_iterations {
+    for iteration in 0..max_iterations {
         let mid_angle = (low_angle + high_angle) / 2.0;
         
         let mut test_inputs = inputs.clone();
         test_inputs.launch_angle = mid_angle;
         
-        let solver = TrajectorySolver::new(test_inputs, Default::default(), Default::default());
+        let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
+        // Make sure we calculate far enough to reach the target
+        solver.set_max_range(target_distance * 2.0);
+        solver.set_time_step(0.001);
         let result = solver.solve()?;
+        
+        eprintln!("  Iteration {}: angle = {:.6} rad ({:.4} deg)", 
+                 iteration, mid_angle, mid_angle * 180.0 / std::f64::consts::PI);
         
         // Find the height at target distance
         let mut height_at_target = None;
@@ -475,7 +497,10 @@ pub fn calculate_zero_angle(
         match height_at_target {
             Some(height) => {
                 let error = height - target_height;
+                eprintln!("    Height at target: {:.6} m, target: {:.6} m, error: {:.6} m", 
+                         height, target_height, error);
                 if error.abs() < 0.001 {
+                    eprintln!("  Converged!");
                     return Ok(mid_angle);
                 }
                 
