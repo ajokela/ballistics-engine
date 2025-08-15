@@ -235,7 +235,7 @@ The ballistics engine implements comprehensive physics modeling for accurate tra
 
 The library includes a Foreign Function Interface (FFI) layer for integration with iOS, Android, and other platforms. The FFI provides C-compatible bindings for all major functionality.
 
-![iOS Integration Example](ios.png)
+<img src="ios.png" alt="iOS Integration Example" width="35%">
 
 ### FFI Features
 - **C-Compatible Structures** - All data structures use C-compatible layouts
