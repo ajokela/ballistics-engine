@@ -9,7 +9,6 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling
-- **Cluster-Based BC Degradation** - ML-based BC adjustments for different projectile types
 - **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects
 - **Wind Effects** - 3D wind calculations with shear modeling
 - **Monte Carlo Simulations** - Statistical analysis with parameter uncertainties
@@ -126,26 +125,7 @@ Enable velocity-dependent BC modeling for more accurate long-range predictions:
   --auto-zero 600 \
   --max-range 1000
 
-# Enable cluster-based BC (automatic bullet classification)
-./ballistics trajectory \
-  -v 2700 -b 0.475 -m 168 -d 0.308 \
-  --use-cluster-bc \  # Auto-detects bullet type from caliber/weight/BC
-  --auto-zero 600 \
-  --max-range 1000
-
-# Manual cluster selection (0-3)
-./ballistics trajectory \
-  -v 3000 -b 0.250 -m 55 -d 0.224 \
-  --use-cluster-bc \
-  --bullet-cluster 2 \  # Force Light Varmint cluster
-  --max-range 500
 ```
-
-Cluster Types:
-- **0**: Standard Long-Range (308 Match, similar)
-- **1**: Low-Drag Specialty (6.5mm high-BC, VLD bullets)
-- **2**: Light Varmint (223 55gr, light fast bullets)
-- **3**: Heavy Magnums (338 Lapua, 50 BMG)
 
 ### Zero Calculation
 
@@ -353,22 +333,6 @@ Example:
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --use-bc-segments --max-range 1000
 ```
 
-### Cluster-Based BC Degradation
-
-Machine learning-based clustering for realistic BC modeling. Enable with `--use-cluster-bc`:
-
-**Automatic Classification** - The system analyzes your bullet parameters and assigns it to one of four clusters:
-
-| Cluster | Type | Example Bullets | BC Retention |
-|---------|------|-----------------|--------------|
-| 0 | Standard Long-Range | .308 168gr Match, .30-06 | Good (98% at muzzle, 80% at 1000 fps) |
-| 1 | Low-Drag Specialty | 6.5mm 140gr VLD, 6mm BR | Excellent (99% at muzzle, 74% at 1000 fps) |
-| 2 | Light Varmint | .223 55gr, .204 Ruger | Poor (96% at muzzle, 55% at 1000 fps) |
-| 3 | Heavy Magnums | .338 300gr, .50 BMG | Moderate (94% at muzzle, 81% at 1000 fps) |
-
-**Manual Override** - Use `--bullet-cluster <0-3>` to force a specific cluster.
-
-The clustering uses normalized Euclidean distance in 3D space (caliber, weight, BC) with pre-computed centroids from ballistic data analysis.
 
 ### Advanced Physics Modeling
 

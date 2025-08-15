@@ -131,8 +131,6 @@ mod tests {
             bullet_model: None,
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
-            use_cluster_bc: false,
-            bullet_cluster: None,
         }
     }
 

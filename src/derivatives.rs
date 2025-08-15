@@ -6,7 +6,6 @@ use crate::drag::get_drag_coefficient_full;
 use crate::spin_drift::{calculate_enhanced_spin_drift, apply_enhanced_spin_drift};
 use crate::bc_estimation::BCSegmentEstimator;
 use crate::form_factor::apply_form_factor_to_drag;
-use crate::cluster_bc::ClusterBCDegradation;
 
 // Physics constants
 const INCHES_PER_FOOT: f64 = 12.0;
@@ -179,31 +178,11 @@ pub fn compute_derivatives(
             );
         }
         
-        // Get BC value - check if cluster BC should override segments
+        // Get BC value
         let mut bc_val = bc_used;
         
-        // If cluster BC is enabled, skip BC segments to avoid double reduction
-        if inputs.use_cluster_bc {
-            // Apply cluster-based BC degradation
-            let cluster_bc = ClusterBCDegradation::new();
-            
-            // Convert mass to grains and diameter to inches for cluster BC
-            let weight_grains = inputs.bullet_mass / GRAINS_TO_KG;
-            let caliber_inches = inputs.bullet_diameter / INCHES_TO_METERS;
-            
-            // Parse cluster ID if provided
-            let cluster_id = inputs.bullet_cluster.as_ref()
-                .and_then(|s| s.parse::<usize>().ok());
-            
-            bc_val = cluster_bc.adjust_bc(
-                bc_used, 
-                v_rel_fps, 
-                caliber_inches,
-                weight_grains,
-                cluster_id
-            );
-        } else if inputs.use_bc_segments {
-            // Use velocity-based segments if cluster BC is disabled
+        if inputs.use_bc_segments {
+            // Use velocity-based segments
             bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used);
         } else if let Some(ref segments) = inputs.bc_segments {
             // Fall back to Mach-based segments
@@ -612,8 +591,6 @@ mod tests {
             bullet_diameter: 0.308,  // in inches
             target_distance: 0.0,
             muzzle_angle: 0.0,
-            use_cluster_bc: false,
-            bullet_cluster: None,
             temperature: 15.0,
             latitude: None,
             enable_advanced_effects: false,

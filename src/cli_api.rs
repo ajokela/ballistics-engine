@@ -72,7 +72,6 @@ pub struct BallisticInputs {
     pub bc_segments_data: Option<Vec<crate::BCSegmentData>>,  // Velocity-BC segments
     pub use_enhanced_spin_drift: bool,
     pub use_form_factor: bool,
-    pub use_cluster_bc: bool,
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
     
@@ -80,7 +79,6 @@ pub struct BallisticInputs {
     pub bc_type_str: Option<String>,
     pub bullet_model: Option<String>,
     pub bullet_id: Option<String>,
-    pub bullet_cluster: Option<String>,
 }
 
 impl Default for BallisticInputs {
@@ -131,7 +129,6 @@ impl Default for BallisticInputs {
             bc_segments_data: None,
             use_enhanced_spin_drift: false,
             use_form_factor: false,
-            use_cluster_bc: false,
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
             
@@ -139,7 +136,6 @@ impl Default for BallisticInputs {
             bc_type_str: None,
             bullet_model: None,
             bullet_id: None,
-            bullet_cluster: None,
         }
     }
 }

@@ -36,7 +36,6 @@ mod reynolds;
 mod form_factor;
 mod monte_carlo;
 mod bc_estimation;
-mod cluster_bc;
 mod stability;
 
 // Internal type alias for compatibility

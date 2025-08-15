@@ -100,14 +100,6 @@ enum Commands {
         #[arg(long)]
         use_bc_segments: bool,
         
-        /// Enable cluster-based BC degradation (overrides BC segments)
-        #[arg(long)]
-        use_cluster_bc: bool,
-        
-        /// Bullet cluster ID (0-3) for cluster BC
-        #[arg(long)]
-        bullet_cluster: Option<usize>,
-        
         // Advanced Physics Parameters
         
         /// Enable Magnus effect (requires twist-rate)
@@ -428,7 +420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_range, time_step, wind_speed, wind_direction,
             temperature, pressure, humidity, altitude,
             output, full, auto_zero, sight_height,
-            use_bc_segments, use_cluster_bc, bullet_cluster,
+            use_bc_segments,
             enable_magnus, enable_coriolis, enable_spin_drift,
             enable_wind_shear, twist_rate, twist_right, latitude,
             shooting_angle, use_powder_sensitivity, 
@@ -477,7 +469,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 max_range_metric, time_step, wind_speed_metric, wind_direction,
                 temperature_metric, pressure_metric, humidity, altitude_metric,
                 output, full, cli.units, sight_height_metric,
-                use_bc_segments, use_cluster_bc, bullet_cluster,
+                use_bc_segments,
                 enable_magnus, enable_coriolis, enable_spin_drift,
                 enable_wind_shear, twist_rate, twist_right, latitude,
                 shooting_angle, use_powder_sensitivity,
@@ -553,8 +545,6 @@ fn run_trajectory(
     units: UnitSystem,
     sight_height: f64,
     use_bc_segments: bool,
-    use_cluster_bc: bool,
-    bullet_cluster: Option<usize>,
     enable_magnus: bool,
     enable_coriolis: bool,
     enable_spin_drift: bool,
@@ -616,7 +606,6 @@ fn run_trajectory(
         bc_segments_data: None,
         use_enhanced_spin_drift: enable_spin_drift,
         use_form_factor: false,
-        use_cluster_bc,
         enable_wind_shear,
         wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
         
@@ -624,7 +613,6 @@ fn run_trajectory(
         bc_type_str: None,
         bullet_model: None,
         bullet_id: None,
-        bullet_cluster: bullet_cluster.map(|id| id.to_string()),
     };
     
     // Set up wind conditions
