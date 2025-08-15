@@ -1,6 +1,6 @@
 [package]
 name = "ballistics-engine"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
