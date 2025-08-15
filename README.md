@@ -231,6 +231,43 @@ The ballistics engine implements comprehensive physics modeling for accurate tra
 - **Yaw of Repose** - Equilibrium yaw angle in crosswind
 - **Limit Cycle Yaw** - Bounded oscillatory motion analysis
 
+## FFI Layer
+
+The library includes a Foreign Function Interface (FFI) layer for integration with iOS, Android, and other platforms. The FFI provides C-compatible bindings for all major functionality.
+
+![iOS Integration Example](ios.png)
+
+### FFI Features
+- **C-Compatible Structures** - All data structures use C-compatible layouts
+- **Safe Memory Management** - Proper handling of memory across language boundaries
+- **iOS/Swift Integration** - Ready for use with Swift through bridging headers
+- **Android/JNI Support** - Compatible with Java Native Interface
+- **Error Handling** - Graceful error propagation across FFI boundary
+
+### Example FFI Usage (C/Swift)
+```c
+// Create input parameters
+FFIBallisticInputs inputs = {
+    .muzzle_velocity = 823.0,        // m/s
+    .ballistic_coefficient = 0.475,
+    .mass = 0.0109,                  // kg
+    .diameter = 0.00782,             // meters
+    .drag_model = 0,                 // G1
+    .sight_height = 0.05,            // meters
+    .temperature = 15.0,             // Celsius
+    .altitude = 0.0
+};
+
+// Calculate trajectory
+FFITrajectoryResult* result = ffi_calculate_trajectory(&inputs, 1000.0);
+
+// Use results
+printf("Max range: %.2f meters\n", result->max_range);
+
+// Clean up
+ffi_free_trajectory_result(result);
+```
+
 ## Output Formats
 
 All commands support three output formats via the `-o` flag:
