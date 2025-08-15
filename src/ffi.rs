@@ -551,7 +551,7 @@ pub extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarl
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
-    let version = CString::new("0.1.1").unwrap();
+    let version = CString::new("0.2.0").unwrap();
     let ptr = version.as_ptr();
     std::mem::forget(version);
     ptr
