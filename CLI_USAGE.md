@@ -74,15 +74,6 @@ Calculate ballistic trajectories with advanced physics modeling:
   --use-bc-segments \
   --auto-zero 600
 
-# Enable cluster-based BC degradation (auto-detects bullet type)
-./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
-  --use-cluster-bc \
-  --auto-zero 600
-
-# Manual cluster selection
-./ballistics trajectory -v 3000 -b 0.250 -m 55 -d 0.224 \
-  --use-cluster-bc \
-  --bullet-cluster 2  # Light Varmint cluster
 ```
 
 ### Zero Calculation
@@ -184,18 +175,8 @@ All commands support three output formats via `-o`:
 | --humidity | Relative humidity | 50 | % | % |
 | --altitude | Altitude | 0 | feet | meters |
 | --use-bc-segments | Enable BC segmentation | false | - | - |
-| --use-cluster-bc | Enable cluster BC | false | - | - |
-| --bullet-cluster | Manual cluster (0-3) | Auto | - | - |
 | --full | Show all trajectory points | false | - | - |
 
-### Cluster Types
-
-| ID | Type | Examples | BC Characteristics |
-|----|------|----------|-------------------|
-| 0 | Standard Long-Range | .308 Match, .30-06 | Gradual degradation |
-| 1 | Low-Drag Specialty | 6.5mm VLD, 6mm BR | Maintains BC well |
-| 2 | Light Varmint | .223 55gr, .204 | Steep BC loss |
-| 3 | Heavy Magnums | .338 Lapua, .50 BMG | Moderate degradation |
 
 ## Practical Examples
 
@@ -234,12 +215,10 @@ All commands support three output formats via `-o`:
   -n 1000 --velocity-std 8 --target-distance 600
 ```
 
-### Varmint Trajectory with Cluster BC
+### Varmint Trajectory
 ```bash
 ./ballistics trajectory \
   -v 3200 -b 0.242 -m 55 -d 0.224 \
-  --use-cluster-bc \
-  --bullet-cluster 2 \
   --auto-zero 200 \
   --max-range 500
 ```
@@ -278,7 +257,6 @@ All commands support three output formats via `-o`:
 
 ### BC Modeling
 - **BC Segmentation**: Velocity-dependent BC based on bullet type
-- **Cluster BC**: ML-based classification and degradation curves
 - **Form Factor**: Additional corrections for bullet shape
 - Automatic bullet type identification from parameters
 

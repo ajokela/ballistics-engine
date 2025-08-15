@@ -2,6 +2,8 @@
 
 A high-performance ballistics trajectory calculation engine with comprehensive physics modeling, automatic zeroing, and statistical analysis capabilities.
 
+**Project Website:** [https://ballistics.rs/](https://ballistics.rs/)
+
 ## Features
 
 - **Full 3D Trajectory Integration** - Six-state ballistic modeling with complete 3D position and velocity tracking
@@ -222,6 +224,7 @@ The library includes a Foreign Function Interface (FFI) layer for integration wi
 - **Safe Memory Management** - Proper handling of memory across language boundaries
 - **iOS/Swift Integration** - Ready for use with Swift through bridging headers
 - **Android/JNI Support** - Compatible with Java Native Interface
+- **Monte Carlo Simulation** - Statistical analysis with parameter variations
 - **Error Handling** - Graceful error propagation across FFI boundary
 
 ### Example FFI Usage (C/Swift)
@@ -239,13 +242,42 @@ FFIBallisticInputs inputs = {
 };
 
 // Calculate trajectory
-FFITrajectoryResult* result = ffi_calculate_trajectory(&inputs, 1000.0);
+FFITrajectoryResult* result = ballistics_calculate_trajectory(&inputs, NULL, NULL, 1000.0, 0.1);
 
 // Use results
 printf("Max range: %.2f meters\n", result->max_range);
 
 // Clean up
-ffi_free_trajectory_result(result);
+ballistics_free_trajectory_result(result);
+```
+
+### Monte Carlo Simulation via FFI
+```c
+// Set up Monte Carlo parameters
+FFIMonteCarloParams params = {
+    .num_simulations = 1000,
+    .velocity_std_dev = 10.0,      // m/s variation
+    .angle_std_dev = 0.001,         // radian variation
+    .bc_std_dev = 0.01,             // BC variation
+    .wind_speed_std_dev = 2.0,      // m/s wind variation
+    .target_distance = 600.0        // Target at 600m
+};
+
+// Run simulation
+FFIMonteCarloResults* results = ballistics_monte_carlo(&inputs, NULL, &params);
+
+// Use statistical results
+printf("Mean range: %.2f m (σ=%.2f)\n", results->mean_range, results->std_dev_range);
+printf("Hit probability at 600m: %.1f%%\n", results->hit_probability * 100);
+
+// Access individual shots
+for (int i = 0; i < results->num_results; i++) {
+    printf("Shot %d: Range %.2f m, Impact velocity %.2f m/s\n", 
+           i, results->ranges[i], results->impact_velocities[i]);
+}
+
+// Clean up
+ballistics_free_monte_carlo_results(results);
 ```
 
 ## Output Formats

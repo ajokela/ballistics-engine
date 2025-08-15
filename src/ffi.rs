@@ -3,6 +3,7 @@
 use crate::{
     BallisticInputs, TrajectorySolver, WindConditions, AtmosphericConditions,
     DragModel, calculate_zero_angle_with_conditions,
+    run_monte_carlo, MonteCarloParams,
 };
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int};
@@ -61,6 +62,33 @@ pub struct FFITrajectoryResult {
     pub impact_energy: c_double,
     pub points: *mut FFITrajectoryPoint,
     pub point_count: c_int,
+}
+
+// Monte Carlo simulation parameters
+#[repr(C)]
+pub struct FFIMonteCarloParams {
+    pub num_simulations: c_int,
+    pub velocity_std_dev: c_double,
+    pub angle_std_dev: c_double,
+    pub bc_std_dev: c_double,
+    pub wind_speed_std_dev: c_double,
+    pub target_distance: c_double,    // Use NAN if not specified
+}
+
+// Monte Carlo simulation results
+#[repr(C)]
+pub struct FFIMonteCarloResults {
+    pub ranges: *mut c_double,
+    pub impact_velocities: *mut c_double,
+    pub impact_positions_x: *mut c_double,
+    pub impact_positions_y: *mut c_double,
+    pub impact_positions_z: *mut c_double,
+    pub num_results: c_int,
+    pub mean_range: c_double,
+    pub std_dev_range: c_double,
+    pub mean_impact_velocity: c_double,
+    pub std_dev_impact_velocity: c_double,
+    pub hit_probability: c_double,     // If target_distance was specified
 }
 
 // Helper function to convert FFI inputs to internal types
@@ -330,10 +358,200 @@ pub extern "C" fn ballistics_quick_trajectory(
     }
 }
 
+// Monte Carlo simulation
+#[no_mangle]
+pub extern "C" fn ballistics_monte_carlo(
+    inputs: *const FFIBallisticInputs,
+    atmosphere: *const FFIAtmosphericConditions,
+    params: *const FFIMonteCarloParams,
+) -> *mut FFIMonteCarloResults {
+    if inputs.is_null() || params.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let inputs = unsafe { &*inputs };
+    let params = unsafe { &*params };
+    
+    // Convert FFI inputs to internal types
+    let ballistic_inputs = convert_inputs(inputs);
+    
+    // Note: Atmospheric conditions are already included in the conversion
+    // from FFIBallisticInputs (temperature, altitude, etc.)
+    
+    // Create Monte Carlo parameters
+    let mc_params = MonteCarloParams {
+        num_simulations: params.num_simulations as usize,
+        velocity_std_dev: params.velocity_std_dev,
+        angle_std_dev: params.angle_std_dev,
+        bc_std_dev: params.bc_std_dev,
+        wind_speed_std_dev: params.wind_speed_std_dev,
+        target_distance: if params.target_distance.is_nan() {
+            None
+        } else {
+            Some(params.target_distance)
+        },
+    };
+    
+    // Run Monte Carlo simulation
+    match run_monte_carlo(ballistic_inputs, mc_params) {
+        Ok(results) => {
+            let num_results = results.ranges.len() as c_int;
+            
+            // Calculate statistics
+            let mean_range: f64 = results.ranges.iter().sum::<f64>() / num_results as f64;
+            let variance_range: f64 = results.ranges.iter()
+                .map(|r| (r - mean_range).powi(2))
+                .sum::<f64>() / num_results as f64;
+            let std_dev_range = variance_range.sqrt();
+            
+            let mean_velocity: f64 = results.impact_velocities.iter().sum::<f64>() / num_results as f64;
+            let variance_velocity: f64 = results.impact_velocities.iter()
+                .map(|v| (v - mean_velocity).powi(2))
+                .sum::<f64>() / num_results as f64;
+            let std_dev_velocity = variance_velocity.sqrt();
+            
+            // Calculate hit probability if target distance was specified
+            let hit_probability = if params.target_distance.is_nan() {
+                0.0
+            } else {
+                let target = params.target_distance;
+                let hit_radius = 0.3; // 30cm radius for hit zone
+                let hits = results.impact_positions.iter()
+                    .filter(|pos| {
+                        let distance = (pos.x.powi(2) + pos.y.powi(2)).sqrt();
+                        distance < target && pos.norm() < hit_radius
+                    })
+                    .count();
+                hits as f64 / num_results as f64
+            };
+            
+            // Allocate memory for arrays
+            let ranges_ptr = unsafe {
+                let ptr = std::alloc::alloc(
+                    std::alloc::Layout::array::<c_double>(num_results as usize).unwrap()
+                ) as *mut c_double;
+                for (i, &range) in results.ranges.iter().enumerate() {
+                    *ptr.add(i) = range;
+                }
+                ptr
+            };
+            
+            let velocities_ptr = unsafe {
+                let ptr = std::alloc::alloc(
+                    std::alloc::Layout::array::<c_double>(num_results as usize).unwrap()
+                ) as *mut c_double;
+                for (i, &vel) in results.impact_velocities.iter().enumerate() {
+                    *ptr.add(i) = vel;
+                }
+                ptr
+            };
+            
+            let pos_x_ptr = unsafe {
+                let ptr = std::alloc::alloc(
+                    std::alloc::Layout::array::<c_double>(num_results as usize).unwrap()
+                ) as *mut c_double;
+                for (i, pos) in results.impact_positions.iter().enumerate() {
+                    *ptr.add(i) = pos.x;
+                }
+                ptr
+            };
+            
+            let pos_y_ptr = unsafe {
+                let ptr = std::alloc::alloc(
+                    std::alloc::Layout::array::<c_double>(num_results as usize).unwrap()
+                ) as *mut c_double;
+                for (i, pos) in results.impact_positions.iter().enumerate() {
+                    *ptr.add(i) = pos.y;
+                }
+                ptr
+            };
+            
+            let pos_z_ptr = unsafe {
+                let ptr = std::alloc::alloc(
+                    std::alloc::Layout::array::<c_double>(num_results as usize).unwrap()
+                ) as *mut c_double;
+                for (i, pos) in results.impact_positions.iter().enumerate() {
+                    *ptr.add(i) = pos.z;
+                }
+                ptr
+            };
+            
+            // Create result structure
+            let result = Box::new(FFIMonteCarloResults {
+                ranges: ranges_ptr,
+                impact_velocities: velocities_ptr,
+                impact_positions_x: pos_x_ptr,
+                impact_positions_y: pos_y_ptr,
+                impact_positions_z: pos_z_ptr,
+                num_results,
+                mean_range,
+                std_dev_range,
+                mean_impact_velocity: mean_velocity,
+                std_dev_impact_velocity: std_dev_velocity,
+                hit_probability,
+            });
+            
+            Box::into_raw(result)
+        }
+        Err(_) => ptr::null_mut()
+    }
+}
+
+// Free Monte Carlo results
+#[no_mangle]
+pub extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarloResults) {
+    if results.is_null() {
+        return;
+    }
+    
+    unsafe {
+        let results = Box::from_raw(results);
+        let num = results.num_results as usize;
+        
+        // Free arrays
+        if !results.ranges.is_null() {
+            std::alloc::dealloc(
+                results.ranges as *mut u8,
+                std::alloc::Layout::array::<c_double>(num).unwrap()
+            );
+        }
+        
+        if !results.impact_velocities.is_null() {
+            std::alloc::dealloc(
+                results.impact_velocities as *mut u8,
+                std::alloc::Layout::array::<c_double>(num).unwrap()
+            );
+        }
+        
+        if !results.impact_positions_x.is_null() {
+            std::alloc::dealloc(
+                results.impact_positions_x as *mut u8,
+                std::alloc::Layout::array::<c_double>(num).unwrap()
+            );
+        }
+        
+        if !results.impact_positions_y.is_null() {
+            std::alloc::dealloc(
+                results.impact_positions_y as *mut u8,
+                std::alloc::Layout::array::<c_double>(num).unwrap()
+            );
+        }
+        
+        if !results.impact_positions_z.is_null() {
+            std::alloc::dealloc(
+                results.impact_positions_z as *mut u8,
+                std::alloc::Layout::array::<c_double>(num).unwrap()
+            );
+        }
+        
+        // Box automatically deallocates the result structure
+    }
+}
+
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
-    let version = CString::new("0.1.0").unwrap();
+    let version = CString::new("0.1.1").unwrap();
     let ptr = version.as_ptr();
     std::mem::forget(version);
     ptr
