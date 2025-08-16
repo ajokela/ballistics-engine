@@ -110,6 +110,10 @@ enum Commands {
         #[arg(long)]
         enable_coriolis: bool,
         
+        /// Use Euler integration instead of RK4 (RK4 is default for better accuracy)
+        #[arg(long)]
+        use_euler: bool,
+        
         /// Enable enhanced spin drift calculations
         #[arg(long)]
         enable_spin_drift: bool,
@@ -431,6 +435,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             use_bc_segments,
             enable_magnus, enable_coriolis, enable_spin_drift,
             enable_wind_shear, twist_rate, twist_right, latitude,
+            use_euler,
             shooting_angle, use_powder_sensitivity, 
             powder_temp_sensitivity, powder_temp
         } => {
@@ -479,7 +484,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 output, full, cli.units, sight_height_metric,
                 use_bc_segments,
                 enable_magnus, enable_coriolis, enable_spin_drift,
-                enable_wind_shear, twist_rate, twist_right, latitude,
+                enable_wind_shear, !use_euler, twist_rate, twist_right, latitude,
                 shooting_angle, use_powder_sensitivity,
                 powder_temp_sensitivity, powder_temp
             )?;
@@ -559,6 +564,7 @@ fn run_trajectory(
     enable_coriolis: bool,
     enable_spin_drift: bool,
     enable_wind_shear: bool,
+    use_rk4: bool,
     twist_rate: Option<f64>,
     twist_right: bool,
     latitude: Option<f64>,
@@ -601,6 +607,7 @@ fn run_trajectory(
         latitude,
         ground_threshold: -10.0,
         azimuth_angle: 0.0,  // No horizontal aiming angle for standard trajectory
+        use_rk4,  // Use RK4 unless user specifies Euler
         
         // Advanced effects - now separately controlled
         enable_advanced_effects: enable_magnus || enable_coriolis,  // Either one enables the system

@@ -28,6 +28,7 @@ pub struct FFIBallisticInputs {
     pub altitude: c_double,               // meters
     pub latitude: c_double,                // degrees (use NAN if not provided)
     pub azimuth_angle: c_double,          // horizontal aiming angle in radians
+    pub use_rk4: c_int,                   // 0=Euler, 1=RK4
 }
 
 #[repr(C)]
@@ -103,6 +104,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.launch_angle = inputs.launch_angle;
     ballistic_inputs.muzzle_angle = inputs.launch_angle;
     ballistic_inputs.azimuth_angle = inputs.azimuth_angle;
+    ballistic_inputs.use_rk4 = inputs.use_rk4 != 0;
     ballistic_inputs.ballistic_coefficient = inputs.ballistic_coefficient;
     ballistic_inputs.bc_value = inputs.ballistic_coefficient;
     ballistic_inputs.mass = inputs.mass;

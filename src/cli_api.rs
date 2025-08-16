@@ -54,6 +54,7 @@ pub struct BallisticInputs {
     pub muzzle_angle: f64,          // same as launch_angle
     pub target_distance: f64,       // meters
     pub azimuth_angle: f64,         // horizontal aiming angle in radians
+    pub use_rk4: bool,              // Use RK4 integration instead of Euler
     pub temperature: f64,           // Celsius
     pub twist_rate: f64,            // inches per turn
     pub is_twist_right: bool,       // right-hand twist
@@ -112,6 +113,7 @@ impl Default for BallisticInputs {
             muzzle_angle: launch_angle_rad,
             target_distance: 100.0,
             azimuth_angle: 0.0,
+            use_rk4: true,  // Default to RK4 for better accuracy
             temperature: 15.0,
             twist_rate: 12.0,  // 1:12" typical
             is_twist_right: true,
@@ -236,6 +238,14 @@ impl TrajectorySolver {
     }
     
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
+        if self.inputs.use_rk4 {
+            self.solve_rk4()
+        } else {
+            self.solve_euler()
+        }
+    }
+    
+    fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
         // Simple trajectory integration using Euler method
         let mut time = 0.0;
         let mut position = Vector3::new(0.0, self.inputs.sight_height, 0.0);
@@ -313,6 +323,111 @@ impl TrajectorySolver {
             impact_energy: last_point.kinetic_energy,
             points,
         })
+    }
+    
+    fn solve_rk4(&self) -> Result<TrajectoryResult, BallisticsError> {
+        // RK4 trajectory integration for better accuracy
+        let mut time = 0.0;
+        let mut position = Vector3::new(0.0, self.inputs.sight_height, 0.0);
+        
+        // Calculate initial velocity components with both elevation and azimuth
+        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
+        let mut velocity = Vector3::new(
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),
+            self.inputs.muzzle_velocity * self.inputs.launch_angle.sin(),
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),
+        );
+        
+        let mut points = Vec::new();
+        let mut max_height = position.y;
+        
+        // Calculate air density
+        let air_density = calculate_air_density(&self.atmosphere);
+        
+        // Wind vector
+        let wind_vector = Vector3::new(
+            self.wind.speed * self.wind.direction.sin(),
+            0.0,
+            self.wind.speed * self.wind.direction.cos(),
+        );
+        
+        // Main RK4 integration loop
+        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
+            // Store trajectory point
+            let velocity_magnitude = velocity.magnitude();
+            let kinetic_energy = 0.5 * self.inputs.mass * velocity_magnitude * velocity_magnitude;
+            
+            points.push(TrajectoryPoint {
+                time,
+                position: position.clone(),
+                velocity_magnitude,
+                kinetic_energy,
+            });
+            
+            if position.y > max_height {
+                max_height = position.y;
+            }
+            
+            // RK4 method
+            let dt = self.time_step;
+            
+            // k1
+            let acc1 = self.calculate_acceleration(&position, &velocity, air_density, &wind_vector);
+            
+            // k2
+            let pos2 = position + velocity * (dt * 0.5);
+            let vel2 = velocity + acc1 * (dt * 0.5);
+            let acc2 = self.calculate_acceleration(&pos2, &vel2, air_density, &wind_vector);
+            
+            // k3
+            let pos3 = position + vel2 * (dt * 0.5);
+            let vel3 = velocity + acc2 * (dt * 0.5);
+            let acc3 = self.calculate_acceleration(&pos3, &vel3, air_density, &wind_vector);
+            
+            // k4
+            let pos4 = position + vel3 * dt;
+            let vel4 = velocity + acc3 * dt;
+            let acc4 = self.calculate_acceleration(&pos4, &vel4, air_density, &wind_vector);
+            
+            // Update position and velocity
+            position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
+            velocity += (acc1 + acc2 * 2.0 + acc3 * 2.0 + acc4) * (dt / 6.0);
+            time += dt;
+        }
+        
+        // Get final values
+        let last_point = points.last().ok_or("No trajectory points generated")?;
+        
+        Ok(TrajectoryResult {
+            max_range: last_point.position.z,
+            max_height,
+            time_of_flight: last_point.time,
+            impact_velocity: last_point.velocity_magnitude,
+            impact_energy: last_point.kinetic_energy,
+            points,
+        })
+    }
+    
+    fn calculate_acceleration(&self, position: &Vector3<f64>, velocity: &Vector3<f64>, air_density: f64, wind_vector: &Vector3<f64>) -> Vector3<f64> {
+        let relative_velocity = velocity - wind_vector;
+        let velocity_magnitude = relative_velocity.magnitude();
+        
+        if velocity_magnitude < 0.001 {
+            return Vector3::new(0.0, -9.81, 0.0);
+        }
+        
+        // Calculate drag force
+        let cd = self.calculate_drag_coefficient(velocity_magnitude);
+        let reference_area = std::f64::consts::PI * (self.inputs.diameter / 2.0).powi(2);
+        let drag_magnitude = 0.5 * air_density * velocity_magnitude.powi(2) * cd * reference_area / self.inputs.ballistic_coefficient;
+        
+        // Drag acts opposite to velocity
+        let drag_force = -relative_velocity.normalize() * drag_magnitude;
+        
+        // Total acceleration = drag/mass + gravity
+        let acceleration = drag_force / self.inputs.mass + Vector3::new(0.0, -9.81, 0.0);
+        
+        acceleration
     }
     
     fn calculate_drag_coefficient(&self, velocity: f64) -> f64 {
