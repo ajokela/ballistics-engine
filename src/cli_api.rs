@@ -858,6 +858,13 @@ pub fn run_monte_carlo_with_wind(
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
     
+    // First, calculate baseline trajectory with no variations
+    let baseline_solver = TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), Default::default());
+    let baseline_result = baseline_solver.solve()?;
+    let baseline_impact = baseline_result.points.last()
+        .ok_or("No baseline trajectory points")?
+        .position.clone();
+    
     // Create normal distributions for variations
     let velocity_dist = Normal::new(base_inputs.muzzle_velocity, params.velocity_std_dev)
         .map_err(|e| format!("Invalid velocity distribution: {}", e))?;
@@ -871,6 +878,11 @@ pub fn run_monte_carlo_with_wind(
         .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
     let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
         .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
+    
+    // Create distribution for pointing errors (simulates shooter's aiming consistency)
+    let distance = baseline_impact.z;  // Distance to target
+    let pointing_error_dist = Normal::new(0.0, params.angle_std_dev * distance)
+        .map_err(|e| format!("Invalid pointing distribution: {}", e))?;
     
     for _ in 0..params.num_simulations {
         // Create varied inputs
@@ -893,7 +905,19 @@ pub fn run_monte_carlo_with_wind(
                 ranges.push(result.max_range);
                 impact_velocities.push(result.impact_velocity);
                 if let Some(last_point) = result.points.last() {
-                    impact_positions.push(last_point.position.clone());
+                    // Calculate physical deviation from baseline impact point
+                    let mut deviation = Vector3::new(
+                        last_point.position.x - baseline_impact.x,  // Lateral deviation
+                        last_point.position.y - baseline_impact.y,  // Vertical deviation
+                        last_point.position.z - baseline_impact.z,  // Range deviation
+                    );
+                    
+                    // Add additional pointing error to simulate realistic group sizes
+                    // This represents the shooter's ability to aim consistently
+                    let pointing_error_y = pointing_error_dist.sample(&mut rng);
+                    deviation.y += pointing_error_y;
+                    
+                    impact_positions.push(deviation);
                 }
             },
             Err(_) => {
@@ -960,12 +984,12 @@ pub fn calculate_zero_angle_with_conditions(
         // Find the height at target distance
         let mut height_at_target = None;
         for i in 0..result.points.len() {
-            if result.points[i].position.x >= target_distance {
+            if result.points[i].position.z >= target_distance {
                 if i > 0 {
                     // Linear interpolation
                     let p1 = &result.points[i - 1];
                     let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
+                    let t = (target_distance - p1.position.z) / (p2.position.z - p1.position.z);
                     height_at_target = Some(p1.position.y + t * (p2.position.y - p1.position.y));
                 } else {
                     height_at_target = Some(result.points[i].position.y);
@@ -1036,12 +1060,12 @@ pub fn estimate_bc_from_trajectory(
             // Find drop at this distance
             let mut calculated_drop = None;
             for i in 0..result.points.len() {
-                if result.points[i].position.x >= *target_dist {
+                if result.points[i].position.z >= *target_dist {
                     if i > 0 {
                         // Linear interpolation
                         let p1 = &result.points[i - 1];
                         let p2 = &result.points[i];
-                        let t = (target_dist - p1.position.x) / (p2.position.x - p1.position.x);
+                        let t = (target_dist - p1.position.z) / (p2.position.z - p1.position.z);
                         calculated_drop = Some(-(p1.position.y + t * (p2.position.y - p1.position.y)));
                     } else {
                         calculated_drop = Some(-result.points[i].position.y);
