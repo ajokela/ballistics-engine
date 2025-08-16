@@ -1,5 +1,6 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::DragModel;
+use crate::wind_shear::{WindShearProfile, WindShearModel, WindLayer};
 use nalgebra::Vector3;
 use std::error::Error;
 use std::fmt;
@@ -237,6 +238,31 @@ impl TrajectorySolver {
         self.time_step = step;
     }
     
+    fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {
+        // Create wind shear profile based on surface wind
+        let profile = WindShearProfile {
+            model: if self.inputs.wind_shear_model == "logarithmic" {
+                WindShearModel::Logarithmic
+            } else if self.inputs.wind_shear_model == "power" {
+                WindShearModel::PowerLaw
+            } else {
+                WindShearModel::PowerLaw  // Default to power law
+            },
+            surface_wind: WindLayer {
+                altitude_m: 0.0,
+                speed_mps: self.wind.speed,
+                direction_deg: self.wind.direction.to_degrees(),
+            },
+            reference_height: 10.0,  // Standard meteorological measurement height
+            roughness_length: 0.03,  // Short grass
+            power_exponent: 1.0 / 7.0,  // Neutral stability
+            geostrophic_wind: None,
+            custom_layers: Vec::new(),
+        };
+        
+        profile.get_wind_at_altitude(altitude_m)
+    }
+    
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
         if self.inputs.use_rk4 {
             self.solve_rk4()
@@ -288,8 +314,13 @@ impl TrajectorySolver {
                 max_height = position.y;
             }
             
-            // Calculate drag
-            let velocity_rel = velocity - wind_vector;
+            // Calculate drag with altitude-dependent wind if enabled
+            let actual_wind = if self.inputs.enable_wind_shear {
+                self.get_wind_at_altitude(position.y)
+            } else {
+                wind_vector.clone()
+            };
+            let velocity_rel = velocity - actual_wind;
             let velocity_rel_mag = velocity_rel.magnitude();
             let drag_coefficient = self.calculate_drag_coefficient(velocity_rel_mag);
             
@@ -409,7 +440,14 @@ impl TrajectorySolver {
     }
     
     fn calculate_acceleration(&self, position: &Vector3<f64>, velocity: &Vector3<f64>, air_density: f64, wind_vector: &Vector3<f64>) -> Vector3<f64> {
-        let relative_velocity = velocity - wind_vector;
+        // Calculate altitude-dependent wind if wind shear is enabled
+        let actual_wind = if self.inputs.enable_wind_shear {
+            self.get_wind_at_altitude(position.y)
+        } else {
+            wind_vector.clone()
+        };
+        
+        let relative_velocity = velocity - &actual_wind;
         let velocity_magnitude = relative_velocity.magnitude();
         
         if velocity_magnitude < 0.001 {

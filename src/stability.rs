@@ -24,13 +24,20 @@ pub fn compute_stability_coefficient(inputs: &BallisticInputs, atmo_params: (f64
     const PRESS_REF_HPA: f64 = 1013.25;
 
     // Calculate intermediate values
-    let twist_calibers = inputs.twist_rate.abs() / inputs.bullet_diameter;
+    // Convert twist rate from inches to meters for consistency
+    let twist_rate_m = inputs.twist_rate.abs() * 0.0254;  // inches to meters
+    let twist_calibers = twist_rate_m / inputs.bullet_diameter;
     let length_calibers = inputs.bullet_length / inputs.bullet_diameter;
 
+    // Convert units for Miller formula
+    let mass_grains = inputs.bullet_mass / 0.00006479891;  // kg to grains
+    let diameter_inches = inputs.bullet_diameter / 0.0254;  // meters to inches
+    let velocity_fps = inputs.muzzle_velocity * 3.28084;  // m/s to fps
+    
     // Miller stability formula components
-    let mass_term = MILLER_CONST * inputs.bullet_mass;
+    let mass_term = MILLER_CONST * mass_grains;
     let geom_term = twist_calibers.powi(2)
-        * inputs.bullet_diameter.powi(3)
+        * diameter_inches.powi(3)
         * length_calibers
         * (1.0 + length_calibers.powi(2));
 
@@ -47,7 +54,7 @@ pub fn compute_stability_coefficient(inputs: &BallisticInputs, atmo_params: (f64
     let density_correction = (temp_k / TEMP_REF_K) * (PRESS_REF_HPA / current_press_hpa);
 
     // Velocity correction factor
-    let velocity_correction = (inputs.muzzle_velocity / VEL_REF_FPS).powf(1.0 / 3.0);
+    let velocity_correction = (velocity_fps / VEL_REF_FPS).powf(1.0 / 3.0);
 
     // Final stability calculation
     

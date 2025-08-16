@@ -326,6 +326,7 @@ struct TrajectoryResult {
     time_of_flight: f64,
     impact_velocity: f64,
     impact_energy: f64,
+    stability_coefficient: Option<f64>,
     trajectory: Vec<TrajectoryPoint>,
 }
 
@@ -597,7 +598,7 @@ fn run_trajectory(
         weight_grains: mass / 0.00006479891,  // Convert kg to grains
         bullet_diameter: diameter,  // Keep in meters
         bullet_mass: mass,  // Keep in kg
-        bullet_length: diameter * 4.0,  // Approximate
+        bullet_length: diameter * 4.5,  // Approximate length/diameter ratio for typical bullet
         muzzle_angle: angle.to_radians(),
         target_distance: max_range,
         temperature,
@@ -650,12 +651,22 @@ fn run_trajectory(
     };
     
     // Create solver
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    let mut solver = TrajectorySolver::new(inputs.clone(), wind, atmosphere.clone());
     solver.set_max_range(max_range);
     solver.set_time_step(time_step);
     
     // Solve trajectory
     let result = solver.solve()?;
+    
+    // Calculate stability coefficient if twist rate is provided
+    let stability = if twist_rate.is_some() && twist_rate.unwrap() > 0.0 {
+        ballistics_engine::stability::compute_stability_coefficient(
+            &inputs,
+            (altitude, temperature, pressure, 1.0)
+        )
+    } else {
+        0.0
+    };
     
     // Format output
     match output {
@@ -666,6 +677,7 @@ fn run_trajectory(
                 time_of_flight: result.time_of_flight,
                 impact_velocity: result.impact_velocity,
                 impact_energy: result.impact_energy,
+                stability_coefficient: if stability > 0.0 { Some(stability) } else { None },
                 trajectory: if full {
                     result.points.into_iter().map(|p| TrajectoryPoint {
                         time: p.time,
@@ -697,6 +709,9 @@ fn run_trajectory(
                 println!("time_of_flight,{:.4}", result.time_of_flight);
                 println!("impact_velocity,{:.2}", result.impact_velocity);
                 println!("impact_energy,{:.2}", result.impact_energy);
+                if stability > 0.0 {
+                    println!("stability_coefficient,{:.2}", stability);
+                }
             }
         },
         
@@ -720,6 +735,18 @@ fn run_trajectory(
             println!("║ Time of Flight:    {:>8.3} s          ║", result.time_of_flight);
             println!("║ Impact Velocity:   {:>8.2} {:3}       ║", velocity_display, velocity_unit);
             println!("║ Impact Energy:     {:>8.2} {:5}     ║", energy_display, energy_unit);
+            if stability > 0.0 {
+                println!("╠════════════════════════════════════════╣");
+                println!("║ Stability (SG):    {:>8.2}            ║", stability);
+                let stability_status = if stability < 1.0 {
+                    "UNSTABLE"
+                } else if stability < 1.5 {
+                    "MARGINAL"
+                } else {
+                    "STABLE  "
+                };
+                println!("║ Status:            {:>8}            ║", stability_status);
+            }
             println!("╚════════════════════════════════════════╝");
             
             if full && !result.points.is_empty() {
