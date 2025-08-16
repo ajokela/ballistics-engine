@@ -176,6 +176,13 @@ All commands support three output formats via `-o`:
 | --altitude | Altitude | 0 | feet | meters |
 | --use-bc-segments | Enable BC segmentation | false | - | - |
 | --full | Show all trajectory points | false | - | - |
+| --enable-magnus | Enable Magnus effect | false | - | - |
+| --enable-coriolis | Enable Coriolis effect | false | - | - |
+| --enable-spin-drift | Enable enhanced spin drift | false | - | - |
+| --twist-rate | Barrel twist rate | 12 | inches/turn | inches/turn |
+| --twist-right | Right-hand twist | false | - | - |
+| --latitude | Latitude for Coriolis | None | degrees | degrees |
+| --shooting-angle | Azimuth angle | 0 | degrees | degrees |
 
 
 ## Practical Examples
@@ -223,6 +230,58 @@ All commands support three output formats via `-o`:
   --max-range 500
 ```
 
+### Advanced Physics - Magnus and Spin Drift
+```bash
+# Enable Magnus effect and spin drift for precision calculation
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --twist-rate 10 \
+  --twist-right \
+  --enable-magnus \
+  --enable-spin-drift \
+  --wind-speed 10 \
+  --wind-direction 90 \
+  --max-range 1000
+
+# Left-hand twist barrel (omit --twist-right)
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --twist-rate 12 \
+  --enable-magnus \
+  --enable-spin-drift \
+  --max-range 1000
+```
+
+### Coriolis Effect for Extreme Long Range
+```bash
+# Northern hemisphere shot, eastward
+./ballistics trajectory \
+  -v 2850 -b 0.690 -m 230 -d 0.338 \
+  --enable-coriolis \
+  --latitude 45 \
+  --shooting-angle 90 \
+  --max-range 2000
+
+# Complete advanced physics
+./ballistics trajectory \
+  -v 3000 -b 0.750 -m 250 -d 0.338 \
+  --drag-model g7 \
+  --twist-rate 8.5 \
+  --twist-right \
+  --enable-magnus \
+  --enable-coriolis \
+  --enable-spin-drift \
+  --latitude 38.5 \
+  --shooting-angle 45 \
+  --wind-speed 15 \
+  --wind-direction 270 \
+  --altitude 6000 \
+  --temperature 25 \
+  --pressure 25.5 \
+  --humidity 30 \
+  --max-range 3000
+```
+
 ### Extreme Weather Conditions
 ```bash
 # Cold, low pressure, high humidity (poor conditions)
@@ -267,6 +326,13 @@ All commands support three output formats via `-o`:
 - Variable atmospheric conditions
 - Wind profile with altitude effects
 - Ground impact detection
+
+#### Advanced Physics Notes
+- **Spin Drift**: Requires `--enable-magnus` or `--enable-coriolis` plus `--enable-spin-drift`
+- **Magnus Effect**: Side force from spinning projectile, requires `--twist-rate` specification
+- **Coriolis Effect**: Earth rotation effects, requires `--latitude` and `--shooting-angle`
+- **Twist Direction**: Use `--twist-right` for right-hand twist, omit for left-hand twist
+- Both Magnus and spin drift work together to model the complete gyroscopic effects
 
 ### Atmospheric Modeling
 - **Temperature Effects**: Affects air density and speed of sound

@@ -53,6 +53,7 @@ pub struct BallisticInputs {
     pub bullet_length: f64,         // meters
     pub muzzle_angle: f64,          // same as launch_angle
     pub target_distance: f64,       // meters
+    pub azimuth_angle: f64,         // horizontal aiming angle in radians
     pub temperature: f64,           // Celsius
     pub twist_rate: f64,            // inches per turn
     pub is_twist_right: bool,       // right-hand twist
@@ -110,6 +111,7 @@ impl Default for BallisticInputs {
             bullet_length: diameter_m * 4.0,  // Approximate
             muzzle_angle: launch_angle_rad,
             target_distance: 100.0,
+            azimuth_angle: 0.0,
             temperature: 15.0,
             twist_rate: 12.0,  // 1:12" typical
             is_twist_right: true,
@@ -237,10 +239,12 @@ impl TrajectorySolver {
         // Simple trajectory integration using Euler method
         let mut time = 0.0;
         let mut position = Vector3::new(0.0, self.inputs.sight_height, 0.0);
+        // Calculate initial velocity components with both elevation and azimuth
+        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
         let mut velocity = Vector3::new(
-            self.inputs.muzzle_velocity * self.inputs.launch_angle.cos(),
-            self.inputs.muzzle_velocity * self.inputs.launch_angle.sin(),
-            0.0,
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: side deviation (left/right)
+            self.inputs.muzzle_velocity * self.inputs.launch_angle.sin(),  // Y: vertical component
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: forward component (down-range)
         );
         
         let mut points = Vec::new();
@@ -257,7 +261,7 @@ impl TrajectorySolver {
         );
         
         // Main integration loop
-        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
+        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.mass * velocity_magnitude * velocity_magnitude;
@@ -302,7 +306,7 @@ impl TrajectorySolver {
         let last_point = points.last().ok_or("No trajectory points generated")?;
         
         Ok(TrajectoryResult {
-            max_range: last_point.position.x,
+            max_range: last_point.position.z,
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -343,6 +347,9 @@ pub struct MonteCarloParams {
     pub bc_std_dev: f64,
     pub wind_speed_std_dev: f64,
     pub target_distance: Option<f64>,
+    pub base_wind_speed: f64,
+    pub base_wind_direction: f64,
+    pub azimuth_std_dev: f64,  // Horizontal aiming variation in radians
 }
 
 impl Default for MonteCarloParams {
@@ -354,6 +361,9 @@ impl Default for MonteCarloParams {
             bc_std_dev: 0.01,
             wind_speed_std_dev: 1.0,
             target_distance: None,
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 0.001,  // Default horizontal spread ~0.057 degrees
         }
     }
 }
@@ -366,9 +376,22 @@ pub struct MonteCarloResults {
     pub impact_positions: Vec<Vector3<f64>>,
 }
 
-// Run Monte Carlo simulation
+// Run Monte Carlo simulation (backwards compatibility)
 pub fn run_monte_carlo(
     base_inputs: BallisticInputs,
+    params: MonteCarloParams,
+) -> Result<MonteCarloResults, BallisticsError> {
+    let base_wind = WindConditions {
+        speed: params.base_wind_speed,
+        direction: params.base_wind_direction,
+    };
+    run_monte_carlo_with_wind(base_inputs, base_wind, params)
+}
+
+// Run Monte Carlo simulation with wind
+pub fn run_monte_carlo_with_wind(
+    base_inputs: BallisticInputs,
+    base_wind: WindConditions,
     params: MonteCarloParams,
 ) -> Result<MonteCarloResults, BallisticsError> {
     use rand::{thread_rng, Rng};
@@ -386,8 +409,12 @@ pub fn run_monte_carlo(
         .map_err(|e| format!("Invalid angle distribution: {}", e))?;
     let bc_dist = Normal::new(base_inputs.ballistic_coefficient, params.bc_std_dev)
         .map_err(|e| format!("Invalid BC distribution: {}", e))?;
-    let wind_dist = Normal::new(0.0, params.wind_speed_std_dev)
-        .map_err(|e| format!("Invalid wind distribution: {}", e))?;
+    let wind_speed_dist = Normal::new(base_wind.speed, params.wind_speed_std_dev)
+        .map_err(|e| format!("Invalid wind speed distribution: {}", e))?;
+    let wind_dir_dist = Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1)  // Small variation in direction
+        .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
+    let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
+        .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
     
     for _ in 0..params.num_simulations {
         // Create varied inputs
@@ -395,11 +422,12 @@ pub fn run_monte_carlo(
         inputs.muzzle_velocity = velocity_dist.sample(&mut rng).max(0.0);
         inputs.launch_angle = angle_dist.sample(&mut rng);
         inputs.ballistic_coefficient = bc_dist.sample(&mut rng).max(0.01);
+        inputs.azimuth_angle = azimuth_dist.sample(&mut rng);  // Add horizontal variation
         
-        // Create varied wind
+        // Create varied wind (now based on base wind conditions)
         let wind = WindConditions {
-            speed: wind_dist.sample(&mut rng).abs(),
-            direction: rng.gen_range(0.0..2.0 * std::f64::consts::PI),
+            speed: wind_speed_dist.sample(&mut rng).abs(),
+            direction: wind_dir_dist.sample(&mut rng),
         };
         
         // Run trajectory

@@ -7,7 +7,7 @@ pub use drag_model::DragModel;
 pub use cli_api::{
     BallisticInputs, TrajectorySolver, WindConditions, AtmosphericConditions,
     TrajectoryResult, TrajectoryPoint, MonteCarloParams, MonteCarloResults,
-    run_monte_carlo, calculate_zero_angle, calculate_zero_angle_with_conditions,
+    run_monte_carlo, run_monte_carlo_with_wind, calculate_zero_angle, calculate_zero_angle_with_conditions,
     estimate_bc_from_trajectory, BallisticsError,
 };
 

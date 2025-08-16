@@ -189,6 +189,14 @@ enum Commands {
         #[arg(long, default_value = "1.0")]
         wind_std: f64,
         
+        /// Base wind speed (m/s)
+        #[arg(long, default_value = "0.0")]
+        wind_speed: f64,
+        
+        /// Base wind direction (degrees, 0=North, 90=East)
+        #[arg(long, default_value = "0.0")]
+        wind_direction: f64,
+        
         /// Target distance (meters)
         #[arg(long)]
         target_distance: Option<f64>,
@@ -480,11 +488,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::MonteCarlo {
             velocity, angle, bc, mass, diameter,
             num_sims, velocity_std, angle_std, bc_std, wind_std,
+            wind_speed, wind_direction,
             target_distance, output
         } => {
             run_monte_carlo(
                 velocity, angle, bc, mass, diameter,
                 num_sims, velocity_std, angle_std, bc_std, wind_std,
+                wind_speed, wind_direction,
                 target_distance, output
             )?;
         },
@@ -590,6 +600,7 @@ fn run_trajectory(
         shooting_angle: shooting_angle.to_radians(),
         latitude,
         ground_threshold: -10.0,
+        azimuth_angle: 0.0,  // No horizontal aiming angle for standard trajectory
         
         // Advanced effects - now separately controlled
         enable_advanced_effects: enable_magnus || enable_coriolis,  // Either one enables the system
@@ -751,6 +762,8 @@ fn run_monte_carlo(
     angle_std: f64,
     bc_std: f64,
     wind_std: f64,
+    wind_speed: f64,
+    wind_direction: f64,
     target_distance: Option<f64>,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
@@ -764,6 +777,12 @@ fn run_monte_carlo(
         ..Default::default()
     };
     
+    // Create base wind conditions
+    let base_wind = WindConditions {
+        speed: wind_speed,
+        direction: wind_direction.to_radians(),
+    };
+    
     // Set up Monte Carlo parameters
     let mc_params = MonteCarloParams {
         num_simulations: num_sims,
@@ -772,11 +791,13 @@ fn run_monte_carlo(
         bc_std_dev: bc_std,
         wind_speed_std_dev: wind_std,
         target_distance,
-        ..Default::default()
+        base_wind_speed: wind_speed,
+        base_wind_direction: wind_direction.to_radians(),
+        azimuth_std_dev: angle_std.to_radians() * 0.5,  // Use half of elevation std for horizontal spread
     };
     
     // Run Monte Carlo simulation
-    let results = ballistics_engine::run_monte_carlo(base_inputs, mc_params)?;
+    let results = ballistics_engine::run_monte_carlo_with_wind(base_inputs, base_wind, mc_params)?;
     
     // Calculate statistics
     let mean_range = results.ranges.iter().sum::<f64>() / results.ranges.len() as f64;

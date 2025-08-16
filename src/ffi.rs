@@ -27,6 +27,7 @@ pub struct FFIBallisticInputs {
     pub shooting_angle: c_double,         // uphill/downhill angle in radians
     pub altitude: c_double,               // meters
     pub latitude: c_double,                // degrees (use NAN if not provided)
+    pub azimuth_angle: c_double,          // horizontal aiming angle in radians
 }
 
 #[repr(C)]
@@ -73,6 +74,9 @@ pub struct FFIMonteCarloParams {
     pub bc_std_dev: c_double,
     pub wind_speed_std_dev: c_double,
     pub target_distance: c_double,    // Use NAN if not specified
+    pub base_wind_speed: c_double,    // Base wind speed in m/s
+    pub base_wind_direction: c_double, // Base wind direction in radians
+    pub azimuth_std_dev: c_double,    // Horizontal aiming variation in radians
 }
 
 // Monte Carlo simulation results
@@ -98,6 +102,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.muzzle_velocity = inputs.muzzle_velocity;
     ballistic_inputs.launch_angle = inputs.launch_angle;
     ballistic_inputs.muzzle_angle = inputs.launch_angle;
+    ballistic_inputs.azimuth_angle = inputs.azimuth_angle;
     ballistic_inputs.ballistic_coefficient = inputs.ballistic_coefficient;
     ballistic_inputs.bc_value = inputs.ballistic_coefficient;
     ballistic_inputs.mass = inputs.mass;
@@ -390,6 +395,9 @@ pub extern "C" fn ballistics_monte_carlo(
         } else {
             Some(params.target_distance)
         },
+        base_wind_speed: params.base_wind_speed,
+        base_wind_direction: params.base_wind_direction,
+        azimuth_std_dev: params.azimuth_std_dev,
     };
     
     // Run Monte Carlo simulation
@@ -551,7 +559,7 @@ pub extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarl
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
-    let version = CString::new("0.2.0").unwrap();
+    let version = CString::new("0.2.2").unwrap();
     let ptr = version.as_ptr();
     std::mem::forget(version);
     ptr

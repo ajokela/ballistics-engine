@@ -126,7 +126,31 @@ Enable velocity-dependent BC modeling for more accurate long-range predictions:
   --use-bc-segments \
   --auto-zero 600 \
   --max-range 1000
+```
 
+#### Advanced Physics - Magnus and Spin Drift
+
+Enable advanced gyroscopic and aerodynamic effects:
+
+```bash
+# Magnus effect and spin drift calculation
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --twist-rate 10      # 1:10" barrel twist
+  --twist-right        # Right-hand twist
+  --enable-magnus      # Enable Magnus effect
+  --enable-spin-drift  # Enable enhanced spin drift
+  --wind-speed 10 \
+  --wind-direction 90 \
+  --max-range 1000
+
+# Coriolis effect for extreme long range
+./ballistics trajectory \
+  -v 3000 -b 0.750 -m 250 -d 0.338 \
+  --enable-coriolis \
+  --latitude 45        # Shooting latitude
+  --shooting-angle 90  # Azimuth (0=N, 90=E)
+  --max-range 2000
 ```
 
 ### Zero Calculation
@@ -256,11 +280,12 @@ ballistics_free_trajectory_result(result);
 // Set up Monte Carlo parameters
 FFIMonteCarloParams params = {
     .num_simulations = 1000,
-    .velocity_std_dev = 10.0,      // m/s variation
-    .angle_std_dev = 0.001,         // radian variation
+    .velocity_std_dev = 10.0,       // m/s variation
+    .angle_std_dev = 0.001,         // radian variation (elevation)
     .bc_std_dev = 0.01,             // BC variation
     .wind_speed_std_dev = 2.0,      // m/s wind variation
-    .target_distance = 600.0        // Target at 600m
+    .target_distance = 600.0,       // Target at 600m
+    .azimuth_std_dev = 0.001        // radian variation (horizontal)
 };
 
 // Run simulation
