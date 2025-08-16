@@ -40,6 +40,9 @@ build/
 *.bak
 *.orig
 
+# FFI test executable
+test_ffi
+
 # OS specific
 Thumbs.db
 .DS_Store
