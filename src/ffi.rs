@@ -29,6 +29,14 @@ pub struct FFIBallisticInputs {
     pub latitude: c_double,                // degrees (use NAN if not provided)
     pub azimuth_angle: c_double,          // horizontal aiming angle in radians
     pub use_rk4: c_int,                   // 0=Euler, 1=RK4
+    pub enable_wind_shear: c_int,         // 0=false, 1=true
+    pub enable_trajectory_sampling: c_int, // 0=false, 1=true
+    pub sample_interval: c_double,        // meters
+    pub enable_pitch_damping: c_int,      // 0=false, 1=true
+    pub enable_precession_nutation: c_int,// 0=false, 1=true
+    pub enable_spin_drift: c_int,         // 0=false, 1=true
+    pub enable_magnus: c_int,             // 0=false, 1=true
+    pub enable_coriolis: c_int,           // 0=false, 1=true
 }
 
 #[repr(C)]
@@ -43,6 +51,18 @@ pub struct FFIAtmosphericConditions {
     pub pressure: c_double,               // hPa
     pub humidity: c_double,               // percentage (0-100)
     pub altitude: c_double,               // meters
+}
+
+#[repr(C)]
+pub struct FFITrajectorySample {
+    pub distance: c_double,               // meters
+    pub time: c_double,                   // seconds
+    pub velocity_mps: c_double,           // meters per second
+    pub energy_joules: c_double,          // joules
+    pub drop_meters: c_double,            // meters
+    pub windage_meters: c_double,         // meters
+    pub mach: c_double,                   // Mach number
+    pub spin_rate_rps: c_double,          // revolutions per second
 }
 
 #[repr(C)]
@@ -64,6 +84,14 @@ pub struct FFITrajectoryResult {
     pub impact_energy: c_double,
     pub points: *mut FFITrajectoryPoint,
     pub point_count: c_int,
+    pub sampled_points: *mut FFITrajectorySample,
+    pub sampled_point_count: c_int,
+    pub min_pitch_damping: c_double,      // NAN if not calculated
+    pub transonic_mach: c_double,         // NAN if not reached
+    pub final_pitch_angle: c_double,      // NAN if not calculated
+    pub final_yaw_angle: c_double,        // NAN if not calculated
+    pub max_yaw_angle: c_double,          // NAN if not calculated
+    pub max_precession_angle: c_double,   // NAN if not calculated
 }
 
 // Monte Carlo simulation parameters
@@ -138,6 +166,15 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.caliber_inches = inputs.diameter / 0.0254;
     ballistic_inputs.weight_grains = inputs.mass / 0.00006479891;
     ballistic_inputs.bullet_length = inputs.diameter * 4.0;
+    
+    // New advanced physics flags
+    ballistic_inputs.enable_wind_shear = inputs.enable_wind_shear != 0;
+    ballistic_inputs.enable_trajectory_sampling = inputs.enable_trajectory_sampling != 0;
+    ballistic_inputs.sample_interval = inputs.sample_interval;
+    ballistic_inputs.enable_pitch_damping = inputs.enable_pitch_damping != 0;
+    ballistic_inputs.enable_precession_nutation = inputs.enable_precession_nutation != 0;
+    ballistic_inputs.use_enhanced_spin_drift = inputs.enable_spin_drift != 0;
+    ballistic_inputs.enable_advanced_effects = inputs.enable_magnus != 0 || inputs.enable_coriolis != 0;
     
     ballistic_inputs
 }
@@ -214,6 +251,41 @@ pub extern "C" fn ballistics_calculate_trajectory(
                 ptr::null_mut()
             };
             
+            // Convert sampled points if available
+            let (sampled_points, sampled_point_count) = if let Some(ref samples) = result.sampled_points {
+                let mut ffi_samples = Vec::with_capacity(samples.len());
+                for sample in samples {
+                    ffi_samples.push(FFITrajectorySample {
+                        distance: sample.distance_m,
+                        time: sample.time_s,
+                        velocity_mps: sample.velocity_mps,
+                        energy_joules: sample.energy_j,
+                        drop_meters: sample.drop_m,
+                        windage_meters: sample.wind_drift_m,
+                        mach: 0.0,  // Would need to calculate from velocity
+                        spin_rate_rps: 0.0,  // Not available in TrajectorySample
+                    });
+                }
+                let count = ffi_samples.len() as c_int;
+                let samples_ptr = ffi_samples.as_mut_ptr();
+                std::mem::forget(ffi_samples);
+                (samples_ptr, count)
+            } else {
+                (ptr::null_mut(), 0)
+            };
+            
+            // Extract angular state values if available
+            let (final_pitch, final_yaw, max_yaw, max_prec) = if let Some(ref angular) = result.angular_state {
+                (
+                    angular.pitch_angle,
+                    angular.yaw_angle,
+                    result.max_yaw_angle.unwrap_or(std::f64::NAN),
+                    result.max_precession_angle.unwrap_or(std::f64::NAN),
+                )
+            } else {
+                (std::f64::NAN, std::f64::NAN, std::f64::NAN, std::f64::NAN)
+            };
+            
             // Create result on heap
             let ffi_result = Box::new(FFITrajectoryResult {
                 max_range: result.max_range,
@@ -223,6 +295,14 @@ pub extern "C" fn ballistics_calculate_trajectory(
                 impact_energy: result.impact_energy,
                 points,
                 point_count: point_count as c_int,
+                sampled_points,
+                sampled_point_count,
+                min_pitch_damping: result.min_pitch_damping.unwrap_or(std::f64::NAN),
+                transonic_mach: result.transonic_mach.unwrap_or(std::f64::NAN),
+                final_pitch_angle: final_pitch,
+                final_yaw_angle: final_yaw,
+                max_yaw_angle: max_yaw,
+                max_precession_angle: max_prec,
             });
             
             Box::into_raw(ffi_result)
@@ -244,6 +324,14 @@ pub extern "C" fn ballistics_free_trajectory_result(result: *mut FFITrajectoryRe
                     result.point_count as usize,
                 );
                 drop(points);
+            }
+            if !result.sampled_points.is_null() && result.sampled_point_count > 0 {
+                let samples = Vec::from_raw_parts(
+                    result.sampled_points,
+                    result.sampled_point_count as usize,
+                    result.sampled_point_count as usize,
+                );
+                drop(samples);
             }
             drop(result);
         }
@@ -561,7 +649,7 @@ pub extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarl
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
-    let version = CString::new("0.2.2").unwrap();
+    let version = CString::new("0.3.0").unwrap();
     let ptr = version.as_ptr();
     std::mem::forget(version);
     ptr

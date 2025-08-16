@@ -1,6 +1,6 @@
 use ballistics_engine::{
     BallisticInputs, TrajectorySolver, MonteCarloParams, 
-    WindConditions, AtmosphericConditions, DragModel
+    WindConditions, AtmosphericConditions, DragModel, trajectory_sampling
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Serialize, Deserialize};
@@ -121,6 +121,22 @@ enum Commands {
         /// Enable wind shear (altitude-dependent wind)
         #[arg(long)]
         enable_wind_shear: bool,
+        
+        /// Enable trajectory sampling at regular intervals
+        #[arg(long)]
+        sample_trajectory: bool,
+        
+        /// Sampling interval in meters (default: 10)
+        #[arg(long, default_value = "10.0")]
+        sample_interval: f64,
+        
+        /// Enable pitch damping for transonic stability analysis
+        #[arg(long)]
+        enable_pitch_damping: bool,
+        
+        /// Enable precession/nutation physics for angular motion modeling
+        #[arg(long)]
+        enable_precession: bool,
         
         /// Barrel twist rate (inches per turn, e.g., 10 for 1:10)
         #[arg(long)]
@@ -279,9 +295,36 @@ enum Commands {
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
     },
+    
+    /// Generate BC segments for velocity-dependent BC
+    GenerateBCSegments {
+        /// Base ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: f64,
+        
+        /// Projectile mass (kg)
+        #[arg(short = 'm', long)]
+        mass: f64,
+        
+        /// Projectile diameter (meters)
+        #[arg(short = 'd', long)]
+        diameter: f64,
+        
+        /// Bullet model/name (e.g., "SMK", "ELD-M", "VLD")
+        #[arg(long, default_value = "")]
+        model: String,
+        
+        /// Drag model (G1 or G7)
+        #[arg(long, default_value = "G1")]
+        drag_model: String,
+        
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 enum UnitSystem {
     /// Metric units (m/s, kg, meters, Celsius)
     Metric,
@@ -327,6 +370,7 @@ struct TrajectoryResult {
     impact_velocity: f64,
     impact_energy: f64,
     stability_coefficient: Option<f64>,
+    spin_drift: Option<f64>,
     trajectory: Vec<TrajectoryPoint>,
 }
 
@@ -435,7 +479,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             output, full, auto_zero, sight_height,
             use_bc_segments,
             enable_magnus, enable_coriolis, enable_spin_drift,
-            enable_wind_shear, twist_rate, twist_right, latitude,
+            enable_wind_shear, sample_trajectory, sample_interval,
+            enable_pitch_damping, enable_precession, twist_rate, twist_right, latitude,
             use_euler,
             shooting_angle, use_powder_sensitivity, 
             powder_temp_sensitivity, powder_temp
@@ -485,7 +530,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 output, full, cli.units, sight_height_metric,
                 use_bc_segments,
                 enable_magnus, enable_coriolis, enable_spin_drift,
-                enable_wind_shear, !use_euler, twist_rate, twist_right, latitude,
+                enable_wind_shear, sample_trajectory, sample_interval,
+                enable_pitch_damping, enable_precession, !use_euler, twist_rate, twist_right, latitude,
                 shooting_angle, use_powder_sensitivity,
                 powder_temp_sensitivity, powder_temp
             )?;
@@ -536,6 +582,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 output
             )?;
         },
+        
+        Commands::GenerateBCSegments {
+            bc, mass, diameter, model, drag_model, output
+        } => {
+            // Convert to metric if needed
+            let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+            
+            run_bc_segment_generation(
+                bc, mass_metric, diameter_metric, 
+                &model, &drag_model, output, cli.units
+            )?;
+        },
     }
     
     Ok(())
@@ -565,6 +624,10 @@ fn run_trajectory(
     enable_coriolis: bool,
     enable_spin_drift: bool,
     enable_wind_shear: bool,
+    sample_trajectory: bool,
+    sample_interval: f64,
+    enable_pitch_damping: bool,
+    enable_precession: bool,
     use_rk4: bool,
     twist_rate: Option<f64>,
     twist_right: bool,
@@ -622,11 +685,33 @@ fn run_trajectory(
         tipoff_decay_distance: 50.0,
         use_bc_segments,
         bc_segments: None,
-        bc_segments_data: None,
+        bc_segments_data: if use_bc_segments {
+            // Generate BC segments automatically
+            use ballistics_engine::bc_estimation::BCSegmentEstimator;
+            let weight_grains = mass / 0.00006479891;
+            let caliber_inches = diameter / 0.0254;
+            let segments = BCSegmentEstimator::estimate_bc_segments(
+                bc, 
+                caliber_inches,
+                weight_grains,
+                "",  // No specific model
+                match drag_model {
+                    DragModelArg::G1 => "G1",
+                    DragModelArg::G7 => "G7",
+                }
+            );
+            Some(segments)
+        } else {
+            None
+        },
         use_enhanced_spin_drift: enable_spin_drift,
         use_form_factor: false,
         enable_wind_shear,
         wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
+        enable_trajectory_sampling: sample_trajectory,
+        sample_interval,
+        enable_pitch_damping,
+        enable_precession_nutation: enable_precession,
         
         // Optional data
         bc_type_str: None,
@@ -668,6 +753,41 @@ fn run_trajectory(
         0.0
     };
     
+    // Calculate spin drift if enabled and twist rate is provided
+    let spin_drift = if enable_spin_drift && twist_rate.is_some() && stability > 0.0 {
+        // Calculate spin decay factor based on time of flight
+        use ballistics_engine::spin_decay::{SpinDecayParameters, calculate_spin_decay_correction_factor};
+        let decay_params = SpinDecayParameters::new();
+        let avg_velocity = (velocity + result.impact_velocity) / 2.0;
+        
+        // Convert units for spin decay calculation
+        let mass_grains = mass / 0.00006479891;
+        let caliber_inches = diameter / 0.0254;
+        let length_inches = diameter * 4.5 / 0.0254;  // Approximate length
+        let air_density = 1.225;  // Standard air density at sea level
+        
+        let decay_factor = calculate_spin_decay_correction_factor(
+            result.time_of_flight,
+            avg_velocity,
+            air_density,
+            mass_grains,
+            caliber_inches,
+            length_inches,
+            Some(&decay_params)
+        );
+        
+        // Calculate spin drift with decay
+        ballistics_engine::stability::compute_spin_drift_with_decay(
+            result.time_of_flight,
+            stability,
+            twist_rate.unwrap(),
+            twist_right,
+            Some(decay_factor)
+        )
+    } else {
+        0.0
+    };
+    
     // Format output
     match output {
         OutputFormat::Json => {
@@ -678,6 +798,7 @@ fn run_trajectory(
                 impact_velocity: result.impact_velocity,
                 impact_energy: result.impact_energy,
                 stability_coefficient: if stability > 0.0 { Some(stability) } else { None },
+                spin_drift: if spin_drift.abs() > 0.0001 { Some(spin_drift) } else { None },
                 trajectory: if full {
                     result.points.into_iter().map(|p| TrajectoryPoint {
                         time: p.time,
@@ -711,6 +832,9 @@ fn run_trajectory(
                 println!("impact_energy,{:.2}", result.impact_energy);
                 if stability > 0.0 {
                     println!("stability_coefficient,{:.2}", stability);
+                }
+                if spin_drift.abs() > 0.0001 {
+                    println!("spin_drift,{:.4}", spin_drift);
                 }
             }
         },
@@ -747,6 +871,48 @@ fn run_trajectory(
                 };
                 println!("║ Status:            {:>8}            ║", stability_status);
             }
+            if spin_drift.abs() > 0.0001 {
+                let drift_display = UnitConverter::distance_from_metric(spin_drift.abs(), units);
+                let direction = if spin_drift > 0.0 { "Right" } else { "Left" };
+                println!("╠════════════════════════════════════════╣");
+                println!("║ Spin Drift:        {:>8.2} {:3}       ║", drift_display, range_unit);
+                println!("║ Direction:         {:>8}            ║", direction);
+            }
+            
+            // Display pitch damping analysis if available
+            if let Some(min_damping) = result.min_pitch_damping {
+                println!("╠════════════════════════════════════════╣");
+                println!("║ Min Pitch Damping: {:>8.3}            ║", min_damping);
+                let stability_warning = if min_damping > 0.0 {
+                    "UNSTABLE" // Positive damping in transonic can cause instability
+                } else if min_damping > -0.2 {
+                    "MARGINAL"
+                } else {
+                    "STABLE  "
+                };
+                println!("║ Transonic Status:  {:>8}            ║", stability_warning);
+                if let Some(mach) = result.transonic_mach {
+                    println!("║ Entered at Mach:   {:>8.2}            ║", mach);
+                }
+            }
+            
+            // Display angular motion analysis if available
+            if let Some(ref angular_state) = result.angular_state {
+                println!("╠════════════════════════════════════════╣");
+                println!("║       Angular Motion Analysis          ║");
+                println!("╠════════════════════════════════════════╣");
+                println!("║ Final Pitch Angle: {:>8.4} rad        ║", angular_state.pitch_angle);
+                println!("║ Final Yaw Angle:   {:>8.4} rad        ║", angular_state.yaw_angle);
+                if let Some(max_yaw) = result.max_yaw_angle {
+                    println!("║ Max Yaw Angle:     {:>8.4} rad        ║", max_yaw);
+                    println!("║                   ({:>8.2}°)          ║", max_yaw.to_degrees());
+                }
+                if let Some(max_prec) = result.max_precession_angle {
+                    println!("║ Max Precession:    {:>8.4} rad        ║", max_prec);
+                }
+                println!("║ Nutation Phase:    {:>8.2} rad        ║", angular_state.nutation_phase);
+            }
+            
             println!("╚════════════════════════════════════════╝");
             
             if full && !result.points.is_empty() {
@@ -778,6 +944,59 @@ fn run_trajectory(
                     }
                 }
                 println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+            }
+            
+            // Display sampled trajectory points if available
+            if let Some(ref samples) = result.sampled_points {
+                if !samples.is_empty() {
+                    println!();
+                    println!("Sampled Trajectory (every {:.0} {})", 
+                        UnitConverter::distance_from_metric(sample_interval, units),
+                        match units {
+                            UnitSystem::Metric => "m",
+                            UnitSystem::Imperial => "yd",
+                        });
+                    
+                    let (dist_hdr, drop_hdr, drift_hdr, vel_hdr) = match units {
+                        UnitSystem::Metric => ("(m)", "(m)", "(m)", "(m/s)"),
+                        UnitSystem::Imperial => ("(yd)", "(in)", "(in)", "(fps)"),
+                    };
+                    
+                    println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                    println!("│ Dist{:4} │ Drop{:4} │Drift{:4} │ Vel{:5} │  Flags   │", 
+                        dist_hdr, drop_hdr, drift_hdr, vel_hdr);
+                    println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+                    
+                    for sample in samples.iter() {
+                        let dist_display = UnitConverter::distance_from_metric(sample.distance_m, units);
+                        let drop_display = if units == UnitSystem::Imperial {
+                            sample.drop_m * 39.3701  // Convert to inches for imperial
+                        } else {
+                            sample.drop_m
+                        };
+                        let drift_display = if units == UnitSystem::Imperial {
+                            sample.wind_drift_m * 39.3701  // Convert to inches for imperial
+                        } else {
+                            sample.wind_drift_m
+                        };
+                        let vel_display = UnitConverter::velocity_from_metric(sample.velocity_mps, units);
+                        
+                        let flags_str = sample.flags.iter()
+                            .map(|f| match f {
+                                trajectory_sampling::TrajectoryFlag::ZeroCrossing => "Zero",
+                                trajectory_sampling::TrajectoryFlag::MachTransition => "Mach",
+                                trajectory_sampling::TrajectoryFlag::Apex => "Apex",
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        
+                        println!("│ {:>8.1} │ {:>8.2} │ {:>8.2} │ {:>8.1} │ {:8} │",
+                            dist_display, drop_display, drift_display, vel_display, 
+                            if flags_str.is_empty() { "-" } else { &flags_str });
+                    }
+                    
+                    println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+                }
             }
         },
     }
@@ -984,6 +1203,88 @@ fn run_zero_calculation(
             println!("║ Zero Angle (MOA):  {:>8.2} MOA        ║", zero_angle.to_degrees() * 60.0);
             println!("║ Zero Angle (mrad): {:>8.2} mrad       ║", zero_angle * 1000.0);
             println!("║ Max Ordinate:      {:>8.3} {:3}       ║", max_ordinate_display, dist_unit);
+            println!("╚════════════════════════════════════════╝");
+        },
+    }
+    
+    Ok(())
+}
+
+fn run_bc_segment_generation(
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    model: &str,
+    drag_model: &str,
+    output: OutputFormat,
+    units: UnitSystem,
+) -> Result<(), Box<dyn Error>> {
+    use ballistics_engine::bc_estimation::BCSegmentEstimator;
+    
+    // Convert mass to grains and diameter to inches for the estimation
+    let weight_grains = mass / 0.00006479891;
+    let caliber_inches = diameter / 0.0254;
+    
+    // Generate BC segments
+    let segments = BCSegmentEstimator::estimate_bc_segments(
+        bc, 
+        caliber_inches,
+        weight_grains,
+        model,
+        drag_model
+    );
+    
+    match output {
+        OutputFormat::Json => {
+            let segments_json: Vec<_> = segments.iter().map(|s| serde_json::json!({
+                "velocity_min_fps": s.velocity_min,
+                "velocity_max_fps": s.velocity_max,
+                "bc": s.bc_value
+            })).collect();
+            
+            let result = serde_json::json!({
+                "base_bc": bc,
+                "mass_grains": weight_grains,
+                "caliber_inches": caliber_inches,
+                "model": model,
+                "drag_model": drag_model,
+                "segments": segments_json
+            });
+            
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        },
+        
+        OutputFormat::Csv => {
+            println!("velocity_min_fps,velocity_max_fps,bc");
+            for segment in &segments {
+                println!("{},{},{:.4}", segment.velocity_min, segment.velocity_max, segment.bc_value);
+            }
+        },
+        
+        OutputFormat::Table => {
+            println!("╔════════════════════════════════════════╗");
+            println!("║        BC SEGMENT GENERATION           ║");
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Base BC:         {:.3}                 ║", bc);
+            println!("║ Caliber:         {:.3} inches          ║", caliber_inches);
+            println!("║ Weight:          {:.1} grains          ║", weight_grains);
+            if !model.is_empty() {
+                println!("║ Model:           {:20}  ║", model);
+            }
+            println!("║ Drag Model:      {:20}  ║", drag_model);
+            println!("╠════════════════════════════════════════╣");
+            println!("║         VELOCITY SEGMENTS              ║");
+            println!("╠════════════════════════════════════════╣");
+            
+            for segment in &segments {
+                let vel_display = if units == UnitSystem::Imperial {
+                    format!("{:.0}-{:.0} fps", segment.velocity_min, segment.velocity_max)
+                } else {
+                    format!("{:.0}-{:.0} m/s", segment.velocity_min / 3.28084, segment.velocity_max / 3.28084)
+                };
+                println!("║ {:18} → BC: {:.4}     ║", vel_display, segment.bc_value);
+            }
+            
             println!("╚════════════════════════════════════════╝");
         },
     }

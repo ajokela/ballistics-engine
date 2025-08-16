@@ -1,6 +1,10 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::DragModel;
 use crate::wind_shear::{WindShearProfile, WindShearModel, WindLayer};
+use crate::transonic_drag::{transonic_correction, get_projectile_shape, ProjectileShape};
+use crate::trajectory_sampling::{sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample};
+use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
+use crate::precession_nutation::{AngularState, PrecessionNutationParams, calculate_combined_angular_motion};
 use nalgebra::Vector3;
 use std::error::Error;
 use std::fmt;
@@ -77,6 +81,10 @@ pub struct BallisticInputs {
     pub use_form_factor: bool,
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
+    pub enable_trajectory_sampling: bool,
+    pub sample_interval: f64,  // meters
+    pub enable_pitch_damping: bool,
+    pub enable_precession_nutation: bool,
     
     // Additional data fields
     pub bc_type_str: Option<String>,
@@ -136,6 +144,10 @@ impl Default for BallisticInputs {
             use_form_factor: false,
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
+            enable_trajectory_sampling: false,
+            sample_interval: 10.0,  // Default 10 meter intervals
+            enable_pitch_damping: false,
+            enable_precession_nutation: false,
             
             // Optional data
             bc_type_str: None,
@@ -199,6 +211,12 @@ pub struct TrajectoryResult {
     pub impact_velocity: f64,
     pub impact_energy: f64,
     pub points: Vec<TrajectoryPoint>,
+    pub sampled_points: Option<Vec<TrajectorySample>>,  // Trajectory samples at regular intervals
+    pub min_pitch_damping: Option<f64>,  // Minimum pitch damping coefficient (for stability warning)
+    pub transonic_mach: Option<f64>,      // Mach number when entering transonic regime
+    pub angular_state: Option<AngularState>,  // Final angular state if precession/nutation enabled
+    pub max_yaw_angle: Option<f64>,           // Maximum yaw angle during flight (radians)
+    pub max_precession_angle: Option<f64>,    // Maximum precession angle (radians)
 }
 
 // Trajectory solver
@@ -285,6 +303,24 @@ impl TrajectorySolver {
         
         let mut points = Vec::new();
         let mut max_height = position.y;
+        let mut min_pitch_damping = 1.0;  // Track minimum pitch damping coefficient
+        let mut transonic_mach = None;    // Track when we enter transonic
+        
+        // Initialize angular state for precession/nutation tracking
+        let mut angular_state = if self.inputs.enable_precession_nutation {
+            Some(AngularState {
+                pitch_angle: 0.001,  // Small initial disturbance
+                yaw_angle: 0.001,
+                pitch_rate: 0.0,
+                yaw_rate: 0.0,
+                precession_angle: 0.0,
+                nutation_phase: 0.0,
+            })
+        } else {
+            None
+        };
+        let mut max_yaw_angle = 0.0;
+        let mut max_precession_angle = 0.0;
         
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
@@ -312,6 +348,85 @@ impl TrajectorySolver {
             // Track max height
             if position.y > max_height {
                 max_height = position.y;
+            }
+            
+            // Calculate pitch damping if enabled
+            if self.inputs.enable_pitch_damping {
+                let temp_c = self.atmosphere.temperature;
+                let temp_k = temp_c + 273.15;
+                let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+                let mach = velocity_magnitude / speed_of_sound;
+                
+                // Track when we enter transonic
+                if transonic_mach.is_none() && mach < 1.2 && mach > 0.8 {
+                    transonic_mach = Some(mach);
+                }
+                
+                // Calculate pitch damping coefficient
+                let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
+                    model.as_str()
+                } else {
+                    "default"
+                };
+                let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
+                let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
+                
+                // Track minimum (most critical for stability)
+                if pitch_damping < min_pitch_damping {
+                    min_pitch_damping = pitch_damping;
+                }
+            }
+            
+            // Calculate precession/nutation if enabled
+            if self.inputs.enable_precession_nutation {
+                if let Some(ref mut state) = angular_state {
+                    let velocity_magnitude = velocity.magnitude();
+                    let temp_c = self.atmosphere.temperature;
+                    let temp_k = temp_c + 273.15;
+                    let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+                    let mach = velocity_magnitude / speed_of_sound;
+                    
+                    // Calculate spin rate from twist rate and velocity
+                    let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
+                        let velocity_fps = velocity_magnitude * 3.28084;
+                        let twist_rate_ft = self.inputs.twist_rate / 12.0;
+                        (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI
+                    } else {
+                        0.0
+                    };
+                    
+                    // Create precession/nutation parameters
+                    let params = PrecessionNutationParams {
+                        mass_kg: self.inputs.mass,
+                        caliber_m: self.inputs.diameter,
+                        length_m: self.inputs.bullet_length,
+                        spin_rate_rad_s,
+                        spin_inertia: 6.94e-8,      // Typical value
+                        transverse_inertia: 9.13e-7, // Typical value
+                        velocity_mps: velocity_magnitude,
+                        air_density_kg_m3: air_density,
+                        mach,
+                        pitch_damping_coeff: -0.8,
+                        nutation_damping_factor: 0.05,
+                    };
+                    
+                    // Update angular state
+                    *state = calculate_combined_angular_motion(
+                        &params,
+                        state,
+                        time,
+                        self.time_step,
+                        0.001,  // Initial disturbance
+                    );
+                    
+                    // Track maximums
+                    if state.yaw_angle.abs() > max_yaw_angle {
+                        max_yaw_angle = state.yaw_angle.abs();
+                    }
+                    if state.precession_angle.abs() > max_precession_angle {
+                        max_precession_angle = state.precession_angle.abs();
+                    }
+                }
             }
             
             // Calculate drag with altitude-dependent wind if enabled
@@ -346,6 +461,32 @@ impl TrajectorySolver {
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
         
+        // Create trajectory sampling data if enabled
+        let sampled_points = if self.inputs.enable_trajectory_sampling {
+            let trajectory_data = TrajectoryData {
+                times: points.iter().map(|p| p.time).collect(),
+                positions: points.iter().map(|p| p.position.clone()).collect(),
+                velocities: points.iter().map(|p| {
+                    // Reconstruct velocity vectors from magnitude (approximate)
+                    Vector3::new(0.0, 0.0, p.velocity_magnitude)
+                }).collect(),
+                transonic_distances: Vec::new(),  // TODO: Track Mach transitions
+            };
+            
+            let outputs = TrajectoryOutputs {
+                target_distance_horiz_m: last_point.position.z,
+                target_vertical_height_m: last_point.position.y,
+                time_of_flight_s: last_point.time,
+                max_ord_dist_horiz_m: max_height,
+            };
+            
+            // Sample at specified intervals
+            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.mass);
+            Some(samples)
+        } else {
+            None
+        };
+        
         Ok(TrajectoryResult {
             max_range: last_point.position.z,
             max_height,
@@ -353,6 +494,12 @@ impl TrajectorySolver {
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
             points,
+            sampled_points,
+            min_pitch_damping: if self.inputs.enable_pitch_damping { Some(min_pitch_damping) } else { None },
+            transonic_mach: transonic_mach,
+            angular_state: angular_state,
+            max_yaw_angle: if self.inputs.enable_precession_nutation { Some(max_yaw_angle) } else { None },
+            max_precession_angle: if self.inputs.enable_precession_nutation { Some(max_precession_angle) } else { None },
         })
     }
     
@@ -371,6 +518,24 @@ impl TrajectorySolver {
         
         let mut points = Vec::new();
         let mut max_height = position.y;
+        let mut min_pitch_damping = 1.0;  // Track minimum pitch damping coefficient
+        let mut transonic_mach = None;    // Track when we enter transonic
+        
+        // Initialize angular state for precession/nutation tracking
+        let mut angular_state = if self.inputs.enable_precession_nutation {
+            Some(AngularState {
+                pitch_angle: 0.001,  // Small initial disturbance
+                yaw_angle: 0.001,
+                pitch_rate: 0.0,
+                yaw_rate: 0.0,
+                precession_angle: 0.0,
+                nutation_phase: 0.0,
+            })
+        } else {
+            None
+        };
+        let mut max_yaw_angle = 0.0;
+        let mut max_precession_angle = 0.0;
         
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
@@ -397,6 +562,85 @@ impl TrajectorySolver {
             
             if position.y > max_height {
                 max_height = position.y;
+            }
+            
+            // Calculate pitch damping if enabled (RK4 solver)
+            if self.inputs.enable_pitch_damping {
+                let temp_c = self.atmosphere.temperature;
+                let temp_k = temp_c + 273.15;
+                let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+                let mach = velocity_magnitude / speed_of_sound;
+                
+                // Track when we enter transonic
+                if transonic_mach.is_none() && mach < 1.2 && mach > 0.8 {
+                    transonic_mach = Some(mach);
+                }
+                
+                // Calculate pitch damping coefficient
+                let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
+                    model.as_str()
+                } else {
+                    "default"
+                };
+                let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
+                let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
+                
+                // Track minimum (most critical for stability)
+                if pitch_damping < min_pitch_damping {
+                    min_pitch_damping = pitch_damping;
+                }
+            }
+            
+            // Calculate precession/nutation if enabled (RK4 solver)
+            if self.inputs.enable_precession_nutation {
+                if let Some(ref mut state) = angular_state {
+                    let velocity_magnitude = velocity.magnitude();
+                    let temp_c = self.atmosphere.temperature;
+                    let temp_k = temp_c + 273.15;
+                    let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+                    let mach = velocity_magnitude / speed_of_sound;
+                    
+                    // Calculate spin rate from twist rate and velocity
+                    let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
+                        let velocity_fps = velocity_magnitude * 3.28084;
+                        let twist_rate_ft = self.inputs.twist_rate / 12.0;
+                        (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI
+                    } else {
+                        0.0
+                    };
+                    
+                    // Create precession/nutation parameters
+                    let params = PrecessionNutationParams {
+                        mass_kg: self.inputs.mass,
+                        caliber_m: self.inputs.diameter,
+                        length_m: self.inputs.bullet_length,
+                        spin_rate_rad_s,
+                        spin_inertia: 6.94e-8,      // Typical value
+                        transverse_inertia: 9.13e-7, // Typical value
+                        velocity_mps: velocity_magnitude,
+                        air_density_kg_m3: air_density,
+                        mach,
+                        pitch_damping_coeff: -0.8,
+                        nutation_damping_factor: 0.05,
+                    };
+                    
+                    // Update angular state
+                    *state = calculate_combined_angular_motion(
+                        &params,
+                        state,
+                        time,
+                        self.time_step,
+                        0.001,  // Initial disturbance
+                    );
+                    
+                    // Track maximums
+                    if state.yaw_angle.abs() > max_yaw_angle {
+                        max_yaw_angle = state.yaw_angle.abs();
+                    }
+                    if state.precession_angle.abs() > max_precession_angle {
+                        max_precession_angle = state.precession_angle.abs();
+                    }
+                }
             }
             
             // RK4 method
@@ -429,6 +673,32 @@ impl TrajectorySolver {
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
         
+        // Create trajectory sampling data if enabled
+        let sampled_points = if self.inputs.enable_trajectory_sampling {
+            let trajectory_data = TrajectoryData {
+                times: points.iter().map(|p| p.time).collect(),
+                positions: points.iter().map(|p| p.position.clone()).collect(),
+                velocities: points.iter().map(|p| {
+                    // Reconstruct velocity vectors from magnitude (approximate)
+                    Vector3::new(0.0, 0.0, p.velocity_magnitude)
+                }).collect(),
+                transonic_distances: Vec::new(),  // TODO: Track Mach transitions
+            };
+            
+            let outputs = TrajectoryOutputs {
+                target_distance_horiz_m: last_point.position.z,
+                target_vertical_height_m: last_point.position.y,
+                time_of_flight_s: last_point.time,
+                max_ord_dist_horiz_m: max_height,
+            };
+            
+            // Sample at specified intervals
+            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.mass);
+            Some(samples)
+        } else {
+            None
+        };
+        
         Ok(TrajectoryResult {
             max_range: last_point.position.z,
             max_height,
@@ -436,6 +706,12 @@ impl TrajectorySolver {
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
             points,
+            sampled_points,
+            min_pitch_damping: if self.inputs.enable_pitch_damping { Some(min_pitch_damping) } else { None },
+            transonic_mach: transonic_mach,
+            angular_state: angular_state,
+            max_yaw_angle: if self.inputs.enable_precession_nutation { Some(max_yaw_angle) } else { None },
+            max_precession_angle: if self.inputs.enable_precession_nutation { Some(max_precession_angle) } else { None },
         })
     }
     
@@ -469,25 +745,52 @@ impl TrajectorySolver {
     }
     
     fn calculate_drag_coefficient(&self, velocity: f64) -> f64 {
-        // Simplified drag calculation
-        // In reality, this would use the drag tables based on drag_model
-        let mach = velocity / 343.0; // Approximate speed of sound
+        // Calculate speed of sound based on atmospheric temperature
+        // Use standard atmosphere temperature at sea level if not available
+        let temp_c = self.atmosphere.temperature;
+        let temp_k = temp_c + 273.15;
+        let gamma = 1.4;  // Ratio of specific heats for air
+        let r_specific = 287.05;  // Specific gas constant for air (J/kg·K)
+        let speed_of_sound = (gamma * r_specific * temp_k).sqrt();
+        let mach = velocity / speed_of_sound;
         
-        // Basic drag curve approximation
+        // Base drag coefficient from drag model
         let base_cd = match self.inputs.drag_model {
             DragModel::G1 => 0.5,
             DragModel::G7 => 0.4,
             _ => 0.45,
         };
         
-        // Transonic effects
-        if mach > 0.8 && mach < 1.2 {
-            base_cd * 1.5
-        } else if mach > 1.2 {
-            base_cd * 0.8
+        // Determine projectile shape for transonic corrections
+        let projectile_shape = if let Some(ref model) = self.inputs.bullet_model {
+            // Try to determine shape from bullet model string
+            if model.to_lowercase().contains("boat") || model.to_lowercase().contains("bt") {
+                ProjectileShape::BoatTail
+            } else if model.to_lowercase().contains("round") || model.to_lowercase().contains("rn") {
+                ProjectileShape::RoundNose
+            } else if model.to_lowercase().contains("flat") || model.to_lowercase().contains("fb") {
+                ProjectileShape::FlatBase
+            } else {
+                // Use heuristic based on caliber, weight, and drag model
+                get_projectile_shape(
+                    self.inputs.diameter,
+                    self.inputs.mass / 0.00006479891,  // Convert kg to grains
+                    &self.inputs.drag_model.to_string()
+                )
+            }
         } else {
-            base_cd
-        }
+            // Use heuristic based on caliber, weight, and drag model
+            get_projectile_shape(
+                self.inputs.diameter,
+                self.inputs.mass / 0.00006479891,  // Convert kg to grains
+                &self.inputs.drag_model.to_string()
+            )
+        };
+        
+        // Apply transonic corrections
+        // Enable wave drag if advanced effects are enabled
+        let include_wave_drag = self.inputs.enable_advanced_effects;
+        transonic_correction(mach, base_cd, projectile_shape, include_wave_drag)
     }
 }
 

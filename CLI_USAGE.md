@@ -183,6 +183,12 @@ All commands support three output formats via `-o`:
 | --twist-right | Right-hand twist | false | - | - |
 | --latitude | Latitude for Coriolis | None | degrees | degrees |
 | --shooting-angle | Azimuth angle | 0 | degrees | degrees |
+| --enable-wind-shear | Wind shear with altitude | false | - | - |
+| --sample-trajectory | Sample at regular intervals | false | - | - |
+| --sample-interval | Sampling interval | 10 | yards/meters | yards/meters |
+| --enable-pitch-damping | Transonic stability analysis | false | - | - |
+| --enable-precession | Angular motion physics | false | - | - |
+| --use-euler | Use Euler integration | false | - | - |
 
 
 ## Practical Examples
@@ -228,6 +234,47 @@ All commands support three output formats via `-o`:
   -v 3200 -b 0.242 -m 55 -d 0.224 \
   --auto-zero 200 \
   --max-range 500
+```
+
+### Wind Shear and Atmospheric Effects
+```bash
+# Enable wind shear for altitude-dependent wind
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --wind-speed 10 \
+  --wind-direction 90 \
+  --enable-wind-shear \
+  --altitude 5000 \
+  --max-range 1000
+```
+
+### Trajectory Sampling for Analysis
+```bash
+# Sample trajectory at 25-yard intervals
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --sample-trajectory \
+  --sample-interval 25 \
+  --max-range 1000 -o json > sampled_trajectory.json
+```
+
+### Transonic Stability Analysis
+```bash
+# Enable pitch damping for transonic stability warnings
+./ballistics trajectory \
+  -v 3000 -b 0.475 -m 168 -d 0.308 \
+  --enable-pitch-damping \
+  --max-range 2000
+```
+
+### Precession and Nutation Physics
+```bash
+# Enable angular motion modeling
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --twist-rate 10 \
+  --enable-precession \
+  --max-range 1000
 ```
 
 ### Advanced Physics - Magnus and Spin Drift
@@ -320,11 +367,26 @@ All commands support three output formats via `-o`:
 - Automatic bullet type identification from parameters
 
 ### Physics Engine
+- **Integration Methods**:
+  - RK4 (Runge-Kutta 4th order) - default for accuracy
+  - Euler method - available with `--use-euler` flag
 - Full 3D trajectory integration with six-state modeling
 - Magnus effect for spin drift
 - Coriolis effect (with latitude input)
 - Variable atmospheric conditions
-- Wind profile with altitude effects
+- **Wind Shear**: Altitude-dependent wind profiles
+  - Power law model
+  - Logarithmic model
+  - Exponential decay model
+- **Trajectory Sampling**: Regular interval data collection
+- **Transonic Effects**:
+  - Automatic drag corrections in transonic regime
+  - Pitch damping analysis for stability
+  - Wave drag modeling
+- **Angular Motion**:
+  - Precession physics
+  - Nutation modeling
+  - Gyroscopic stability calculations
 - Ground impact detection
 
 #### Advanced Physics Notes
@@ -332,6 +394,11 @@ All commands support three output formats via `-o`:
 - **Magnus Effect**: Side force from spinning projectile, requires `--twist-rate` specification
 - **Coriolis Effect**: Earth rotation effects, requires `--latitude` and `--shooting-angle`
 - **Twist Direction**: Use `--twist-right` for right-hand twist, omit for left-hand twist
+- **Wind Shear**: Models wind speed increase with altitude, affects long-range shots
+- **Trajectory Sampling**: Use with JSON/CSV output for detailed analysis
+- **Pitch Damping**: Warns about transonic instability (Mach 0.8-1.2)
+- **Precession/Nutation**: Models angular motion of spinning projectiles
+- **Integration Method**: RK4 is default (more accurate), Euler available for speed
 - Both Magnus and spin drift work together to model the complete gyroscopic effects
 
 ### Atmospheric Modeling

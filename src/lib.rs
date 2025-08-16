@@ -23,19 +23,19 @@ mod wind;
 mod wind_shear;
 mod derivatives;
 mod trajectory_solver;
-mod trajectory_sampling;
+pub mod trajectory_sampling;
 mod fast_trajectory;
 mod spin_drift;
-mod spin_decay;
-mod pitch_damping;
+pub mod spin_decay;
+pub mod pitch_damping;
 mod precession_nutation;
 mod aerodynamic_jump;
 mod angle_calculations;
-mod transonic_drag;
+pub mod transonic_drag;
 mod reynolds;
 mod form_factor;
 mod monte_carlo;
-mod bc_estimation;
+pub mod bc_estimation;
 pub mod stability;
 
 // Internal type alias for compatibility

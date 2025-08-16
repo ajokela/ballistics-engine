@@ -72,6 +72,17 @@ pub fn compute_stability_coefficient(inputs: &BallisticInputs, atmo_params: (f64
 /// # Returns
 /// * Spin drift in meters
 pub fn compute_spin_drift(time_s: f64, stability: f64, twist_rate: f64, is_twist_right: bool) -> f64 {
+    compute_spin_drift_with_decay(time_s, stability, twist_rate, is_twist_right, None)
+}
+
+/// Calculate spin drift with optional spin decay modeling
+pub fn compute_spin_drift_with_decay(
+    time_s: f64, 
+    stability: f64, 
+    twist_rate: f64, 
+    is_twist_right: bool,
+    decay_factor: Option<f64>  // Optional spin decay factor (0-1)
+) -> f64 {
     if stability == 0.0 || time_s <= 0.0 || twist_rate == 0.0 {
         return 0.0;
     }
@@ -83,10 +94,17 @@ pub fn compute_spin_drift(time_s: f64, stability: f64, twist_rate: f64, is_twist
     // This overestimates significantly for short TOF
     // Using a modified version with better scaling factor
     let scaling_factor = 0.075; // Reduced from 1.25 to give realistic values
-    let drift_inches = sign * scaling_factor * (stability + 1.2) * time_s.powf(1.83);
+    let base_drift = sign * scaling_factor * (stability + 1.2) * time_s.powf(1.83);
+    
+    // Apply spin decay if provided
+    let effective_drift = if let Some(decay) = decay_factor {
+        base_drift * decay.max(0.0).min(1.0)
+    } else {
+        base_drift
+    };
     
     // Convert inches to meters
-    drift_inches * 0.0254
+    effective_drift * 0.0254
 }
 
 #[cfg(test)]
@@ -108,12 +126,12 @@ mod tests {
             // Duplicate fields for compatibility
             bc_value: 0.5,
             bc_type: DragModel::G1,
-            bullet_mass: 168.0,  // in grains
+            bullet_mass: 0.0109,  // in kg (168 grains)
             altitude: 0.0,
             bc_type_str: Some("G1".to_string()),
             twist_rate: 10.0,
-            bullet_length: 1.3,  // in inches
-            bullet_diameter: 0.308,  // in inches
+            bullet_length: 0.033,  // in meters (1.3 inches)
+            bullet_diameter: 0.00782,  // in meters (0.308 inches)
             tipoff_yaw: 0.0,
             tipoff_decay_distance: 20.0,
             ground_threshold: 0.0,
@@ -138,6 +156,12 @@ mod tests {
             bullet_model: None,
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
+            azimuth_angle: 0.0,
+            use_rk4: true,
+            enable_trajectory_sampling: false,
+            sample_interval: 10.0,
+            enable_pitch_damping: false,
+            enable_precession_nutation: false,
         }
     }
 
@@ -147,6 +171,9 @@ mod tests {
         let atmo_params = (0.0, 15.0, 1013.25, 1.0); // Standard conditions
         
         let stability = compute_stability_coefficient(&inputs, atmo_params);
+        
+        // Debug output
+        println!("Computed stability: {}", stability);
         
         // Should be a reasonable stability value
         assert!(stability > 0.0);

@@ -384,6 +384,12 @@ mod tests {
             bullet_model: None,
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
+            azimuth_angle: 0.0,
+            use_rk4: true,
+            enable_trajectory_sampling: false,
+            sample_interval: 10.0,
+            enable_pitch_damping: false,
+            enable_precession_nutation: false,
         }
     }
     

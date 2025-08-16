@@ -6,16 +6,22 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 
 ## Features
 
-- **Full 3D Trajectory Integration** - Six-state ballistic modeling with complete 3D position and velocity tracking
-- **Advanced Drag Models** - Support for G1, G7, and custom drag curves with transonic corrections
+- **Full 3D Trajectory Integration** - Six-state ballistic modeling with RK4 and Euler integration methods
+- **Advanced Drag Models** - Support for G1, G7, and custom drag curves with automatic transonic corrections
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
-- **BC Segmentation** - Velocity-dependent ballistic coefficient modeling
-- **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects
-- **Wind Effects** - 3D wind calculations with shear modeling
+- **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation
+- **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere
+- **Wind Effects** - 3D wind calculations with altitude-dependent wind shear modeling
 - **Monte Carlo Simulations** - Statistical analysis with parameter uncertainties
 - **BC Estimation** - Estimate ballistic coefficients from trajectory data
-- **Advanced Physics** - Magnus effect, spin drift, Coriolis effect, gyroscopic precession, nutation, spin decay, pitch damping, and form factor corrections
+- **Advanced Physics**:
+  - **Spin Effects**: Magnus effect, enhanced spin drift with decay modeling
+  - **Earth Effects**: Coriolis effect with latitude-dependent calculations
+  - **Angular Motion**: Gyroscopic precession and nutation physics
+  - **Transonic Analysis**: Pitch damping coefficients and stability warnings
+  - **Trajectory Sampling**: Regular interval data collection for analysis
+  - **Form Factor Corrections**: Bullet-specific drag adjustments
 - **Multiple Output Formats** - JSON, CSV, and formatted tables
 
 ## Installation
@@ -208,6 +214,81 @@ Estimate ballistic coefficient from observed trajectory data:
   -v 2700 -m 168 -d 0.308 \
   --distance1 100 --drop1 0.0   # First data point
   --distance2 200 --drop2 0.023  # Second data point
+```
+
+## Advanced Features
+
+### Integration Methods
+
+The engine supports two numerical integration methods:
+
+- **RK4 (Runge-Kutta 4th Order)** - Default method, provides superior accuracy
+- **Euler Method** - Available with `--use-euler` flag for faster computation
+
+### Wind Shear Modeling
+
+Model altitude-dependent wind variations:
+
+```bash
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --wind-speed 10 --wind-direction 90 \
+  --enable-wind-shear \
+  --max-range 1000
+```
+
+### Transonic Stability Analysis
+
+Analyze projectile stability through the transonic regime:
+
+```bash
+./ballistics trajectory -v 3000 -b 0.475 -m 168 -d 0.308 \
+  --enable-pitch-damping \
+  --max-range 2000
+```
+
+Provides warnings about transonic instability and minimum pitch damping coefficients.
+
+### Trajectory Sampling
+
+Collect trajectory data at regular intervals for detailed analysis:
+
+```bash
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --sample-trajectory \
+  --sample-interval 25  # Sample every 25 yards
+  --max-range 1000 -o json
+```
+
+### Angular Motion Physics
+
+Model precession and nutation of spinning projectiles:
+
+```bash
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --twist-rate 10 \
+  --enable-precession \
+  --max-range 1000
+```
+
+### Complete Advanced Physics Example
+
+```bash
+./ballistics trajectory \
+  -v 2850 -b 0.690 -m 230 -d 0.338 \
+  --drag-model g7 \
+  --twist-rate 8.5 --twist-right \
+  --enable-magnus \
+  --enable-coriolis \
+  --enable-spin-drift \
+  --enable-wind-shear \
+  --enable-pitch-damping \
+  --enable-precession \
+  --sample-trajectory \
+  --latitude 38.5 \
+  --shooting-angle 45 \
+  --wind-speed 15 --wind-direction 270 \
+  --altitude 6000 \
+  --max-range 2000
 ```
 
 ## Physics Modeling
