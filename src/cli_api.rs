@@ -1053,6 +1053,7 @@ pub fn estimate_bc_from_trajectory(
     // Simple BC estimation using least squares
     let mut best_bc = 0.5;
     let mut best_error = f64::MAX;
+    let mut found_valid = false;
     
     // Try different BC values
     for bc in (100..1000).step_by(10) {
@@ -1066,8 +1067,14 @@ pub fn estimate_bc_from_trajectory(
             ..Default::default()
         };
         
-        let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
-        let result = solver.solve()?;
+        let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+        // Set max range for BC estimation
+        solver.set_max_range(points.last().map(|(d, _)| *d * 1.5).unwrap_or(1000.0));
+        
+        let result = match solver.solve() {
+            Ok(r) => r,
+            Err(_) => continue, // Skip this BC value if solve fails
+        };
         
         // Calculate error
         let mut total_error = 0.0;
@@ -1098,7 +1105,12 @@ pub fn estimate_bc_from_trajectory(
         if total_error < best_error {
             best_error = total_error;
             best_bc = bc_value;
+            found_valid = true;
         }
+    }
+    
+    if !found_valid {
+        return Err(BallisticsError::from("Unable to estimate BC from provided data. Check that drop values are in correct units.".to_string()));
     }
     
     Ok(best_bc)
