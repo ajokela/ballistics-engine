@@ -127,6 +127,9 @@ impl WasmBallistics {
         inputs.drag_model = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
         
+        // Set sight height to 2 inches (typical scope height)
+        inputs.sight_height = 2.0 * 0.0254; // inches to meters
+        
         // Set wind
         let mut wind = WindConditions::default();
         wind.speed = wind_speed * 0.44704; // mph to m/s
@@ -176,15 +179,24 @@ Try it now with default values:
         output.push_str("Range(yd) | Drop(in) | Drift(in) | Velocity(fps) | Energy(ft-lb) | Time(s)\n");
         output.push_str("----------|----------|-----------|---------------|---------------|--------\n");
 
-        // Sample every 100 yards
-        let sample_interval = 100.0;
+        // Sample every 100 yards, or more frequently if max range is small
+        let max_range_yards = result.max_range * 1.09361;
+        let sample_interval = if max_range_yards < 500.0 { 50.0 } else { 100.0 };
         let mut current_range = 0.0;
+        
+        // Get initial height for reference (sight height)
+        let sight_height_inches = if !result.points.is_empty() {
+            result.points[0].position.y * 39.3701
+        } else {
+            2.0
+        };
         
         for point in &result.points {
             let range_yards = point.position.z * 1.09361; // m to yards
             
-            if range_yards >= current_range {
-                let drop_inches = -point.position.y * 39.3701; // m to inches
+            if range_yards >= current_range || (result.points.last() == Some(point)) {
+                // Calculate drop relative to line of sight (not absolute position)
+                let drop_inches = (sight_height_inches - point.position.y * 39.3701);
                 let drift_inches = point.position.x * 39.3701; // m to inches
                 let velocity_fps = point.velocity_magnitude * 3.28084; // m/s to fps
                 
