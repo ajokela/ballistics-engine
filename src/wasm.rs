@@ -5,6 +5,7 @@ use crate::cli_api::{
     TrajectorySolver, 
     BallisticInputs as InternalBallisticInputs, 
     WindConditions, AtmosphericConditions,
+    calculate_zero_angle_with_conditions,
 };
 use crate::drag_model::DragModel;
 
@@ -52,6 +53,7 @@ impl WasmBallistics {
         let mut max_range = 1000.0; // yards
         let mut wind_speed = 0.0; // mph
         let mut wind_direction = 90.0; // degrees
+        let mut auto_zero: Option<f64> = None; // yards
 
         let mut i = 1;
         while i < args.len() {
@@ -111,6 +113,13 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--auto-zero" | "-z" => {
+                    if i + 1 < args.len() {
+                        auto_zero = Some(args[i + 1].parse()
+                            .map_err(|_| JsValue::from_str("Invalid zero distance"))?);
+                        i += 1;
+                    }
+                }
                 _ => {}
             }
             i += 1;
@@ -138,13 +147,40 @@ impl WasmBallistics {
         // Default atmosphere
         let atmosphere = AtmosphericConditions::default();
         
-        // Create solver and calculate
-        let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+        // Handle auto-zero if specified
+        let mut zero_info = String::new();
+        if let Some(zero_distance_yards) = auto_zero {
+            let zero_distance_m = zero_distance_yards * 0.9144; // yards to meters
+            let target_height = 0.0; // Zero at same height as bore
+            
+            match calculate_zero_angle_with_conditions(
+                inputs.clone(), 
+                zero_distance_m,
+                target_height,
+                wind.clone(), 
+                atmosphere.clone()
+            ) {
+                Ok(zero_angle) => {
+                    inputs.launch_angle = zero_angle;
+                    let moa_adjustment = zero_angle * 180.0 / std::f64::consts::PI * 60.0; // radians to MOA
+                    zero_info = format!("Rifle zeroed at {} yards (Adjustment: {:.2} MOA up)\n\n", 
+                                      zero_distance_yards, 
+                                      moa_adjustment);
+                }
+                Err(e) => {
+                    return Ok(format!("Error calculating zero: {}\n\nTry a shorter zero distance or check your ballistic parameters.", e));
+                }
+            }
+        }
+        
+        // Create solver and calculate - inputs now has the correct launch_angle if auto-zeroed
+        let mut solver = TrajectorySolver::new(inputs.clone(), wind, atmosphere);
         solver.set_max_range(max_range * 0.9144); // yards to meters
         
         match solver.solve() {
             Ok(result) => {
-                Ok(self.format_trajectory_output(&result))
+                let trajectory_output = self.format_trajectory_output(&result, auto_zero);
+                Ok(format!("{}{}", zero_info, trajectory_output))
             }
             Err(e) => Ok(format!("Error: {}", e))
         }
@@ -164,15 +200,18 @@ Options:
   --max-range <RANGE>          Maximum range (yards) [default: 1000]
   --wind-speed <SPEED>         Wind speed (mph) [default: 0]
   --wind-direction <DIR>       Wind direction (degrees, 90=right) [default: 90]
+  -z, --auto-zero <DISTANCE>   Automatically zero at distance (yards)
 
-Example:
+Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1000
+  ballistics trajectory --auto-zero 200 --max-range 600
+  ballistics trajectory -z 100 --wind-speed 10 --wind-direction 90
 
 Try it now with default values:
   ballistics trajectory"#.to_string()
     }
 
-    fn format_trajectory_output(&self, result: &crate::cli_api::TrajectoryResult) -> String {
+    fn format_trajectory_output(&self, result: &crate::cli_api::TrajectoryResult, zero_distance: Option<f64>) -> String {
         let mut output = String::new();
         output.push_str("Trajectory Calculation Results\n");
         output.push_str("==============================\n\n");
@@ -191,12 +230,18 @@ Try it now with default values:
             2.0
         };
         
-        for point in &result.points {
+        for (idx, point) in result.points.iter().enumerate() {
             let range_yards = point.position.z * 1.09361; // m to yards
+            let is_last_point = idx == result.points.len() - 1;
             
-            if range_yards >= current_range || (result.points.last() == Some(point)) {
+            // Show point if it's at the sampling interval OR if it's the last point OR if it's the zero distance
+            let should_show = range_yards >= current_range || 
+                            is_last_point || 
+                            (zero_distance.is_some() && (range_yards - zero_distance.unwrap()).abs() < 1.0);
+            
+            if should_show {
                 // Calculate drop relative to line of sight (not absolute position)
-                let drop_inches = (sight_height_inches - point.position.y * 39.3701);
+                let drop_inches = sight_height_inches - point.position.y * 39.3701;
                 let drift_inches = point.position.x * 39.3701; // m to inches
                 let velocity_fps = point.velocity_magnitude * 3.28084; // m/s to fps
                 
@@ -211,7 +256,9 @@ Try it now with default values:
                     range_yards, drop_inches, drift_inches, velocity_fps, energy_ftlb, point.time
                 ));
                 
-                current_range += sample_interval;
+                if range_yards >= current_range {
+                    current_range += sample_interval;
+                }
             }
         }
         
