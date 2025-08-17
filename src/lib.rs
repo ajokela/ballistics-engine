@@ -17,6 +17,8 @@ pub mod cli_api;
 pub mod ffi;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
+#[cfg(test)]
+mod wasm_tests;
 mod constants;
 mod drag;
 mod drag_tables;

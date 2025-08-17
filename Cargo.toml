@@ -38,6 +38,7 @@ getrandom = { version = "0.2", features = ["js"] }
 [dev-dependencies]
 approx = "0.5"
 criterion = "0.5"
+wasm-bindgen-test = "0.3"
 
 [[bin]]
 name = "ballistics"

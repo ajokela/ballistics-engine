@@ -358,27 +358,29 @@ impl WasmBallistics {
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
         
         // Set advanced physics flags
-        inputs.enable_magnus_effect = enable_magnus;
-        inputs.enable_coriolis_effect = enable_coriolis;
+        // Magnus and Coriolis are controlled by enable_advanced_effects
+        if enable_magnus || enable_coriolis {
+            inputs.enable_advanced_effects = true;
+        }
         inputs.use_rk4 = !use_euler;
-        inputs.enable_spin_drift = enable_spin_drift;
+        inputs.use_enhanced_spin_drift = enable_spin_drift;
         inputs.enable_wind_shear = enable_wind_shear;
         inputs.enable_trajectory_sampling = sample_trajectory;
-        inputs.sampling_interval = sample_interval;
+        inputs.sample_interval = sample_interval;
         inputs.enable_pitch_damping = enable_pitch_damping;
         inputs.enable_precession_nutation = enable_precession;
-        inputs.use_velocity_bc_segments = use_bc_segments;
-        inputs.use_powder_temp_sensitivity = use_powder_sensitivity;
+        inputs.use_bc_segments = use_bc_segments;
+        inputs.use_powder_sensitivity = use_powder_sensitivity;
         
         // Set additional parameters
         if let Some(rate) = twist_rate {
             inputs.twist_rate = rate;
         }
-        inputs.twist_direction_right = twist_right;
+        inputs.is_twist_right = twist_right;
         if let Some(lat) = latitude {
-            inputs.latitude = lat;
+            inputs.latitude = Some(lat);
         }
-        inputs.powder_temp_modifier = powder_temp_sensitivity;
+        inputs.powder_temp_sensitivity = powder_temp_sensitivity;
         
         // Adjust velocity for powder temperature if enabled
         if use_powder_sensitivity {
@@ -732,16 +734,17 @@ impl WasmBallistics {
         // Create Monte Carlo parameters
         let params = MonteCarloParams {
             num_simulations: num_sims,
-            velocity_std: velocity_std * (if units == UnitSystem::Imperial { 0.3048 } else { 1.0 }),
-            angle_std: angle_std * std::f64::consts::PI / 180.0,
-            bc_std,
-            wind_speed_std: wind_speed_std * (if units == UnitSystem::Imperial { 0.44704 } else { 1.0 }),
-            wind_dir_std,
-            azimuth_std: 0.001,
-            pointing_error_std: 0.0001,
+            velocity_std_dev: velocity_std * (if units == UnitSystem::Imperial { 0.3048 } else { 1.0 }),
+            angle_std_dev: angle_std * std::f64::consts::PI / 180.0,
+            bc_std_dev: bc_std,
+            wind_speed_std_dev: wind_speed_std * (if units == UnitSystem::Imperial { 0.44704 } else { 1.0 }),
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 0.001,
+            target_distance: None,
         };
 
-        match run_monte_carlo(inputs, params, WindConditions::default()) {
+        match run_monte_carlo(inputs, params) {
             Ok(results) => {
                 // Calculate statistics
                 let mean_range: f64 = results.ranges.iter().sum::<f64>() / results.ranges.len() as f64;
