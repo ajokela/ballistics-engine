@@ -9,6 +9,21 @@ use nalgebra::Vector3;
 use std::error::Error;
 use std::fmt;
 
+// Unit system for input/output
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnitSystem {
+    Imperial,
+    Metric,
+}
+
+// Output format for results
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutputFormat {
+    Table,
+    Json,
+    Csv,
+}
+
 // Error type for CLI operations
 #[derive(Debug)]
 pub struct BallisticsError {

@@ -15,6 +15,8 @@ pub use cli_api::{
 mod drag_model;
 pub mod cli_api;
 pub mod ffi;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 mod constants;
 mod drag;
 mod drag_tables;
