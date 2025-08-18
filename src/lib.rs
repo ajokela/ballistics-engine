@@ -1,6 +1,18 @@
 //! # Ballistics Engine
 //! 
 //! High-performance ballistics trajectory calculation engine with comprehensive physics modeling.
+//! 
+//! ## Interactive Web Demo
+//! 
+//! Try the ballistics engine directly in your browser at [https://ballistics.rs/](https://ballistics.rs/)
+//! 
+//! ## Features
+//! 
+//! - Professional-grade trajectory calculations with multiple drag models
+//! - Advanced physics including spin drift, Coriolis effect, and Magnus force
+//! - Monte Carlo simulations for uncertainty analysis
+//! - WebAssembly support for browser-based applications
+//! - FFI bindings for iOS and Android development
 
 // Re-export the main types and functions
 pub use drag_model::DragModel;

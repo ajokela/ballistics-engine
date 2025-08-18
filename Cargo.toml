@@ -1,11 +1,13 @@
 [package]
 name = "ballistics-engine"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ajokela/ballistics-engine"
+homepage = "https://ballistics.rs/"
+documentation = "https://docs.rs/ballistics-engine"
 keywords = ["ballistics", "trajectory", "physics", "simulation"]
 categories = ["science", "simulation"]
 
