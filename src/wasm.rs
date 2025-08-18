@@ -60,7 +60,34 @@ impl WasmBallistics {
     /// Run a command and return the output
     #[wasm_bindgen(js_name = runCommand)]
     pub fn run_command(&self, command: &str) -> Result<String, JsValue> {
-        let args: Vec<&str> = command.split_whitespace().collect();
+        // Handle quoted arguments properly
+        let mut args: Vec<String> = Vec::new();
+        let mut current_arg = String::new();
+        let mut in_quotes = false;
+        let mut quote_char = ' ';
+        
+        for c in command.chars() {
+            if !in_quotes && (c == '\'' || c == '"') {
+                in_quotes = true;
+                quote_char = c;
+            } else if in_quotes && c == quote_char {
+                in_quotes = false;
+                quote_char = ' ';
+            } else if !in_quotes && c.is_whitespace() {
+                if !current_arg.is_empty() {
+                    args.push(current_arg.clone());
+                    current_arg.clear();
+                }
+            } else {
+                current_arg.push(c);
+            }
+        }
+        
+        if !current_arg.is_empty() {
+            args.push(current_arg);
+        }
+        
+        let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         
         if args.is_empty() {
             return Ok(self.show_help());
@@ -862,14 +889,16 @@ impl WasmBallistics {
                 "--data" => {
                     // Parse distance,drop pairs
                     if i + 1 < args.len() {
-                        let pairs: Vec<&str> = args[i + 1].split(';').collect();
+                        // Remove quotes if present
+                        let data_str = args[i + 1].trim_matches('\'').trim_matches('"');
+                        let pairs: Vec<&str> = data_str.split(';').collect();
                         for pair in pairs {
                             let parts: Vec<&str> = pair.split(',').collect();
                             if parts.len() == 2 {
-                                let distance = parts[0].parse()
-                                    .map_err(|_| JsValue::from_str("Invalid distance in data"))?;
-                                let drop = parts[1].parse()
-                                    .map_err(|_| JsValue::from_str("Invalid drop in data"))?;
+                                let distance: f64 = parts[0].trim().parse()
+                                    .map_err(|e| JsValue::from_str(&format!("Invalid distance '{}': {}", parts[0], e)))?;
+                                let drop: f64 = parts[1].trim().parse()
+                                    .map_err(|e| JsValue::from_str(&format!("Invalid drop '{}': {}", parts[1], e)))?;
                                 data_points.push((distance, drop));
                             }
                         }
