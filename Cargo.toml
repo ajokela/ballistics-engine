@@ -10,6 +10,7 @@ homepage = "https://ballistics.rs/"
 documentation = "https://docs.rs/ballistics-engine"
 keywords = ["ballistics", "trajectory", "physics", "simulation"]
 categories = ["science", "simulation"]
+exclude = ["app/", "tests/", "examples/", "ios.png", "pkg/", "test_ffi.c", "test_monte_carlo.py", "ballistics_standalone.rs"]
 
 [features]
 default = []
