@@ -301,9 +301,16 @@ jobs:
           -serial mon:stdio
         
         # Wait for boot and login prompt
+        set timeout 120
         expect {
           "login:" {
+            puts "Found login prompt"
             send "root\r"
+          }
+          "boot>" {
+            puts "Found boot prompt, sending enter"
+            send "\r"
+            exp_continue
           }
           timeout {
             puts "Timeout waiting for login"
@@ -352,9 +359,12 @@ jobs:
         expect eof
         EXPECT
         
-        # Try the automated build
+        # Debug: Check if image is valid
+        qemu-img info openbsd.qcow2
+        
+        # Try the automated build with shorter timeout for testing
         chmod +x run_build.expect
-        if timeout 30m ./run_build.expect; then
+        if timeout 5m ./run_build.expect; then
           echo "QEMU build completed successfully"
           
           # Mount the disk image to extract the binary
