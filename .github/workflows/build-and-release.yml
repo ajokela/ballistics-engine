@@ -282,8 +282,8 @@ jobs:
         halt -p
         BUILDSCRIPT
         
-        # Package source code
-        tar czf source.tar.gz .
+        # Package source code (create in /tmp to avoid circular reference)
+        tar czf /tmp/source.tar.gz --exclude=openbsd.box --exclude=openbsd.qcow2 --exclude=box.img .
         
         # Create expect script to run QEMU and execute build
         cat > run_build.expect << 'EXPECT'
@@ -316,7 +316,7 @@ jobs:
         
         # Copy files via base64 encoding (since no SSH)
         send "cat > /tmp/source.tar.gz.b64 << 'EOF'\r"
-        send [exec base64 source.tar.gz]
+        send [exec base64 /tmp/source.tar.gz]
         send "\rEOF\r"
         expect "# "
         
@@ -354,21 +354,57 @@ jobs:
         
         # Try the automated build
         chmod +x run_build.expect
-        timeout 30m ./run_build.expect || {
-          echo "QEMU build failed or timed out"
+        if timeout 30m ./run_build.expect; then
+          echo "QEMU build completed successfully"
           
-          # Create placeholder
+          # Mount the disk image to extract the binary
+          # Convert to raw format for mounting
+          qemu-img convert -f qcow2 -O raw openbsd.qcow2 openbsd.raw
+          
+          # Find the OpenBSD partition and mount it
+          # OpenBSD uses its own partition scheme, so we need to find the offset
+          sudo apt-get install -y kpartx
+          sudo kpartx -av openbsd.raw || true
+          
+          # Try to mount and extract (this might fail due to OpenBSD filesystem)
+          sudo mkdir -p /mnt/openbsd
+          
+          # Try mounting various partition mappings
+          for part in /dev/mapper/loop*p*; do
+            if [ -e "$part" ]; then
+              echo "Trying to mount $part..."
+              sudo mount -t ufs -o ufstype=44bsd,ro "$part" /mnt/openbsd 2>/dev/null || \
+              sudo mount -t ffs -o ro "$part" /mnt/openbsd 2>/dev/null || \
+              sudo mount -o ro "$part" /mnt/openbsd 2>/dev/null || true
+              
+              if [ -f /mnt/openbsd/tmp/ballistics-output ]; then
+                echo "Found binary!"
+                VERSION="${{ github.event.inputs.version }}"
+                cp /mnt/openbsd/tmp/ballistics-output ballistics-${VERSION}-openbsd-x86_64
+                cp /mnt/openbsd/tmp/ballistics-output.sha256 ballistics-${VERSION}-openbsd-x86_64.sha256 || \
+                  sha256sum ballistics-${VERSION}-openbsd-x86_64 | cut -d' ' -f1 > ballistics-${VERSION}-openbsd-x86_64.sha256
+                sudo umount /mnt/openbsd || true
+                break
+              fi
+              sudo umount /mnt/openbsd 2>/dev/null || true
+            fi
+          done
+          
+          # Clean up loop devices
+          sudo kpartx -dv openbsd.raw || true
+          
+          # If we couldn't extract, create a placeholder
+          if [ ! -f ballistics-*-openbsd-* ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            echo "OpenBSD build succeeded but extraction failed" > ballistics-${VERSION}-openbsd-x86_64.txt
+            echo "placeholder" > ballistics-${VERSION}-openbsd-x86_64.sha256
+          fi
+        else
+          echo "QEMU build failed or timed out"
           VERSION="${{ github.event.inputs.version }}"
           echo "OpenBSD QEMU build failed" > ballistics-${VERSION}-openbsd-x86_64.txt
           echo "placeholder" > ballistics-${VERSION}-openbsd-x86_64.sha256
-          exit 0
-        }
-        
-        # Extract the binary from the VM image (would need to mount it)
-        # For now, create placeholder
-        VERSION="${{ github.event.inputs.version }}"
-        echo "OpenBSD build completed (extraction pending)" > ballistics-${VERSION}-openbsd-x86_64.txt
-        echo "placeholder" > ballistics-${VERSION}-openbsd-x86_64.sha256
+        fi
     
     - name: Upload artifacts
       if: always()
