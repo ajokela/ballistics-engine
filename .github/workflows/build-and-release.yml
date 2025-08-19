@@ -1,0 +1,237 @@
+name: Build and Release All Platforms
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build'
+        required: true
+        default: '0.3.2'
+      platforms:
+        description: 'Platforms to build (comma-separated: macos,linux,windows,bsd)'
+        required: true
+        default: 'macos,linux,bsd'
+
+jobs:
+  build-macos:
+    if: contains(github.event.inputs.platforms, 'macos')
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            arch: x86_64
+          - target: aarch64-apple-darwin
+            arch: aarch64
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Build
+      run: |
+        cd ballistics-engine
+        cargo build --release --target ${{ matrix.target }}
+        
+        VERSION="${{ github.event.inputs.version }}"
+        cp target/${{ matrix.target }}/release/ballistics ../ballistics-${VERSION}-macos-${{ matrix.arch }}
+        
+        # Generate checksum
+        shasum -a 256 ../ballistics-${VERSION}-macos-${{ matrix.arch }} | cut -d' ' -f1 > ../ballistics-${VERSION}-macos-${{ matrix.arch }}.sha256
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-${{ matrix.arch }}
+        path: |
+          ballistics-*-macos-*
+
+  build-linux:
+    if: contains(github.event.inputs.platforms, 'linux')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+            use_cross: true
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Install cross
+      if: matrix.use_cross
+      run: cargo install cross
+    
+    - name: Install musl tools
+      if: matrix.arch == 'x86_64'
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
+    
+    - name: Build with cargo
+      if: '!matrix.use_cross'
+      run: |
+        cd ballistics-engine
+        cargo build --release --target ${{ matrix.target }}
+        
+        VERSION="${{ github.event.inputs.version }}"
+        cp target/${{ matrix.target }}/release/ballistics ../ballistics-${VERSION}-linux-${{ matrix.arch }}
+    
+    - name: Build with cross
+      if: matrix.use_cross
+      run: |
+        cd ballistics-engine
+        cross build --release --target ${{ matrix.target }}
+        
+        VERSION="${{ github.event.inputs.version }}"
+        cp target/${{ matrix.target }}/release/ballistics ../ballistics-${VERSION}-linux-${{ matrix.arch }}
+    
+    - name: Generate checksums
+      run: |
+        VERSION="${{ github.event.inputs.version }}"
+        sha256sum ballistics-${VERSION}-linux-${{ matrix.arch }} | cut -d' ' -f1 > ballistics-${VERSION}-linux-${{ matrix.arch }}.sha256
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: linux-${{ matrix.arch }}
+        path: |
+          ballistics-*-linux-*
+
+  build-windows:
+    if: contains(github.event.inputs.platforms, 'windows')
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-msvc
+    
+    - name: Build
+      run: |
+        cd ballistics-engine
+        cargo build --release --target x86_64-pc-windows-msvc
+        
+        $VERSION = "${{ github.event.inputs.version }}"
+        Copy-Item target\x86_64-pc-windows-msvc\release\ballistics.exe ..\ballistics-$VERSION-windows-x86_64.exe
+    
+    - name: Generate checksum
+      run: |
+        $VERSION = "${{ github.event.inputs.version }}"
+        $hash = Get-FileHash -Path ballistics-$VERSION-windows-x86_64.exe -Algorithm SHA256
+        $hash.Hash.ToLower() | Out-File -FilePath ballistics-$VERSION-windows-x86_64.exe.sha256 -NoNewline
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-x86_64
+        path: |
+          ballistics-*-windows-*
+
+  build-bsd-simple:
+    if: contains(github.event.inputs.platforms, 'bsd')
+    runs-on: ubuntu-latest
+    name: Build BSD binaries (FreeBSD only for now)
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build in FreeBSD VM
+      uses: cross-platform-actions/action@v0
+      with:
+        operating_system: freebsd
+        version: '14.0'
+        architecture: x86-64
+        run: |
+          # Install Rust
+          sudo pkg install -y rust git
+          
+          # Build the project
+          cd ballistics-engine
+          cargo build --release
+          
+          # Create versioned binary
+          VERSION="${{ github.event.inputs.version }}"
+          cp target/release/ballistics ../ballistics-${VERSION}-freebsd-x86_64
+          
+          # Generate checksum
+          sha256 ../ballistics-${VERSION}-freebsd-x86_64 > ../ballistics-${VERSION}-freebsd-x86_64.sha256
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: freebsd-x86_64
+        path: |
+          ballistics-*-freebsd-*
+
+  create-release:
+    needs: [build-macos, build-linux, build-windows, build-bsd-simple]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Prepare release files
+      run: |
+        # Flatten artifact structure
+        find artifacts -type f -name "ballistics-*" -exec mv {} . \; 2>/dev/null || true
+        
+        # List all files
+        echo "Release files:"
+        ls -la ballistics-* || echo "No files found"
+    
+    - name: Create GitHub Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION="${{ github.event.inputs.version }}"
+        
+        # Create release notes
+        cat > release-notes.md << 'EOF'
+        ## Ballistics Engine v${{ github.event.inputs.version }}
+        
+        ### Installation
+        
+        Install via the universal installer:
+        ```bash
+        curl --proto '=https' --tlsv1.2 -sSf https://ballistics.zip | sh
+        ```
+        
+        ### Available Binaries
+        
+        This release includes binaries for:
+        - macOS (Intel and Apple Silicon)
+        - Linux (x86_64 and ARM64)
+        - Windows (x86_64)
+        - FreeBSD (x86_64)
+        
+        ### Checksums
+        
+        All binaries include SHA256 checksums for verification.
+        EOF
+        
+        # Create release (allow it to fail if tag exists)
+        gh release create "v${VERSION}" \
+          --title "Ballistics Engine v${VERSION}" \
+          --notes-file release-notes.md \
+          ballistics-* || \
+        gh release upload "v${VERSION}" ballistics-* --clobber
