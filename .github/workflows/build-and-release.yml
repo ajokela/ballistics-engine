@@ -216,27 +216,55 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Build in OpenBSD VM
+    - name: Install Rust and cross
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+        cargo install cross --git https://github.com/cross-rs/cross
+    
+    - name: Try cross-compilation for OpenBSD
+      run: |
+        # Try to cross-compile for OpenBSD
+        # This might fail but worth trying
+        rustup target add x86_64-unknown-openbsd || true
+        
+        # Attempt build with cross
+        cross build --release --target x86_64-unknown-openbsd || {
+          echo "Cross-compilation failed, trying VM approach with shorter timeout"
+          exit 1
+        }
+        
+        # If successful, create artifact
+        VERSION="${{ github.event.inputs.version }}"
+        cp target/x86_64-unknown-openbsd/release/ballistics ./ballistics-${VERSION}-openbsd-x86_64
+        sha256sum ./ballistics-${VERSION}-openbsd-x86_64 | cut -d' ' -f1 > ./ballistics-${VERSION}-openbsd-x86_64.sha256
+    
+    - name: Fallback - Build in OpenBSD VM with optimizations
+      if: failure()
       uses: cross-platform-actions/action@v0.25.0
       with:
         operating_system: openbsd
         version: '7.5'
         architecture: x86-64
         run: |
-          # Install Rust
+          # Try faster build with less optimization
           sudo pkg_add rust git
           
-          # Build the project
+          # Build with opt-level=1 for faster compilation
+          cat >> Cargo.toml << 'EOF'
+          
+          [profile.release]
+          opt-level = 1
+          EOF
+          
           cargo build --release
           
-          # Create versioned binary
           VERSION="${{ github.event.inputs.version }}"
           cp target/release/ballistics ./ballistics-${VERSION}-openbsd-x86_64
-          
-          # Generate checksum
           sha256 -q ./ballistics-${VERSION}-openbsd-x86_64 > ./ballistics-${VERSION}-openbsd-x86_64.sha256
     
     - name: Upload artifacts
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: openbsd-x86_64
