@@ -137,65 +137,43 @@ jobs:
         path: |
           ballistics-*-windows-*
 
-  build-bsd:
+  build-freebsd:
     if: contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
-    name: Build BSD binaries
-    strategy:
-      matrix:
-        include:
-          - os: freebsd
-            version: '14.0'
-            arch: x86_64
-          - os: netbsd
-            version: '10.0'
-            arch: x86_64
-          - os: openbsd
-            version: '7.5'
-            arch: x86_64
+    name: Build FreeBSD binary
     
     steps:
     - uses: actions/checkout@v4
     
-    - name: Build in ${{ matrix.os }} VM
+    - name: Build in FreeBSD VM
       uses: cross-platform-actions/action@v0.25.0
       with:
-        operating_system: ${{ matrix.os }}
-        version: ${{ matrix.version }}
+        operating_system: freebsd
+        version: '14.0'
         architecture: x86-64
         run: |
-          # Install Rust based on OS
-          if [ "${{ matrix.os }}" = "freebsd" ]; then
-            sudo pkg install -y rust git
-          elif [ "${{ matrix.os }}" = "netbsd" ]; then
-            sudo pkgin -y install rust git
-          elif [ "${{ matrix.os }}" = "openbsd" ]; then
-            sudo pkg_add rust git
-          fi
+          # Install Rust
+          sudo pkg install -y rust git
           
           # Build the project
           cargo build --release
           
           # Create versioned binary
           VERSION="${{ github.event.inputs.version }}"
-          cp target/release/ballistics ./ballistics-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}
+          cp target/release/ballistics ./ballistics-${VERSION}-freebsd-x86_64
           
           # Generate checksum
-          if [ "${{ matrix.os }}" = "openbsd" ]; then
-            sha256 -q ./ballistics-${VERSION}-${{ matrix.os }}-${{ matrix.arch }} > ./ballistics-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.sha256
-          else
-            sha256 ./ballistics-${VERSION}-${{ matrix.os }}-${{ matrix.arch }} > ./ballistics-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.sha256
-          fi
+          sha256 ./ballistics-${VERSION}-freebsd-x86_64 > ./ballistics-${VERSION}-freebsd-x86_64.sha256
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.os }}-${{ matrix.arch }}
+        name: freebsd-x86_64
         path: |
-          ballistics-*-${{ matrix.os }}-*
+          ballistics-*-freebsd-*
 
   create-release:
-    needs: [build-macos, build-linux, build-windows, build-bsd]
+    needs: [build-macos, build-linux, build-windows, build-freebsd]
     if: always()
     runs-on: ubuntu-latest
     
@@ -240,8 +218,6 @@ jobs:
         - Linux (x86_64 and ARM64)
         - Windows (x86_64)
         - FreeBSD (x86_64)
-        - NetBSD (x86_64)
-        - OpenBSD (x86_64)
         
         ### Checksums
         
