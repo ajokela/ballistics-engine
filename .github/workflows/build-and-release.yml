@@ -37,10 +37,10 @@ jobs:
         cargo build --release --target ${{ matrix.target }}
         
         VERSION="${{ github.event.inputs.version }}"
-        cp target/${{ matrix.target }}/release/ballistics ../ballistics-${VERSION}-macos-${{ matrix.arch }}
+        cp target/${{ matrix.target }}/release/ballistics ./ballistics-${VERSION}-macos-${{ matrix.arch }}
         
         # Generate checksum
-        shasum -a 256 ../ballistics-${VERSION}-macos-${{ matrix.arch }} | cut -d' ' -f1 > ../ballistics-${VERSION}-macos-${{ matrix.arch }}.sha256
+        shasum -a 256 ./ballistics-${VERSION}-macos-${{ matrix.arch }} | cut -d' ' -f1 > ./ballistics-${VERSION}-macos-${{ matrix.arch }}.sha256
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -83,7 +83,7 @@ jobs:
         cargo build --release --target ${{ matrix.target }}
         
         VERSION="${{ github.event.inputs.version }}"
-        cp target/${{ matrix.target }}/release/ballistics ../ballistics-${VERSION}-linux-${{ matrix.arch }}
+        cp target/${{ matrix.target }}/release/ballistics ./ballistics-${VERSION}-linux-${{ matrix.arch }}
     
     - name: Build with cross
       if: matrix.use_cross
@@ -91,7 +91,7 @@ jobs:
         cross build --release --target ${{ matrix.target }}
         
         VERSION="${{ github.event.inputs.version }}"
-        cp target/${{ matrix.target }}/release/ballistics ../ballistics-${VERSION}-linux-${{ matrix.arch }}
+        cp target/${{ matrix.target }}/release/ballistics ./ballistics-${VERSION}-linux-${{ matrix.arch }}
     
     - name: Generate checksums
       run: |
@@ -122,7 +122,7 @@ jobs:
         cargo build --release --target x86_64-pc-windows-msvc
         
         $VERSION = "${{ github.event.inputs.version }}"
-        Copy-Item target\x86_64-pc-windows-msvc\release\ballistics.exe ..\ballistics-$VERSION-windows-x86_64.exe
+        Copy-Item target\x86_64-pc-windows-msvc\release\ballistics.exe .\ballistics-$VERSION-windows-x86_64.exe
     
     - name: Generate checksum
       run: |
@@ -160,10 +160,10 @@ jobs:
           
           # Create versioned binary
           VERSION="${{ github.event.inputs.version }}"
-          cp target/release/ballistics ../ballistics-${VERSION}-freebsd-x86_64
+          cp target/release/ballistics ./ballistics-${VERSION}-freebsd-x86_64
           
           # Generate checksum
-          sha256 ../ballistics-${VERSION}-freebsd-x86_64 > ../ballistics-${VERSION}-freebsd-x86_64.sha256
+          sha256 ./ballistics-${VERSION}-freebsd-x86_64 > ./ballistics-${VERSION}-freebsd-x86_64.sha256
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
