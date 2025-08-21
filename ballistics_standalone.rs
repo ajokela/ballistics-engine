@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("║ trajectory calculation engine.         ║");
             println!("╠════════════════════════════════════════╣");
             println!("║ Features:                              ║");
-            println!("║ • 6DOF trajectory integration          ║");
+            println!("║ • 3DOF trajectory integration          ║");
             println!("║ • Atmospheric modeling                 ║");
             println!("║ • Drag coefficient interpolation       ║");
             println!("║ • Multiple output formats              ║");
