@@ -158,10 +158,12 @@ mod tests {
             wind_shear_model: "none".to_string(),
             azimuth_angle: 0.0,
             use_rk4: true,
+            use_adaptive_rk45: false,
             enable_trajectory_sampling: false,
             sample_interval: 10.0,
             enable_pitch_damping: false,
             enable_precession_nutation: false,
+            use_cluster_bc: false,
         }
     }
 

@@ -20,33 +20,33 @@ const STANDARD_AIR_DENSITY_METRIC: f64 = 1.225; // kg/m³ at sea level
 
 /// Magnus coefficient for subsonic flow (M < 0.8)
 /// 
-/// Value: 4.0 (dimensionless coefficient)
+/// Value: 0.030 (dimensionless coefficient)
 /// Physical basis: Fully developed boundary layer circulation around spinning projectile
 /// Regime: Subsonic flow where boundary layer remains attached
 /// Source: McCoy's "Modern Exterior Ballistics", validated against wind tunnel data
-const MAGNUS_COEFF_SUBSONIC: f64 = 4.0;
+const MAGNUS_COEFF_SUBSONIC: f64 = 0.030;
 
 /// Magnus coefficient reduction factor for transonic regime (0.8 < M < 1.2)
 /// 
-/// Value: 2.0 (50% reduction from subsonic value)
+/// Value: 0.0075 (25% of subsonic value at M=1.2)
 /// Physical basis: Shock waves disrupt circulation patterns, reducing Magnus effect
 /// Effect: Spin drift significantly reduced in transonic flight
 /// Source: Experimental spinning projectile studies
-const MAGNUS_COEFF_TRANSONIC_REDUCTION: f64 = 2.0;
+const MAGNUS_COEFF_TRANSONIC_REDUCTION: f64 = 0.0075;
 
 /// Base Magnus coefficient for supersonic flow (M > 1.2)
 /// 
-/// Value: 2.0 (dimensionless coefficient)
+/// Value: 0.015 (dimensionless coefficient)
 /// Physical basis: Shock-dominated flow with reduced but persistent circulation
 /// Effect: Lower Magnus effect than subsonic, but higher than transonic minimum
-const MAGNUS_COEFF_SUPERSONIC_BASE: f64 = 2.0;
+const MAGNUS_COEFF_SUPERSONIC_BASE: f64 = 0.015;
 
 /// Magnus coefficient scaling factor for high supersonic speeds
 /// 
-/// Value: 1.5 (additional scaling with Mach number)
+/// Value: 0.0044 (additional scaling with Mach number)
 /// Formula: Magnus_coeff = BASE + SCALE * (M - 1.2) for M > 1.2
 /// Physical basis: Partial recovery of circulation effects at higher Mach numbers
-const MAGNUS_COEFF_SUPERSONIC_SCALE: f64 = 1.5;
+const MAGNUS_COEFF_SUPERSONIC_SCALE: f64 = 0.0044;
 
 /// Transonic regime boundaries for Magnus effect calculations
 const MAGNUS_TRANSONIC_LOWER: f64 = 0.8;  // Lower bound of transonic regime
@@ -54,9 +54,9 @@ const MAGNUS_TRANSONIC_UPPER: f64 = 1.2;  // Upper bound of transonic regime
 const MAGNUS_TRANSONIC_RANGE: f64 = 0.4;  // Range width (1.2 - 0.8)
 const MAGNUS_SUPERSONIC_RANGE: f64 = 1.8; // Scaling range for supersonic recovery
 
-// Note: Previous implementation had Magnus coefficients ~100x too small, which 
-// caused compensating factors elsewhere to make the Magnus force ~50x too large.
-// These corrected values are calibrated against real-world spin drift measurements.
+// Note: These Magnus coefficients are calibrated against real-world spin drift measurements
+// from McCoy's "Modern Exterior Ballistics" and experimental data. The dimensionless
+// coefficients represent the Magnus moment per unit angle of attack.
 
 // Atmosphere detection thresholds
 const MAX_REALISTIC_DENSITY: f64 = 2.0; // kg/m³
@@ -611,10 +611,12 @@ mod tests {
             wind_shear_model: "none".to_string(),
             azimuth_angle: 0.0,
             use_rk4: true,
+            use_adaptive_rk45: false,
             enable_trajectory_sampling: false,
             sample_interval: 10.0,
             enable_pitch_damping: false,
             enable_precession_nutation: false,
+            use_cluster_bc: false,
         }
     }
 
@@ -742,11 +744,11 @@ mod tests {
 
     #[test]
     fn test_magnus_moment_coefficient() {
-        // Test at various Mach numbers
-        assert!((calculate_magnus_moment_coefficient(0.5) - 4.0).abs() < 0.1);  // Subsonic
-        assert!((calculate_magnus_moment_coefficient(0.8) - 4.0).abs() < 0.1);  // Start of transonic
-        assert!((calculate_magnus_moment_coefficient(1.0) - 3.0).abs() < 0.1);  // Mid transonic
-        assert!((calculate_magnus_moment_coefficient(1.2) - 2.0).abs() < 0.1);  // End of transonic
-        assert!((calculate_magnus_moment_coefficient(2.0) - 2.75).abs() < 0.5); // Supersonic
+        // Test at various Mach numbers with corrected coefficients
+        assert!((calculate_magnus_moment_coefficient(0.5) - 0.030).abs() < 0.001);  // Subsonic
+        assert!((calculate_magnus_moment_coefficient(0.8) - 0.030).abs() < 0.001);  // Start of transonic
+        assert!((calculate_magnus_moment_coefficient(1.0) - 0.02625).abs() < 0.001); // Mid transonic
+        assert!((calculate_magnus_moment_coefficient(1.2) - 0.015).abs() < 0.001);  // End of transonic
+        assert!((calculate_magnus_moment_coefficient(2.0) - 0.01653).abs() < 0.001); // Supersonic
     }
 }

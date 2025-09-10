@@ -5,6 +5,7 @@ use crate::transonic_drag::{transonic_correction, get_projectile_shape, Projecti
 use crate::trajectory_sampling::{sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample};
 use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
 use crate::precession_nutation::{AngularState, PrecessionNutationParams, calculate_combined_angular_motion};
+use crate::cluster_bc::ClusterBCDegradation;
 use nalgebra::Vector3;
 use std::error::Error;
 use std::fmt;
@@ -75,6 +76,7 @@ pub struct BallisticInputs {
     pub target_distance: f64,       // meters
     pub azimuth_angle: f64,         // horizontal aiming angle in radians
     pub use_rk4: bool,              // Use RK4 integration instead of Euler
+    pub use_adaptive_rk45: bool,    // Use RK45 adaptive step size integration
     pub temperature: f64,           // Celsius
     pub twist_rate: f64,            // inches per turn
     pub is_twist_right: bool,       // right-hand twist
@@ -100,6 +102,7 @@ pub struct BallisticInputs {
     pub sample_interval: f64,  // meters
     pub enable_pitch_damping: bool,
     pub enable_precession_nutation: bool,
+    pub use_cluster_bc: bool,  // Use cluster-based BC degradation
     
     // Additional data fields
     pub bc_type_str: Option<String>,
@@ -137,7 +140,8 @@ impl Default for BallisticInputs {
             muzzle_angle: launch_angle_rad,
             target_distance: 100.0,
             azimuth_angle: 0.0,
-            use_rk4: true,  // Default to RK4 for better accuracy
+            use_rk4: true,  // Use Runge-Kutta methods by default
+            use_adaptive_rk45: true,  // Default to RK45 adaptive for best accuracy
             temperature: 15.0,
             twist_rate: 12.0,  // 1:12" typical
             is_twist_right: true,
@@ -163,6 +167,7 @@ impl Default for BallisticInputs {
             sample_interval: 10.0,  // Default 10 meter intervals
             enable_pitch_damping: false,
             enable_precession_nutation: false,
+            use_cluster_bc: false,  // Disabled by default for backward compatibility
             
             // Optional data
             bc_type_str: None,
@@ -241,6 +246,7 @@ pub struct TrajectorySolver {
     atmosphere: AtmosphericConditions,
     max_range: f64,
     time_step: f64,
+    cluster_bc: Option<ClusterBCDegradation>,
 }
 
 impl TrajectorySolver {
@@ -254,12 +260,20 @@ impl TrajectorySolver {
         inputs.caliber_inches = inputs.diameter / 0.0254;
         inputs.weight_grains = inputs.mass / 0.00006479891;
         
+        // Initialize cluster BC if enabled
+        let cluster_bc = if inputs.use_cluster_bc {
+            Some(ClusterBCDegradation::new())
+        } else {
+            None
+        };
+        
         Self {
             inputs,
             wind,
             atmosphere,
             max_range: 1000.0,
             time_step: 0.001,
+            cluster_bc,
         }
     }
     
@@ -298,7 +312,11 @@ impl TrajectorySolver {
     
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
         if self.inputs.use_rk4 {
-            self.solve_rk4()
+            if self.inputs.use_adaptive_rk45 {
+                self.solve_rk45()
+            } else {
+                self.solve_rk4()
+            }
         } else {
             self.solve_euler()
         }
@@ -730,6 +748,196 @@ impl TrajectorySolver {
         })
     }
     
+    fn solve_rk45(&self) -> Result<TrajectoryResult, BallisticsError> {
+        // RK45 adaptive step size integration (Dormand-Prince method)
+        let mut time = 0.0;
+        let mut position = Vector3::new(0.0, self.inputs.sight_height, 0.0);
+        
+        // Calculate initial velocity components
+        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
+        let mut velocity = Vector3::new(
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),
+            self.inputs.muzzle_velocity * self.inputs.launch_angle.sin(),
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),
+        );
+        
+        let mut points = Vec::new();
+        let mut max_height = position.y;
+        let mut dt = 0.001;  // Initial step size
+        let tolerance = 1e-6;  // Error tolerance
+        let safety_factor = 0.9;  // Safety factor for step size adjustment
+        let max_dt = 0.01;  // Maximum step size
+        let min_dt = 1e-6;   // Minimum step size
+        
+        while position.z < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
+            // Store current point
+            let velocity_magnitude = velocity.magnitude();
+            let kinetic_energy = 0.5 * self.inputs.mass * velocity_magnitude.powi(2);
+            
+            points.push(TrajectoryPoint {
+                time,
+                position: position.clone(),
+                velocity_magnitude,
+                kinetic_energy,
+            });
+            
+            if position.y > max_height {
+                max_height = position.y;
+            }
+            
+            // Get atmospheric conditions and wind
+            let air_density = calculate_air_density(&self.atmosphere);
+            let wind_vector = Vector3::new(
+                -self.wind.speed * self.wind.direction.sin(),
+                0.0,
+                -self.wind.speed * self.wind.direction.cos(),
+            );
+            
+            // RK45 step with adaptive step size
+            let (new_pos, new_vel, new_dt) = self.rk45_step(
+                &position,
+                &velocity,
+                dt,
+                air_density,
+                &wind_vector,
+                tolerance,
+            );
+            
+            // Update step size with safety factor and bounds
+            dt = (safety_factor * new_dt).clamp(min_dt, max_dt);
+            
+            // Update state
+            position = new_pos;
+            velocity = new_vel;
+            time += dt;
+        }
+        
+        // Ensure we have at least one point
+        if points.is_empty() {
+            return Err(BallisticsError::from("No trajectory points calculated"));
+        }
+        
+        let last_point = points.last().unwrap();
+        
+        Ok(TrajectoryResult {
+            max_range: last_point.position.z,
+            max_height,
+            time_of_flight: last_point.time,
+            impact_velocity: last_point.velocity_magnitude,
+            impact_energy: last_point.kinetic_energy,
+            points,
+            sampled_points: None,  // Simplified - no trajectory sampling in RK45 for now
+            min_pitch_damping: None,
+            transonic_mach: None,
+            angular_state: None,
+            max_yaw_angle: None,
+            max_precession_angle: None,
+        })
+    }
+    
+    fn rk45_step(
+        &self,
+        position: &Vector3<f64>,
+        velocity: &Vector3<f64>,
+        dt: f64,
+        air_density: f64,
+        wind_vector: &Vector3<f64>,
+        tolerance: f64,
+    ) -> (Vector3<f64>, Vector3<f64>, f64) {
+        // Dormand-Prince coefficients
+        const A21: f64 = 1.0 / 5.0;
+        const A31: f64 = 3.0 / 40.0;
+        const A32: f64 = 9.0 / 40.0;
+        const A41: f64 = 44.0 / 45.0;
+        const A42: f64 = -56.0 / 15.0;
+        const A43: f64 = 32.0 / 9.0;
+        const A51: f64 = 19372.0 / 6561.0;
+        const A52: f64 = -25360.0 / 2187.0;
+        const A53: f64 = 64448.0 / 6561.0;
+        const A54: f64 = -212.0 / 729.0;
+        const A61: f64 = 9017.0 / 3168.0;
+        const A62: f64 = -355.0 / 33.0;
+        const A63: f64 = 46732.0 / 5247.0;
+        const A64: f64 = 49.0 / 176.0;
+        const A65: f64 = -5103.0 / 18656.0;
+        const A71: f64 = 35.0 / 384.0;
+        const A73: f64 = 500.0 / 1113.0;
+        const A74: f64 = 125.0 / 192.0;
+        const A75: f64 = -2187.0 / 6784.0;
+        const A76: f64 = 11.0 / 84.0;
+        
+        // 5th order coefficients
+        const B1: f64 = 35.0 / 384.0;
+        const B3: f64 = 500.0 / 1113.0;
+        const B4: f64 = 125.0 / 192.0;
+        const B5: f64 = -2187.0 / 6784.0;
+        const B6: f64 = 11.0 / 84.0;
+        
+        // 4th order coefficients for error estimation
+        const B1_ERR: f64 = 5179.0 / 57600.0;
+        const B3_ERR: f64 = 7571.0 / 16695.0;
+        const B4_ERR: f64 = 393.0 / 640.0;
+        const B5_ERR: f64 = -92097.0 / 339200.0;
+        const B6_ERR: f64 = 187.0 / 2100.0;
+        const B7_ERR: f64 = 1.0 / 40.0;
+        
+        // Compute RK45 stages
+        let k1_v = self.calculate_acceleration(position, velocity, air_density, wind_vector);
+        let k1_p = velocity.clone();
+        
+        let p2 = position + dt * A21 * k1_p;
+        let v2 = velocity + dt * A21 * k1_v;
+        let k2_v = self.calculate_acceleration(&p2, &v2, air_density, wind_vector);
+        let k2_p = v2;
+        
+        let p3 = position + dt * (A31 * k1_p + A32 * k2_p);
+        let v3 = velocity + dt * (A31 * k1_v + A32 * k2_v);
+        let k3_v = self.calculate_acceleration(&p3, &v3, air_density, wind_vector);
+        let k3_p = v3;
+        
+        let p4 = position + dt * (A41 * k1_p + A42 * k2_p + A43 * k3_p);
+        let v4 = velocity + dt * (A41 * k1_v + A42 * k2_v + A43 * k3_v);
+        let k4_v = self.calculate_acceleration(&p4, &v4, air_density, wind_vector);
+        let k4_p = v4;
+        
+        let p5 = position + dt * (A51 * k1_p + A52 * k2_p + A53 * k3_p + A54 * k4_p);
+        let v5 = velocity + dt * (A51 * k1_v + A52 * k2_v + A53 * k3_v + A54 * k4_v);
+        let k5_v = self.calculate_acceleration(&p5, &v5, air_density, wind_vector);
+        let k5_p = v5;
+        
+        let p6 = position + dt * (A61 * k1_p + A62 * k2_p + A63 * k3_p + A64 * k4_p + A65 * k5_p);
+        let v6 = velocity + dt * (A61 * k1_v + A62 * k2_v + A63 * k3_v + A64 * k4_v + A65 * k5_v);
+        let k6_v = self.calculate_acceleration(&p6, &v6, air_density, wind_vector);
+        let k6_p = v6;
+        
+        let p7 = position + dt * (A71 * k1_p + A73 * k3_p + A74 * k4_p + A75 * k5_p + A76 * k6_p);
+        let v7 = velocity + dt * (A71 * k1_v + A73 * k3_v + A74 * k4_v + A75 * k5_v + A76 * k6_v);
+        let k7_v = self.calculate_acceleration(&p7, &v7, air_density, wind_vector);
+        let k7_p = v7;
+        
+        // 5th order solution
+        let new_pos = position + dt * (B1 * k1_p + B3 * k3_p + B4 * k4_p + B5 * k5_p + B6 * k6_p);
+        let new_vel = velocity + dt * (B1 * k1_v + B3 * k3_v + B4 * k4_v + B5 * k5_v + B6 * k6_v);
+        
+        // 4th order solution for error estimate
+        let pos_err = position + dt * (B1_ERR * k1_p + B3_ERR * k3_p + B4_ERR * k4_p + B5_ERR * k5_p + B6_ERR * k6_p + B7_ERR * k7_p);
+        let vel_err = velocity + dt * (B1_ERR * k1_v + B3_ERR * k3_v + B4_ERR * k4_v + B5_ERR * k5_v + B6_ERR * k6_v + B7_ERR * k7_v);
+        
+        // Estimate error
+        let pos_error = (new_pos - pos_err).magnitude();
+        let vel_error = (new_vel - vel_err).magnitude();
+        let error = (pos_error + vel_error) / (1.0 + position.magnitude() + velocity.magnitude());
+        
+        // Calculate new step size
+        let dt_new = if error < tolerance {
+            dt * (tolerance / error).powf(0.2).min(2.0)
+        } else {
+            dt * (tolerance / error).powf(0.25).max(0.1)
+        };
+        
+        (new_pos, new_vel, dt_new)
+    }
+    
     fn calculate_acceleration(&self, position: &Vector3<f64>, velocity: &Vector3<f64>, air_density: f64, wind_vector: &Vector3<f64>) -> Vector3<f64> {
         // Calculate altitude-dependent wind if wind shear is enabled
         let actual_wind = if self.inputs.enable_wind_shear {
@@ -748,7 +956,22 @@ impl TrajectorySolver {
         // Calculate drag force
         let cd = self.calculate_drag_coefficient(velocity_magnitude);
         let reference_area = std::f64::consts::PI * (self.inputs.diameter / 2.0).powi(2);
-        let drag_magnitude = 0.5 * air_density * velocity_magnitude.powi(2) * cd * reference_area / self.inputs.ballistic_coefficient;
+        
+        // Apply cluster BC correction if enabled
+        let effective_bc = if let Some(ref cluster_bc) = self.cluster_bc {
+            // Convert velocity to fps for cluster BC calculation
+            let velocity_fps = velocity_magnitude * 3.28084;
+            cluster_bc.apply_correction(
+                self.inputs.ballistic_coefficient,
+                self.inputs.caliber_inches * 0.0254,  // Convert back to meters for consistency
+                self.inputs.weight_grains,
+                velocity_fps
+            )
+        } else {
+            self.inputs.ballistic_coefficient
+        };
+        
+        let drag_magnitude = 0.5 * air_density * velocity_magnitude.powi(2) * cd * reference_area / effective_bc;
         
         // Drag acts opposite to velocity
         let drag_force = -relative_velocity.normalize() * drag_magnitude;

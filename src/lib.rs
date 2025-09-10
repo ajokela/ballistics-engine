@@ -53,6 +53,7 @@ mod form_factor;
 mod monte_carlo;
 pub mod bc_estimation;
 pub mod stability;
+pub mod cluster_bc;
 
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;

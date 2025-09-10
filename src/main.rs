@@ -110,9 +110,13 @@ enum Commands {
         #[arg(long)]
         enable_coriolis: bool,
         
-        /// Use Euler integration instead of RK4 (RK4 is default for better accuracy)
+        /// Use Euler integration instead of RK45 (RK45 adaptive is default for best accuracy)
         #[arg(long)]
         use_euler: bool,
+        
+        /// Use fixed-step RK4 instead of adaptive RK45 (faster but less accurate)
+        #[arg(long)]
+        use_rk4_fixed: bool,
         
         /// Enable enhanced spin drift calculations
         #[arg(long)]
@@ -137,6 +141,10 @@ enum Commands {
         /// Enable precession/nutation physics for angular motion modeling
         #[arg(long)]
         enable_precession: bool,
+        
+        /// Use cluster-based BC degradation for improved accuracy
+        #[arg(long)]
+        use_cluster_bc: bool,
         
         /// Barrel twist rate (inches per turn, e.g., 10 for 1:10)
         #[arg(long)]
@@ -480,8 +488,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             use_bc_segments,
             enable_magnus, enable_coriolis, enable_spin_drift,
             enable_wind_shear, sample_trajectory, sample_interval,
-            enable_pitch_damping, enable_precession, twist_rate, twist_right, latitude,
-            use_euler,
+            enable_pitch_damping, enable_precession, use_cluster_bc, twist_rate, twist_right, latitude,
+            use_euler, use_rk4_fixed,
             shooting_angle, use_powder_sensitivity, 
             powder_temp_sensitivity, powder_temp
         } => {
@@ -531,7 +539,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 use_bc_segments,
                 enable_magnus, enable_coriolis, enable_spin_drift,
                 enable_wind_shear, sample_trajectory, sample_interval,
-                enable_pitch_damping, enable_precession, !use_euler, twist_rate, twist_right, latitude,
+                enable_pitch_damping, enable_precession, use_cluster_bc, !use_euler, !use_rk4_fixed, twist_rate, twist_right, latitude,
                 shooting_angle, use_powder_sensitivity,
                 powder_temp_sensitivity, powder_temp
             )?;
@@ -628,7 +636,9 @@ fn run_trajectory(
     sample_interval: f64,
     enable_pitch_damping: bool,
     enable_precession: bool,
+    use_cluster_bc: bool,
     use_rk4: bool,
+    use_rk45: bool,
     twist_rate: Option<f64>,
     twist_right: bool,
     latitude: Option<f64>,
@@ -671,7 +681,8 @@ fn run_trajectory(
         latitude,
         ground_threshold: -10.0,
         azimuth_angle: 0.0,  // No horizontal aiming angle for standard trajectory
-        use_rk4,  // Use RK4 unless user specifies Euler
+        use_rk4,  // Use RK methods unless user specifies Euler
+        use_adaptive_rk45: use_rk45,  // Use RK45 adaptive unless user specifies fixed RK4
         
         // Advanced effects - now separately controlled
         enable_advanced_effects: enable_magnus || enable_coriolis,  // Either one enables the system
@@ -712,6 +723,7 @@ fn run_trajectory(
         sample_interval,
         enable_pitch_damping,
         enable_precession_nutation: enable_precession,
+        use_cluster_bc,
         
         // Optional data
         bc_type_str: None,
