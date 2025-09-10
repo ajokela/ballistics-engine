@@ -6,7 +6,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 
 ## Features
 
-- **Full 3D Trajectory Integration** - Six-state ballistic modeling with RK4 and Euler integration methods
+- **Full 3D Trajectory Integration** - Six-state ballistic modeling with adaptive RK45 and fixed-step RK4 integration methods
 - **Advanced Drag Models** - Support for G1, G7, and custom drag curves with automatic transonic corrections
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
@@ -222,8 +222,8 @@ Estimate ballistic coefficient from observed trajectory data:
 
 The engine supports two numerical integration methods:
 
-- **RK4 (Runge-Kutta 4th Order)** - Default method, provides superior accuracy
-- **Euler Method** - Available with `--use-euler` flag for faster computation
+- **RK45 (Dormand-Prince Adaptive)** - Default method, provides best accuracy with adaptive step sizing
+- **RK4 (Runge-Kutta 4th Order Fixed-Step)** - Available with `--use-rk4-fixed` flag for faster computation
 
 ### Wind Shear Modeling
 

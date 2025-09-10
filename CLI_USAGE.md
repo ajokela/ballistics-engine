@@ -188,7 +188,7 @@ All commands support three output formats via `-o`:
 | --sample-interval | Sampling interval | 10 | yards/meters | yards/meters |
 | --enable-pitch-damping | Transonic stability analysis | false | - | - |
 | --enable-precession | Angular motion physics | false | - | - |
-| --use-euler | Use Euler integration | false | - | - |
+| --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
 
 
 ## Practical Examples
@@ -368,8 +368,8 @@ All commands support three output formats via `-o`:
 
 ### Physics Engine
 - **Integration Methods**:
-  - RK4 (Runge-Kutta 4th order) - default for accuracy
-  - Euler method - available with `--use-euler` flag
+  - RK45 (Dormand-Prince adaptive) - default for best accuracy
+  - RK4 (Runge-Kutta 4th order fixed-step) - available with `--use-rk4-fixed` flag
 - Full 3D trajectory integration with six-state modeling
 - Magnus effect for spin drift
 - Coriolis effect (with latitude input)
@@ -398,7 +398,7 @@ All commands support three output formats via `-o`:
 - **Trajectory Sampling**: Use with JSON/CSV output for detailed analysis
 - **Pitch Damping**: Warns about transonic instability (Mach 0.8-1.2)
 - **Precession/Nutation**: Models angular motion of spinning projectiles
-- **Integration Method**: RK4 is default (more accurate), Euler available for speed
+- **Integration Method**: RK45 adaptive is default (most accurate), RK4 fixed-step available for speed
 - Both Magnus and spin drift work together to model the complete gyroscopic effects
 
 ### Atmospheric Modeling
