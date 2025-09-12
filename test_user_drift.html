@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head><title>User Drift Test</title></head>
+<body>
+<h1>Testing User's Exact Command</h1>
+<pre id="output"></pre>
+<script type="module">
+import init, { WasmBallistics } from '/Users/alexjokela/projects/ballistics.rs/wasm/ballistics_engine.js';
+
+async function test() {
+    await init();
+    const ballistics = new WasmBallistics();
+    
+    // User's exact command
+    const cmd = `trajectory --units metric -v 806 -b 0.518 -m 11.3398 -d 7.8232 --drag-model g1 --max-range 1050 --temperature 18 --pressure 1005 --humidity 40 --wind-speed 10 --wind-direction 89 --enable-spin-drift --enable-coriolis --latitude 45.29 --output table --full --auto-zero 100 --twist-rate 10 --sight-height 55 --muzzle-height 100 --target-height 100`;
+    
+    console.log('Running command:', cmd);
+    const result = ballistics.runCommand(cmd);
+    
+    document.getElementById('output').textContent = result;
+    
+    // Parse for 142m line
+    const lines = result.split('\n');
+    for (const line of lines) {
+        if (line.includes('142')) {
+            console.log('Line at ~142m:', line);
+        }
+        if (line.includes('struck') || line.includes('ground')) {
+            console.log('Ground strike:', line);
+        }
+    }
+}
+
+test().catch(err => {
+    console.error('Error:', err);
+    document.getElementById('output').textContent = 'Error: ' + err;
+});
+</script>
+</body>
+</html>

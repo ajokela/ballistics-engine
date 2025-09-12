@@ -329,7 +329,7 @@ impl TrajectorySolver {
     fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
         // Simple trajectory integration using Euler method
         let mut time = 0.0;
-        let mut position = Vector3::new(0.0, self.inputs.sight_height, 0.0);
+        let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         // Calculate initial velocity components with both elevation and azimuth
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
         let mut velocity = Vector3::new(
@@ -543,7 +543,7 @@ impl TrajectorySolver {
     fn solve_rk4(&self) -> Result<TrajectoryResult, BallisticsError> {
         // RK4 trajectory integration for better accuracy
         let mut time = 0.0;
-        let mut position = Vector3::new(0.0, self.inputs.sight_height, 0.0);
+        let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         
         // Calculate initial velocity components with both elevation and azimuth
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
@@ -755,7 +755,7 @@ impl TrajectorySolver {
     fn solve_rk45(&self) -> Result<TrajectoryResult, BallisticsError> {
         // RK45 adaptive step size integration (Dormand-Prince method)
         let mut time = 0.0;
-        let mut position = Vector3::new(0.0, self.inputs.sight_height, 0.0);
+        let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         
         // Calculate initial velocity components
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
@@ -773,7 +773,16 @@ impl TrajectorySolver {
         let max_dt = 0.01;  // Maximum step size
         let min_dt = 1e-6;   // Minimum step size
         
+        // Add a point counter to debug
+        let mut iteration_count = 0;
+        const MAX_ITERATIONS: usize = 100000;
+        
         while position.z < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
+            iteration_count += 1;
+            if iteration_count > MAX_ITERATIONS {
+                break; // Prevent infinite loop
+            }
+            
             // Store current point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.mass * velocity_magnitude.powi(2);

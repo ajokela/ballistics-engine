@@ -117,6 +117,7 @@ impl WasmBallistics {
 
         // Route to appropriate command handler
         match args[0] {
+            "version" => Ok("Ballistics Engine v0.4.2\nWASM Build\n".to_string()),
             "trajectory" => self.handle_trajectory_command(&args[1..], units),
             "zero" => self.handle_zero_command(&args[1..], units),
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
@@ -1093,6 +1094,28 @@ impl WasmBallistics {
             if units == UnitSystem::Imperial { result.max_range * 1.09361 } else { result.max_range },
             if units == UnitSystem::Imperial { "yards" } else { "meters" }
         ));
+        
+        // Check termination reason
+        if let Some(last_point) = result.points.last() {
+            // Debug info about last point
+            let last_height = last_point.position.y;
+            let last_range = last_point.position.z;
+            let last_time = last_point.time;
+            
+            // Ground threshold is typically around 0.01m (1cm), so if y is close to or below that, it hit ground
+            if last_height <= 0.01 {
+                output.push_str(&format!("Bullet struck ground at {:.0} {}\n",
+                    if units == UnitSystem::Imperial { last_range * 1.09361 } else { last_range },
+                    if units == UnitSystem::Imperial { "yards" } else { "meters" }
+                ));
+            } else if last_time >= 99.0 {
+                output.push_str(&format!("Trajectory timeout at {:.0} {} (time limit reached)\n",
+                    if units == UnitSystem::Imperial { last_range * 1.09361 } else { last_range },
+                    if units == UnitSystem::Imperial { "yards" } else { "meters" }
+                ));
+            }
+        }
+        
         output.push_str(&format!("Max Height: {:.1} {}\n", 
             if units == UnitSystem::Imperial { result.max_height * 39.3701 } else { result.max_height * 100.0 },
             if units == UnitSystem::Imperial { "inches" } else { "cm" }

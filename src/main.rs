@@ -950,6 +950,19 @@ fn run_trajectory(
             
             println!("╚════════════════════════════════════════╝");
             
+            // Check if trajectory hit ground
+            if let Some(last_point) = result.points.last() {
+                let last_height = last_point.position.y;
+                let last_range = last_point.position.z;
+                
+                // Ground threshold is typically around 0, so if y is close to or below 0, it hit ground
+                if last_height <= 0.001 {
+                    println!();
+                    let range_display = UnitConverter::distance_from_metric(last_range, units);
+                    println!("Bullet struck ground at {:.0} {}", range_display, range_unit);
+                }
+            }
+            
             if full && !result.points.is_empty() {
                 println!();
                 println!("Trajectory Points:");
