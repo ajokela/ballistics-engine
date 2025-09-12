@@ -36,11 +36,11 @@ enum Commands {
         #[arg(short = 'b', long)]
         bc: f64,
         
-        /// Mass (grains or kg based on --units)
+        /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long)]
         mass: f64,
         
-        /// Diameter (inches or meters based on --units)
+        /// Diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long)]
         diameter: f64,
         
@@ -92,9 +92,9 @@ enum Commands {
         #[arg(long)]
         auto_zero: Option<f64>,
         
-        /// Sight height above bore for auto-zero
-        #[arg(long, default_value = "0.05")]
-        sight_height: f64,
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
         
         /// Enable velocity-based BC segmentation
         #[arg(long)]
@@ -236,7 +236,7 @@ enum Commands {
     
     /// Calculate zero angle for a target
     Zero {
-        /// Initial velocity (m/s)
+        /// Initial velocity (fps for imperial, m/s for metric)
         #[arg(short = 'v', long)]
         velocity: f64,
         
@@ -244,25 +244,25 @@ enum Commands {
         #[arg(short = 'b', long)]
         bc: f64,
         
-        /// Mass (kg)
+        /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long)]
         mass: f64,
         
-        /// Diameter (meters)
+        /// Diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long)]
         diameter: f64,
         
-        /// Target distance (meters)
+        /// Target distance (yards for imperial, meters for metric)
         #[arg(long)]
         target_distance: f64,
         
-        /// Target height (meters, negative for below)
+        /// Target height (yards for imperial, meters for metric)
         #[arg(long, default_value = "0.0")]
         target_height: f64,
         
-        /// Sight height above bore (meters)
-        #[arg(long, default_value = "0.05")]
-        sight_height: f64,
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
         
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -406,7 +406,7 @@ impl UnitConverter {
     
     fn mass_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
-            UnitSystem::Metric => val,
+            UnitSystem::Metric => val * 0.001,           // grams to kg
             UnitSystem::Imperial => val * 0.00006479891, // grains to kg
         }
     }
@@ -420,7 +420,14 @@ impl UnitConverter {
     
     fn diameter_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
-            UnitSystem::Metric => val,
+            UnitSystem::Metric => val * 0.001,    // mm to meters
+            UnitSystem::Imperial => val * 0.0254, // inches to meters
+        }
+    }
+    
+    fn sight_height_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val * 0.001,    // mm to meters
             UnitSystem::Imperial => val * 0.0254, // inches to meters
         }
     }
@@ -502,7 +509,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
             let pressure_metric = UnitConverter::pressure_to_metric(pressure, cli.units);
             let altitude_metric = UnitConverter::altitude_to_metric(altitude, cli.units);
-            let sight_height_metric = UnitConverter::distance_to_metric(sight_height, cli.units);
+            // Default sight height: 2 inches for imperial, 50mm for metric
+            let sight_height_default = match cli.units {
+                UnitSystem::Imperial => 2.0,
+                UnitSystem::Metric => 50.0,
+            };
+            let sight_height_value = sight_height.unwrap_or(sight_height_default);
+            let sight_height_metric = UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
             
             // Calculate zero angle if auto-zero is specified
             let launch_angle = if let Some(zero_distance) = auto_zero {
@@ -570,7 +583,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
             let target_distance_metric = UnitConverter::distance_to_metric(target_distance, cli.units);
             let target_height_metric = UnitConverter::distance_to_metric(target_height, cli.units);
-            let sight_height_metric = UnitConverter::distance_to_metric(sight_height, cli.units);
+            // Default sight height: 2 inches for imperial, 50mm for metric
+            let sight_height_default = match cli.units {
+                UnitSystem::Imperial => 2.0,
+                UnitSystem::Metric => 50.0,
+            };
+            let sight_height_value = sight_height.unwrap_or(sight_height_default);
+            let sight_height_metric = UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
             
             run_zero_calculation(
                 velocity_metric, bc, mass_metric, diameter_metric,
@@ -729,6 +748,10 @@ fn run_trajectory(
         bc_type_str: None,
         bullet_model: None,
         bullet_id: None,
+        
+        // Height parameters (using reasonable defaults)
+        muzzle_height: 1.5,  // Default standing position in meters
+        target_height: 0.0,  // Default ground level target in meters
     };
     
     // Set up wind conditions

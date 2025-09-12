@@ -61,7 +61,8 @@ pub struct BallisticInputs {
     pub mass: f64,                  // kg
     pub diameter: f64,              // meters
     pub drag_model: DragModel,
-    pub sight_height: f64,          // meters
+    pub sight_height: f64,          // meters above bore
+    pub muzzle_height: f64,         // meters above ground
     
     // Additional fields for compatibility
     pub altitude: f64,              // meters
@@ -83,6 +84,7 @@ pub struct BallisticInputs {
     pub shooting_angle: f64,        // uphill/downhill angle in radians
     pub latitude: Option<f64>,      // degrees
     pub ground_threshold: f64,      // meters below which to stop
+    pub target_height: f64,         // meters above ground for zeroing
     
     // Advanced effects flags
     pub enable_advanced_effects: bool,
@@ -127,6 +129,7 @@ impl Default for BallisticInputs {
             diameter: diameter_m,
             drag_model,
             sight_height: 0.05,
+            muzzle_height: 1.5,  // 1.5m default (standing position)
             
             // Duplicate fields for compatibility
             altitude: 0.0,
@@ -147,7 +150,8 @@ impl Default for BallisticInputs {
             is_twist_right: true,
             shooting_angle: 0.0,
             latitude: None,
-            ground_threshold: -10.0,
+            ground_threshold: -0.001,  // Stop just below ground level
+            target_height: 0.0,  // Target at ground level by default
             
             // Advanced effects (disabled by default)
             enable_advanced_effects: false,

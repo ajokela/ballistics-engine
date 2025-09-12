@@ -21,6 +21,7 @@ The CLI supports two unit systems, selectable with the `--units` flag (default: 
 - Mass: grains
 - Distance: yards
 - Diameter: inches
+- Sight Height: inches
 - Temperature: Fahrenheit
 - Pressure: inHg
 
@@ -28,7 +29,8 @@ The CLI supports two unit systems, selectable with the `--units` flag (default: 
 - Velocity: meters per second (m/s)
 - Mass: grams
 - Distance: meters
-- Diameter: millimeters
+- Diameter: millimeters (mm)
+- Sight Height: millimeters (mm)
 - Temperature: Celsius
 - Pressure: hPa
 

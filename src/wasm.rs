@@ -151,11 +151,14 @@ impl WasmBallistics {
         let mut full = false;
         let mut auto_zero: Option<f64> = None;
         let mut sight_height = if units == UnitSystem::Imperial { 2.0 } else { 50.0 }; // inches or mm
+        let mut muzzle_height = if units == UnitSystem::Imperial { 60.0 } else { 1500.0 }; // inches or mm (standing)
+        let mut target_height = 0.0; // inches or mm (ground level)
         
         // Advanced physics flags
         let mut enable_magnus = false;
         let mut enable_coriolis = false;
         let mut use_euler = false;
+        let mut use_rk4_fixed = false;  // Use fixed-step RK4 instead of adaptive RK45
         let mut enable_spin_drift = false;
         let mut enable_wind_shear = false;
         let mut sample_trajectory = false;
@@ -295,9 +298,24 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--muzzle-height" => {
+                    if i + 1 < args.len() {
+                        muzzle_height = args[i + 1].parse()
+                            .map_err(|_| JsValue::from_str("Invalid muzzle height"))?;
+                        i += 1;
+                    }
+                }
+                "--target-height" => {
+                    if i + 1 < args.len() {
+                        target_height = args[i + 1].parse()
+                            .map_err(|_| JsValue::from_str("Invalid target height"))?;
+                        i += 1;
+                    }
+                }
                 "--enable-magnus" => enable_magnus = true,
                 "--enable-coriolis" => enable_coriolis = true,
                 "--use-euler" => use_euler = true,
+                "--use-rk4-fixed" => use_rk4_fixed = true,
                 "--enable-spin-drift" => enable_spin_drift = true,
                 "--enable-wind-shear" => enable_wind_shear = true,
                 "--sample-trajectory" => sample_trajectory = true,
@@ -369,12 +387,16 @@ impl WasmBallistics {
                 inputs.mass = mass * 0.00006479891; // grains to kg
                 inputs.diameter = diameter * 0.0254; // inches to meters
                 inputs.sight_height = sight_height * 0.0254; // inches to meters
+                inputs.muzzle_height = muzzle_height * 0.0254; // inches to meters
+                inputs.target_height = target_height * 0.0254; // inches to meters
             }
             UnitSystem::Metric => {
                 inputs.muzzle_velocity = velocity; // already m/s
                 inputs.mass = mass * 0.001; // grams to kg
                 inputs.diameter = diameter * 0.001; // mm to meters
                 inputs.sight_height = sight_height * 0.001; // mm to meters
+                inputs.muzzle_height = muzzle_height * 0.001; // mm to meters
+                inputs.target_height = target_height * 0.001; // mm to meters
             }
         }
         
@@ -389,7 +411,17 @@ impl WasmBallistics {
         if enable_magnus || enable_coriolis {
             inputs.enable_advanced_effects = true;
         }
-        inputs.use_rk4 = !use_euler;
+        // Set integration method: Euler < RK4 fixed < RK45 adaptive (default)
+        if use_euler {
+            inputs.use_rk4 = false;
+            inputs.use_adaptive_rk45 = false;
+        } else if use_rk4_fixed {
+            inputs.use_rk4 = true;
+            inputs.use_adaptive_rk45 = false;  // Fixed-step RK4
+        } else {
+            inputs.use_rk4 = true;
+            inputs.use_adaptive_rk45 = true;   // Default: adaptive RK45
+        }
         inputs.use_enhanced_spin_drift = enable_spin_drift;
         inputs.enable_wind_shear = enable_wind_shear;
         inputs.enable_trajectory_sampling = sample_trajectory;
@@ -458,7 +490,7 @@ impl WasmBallistics {
             match calculate_zero_angle_with_conditions(
                 inputs.clone(), 
                 zero_distance_m,
-                0.0, // Zero at same height as bore
+                inputs.target_height, // Use target height from inputs
                 wind.clone(), 
                 atmosphere.clone()
             ) {
@@ -513,6 +545,8 @@ impl WasmBallistics {
         let mut diameter = default_diameter;
         let mut target_distance = if units == UnitSystem::Imperial { 100.0 } else { 100.0 };
         let mut sight_height = if units == UnitSystem::Imperial { 2.0 } else { 50.0 };
+        let mut muzzle_height = if units == UnitSystem::Imperial { 60.0 } else { 1500.0 }; // inches or mm
+        let mut target_height = 0.0; // inches or mm
         let mut drag_model = "G1";
 
         // Parse arguments
@@ -558,6 +592,20 @@ impl WasmBallistics {
                     if i + 1 < args.len() {
                         sight_height = args[i + 1].parse()
                             .map_err(|_| JsValue::from_str("Invalid sight height"))?;
+                        i += 1;
+                    }
+                }
+                "--muzzle-height" => {
+                    if i + 1 < args.len() {
+                        muzzle_height = args[i + 1].parse()
+                            .map_err(|_| JsValue::from_str("Invalid muzzle height"))?;
+                        i += 1;
+                    }
+                }
+                "--target-height" => {
+                    if i + 1 < args.len() {
+                        target_height = args[i + 1].parse()
+                            .map_err(|_| JsValue::from_str("Invalid target height"))?;
                         i += 1;
                     }
                 }
@@ -1234,7 +1282,8 @@ Trajectory Command:
     --enable-wind-shear          Enable altitude-dependent wind
     --enable-pitch-damping       Enable transonic stability
     --enable-precession          Enable angular motion physics
-    --use-euler                  Use Euler integration (default: RK4)
+    --use-euler                  Use Euler integration (less accurate)
+    --use-rk4-fixed              Use fixed-step RK4 (default: adaptive RK45)
     --sample-trajectory          Enable trajectory sampling
     --use-bc-segments            Use velocity-based BC
     --use-powder-sensitivity     Enable powder temp sensitivity
@@ -1244,7 +1293,9 @@ Trajectory Command:
     --twist-right <BOOL>         Right-hand twist (true/false)
     --latitude <LAT>             Latitude for Coriolis (degrees)
     --shooting-angle <ANGLE>     Uphill/downhill angle (degrees)
-    --sight-height <HEIGHT>      Sight height (inches/mm)
+    --sight-height <HEIGHT>      Sight height above bore (inches/mm)
+    --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm)
+    --target-height <HEIGHT>     Target height above ground (inches/mm)
     --powder-temp <TEMP>         Powder temperature
     --powder-temp-sensitivity    Velocity change per degree
 
