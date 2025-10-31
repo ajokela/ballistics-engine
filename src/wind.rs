@@ -48,17 +48,22 @@ impl WindSock {
     /// Calculate wind vector from wind segment
     fn calc_vec(seg: &WindSegment) -> Vector3<f64> {
         let (speed_kmh, angle_deg, _) = *seg;
-        
+
         // Convert kmh to m/s
         let speed_mps = speed_kmh * KMH_TO_MPS;
         let angle_rad = angle_deg * PI / 180.0;
-        
-        // Wind vector points in the direction the wind is blowing TO
-        // So a 90° wind blows from right to left (negative Z)
+
+        // Wind convention (matching trajectory coordinates):
+        // 0° = headwind (from front, affects -z downrange)
+        // 90° = wind from right (affects -x lateral)
+        // 180° = tailwind (from back, affects +z downrange)
+        // 270° = wind from left (affects +x lateral)
+        //
+        // Standard ballistics convention: x=lateral, y=vertical, z=downrange
         Vector3::new(
-            -speed_mps * angle_rad.cos(),
-            0.0,
-            -speed_mps * angle_rad.sin(),
+            -speed_mps * angle_rad.sin(),  // x (lateral - crosswind component)
+            0.0,                            // y (vertical)
+            -speed_mps * angle_rad.cos(),  // z (downrange - head/tail component)
         )
     }
     
