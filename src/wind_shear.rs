@@ -29,12 +29,13 @@ pub struct WindLayer {
 
 impl WindLayer {
     /// Convert to wind vector [x, y, z] in m/s
+    /// Z IS DOWNRANGE: x=lateral, y=vertical, z=downrange
     pub fn to_vector(&self) -> Vector3<f64> {
         let ang = self.direction_deg.to_radians();
         Vector3::new(
-            -self.speed_mps * ang.cos(), // x (downrange)
+            -self.speed_mps * ang.sin(), // x (lateral - crosswind component)
             0.0,                         // y (vertical)
-            -self.speed_mps * ang.sin(), // z (lateral)
+            -self.speed_mps * ang.cos(), // z (downrange - head/tail component)
         )
     }
 }
@@ -82,14 +83,28 @@ impl WindShearProfile {
     }
 
     /// Logarithmic wind profile (boundary layer)
+    /// U(z) = U_ref * ln(z/z0) / ln(z_ref/z0)
     fn logarithmic_profile(&self, altitude_m: f64) -> Vector3<f64> {
-        if altitude_m <= self.roughness_length {
+        // Handle negative altitudes (bullet below sight line)
+        // Use absolute altitude, but add small offset only if very close to ground
+        let effective_altitude = if altitude_m < 0.0 {
+            // For negative altitudes, use a small positive value
+            0.001  // 1mm above ground
+        } else if altitude_m < 0.001 {
+            // Very small positive altitudes
+            0.001
+        } else {
+            altitude_m
+        };
+
+        // If very close to roughness length, return near-zero wind
+        if effective_altitude <= self.roughness_length {
             return Vector3::zeros();
         }
 
         // Calculate speed ratio
-        let speed_ratio = if altitude_m > self.roughness_length && self.reference_height > self.roughness_length {
-            (altitude_m / self.roughness_length).ln() / (self.reference_height / self.roughness_length).ln()
+        let speed_ratio = if effective_altitude > self.roughness_length && self.reference_height > self.roughness_length {
+            (effective_altitude / self.roughness_length).ln() / (self.reference_height / self.roughness_length).ln()
         } else {
             1.0
         };
@@ -271,6 +286,109 @@ impl WindShearWindSock {
         // Beyond all segments
         Vector3::zeros()
     }
+}
+
+/// High-level API function to get wind at arbitrary position
+///
+/// This is a convenience wrapper that handles wind segments, shear models,
+/// and altitude calculations in a single function call.
+///
+/// # Arguments
+/// * `position` - 3D position vector [x_lateral, y_vertical, z_downrange]
+/// * `wind_segments` - Wind segments as (speed_kmh, angle_deg, until_distance_m)
+/// * `enable_wind_shear` - Whether to apply wind shear modeling
+/// * `wind_shear_model` - Model type: "none", "logarithmic", "power_law", "ekman_spiral"
+/// * `shooter_altitude_m` - Shooter's altitude above sea level
+///
+/// # Returns
+/// Wind vector in m/s [x_lateral, y_vertical, z_downrange]
+pub fn get_wind_at_position(
+    position: &Vector3<f64>,
+    wind_segments: &[(f64, f64, f64)],  // (speed_kmh, angle_deg, until_distance_m)
+    enable_wind_shear: bool,
+    wind_shear_model: &str,
+    shooter_altitude_m: f64,
+) -> Vector3<f64> {
+    // Z IS DOWNRANGE
+    let range_m = position[2];
+    let altitude_m = position[1];  // Y is vertical, relative to shooter
+
+    // Find appropriate wind segment based on range
+    let base_wind = if wind_segments.is_empty() {
+        (0.0, 0.0)
+    } else {
+        // Find the segment that covers this range
+        let mut found_wind = (wind_segments[0].0, wind_segments[0].1);
+        for seg in wind_segments {
+            if range_m <= seg.2 {
+                found_wind = (seg.0, seg.1);
+                break;
+            }
+        }
+        found_wind
+    };
+
+    // Convert base wind from km/h to m/s
+    let base_speed_mps = base_wind.0 * 0.2777778;  // km/h to m/s
+    let base_direction_deg = base_wind.1;
+
+    if !enable_wind_shear || wind_shear_model == "none" {
+        // No shear - return constant wind
+        let ang = base_direction_deg.to_radians();
+        return Vector3::new(
+            -base_speed_mps * ang.sin(),  // x (lateral)
+            0.0,                           // y (vertical)
+            -base_speed_mps * ang.cos(),  // z (downrange)
+        );
+    }
+
+    // Create wind shear profile
+    let mut profile = WindShearProfile::default();
+    profile.model = match wind_shear_model {
+        "logarithmic" => WindShearModel::Logarithmic,
+        "power_law" | "powerlaw" => WindShearModel::PowerLaw,
+        "ekman_spiral" | "ekman" => WindShearModel::EkmanSpiral,
+        "custom_layers" | "custom" => WindShearModel::CustomLayers,
+        _ => WindShearModel::None,
+    };
+    profile.surface_wind = WindLayer {
+        altitude_m: 0.0,
+        speed_mps: base_speed_mps,
+        direction_deg: base_direction_deg,
+    };
+
+    // Calculate absolute altitude by adding shooter's altitude
+    let absolute_altitude_m = altitude_m + shooter_altitude_m;
+
+    // OPTIMIZATION: Skip complex shear for very small altitude changes
+    // This avoids numerical issues near ground level
+    if absolute_altitude_m.abs() < 0.1 && altitude_m.abs() < 0.1 {
+        // Near ground level - use base wind directly with reduction
+        let ang = base_direction_deg.to_radians();
+        return Vector3::new(
+            -base_speed_mps * ang.sin() * 0.5,  // Reduced at ground
+            0.0,
+            -base_speed_mps * ang.cos() * 0.5,
+        );
+    }
+
+    // OPTIMIZATION: For long-range shots, use simplified model
+    // to avoid numerical instability in RK45 integration
+    if range_m > 800.0 {
+        // Use simplified linear interpolation for stability
+        let altitude_factor = (1.0 + absolute_altitude_m / 100.0).min(2.0).max(0.1);
+        let sheared_speed = base_speed_mps * altitude_factor;
+        let ang = base_direction_deg.to_radians();
+        return Vector3::new(
+            -sheared_speed * ang.sin(),
+            0.0,
+            -sheared_speed * ang.cos(),
+        );
+    }
+
+    // For normal ranges, use full shear model with clamped altitude
+    let clamped_altitude = absolute_altitude_m.max(-10.0).min(1000.0);
+    profile.get_wind_at_altitude(clamped_altitude)
 }
 
 #[cfg(test)]
