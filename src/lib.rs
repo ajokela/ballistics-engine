@@ -42,6 +42,7 @@ mod trajectory_solver;
 pub mod trajectory_sampling;
 mod fast_trajectory;
 mod spin_drift;
+pub mod spin_drift_advanced;
 pub mod spin_decay;
 pub mod pitch_damping;
 mod precession_nutation;
@@ -53,6 +54,7 @@ mod form_factor;
 mod monte_carlo;
 pub mod bc_estimation;
 pub mod stability;
+pub mod stability_advanced;
 pub mod cluster_bc;
 
 // Internal type alias for compatibility
