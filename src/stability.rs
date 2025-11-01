@@ -114,58 +114,13 @@ mod tests {
 
     fn create_test_inputs() -> BallisticInputs {
         BallisticInputs {
-            // Core fields
             muzzle_velocity: 823.0,  // 2700 fps in m/s
-            launch_angle: 0.0,
-            ballistic_coefficient: 0.5,
-            mass: 0.0109,  // 168 grains in kg
-            diameter: 0.00782,  // 0.308 inches in meters
-            drag_model: DragModel::G1,
-            sight_height: 0.05,
-            
-            // Duplicate fields for compatibility
             bc_value: 0.5,
-            bc_type: DragModel::G1,
-            bullet_mass: 0.0109,  // in kg (168 grains)
-            altitude: 0.0,
-            bc_type_str: Some("G1".to_string()),
-            twist_rate: 10.0,
+            bullet_mass: 0.0109,  // 168 grains in kg
+            bullet_diameter: 0.00782,  // 0.308 inches in meters
             bullet_length: 0.033,  // in meters (1.3 inches)
-            bullet_diameter: 0.00782,  // in meters (0.308 inches)
-            tipoff_yaw: 0.0,
-            tipoff_decay_distance: 20.0,
-            ground_threshold: 0.0,
-            bc_segments: None,
-            target_distance: 0.0,
-            muzzle_angle: 0.0,
-            temperature: 15.0,
-            latitude: None,
-            enable_advanced_effects: false,
-            is_twist_right: true,
-            shooting_angle: 0.0,
-            use_powder_sensitivity: false,
-            powder_temp_sensitivity: 0.0,
-            powder_temp: 70.0,
-            caliber_inches: 0.0,
-            weight_grains: 0.0,
-            use_bc_segments: false,
-            bullet_id: None,
-            bc_segments_data: None,
-            use_enhanced_spin_drift: false,
-            use_form_factor: false,
-            bullet_model: None,
-            enable_wind_shear: false,
-            wind_shear_model: "none".to_string(),
-            azimuth_angle: 0.0,
-            use_rk4: true,
-            use_adaptive_rk45: false,
-            enable_trajectory_sampling: false,
-            sample_interval: 10.0,
-            enable_pitch_damping: false,
-            enable_precession_nutation: false,
-            use_cluster_bc: false,
-            muzzle_height: 1.5,
-            target_height: 0.0,
+            twist_rate: 10.0,
+            ..Default::default()
         }
     }
 

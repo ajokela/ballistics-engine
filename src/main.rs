@@ -488,7 +488,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     match cli.command {
         Commands::Trajectory { 
-            velocity, angle, bc, mass, diameter, drag_model, 
+            velocity, angle, bc, bullet_mass, bullet_diameter, drag_model, 
             max_range, time_step, wind_speed, wind_direction,
             temperature, pressure, humidity, altitude,
             output, full, auto_zero, sight_height,
@@ -502,8 +502,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             // Convert inputs to metric
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
-            let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
-            let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+            let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
             let max_range_metric = UnitConverter::distance_to_metric(max_range, cli.units);
             let wind_speed_metric = UnitConverter::wind_to_metric(wind_speed, cli.units);
             let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
@@ -518,13 +518,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             let sight_height_metric = UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
             
             // Calculate zero angle if auto-zero is specified
-            let launch_angle = if let Some(zero_distance) = auto_zero {
+            let muzzle_angle = if let Some(zero_distance) = auto_zero {
                 let zero_distance_metric = UnitConverter::distance_to_metric(zero_distance, cli.units);
                 
                 // Create inputs for zero calculation
                 let zero_inputs = BallisticInputs {
                     muzzle_velocity: velocity_metric,
-                    ballistic_coefficient: bc,
+                    bc_value: bc,
                     mass: mass_metric,
                     diameter: diameter_metric,
                     sight_height: sight_height_metric,
@@ -545,7 +545,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             
             run_trajectory(
-                velocity_metric, launch_angle, bc, mass_metric, diameter_metric, drag_model,
+                velocity_metric, muzzle_angle, bc, mass_metric, diameter_metric, drag_model,
                 max_range_metric, time_step, wind_speed_metric, wind_direction,
                 temperature_metric, pressure_metric, humidity, altitude_metric,
                 output, full, cli.units, sight_height_metric,
@@ -559,13 +559,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         
         Commands::MonteCarlo {
-            velocity, angle, bc, mass, diameter,
+            velocity, angle, bc, bullet_mass, bullet_diameter,
             num_sims, velocity_std, angle_std, bc_std, wind_std,
             wind_speed, wind_direction,
             target_distance, output
         } => {
             run_monte_carlo(
-                velocity, angle, bc, mass, diameter,
+                velocity, angle, bc, bullet_mass, bullet_diameter,
                 num_sims, velocity_std, angle_std, bc_std, wind_std,
                 wind_speed, wind_direction,
                 target_distance, output
@@ -573,14 +573,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         
         Commands::Zero {
-            velocity, bc, mass, diameter,
+            velocity, bc, bullet_mass, bullet_diameter,
             target_distance, target_height, sight_height,
             output
         } => {
             // Convert inputs to metric
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
-            let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
-            let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+            let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
             let target_distance_metric = UnitConverter::distance_to_metric(target_distance, cli.units);
             let target_height_metric = UnitConverter::distance_to_metric(target_height, cli.units);
             // Default sight height: 2 inches for imperial, 50mm for metric
@@ -599,23 +599,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         
         Commands::EstimateBC {
-            velocity, mass, diameter,
+            velocity, bullet_mass, bullet_diameter,
             distance1, drop1, distance2, drop2,
             output
         } => {
             run_bc_estimation(
-                velocity, mass, diameter,
+                velocity, bullet_mass, bullet_diameter,
                 distance1, drop1, distance2, drop2,
                 output
             )?;
         },
         
         Commands::GenerateBCSegments {
-            bc, mass, diameter, model, drag_model, output
+            bc, bullet_mass, bullet_diameter, model, drag_model, output
         } => {
             // Convert to metric if needed
-            let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
-            let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+            let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
             
             run_bc_segment_generation(
                 bc, mass_metric, diameter_metric, 
@@ -673,37 +673,50 @@ fn run_trajectory(
     };
     
     let inputs = BallisticInputs {
-        // Core fields
-        muzzle_velocity: velocity,
-        launch_angle: angle.to_radians(),
-        ballistic_coefficient: bc,
-        mass,
-        diameter,
-        drag_model: drag_model_enum,
-        sight_height,  // Use provided sight height
-        
-        // Duplicate fields for internal compatibility
-        altitude,
-        bc_type: drag_model_enum,
+        // Core ballistics parameters
         bc_value: bc,
-        caliber_inches: diameter / 0.0254,  // Convert meters to inches
-        weight_grains: mass / 0.00006479891,  // Convert kg to grains
-        bullet_diameter: diameter,  // Keep in meters
-        bullet_mass: mass,  // Keep in kg
-        bullet_length: diameter * 4.5,  // Approximate length/diameter ratio for typical bullet
+        bc_type: drag_model_enum,
+        bullet_mass: mass,
+        muzzle_velocity: velocity,
+        bullet_diameter: diameter,
+        bullet_length: diameter * 4.5,  // Approximate length/diameter ratio
+
+        // Targeting and positioning
         muzzle_angle: angle.to_radians(),
         target_distance: max_range,
-        temperature,
-        twist_rate: twist_rate.unwrap_or(12.0),  // Default 1:12" twist if not specified
-        is_twist_right: twist_right,
+        azimuth_angle: 0.0,
         shooting_angle: shooting_angle.to_radians(),
+        sight_height,
+        muzzle_height: 1.5,
+        target_height: 0.0,
+        ground_threshold: -0.001,
+
+        // Environmental conditions
+        altitude,
+        temperature,
+        pressure,
+        humidity,
         latitude,
-        ground_threshold: -10.0,
-        azimuth_angle: 0.0,  // No horizontal aiming angle for standard trajectory
-        use_rk4,  // Use RK methods unless user specifies Euler
-        use_adaptive_rk45: use_rk45,  // Use RK45 adaptive unless user specifies fixed RK4
-        
-        // Advanced effects - now separately controlled
+
+        // Wind conditions
+        wind_speed,
+        wind_angle: wind_direction,
+
+        // Bullet characteristics
+        twist_rate: twist_rate.unwrap_or(12.0),
+        is_twist_right: twist_right,
+        caliber_inches: diameter / 0.0254,
+        weight_grains: mass / 0.00006479891,
+        manufacturer: None,
+        bullet_model: None,
+        bullet_id: None,
+        bullet_cluster: None,
+
+        // Integration method selection
+        use_rk4,
+        use_adaptive_rk45: use_rk45,
+
+        // Advanced effects
         enable_advanced_effects: enable_magnus || enable_coriolis,  // Either one enables the system
         use_powder_sensitivity,
         powder_temp_sensitivity: if use_powder_sensitivity { 
@@ -1071,10 +1084,10 @@ fn run_monte_carlo(
     // Create base inputs
     let base_inputs = BallisticInputs {
         muzzle_velocity: velocity,
-        launch_angle: angle.to_radians(),
-        ballistic_coefficient: bc,
-        mass,
-        diameter,
+        muzzle_angle: angle.to_radians(),
+        bc_value: bc,
+        bullet_mass,
+        bullet_diameter,
         ..Default::default()
     };
     
@@ -1183,9 +1196,9 @@ fn run_zero_calculation(
     // Create ballistic inputs
     let inputs = BallisticInputs {
         muzzle_velocity: velocity,
-        ballistic_coefficient: bc,
-        mass,
-        diameter,
+        bc_value: bc,
+        bullet_mass,
+        bullet_diameter,
         sight_height,
         ..Default::default()
     };
@@ -1199,7 +1212,7 @@ fn run_zero_calculation(
     
     // Calculate trajectory at zero angle to get additional info
     let mut zeroed_inputs = inputs;
-    zeroed_inputs.launch_angle = zero_angle;
+    zeroed_inputs.muzzle_angle = zero_angle;
     
     let solver = TrajectorySolver::new(zeroed_inputs, Default::default(), Default::default());
     let trajectory = solver.solve()?;
@@ -1359,17 +1372,17 @@ fn run_bc_estimation(
     // Estimate BC
     let estimated_bc = ballistics_engine::estimate_bc_from_trajectory(
         velocity,
-        mass,
-        diameter,
+        bullet_mass,
+        bullet_diameter,
         &points,
     )?;
     
     // Verify the estimation by running a trajectory
     let inputs = BallisticInputs {
         muzzle_velocity: velocity,
-        ballistic_coefficient: estimated_bc,
-        mass,
-        diameter,
+        bc_value: estimated_bc,
+        bullet_mass,
+        bullet_diameter,
         ..Default::default()
     };
     

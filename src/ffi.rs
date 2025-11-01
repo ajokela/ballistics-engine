@@ -14,11 +14,11 @@ use std::ptr;
 #[repr(C)]
 pub struct FFIBallisticInputs {
     pub muzzle_velocity: c_double,        // m/s
-    pub launch_angle: c_double,           // radians
-    pub ballistic_coefficient: c_double,
-    pub mass: c_double,                   // kg
-    pub diameter: c_double,               // meters
-    pub drag_model: c_int,                // 0=G1, 1=G7, 2=CustomDragTable
+    pub muzzle_angle: c_double,           // radians (launch angle)
+    pub bc_value: c_double,               // ballistic coefficient
+    pub bullet_mass: c_double,            // kg
+    pub bullet_diameter: c_double,        // meters
+    pub bc_type: c_int,                   // 0=G1, 1=G7, etc.
     pub sight_height: c_double,           // meters
     pub target_distance: c_double,        // meters
     pub temperature: c_double,            // Celsius
@@ -129,17 +129,17 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     let mut ballistic_inputs = BallisticInputs::default();
     
     ballistic_inputs.muzzle_velocity = inputs.muzzle_velocity;
-    ballistic_inputs.launch_angle = inputs.launch_angle;
-    ballistic_inputs.muzzle_angle = inputs.launch_angle;
+    ballistic_inputs.muzzle_angle = inputs.muzzle_angle;
+    ballistic_inputs.muzzle_angle = inputs.muzzle_angle;
     ballistic_inputs.azimuth_angle = inputs.azimuth_angle;
     ballistic_inputs.use_rk4 = inputs.use_rk4 != 0;
-    ballistic_inputs.ballistic_coefficient = inputs.ballistic_coefficient;
-    ballistic_inputs.bc_value = inputs.ballistic_coefficient;
-    ballistic_inputs.mass = inputs.mass;
-    ballistic_inputs.bullet_mass = inputs.mass;
-    ballistic_inputs.diameter = inputs.diameter;
-    ballistic_inputs.bullet_diameter = inputs.diameter;
-    ballistic_inputs.drag_model = match inputs.drag_model {
+    ballistic_inputs.bc_value = inputs.bc_value;
+    ballistic_inputs.bc_value = inputs.bc_value;
+    ballistic_inputs.bullet_mass = inputs.bullet_mass;
+    ballistic_inputs.bullet_mass = inputs.bullet_mass;
+    ballistic_inputs.bullet_diameter = inputs.bullet_diameter;
+    ballistic_inputs.bullet_diameter = inputs.bullet_diameter;
+    ballistic_inputs.bc_type = match inputs.bc_type {
         1 => DragModel::G7,
         2 => DragModel::G2,
         3 => DragModel::G5,
@@ -149,7 +149,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
         7 => DragModel::GS,
         _ => DragModel::G1,
     };
-    ballistic_inputs.bc_type = ballistic_inputs.drag_model.clone();
+    ballistic_inputs.bc_type = ballistic_inputs.bc_type.clone();
     ballistic_inputs.sight_height = inputs.sight_height;
     ballistic_inputs.target_distance = inputs.target_distance;
     ballistic_inputs.temperature = inputs.temperature;
@@ -163,9 +163,9 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     }
     
     // Set derived values
-    ballistic_inputs.caliber_inches = inputs.diameter / 0.0254;
-    ballistic_inputs.weight_grains = inputs.mass / 0.00006479891;
-    ballistic_inputs.bullet_length = inputs.diameter * 4.0;
+    ballistic_inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
+    ballistic_inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
+    ballistic_inputs.bullet_length = inputs.bullet_diameter * 4.0;
     
     // New advanced physics flags
     ballistic_inputs.enable_wind_shear = inputs.enable_wind_shear != 0;
@@ -418,7 +418,7 @@ pub extern "C" fn ballistics_quick_trajectory(
     
     let mut inputs = BallisticInputs::default();
     inputs.muzzle_velocity = muzzle_velocity;
-    inputs.ballistic_coefficient = bc;
+    inputs.bc_value = bc;
     inputs.bc_value = bc;
     inputs.sight_height = sight_height;
     inputs.target_distance = target_distance;
@@ -433,7 +433,7 @@ pub extern "C" fn ballistics_quick_trajectory(
     };
     
     // Now calculate trajectory with that zero angle
-    inputs.launch_angle = zero_angle;
+    inputs.muzzle_angle = zero_angle;
     inputs.muzzle_angle = zero_angle;
     
     let mut solver = TrajectorySolver::new(inputs, wind, atmo);

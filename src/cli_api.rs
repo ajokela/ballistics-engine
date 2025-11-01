@@ -51,48 +51,60 @@ impl From<&str> for BallisticsError {
     }
 }
 
-// Ballistic input parameters
-// MBA-151: Optional PyO3 support for Python bindings
+// Ballistic input parameters - MBA-151 Reconciled Structure
+// Unified structure used by both ballistics-engine and ballistics_rust
+// Duplicates removed, all necessary fields included
 #[cfg_attr(feature = "python", pyo3::pyclass)]
 #[derive(Debug, Clone)]
 pub struct BallisticInputs {
-    // Core ballistics parameters
-    pub muzzle_velocity: f64,      // m/s
-    pub launch_angle: f64,          // radians (same as muzzle_angle)
-    pub ballistic_coefficient: f64,
-    pub mass: f64,                  // kg
-    pub diameter: f64,              // meters
-    pub drag_model: DragModel,
-    pub sight_height: f64,          // meters above bore
-    pub muzzle_height: f64,         // meters above ground
-    
-    // Additional fields for compatibility
-    pub altitude: f64,              // meters
-    pub bc_type: DragModel,         // same as drag_model
-    pub bc_value: f64,              // same as ballistic_coefficient
-    pub caliber_inches: f64,        // diameter in inches
-    pub weight_grains: f64,         // mass in grains
-    pub bullet_diameter: f64,       // same as diameter
-    pub bullet_mass: f64,           // same as mass
+    // Core ballistics parameters (using intuitive names)
+    pub bc_value: f64,              // Ballistic coefficient (G1, G7, etc.)
+    pub bc_type: DragModel,         // Drag model (G1, G7, G8, etc.)
+    pub bullet_mass: f64,           // kg
+    pub muzzle_velocity: f64,       // m/s
+    pub bullet_diameter: f64,       // meters
     pub bullet_length: f64,         // meters
-    pub muzzle_angle: f64,          // same as launch_angle
+
+    // Targeting and positioning
+    pub muzzle_angle: f64,          // radians (launch angle)
     pub target_distance: f64,       // meters
     pub azimuth_angle: f64,         // horizontal aiming angle in radians
-    pub use_rk4: bool,              // Use RK4 integration instead of Euler
-    pub use_adaptive_rk45: bool,    // Use RK45 adaptive step size integration
+    pub shooting_angle: f64,        // uphill/downhill angle in radians
+    pub sight_height: f64,          // meters above bore
+    pub muzzle_height: f64,         // meters above ground
+    pub target_height: f64,         // meters above ground for zeroing
+    pub ground_threshold: f64,      // meters below which to stop
+
+    // Environmental conditions
+    pub altitude: f64,              // meters
     pub temperature: f64,           // Celsius
+    pub pressure: f64,              // millibars/hPa
+    pub humidity: f64,              // relative humidity (0-1)
+    pub latitude: Option<f64>,      // degrees
+
+    // Wind conditions
+    pub wind_speed: f64,            // m/s
+    pub wind_angle: f64,            // radians (0=headwind, 90=from right)
+
+    // Bullet characteristics
     pub twist_rate: f64,            // inches per turn
     pub is_twist_right: bool,       // right-hand twist
-    pub shooting_angle: f64,        // uphill/downhill angle in radians
-    pub latitude: Option<f64>,      // degrees
-    pub ground_threshold: f64,      // meters below which to stop
-    pub target_height: f64,         // meters above ground for zeroing
-    
+    pub caliber_inches: f64,        // diameter in inches
+    pub weight_grains: f64,         // mass in grains
+    pub manufacturer: Option<String>, // Bullet manufacturer
+    pub bullet_model: Option<String>, // Bullet model name
+    pub bullet_id: Option<String>,  // Unique bullet identifier
+    pub bullet_cluster: Option<usize>, // BC cluster ID for cluster_bc module
+
+    // Integration method selection
+    pub use_rk4: bool,              // Use RK4 integration instead of Euler
+    pub use_adaptive_rk45: bool,    // Use RK45 adaptive step size integration
+
     // Advanced effects flags
     pub enable_advanced_effects: bool,
     pub use_powder_sensitivity: bool,
     pub powder_temp_sensitivity: f64,
-    pub powder_temp: f64,          // Celsius
+    pub powder_temp: f64,           // Celsius
     pub tipoff_yaw: f64,            // radians
     pub tipoff_decay_distance: f64, // meters
     pub use_bc_segments: bool,
@@ -103,15 +115,16 @@ pub struct BallisticInputs {
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
     pub enable_trajectory_sampling: bool,
-    pub sample_interval: f64,  // meters
+    pub sample_interval: f64,       // meters
     pub enable_pitch_damping: bool,
     pub enable_precession_nutation: bool,
-    pub use_cluster_bc: bool,  // Use cluster-based BC degradation
-    
-    // Additional data fields
+    pub use_cluster_bc: bool,       // Use cluster-based BC degradation
+
+    // Custom drag model support
+    pub custom_drag_table: Option<crate::drag::DragTable>,
+
+    // Legacy field for compatibility
     pub bc_type_str: Option<String>,
-    pub bullet_model: Option<String>,
-    pub bullet_id: Option<String>,
 }
 
 impl Default for BallisticInputs {
@@ -119,42 +132,53 @@ impl Default for BallisticInputs {
         let mass_kg = 0.01;
         let diameter_m = 0.00762;
         let bc = 0.5;
-        let launch_angle_rad = 0.0;
-        let drag_model = DragModel::G1;
-        
+        let muzzle_angle_rad = 0.0;
+        let bc_type = DragModel::G1;
+
         Self {
-            // Core parameters
-            muzzle_velocity: 800.0,
-            launch_angle: launch_angle_rad,
-            ballistic_coefficient: bc,
-            mass: mass_kg,
-            diameter: diameter_m,
-            drag_model,
-            sight_height: 0.05,
-            muzzle_height: 1.5,  // 1.5m default (standing position)
-            
-            // Duplicate fields for compatibility
-            altitude: 0.0,
-            bc_type: drag_model,
+            // Core ballistics parameters
             bc_value: bc,
-            caliber_inches: diameter_m / 0.0254,  // Convert to inches
-            weight_grains: mass_kg / 0.00006479891,  // Convert to grains
-            bullet_diameter: diameter_m,
+            bc_type,
             bullet_mass: mass_kg,
+            muzzle_velocity: 800.0,
+            bullet_diameter: diameter_m,
             bullet_length: diameter_m * 4.0,  // Approximate
-            muzzle_angle: launch_angle_rad,
+
+            // Targeting and positioning
+            muzzle_angle: muzzle_angle_rad,
             target_distance: 100.0,
             azimuth_angle: 0.0,
-            use_rk4: true,  // Use Runge-Kutta methods by default
-            use_adaptive_rk45: true,  // Default to RK45 adaptive for best accuracy
+            shooting_angle: 0.0,
+            sight_height: 0.05,
+            muzzle_height: 1.5,  // 1.5m default (standing position)
+            target_height: 0.0,  // Target at ground level by default
+            ground_threshold: -0.001,  // Stop just below ground level
+
+            // Environmental conditions
+            altitude: 0.0,
             temperature: 15.0,
+            pressure: 1013.25,  // Standard sea level pressure (millibars)
+            humidity: 0.5,  // 50% relative humidity
+            latitude: None,
+
+            // Wind conditions
+            wind_speed: 0.0,
+            wind_angle: 0.0,
+
+            // Bullet characteristics
             twist_rate: 12.0,  // 1:12" typical
             is_twist_right: true,
-            shooting_angle: 0.0,
-            latitude: None,
-            ground_threshold: -0.001,  // Stop just below ground level
-            target_height: 0.0,  // Target at ground level by default
-            
+            caliber_inches: diameter_m / 0.0254,  // Convert to inches
+            weight_grains: mass_kg / 0.00006479891,  // Convert to grains
+            manufacturer: None,
+            bullet_model: None,
+            bullet_id: None,
+            bullet_cluster: None,
+
+            // Integration method selection
+            use_rk4: true,  // Use Runge-Kutta methods by default
+            use_adaptive_rk45: true,  // Default to RK45 adaptive for best accuracy
+
             // Advanced effects (disabled by default)
             enable_advanced_effects: false,
             use_powder_sensitivity: false,
@@ -174,11 +198,12 @@ impl Default for BallisticInputs {
             enable_pitch_damping: false,
             enable_precession_nutation: false,
             use_cluster_bc: false,  // Disabled by default for backward compatibility
-            
-            // Optional data
+
+            // Custom drag model support
+            custom_drag_table: None,
+
+            // Legacy field for compatibility
             bc_type_str: None,
-            bullet_model: None,
-            bullet_id: None,
         }
     }
 }
@@ -258,13 +283,13 @@ pub struct TrajectorySolver {
 impl TrajectorySolver {
     pub fn new(mut inputs: BallisticInputs, wind: WindConditions, atmosphere: AtmosphericConditions) -> Self {
         // Ensure duplicate fields are synchronized
-        inputs.bc_type = inputs.drag_model;
-        inputs.bc_value = inputs.ballistic_coefficient;
-        inputs.bullet_diameter = inputs.diameter;
-        inputs.bullet_mass = inputs.mass;
-        inputs.muzzle_angle = inputs.launch_angle;
-        inputs.caliber_inches = inputs.diameter / 0.0254;
-        inputs.weight_grains = inputs.mass / 0.00006479891;
+        inputs.bc_type = inputs.bc_type;
+        inputs.bc_value = inputs.bc_value;
+        inputs.bullet_diameter = inputs.bullet_diameter;
+        inputs.bullet_mass = inputs.bullet_mass;
+        inputs.muzzle_angle = inputs.muzzle_angle;
+        inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
+        inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
         
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
@@ -333,10 +358,10 @@ impl TrajectorySolver {
         let mut time = 0.0;
         let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         // Calculate initial velocity components with both elevation and azimuth
-        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
+        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
             horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: side deviation (left/right)
-            self.inputs.muzzle_velocity * self.inputs.launch_angle.sin(),  // Y: vertical component
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
             horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: forward component (down-range)
         );
         
@@ -375,7 +400,7 @@ impl TrajectorySolver {
         while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
-            let kinetic_energy = 0.5 * self.inputs.mass * velocity_magnitude * velocity_magnitude;
+            let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
             
             points.push(TrajectoryPoint {
                 time,
@@ -436,8 +461,8 @@ impl TrajectorySolver {
                     
                     // Create precession/nutation parameters
                     let params = PrecessionNutationParams {
-                        mass_kg: self.inputs.mass,
-                        caliber_m: self.inputs.diameter,
+                        mass_kg: self.inputs.bullet_mass,
+                        caliber_m: self.inputs.bullet_diameter,
                         length_m: self.inputs.bullet_length,
                         spin_rate_rad_s,
                         spin_inertia: 6.94e-8,      // Typical value
@@ -480,11 +505,11 @@ impl TrajectorySolver {
             
             // Calculate drag force
             let drag_force = 0.5 * air_density * drag_coefficient * 
-                            self.inputs.diameter * self.inputs.diameter * 
+                            self.inputs.bullet_diameter * self.inputs.bullet_diameter * 
                             std::f64::consts::PI / 4.0 * velocity_rel_mag * velocity_rel_mag;
             
             // Calculate acceleration
-            let drag_acceleration = -drag_force / self.inputs.mass;
+            let drag_acceleration = -drag_force / self.inputs.bullet_mass;
             let acceleration = Vector3::new(
                 drag_acceleration * velocity_rel.x / velocity_rel_mag,
                 drag_acceleration * velocity_rel.y / velocity_rel_mag - 9.80665,
@@ -520,7 +545,7 @@ impl TrajectorySolver {
             };
             
             // Sample at specified intervals
-            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.mass);
+            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.bullet_mass);
             Some(samples)
         } else {
             None
@@ -548,10 +573,10 @@ impl TrajectorySolver {
         let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         
         // Calculate initial velocity components with both elevation and azimuth
-        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
+        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
             horizontal_velocity * self.inputs.azimuth_angle.sin(),
-            self.inputs.muzzle_velocity * self.inputs.launch_angle.sin(),
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),
             horizontal_velocity * self.inputs.azimuth_angle.cos(),
         );
         
@@ -590,7 +615,7 @@ impl TrajectorySolver {
         while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
-            let kinetic_energy = 0.5 * self.inputs.mass * velocity_magnitude * velocity_magnitude;
+            let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
             
             points.push(TrajectoryPoint {
                 time,
@@ -650,8 +675,8 @@ impl TrajectorySolver {
                     
                     // Create precession/nutation parameters
                     let params = PrecessionNutationParams {
-                        mass_kg: self.inputs.mass,
-                        caliber_m: self.inputs.diameter,
+                        mass_kg: self.inputs.bullet_mass,
+                        caliber_m: self.inputs.bullet_diameter,
                         length_m: self.inputs.bullet_length,
                         spin_rate_rad_s,
                         spin_inertia: 6.94e-8,      // Typical value
@@ -732,7 +757,7 @@ impl TrajectorySolver {
             };
             
             // Sample at specified intervals
-            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.mass);
+            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.bullet_mass);
             Some(samples)
         } else {
             None
@@ -760,10 +785,10 @@ impl TrajectorySolver {
         let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         
         // Calculate initial velocity components
-        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.launch_angle.cos();
+        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
             horizontal_velocity * self.inputs.azimuth_angle.sin(),
-            self.inputs.muzzle_velocity * self.inputs.launch_angle.sin(),
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),
             horizontal_velocity * self.inputs.azimuth_angle.cos(),
         );
         
@@ -787,7 +812,7 @@ impl TrajectorySolver {
             
             // Store current point
             let velocity_magnitude = velocity.magnitude();
-            let kinetic_energy = 0.5 * self.inputs.mass * velocity_magnitude.powi(2);
+            let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude.powi(2);
             
             points.push(TrajectoryPoint {
                 time,
@@ -970,20 +995,20 @@ impl TrajectorySolver {
         
         // Calculate drag force
         let cd = self.calculate_drag_coefficient(velocity_magnitude);
-        let reference_area = std::f64::consts::PI * (self.inputs.diameter / 2.0).powi(2);
+        let reference_area = std::f64::consts::PI * (self.inputs.bullet_diameter / 2.0).powi(2);
         
         // Apply cluster BC correction if enabled
         let effective_bc = if let Some(ref cluster_bc) = self.cluster_bc {
             // Convert velocity to fps for cluster BC calculation
             let velocity_fps = velocity_magnitude * 3.28084;
             cluster_bc.apply_correction(
-                self.inputs.ballistic_coefficient,
+                self.inputs.bc_value,
                 self.inputs.caliber_inches * 0.0254,  // Convert back to meters for consistency
                 self.inputs.weight_grains,
                 velocity_fps
             )
         } else {
-            self.inputs.ballistic_coefficient
+            self.inputs.bc_value
         };
         
         let drag_magnitude = 0.5 * air_density * velocity_magnitude.powi(2) * cd * reference_area / effective_bc;
@@ -992,7 +1017,7 @@ impl TrajectorySolver {
         let drag_force = -relative_velocity.normalize() * drag_magnitude;
         
         // Total acceleration = drag/mass + gravity
-        let acceleration = drag_force / self.inputs.mass + Vector3::new(0.0, -9.81, 0.0);
+        let acceleration = drag_force / self.inputs.bullet_mass + Vector3::new(0.0, -9.81, 0.0);
         
         acceleration
     }
@@ -1008,7 +1033,7 @@ impl TrajectorySolver {
         let mach = velocity / speed_of_sound;
         
         // Base drag coefficient from drag model
-        let base_cd = match self.inputs.drag_model {
+        let base_cd = match self.inputs.bc_type {
             DragModel::G1 => 0.5,
             DragModel::G7 => 0.4,
             _ => 0.45,
@@ -1026,17 +1051,17 @@ impl TrajectorySolver {
             } else {
                 // Use heuristic based on caliber, weight, and drag model
                 get_projectile_shape(
-                    self.inputs.diameter,
-                    self.inputs.mass / 0.00006479891,  // Convert kg to grains
-                    &self.inputs.drag_model.to_string()
+                    self.inputs.bullet_diameter,
+                    self.inputs.bullet_mass / 0.00006479891,  // Convert kg to grains
+                    &self.inputs.bc_type.to_string()
                 )
             }
         } else {
             // Use heuristic based on caliber, weight, and drag model
             get_projectile_shape(
-                self.inputs.diameter,
-                self.inputs.mass / 0.00006479891,  // Convert kg to grains
-                &self.inputs.drag_model.to_string()
+                self.inputs.bullet_diameter,
+                self.inputs.bullet_mass / 0.00006479891,  // Convert kg to grains
+                &self.inputs.bc_type.to_string()
             )
         };
         
@@ -1121,9 +1146,9 @@ pub fn run_monte_carlo_with_wind(
     // Create normal distributions for variations
     let velocity_dist = Normal::new(base_inputs.muzzle_velocity, params.velocity_std_dev)
         .map_err(|e| format!("Invalid velocity distribution: {}", e))?;
-    let angle_dist = Normal::new(base_inputs.launch_angle, params.angle_std_dev)
+    let angle_dist = Normal::new(base_inputs.muzzle_angle, params.angle_std_dev)
         .map_err(|e| format!("Invalid angle distribution: {}", e))?;
-    let bc_dist = Normal::new(base_inputs.ballistic_coefficient, params.bc_std_dev)
+    let bc_dist = Normal::new(base_inputs.bc_value, params.bc_std_dev)
         .map_err(|e| format!("Invalid BC distribution: {}", e))?;
     let wind_speed_dist = Normal::new(base_wind.speed, params.wind_speed_std_dev)
         .map_err(|e| format!("Invalid wind speed distribution: {}", e))?;
@@ -1141,8 +1166,8 @@ pub fn run_monte_carlo_with_wind(
         // Create varied inputs
         let mut inputs = base_inputs.clone();
         inputs.muzzle_velocity = velocity_dist.sample(&mut rng).max(0.0);
-        inputs.launch_angle = angle_dist.sample(&mut rng);
-        inputs.ballistic_coefficient = bc_dist.sample(&mut rng).max(0.01);
+        inputs.muzzle_angle = angle_dist.sample(&mut rng);
+        inputs.bc_value = bc_dist.sample(&mut rng).max(0.01);
         inputs.azimuth_angle = azimuth_dist.sample(&mut rng);  // Add horizontal variation
         
         // Create varied wind (now based on base wind conditions)
@@ -1223,7 +1248,7 @@ pub fn calculate_zero_angle_with_conditions(
         let mid_angle = (low_angle + high_angle) / 2.0;
         
         let mut test_inputs = inputs.clone();
-        test_inputs.launch_angle = mid_angle;
+        test_inputs.muzzle_angle = mid_angle;
         
         let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
         // Make sure we calculate far enough to reach the target
@@ -1299,9 +1324,9 @@ pub fn estimate_bc_from_trajectory(
         
         let inputs = BallisticInputs {
             muzzle_velocity: velocity,
-            ballistic_coefficient: bc_value,
-            mass,
-            diameter,
+            bc_value,
+            bullet_mass: mass,
+            bullet_diameter: diameter,
             ..Default::default()
         };
         

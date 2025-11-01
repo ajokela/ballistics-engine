@@ -385,26 +385,26 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 inputs.muzzle_velocity = velocity * 0.3048; // fps to m/s
-                inputs.mass = mass * 0.00006479891; // grains to kg
-                inputs.diameter = diameter * 0.0254; // inches to meters
+                inputs.bullet_mass = mass * 0.00006479891; // grains to kg
+                inputs.bullet_diameter = diameter * 0.0254; // inches to meters
                 inputs.sight_height = sight_height * 0.0254; // inches to meters
                 inputs.muzzle_height = muzzle_height * 0.0254; // inches to meters
                 inputs.target_height = target_height * 0.0254; // inches to meters
             }
             UnitSystem::Metric => {
                 inputs.muzzle_velocity = velocity; // already m/s
-                inputs.mass = mass * 0.001; // grams to kg
-                inputs.diameter = diameter * 0.001; // mm to meters
+                inputs.bullet_mass = mass * 0.001; // grams to kg
+                inputs.bullet_diameter = diameter * 0.001; // mm to meters
                 inputs.sight_height = sight_height * 0.001; // mm to meters
                 inputs.muzzle_height = muzzle_height * 0.001; // mm to meters
                 inputs.target_height = target_height * 0.001; // mm to meters
             }
         }
         
-        inputs.ballistic_coefficient = bc;
-        inputs.drag_model = DragModel::from_str(drag_model)
+        inputs.bc_value = bc;
+        inputs.bc_type = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
-        inputs.launch_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
+        inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
         
         // Set advanced physics flags
@@ -496,7 +496,7 @@ impl WasmBallistics {
                 atmosphere.clone()
             ) {
                 Ok(zero_angle) => {
-                    inputs.launch_angle = zero_angle;
+                    inputs.muzzle_angle = zero_angle;
                     let moa_adjustment = zero_angle * 180.0 / std::f64::consts::PI * 60.0;
                     let mrad_adjustment = zero_angle * 1000.0;
                     zero_info = format!("Rifle zeroed at {} {} (Adjustment: {:.2} MOA / {:.2} mrad up)\n\n", 
@@ -628,20 +628,20 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 inputs.muzzle_velocity = velocity * 0.3048;
-                inputs.mass = mass * 0.00006479891;
-                inputs.diameter = diameter * 0.0254;
+                inputs.bullet_mass = mass * 0.00006479891;
+                inputs.bullet_diameter = diameter * 0.0254;
                 inputs.sight_height = sight_height * 0.0254;
             }
             UnitSystem::Metric => {
                 inputs.muzzle_velocity = velocity;
-                inputs.mass = mass * 0.001;
-                inputs.diameter = diameter * 0.001;
+                inputs.bullet_mass = mass * 0.001;
+                inputs.bullet_diameter = diameter * 0.001;
                 inputs.sight_height = sight_height * 0.001;
             }
         }
         
-        inputs.ballistic_coefficient = bc;
-        inputs.drag_model = DragModel::from_str(drag_model)
+        inputs.bc_value = bc;
+        inputs.bc_type = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
 
         let target_distance_m = match units {
@@ -794,18 +794,18 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 inputs.muzzle_velocity = velocity * 0.3048;
-                inputs.mass = mass * 0.00006479891;
-                inputs.diameter = diameter * 0.0254;
+                inputs.bullet_mass = mass * 0.00006479891;
+                inputs.bullet_diameter = diameter * 0.0254;
             }
             UnitSystem::Metric => {
                 inputs.muzzle_velocity = velocity;
-                inputs.mass = mass * 0.001;
-                inputs.diameter = diameter * 0.001;
+                inputs.bullet_mass = mass * 0.001;
+                inputs.bullet_diameter = diameter * 0.001;
             }
         }
         
-        inputs.ballistic_coefficient = bc;
-        inputs.launch_angle = angle * std::f64::consts::PI / 180.0;
+        inputs.bc_value = bc;
+        inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
 
         // Create Monte Carlo parameters
         let params = MonteCarloParams {

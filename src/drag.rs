@@ -6,7 +6,7 @@ use crate::DragModel;
 use crate::transonic_drag::{transonic_correction, get_projectile_shape, ProjectileShape};
 
 /// Drag table data structure
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DragTable {
     pub mach_values: Vec<f64>,
     pub cd_values: Vec<f64>,

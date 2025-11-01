@@ -32,7 +32,7 @@ pub mod wasm;
 #[cfg(test)]
 mod wasm_tests;
 mod constants;
-mod drag;
+pub mod drag;
 mod drag_tables;
 pub mod atmosphere;
 pub mod wind;

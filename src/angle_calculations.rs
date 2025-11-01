@@ -342,58 +342,14 @@ mod tests {
     
     fn create_test_inputs() -> InternalBallisticInputs {
         InternalBallisticInputs {
-            // Core fields
             muzzle_velocity: 823.0,  // 2700 fps in m/s
-            launch_angle: 0.0,
-            ballistic_coefficient: 0.5,
-            mass: 0.0109,  // 168 grains in kg
-            diameter: 0.00782,  // 0.308 inches in meters
-            drag_model: DragModel::G1,
-            sight_height: 0.05,
-            
-            // Duplicate fields for compatibility
             bc_value: 0.5,
-            bc_type: DragModel::G1,
-            bullet_mass: 168.0,  // in grains
-            altitude: 0.0,
-            bc_type_str: Some("G1".to_string()),
-            twist_rate: 10.0,
-            bullet_length: 1.3,  // in inches
-            bullet_diameter: 0.308,  // in inches
-            tipoff_yaw: 0.0,
-            tipoff_decay_distance: 20.0,
-            ground_threshold: 0.0,
-            bc_segments: None,
+            bullet_mass: 0.0109,  // 168 grains in kg
+            bullet_diameter: 0.00782,  // 0.308 inches in meters
             target_distance: 500.0,
-            muzzle_angle: 0.0,
             temperature: 21.1,  // 70°F in Celsius
-            latitude: None,
-            enable_advanced_effects: false,
-            is_twist_right: true,
-            shooting_angle: 0.0,
-            use_powder_sensitivity: false,
-            powder_temp_sensitivity: 0.0,
-            powder_temp: 70.0,
-            caliber_inches: 0.0,
-            weight_grains: 0.0,
-            use_bc_segments: false,
-            bullet_id: None,
-            bc_segments_data: None,
-            use_enhanced_spin_drift: false,
-            use_form_factor: false,
-            bullet_model: None,
-            enable_wind_shear: false,
-            wind_shear_model: "none".to_string(),
-            azimuth_angle: 0.0,
-            use_rk4: true,
-            use_adaptive_rk45: false,
-            enable_trajectory_sampling: false,
-            sample_interval: 10.0,
-            enable_pitch_damping: false,
-            enable_precession_nutation: false,
-            use_cluster_bc: false,
-            muzzle_height: 1.5,
-            target_height: 0.0,
+            powder_temp: 21.1,  // Match temperature for default case (70°F)
+            ..Default::default()
         }
     }
     
@@ -443,7 +399,8 @@ mod tests {
         inputs.use_powder_sensitivity = true;
         inputs.powder_temp_sensitivity = 1.0; // 1 fps per degree F
         inputs.temperature = 85.0; // 15 degrees above powder temp
-        
+        inputs.powder_temp = 70.0; // Base powder temp
+
         let result = adjusted_muzzle_velocity(&inputs);
         // Should be 823 * (1 + 1.0 * (85-70) / 15) = 823 * (1 + 1) = 1646
         assert!((result - 1646.0).abs() < 1e-6);
