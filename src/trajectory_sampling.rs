@@ -67,6 +67,7 @@ pub fn sample_trajectory(
         step_m
     };
     
+    // Use the input target distance as the limit for sampling
     let max_dist = outputs.target_distance_horiz_m;
     if max_dist < 1e-9 {
         return Vec::new();
@@ -86,25 +87,36 @@ pub fn sample_trajectory(
         .collect();
     
     // Generate sampling distances
-    let num_steps = ((max_dist / step_size) + 0.5) as usize + 1;
+    // Calculate number of steps to reach target without exceeding it
+    let num_steps = (max_dist / step_size).ceil() as usize + 1;
     let distances: Vec<f64> = (0..num_steps)
         .map(|i| i as f64 * step_size)
-        .take_while(|&d| d <= max_dist + step_size * 0.5)
+        .filter(|&d| d <= max_dist + 0.1)  // Stop exactly at target (with tiny tolerance for rounding)
         .collect();
     
     // Vectorized interpolation for all trajectory data
     let mut samples = Vec::with_capacity(distances.len());
     
+    // Get initial height (muzzle height) for proper LOS calculation
+    let muzzle_y = if !y_vals.is_empty() { y_vals[0] } else { 0.0 };
+    
     for &distance in &distances {
-        let y_interp = interpolate(&x_vals, &y_vals, distance);
-        let wind_drift = interpolate(&x_vals, &z_vals, distance);
-        let velocity = interpolate(&x_vals, &speeds, distance);
-        let time = interpolate(&x_vals, &trajectory_data.times, distance);
-        let energy = interpolate(&x_vals, &energies, distance);
+        // Interpolate using z (downrange) as the independent variable
+        let y_interp = interpolate(&z_vals, &y_vals, distance);  // vertical at downrange distance
+        let wind_drift = interpolate(&z_vals, &x_vals, distance);  // lateral drift at downrange distance
+        let velocity = interpolate(&z_vals, &speeds, distance);  // velocity at downrange distance
+        let time = interpolate(&z_vals, &trajectory_data.times, distance);  // time at downrange distance
+        let energy = interpolate(&z_vals, &energies, distance);  // energy at downrange distance
         
         // Calculate line-of-sight y-coordinate and drop
-        let los_y = outputs.target_vertical_height_m * distance / max_dist;
-        let drop = los_y - y_interp;
+        // The LOS is the straight line from initial position to target
+        // For coordinate shots: goes from muzzle_y to target_vertical_height_m
+        // Drop convention:
+        // - Positive drop means bullet is below LOS (has dropped)
+        // - Negative drop means bullet is above LOS (has risen)
+        // Therefore: drop = LOS - actual (not actual - LOS)
+        let los_y = muzzle_y + (outputs.target_vertical_height_m - muzzle_y) * distance / max_dist;
+        let drop = los_y - y_interp;  // LOS - actual: positive when bullet is below LOS
         
         samples.push(TrajectorySample {
             distance_m: distance,
@@ -118,7 +130,7 @@ pub fn sample_trajectory(
     }
     
     // Add flags using vectorized detection
-    add_trajectory_flags(&mut samples, &trajectory_data.transonic_distances, outputs.max_ord_dist_horiz_m);
+    add_trajectory_flags(&mut samples, &trajectory_data.transonic_distances, max_dist);
     
     samples
 }
@@ -171,7 +183,7 @@ fn interpolate(x_vals: &[f64], y_vals: &[f64], x: f64) -> f64 {
 fn add_trajectory_flags(
     samples: &mut [TrajectorySample],
     transonic_distances: &[f64],
-    apex_distance: f64,
+    target_distance_input_m: f64,
 ) {
     let tolerance = 1e-6;
     
@@ -185,11 +197,33 @@ fn add_trajectory_flags(
         }
     }
     
-    // 3. Apex
-    if apex_distance > 0.0 {
-        if let Some(idx) = find_closest_sample_index(samples, apex_distance) {
-            samples[idx].flags.push(TrajectoryFlag::Apex);
+    // 3. Apex - find the point with maximum height between muzzle and target
+    // Since drop is positive when bullet is below LOS and negative when above,
+    // the apex is where drop is minimum (most negative)
+    if samples.len() > 2 {
+        // Use the target distance passed as parameter
+        let target_distance_m = target_distance_input_m;
+        
+        // Find the index of maximum height (minimum drop, most negative) within target distance
+        // Exclude first point (always 0 for auto-zeroing)
+        let mut min_drop = f64::INFINITY;
+        let mut apex_idx = 1;
+
+        // Search from index 1, but stop at target distance
+        for i in 1..samples.len() {
+            // Only consider points up to target distance
+            if samples[i].distance_m > target_distance_m {
+                break;
+            }
+
+            if samples[i].drop_m < min_drop {
+                min_drop = samples[i].drop_m;
+                apex_idx = i;
+            }
         }
+        
+        // Mark the apex
+        samples[apex_idx].flags.push(TrajectoryFlag::Apex);
     }
 }
 
@@ -263,8 +297,9 @@ fn find_closest_sample_index(samples: &[TrajectorySample], target_distance: f64)
     if left > 0 {
         let left_dist = (distances[left - 1] - target_distance).abs();
         let right_dist = (distances[best_idx] - target_distance).abs();
-        
-        if left_dist < right_dist {
+
+        // Prefer earlier index in case of tie
+        if left_dist <= right_dist {
             best_idx = left - 1;
         }
     }
@@ -349,10 +384,9 @@ mod tests {
             },
         ];
         
-        // Test that we find a valid index for each target
-        assert!(find_closest_sample_index(&samples, 5.0).is_some());
-        assert!(find_closest_sample_index(&samples, 12.0).is_some());
-        assert!(find_closest_sample_index(&samples, 18.0).is_some());
+        assert_eq!(find_closest_sample_index(&samples, 5.0), Some(0));
+        assert_eq!(find_closest_sample_index(&samples, 12.0), Some(1));
+        assert_eq!(find_closest_sample_index(&samples, 18.0), Some(2));
     }
     
     #[test]
@@ -398,17 +432,18 @@ mod tests {
     #[test]
     fn test_sample_trajectory_basic() {
         // Create simple test trajectory data
+        // Note: x=lateral, y=vertical, z=downrange
         let trajectory_data = TrajectoryData {
             times: vec![0.0, 1.0, 2.0],
             positions: vec![
-                Vector3::new(0.0, 0.0, 0.0),
-                Vector3::new(100.0, 10.0, 1.0),
-                Vector3::new(200.0, 5.0, 2.0),
+                Vector3::new(0.0, 0.0, 0.0),      // x=0, y=0, z=0 (start)
+                Vector3::new(1.0, 10.0, 100.0),   // x=1, y=10, z=100 (mid - apex region)
+                Vector3::new(2.0, 5.0, 200.0),    // x=2, y=5, z=200 (end)
             ],
             velocities: vec![
-                Vector3::new(100.0, 10.0, 1.0),
-                Vector3::new(95.0, 5.0, 1.0),
-                Vector3::new(90.0, 0.0, 1.0),
+                Vector3::new(1.0, 10.0, 100.0),
+                Vector3::new(1.0, 5.0, 95.0),
+                Vector3::new(1.0, 0.0, 90.0),
             ],
             transonic_distances: vec![150.0],
         };
