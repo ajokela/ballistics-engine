@@ -211,14 +211,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Create ballistic inputs
             let inputs = BallisticInputs {
                 muzzle_velocity: velocity,
-                launch_angle: angle_rad,
-                ballistic_coefficient: bc,
-                mass: mass_kg,
-                diameter: diameter_m,
-                drag_model: drag_model_enum,
+                muzzle_angle: angle_rad,
+                bc_value: bc,
+                bullet_mass: mass_kg,
+                bullet_diameter: diameter_m,
+                bullet_length: diameter_m * 4.5,  // Approximate length/diameter ratio
+                bc_type: drag_model_enum,
                 sight_height: 0.0,
                 altitude,
                 temperature,
+                custom_drag_table: None,
                 ..Default::default()
             };
             

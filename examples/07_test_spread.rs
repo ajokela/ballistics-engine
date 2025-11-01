@@ -7,11 +7,12 @@ fn main() {
     // Set up base inputs
     let mut base_inputs = BallisticInputs::default();
     base_inputs.muzzle_velocity = 800.0;
-    base_inputs.launch_angle = 0.785398;  // 45 degrees
-    base_inputs.ballistic_coefficient = 0.5;
-    base_inputs.mass = 0.01;
-    base_inputs.diameter = 0.008;
-    base_inputs.drag_model = DragModel::G1;
+    base_inputs.muzzle_angle = 0.785398;  // 45 degrees
+    base_inputs.bc_value = 0.5;
+    base_inputs.bullet_mass = 0.01;
+    base_inputs.bullet_diameter = 0.008;
+    base_inputs.bullet_length = 0.008 * 4.5;  // Approximate length/diameter ratio
+    base_inputs.bc_type = DragModel::G1;
     base_inputs.azimuth_angle = 0.0;  // Shooting straight ahead
     
     // Set up wind

@@ -487,8 +487,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     
     match cli.command {
-        Commands::Trajectory { 
-            velocity, angle, bc, bullet_mass, bullet_diameter, drag_model, 
+        Commands::Trajectory {
+            velocity, angle, bc, mass, diameter, drag_model,
             max_range, time_step, wind_speed, wind_direction,
             temperature, pressure, humidity, altitude,
             output, full, auto_zero, sight_height,
@@ -497,9 +497,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             enable_wind_shear, sample_trajectory, sample_interval,
             enable_pitch_damping, enable_precession, use_cluster_bc, twist_rate, twist_right, latitude,
             use_euler, use_rk4_fixed,
-            shooting_angle, use_powder_sensitivity, 
+            shooting_angle, use_powder_sensitivity,
             powder_temp_sensitivity, powder_temp
         } => {
+            // Rename for clarity
+            let bullet_mass = mass;
+            let bullet_diameter = diameter;
             // Convert inputs to metric
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
@@ -525,8 +528,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let zero_inputs = BallisticInputs {
                     muzzle_velocity: velocity_metric,
                     bc_value: bc,
-                    mass: mass_metric,
-                    diameter: diameter_metric,
+                    bullet_mass: mass_metric,
+                    bullet_diameter: diameter_metric,
                     sight_height: sight_height_metric,
                     ..Default::default()
                 };
@@ -559,11 +562,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         
         Commands::MonteCarlo {
-            velocity, angle, bc, bullet_mass, bullet_diameter,
+            velocity, angle, bc, mass, diameter,
             num_sims, velocity_std, angle_std, bc_std, wind_std,
             wind_speed, wind_direction,
             target_distance, output
         } => {
+            let bullet_mass = mass;
+            let bullet_diameter = diameter;
             run_monte_carlo(
                 velocity, angle, bc, bullet_mass, bullet_diameter,
                 num_sims, velocity_std, angle_std, bc_std, wind_std,
@@ -573,10 +578,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         
         Commands::Zero {
-            velocity, bc, bullet_mass, bullet_diameter,
+            velocity, bc, mass, diameter,
             target_distance, target_height, sight_height,
             output
         } => {
+            let bullet_mass = mass;
+            let bullet_diameter = diameter;
             // Convert inputs to metric
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
@@ -599,10 +606,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         
         Commands::EstimateBC {
-            velocity, bullet_mass, bullet_diameter,
+            velocity, mass, diameter,
             distance1, drop1, distance2, drop2,
             output
         } => {
+            let bullet_mass = mass;
+            let bullet_diameter = diameter;
             run_bc_estimation(
                 velocity, bullet_mass, bullet_diameter,
                 distance1, drop1, distance2, drop2,
@@ -611,8 +620,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         
         Commands::GenerateBCSegments {
-            bc, bullet_mass, bullet_diameter, model, drag_model, output
+            bc, mass, diameter, model, drag_model, output
         } => {
+            let bullet_mass = mass;
+            let bullet_diameter = diameter;
             // Convert to metric if needed
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
             let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
@@ -756,15 +767,10 @@ fn run_trajectory(
         enable_pitch_damping,
         enable_precession_nutation: enable_precession,
         use_cluster_bc,
-        
+
         // Optional data
         bc_type_str: None,
-        bullet_model: None,
-        bullet_id: None,
-        
-        // Height parameters (using reasonable defaults)
-        muzzle_height: 1.5,  // Default standing position in meters
-        target_height: 0.0,  // Default ground level target in meters
+        custom_drag_table: None,
     };
     
     // Set up wind conditions
@@ -1086,8 +1092,8 @@ fn run_monte_carlo(
         muzzle_velocity: velocity,
         muzzle_angle: angle.to_radians(),
         bc_value: bc,
-        bullet_mass,
-        bullet_diameter,
+        bullet_mass: mass,
+        bullet_diameter: diameter,
         ..Default::default()
     };
     
@@ -1197,8 +1203,8 @@ fn run_zero_calculation(
     let inputs = BallisticInputs {
         muzzle_velocity: velocity,
         bc_value: bc,
-        bullet_mass,
-        bullet_diameter,
+        bullet_mass: mass,
+        bullet_diameter: diameter,
         sight_height,
         ..Default::default()
     };
@@ -1372,17 +1378,17 @@ fn run_bc_estimation(
     // Estimate BC
     let estimated_bc = ballistics_engine::estimate_bc_from_trajectory(
         velocity,
-        bullet_mass,
-        bullet_diameter,
+        mass,
+        diameter,
         &points,
     )?;
-    
+
     // Verify the estimation by running a trajectory
     let inputs = BallisticInputs {
         muzzle_velocity: velocity,
         bc_value: estimated_bc,
-        bullet_mass,
-        bullet_diameter,
+        bullet_mass: mass,
+        bullet_diameter: diameter,
         ..Default::default()
     };
     
