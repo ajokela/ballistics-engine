@@ -164,6 +164,8 @@ mod tests {
             enable_pitch_damping: false,
             enable_precession_nutation: false,
             use_cluster_bc: false,
+            muzzle_height: 1.5,
+            target_height: 0.0,
         }
     }
 

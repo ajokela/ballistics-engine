@@ -52,6 +52,8 @@ impl From<&str> for BallisticsError {
 }
 
 // Ballistic input parameters
+// MBA-151: Optional PyO3 support for Python bindings
+#[cfg_attr(feature = "python", pyo3::pyclass)]
 #[derive(Debug, Clone)]
 pub struct BallisticInputs {
     // Core ballistics parameters
