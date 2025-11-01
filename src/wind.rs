@@ -129,13 +129,15 @@ mod tests {
     fn test_wind_sock_single_segment() {
         // 16.0934 kmh (10 mph) @ 90° until 100m
         let sock = WindSock::new(vec![(16.0934, 90.0, 100.0)]);
-        
+
         // Should have wind before 100m
         let vec_50 = sock.vector_for_range_stateless(50.0);
+        println!("vec_50 = [{}, {}, {}]", vec_50[0], vec_50[1], vec_50[2]);
         assert!(vec_50.norm() > 0.0);
-        assert!(vec_50[0].abs() < 0.01); // Nearly zero X component
+        // 90° wind from right: should have negative X component, zero Y, small Z
+        assert!(vec_50[0] < 0.0, "X component should be negative for 90° wind, got {}", vec_50[0]);
         assert_eq!(vec_50[1], 0.0); // Zero Y component
-        assert!(vec_50[2] < 0.0); // Negative Z (wind from right)
+        assert!(vec_50[2].abs() < 0.01, "Z component should be nearly zero for 90° wind, got {}", vec_50[2]);
         
         // No wind after 100m
         let vec_150 = sock.vector_for_range_stateless(150.0);
@@ -150,21 +152,25 @@ mod tests {
             (24.1401, 45.0, 100.0),  // 15 mph @ 45° until 100m
             (8.0467, 180.0, 200.0),  // 5 mph @ 180° until 200m
         ]);
-        
+
         // Test each segment
         let vec_25 = sock.vector_for_range_stateless(25.0);
+        println!("vec_25 = [{}, {}, {}]", vec_25[0], vec_25[1], vec_25[2]);
         assert!(vec_25.norm() > 0.0);
-        assert!(vec_25[2] < 0.0); // 90° wind
-        
+        assert!(vec_25[0] < 0.0, "90° wind should have negative X"); // 90° wind from right
+
         let vec_75 = sock.vector_for_range_stateless(75.0);
+        println!("vec_75 = [{}, {}, {}]", vec_75[0], vec_75[1], vec_75[2]);
         assert!(vec_75.norm() > vec_25.norm()); // 15 mph > 10 mph
-        assert!(vec_75[0] < 0.0); // 45° wind has X component
-        assert!(vec_75[2] < 0.0); // 45° wind has Z component
-        
+        assert!(vec_75[0] < 0.0); // 45° wind has negative X component
+        assert!(vec_75[2] < 0.0); // 45° wind has negative Z component
+
         let vec_150 = sock.vector_for_range_stateless(150.0);
+        println!("vec_150 = [{}, {}, {}]", vec_150[0], vec_150[1], vec_150[2]);
         assert!(vec_150.norm() < vec_75.norm()); // 5 mph < 15 mph
-        assert!(vec_150[0] > 0.0); // 180° wind (from behind)
-        
+        assert!(vec_150[0].abs() < 0.01, "180° wind should have near-zero X, got {}", vec_150[0]); // 180° wind (from behind)
+        assert!(vec_150[2] > 0.0, "180° wind should have positive Z (tailwind), got {}", vec_150[2]); // Tailwind
+
         let vec_250 = sock.vector_for_range_stateless(250.0);
         assert_eq!(vec_250, Vector3::zeros()); // Beyond all segments
     }

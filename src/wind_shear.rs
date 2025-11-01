@@ -397,16 +397,29 @@ mod tests {
 
     #[test]
     fn test_wind_layer() {
-        let layer = WindLayer {
+        // Test 0° wind (from north/front - headwind)
+        let layer_headwind = WindLayer {
             altitude_m: 100.0,
             speed_mps: 10.0,
-            direction_deg: 0.0, // North wind
+            direction_deg: 0.0, // Wind from front (headwind)
         };
 
-        let vec = layer.to_vector();
-        assert!((vec.x - (-10.0)).abs() < 1e-6);
+        let vec = layer_headwind.to_vector();
+        assert!((vec.x).abs() < 1e-6, "0° wind should have zero lateral component");
         assert_eq!(vec.y, 0.0);
-        assert!((vec.z).abs() < 1e-6);
+        assert!((vec.z - (-10.0)).abs() < 1e-6, "0° wind should be headwind (negative Z)");
+
+        // Test 90° wind (from right)
+        let layer_crosswind = WindLayer {
+            altitude_m: 100.0,
+            speed_mps: 10.0,
+            direction_deg: 90.0, // Wind from right
+        };
+
+        let vec_cross = layer_crosswind.to_vector();
+        assert!((vec_cross.x - (-10.0)).abs() < 1e-6, "90° wind should have negative X");
+        assert_eq!(vec_cross.y, 0.0);
+        assert!((vec_cross.z).abs() < 1e-6, "90° wind should have zero downrange component");
     }
 
     #[test]
