@@ -31,17 +31,21 @@ pub mod ffi;
 pub mod wasm;
 #[cfg(test)]
 mod wasm_tests;
-mod constants;
+// MBA-154: Make constants public for ballistics_rust wrapping
+pub mod constants;
 pub mod drag;
 mod drag_tables;
 pub mod atmosphere;
 pub mod wind;
 // MBA-153: Make wind_shear public for ballistics_rust wrapping
 pub mod wind_shear;
-mod derivatives;
-mod trajectory_solver;
+// MBA-154: Make derivatives public for ballistics_rust wrapping
+pub mod derivatives;
+// MBA-154: Make trajectory_solver public for ballistics_rust wrapping
+pub mod trajectory_solver;
 pub mod trajectory_sampling;
-mod fast_trajectory;
+// MBA-154: Make fast_trajectory public for ballistics_rust wrapping
+pub mod fast_trajectory;
 // MBA-149 Phase 5 Priority 2: Export enhanced spin_drift
 pub mod spin_drift;
 pub mod spin_drift_advanced;
