@@ -36,7 +36,8 @@ pub mod drag;
 mod drag_tables;
 pub mod atmosphere;
 pub mod wind;
-mod wind_shear;
+// MBA-153: Make wind_shear public for ballistics_rust wrapping
+pub mod wind_shear;
 mod derivatives;
 mod trajectory_solver;
 pub mod trajectory_sampling;
@@ -48,14 +49,17 @@ pub mod spin_decay;
 pub mod pitch_damping;
 // MBA-149 Phase 5 Priority 2: Export enhanced precession_nutation
 pub mod precession_nutation;
-mod aerodynamic_jump;
+// MBA-153: Make aerodynamic_jump public for ballistics_rust wrapping
+pub mod aerodynamic_jump;
 // MBA-149 Phase 5 Priority 2: Export enhanced angle_calculations
 pub mod angle_calculations;
 pub mod transonic_drag;
-mod reynolds;
+// MBA-153: Make reynolds public for ballistics_rust wrapping
+pub mod reynolds;
 // MBA-149 Phase 5 Priority 2: Export enhanced form_factor
 pub mod form_factor;
-mod monte_carlo;
+// MBA-153: Make monte_carlo public for ballistics_rust wrapping
+pub mod monte_carlo;
 pub mod bc_estimation;
 pub mod stability;
 pub mod stability_advanced;
