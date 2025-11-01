@@ -46,6 +46,8 @@ pub mod trajectory_solver;
 pub mod trajectory_sampling;
 // MBA-154: Make fast_trajectory public for ballistics_rust wrapping
 pub mod fast_trajectory;
+// MBA-155: Add advanced integration methods (RK4, RK45)
+pub mod trajectory_integration;
 // MBA-149 Phase 5 Priority 2: Export enhanced spin_drift
 pub mod spin_drift;
 pub mod spin_drift_advanced;

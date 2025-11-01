@@ -317,6 +317,114 @@ fn get_bc_from_velocity_segments(velocity_fps: f64, segments: &[BCSegmentData]) 
     0.5
 }
 
+/// Fast integration with explicit wind segments using RK45
+/// MBA-155: Upstreamed from ballistics_rust
+pub fn fast_integrate_with_segments(
+    inputs: &BallisticInputs,
+    wind_segments: Vec<crate::wind::WindSegment>,
+    params: FastIntegrationParams,
+) -> FastSolution {
+    // Use the RK45 implementation from trajectory_integration module
+    use crate::trajectory_integration::{integrate_trajectory, TrajectoryParams};
+
+    // Extract parameters
+    let mass_kg = inputs.bullet_mass * GRAINS_TO_KG;
+    let bc = inputs.bc_value;
+    let drag_model = inputs.bc_type.clone();
+
+    // Get omega vector if advanced effects enabled
+    let omega_vector = if inputs.enable_advanced_effects {
+        // Calculate omega based on latitude
+        let omega_earth = 7.2921159e-5; // rad/s
+        let lat_rad = inputs.latitude.unwrap_or(0.0).to_radians();
+        Some(Vector3::new(
+            0.0,
+            omega_earth * lat_rad.cos(),
+            omega_earth * lat_rad.sin(),
+        ))
+    } else {
+        None
+    };
+
+    // Set up trajectory parameters
+    let traj_params = TrajectoryParams {
+        mass_kg,
+        bc,
+        drag_model,
+        wind_segments,
+        atmos_params: params.atmo_params,
+        omega_vector,
+        enable_spin_drift: inputs.enable_advanced_effects,
+        enable_magnus: inputs.enable_advanced_effects,
+        enable_coriolis: inputs.enable_advanced_effects,
+        target_distance_m: params.horiz,
+        enable_wind_shear: inputs.enable_wind_shear,
+        wind_shear_model: inputs.wind_shear_model.clone(),
+        shooter_altitude_m: inputs.altitude,
+        is_twist_right: inputs.is_twist_right,
+        custom_drag_table: inputs.custom_drag_table.clone(),
+    };
+
+    // Use RK45 adaptive integration
+    let trajectory = integrate_trajectory(
+        params.initial_state,
+        params.t_span,
+        traj_params,
+        "RK45",  // Use RK45 implementation
+        1e-6,    // tolerance
+        0.01,    // max_step
+    );
+
+    // Convert trajectory to FastSolution format
+    let n_points = trajectory.len();
+    let mut times = Vec::with_capacity(n_points);
+    let mut states = Vec::with_capacity(n_points);
+
+    let mut target_hit_time: Option<f64> = None;
+    let mut ground_hit_time: Option<f64> = None;
+    let mut max_ord_time = None;
+    let mut max_ord_y = 0.0;
+
+    for (t, state_vec) in trajectory {
+        // Convert Vector6 to array
+        let state = [
+            state_vec[0], state_vec[1], state_vec[2],
+            state_vec[3], state_vec[4], state_vec[5],
+        ];
+
+        // Check termination conditions
+        // Z IS DOWNRANGE: state[0]=lateral, state[1]=vertical, state[2]=downrange
+
+        // Record FIRST time target is hit
+        if target_hit_time.is_none() && state[2] >= params.horiz {
+            target_hit_time = Some(t);
+        }
+
+        // Record ground hit
+        if ground_hit_time.is_none() && state[1] <= inputs.ground_threshold {
+            ground_hit_time = Some(t);
+        }
+
+        // Track maximum ordinate
+        if state[1] > max_ord_y {
+            max_ord_y = state[1];
+            max_ord_time = Some(t);
+        }
+
+        times.push(t);
+        states.push(state);
+    }
+
+    // Create event arrays
+    let t_events = [
+        if let Some(t) = target_hit_time { vec![t] } else { vec![] },
+        if let Some(t) = max_ord_time { vec![t] } else { vec![] },
+        if let Some(t) = ground_hit_time { vec![t] } else { vec![] },
+    ];
+
+    FastSolution::from_trajectory_data(times, states, t_events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
