@@ -41,16 +41,20 @@ mod derivatives;
 mod trajectory_solver;
 pub mod trajectory_sampling;
 mod fast_trajectory;
-mod spin_drift;
+// MBA-149 Phase 5 Priority 2: Export enhanced spin_drift
+pub mod spin_drift;
 pub mod spin_drift_advanced;
 pub mod spin_decay;
 pub mod pitch_damping;
-mod precession_nutation;
+// MBA-149 Phase 5 Priority 2: Export enhanced precession_nutation
+pub mod precession_nutation;
 mod aerodynamic_jump;
-mod angle_calculations;
+// MBA-149 Phase 5 Priority 2: Export enhanced angle_calculations
+pub mod angle_calculations;
 pub mod transonic_drag;
 mod reynolds;
-mod form_factor;
+// MBA-149 Phase 5 Priority 2: Export enhanced form_factor
+pub mod form_factor;
 mod monte_carlo;
 pub mod bc_estimation;
 pub mod stability;
