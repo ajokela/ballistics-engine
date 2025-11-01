@@ -26,7 +26,8 @@ pub use cli_api::{
 // Module declarations
 mod drag_model;
 pub mod cli_api;
-pub mod ffi;
+// Excluded from crates.io (has CLI dependencies)
+// pub mod ffi;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 #[cfg(test)]
