@@ -311,7 +311,7 @@ pub fn post_process_trajectory(
     let drop_m = initial_conditions.target_vertical_height_m - final_y_m;
     
     // Calculate wind drift including spin drift
-    let mut wind_drift_m = final_z_m;
+    let wind_drift_m = final_z_m;
     if inputs.enable_advanced_effects {
         // Add spin drift using existing function
         // TODO: Re-enable when stability module is available

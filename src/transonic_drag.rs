@@ -29,11 +29,12 @@ impl ProjectileShape {
 /// 
 /// This factor accounts for air compressibility effects in subsonic flow approaching Mach 1.
 /// Formula: 1/sqrt(1-M²) where M is Mach number
-/// 
+///
 /// Physical basis: As flow approaches sonic speeds, local acceleration over the projectile
 /// surface causes compressibility effects that increase the effective angle of attack and drag.
-/// 
+///
 /// Note: This correction is only valid for subsonic flow (Mach < 1.0)
+#[allow(dead_code)]
 fn prandtl_glauert_correction(mach: f64) -> f64 {
     if mach >= 0.99 {
         // Near Mach 1, the theoretical correction approaches infinity (1/sqrt(1-1²) = 1/0)
@@ -41,7 +42,7 @@ fn prandtl_glauert_correction(mach: f64) -> f64 {
         // This represents a practical limit where the linear theory breaks down
         return 10.0;
     }
-    
+
     // Classic Prandtl-Glauert compressibility correction factor
     // Accounts for increased pressure coefficients due to compressibility
     let beta = (1.0 - mach * mach).sqrt();

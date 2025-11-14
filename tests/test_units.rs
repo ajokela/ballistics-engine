@@ -73,9 +73,9 @@ fn main() {
     
     println!("\nMetric In/Out (no conversion):");
     let metric_velocity = 850.0;
-    let metric_mass = 0.01;
-    let metric_distance = 900.0;
-    
+    let _metric_mass = 0.01;
+    let _metric_distance = 900.0;
+
     let processed_velocity = UnitConverter::velocity_to_metric(metric_velocity, UnitSystem::Metric);
     let output_velocity_metric = UnitConverter::velocity_from_metric(processed_velocity, UnitSystem::Metric);
     

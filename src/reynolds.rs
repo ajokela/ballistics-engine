@@ -6,6 +6,7 @@
 
 
 /// Flow regime classification based on Reynolds number
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FlowRegime {
     Laminar,        // Re < 2000
@@ -50,6 +51,7 @@ fn calculate_air_viscosity(temperature_k: f64) -> f64 {
 }
 
 /// Determine flow regime based on Reynolds number
+#[allow(dead_code)]
 fn get_flow_regime(reynolds_number: f64) -> FlowRegime {
     if reynolds_number < 2000.0 {
         FlowRegime::Laminar

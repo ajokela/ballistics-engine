@@ -482,8 +482,8 @@ mod tests {
     
     #[test]
     fn test_transonic_jump() {
-        let coeffs = PitchDampingCoefficients::from_bullet_type("hunting");
-        
+        let _coeffs = PitchDampingCoefficients::from_bullet_type("hunting");
+
         // In transonic region, check for potential instability
         let (yaw_subsonic, _) = calculate_damped_yaw_of_repose(
             2.5, 250.0, 19000.0, 10.0, 0.01, 1.225,

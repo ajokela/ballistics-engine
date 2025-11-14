@@ -37,19 +37,13 @@ fn main() {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!(" Scenario              | Range (m) | Drift (m) | Impact V (m/s) | TOF (s)");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    
-    let mut baseline_range = 0.0;
-    
+
     for (name, wind_speed, wind_dir) in wind_scenarios {
         let result = calculate_with_wind(
             velocity, angle_deg, mass, diameter, bc,
             wind_speed, wind_dir
         );
-        
-        if name == "No Wind" {
-            baseline_range = result.range;
-        }
-        
+
         println!(" {:20} | {:9.2} | {:9.2} | {:14.2} | {:7.3}",
             name, result.range, result.lateral_drift, 
             result.impact_velocity, result.time_of_flight);

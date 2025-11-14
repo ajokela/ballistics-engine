@@ -563,7 +563,7 @@ fn get_bc_for_velocity(velocity_fps: f64, inputs: &BallisticInputs, bc_used: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DragModel;
+    
 
     fn create_test_inputs() -> BallisticInputs {
         BallisticInputs {

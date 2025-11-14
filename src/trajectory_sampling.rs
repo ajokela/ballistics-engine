@@ -1,9 +1,6 @@
 use nalgebra::Vector3;
 use std::collections::HashSet;
 
-// Constants for unit conversions
-const YARDS_TO_METERS: f64 = 0.9144;
-
 /// Trajectory flags for notable events
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TrajectoryFlag {

@@ -110,7 +110,7 @@ pub fn compute_spin_drift_with_decay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DragModel;
+    
 
     fn create_test_inputs() -> BallisticInputs {
         BallisticInputs {

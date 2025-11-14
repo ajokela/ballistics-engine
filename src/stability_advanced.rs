@@ -198,9 +198,6 @@ fn apply_bowman_howell_correction(sg: f64, velocity_fps: f64, caliber_inches: f6
         return sg;
     }
     
-    // Calculate Mach number
-    let mach = velocity_fps / 1125.0; // Approximate speed of sound in fps
-    
     // Hypervelocity correction factor
     let excess_velocity = (velocity_fps - 3000.0) / 1000.0;
     let mach_correction = 1.0 - 0.05 * excess_velocity.min(2.0);
@@ -224,7 +221,7 @@ pub fn calculate_dynamic_stability(
     spin_rate_rad_s: f64,
     yaw_angle_rad: f64,
     caliber_m: f64,
-    mass_kg: f64,
+    _mass_kg: f64,
 ) -> f64 {
     // Dynamic stability accounts for yaw and precession
     

@@ -457,7 +457,7 @@ pub extern "C" fn ballistics_quick_trajectory(
 #[no_mangle]
 pub extern "C" fn ballistics_monte_carlo(
     inputs: *const FFIBallisticInputs,
-    atmosphere: *const FFIAtmosphericConditions,
+    _atmosphere: *const FFIAtmosphericConditions,
     params: *const FFIMonteCarloParams,
 ) -> *mut FFIMonteCarloResults {
     if inputs.is_null() || params.is_null() {

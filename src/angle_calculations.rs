@@ -8,7 +8,6 @@ const DEGREES_TO_RADIANS: f64 = std::f64::consts::PI / 180.0;
 const RADIANS_TO_DEGREES: f64 = 180.0 / std::f64::consts::PI;
 
 // Zero finding constants
-const ZERO_FINDING_ACCURACY: f64 = crate::constants::ROOT_FINDING_TOLERANCE;
 const ZERO_FINDING_MAX_ITER: usize = 100;
 
 /// Result of angle calculation
@@ -338,7 +337,7 @@ pub fn quick_drop_estimate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DragModel;
+    
     
     fn create_test_inputs() -> InternalBallisticInputs {
         InternalBallisticInputs {
