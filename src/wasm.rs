@@ -1038,8 +1038,8 @@ impl WasmBallistics {
         
         for (idx, point) in result.points.iter().enumerate() {
             let range_display = match units {
-                UnitSystem::Imperial => point.position.z * 1.09361, // m to yards
-                UnitSystem::Metric => point.position.z,
+                UnitSystem::Imperial => point.position.x * 1.09361, // X is downrange, m to yards
+                UnitSystem::Metric => point.position.x,  // X is downrange
             };
             
             let is_last_point = idx == result.points.len() - 1;
@@ -1051,7 +1051,7 @@ impl WasmBallistics {
             
             if should_show {
                 let drop = sight_height - point.position.y;
-                let drift = point.position.x;
+                let drift = point.position.z;  // Z is lateral (windage)
                 let velocity = point.velocity_magnitude;
                 
                 // Format values based on unit system
@@ -1099,7 +1099,7 @@ impl WasmBallistics {
         if let Some(last_point) = result.points.last() {
             // Debug info about last point
             let last_height = last_point.position.y;
-            let last_range = last_point.position.z;
+            let last_range = last_point.position.x;  // X is downrange
             let last_time = last_point.time;
             
             // Ground threshold is typically around 0.01m (1cm), so if y is close to or below that, it hit ground
@@ -1134,9 +1134,9 @@ impl WasmBallistics {
             match units {
                 UnitSystem::Imperial => {
                     serde_json::json!({
-                        "range_yards": p.position.z * 1.09361,
+                        "range_yards": p.position.x * 1.09361,  // X is downrange
                         "drop_inches": (result.points[0].position.y - p.position.y) * 39.3701,
-                        "drift_inches": p.position.x * 39.3701,
+                        "drift_inches": p.position.z * 39.3701,  // Z is lateral (windage)
                         "velocity_fps": p.velocity_magnitude * 3.28084,
                         "energy_ftlb": p.kinetic_energy * 0.737562149,
                         "time_seconds": p.time
@@ -1144,9 +1144,9 @@ impl WasmBallistics {
                 },
                 UnitSystem::Metric => {
                     serde_json::json!({
-                        "range_meters": p.position.z,
+                        "range_meters": p.position.x,  // X is downrange
                         "drop_cm": (result.points[0].position.y - p.position.y) * 100.0,
-                        "drift_cm": p.position.x * 100.0,
+                        "drift_cm": p.position.z * 100.0,  // Z is lateral (windage)
                         "velocity_mps": p.velocity_magnitude,
                         "energy_joules": p.kinetic_energy,
                         "time_seconds": p.time
@@ -1216,15 +1216,15 @@ impl WasmBallistics {
 
         for (idx, point) in result.points.iter().enumerate() {
             let range_display = match units {
-                UnitSystem::Imperial => point.position.z * 1.09361,
-                UnitSystem::Metric => point.position.z,
+                UnitSystem::Imperial => point.position.x * 1.09361,  // X is downrange
+                UnitSystem::Metric => point.position.x,  // X is downrange
             };
-            
+
             let is_last_point = idx == result.points.len() - 1;
-            
+
             if range_display >= current_range || is_last_point {
                 let drop = sight_height - point.position.y;
-                
+
                 match units {
                     UnitSystem::Imperial => {
                         let energy_ftlb = point.kinetic_energy * 0.737562149;
@@ -1232,7 +1232,7 @@ impl WasmBallistics {
                             "{:.1},{:.2},{:.2},{:.0},{:.0},{:.3}\n",
                             range_display,
                             drop * 39.3701,
-                            point.position.x * 39.3701,
+                            point.position.z * 39.3701,  // Z is lateral (windage)
                             point.velocity_magnitude * 3.28084,
                             energy_ftlb,
                             point.time
@@ -1243,7 +1243,7 @@ impl WasmBallistics {
                             "{:.1},{:.2},{:.2},{:.0},{:.0},{:.3}\n",
                             range_display,
                             drop * 100.0,
-                            point.position.x * 100.0,
+                            point.position.z * 100.0,  // Z is lateral (windage)
                             point.velocity_magnitude,
                             point.kinetic_energy,
                             point.time
