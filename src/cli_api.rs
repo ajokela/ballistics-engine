@@ -360,9 +360,9 @@ impl TrajectorySolver {
         // Calculate initial velocity components with both elevation and azimuth
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: side deviation (left/right)
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // X: forward component (downrange)
             self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: forward component (down-range)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // Z: side deviation (lateral)
         );
         
         let mut points = Vec::new();
@@ -389,15 +389,15 @@ impl TrajectorySolver {
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
         
-        // Wind vector
+        // Wind vector (X is downrange, Z is lateral)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.sin(),
+            self.wind.speed * self.wind.direction.cos(),  // X: downrange (head/tail wind)
             0.0,
-            self.wind.speed * self.wind.direction.cos(),
+            self.wind.speed * self.wind.direction.sin(),  // Z: lateral (crosswind)
         );
         
-        // Main integration loop
-        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
+        // Main integration loop (X is downrange)
+        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
@@ -538,7 +538,7 @@ impl TrajectorySolver {
             };
             
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.z,
+                target_distance_horiz_m: last_point.position.x,  // X is downrange
                 target_vertical_height_m: last_point.position.y,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
@@ -552,7 +552,7 @@ impl TrajectorySolver {
         };
         
         Ok(TrajectoryResult {
-            max_range: last_point.position.z,
+            max_range: last_point.position.x,  // X is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -575,16 +575,16 @@ impl TrajectorySolver {
         // Calculate initial velocity components with both elevation and azimuth
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // X: forward component (downrange)
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // Z: side deviation (lateral)
         );
-        
+
         let mut points = Vec::new();
         let mut max_height = position.y;
         let mut min_pitch_damping = 1.0;  // Track minimum pitch damping coefficient
         let mut transonic_mach = None;    // Track when we enter transonic
-        
+
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
             Some(AngularState {
@@ -600,19 +600,19 @@ impl TrajectorySolver {
         };
         let mut max_yaw_angle = 0.0;
         let mut max_precession_angle = 0.0;
-        
+
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
-        
-        // Wind vector
+
+        // Wind vector (X is downrange, Z is lateral)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.sin(),
+            self.wind.speed * self.wind.direction.cos(),  // X: downrange (head/tail wind)
             0.0,
-            self.wind.speed * self.wind.direction.cos(),
+            self.wind.speed * self.wind.direction.sin(),  // Z: lateral (crosswind)
         );
-        
-        // Main RK4 integration loop
-        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
+
+        // Main RK4 integration loop (X is downrange)
+        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
@@ -750,7 +750,7 @@ impl TrajectorySolver {
             };
             
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.z,
+                target_distance_horiz_m: last_point.position.x,  // X is downrange
                 target_vertical_height_m: last_point.position.y,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
@@ -764,7 +764,7 @@ impl TrajectorySolver {
         };
         
         Ok(TrajectoryResult {
-            max_range: last_point.position.z,
+            max_range: last_point.position.x,  // X is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -860,7 +860,7 @@ impl TrajectorySolver {
         let last_point = points.last().unwrap();
         
         Ok(TrajectoryResult {
-            max_range: last_point.position.z,
+            max_range: last_point.position.x,  // X is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
