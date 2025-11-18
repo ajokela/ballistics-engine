@@ -150,7 +150,7 @@ impl Default for BallisticInputs {
             azimuth_angle: 0.0,
             shooting_angle: 0.0,
             sight_height: 0.05,
-            muzzle_height: 1.5,  // 1.5m default (standing position)
+            muzzle_height: 0.0,  // Default 0 - height is in sight_height
             target_height: 0.0,  // Target at ground level by default
             ground_threshold: -0.001,  // Stop just below ground level
 
@@ -1265,15 +1265,15 @@ pub fn calculate_zero_angle_with_conditions(
         eprintln!("  Iteration {}: angle = {:.6} rad ({:.4} deg)", 
                  iteration, mid_angle, mid_angle * 180.0 / std::f64::consts::PI);
         
-        // Find the height at target distance
+        // Find the height at target distance (X is downrange)
         let mut height_at_target = None;
         for i in 0..result.points.len() {
-            if result.points[i].position.z >= target_distance {
+            if result.points[i].position.x >= target_distance {
                 if i > 0 {
                     // Linear interpolation
                     let p1 = &result.points[i - 1];
                     let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.z) / (p2.position.z - p1.position.z);
+                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
                     height_at_target = Some(p1.position.y + t * (p2.position.y - p1.position.y));
                 } else {
                     height_at_target = Some(result.points[i].position.y);
