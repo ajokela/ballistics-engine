@@ -401,13 +401,19 @@ impl TrajectorySolver {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
-            
+
             points.push(TrajectoryPoint {
                 time,
                 position: position.clone(),
                 velocity_magnitude,
                 kinetic_energy,
             });
+
+            // Debug: Log first and every 100th point
+            if points.len() == 1 || points.len() % 100 == 0 {
+                eprintln!("Trajectory point {}: time={:.3}s, x={:.2}m, y={:.2}m, z={:.2}m, vel={:.1}m/s",
+                    points.len(), time, position.x, position.y, position.z, velocity_magnitude);
+            }
             
             // Track max height
             if position.y > max_height {
@@ -784,12 +790,12 @@ impl TrajectorySolver {
         let mut time = 0.0;
         let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         
-        // Calculate initial velocity components
+        // Calculate initial velocity components (X is downrange, Z is lateral)
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // X: forward component (downrange)
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // Z: side deviation (lateral)
         );
         
         let mut points = Vec::new();
@@ -804,7 +810,7 @@ impl TrajectorySolver {
         let mut iteration_count = 0;
         const MAX_ITERATIONS: usize = 100000;
         
-        while position.z < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
+        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {  // X is downrange
             iteration_count += 1;
             if iteration_count > MAX_ITERATIONS {
                 break; // Prevent infinite loop
@@ -825,12 +831,12 @@ impl TrajectorySolver {
                 max_height = position.y;
             }
             
-            // Get atmospheric conditions and wind
+            // Get atmospheric conditions and wind (X is downrange, Z is lateral)
             let air_density = calculate_air_density(&self.atmosphere);
             let wind_vector = Vector3::new(
-                -self.wind.speed * self.wind.direction.sin(),
+                self.wind.speed * self.wind.direction.cos(),  // X: downrange (head/tail wind)
                 0.0,
-                -self.wind.speed * self.wind.direction.cos(),
+                self.wind.speed * self.wind.direction.sin(),  // Z: lateral (crosswind)
             );
             
             // RK45 step with adaptive step size

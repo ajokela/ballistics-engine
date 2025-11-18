@@ -234,7 +234,7 @@ pub extern "C" fn ballistics_calculate_trajectory(
             let point_count = result.points.len();
             let points = if point_count > 0 {
                 let mut ffi_points = Vec::with_capacity(point_count);
-                for point in &result.points {
+                for (i, point) in result.points.iter().enumerate() {
                     ffi_points.push(FFITrajectoryPoint {
                         time: point.time,
                         position_x: point.position[0],
@@ -243,6 +243,12 @@ pub extern "C" fn ballistics_calculate_trajectory(
                         velocity_magnitude: point.velocity_magnitude,
                         kinetic_energy: point.kinetic_energy,
                     });
+
+                    // Debug: Log first, last, and every 100th point
+                    if i == 0 || i == result.points.len() - 1 || i % 100 == 0 {
+                        eprintln!("FFI point {}: x={:.2}m, y={:.2}m, z={:.2}m (X is downrange)",
+                            i, point.position[0], point.position[1], point.position[2]);
+                    }
                 }
                 let points_ptr = ffi_points.as_mut_ptr();
                 std::mem::forget(ffi_points); // Prevent deallocation
