@@ -98,12 +98,12 @@ pub fn sample_trajectory(
     let muzzle_y = if !y_vals.is_empty() { y_vals[0] } else { 0.0 };
     
     for &distance in &distances {
-        // Interpolate using z (downrange) as the independent variable
-        let y_interp = interpolate(&z_vals, &y_vals, distance);  // vertical at downrange distance
-        let wind_drift = interpolate(&z_vals, &x_vals, distance);  // lateral drift at downrange distance
-        let velocity = interpolate(&z_vals, &speeds, distance);  // velocity at downrange distance
-        let time = interpolate(&z_vals, &trajectory_data.times, distance);  // time at downrange distance
-        let energy = interpolate(&z_vals, &energies, distance);  // energy at downrange distance
+        // Interpolate using x (downrange) as the independent variable - STANDARD BALLISTICS CONVENTION
+        let y_interp = interpolate(&x_vals, &y_vals, distance);  // vertical at downrange distance
+        let wind_drift = interpolate(&x_vals, &z_vals, distance);  // lateral drift at downrange distance
+        let velocity = interpolate(&x_vals, &speeds, distance);  // velocity at downrange distance
+        let time = interpolate(&x_vals, &trajectory_data.times, distance);  // time at downrange distance
+        let energy = interpolate(&x_vals, &energies, distance);  // energy at downrange distance
         
         // Calculate line-of-sight y-coordinate and drop
         // The LOS is the straight line from initial position to target
@@ -429,13 +429,13 @@ mod tests {
     #[test]
     fn test_sample_trajectory_basic() {
         // Create simple test trajectory data
-        // Note: x=lateral, y=vertical, z=downrange
+        // Note: x=downrange, y=vertical, z=lateral (STANDARD BALLISTICS CONVENTION)
         let trajectory_data = TrajectoryData {
             times: vec![0.0, 1.0, 2.0],
             positions: vec![
-                Vector3::new(0.0, 0.0, 0.0),      // x=0, y=0, z=0 (start)
-                Vector3::new(1.0, 10.0, 100.0),   // x=1, y=10, z=100 (mid - apex region)
-                Vector3::new(2.0, 5.0, 200.0),    // x=2, y=5, z=200 (end)
+                Vector3::new(0.0, 0.0, 0.0),      // x=0 (start), y=0 (vertical), z=0 (lateral)
+                Vector3::new(100.0, 10.0, 1.0),   // x=100 (mid - apex region), y=10, z=1 (drift)
+                Vector3::new(200.0, 5.0, 2.0),    // x=200 (end), y=5, z=2 (drift)
             ],
             velocities: vec![
                 Vector3::new(1.0, 10.0, 100.0),

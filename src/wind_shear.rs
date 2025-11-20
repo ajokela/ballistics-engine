@@ -29,13 +29,13 @@ pub struct WindLayer {
 
 impl WindLayer {
     /// Convert to wind vector [x, y, z] in m/s
-    /// Z IS DOWNRANGE: x=lateral, y=vertical, z=downrange
+    /// STANDARD BALLISTICS CONVENTION: x=downrange, y=vertical, z=lateral
     pub fn to_vector(&self) -> Vector3<f64> {
         let ang = self.direction_deg.to_radians();
         Vector3::new(
-            -self.speed_mps * ang.sin(), // x (lateral - crosswind component)
+            -self.speed_mps * ang.cos(), // x (downrange - head/tail component)
             0.0,                         // y (vertical)
-            -self.speed_mps * ang.cos(), // z (downrange - head/tail component)
+            -self.speed_mps * ang.sin(), // z (lateral - crosswind component)
         )
     }
 }
@@ -294,14 +294,14 @@ impl WindShearWindSock {
 /// and altitude calculations in a single function call.
 ///
 /// # Arguments
-/// * `position` - 3D position vector [x_lateral, y_vertical, z_downrange]
+/// * `position` - 3D position vector [x_downrange, y_vertical, z_lateral]
 /// * `wind_segments` - Wind segments as (speed_kmh, angle_deg, until_distance_m)
 /// * `enable_wind_shear` - Whether to apply wind shear modeling
 /// * `wind_shear_model` - Model type: "none", "logarithmic", "power_law", "ekman_spiral"
 /// * `shooter_altitude_m` - Shooter's altitude above sea level
 ///
 /// # Returns
-/// Wind vector in m/s [x_lateral, y_vertical, z_downrange]
+/// Wind vector in m/s [x_downrange, y_vertical, z_lateral]
 pub fn get_wind_at_position(
     position: &Vector3<f64>,
     wind_segments: &[(f64, f64, f64)],  // (speed_kmh, angle_deg, until_distance_m)
@@ -405,9 +405,9 @@ mod tests {
         };
 
         let vec = layer_headwind.to_vector();
-        assert!((vec.x).abs() < 1e-6, "0° wind should have zero lateral component");
+        assert!((vec.x - (-10.0)).abs() < 1e-6, "0° wind should be headwind (negative X downrange)");
         assert_eq!(vec.y, 0.0);
-        assert!((vec.z - (-10.0)).abs() < 1e-6, "0° wind should be headwind (negative Z)");
+        assert!((vec.z).abs() < 1e-6, "0° wind should have zero lateral component");
 
         // Test 90° wind (from right)
         let layer_crosswind = WindLayer {
@@ -417,9 +417,9 @@ mod tests {
         };
 
         let vec_cross = layer_crosswind.to_vector();
-        assert!((vec_cross.x - (-10.0)).abs() < 1e-6, "90° wind should have negative X");
+        assert!((vec_cross.x).abs() < 1e-6, "90° wind should have zero downrange component");
         assert_eq!(vec_cross.y, 0.0);
-        assert!((vec_cross.z).abs() < 1e-6, "90° wind should have zero downrange component");
+        assert!((vec_cross.z - (-10.0)).abs() < 1e-6, "90° wind should have negative Z lateral");
     }
 
     #[test]
