@@ -1,0 +1,11 @@
+require "rb_sys/cargo"
+
+task :default do
+  RbSys::Cargo.build(
+    manifest_path: File.expand_path("../../Cargo.toml", __dir__),
+    profile: ENV["RELEASE"] ? :release : :dev,
+    target_dir: File.expand_path("../../target", __dir__),
+    ext_dir: __dir__,
+    lib_dir: File.expand_path("../../lib/ballistics_engine", __dir__)
+  )
+end
