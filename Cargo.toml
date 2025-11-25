@@ -1,6 +1,6 @@
-[workspace]
-members = [".", "ballistics-engine-py"]
-exclude = ["ballistics-engine-rb"]
+# [workspace]
+# members = [".", "ballistics-engine-py"]
+# exclude = ["ballistics-engine-rb"]
 
 [package]
 name = "ballistics-engine"
@@ -14,7 +14,7 @@ homepage = "https://ballistics.rs/"
 documentation = "https://docs.rs/ballistics-engine"
 keywords = ["ballistics", "trajectory", "physics", "simulation"]
 categories = ["science", "simulation"]
-exclude = ["app/", "tests/", "examples/", "ios.png", "pkg/", "test_ffi.c", "test_monte_carlo.py", "ballistics_standalone.rs", "ballistics/", "ballistics", "src/main.rs", "src/bin/", "ballistics-engine-py/", "ballistics-engine-rb/", "doc/"]
+exclude = ["app/", "tests/", "examples/", "ios.png", "pkg/", "test_ffi.c", "test_monte_carlo.py", "ballistics_standalone.rs", "ballistics/", "ballistics", "src/main.rs", "src/bin/", "ballistics-engine-py/", "ballistics-engine-rb/", "doc/", "target/"]
 
 [dependencies]
 nalgebra = "0.33"

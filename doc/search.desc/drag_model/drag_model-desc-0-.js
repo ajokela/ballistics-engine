@@ -1,0 +1,1 @@
+searchState.loadedDescShard("drag_model", 0, "Drag model enum\nReturns the argument unchanged.\nCalls <code>U::from(self)</code>.")
