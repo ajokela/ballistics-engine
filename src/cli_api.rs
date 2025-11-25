@@ -862,9 +862,9 @@ impl TrajectorySolver {
         if points.is_empty() {
             return Err(BallisticsError::from("No trajectory points calculated"));
         }
-        
+
         let last_point = points.last().unwrap();
-        
+
         Ok(TrajectoryResult {
             max_range: last_point.position.x,  // X is downrange
             max_height,

@@ -1356,3 +1356,366 @@ Examples:
   ballistics monte-carlo -n 1000 --velocity-std 10"#.to_string()
     }
 }
+
+// ============================================================================
+// Object-Oriented API
+// ============================================================================
+
+/// Object-oriented calculator for programmatic use
+/// Provides a type-safe, fluent API alternative to the CLI interface
+#[wasm_bindgen]
+pub struct Calculator {
+    // Projectile properties
+    bc: f64,
+    velocity_fps: f64,
+    mass_grains: f64,
+    diameter_inches: f64,
+    drag_model: String,
+
+    // Environmental conditions
+    wind_speed_mph: f64,
+    wind_direction_deg: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity_percent: f64,
+    altitude_ft: f64,
+
+    // Shooting parameters
+    sight_height_inches: f64,
+    zero_range_yards: Option<f64>,
+    max_range_yards: f64,
+
+    // Advanced options
+    enable_spin_drift: bool,
+    enable_coriolis: bool,
+    twist_rate_inches: Option<f64>,
+    latitude_deg: Option<f64>,
+}
+
+#[wasm_bindgen]
+impl Calculator {
+    /// Create a new calculator with default values
+    /// Defaults: .308 Winchester 168gr at 2700 fps, standard atmosphere
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Calculator {
+            bc: 0.475,
+            velocity_fps: 2700.0,
+            mass_grains: 168.0,
+            diameter_inches: 0.308,
+            drag_model: "G7".to_string(),
+
+            wind_speed_mph: 0.0,
+            wind_direction_deg: 90.0,
+            temperature_f: 59.0,
+            pressure_inhg: 29.92,
+            humidity_percent: 50.0,
+            altitude_ft: 0.0,
+
+            sight_height_inches: 2.0,
+            zero_range_yards: None,
+            max_range_yards: 1000.0,
+
+            enable_spin_drift: false,
+            enable_coriolis: false,
+            twist_rate_inches: None,
+            latitude_deg: None,
+        }
+    }
+
+    // Projectile property setters (fluent API)
+
+    #[wasm_bindgen(js_name = setBC)]
+    pub fn set_bc(mut self, bc: f64) -> Self {
+        self.bc = bc;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setVelocity)]
+    pub fn set_velocity(mut self, velocity_fps: f64) -> Self {
+        self.velocity_fps = velocity_fps;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setMass)]
+    pub fn set_mass(mut self, mass_grains: f64) -> Self {
+        self.mass_grains = mass_grains;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setDiameter)]
+    pub fn set_diameter(mut self, diameter_inches: f64) -> Self {
+        self.diameter_inches = diameter_inches;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setDragModel)]
+    pub fn set_drag_model(mut self, model: &str) -> Self {
+        self.drag_model = model.to_string();
+        self
+    }
+
+    // Environmental setters
+
+    #[wasm_bindgen(js_name = setWind)]
+    pub fn set_wind(mut self, speed_mph: f64, direction_deg: f64) -> Self {
+        self.wind_speed_mph = speed_mph;
+        self.wind_direction_deg = direction_deg;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setTemperature)]
+    pub fn set_temperature(mut self, temp_f: f64) -> Self {
+        self.temperature_f = temp_f;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setPressure)]
+    pub fn set_pressure(mut self, pressure_inhg: f64) -> Self {
+        self.pressure_inhg = pressure_inhg;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setHumidity)]
+    pub fn set_humidity(mut self, humidity: f64) -> Self {
+        self.humidity_percent = humidity;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setAltitude)]
+    pub fn set_altitude(mut self, altitude_ft: f64) -> Self {
+        self.altitude_ft = altitude_ft;
+        self
+    }
+
+    // Shooting parameter setters
+
+    #[wasm_bindgen(js_name = setSightHeight)]
+    pub fn set_sight_height(mut self, height_inches: f64) -> Self {
+        self.sight_height_inches = height_inches;
+        self
+    }
+
+    #[wasm_bindgen(js_name = setZeroRange)]
+    pub fn set_zero_range(mut self, range_yards: f64) -> Self {
+        self.zero_range_yards = Some(range_yards);
+        self
+    }
+
+    #[wasm_bindgen(js_name = setMaxRange)]
+    pub fn set_max_range(mut self, range_yards: f64) -> Self {
+        self.max_range_yards = range_yards;
+        self
+    }
+
+    // Advanced option setters
+
+    #[wasm_bindgen(js_name = enableSpinDrift)]
+    pub fn enable_spin_drift_opt(mut self, enabled: bool, twist_rate: Option<f64>) -> Self {
+        self.enable_spin_drift = enabled;
+        self.twist_rate_inches = twist_rate;
+        self
+    }
+
+    #[wasm_bindgen(js_name = enableCoriolis)]
+    pub fn enable_coriolis_opt(mut self, enabled: bool, latitude: Option<f64>) -> Self {
+        self.enable_coriolis = enabled;
+        self.latitude_deg = latitude;
+        self
+    }
+
+    // Calculation method
+
+    /// Calculate trajectory and return result as JavaScript object
+    /// Returns: { range_yards, drop_inches, windage_inches, velocity_fps, energy_ftlb, time_sec }
+    #[wasm_bindgen(js_name = calculateTrajectory)]
+    pub fn calculate_trajectory(&self, range_yards: f64) -> Result<JsValue, JsValue> {
+        // Build CLI command from parameters
+        let mut cmd = format!(
+            "ballistics trajectory -v {} -b {} -m {} -d {} --drag-model {} --max-range {}",
+            self.velocity_fps,
+            self.bc,
+            self.mass_grains,
+            self.diameter_inches,
+            self.drag_model,
+            range_yards
+        );
+
+        // Add environmental parameters
+        if self.wind_speed_mph > 0.0 {
+            cmd.push_str(&format!(" --wind-speed {} --wind-direction {}",
+                self.wind_speed_mph, self.wind_direction_deg));
+        }
+
+        cmd.push_str(&format!(" --temperature {} --pressure {} --humidity {} --altitude {}",
+            self.temperature_f, self.pressure_inhg, self.humidity_percent, self.altitude_ft));
+
+        // Add shooting parameters
+        cmd.push_str(&format!(" --sight-height {}", self.sight_height_inches));
+
+        if let Some(zero) = self.zero_range_yards {
+            cmd.push_str(&format!(" --auto-zero {}", zero));
+        }
+
+        // Add advanced options
+        if self.enable_spin_drift {
+            cmd.push_str(" --enable-spin-drift");
+            if let Some(twist) = self.twist_rate_inches {
+                cmd.push_str(&format!(" --twist-rate {}", twist));
+            }
+        }
+
+        if self.enable_coriolis {
+            cmd.push_str(" --enable-coriolis");
+            if let Some(lat) = self.latitude_deg {
+                cmd.push_str(&format!(" --latitude {}", lat));
+            }
+        }
+
+        // Use JSON output format for easy parsing
+        cmd.push_str(" -o json");
+
+        // Execute command
+        let wasm_ballistics = WasmBallistics::new();
+        let result_str = wasm_ballistics.run_command(&cmd)?;
+
+        // Strip any text before the JSON (like zero info messages)
+        let json_str = if let Some(json_start) = result_str.find('{') {
+            &result_str[json_start..]
+        } else {
+            &result_str
+        };
+
+        // Parse JSON result
+        let json_result: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}. Result was: {}", e, &json_str[..json_str.len().min(500)])))?;
+
+        // Find the point closest to the requested range
+        if let Some(trajectory) = json_result.get("trajectory").and_then(|t| t.as_array()) {
+            let target_point = trajectory.iter()
+                .min_by_key(|p| {
+                    let range = p.get("range_yards").and_then(|r| r.as_f64()).unwrap_or(0.0);
+                    ((range - range_yards).abs() * 100.0) as i64
+                })
+                .ok_or_else(|| JsValue::from_str("No trajectory points found"))?;
+
+            // Manually construct JavaScript object to avoid Map conversion
+            let result = js_sys::Object::new();
+            js_sys::Reflect::set(&result, &"range_yards".into(),
+                &target_point.get("range_yards").and_then(|v| v.as_f64()).unwrap_or(0.0).into())?;
+            js_sys::Reflect::set(&result, &"drop_inches".into(),
+                &target_point.get("drop_inches").and_then(|v| v.as_f64()).unwrap_or(0.0).into())?;
+            js_sys::Reflect::set(&result, &"drift_inches".into(),
+                &target_point.get("drift_inches").and_then(|v| v.as_f64()).unwrap_or(0.0).into())?;
+            js_sys::Reflect::set(&result, &"velocity_fps".into(),
+                &target_point.get("velocity_fps").and_then(|v| v.as_f64()).unwrap_or(0.0).into())?;
+            js_sys::Reflect::set(&result, &"energy_ftlb".into(),
+                &target_point.get("energy_ftlb").and_then(|v| v.as_f64()).unwrap_or(0.0).into())?;
+            js_sys::Reflect::set(&result, &"time_seconds".into(),
+                &target_point.get("time_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0).into())?;
+
+            Ok(result.into())
+        } else {
+            Err(JsValue::from_str("Invalid trajectory data"))
+        }
+    }
+
+    /// Get full trajectory table as array of points
+    /// Returns array of: [{ range_yards, drop_inches, windage_inches, velocity_fps, energy_ftlb, time_sec }, ...]
+    #[wasm_bindgen(js_name = getFullTrajectory)]
+    pub fn get_full_trajectory(&self) -> Result<JsValue, JsValue> {
+        // Build CLI command (similar to calculate_trajectory but get full table)
+        let mut cmd = format!(
+            "ballistics trajectory -v {} -b {} -m {} -d {} --drag-model {} --max-range {} --full",
+            self.velocity_fps,
+            self.bc,
+            self.mass_grains,
+            self.diameter_inches,
+            self.drag_model,
+            self.max_range_yards
+        );
+
+        // Add environmental parameters
+        if self.wind_speed_mph > 0.0 {
+            cmd.push_str(&format!(" --wind-speed {} --wind-direction {}",
+                self.wind_speed_mph, self.wind_direction_deg));
+        }
+
+        cmd.push_str(&format!(" --temperature {} --pressure {} --humidity {} --altitude {}",
+            self.temperature_f, self.pressure_inhg, self.humidity_percent, self.altitude_ft));
+
+        cmd.push_str(&format!(" --sight-height {}", self.sight_height_inches));
+
+        if let Some(zero) = self.zero_range_yards {
+            cmd.push_str(&format!(" --auto-zero {}", zero));
+        }
+
+        if self.enable_spin_drift {
+            cmd.push_str(" --enable-spin-drift");
+            if let Some(twist) = self.twist_rate_inches {
+                cmd.push_str(&format!(" --twist-rate {}", twist));
+            }
+        }
+
+        if self.enable_coriolis {
+            cmd.push_str(" --enable-coriolis");
+            if let Some(lat) = self.latitude_deg {
+                cmd.push_str(&format!(" --latitude {}", lat));
+            }
+        }
+
+        cmd.push_str(" -o json");
+
+        // Execute command
+        let wasm_ballistics = WasmBallistics::new();
+        let result_str = wasm_ballistics.run_command(&cmd)?;
+
+        // Strip any text before the JSON (like zero info messages)
+        let json_str = if let Some(json_start) = result_str.find('{') {
+            &result_str[json_start..]
+        } else {
+            &result_str
+        };
+
+        // Parse JSON result and return trajectory array
+        let json_result: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}. Result: {}", e, &json_str[..json_str.len().min(500)])))?;
+
+        if let Some(trajectory) = json_result.get("trajectory") {
+            // Convert trajectory array to JavaScript array of plain objects
+            let js_array = js_sys::Array::new();
+
+            if let Some(points) = trajectory.as_array() {
+                for point in points {
+                    let js_point = js_sys::Object::new();
+
+                    // Extract each field and add to JavaScript object
+                    if let Some(range) = point.get("range_yards").and_then(|v| v.as_f64()) {
+                        js_sys::Reflect::set(&js_point, &"range_yards".into(), &range.into())?;
+                    }
+                    if let Some(drop) = point.get("drop_inches").and_then(|v| v.as_f64()) {
+                        js_sys::Reflect::set(&js_point, &"drop_inches".into(), &drop.into())?;
+                    }
+                    if let Some(windage) = point.get("windage_inches").and_then(|v| v.as_f64()) {
+                        js_sys::Reflect::set(&js_point, &"windage_inches".into(), &windage.into())?;
+                    }
+                    if let Some(velocity) = point.get("velocity_fps").and_then(|v| v.as_f64()) {
+                        js_sys::Reflect::set(&js_point, &"velocity_fps".into(), &velocity.into())?;
+                    }
+                    if let Some(energy) = point.get("energy_ftlb").and_then(|v| v.as_f64()) {
+                        js_sys::Reflect::set(&js_point, &"energy_ftlb".into(), &energy.into())?;
+                    }
+                    if let Some(time) = point.get("time_sec").and_then(|v| v.as_f64()) {
+                        js_sys::Reflect::set(&js_point, &"time_sec".into(), &time.into())?;
+                    }
+
+                    js_array.push(&js_point);
+                }
+            }
+
+            Ok(js_array.into())
+        } else {
+            Err(JsValue::from_str("No trajectory data found"))
+        }
+    }
+}
