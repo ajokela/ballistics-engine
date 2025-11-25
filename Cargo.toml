@@ -1,6 +1,6 @@
-# [workspace]
-# members = [".", "ballistics-engine-py"]
-# exclude = ["ballistics-engine-rb"]
+[workspace]
+members = [".", "ballistics-engine-py"]
+exclude = ["ballistics-engine-rb"]
 
 [package]
 name = "ballistics-engine"
@@ -38,6 +38,10 @@ exclude = [
     "target/",
     "*.bak"
 ]
+
+[features]
+default = []
+python = []
 
 [dependencies]
 nalgebra = "0.33"
