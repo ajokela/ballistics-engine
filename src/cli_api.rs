@@ -1245,7 +1245,8 @@ pub fn calculate_zero_angle_with_conditions(
     atmosphere: AtmosphericConditions,
 ) -> Result<f64, BallisticsError> {
     // Binary search for the angle that hits the target
-    let mut low_angle = -0.2; // radians (about -11 degrees)
+    // Use only positive angles to ensure proper ballistic arc (upward trajectory)
+    let mut low_angle = 0.0;   // radians (horizontal)
     let mut high_angle = 0.2;  // radians (about 11 degrees)
     let tolerance = 0.00001;   // radians
     let max_iterations = 50;
@@ -1261,10 +1262,7 @@ pub fn calculate_zero_angle_with_conditions(
         solver.set_max_range(target_distance * 2.0);
         solver.set_time_step(0.001);
         let result = solver.solve()?;
-        
-        eprintln!("  Iteration {}: angle = {:.6} rad ({:.4} deg)", 
-                 iteration, mid_angle, mid_angle * 180.0 / std::f64::consts::PI);
-        
+
         // Find the height at target distance (X is downrange)
         let mut height_at_target = None;
         for i in 0..result.points.len() {
@@ -1285,10 +1283,7 @@ pub fn calculate_zero_angle_with_conditions(
         match height_at_target {
             Some(height) => {
                 let error = height - target_height;
-                eprintln!("    Height at target: {:.6} m, target: {:.6} m, error: {:.6} m", 
-                         height, target_height, error);
                 if error.abs() < 0.001 {
-                    eprintln!("  Converged!");
                     return Ok(mid_angle);
                 }
                 
