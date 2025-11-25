@@ -14,7 +14,30 @@ homepage = "https://ballistics.rs/"
 documentation = "https://docs.rs/ballistics-engine"
 keywords = ["ballistics", "trajectory", "physics", "simulation"]
 categories = ["science", "simulation"]
-exclude = ["app/", "tests/", "examples/", "ios.png", "pkg/", "test_ffi.c", "test_monte_carlo.py", "ballistics_standalone.rs", "ballistics/", "ballistics", "src/main.rs", "src/bin/", "ballistics-engine-py/", "ballistics-engine-rb/", "doc/", "target/"]
+exclude = [
+    "app/",
+    "tests/",
+    "examples/",
+    "ios.png",
+    "pkg/",
+    "pkg-nodejs/",
+    "test_ffi.c",
+    "test_monte_carlo.py",
+    "ballistics_standalone.rs",
+    "ballistics/",
+    "ballistics",
+    "src/main.rs",
+    "src/bin/",
+    "ballistics-engine-py/",
+    "ballistics-engine-rb/",
+    "ballistics-engine-rb.bak/",
+    "BallisticsEngine.xcframework/",
+    "BallisticsEngine.xcframework.bak/",
+    "*.xcframework",
+    "doc/",
+    "target/",
+    "*.bak"
+]
 
 [dependencies]
 nalgebra = "0.33"
