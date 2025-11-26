@@ -423,9 +423,57 @@ mod tests {
         // Test that angle bounds are reasonable
         let lower = -10.0 * DEGREES_TO_RADIANS;
         let upper = 10.0 * DEGREES_TO_RADIANS;
-        
+
         assert!(lower < 0.0);
         assert!(upper > 0.0);
         assert!((upper - lower).abs() > 0.1); // Reasonable search range
+    }
+
+    #[test]
+    fn test_brent_root_find_near_zero_function_values() {
+        // Test with function that has very small values near the root
+        // This exercises the EPSILON guards against division by zero
+        // The algorithm should not panic and should converge to some result
+        let f = |x: f64| (x - 1.0) * 1e-10; // Small function values
+        let result = brent_root_find(f, 0.0, 2.0, 1e-12, 100).unwrap();
+
+        // Main goal: no panic from division by zero
+        // With very small function values, the algorithm should still work
+        assert!(result.success || result.iterations_used > 0);
+        // The result should be reasonably close to the root
+        assert!((result.angle_rad - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_brent_root_find_steep_function() {
+        // Test with steep function that could cause large intermediate values
+        let f = |x: f64| (x - 0.5).powi(3) * 1e6;
+        let result = brent_root_find(f, 0.0, 1.0, 1e-9, 100).unwrap();
+
+        assert!(result.success);
+        assert!((result.angle_rad - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_brent_root_find_oscillating_convergence() {
+        // Test function that might cause the interpolation to struggle
+        // forcing fallback to bisection (tests the safety guards)
+        let f = |x: f64| x.sin() - 0.5;
+        let result = brent_root_find(f, 0.0, 1.0, 1e-10, 100).unwrap();
+
+        assert!(result.success);
+        // Root is at arcsin(0.5) ≈ 0.5236
+        assert!((result.angle_rad - 0.5235987755982989).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_brent_root_find_flat_region() {
+        // Test with function that has flat regions (derivative near zero)
+        // which could cause issues in interpolation
+        let f = |x: f64| (x - 2.0).powi(5);
+        let result = brent_root_find(f, 1.0, 3.0, 1e-8, 100).unwrap();
+
+        assert!(result.success);
+        assert!((result.angle_rad - 2.0).abs() < 1e-4);
     }
 }
