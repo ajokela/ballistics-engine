@@ -318,6 +318,15 @@ The ballistics engine implements comprehensive physics modeling for accurate tra
 - **Yaw of Repose** - Equilibrium yaw angle in crosswind
 - **Limit Cycle Yaw** - Bounded oscillatory motion analysis
 
+## Language Bindings
+
+Official language bindings are maintained as separate projects:
+
+- **Python**: [ballistics-engine-py](https://github.com/ajokela/ballistics-engine-py) - PyO3 bindings via maturin
+- **Ruby**: [ballistics-engine-rb](https://github.com/ajokela/ballistics-engine-rb) - Magnus bindings via rb_sys
+
+These bindings depend on the `ballistics-engine` crate published on [crates.io](https://crates.io/crates/ballistics-engine).
+
 ## FFI Layer
 
 The library includes a Foreign Function Interface (FFI) layer for integration with iOS, Android, and other platforms. The FFI provides C-compatible bindings for all major functionality.
