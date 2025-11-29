@@ -244,6 +244,12 @@ pub fn integrate_trajectory(
     tolerance: f64,
     max_step: f64,
 ) -> Vec<(f64, Vector6<f64>)> {
+    // DEBUG: Print input parameters
+    eprintln!("DEBUG integrate_trajectory: initial_state = {:?}", initial_state);
+    eprintln!("DEBUG integrate_trajectory: t_span = {:?}", t_span);
+    eprintln!("DEBUG integrate_trajectory: target_distance_m = {}", params.target_distance_m);
+    eprintln!("DEBUG integrate_trajectory: method = {}", method);
+
     let mut state = Vector6::new(
         initial_state[0], initial_state[1], initial_state[2],
         initial_state[3], initial_state[4], initial_state[5],
@@ -252,6 +258,8 @@ pub fn integrate_trajectory(
     let mut t = t_span.0;
     let t_end = t_span.1;
     let mut dt = (t_end - t) / 1000.0; // Initial step size
+
+    eprintln!("DEBUG integrate_trajectory: t = {}, t_end = {}, dt = {}", t, t_end, dt);
 
     let mut trajectory = Vec::with_capacity(10000);
     trajectory.push((t, state.clone()));
@@ -311,6 +319,8 @@ pub fn integrate_trajectory(
             let mut last_save_z = 0.0;  // z is downrange
             let save_interval_m = params.target_distance_m / 50.0; // Save ~50 points minimum
 
+            eprintln!("DEBUG RK45: save_interval_m = {}", save_interval_m);
+
             // OPTIMIZATION: Adjust max step size when wind shear is enabled
             // This improves numerical stability at long ranges
             let effective_max_step = if params.enable_wind_shear && params.wind_shear_model != "none" {
@@ -327,12 +337,20 @@ pub fn integrate_trajectory(
             // Set initial step size - ensure it's reasonable
             dt = dt.min(effective_max_step).max(0.0001);  // At least 0.1ms to avoid infinite loops
 
+            eprintln!("DEBUG RK45: effective_max_step = {}, dt after min/max = {}", effective_max_step, dt);
+
             // Safety check: maximum iterations to prevent infinite loops
             let max_iterations = 100000;  // Should be more than enough for any realistic trajectory
             let mut iteration_count = 0;
 
+            eprintln!("DEBUG RK45: About to enter loop, t={}, t_end={}, state[2]={}", t, t_end, state[2]);
+
             while t < t_end && iteration_count < max_iterations {
                 iteration_count += 1;
+
+                if iteration_count <= 3 {
+                    eprintln!("DEBUG RK45: iteration {}, t={}, state[2]={}", iteration_count, t, state[2]);
+                }
 
                 // Limit time step for better resolution
                 if t + dt > t_end {
