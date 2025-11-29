@@ -162,9 +162,9 @@ pub fn fast_integrate(
         
         let pos = Vector3::new(state[0], state[1], state[2]);
         let _vel = Vector3::new(state[3], state[4], state[5]);
-        
-        // Check termination conditions
-        if pos.x >= params.horiz {
+
+        // Check termination conditions (z is downrange)
+        if pos.z >= params.horiz {
             hit_target = true;
             times.push(t);
             states.push(state);

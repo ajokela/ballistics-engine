@@ -148,11 +148,11 @@ fn compute_derivatives_vec(
             let seg = &params.wind_segments[0];
             let wind_speed_mps = seg.0 * 0.2777778; // km/h to m/s
             let wind_angle_rad = seg.1.to_radians();
-            // X IS DOWNRANGE: x=downrange, y=vertical, z=lateral
+            // Z IS DOWNRANGE: x=lateral, y=vertical, z=downrange
             Vector3::new(
-                -wind_speed_mps * wind_angle_rad.cos(),  // x (downrange - head/tail component)
+                -wind_speed_mps * wind_angle_rad.sin(),  // x (lateral - crosswind component)
                 0.0,                                      // y (vertical)
-                -wind_speed_mps * wind_angle_rad.sin(),  // z (lateral - crosswind component)
+                -wind_speed_mps * wind_angle_rad.cos(),  // z (downrange - head/tail component)
             )
         }
     } else {
@@ -268,10 +268,10 @@ pub fn integrate_trajectory(
 
                 let new_state = rk4_step(&state, t, dt, &params);
 
-                // Check if we're about to pass the target (x is downrange)
-                if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
+                // Check if we're about to pass the target (z is downrange)
+                if state[2] < params.target_distance_m && new_state[2] >= params.target_distance_m {
                     // Interpolate to find exact target crossing
-                    let alpha = (params.target_distance_m - state[0]) / (new_state[0] - state[0]);
+                    let alpha = (params.target_distance_m - state[2]) / (new_state[2] - state[2]);
                     let dt_to_target = dt * alpha;
 
                     // Take a smaller step to reach target exactly
@@ -279,8 +279,8 @@ pub fn integrate_trajectory(
 
                     // Ensure we don't overshoot
                     let mut corrected_state = final_state;
-                    if corrected_state[0] > params.target_distance_m {
-                        corrected_state[0] = params.target_distance_m;
+                    if corrected_state[2] > params.target_distance_m {
+                        corrected_state[2] = params.target_distance_m;
                     }
 
                     trajectory.push((t + dt_to_target, corrected_state));
@@ -292,10 +292,10 @@ pub fn integrate_trajectory(
                 trajectory.push((t, state.clone()));
 
                 // Check if we've reached or passed the target
-                if state[0] >= params.target_distance_m {  // x is downrange
+                if state[2] >= params.target_distance_m {  // z is downrange
                     // Add final point exactly at target
                     let mut final_state = state;
-                    final_state[0] = params.target_distance_m;  // x is downrange
+                    final_state[2] = params.target_distance_m;  // z is downrange
                     trajectory.push((t, final_state));
                     break;
                 }
@@ -308,7 +308,7 @@ pub fn integrate_trajectory(
         }
         "RK45" | _ => {
             // Adaptive RK45 with better sampling
-            let mut last_save_x = 0.0;
+            let mut last_save_z = 0.0;  // z is downrange
             let save_interval_m = params.target_distance_m / 50.0; // Save ~50 points minimum
 
             // OPTIMIZATION: Adjust max step size when wind shear is enabled
@@ -341,10 +341,10 @@ pub fn integrate_trajectory(
 
                 let (new_state, dt_new, _error) = rk45_step(&state, t, dt, &params, tolerance);
 
-                // Check if we're about to pass the target (x is downrange)
-                if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
+                // Check if we're about to pass the target (z is downrange)
+                if state[2] < params.target_distance_m && new_state[2] >= params.target_distance_m {
                     // Interpolate to find exact target crossing
-                    let alpha = (params.target_distance_m - state[0]) / (new_state[0] - state[0]);
+                    let alpha = (params.target_distance_m - state[2]) / (new_state[2] - state[2]);
                     let dt_to_target = dt * alpha;
 
                     // Take a smaller step to reach target exactly
@@ -352,8 +352,8 @@ pub fn integrate_trajectory(
 
                     // Make sure we don't overshoot
                     let mut corrected_state = final_state;
-                    if corrected_state[0] > params.target_distance_m {
-                        corrected_state[0] = params.target_distance_m;
+                    if corrected_state[2] > params.target_distance_m {
+                        corrected_state[2] = params.target_distance_m;
                     }
 
                     trajectory.push((t + dt_to_target, corrected_state));
@@ -365,19 +365,19 @@ pub fn integrate_trajectory(
                 t += dt;
 
                 // Save trajectory point if we've moved enough distance
-                if state[0] - last_save_x >= save_interval_m || state[0] >= params.target_distance_m {  // x is downrange
+                if state[2] - last_save_z >= save_interval_m || state[2] >= params.target_distance_m {  // z is downrange
                     trajectory.push((t, state.clone()));
-                    last_save_x = state[0];
+                    last_save_z = state[2];
                 }
 
                 // Limit dt for next step - ensure we get enough resolution
                 dt = dt_new.min(effective_max_step).max(0.0001); // Use effective max step, min 0.1ms
 
                 // Stop if we've reached the target
-                if state[0] >= params.target_distance_m {  // x is downrange
+                if state[2] >= params.target_distance_m {  // z is downrange
                     // Add final point at target distance
                     let mut final_state = state;
-                    final_state[0] = params.target_distance_m;  // x is downrange
+                    final_state[2] = params.target_distance_m;  // z is downrange
                     trajectory.push((t, final_state));
                     break;
                 }
@@ -392,7 +392,7 @@ pub fn integrate_trajectory(
             if iteration_count >= max_iterations {
                 eprintln!("WARNING: Trajectory integration hit maximum iteration limit ({} iterations)", max_iterations);
                 eprintln!("  Final time: {}, Target time: {}", t, t_end);
-                eprintln!("  Final position: x={}, Target: {}m", state[0], params.target_distance_m);
+                eprintln!("  Final position: z={}, Target: {}m", state[2], params.target_distance_m);
             }
         }
     }
