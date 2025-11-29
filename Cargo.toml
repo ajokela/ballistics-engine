@@ -1,6 +1,6 @@
 [workspace]
-members = [".", "ballistics-engine-py"]
-exclude = ["ballistics-engine-rb"]
+members = ["."]
+exclude = ["ballistics-engine-rb", "ballistics-engine-py"]
 
 [package]
 name = "ballistics-engine"
