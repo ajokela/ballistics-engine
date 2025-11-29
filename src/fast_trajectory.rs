@@ -238,7 +238,7 @@ fn compute_derivatives(
 ) -> [f64; 6] {
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
-    
+
     // Get wind vector (based on downrange distance, which is Z coordinate)
     let wind_vector = wind_sock.vector_for_range_stateless(pos.z);
     
