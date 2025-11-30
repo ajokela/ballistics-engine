@@ -244,12 +244,6 @@ pub fn integrate_trajectory(
     tolerance: f64,
     max_step: f64,
 ) -> Vec<(f64, Vector6<f64>)> {
-    // DEBUG: Print input parameters
-    eprintln!("DEBUG integrate_trajectory: initial_state = {:?}", initial_state);
-    eprintln!("DEBUG integrate_trajectory: t_span = {:?}", t_span);
-    eprintln!("DEBUG integrate_trajectory: target_distance_m = {}", params.target_distance_m);
-    eprintln!("DEBUG integrate_trajectory: method = {}", method);
-
     let mut state = Vector6::new(
         initial_state[0], initial_state[1], initial_state[2],
         initial_state[3], initial_state[4], initial_state[5],
@@ -258,8 +252,6 @@ pub fn integrate_trajectory(
     let mut t = t_span.0;
     let t_end = t_span.1;
     let mut dt = (t_end - t) / 1000.0; // Initial step size
-
-    eprintln!("DEBUG integrate_trajectory: t = {}, t_end = {}, dt = {}", t, t_end, dt);
 
     let mut trajectory = Vec::with_capacity(10000);
     trajectory.push((t, state.clone()));
@@ -319,8 +311,6 @@ pub fn integrate_trajectory(
             let mut last_save_z = 0.0;  // z is downrange
             let save_interval_m = params.target_distance_m / 50.0; // Save ~50 points minimum
 
-            eprintln!("DEBUG RK45: save_interval_m = {}", save_interval_m);
-
             // OPTIMIZATION: Adjust max step size when wind shear is enabled
             // This improves numerical stability at long ranges
             let effective_max_step = if params.enable_wind_shear && params.wind_shear_model != "none" {
@@ -337,20 +327,12 @@ pub fn integrate_trajectory(
             // Set initial step size - ensure it's reasonable
             dt = dt.min(effective_max_step).max(0.0001);  // At least 0.1ms to avoid infinite loops
 
-            eprintln!("DEBUG RK45: effective_max_step = {}, dt after min/max = {}", effective_max_step, dt);
-
             // Safety check: maximum iterations to prevent infinite loops
             let max_iterations = 100000;  // Should be more than enough for any realistic trajectory
             let mut iteration_count = 0;
 
-            eprintln!("DEBUG RK45: About to enter loop, t={}, t_end={}, state[2]={}", t, t_end, state[2]);
-
             while t < t_end && iteration_count < max_iterations {
                 iteration_count += 1;
-
-                if iteration_count <= 3 {
-                    eprintln!("DEBUG RK45: iteration {}, t={}, state[2]={}", iteration_count, t, state[2]);
-                }
 
                 // Limit time step for better resolution
                 if t + dt > t_end {
@@ -477,4 +459,59 @@ pub fn solve_trajectory_rust(
         point.insert("vz".to_string(), state[5]);
         point
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_integrate_trajectory_basic() {
+        // Same initial state as Python test: [x,y,z,vx,vy,vz]
+        // z=0 (downrange start), vz=821.52 (downrange velocity)
+        let initial_state = [0.0, -0.038, 0.0, 0.0, 48.61, 821.52];
+
+        let params = TrajectoryParams {
+            mass_kg: 0.01134, // 175 grains in kg
+            bc: 0.442,
+            drag_model: DragModel::G7,
+            wind_segments: vec![(0.0, 90.0, 914.4)],
+            atmos_params: (0.0, 59.0, 29.92, 0.0),
+            omega_vector: None,
+            enable_spin_drift: false,
+            enable_magnus: false,
+            enable_coriolis: false,
+            target_distance_m: 914.4, // 1000 yards in meters
+            enable_wind_shear: false,
+            wind_shear_model: "none".to_string(),
+            shooter_altitude_m: 0.0,
+            is_twist_right: true,
+            custom_drag_table: None,
+        };
+
+        println!("Running integrate_trajectory test...");
+        println!("Initial state: {:?}", initial_state);
+        println!("Target distance: {} m", params.target_distance_m);
+
+        let trajectory = integrate_trajectory(
+            initial_state,
+            (0.0, 10.0),
+            params,
+            "RK45",
+            1e-6,
+            0.01,
+        );
+
+        println!("Trajectory has {} points", trajectory.len());
+
+        // Should have more than just initial point
+        assert!(trajectory.len() > 1, "Trajectory should have more than 1 point, but has {}", trajectory.len());
+
+        // Check that we actually moved downrange
+        if let Some((_, final_state)) = trajectory.last() {
+            println!("Final state: z={}", final_state[2]);
+            assert!(final_state[2] > 0.0, "Final z should be positive (bullet moved downrange)");
+            assert!(final_state[2] >= 900.0, "Final z should be near target distance");
+        }
+    }
 }
