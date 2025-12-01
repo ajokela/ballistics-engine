@@ -54,7 +54,6 @@ impl From<&str> for BallisticsError {
 // Ballistic input parameters - MBA-151 Reconciled Structure
 // Unified structure used by both ballistics-engine and ballistics_rust
 // Duplicates removed, all necessary fields included
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 #[derive(Debug, Clone)]
 pub struct BallisticInputs {
     // Core ballistics parameters (using intuitive names)
@@ -282,12 +281,7 @@ pub struct TrajectorySolver {
 
 impl TrajectorySolver {
     pub fn new(mut inputs: BallisticInputs, wind: WindConditions, atmosphere: AtmosphericConditions) -> Self {
-        // Ensure duplicate fields are synchronized
-        inputs.bc_type = inputs.bc_type;
-        inputs.bc_value = inputs.bc_value;
-        inputs.bullet_diameter = inputs.bullet_diameter;
-        inputs.bullet_mass = inputs.bullet_mass;
-        inputs.muzzle_angle = inputs.muzzle_angle;
+        // Compute derived fields from base units
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
         inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
         
