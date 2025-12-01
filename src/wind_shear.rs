@@ -202,7 +202,13 @@ impl WindShearProfile {
         let low_layer = &self.custom_layers[low_idx];
         let high_layer = &self.custom_layers[high_idx];
 
-        let ratio = (altitude_m - low_layer.altitude_m) / (high_layer.altitude_m - low_layer.altitude_m);
+        // MBA-246: Guard against division by zero when layers have same altitude
+        let altitude_diff = high_layer.altitude_m - low_layer.altitude_m;
+        if altitude_diff.abs() < 1e-9 {
+            return low_layer.to_vector();
+        }
+
+        let ratio = (altitude_m - low_layer.altitude_m) / altitude_diff;
 
         // Interpolate vectors
         let low_vec = low_layer.to_vector();
