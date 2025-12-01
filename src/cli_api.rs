@@ -1246,14 +1246,93 @@ pub fn calculate_zero_angle_with_conditions(
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
 ) -> Result<f64, BallisticsError> {
+    // Helper function to get height at target distance for a given angle
+    let get_height_at_angle = |angle: f64| -> Result<Option<f64>, BallisticsError> {
+        let mut test_inputs = inputs.clone();
+        test_inputs.muzzle_angle = angle;
+
+        let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
+        solver.set_max_range(target_distance * 2.0);
+        solver.set_time_step(0.001);
+        let result = solver.solve()?;
+
+        for i in 0..result.points.len() {
+            if result.points[i].position.x >= target_distance {
+                if i > 0 {
+                    let p1 = &result.points[i - 1];
+                    let p2 = &result.points[i];
+                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
+                    return Ok(Some(p1.position.y + t * (p2.position.y - p1.position.y)));
+                } else {
+                    return Ok(Some(result.points[i].position.y));
+                }
+            }
+        }
+        Ok(None)
+    };
+
     // Binary search for the angle that hits the target
     // Use only positive angles to ensure proper ballistic arc (upward trajectory)
     let mut low_angle = 0.0;   // radians (horizontal)
     let mut high_angle = 0.2;  // radians (about 11 degrees)
     let tolerance = 0.00001;   // radians
     let max_iterations = 50;
-    
-    for iteration in 0..max_iterations {
+
+    // MBA-194: Validate bracketing before starting binary search
+    // Check that the target height is actually between low and high angle trajectories
+    let low_height = get_height_at_angle(low_angle)?;
+    let high_height = get_height_at_angle(high_angle)?;
+
+    match (low_height, high_height) {
+        (Some(lh), Some(hh)) => {
+            let low_error = lh - target_height;
+            let high_error = hh - target_height;
+
+            // For proper bracketing, low angle should undershoot (negative error)
+            // and high angle should overshoot (positive error)
+            if low_error > 0.0 && high_error > 0.0 {
+                // Both angles overshoot - target is too close or height too low
+                // This shouldn't happen for typical zeroing, but handle gracefully
+                // Try to find a valid bracket by reducing low_angle (can't go negative)
+                // Since we can't go below 0, just proceed and let binary search find best
+            } else if low_error < 0.0 && high_error < 0.0 {
+                // Both angles undershoot - target is beyond effective range
+                // Try expanding high_angle up to 45 degrees (0.785 rad)
+                let mut expanded = false;
+                for multiplier in [2.0, 3.0, 4.0] {
+                    let new_high = (high_angle * multiplier).min(0.785);
+                    if let Ok(Some(h)) = get_height_at_angle(new_high) {
+                        if h - target_height > 0.0 {
+                            high_angle = new_high;
+                            expanded = true;
+                            break;
+                        }
+                    }
+                    if new_high >= 0.785 {
+                        break;
+                    }
+                }
+                if !expanded {
+                    return Err("Cannot find zero angle: target beyond effective range even at maximum angle".into());
+                }
+            }
+            // If signs are opposite, we have valid bracketing - proceed
+        },
+        (None, Some(_hh)) => {
+            // Low angle doesn't reach target, high does - this is fine
+            // Binary search will increase low_angle until trajectory reaches
+        },
+        (Some(_lh), None) => {
+            // High angle doesn't reach target - shouldn't happen
+            return Err("Cannot find zero angle: high angle trajectory doesn't reach target distance".into());
+        },
+        (None, None) => {
+            // Neither reaches target - target too far
+            return Err("Cannot find zero angle: trajectory cannot reach target distance at any angle".into());
+        }
+    }
+
+    for _iteration in 0..max_iterations {
         let mid_angle = (low_angle + high_angle) / 2.0;
         
         let mut test_inputs = inputs.clone();
