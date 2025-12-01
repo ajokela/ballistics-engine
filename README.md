@@ -121,6 +121,27 @@ Automatically calculate and apply the zero angle for a specific distance:
   --sight-height 0.055  # 2.2 inches in yards
 ```
 
+#### Bore Height and Ground Impact
+
+Control bore height above ground and ground impact detection:
+
+```bash
+# Set bore height for prone shooting position (2 feet)
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 \
+  --bore-height 2  # 2 feet (imperial) or meters (metric)
+
+# Disable ground impact detection for full trajectory to max range
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 \
+  --max-range 1000 \
+  --ignore-ground-impact
+```
+
+Bore height defaults: 5 feet (imperial) / 1.5 meters (metric) - standing position.
+
 #### Advanced BC Modeling
 
 Enable velocity-dependent BC modeling for more accurate long-range predictions:
