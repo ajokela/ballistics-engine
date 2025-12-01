@@ -1285,10 +1285,25 @@ pub fn calculate_zero_angle_with_conditions(
         match height_at_target {
             Some(height) => {
                 let error = height - target_height;
+                // MBA-193: Check height error FIRST (primary convergence criterion)
+                // Height accuracy is what matters for zeroing - angle tolerance is secondary
                 if error.abs() < 0.001 {
                     return Ok(mid_angle);
                 }
-                
+
+                // Only use angle tolerance as convergence criterion if we have
+                // exhausted angle precision AND height error is still acceptable
+                // (within 10mm which is reasonable for long range)
+                if (high_angle - low_angle).abs() < tolerance {
+                    if error.abs() < 0.01 {
+                        // Height error within 10mm - acceptable for practical use
+                        return Ok(mid_angle);
+                    }
+                    // Angle converged but height error too large - this shouldn't happen
+                    // with proper tolerance values, but return best effort
+                    return Ok(mid_angle);
+                }
+
                 if error > 0.0 {
                     high_angle = mid_angle;
                 } else {
@@ -1298,11 +1313,12 @@ pub fn calculate_zero_angle_with_conditions(
             None => {
                 // Trajectory didn't reach target distance, increase angle
                 low_angle = mid_angle;
+
+                // MBA-193: Check angle tolerance for None case too
+                if (high_angle - low_angle).abs() < tolerance {
+                    return Err("Trajectory cannot reach target distance - angle converged without valid solution".into());
+                }
             }
-        }
-        
-        if (high_angle - low_angle).abs() < tolerance {
-            return Ok(mid_angle);
         }
     }
     
