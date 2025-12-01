@@ -26,8 +26,12 @@ impl ClusterBCDegradation {
 
     /// Predict which cluster a bullet belongs to
     pub fn predict_cluster(&self, caliber: f64, weight_gr: f64, bc_g1: f64) -> usize {
-        // Normalize features
-        let caliber_norm = (caliber - 0.172) / (0.585 - 0.172);
+        // Normalize features to [0, 1] range
+        // Bounds derived from training data and centroid values:
+        // - Caliber: 0.172 (.17 HMR) to 0.750 (.50 BMG) - matches cluster 3 centroid
+        // - Weight: 15gr (light varmint) to 750gr (heavy magnum)
+        // - BC G1: 0.05 (low drag) to 1.2 (high BC match bullets)
+        let caliber_norm = (caliber - 0.172) / (0.750 - 0.172);
         let weight_norm = (weight_gr - 15.0) / (750.0 - 15.0);
         let bc_norm = (bc_g1 - 0.05) / (1.2 - 0.05);
 
