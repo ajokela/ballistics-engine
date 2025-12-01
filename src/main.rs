@@ -95,7 +95,15 @@ enum Commands {
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
         sight_height: Option<f64>,
-        
+
+        /// Bore height above ground (feet for imperial, meters for metric). Default: 5ft/1.5m
+        #[arg(long)]
+        bore_height: Option<f64>,
+
+        /// Ignore ground impact detection (trajectory continues to max range)
+        #[arg(long)]
+        ignore_ground_impact: bool,
+
         /// Enable velocity-based BC segmentation
         #[arg(long)]
         use_bc_segments: bool,
@@ -491,7 +499,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             velocity, angle, bc, mass, diameter, drag_model,
             max_range, time_step, wind_speed, wind_direction,
             temperature, pressure, humidity, altitude,
-            output, full, auto_zero, sight_height,
+            output, full, auto_zero, sight_height, bore_height, ignore_ground_impact,
             use_bc_segments,
             enable_magnus, enable_coriolis, enable_spin_drift,
             enable_wind_shear, sample_trajectory, sample_interval,
@@ -519,7 +527,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             let sight_height_value = sight_height.unwrap_or(sight_height_default);
             let sight_height_metric = UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
-            
+
+            // Bore height above ground: default 5 feet (imperial) or 1.5 meters (metric)
+            let bore_height_default = match cli.units {
+                UnitSystem::Imperial => 5.0,  // feet
+                UnitSystem::Metric => 1.5,    // meters
+            };
+            let bore_height_value = bore_height.unwrap_or(bore_height_default);
+            let bore_height_metric = match cli.units {
+                UnitSystem::Imperial => bore_height_value * 0.3048,  // feet to meters
+                UnitSystem::Metric => bore_height_value,
+            };
+
             // Calculate zero angle if auto-zero is specified
             let muzzle_angle = if let Some(zero_distance) = auto_zero {
                 let zero_distance_metric = UnitConverter::distance_to_metric(zero_distance, cli.units);
@@ -551,7 +570,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 velocity_metric, muzzle_angle, bc, mass_metric, diameter_metric, drag_model,
                 max_range_metric, time_step, wind_speed_metric, wind_direction,
                 temperature_metric, pressure_metric, humidity, altitude_metric,
-                output, full, cli.units, sight_height_metric,
+                output, full, cli.units, sight_height_metric, bore_height_metric, ignore_ground_impact,
                 use_bc_segments,
                 enable_magnus, enable_coriolis, enable_spin_drift,
                 enable_wind_shear, sample_trajectory, sample_interval,
@@ -657,6 +676,8 @@ fn run_trajectory(
     full: bool,
     units: UnitSystem,
     sight_height: f64,
+    bore_height: f64,  // Bore height above ground in meters
+    ignore_ground_impact: bool,  // Disable ground impact detection
     use_bc_segments: bool,
     enable_magnus: bool,
     enable_coriolis: bool,
@@ -698,9 +719,9 @@ fn run_trajectory(
         azimuth_angle: 0.0,
         shooting_angle: shooting_angle.to_radians(),
         sight_height,
-        muzzle_height: 1.5,
+        muzzle_height: bore_height,  // Bore height above ground from --bore-height CLI option
         target_height: 0.0,
-        ground_threshold: -0.001,
+        ground_threshold: if ignore_ground_impact { f64::NEG_INFINITY } else { -bore_height },  // Ground is at -bore_height relative to bore, or disabled if --ignore-ground-impact
 
         // Environmental conditions
         altitude,

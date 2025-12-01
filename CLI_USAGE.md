@@ -22,6 +22,7 @@ The CLI supports two unit systems, selectable with the `--units` flag (default: 
 - Distance: yards
 - Diameter: inches
 - Sight Height: inches
+- Bore Height: feet
 - Temperature: Fahrenheit
 - Pressure: inHg
 
@@ -31,6 +32,7 @@ The CLI supports two unit systems, selectable with the `--units` flag (default: 
 - Distance: meters
 - Diameter: millimeters (mm)
 - Sight Height: millimeters (mm)
+- Bore Height: meters
 - Temperature: Celsius
 - Pressure: hPa
 
@@ -168,6 +170,8 @@ All commands support three output formats via `-o`:
 | --drag-model | Drag model (g1/g7) | g1 | - | - |
 | --auto-zero | Auto-zero distance | None | yards | meters |
 | --sight-height | Sight height above bore | 0.05 | yards | meters |
+| --bore-height | Bore height above ground | 5 | feet | meters |
+| --ignore-ground-impact | Disable ground impact detection | false | - | - |
 | --max-range | Maximum range | 1000 | yards | meters |
 | --time-step | Integration time step | 0.001 | seconds | seconds |
 | --wind-speed | Wind speed | 0 | mph | m/s |
@@ -422,3 +426,4 @@ All commands support three output formats via `-o`:
 - Wind direction: 0° = headwind, 90° = from right, 180° = tailwind, 270° = from left
 - Trajectory stops at ground impact or max range
 - Sight height default is 1.8 inches (0.05 yards) above bore
+- Bore height default is 5 feet (1.5 meters) above ground - adjust for shooting position (e.g., 2ft prone, 4ft sitting, 5ft standing)

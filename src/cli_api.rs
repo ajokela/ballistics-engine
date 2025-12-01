@@ -152,7 +152,7 @@ impl Default for BallisticInputs {
             sight_height: 0.05,
             muzzle_height: 0.0,  // Default 0 - height is in sight_height
             target_height: 0.0,  // Target at ground level by default
-            ground_threshold: -0.001,  // Stop just below ground level
+            ground_threshold: -100.0,  // Effectively disable ground detection (allow bullet to drop 100m below start)
 
             // Environmental conditions
             altitude: 0.0,
@@ -991,18 +991,17 @@ impl TrajectorySolver {
         } else {
             wind_vector.clone()
         };
-        
+
         let relative_velocity = velocity - &actual_wind;
         let velocity_magnitude = relative_velocity.magnitude();
-        
+
         if velocity_magnitude < 0.001 {
             return Vector3::new(0.0, -9.81, 0.0);
         }
-        
-        // Calculate drag force
+
+        // Get drag coefficient from drag model (Mach-indexed from drag tables)
         let cd = self.calculate_drag_coefficient(velocity_magnitude);
-        let reference_area = std::f64::consts::PI * (self.inputs.bullet_diameter / 2.0).powi(2);
-        
+
         // Apply cluster BC correction if enabled
         let effective_bc = if let Some(ref cluster_bc) = self.cluster_bc {
             // Convert velocity to fps for cluster BC calculation
@@ -1016,35 +1015,38 @@ impl TrajectorySolver {
         } else {
             self.inputs.bc_value
         };
-        
-        let drag_magnitude = 0.5 * air_density * velocity_magnitude.powi(2) * cd * reference_area / effective_bc;
-        
-        // Drag acts opposite to velocity
-        let drag_force = -relative_velocity.normalize() * drag_magnitude;
-        
-        // Total acceleration = drag/mass + gravity
-        let acceleration = drag_force / self.inputs.bullet_mass + Vector3::new(0.0, -9.81, 0.0);
-        
-        acceleration
+
+        // Use proper ballistics retardation formula
+        // This matches the proven formula from fast_trajectory.rs
+        // The standard retardation factor converts Cd to drag deceleration
+        let velocity_fps = velocity_magnitude * 3.28084;  // m/s to fps
+        let cd_to_retard = 0.000683 * 0.30;  // Standard ballistics constant
+        let standard_factor = cd * cd_to_retard;
+        let density_scale = air_density / 1.225;  // Scale relative to standard air (1.225 kg/m³)
+
+        // Drag acceleration in ft/s² then convert to m/s²
+        let a_drag_ft_s2 = (velocity_fps * velocity_fps) * standard_factor * density_scale / effective_bc;
+        let a_drag_m_s2 = a_drag_ft_s2 * 0.3048;  // ft/s² to m/s²
+
+        // Apply drag opposite to velocity direction
+        let drag_acceleration = -a_drag_m_s2 * (relative_velocity / velocity_magnitude);
+
+        // Total acceleration = drag + gravity
+        drag_acceleration + Vector3::new(0.0, -9.81, 0.0)
     }
     
     fn calculate_drag_coefficient(&self, velocity: f64) -> f64 {
         // Calculate speed of sound based on atmospheric temperature
-        // Use standard atmosphere temperature at sea level if not available
         let temp_c = self.atmosphere.temperature;
         let temp_k = temp_c + 273.15;
         let gamma = 1.4;  // Ratio of specific heats for air
         let r_specific = 287.05;  // Specific gas constant for air (J/kg·K)
         let speed_of_sound = (gamma * r_specific * temp_k).sqrt();
         let mach = velocity / speed_of_sound;
-        
-        // Base drag coefficient from drag model
-        let base_cd = match self.inputs.bc_type {
-            DragModel::G1 => 0.5,
-            DragModel::G7 => 0.4,
-            _ => 0.45,
-        };
-        
+
+        // Get drag coefficient from the drag tables (Mach-indexed)
+        let base_cd = crate::drag::get_drag_coefficient(mach, &self.inputs.bc_type);
+
         // Determine projectile shape for transonic corrections
         let projectile_shape = if let Some(ref model) = self.inputs.bullet_model {
             // Try to determine shape from bullet model string
@@ -1070,7 +1072,7 @@ impl TrajectorySolver {
                 &self.inputs.bc_type.to_string()
             )
         };
-        
+
         // Apply transonic corrections
         // Enable wave drag if advanced effects are enabled
         let include_wave_drag = self.inputs.enable_advanced_effects;
