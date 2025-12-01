@@ -342,9 +342,9 @@ fn calculate_trajectory_simple(
         time += time_step;
     }
     
-    // Get final values
-    let last = trajectory.last().unwrap();
-    
+    // Get final values (trajectory always has at least one point from the initial state)
+    let last = trajectory.last().ok_or("Empty trajectory - no points generated")?;
+
     Ok(TrajectoryResult {
         max_range: last.x,
         max_height,
