@@ -75,7 +75,9 @@ pub fn calculate_advanced_spin_drift(
     bullet_type: &str,
 ) -> f64 {
     // Edge cases: no drift if no time or no stability
-    if time_of_flight_s <= 0.0 || stability_factor <= 0.0 {
+    // MBA-205: Guard against division by zero
+    if time_of_flight_s <= 0.0 || stability_factor <= 0.0
+        || muzzle_velocity_mps <= 0.0 || air_density_kg_m3 <= 0.0 {
         return 0.0;
     }
     
@@ -158,7 +160,12 @@ fn calculate_aerodynamic_jump_correction(
 ) -> f64 {
     // Aerodynamic jump contributes to initial displacement
     // Based on McCoy's research on muzzle exit effects
-    
+
+    // MBA-205: Guard against division by zero when mach == 0
+    if mach <= 0.0 {
+        return 0.0;
+    }
+
     let spin_parameter = spin_rate_rad_s * caliber_m / (2.0 * 343.0 * mach);
     
     // Jump magnitude in milliradians
