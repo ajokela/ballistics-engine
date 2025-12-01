@@ -184,11 +184,12 @@ pub fn zero_angle(
     };
     
     // Define the height difference function
+    // MBA-192: Use NaN instead of -999.0 on trajectory failure to prevent false roots
     let height_diff = |look_angle_rad: f64| -> f64 {
         // Calculate bullet height at target distance minus target height
         match trajectory_func(inputs, look_angle_rad) {
             Ok(bullet_height) => bullet_height - vert,
-            Err(_) => -999.0, // Return large negative on failure
+            Err(_) => f64::NAN, // NaN causes Brent's method to fail gracefully
         }
     };
     
