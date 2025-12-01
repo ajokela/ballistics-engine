@@ -32,7 +32,8 @@ impl FastSolution {
         
         for (i, &tq) in t_query.iter().enumerate() {
             // Find the right interval using binary search
-            let idx = match self.t.binary_search_by(|&t| t.partial_cmp(&tq).unwrap()) {
+            // Use unwrap_or to safely handle NaN values by treating them as greater
+            let idx = match self.t.binary_search_by(|&t| t.partial_cmp(&tq).unwrap_or(std::cmp::Ordering::Greater)) {
                 Ok(idx) => idx,
                 Err(idx) => idx,
             };
