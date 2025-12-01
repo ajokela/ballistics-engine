@@ -27,8 +27,8 @@ impl WindSock {
     /// Args:
     ///     segments: List of (speed_kmh, angle_deg, until_distance_m) tuples
     pub fn new(mut segments: Vec<WindSegment>) -> Self {
-        // Sort segments by distance
-        segments.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        // Sort segments by distance, handling NaN safely by treating it as greater than any value
+        segments.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Greater));
         
         let (current, next_range, current_vec) = if segments.is_empty() {
             (0, f64::INFINITY, Vector3::zeros())
