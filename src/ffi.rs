@@ -131,15 +131,11 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     
     ballistic_inputs.muzzle_velocity = inputs.muzzle_velocity;
     ballistic_inputs.muzzle_angle = inputs.muzzle_angle;
-    ballistic_inputs.muzzle_angle = inputs.muzzle_angle;
     ballistic_inputs.azimuth_angle = inputs.azimuth_angle;
     ballistic_inputs.use_rk4 = inputs.use_rk4 != 0;
     ballistic_inputs.use_adaptive_rk45 = inputs.use_adaptive_rk45 != 0;
     ballistic_inputs.bc_value = inputs.bc_value;
-    ballistic_inputs.bc_value = inputs.bc_value;
     ballistic_inputs.bullet_mass = inputs.bullet_mass;
-    ballistic_inputs.bullet_mass = inputs.bullet_mass;
-    ballistic_inputs.bullet_diameter = inputs.bullet_diameter;
     ballistic_inputs.bullet_diameter = inputs.bullet_diameter;
     ballistic_inputs.bc_type = match inputs.bc_type {
         1 => DragModel::G7,
@@ -151,7 +147,6 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
         7 => DragModel::GS,
         _ => DragModel::G1,
     };
-    ballistic_inputs.bc_type = ballistic_inputs.bc_type.clone();
     ballistic_inputs.sight_height = inputs.sight_height;
     ballistic_inputs.target_distance = inputs.target_distance;
     ballistic_inputs.temperature = inputs.temperature;
@@ -247,6 +242,7 @@ pub extern "C" fn ballistics_calculate_trajectory(
                     });
 
                     // Debug: Log first, last, and every 100th point
+                    #[cfg(debug_assertions)]
                     if i == 0 || i == result.points.len() - 1 || i % 100 == 0 {
                         eprintln!("FFI point {}: x={:.2}m, y={:.2}m, z={:.2}m (X is downrange)",
                             i, point.position[0], point.position[1], point.position[2]);
@@ -387,13 +383,16 @@ pub extern "C" fn ballistics_calculate_zero_angle(
     // This means the bullet crosses the line of sight at the zero distance
     let target_height = ballistic_inputs.sight_height;
     
-    eprintln!("FFI: Calculating zero angle for:");
-    eprintln!("  Zero distance: {} m", zero_distance);
-    eprintln!("  Target height: {} m", target_height);
-    eprintln!("  Sight height: {} m", ballistic_inputs.sight_height);
-    eprintln!("  Wind speed: {} m/s", wind_conditions.speed);
-    eprintln!("  Temperature: {} C", atmospheric_conditions.temperature);
-    
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("FFI: Calculating zero angle for:");
+        eprintln!("  Zero distance: {} m", zero_distance);
+        eprintln!("  Target height: {} m", target_height);
+        eprintln!("  Sight height: {} m", ballistic_inputs.sight_height);
+        eprintln!("  Wind speed: {} m/s", wind_conditions.speed);
+        eprintln!("  Temperature: {} C", atmospheric_conditions.temperature);
+    }
+
     match calculate_zero_angle_with_conditions(
         ballistic_inputs,
         zero_distance,
@@ -402,10 +401,12 @@ pub extern "C" fn ballistics_calculate_zero_angle(
         atmospheric_conditions,
     ) {
         Ok(angle) => {
+            #[cfg(debug_assertions)]
             eprintln!("  Calculated angle: {} rad ({} deg)", angle, angle * 180.0 / std::f64::consts::PI);
             angle
         },
         Err(e) => {
+            #[cfg(debug_assertions)]
             eprintln!("  Error: {:?}", e);
             f64::NAN
         }
@@ -427,7 +428,6 @@ pub extern "C" fn ballistics_quick_trajectory(
     let mut inputs = BallisticInputs::default();
     inputs.muzzle_velocity = muzzle_velocity;
     inputs.bc_value = bc;
-    inputs.bc_value = bc;
     inputs.sight_height = sight_height;
     inputs.target_distance = target_distance;
     
@@ -442,8 +442,7 @@ pub extern "C" fn ballistics_quick_trajectory(
     
     // Now calculate trajectory with that zero angle
     inputs.muzzle_angle = zero_angle;
-    inputs.muzzle_angle = zero_angle;
-    
+
     let mut solver = TrajectorySolver::new(inputs, wind, atmo);
     solver.set_max_range(target_distance * 1.1);
     
