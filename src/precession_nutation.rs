@@ -130,8 +130,14 @@ pub fn calculate_combined_angular_motion(
     dt: f64,
     initial_disturbance: f64,
 ) -> AngularState {
+    // MBA-198: Guard against division by zero in stability calculation
+    if params.transverse_inertia == 0.0 || params.velocity_mps == 0.0 || params.length_m == 0.0 {
+        // Return unchanged state if invalid parameters
+        return *angular_state;
+    }
+
     // Calculate stability factor (simplified)
-    let stability = (params.spin_inertia * params.spin_rate_rad_s.powi(2)) / 
+    let stability = (params.spin_inertia * params.spin_rate_rad_s.powi(2)) /
         (4.0 * params.transverse_inertia * params.velocity_mps.powi(2) / params.length_m);
     
     // Precession frequency
@@ -212,15 +218,16 @@ pub fn calculate_epicyclic_motion(
     time_s: f64,
     initial_yaw_rad: f64,
 ) -> (f64, f64) {
-    if stability_factor <= 1.0 {
-        // Unstable - no regular motion
+    // MBA-198: Guard against division by zero
+    if stability_factor <= 1.0 || spin_rate_rad_s == 0.0 {
+        // Unstable or no spin - no regular motion
         return (initial_yaw_rad, initial_yaw_rad);
     }
-    
+
     // Frequencies (simplified model)
     // Slow mode (precession)
     let omega_slow = 2.0 * velocity_mps / (stability_factor * spin_rate_rad_s);
-    
+
     // Fast mode (nutation)
     let omega_fast = spin_rate_rad_s * ((stability_factor - 1.0).sqrt()) / stability_factor;
     
