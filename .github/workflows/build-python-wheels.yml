@@ -48,7 +48,7 @@ jobs:
         maturin build --release -i python${{ matrix.python-version }}
 
     - name: Upload wheel
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: wheel-linux-x86_64-py${{ matrix.python-version }}
         path: target/wheels/*.whl
@@ -89,7 +89,7 @@ jobs:
         maturin build --release --target ${{ matrix.target }} -i python${{ matrix.python-version }}
 
     - name: Upload wheel
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: wheel-macos-${{ matrix.target }}-py${{ matrix.python-version }}
         path: target/wheels/*.whl
@@ -129,7 +129,7 @@ jobs:
         maturin build --release --target x86_64-pc-windows-msvc -i python
 
     - name: Upload wheel
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: wheel-windows-x86_64-py${{ matrix.python-version }}
         path: target/wheels/*.whl
@@ -154,7 +154,7 @@ jobs:
         echo "Total wheels: $(find wheels -name '*.whl' -type f | wc -l)"
 
     - name: Upload combined wheels artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: all-python-wheels
         path: wheels/**/*.whl
