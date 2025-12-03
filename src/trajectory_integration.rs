@@ -121,6 +121,8 @@ pub struct TrajectoryParams {
     pub shooter_altitude_m: f64,
     pub is_twist_right: bool,  // True for right-hand twist, false for left-hand
     pub custom_drag_table: Option<crate::drag::DragTable>,  // Custom Drag Model (CDM) data
+    pub bc_segments: Option<Vec<(f64, f64)>>,  // Mach-based BC segments: (mach, bc)
+    pub use_bc_segments: bool,  // Whether to use BC segment interpolation
 }
 
 /// Convert state to Vector6 and call compute_derivatives
@@ -187,10 +189,10 @@ fn compute_derivatives_vec(
         powder_temp: 59.0,
         tipoff_decay_distance: 0.0,
         ground_threshold: -1000.0,
-        bc_segments: None,
+        bc_segments: params.bc_segments.clone(),
         caliber_inches: 0.308,
         weight_grains: params.mass_kg / 0.00006479891,
-        use_bc_segments: false,
+        use_bc_segments: params.use_bc_segments,
         bullet_id: None,
         bc_segments_data: None,
         use_enhanced_spin_drift: params.enable_spin_drift,
@@ -436,6 +438,8 @@ pub fn solve_trajectory_rust(
         shooter_altitude_m: 0.0,
         is_twist_right: true,  // Default for test function
         custom_drag_table: None,  // No CDM for test function
+        bc_segments: None,  // No BC segments for legacy function
+        use_bc_segments: false,
     };
 
     let trajectory = integrate_trajectory(
@@ -487,6 +491,8 @@ mod tests {
             shooter_altitude_m: 0.0,
             is_twist_right: true,
             custom_drag_table: None,
+            bc_segments: None,
+            use_bc_segments: false,
         };
 
         println!("Running integrate_trajectory test...");
