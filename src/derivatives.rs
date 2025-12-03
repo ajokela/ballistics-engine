@@ -180,12 +180,20 @@ pub fn compute_derivatives(
         
         // Get BC value
         let mut bc_val = bc_used;
-        
+
         if inputs.use_bc_segments {
-            // Use velocity-based segments
-            bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used);
+            // First try velocity-based segments if available
+            if inputs.bc_segments_data.is_some() {
+                bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used);
+            } else if let Some(ref segments) = inputs.bc_segments {
+                // Fall back to Mach-based segments when use_bc_segments=true but no velocity data
+                bc_val = interpolated_bc(mach, segments, Some(inputs));
+            } else {
+                // No explicit segments - try BC estimation
+                bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used);
+            }
         } else if let Some(ref segments) = inputs.bc_segments {
-            // Fall back to Mach-based segments
+            // Explicit Mach-based segments (legacy behavior when use_bc_segments=false)
             bc_val = interpolated_bc(mach, segments, Some(inputs));
         }
         
