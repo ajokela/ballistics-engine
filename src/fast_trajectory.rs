@@ -364,6 +364,8 @@ pub fn fast_integrate_with_segments(
         shooter_altitude_m: inputs.altitude,
         is_twist_right: inputs.is_twist_right,
         custom_drag_table: inputs.custom_drag_table.clone(),
+        bc_segments: inputs.bc_segments.clone(),
+        use_bc_segments: inputs.use_bc_segments,
     };
 
     // Use RK45 adaptive integration
