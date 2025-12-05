@@ -269,6 +269,43 @@ pub struct TrajectoryResult {
     pub max_precession_angle: Option<f64>,    // Maximum precession angle (radians)
 }
 
+impl TrajectoryResult {
+    /// Interpolate position at a given downrange distance (Z coordinate).
+    /// Returns the interpolated (x, y, z) position at that range.
+    /// If the target range exceeds the trajectory, returns the last point.
+    pub fn position_at_range(&self, target_range: f64) -> Option<Vector3<f64>> {
+        if self.points.is_empty() {
+            return None;
+        }
+
+        // Find the two points that bracket the target range
+        for i in 0..self.points.len() - 1 {
+            let p1 = &self.points[i];
+            let p2 = &self.points[i + 1];
+
+            // Check if target range is between these two points
+            if p1.position.z <= target_range && p2.position.z >= target_range {
+                // Linear interpolation factor
+                let dz = p2.position.z - p1.position.z;
+                if dz.abs() < 1e-10 {
+                    return Some(p1.position);
+                }
+                let t = (target_range - p1.position.z) / dz;
+
+                // Interpolate X and Y, use exact target_range for Z
+                return Some(Vector3::new(
+                    p1.position.x + t * (p2.position.x - p1.position.x),
+                    p1.position.y + t * (p2.position.y - p1.position.y),
+                    target_range,
+                ));
+            }
+        }
+
+        // Target range is beyond trajectory - return last point
+        self.points.last().map(|p| p.position)
+    }
+}
+
 // Trajectory solver
 pub struct TrajectorySolver {
     inputs: BallisticInputs,
@@ -352,18 +389,19 @@ impl TrajectorySolver {
         let mut time = 0.0;
         let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
         // Calculate initial velocity components with both elevation and azimuth
+        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // X: forward component (downrange)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: lateral (side deviation)
             self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // Z: side deviation (lateral)
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: downrange (forward)
         );
-        
+
         let mut points = Vec::new();
         let mut max_height = position.y;
         let mut min_pitch_damping = 1.0;  // Track minimum pitch damping coefficient
         let mut transonic_mach = None;    // Track when we enter transonic
-        
+
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
             Some(AngularState {
@@ -379,19 +417,19 @@ impl TrajectorySolver {
         };
         let mut max_yaw_angle = 0.0;
         let mut max_precession_angle = 0.0;
-        
+
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
-        
-        // Wind vector (X is downrange, Z is lateral)
+
+        // Wind vector: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.cos(),  // X: downrange (head/tail wind)
+            self.wind.speed * self.wind.direction.sin(),  // X: lateral (crosswind)
             0.0,
-            self.wind.speed * self.wind.direction.sin(),  // Z: lateral (crosswind)
+            self.wind.speed * self.wind.direction.cos(),  // Z: downrange (head/tail wind)
         );
-        
-        // Main integration loop (X is downrange)
-        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
+
+        // Main integration loop (Z is downrange)
+        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
@@ -404,8 +442,9 @@ impl TrajectorySolver {
             });
 
             // Debug: Log first and every 100th point
+            // Coordinate system: X=lateral, Y=vertical, Z=downrange
             if points.len() == 1 || points.len() % 100 == 0 {
-                eprintln!("Trajectory point {}: time={:.3}s, x={:.2}m, y={:.2}m, z={:.2}m, vel={:.1}m/s",
+                eprintln!("Trajectory point {}: time={:.3}s, lateral={:.2}m, vertical={:.2}m, downrange={:.2}m, vel={:.1}m/s",
                     points.len(), time, position.x, position.y, position.z, velocity_magnitude);
             }
             
@@ -538,7 +577,7 @@ impl TrajectorySolver {
             };
             
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.x,  // X is downrange
+                target_distance_horiz_m: last_point.position.z,  // Z is downrange
                 target_vertical_height_m: last_point.position.y,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
@@ -552,7 +591,7 @@ impl TrajectorySolver {
         };
         
         Ok(TrajectoryResult {
-            max_range: last_point.position.x,  // X is downrange
+            max_range: last_point.position.z,  // Z is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -571,13 +610,14 @@ impl TrajectorySolver {
         // RK4 trajectory integration for better accuracy
         let mut time = 0.0;
         let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
-        
+
         // Calculate initial velocity components with both elevation and azimuth
+        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // X: forward component (downrange)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: lateral (side deviation)
             self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // Z: side deviation (lateral)
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: downrange (forward)
         );
 
         let mut points = Vec::new();
@@ -604,15 +644,15 @@ impl TrajectorySolver {
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
 
-        // Wind vector (X is downrange, Z is lateral)
+        // Wind vector: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.cos(),  // X: downrange (head/tail wind)
+            self.wind.speed * self.wind.direction.sin(),  // X: lateral (crosswind)
             0.0,
-            self.wind.speed * self.wind.direction.sin(),  // Z: lateral (crosswind)
+            self.wind.speed * self.wind.direction.cos(),  // Z: downrange (head/tail wind)
         );
 
-        // Main RK4 integration loop (X is downrange)
-        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
+        // Main RK4 integration loop (Z is downrange)
+        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
@@ -750,7 +790,7 @@ impl TrajectorySolver {
             };
             
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.x,  // X is downrange
+                target_distance_horiz_m: last_point.position.z,  // Z is downrange
                 target_vertical_height_m: last_point.position.y,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
@@ -764,7 +804,7 @@ impl TrajectorySolver {
         };
         
         Ok(TrajectoryResult {
-            max_range: last_point.position.x,  // X is downrange
+            max_range: last_point.position.z,  // Z is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -783,15 +823,16 @@ impl TrajectorySolver {
         // RK45 adaptive step size integration (Dormand-Prince method)
         let mut time = 0.0;
         let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
-        
-        // Calculate initial velocity components (X is downrange, Z is lateral)
+
+        // Calculate initial velocity components
+        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // X: forward component (downrange)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: lateral (side deviation)
             self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // Z: side deviation (lateral)
+            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: downrange (forward)
         );
-        
+
         let mut points = Vec::new();
         let mut max_height = position.y;
         let mut dt = 0.001;  // Initial step size
@@ -799,38 +840,38 @@ impl TrajectorySolver {
         let safety_factor = 0.9;  // Safety factor for step size adjustment
         let max_dt = 0.01;  // Maximum step size
         let min_dt = 1e-6;   // Minimum step size
-        
+
         // Add a point counter to debug
         let mut iteration_count = 0;
         const MAX_ITERATIONS: usize = 100000;
-        
-        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {  // X is downrange
+
+        while position.z < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {  // Z is downrange
             iteration_count += 1;
             if iteration_count > MAX_ITERATIONS {
                 break; // Prevent infinite loop
             }
-            
+
             // Store current point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude.powi(2);
-            
+
             points.push(TrajectoryPoint {
                 time,
                 position: position.clone(),
                 velocity_magnitude,
                 kinetic_energy,
             });
-            
+
             if position.y > max_height {
                 max_height = position.y;
             }
-            
-            // Get atmospheric conditions and wind (X is downrange, Z is lateral)
+
+            // Get atmospheric conditions and wind: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
             let air_density = calculate_air_density(&self.atmosphere);
             let wind_vector = Vector3::new(
-                self.wind.speed * self.wind.direction.cos(),  // X: downrange (head/tail wind)
+                self.wind.speed * self.wind.direction.sin(),  // X: lateral (crosswind)
                 0.0,
-                self.wind.speed * self.wind.direction.sin(),  // Z: lateral (crosswind)
+                self.wind.speed * self.wind.direction.cos(),  // Z: downrange (head/tail wind)
             );
             
             // RK45 step with adaptive step size
@@ -860,7 +901,7 @@ impl TrajectorySolver {
         let last_point = points.last().unwrap();
 
         Ok(TrajectoryResult {
-            max_range: last_point.position.x,  // X is downrange
+            max_range: last_point.position.z,  // Z is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -1132,19 +1173,23 @@ pub fn run_monte_carlo_with_wind(
 ) -> Result<MonteCarloResults, BallisticsError> {
     use rand::thread_rng;
     use rand_distr::{Distribution, Normal};
-    
+
     let mut rng = thread_rng();
     let mut ranges = Vec::new();
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
-    
+
     // First, calculate baseline trajectory with no variations
     let baseline_solver = TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), Default::default());
     let baseline_result = baseline_solver.solve()?;
-    let baseline_impact = baseline_result.points.last()
-        .ok_or("No baseline trajectory points")?
-        .position.clone();
-    
+
+    // Determine target distance: use explicit target or baseline max range
+    let target_distance = params.target_distance.unwrap_or(baseline_result.max_range);
+
+    // Get baseline position at target distance (interpolated)
+    let baseline_at_target = baseline_result.position_at_range(target_distance)
+        .ok_or("Could not interpolate baseline at target distance")?;
+
     // Create normal distributions for variations
     let velocity_dist = Normal::new(base_inputs.muzzle_velocity, params.velocity_std_dev)
         .map_err(|e| format!("Invalid velocity distribution: {}", e))?;
@@ -1158,12 +1203,11 @@ pub fn run_monte_carlo_with_wind(
         .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
     let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
         .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
-    
+
     // Create distribution for pointing errors (simulates shooter's aiming consistency)
-    let distance = baseline_impact.z;  // Distance to target
-    let pointing_error_dist = Normal::new(0.0, params.angle_std_dev * distance)
+    let pointing_error_dist = Normal::new(0.0, params.angle_std_dev * target_distance)
         .map_err(|e| format!("Invalid pointing distribution: {}", e))?;
-    
+
     for _ in 0..params.num_simulations {
         // Create varied inputs
         let mut inputs = base_inputs.clone();
@@ -1171,32 +1215,35 @@ pub fn run_monte_carlo_with_wind(
         inputs.muzzle_angle = angle_dist.sample(&mut rng);
         inputs.bc_value = bc_dist.sample(&mut rng).max(0.01);
         inputs.azimuth_angle = azimuth_dist.sample(&mut rng);  // Add horizontal variation
-        
+
         // Create varied wind (now based on base wind conditions)
         let wind = WindConditions {
             speed: wind_speed_dist.sample(&mut rng).abs(),
             direction: wind_dir_dist.sample(&mut rng),
         };
-        
+
         // Run trajectory
         let solver = TrajectorySolver::new(inputs, wind, Default::default());
         match solver.solve() {
             Ok(result) => {
                 ranges.push(result.max_range);
                 impact_velocities.push(result.impact_velocity);
-                if let Some(last_point) = result.points.last() {
-                    // Calculate physical deviation from baseline impact point
+
+                // Interpolate position at target distance (not ground impact)
+                if let Some(pos_at_target) = result.position_at_range(target_distance) {
+                    // Calculate deviation from baseline at the SAME target distance
+                    // X = lateral deviation (windage), Y = vertical deviation (elevation)
                     let mut deviation = Vector3::new(
-                        last_point.position.x - baseline_impact.x,  // Lateral deviation
-                        last_point.position.y - baseline_impact.y,  // Vertical deviation
-                        last_point.position.z - baseline_impact.z,  // Range deviation
+                        pos_at_target.x - baseline_at_target.x,  // Lateral deviation
+                        pos_at_target.y - baseline_at_target.y,  // Vertical deviation
+                        0.0,  // Z deviation is 0 since we're comparing at same range
                     );
-                    
+
                     // Add additional pointing error to simulate realistic group sizes
                     // This represents the shooter's ability to aim consistently
                     let pointing_error_y = pointing_error_dist.sample(&mut rng);
                     deviation.y += pointing_error_y;
-                    
+
                     impact_positions.push(deviation);
                 }
             },
@@ -1206,11 +1253,11 @@ pub fn run_monte_carlo_with_wind(
             }
         }
     }
-    
+
     if ranges.is_empty() {
         return Err("No successful simulations".into());
     }
-    
+
     Ok(MonteCarloResults {
         ranges,
         impact_velocities,
@@ -1338,15 +1385,15 @@ pub fn calculate_zero_angle_with_conditions(
         solver.set_time_step(0.001);
         let result = solver.solve()?;
 
-        // Find the height at target distance (X is downrange)
+        // Find the height at target distance (Z is downrange)
         let mut height_at_target = None;
         for i in 0..result.points.len() {
-            if result.points[i].position.x >= target_distance {
+            if result.points[i].position.z >= target_distance {
                 if i > 0 {
                     // Linear interpolation
                     let p1 = &result.points[i - 1];
                     let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
+                    let t = (target_distance - p1.position.z) / (p2.position.z - p1.position.z);
                     height_at_target = Some(p1.position.y + t * (p2.position.y - p1.position.y));
                 } else {
                     height_at_target = Some(result.points[i].position.y);

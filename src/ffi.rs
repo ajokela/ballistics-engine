@@ -242,9 +242,10 @@ pub extern "C" fn ballistics_calculate_trajectory(
                     });
 
                     // Debug: Log first, last, and every 100th point
+                    // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
                     #[cfg(debug_assertions)]
                     if i == 0 || i == result.points.len() - 1 || i % 100 == 0 {
-                        eprintln!("FFI point {}: x={:.2}m, y={:.2}m, z={:.2}m (X is downrange)",
+                        eprintln!("FFI point {}: lateral={:.2}m, vertical={:.2}m, downrange={:.2}m",
                             i, point.position[0], point.position[1], point.position[2]);
                     }
                 }
