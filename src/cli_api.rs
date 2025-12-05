@@ -1297,12 +1297,13 @@ pub fn calculate_zero_angle_with_conditions(
         solver.set_time_step(0.001);
         let result = solver.solve()?;
 
+        // Z is downrange in standard ballistics coordinates
         for i in 0..result.points.len() {
-            if result.points[i].position.x >= target_distance {
+            if result.points[i].position.z >= target_distance {
                 if i > 0 {
                     let p1 = &result.points[i - 1];
                     let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
+                    let t = (target_distance - p1.position.z) / (p2.position.z - p1.position.z);
                     return Ok(Some(p1.position.y + t * (p2.position.y - p1.position.y)));
                 } else {
                     return Ok(Some(result.points[i].position.y));
