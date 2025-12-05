@@ -1416,14 +1416,14 @@ fn run_bc_estimation(
     let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
     let trajectory = solver.solve()?;
     
-    // Find drops at the specified distances
+    // Find drops at the specified distances (Z is downrange)
     let calc_drop1 = trajectory.points.iter()
-        .find(|p| p.position.x >= distance1)
+        .find(|p| p.position.z >= distance1)
         .map(|p| -p.position.y)
         .unwrap_or(0.0);
-    
+
     let calc_drop2 = trajectory.points.iter()
-        .find(|p| p.position.x >= distance2)
+        .find(|p| p.position.z >= distance2)
         .map(|p| -p.position.y)
         .unwrap_or(0.0);
     

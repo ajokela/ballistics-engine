@@ -29,13 +29,13 @@ pub struct WindLayer {
 
 impl WindLayer {
     /// Convert to wind vector [x, y, z] in m/s
-    /// STANDARD BALLISTICS CONVENTION: x=downrange, y=vertical, z=lateral
+    /// STANDARD BALLISTICS CONVENTION: X=lateral, Y=vertical, Z=downrange
     pub fn to_vector(&self) -> Vector3<f64> {
         let ang = self.direction_deg.to_radians();
         Vector3::new(
-            -self.speed_mps * ang.cos(), // x (downrange - head/tail component)
-            0.0,                         // y (vertical)
-            -self.speed_mps * ang.sin(), // z (lateral - crosswind component)
+            -self.speed_mps * ang.sin(), // X (lateral - crosswind component)
+            0.0,                         // Y (vertical)
+            -self.speed_mps * ang.cos(), // Z (downrange - head/tail component)
         )
     }
 }
@@ -165,11 +165,11 @@ impl WindShearProfile {
 
         let direction_rad = dir1 * (1.0 - ratio) + dir2 * ratio;
 
-        // Convert to vector
+        // Convert to vector (X=lateral, Y=vertical, Z=downrange)
         Vector3::new(
-            -speed * direction_rad.cos(),
+            -speed * direction_rad.sin(),  // X (lateral - crosswind)
             0.0,
-            -speed * direction_rad.sin(),
+            -speed * direction_rad.cos(),  // Z (downrange - head/tail)
         )
     }
 
@@ -244,8 +244,9 @@ impl WindShearWindSock {
     }
 
     /// Get wind vector for 3D position
+    /// Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
     pub fn vector_for_position(&self, position: Vector3<f64>) -> Vector3<f64> {
-        let range_m = position.x;
+        let range_m = position.z;  // Z is downrange
         let altitude_m = position.y;  // Relative to shooter
 
         // Get base wind at this range
@@ -272,6 +273,7 @@ impl WindShearWindSock {
     }
 
     /// Get wind based on horizontal range
+    /// Returns wind vector in standard ballistics coordinates: X=lateral, Y=vertical, Z=downrange
     fn get_range_wind(&self, range_m: f64) -> Vector3<f64> {
         if range_m.is_nan() || self.segments.is_empty() {
             return Vector3::zeros();
@@ -282,9 +284,9 @@ impl WindShearWindSock {
             if range_m <= until_dist {
                 let ang = angle_deg.to_radians();
                 return Vector3::new(
-                    -speed_mps * ang.cos(),
+                    -speed_mps * ang.sin(),  // X (lateral - crosswind)
                     0.0,
-                    -speed_mps * ang.sin(),
+                    -speed_mps * ang.cos(),  // Z (downrange - head/tail)
                 );
             }
         }
@@ -403,6 +405,9 @@ mod tests {
 
     #[test]
     fn test_wind_layer() {
+        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
+        // Wind direction: 0°=headwind, 90°=from right, 180°=tailwind, 270°=from left
+
         // Test 0° wind (from north/front - headwind)
         let layer_headwind = WindLayer {
             altitude_m: 100.0,
@@ -411,9 +416,9 @@ mod tests {
         };
 
         let vec = layer_headwind.to_vector();
-        assert!((vec.x - (-10.0)).abs() < 1e-6, "0° wind should be headwind (negative X downrange)");
+        assert!((vec.x).abs() < 1e-6, "0° wind (headwind) should have zero lateral (X) component");
         assert_eq!(vec.y, 0.0);
-        assert!((vec.z).abs() < 1e-6, "0° wind should have zero lateral component");
+        assert!((vec.z - (-10.0)).abs() < 1e-6, "0° wind should be headwind (negative Z downrange)");
 
         // Test 90° wind (from right)
         let layer_crosswind = WindLayer {
@@ -423,9 +428,9 @@ mod tests {
         };
 
         let vec_cross = layer_crosswind.to_vector();
-        assert!((vec_cross.x).abs() < 1e-6, "90° wind should have zero downrange component");
+        assert!((vec_cross.x - (-10.0)).abs() < 1e-6, "90° wind should have negative X lateral (from right)");
         assert_eq!(vec_cross.y, 0.0);
-        assert!((vec_cross.z - (-10.0)).abs() < 1e-6, "90° wind should have negative Z lateral");
+        assert!((vec_cross.z).abs() < 1e-6, "90° wind (crosswind) should have zero downrange (Z) component");
     }
 
     #[test]

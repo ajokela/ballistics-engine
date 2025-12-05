@@ -1037,21 +1037,22 @@ impl WasmBallistics {
         };
         
         for (idx, point) in result.points.iter().enumerate() {
+            // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
             let range_display = match units {
-                UnitSystem::Imperial => point.position.x * 1.09361, // X is downrange, m to yards
-                UnitSystem::Metric => point.position.x,  // X is downrange
+                UnitSystem::Imperial => point.position.z * 1.09361, // Z is downrange, m to yards
+                UnitSystem::Metric => point.position.z,  // Z is downrange
             };
-            
+
             let is_last_point = idx == result.points.len() - 1;
-            
+
             // Show point if it's at the sampling interval OR if it's the last point OR if it's the zero distance
-            let should_show = range_display >= current_range || 
-                            is_last_point || 
+            let should_show = range_display >= current_range ||
+                            is_last_point ||
                             (zero_distance.is_some() && (range_display - zero_distance.unwrap()).abs() < 1.0);
-            
+
             if should_show {
                 let drop = sight_height - point.position.y;
-                let drift = point.position.z;  // Z is lateral (windage)
+                let drift = point.position.x;  // X is lateral (windage)
                 let velocity = point.velocity_magnitude;
                 
                 // Format values based on unit system
@@ -1098,8 +1099,9 @@ impl WasmBallistics {
         // Check termination reason
         if let Some(last_point) = result.points.last() {
             // Debug info about last point
+            // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
             let last_height = last_point.position.y;
-            let last_range = last_point.position.x;  // X is downrange
+            let last_range = last_point.position.z;  // Z is downrange
             let last_time = last_point.time;
             
             // Ground threshold is typically around 0.01m (1cm), so if y is close to or below that, it hit ground
@@ -1130,13 +1132,14 @@ impl WasmBallistics {
     }
 
     fn format_trajectory_json(&self, result: &crate::cli_api::TrajectoryResult, units: UnitSystem) -> String {
+        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
         let points: Vec<serde_json::Value> = result.points.iter().map(|p| {
             match units {
                 UnitSystem::Imperial => {
                     serde_json::json!({
-                        "range_yards": p.position.x * 1.09361,  // X is downrange
+                        "range_yards": p.position.z * 1.09361,  // Z is downrange
                         "drop_inches": (result.points[0].position.y - p.position.y) * 39.3701,
-                        "drift_inches": p.position.z * 39.3701,  // Z is lateral (windage)
+                        "drift_inches": p.position.x * 39.3701,  // X is lateral (windage)
                         "velocity_fps": p.velocity_magnitude * 3.28084,
                         "energy_ftlb": p.kinetic_energy * 0.737562149,
                         "time_seconds": p.time
@@ -1144,9 +1147,9 @@ impl WasmBallistics {
                 },
                 UnitSystem::Metric => {
                     serde_json::json!({
-                        "range_meters": p.position.x,  // X is downrange
+                        "range_meters": p.position.z,  // Z is downrange
                         "drop_cm": (result.points[0].position.y - p.position.y) * 100.0,
-                        "drift_cm": p.position.z * 100.0,  // Z is lateral (windage)
+                        "drift_cm": p.position.x * 100.0,  // X is lateral (windage)
                         "velocity_mps": p.velocity_magnitude,
                         "energy_joules": p.kinetic_energy,
                         "time_seconds": p.time
@@ -1215,9 +1218,10 @@ impl WasmBallistics {
         };
 
         for (idx, point) in result.points.iter().enumerate() {
+            // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
             let range_display = match units {
-                UnitSystem::Imperial => point.position.x * 1.09361,  // X is downrange
-                UnitSystem::Metric => point.position.x,  // X is downrange
+                UnitSystem::Imperial => point.position.z * 1.09361,  // Z is downrange
+                UnitSystem::Metric => point.position.z,  // Z is downrange
             };
 
             let is_last_point = idx == result.points.len() - 1;
@@ -1232,7 +1236,7 @@ impl WasmBallistics {
                             "{:.1},{:.2},{:.2},{:.0},{:.0},{:.3}\n",
                             range_display,
                             drop * 39.3701,
-                            point.position.z * 39.3701,  // Z is lateral (windage)
+                            point.position.x * 39.3701,  // X is lateral (windage)
                             point.velocity_magnitude * 3.28084,
                             energy_ftlb,
                             point.time
@@ -1243,14 +1247,14 @@ impl WasmBallistics {
                             "{:.1},{:.2},{:.2},{:.0},{:.0},{:.3}\n",
                             range_display,
                             drop * 100.0,
-                            point.position.z * 100.0,  // Z is lateral (windage)
+                            point.position.x * 100.0,  // X is lateral (windage)
                             point.velocity_magnitude,
                             point.kinetic_energy,
                             point.time
                         ));
                     }
                 }
-                
+
                 if range_display >= current_range {
                     current_range += sample_interval;
                 }
