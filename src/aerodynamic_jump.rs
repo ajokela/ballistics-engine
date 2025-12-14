@@ -3,12 +3,12 @@ use crate::constants::{AIR_DENSITY_SEA_LEVEL, SPEED_OF_SOUND_MPS};
 /// Components of aerodynamic jump calculation
 #[derive(Debug, Clone, Copy)]
 pub struct AerodynamicJumpComponents {
-    pub vertical_jump_moa: f64,      // Vertical displacement in MOA at 100 yards
-    pub horizontal_jump_moa: f64,    // Horizontal displacement in MOA at 100 yards
-    pub jump_angle_rad: f64,         // Total angular displacement in radians
-    pub magnus_component_moa: f64,   // Magnus effect contribution
-    pub yaw_component_moa: f64,      // Initial yaw contribution
-    pub stabilization_factor: f64,   // How quickly projectile stabilizes (0-1)
+    pub vertical_jump_moa: f64,    // Vertical displacement in MOA at 100 yards
+    pub horizontal_jump_moa: f64,  // Horizontal displacement in MOA at 100 yards
+    pub jump_angle_rad: f64,       // Total angular displacement in radians
+    pub magnus_component_moa: f64, // Magnus effect contribution
+    pub yaw_component_moa: f64,    // Initial yaw contribution
+    pub stabilization_factor: f64, // How quickly projectile stabilizes (0-1)
 }
 
 /// Calculate aerodynamic jump for a spinning projectile.
@@ -43,7 +43,7 @@ pub fn calculate_aerodynamic_jump(
     let magnus_coeff = if mach < 0.8 {
         0.25
     } else if mach < 1.2 {
-        0.15  // Reduced in transonic
+        0.15 // Reduced in transonic
     } else {
         0.20
     };
@@ -57,13 +57,18 @@ pub fn calculate_aerodynamic_jump(
     } else {
         0.0
     };
-    
+
     let total_yaw_rad = crosswind_yaw + initial_yaw_rad;
 
     // Magnus force during barrel exit
     let area = std::f64::consts::PI * (caliber_m / 2.0).powi(2);
-    let magnus_force = 0.5 * air_density_kg_m3 * muzzle_velocity_mps.powi(2) * 
-                      area * magnus_coeff * spin_param * total_yaw_rad.sin();
+    let magnus_force = 0.5
+        * air_density_kg_m3
+        * muzzle_velocity_mps.powi(2)
+        * area
+        * magnus_coeff
+        * spin_param
+        * total_yaw_rad.sin();
 
     // Time for projectile to clear muzzle
     let exit_time = 2.0 * barrel_length_m / muzzle_velocity_mps;
@@ -89,23 +94,26 @@ pub fn calculate_aerodynamic_jump(
     // Enhanced calculation accounting for barrel exit dynamics
     let lever_factor = (barrel_length_m / caliber_m) * 0.1;
     let magnus_enhancement = 50.0; // Calibrated to match empirical data
-    
+
     // Vertical displacement
-    let mut vertical_jump_m = magnus_enhancement * lever_factor * vertical_sign * 
-                             magnus_accel.abs() * effective_time.powi(2);
-    
+    let mut vertical_jump_m = magnus_enhancement
+        * lever_factor
+        * vertical_sign
+        * magnus_accel.abs()
+        * effective_time.powi(2);
+
     // Add yaw-induced component
     if total_yaw_rad != 0.0 {
         let yaw_contribution = total_yaw_rad.abs() * barrel_length_m * 0.5;
         vertical_jump_m += vertical_sign * yaw_contribution;
     }
-    
+
     // Horizontal component (smaller effect)
     let horizontal_jump_m = 0.25 * vertical_jump_m * (2.0 * total_yaw_rad).sin();
 
     // Convert to MOA at 100 yards
     const YARDS_TO_M: f64 = 0.9144;
-    const MOA_PER_RADIAN: f64 = 3437.7467707849;  // 1 / 0.0002908882
+    const MOA_PER_RADIAN: f64 = 3437.7467707849; // 1 / 0.0002908882
 
     let range_100y = 100.0 * YARDS_TO_M;
     let vertical_angle_rad = vertical_jump_m / range_100y;
@@ -123,8 +131,7 @@ pub fn calculate_aerodynamic_jump(
 
     // Stabilization factor
     let caliber_in = caliber_m / 0.0254;
-    let sg_approx = 30.0 * mass_kg * 15.432 / 
-                   (twist_rate_calibers.powi(2) * caliber_in.powi(3));
+    let sg_approx = 30.0 * mass_kg * 15.432 / (twist_rate_calibers.powi(2) * caliber_in.powi(3));
     let stabilization_factor = (sg_approx / 1.5).min(1.0);
 
     AerodynamicJumpComponents {
@@ -144,7 +151,7 @@ pub fn calculate_sight_correction_for_jump(
     sight_height_m: f64,
 ) -> (f64, f64) {
     // Range factor
-    let range_factor = 91.44 / zero_range_m;  // 100 yards / zero range
+    let range_factor = 91.44 / zero_range_m; // 100 yards / zero range
 
     // Sight corrections (opposite of jump direction)
     let mut vertical_correction = -jump_components.vertical_jump_moa * range_factor;
@@ -175,10 +182,10 @@ pub fn calculate_crosswind_jump_sensitivity(
         crosswind_1mph,
         caliber_m,
         mass_kg,
-        0.6,  // Typical 24" barrel
+        0.6, // Typical 24" barrel
         twist_rate_calibers,
         is_right_twist,
-        0.0,  // No initial yaw
+        0.0, // No initial yaw
         AIR_DENSITY_SEA_LEVEL,
     );
 
@@ -234,17 +241,15 @@ mod tests {
     #[test]
     fn test_opposite_twist_direction() {
         let crosswind = 4.4704; // 10 mph
-        
+
         // Right twist
         let jump_right = calculate_aerodynamic_jump(
-            800.0, 17593.0, crosswind, 0.00782, 0.01134,
-            0.6096, 32.47, true, 0.0, 1.225,
+            800.0, 17593.0, crosswind, 0.00782, 0.01134, 0.6096, 32.47, true, 0.0, 1.225,
         );
 
         // Left twist
         let jump_left = calculate_aerodynamic_jump(
-            800.0, 17593.0, crosswind, 0.00782, 0.01134,
-            0.6096, 32.47, false, 0.0, 1.225,
+            800.0, 17593.0, crosswind, 0.00782, 0.01134, 0.6096, 32.47, false, 0.0, 1.225,
         );
 
         // Opposite twist should give opposite vertical jump
@@ -263,9 +268,8 @@ mod tests {
         };
 
         let (vert, horiz) = calculate_sight_correction_for_jump(
-            &jump,
-            274.32,  // 300 yards
-            0.05,    // 2" sight height
+            &jump, 274.32, // 300 yards
+            0.05,   // 2" sight height
         );
 
         // Corrections should be opposite of jump

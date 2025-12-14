@@ -13,18 +13,18 @@ pub const FPS_TO_MPS: f64 = 0.3048;
 pub const STANDARD_AIR_DENSITY: f64 = 1.225;
 
 /// Critical drag coefficient to retardation conversion constant
-/// 
+///
 /// This fundamental constant converts drag coefficient (Cd) to ballistic retardation force.
 /// Value: 0.000683 * 0.30 = 0.0002049
-/// 
+///
 /// Derivation:
 /// - 0.000683: Dimensional conversion factor from imperial ballistics units
 /// - 0.30: Empirical correction factor from extensive ballistics testing
-/// 
+///
 /// Physical meaning: Proportionality constant in the ballistic coefficient equation:
 /// BC = (bullet_mass / bullet_diameter²) / (Cd / Cd_standard)
 /// Retardation = CD_TO_RETARD * Cd * air_density * velocity²
-/// 
+///
 /// Sources: Classical ballistics theory (Pejsa, McCoy), validated against
 /// Aberdeen Proving Ground data and modern Doppler radar measurements.
 pub const CD_TO_RETARD: f64 = 0.000683 * 0.30;
@@ -36,15 +36,15 @@ pub const GRAINS_TO_KG: f64 = 0.00006479891;
 pub const AIR_DENSITY_SEA_LEVEL: f64 = 1.225;
 
 /// Speed of sound at sea level, standard atmospheric conditions
-/// 
+///
 /// Value: 340.29 m/s (1116.8 ft/s)
 /// Conditions: 15°C (59°F), 1013.25 hPa, dry air
-/// 
+///
 /// Temperature dependence: c = 331.3 * sqrt(T_kelvin / 273.15)
-/// 
+///
 /// Note: Some calculations use 343.0 m/s (20°C reference) - ensure consistency
 /// in Mach number calculations. This value follows ICAO Standard Atmosphere.
-/// 
+///
 /// Source: International Standard Atmosphere (ISO 2533)
 pub const SPEED_OF_SOUND_MPS: f64 = 340.29;
 
@@ -65,21 +65,21 @@ pub const ROOT_FINDING_TOLERANCE: f64 = 1e-6;
 pub const MIN_MACH_THRESHOLD: f64 = 1e-3;
 
 // Ballistic Coefficient (BC) fallback constants
-// 
+//
 // These values are used when BC calculations fail or data is missing.
 // Derived from statistical analysis of 2,000+ projectile database.
 // Values represent conservative estimates (25th percentile) to avoid
 // over-predicting ballistic performance.
 
 /// Conservative overall BC fallback value
-/// 
+///
 /// Value: 0.31 (25th percentile from comprehensive ballistics database)
 /// Usage: General fallback when no specific projectile data available
 /// Methodology: Statistical analysis of measured BC values across all categories
 pub const BC_FALLBACK_CONSERVATIVE: f64 = 0.31;
 
 /// BC fallback values by projectile weight category (grains)
-/// 
+///
 /// Values based on statistical analysis of ballistic coefficient vs mass relationships.
 /// Each constant represents 25th percentile BC for that weight category.
 
@@ -104,7 +104,7 @@ pub const BC_FALLBACK_HEAVY: f64 = 0.393;
 pub const BC_FALLBACK_VERY_HEAVY: f64 = 0.441;
 
 /// BC fallback values by caliber category (inches)
-/// 
+///
 /// Values account for diameter limitations on achievable ballistic coefficient.
 /// Larger calibers generally allow higher BC but with diminishing returns.
 

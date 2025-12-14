@@ -1,9 +1,9 @@
 use ballistics_engine::{
-    BallisticInputs, TrajectorySolver, MonteCarloParams, 
-    WindConditions, AtmosphericConditions, DragModel, trajectory_sampling
+    trajectory_sampling, AtmosphericConditions, BallisticInputs, DragModel, MonteCarloParams,
+    TrajectorySolver, WindConditions,
 };
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 
 #[derive(Parser)]
@@ -15,7 +15,7 @@ struct Cli {
     /// Unit system for input/output (metric or imperial)
     #[arg(short = 'u', long, default_value = "imperial", global = true)]
     units: UnitSystem,
-    
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -27,71 +27,71 @@ enum Commands {
         /// Initial velocity (fps or m/s based on --units)
         #[arg(short = 'v', long)]
         velocity: f64,
-        
+
         /// Launch angle (degrees)
         #[arg(short = 'a', long, default_value = "0.0")]
         angle: f64,
-        
+
         /// Ballistic coefficient
         #[arg(short = 'b', long)]
         bc: f64,
-        
+
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long)]
         mass: f64,
-        
+
         /// Diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long)]
         diameter: f64,
-        
+
         /// Drag model (G1, G7, Custom)
         #[arg(long, default_value = "g1")]
         drag_model: DragModelArg,
-        
+
         /// Maximum range (yards or meters based on --units)
         #[arg(long, default_value = "1000.0")]
         max_range: f64,
-        
+
         /// Time step (seconds)
         #[arg(long, default_value = "0.001")]
         time_step: f64,
-        
+
         /// Wind speed (mph or m/s based on --units)
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
-        
+
         /// Wind direction (degrees, 0=North, 90=East)
         #[arg(long, default_value = "0.0")]
         wind_direction: f64,
-        
+
         /// Temperature (Fahrenheit or Celsius based on --units)
         #[arg(long, default_value = "59.0")]
         temperature: f64,
-        
+
         /// Pressure (inHg or hPa based on --units)
         #[arg(long, default_value = "29.92")]
         pressure: f64,
-        
+
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0")]
         humidity: f64,
-        
+
         /// Altitude (feet or meters based on --units)
         #[arg(long, default_value = "0.0")]
         altitude: f64,
-        
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
-        
+
         /// Show all trajectory points
         #[arg(long)]
         full: bool,
-        
+
         /// Automatically zero to target distance (overrides --angle)
         #[arg(long)]
         auto_zero: Option<f64>,
-        
+
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
         sight_height: Option<f64>,
@@ -107,233 +107,232 @@ enum Commands {
         /// Enable velocity-based BC segmentation
         #[arg(long)]
         use_bc_segments: bool,
-        
+
         // Advanced Physics Parameters
-        
         /// Enable Magnus effect (requires twist-rate)
         #[arg(long)]
         enable_magnus: bool,
-        
+
         /// Enable Coriolis effect (requires latitude)
         #[arg(long)]
         enable_coriolis: bool,
-        
+
         /// Use Euler integration instead of RK45 (RK45 adaptive is default for best accuracy)
         #[arg(long)]
         use_euler: bool,
-        
+
         /// Use fixed-step RK4 instead of adaptive RK45 (faster but less accurate)
         #[arg(long)]
         use_rk4_fixed: bool,
-        
+
         /// Enable enhanced spin drift calculations
         #[arg(long)]
         enable_spin_drift: bool,
-        
+
         /// Enable wind shear (altitude-dependent wind)
         #[arg(long)]
         enable_wind_shear: bool,
-        
+
         /// Enable trajectory sampling at regular intervals
         #[arg(long)]
         sample_trajectory: bool,
-        
+
         /// Sampling interval in meters (default: 10)
         #[arg(long, default_value = "10.0")]
         sample_interval: f64,
-        
+
         /// Enable pitch damping for transonic stability analysis
         #[arg(long)]
         enable_pitch_damping: bool,
-        
+
         /// Enable precession/nutation physics for angular motion modeling
         #[arg(long)]
         enable_precession: bool,
-        
+
         /// Use cluster-based BC degradation for improved accuracy
         #[arg(long)]
         use_cluster_bc: bool,
-        
+
         /// Barrel twist rate (inches per turn, e.g., 10 for 1:10)
         #[arg(long)]
         twist_rate: Option<f64>,
-        
+
         /// Right-hand twist (true) or left-hand (false)
         #[arg(long, default_value = "true")]
         twist_right: bool,
-        
+
         /// Latitude for Coriolis effect (degrees, -90 to 90)
         #[arg(long)]
         latitude: Option<f64>,
-        
+
         /// Shooting angle (degrees, positive = uphill, negative = downhill)
         #[arg(long, default_value = "0.0")]
         shooting_angle: f64,
-        
+
         /// Enable powder temperature sensitivity
         #[arg(long)]
         use_powder_sensitivity: bool,
-        
+
         /// Powder temperature sensitivity (fps per degree)
         #[arg(long, default_value = "1.0")]
         powder_temp_sensitivity: f64,
-        
+
         /// Powder temperature
         #[arg(long, default_value = "70.0")]
         powder_temp: f64,
     },
-    
+
     /// Run Monte Carlo simulation
     MonteCarlo {
         /// Base velocity (m/s)
         #[arg(short = 'v', long)]
         velocity: f64,
-        
+
         /// Launch angle (degrees)
         #[arg(short = 'a', long, default_value = "0.0")]
         angle: f64,
-        
+
         /// Ballistic coefficient
         #[arg(short = 'b', long)]
         bc: f64,
-        
+
         /// Mass (kg)
         #[arg(short = 'm', long)]
         mass: f64,
-        
+
         /// Diameter (meters)
         #[arg(short = 'd', long)]
         diameter: f64,
-        
+
         /// Number of simulations
         #[arg(short = 'n', long, default_value = "1000")]
         num_sims: usize,
-        
+
         /// Velocity standard deviation (m/s)
         #[arg(long, default_value = "1.0")]
         velocity_std: f64,
-        
+
         /// Angle standard deviation (degrees)
         #[arg(long, default_value = "0.1")]
         angle_std: f64,
-        
+
         /// BC standard deviation
         #[arg(long, default_value = "0.01")]
         bc_std: f64,
-        
+
         /// Wind speed standard deviation (m/s)
         #[arg(long, default_value = "1.0")]
         wind_std: f64,
-        
+
         /// Base wind speed (m/s)
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
-        
+
         /// Base wind direction (degrees, 0=North, 90=East)
         #[arg(long, default_value = "0.0")]
         wind_direction: f64,
-        
+
         /// Target distance (meters)
         #[arg(long)]
         target_distance: Option<f64>,
-        
+
         /// Output format
         #[arg(short = 'o', long, default_value = "summary")]
         output: MonteCarloOutput,
     },
-    
+
     /// Calculate zero angle for a target
     Zero {
         /// Initial velocity (fps for imperial, m/s for metric)
         #[arg(short = 'v', long)]
         velocity: f64,
-        
+
         /// Ballistic coefficient
         #[arg(short = 'b', long)]
         bc: f64,
-        
+
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long)]
         mass: f64,
-        
+
         /// Diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long)]
         diameter: f64,
-        
+
         /// Target distance (yards for imperial, meters for metric)
         #[arg(long)]
         target_distance: f64,
-        
+
         /// Target height (yards for imperial, meters for metric)
         #[arg(long, default_value = "0.0")]
         target_height: f64,
-        
+
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
         sight_height: Option<f64>,
-        
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
     },
-    
+
     /// Estimate BC from trajectory data
     EstimateBC {
         /// Initial velocity (m/s)
         #[arg(short = 'v', long)]
         velocity: f64,
-        
+
         /// Mass (kg)
         #[arg(short = 'm', long)]
         mass: f64,
-        
+
         /// Diameter (meters)
         #[arg(short = 'd', long)]
         diameter: f64,
-        
+
         /// Distance 1 (meters)
         #[arg(long)]
         distance1: f64,
-        
+
         /// Drop at distance 1 (meters)
         #[arg(long)]
         drop1: f64,
-        
+
         /// Distance 2 (meters)
         #[arg(long)]
         distance2: f64,
-        
+
         /// Drop at distance 2 (meters)
         #[arg(long)]
         drop2: f64,
-        
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
     },
-    
+
     /// Generate BC segments for velocity-dependent BC
     GenerateBCSegments {
         /// Base ballistic coefficient
         #[arg(short = 'b', long)]
         bc: f64,
-        
+
         /// Projectile mass (kg)
         #[arg(short = 'm', long)]
         mass: f64,
-        
+
         /// Projectile diameter (meters)
         #[arg(short = 'd', long)]
         diameter: f64,
-        
+
         /// Bullet model/name (e.g., "SMK", "ELD-M", "VLD")
         #[arg(long, default_value = "")]
         model: String,
-        
+
         /// Drag model (G1 or G7)
         #[arg(long, default_value = "G1")]
         drag_model: String,
-        
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
@@ -396,7 +395,7 @@ struct MonteCarloResult {
     std_range: f64,
     mean_impact_velocity: f64,
     std_impact_velocity: f64,
-    cep: f64,  // Circular Error Probable
+    cep: f64, // Circular Error Probable
     hit_probability: Option<f64>,
 }
 
@@ -411,63 +410,63 @@ impl UnitConverter {
             UnitSystem::Imperial => val * 0.3048, // fps to m/s
         }
     }
-    
+
     fn mass_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val * 0.001,           // grams to kg
             UnitSystem::Imperial => val * 0.00006479891, // grains to kg
         }
     }
-    
+
     fn distance_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val * 0.9144, // yards to meters
         }
     }
-    
+
     fn diameter_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val * 0.001,    // mm to meters
             UnitSystem::Imperial => val * 0.0254, // inches to meters
         }
     }
-    
+
     fn sight_height_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val * 0.001,    // mm to meters
             UnitSystem::Imperial => val * 0.0254, // inches to meters
         }
     }
-    
+
     fn wind_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val * 0.44704, // mph to m/s
         }
     }
-    
+
     fn temperature_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => (val - 32.0) * 5.0 / 9.0, // Fahrenheit to Celsius
         }
     }
-    
+
     fn pressure_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val * 33.8639, // inHg to hPa
         }
     }
-    
+
     fn altitude_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val * 0.3048, // feet to meters
         }
     }
-    
+
     // Output conversions (from metric)
     fn velocity_from_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
@@ -475,14 +474,14 @@ impl UnitConverter {
             UnitSystem::Imperial => val / 0.3048, // m/s to fps
         }
     }
-    
+
     fn distance_from_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val / 0.9144, // meters to yards
         }
     }
-    
+
     fn energy_from_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
@@ -493,20 +492,48 @@ impl UnitConverter {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    
+
     match cli.command {
         Commands::Trajectory {
-            velocity, angle, bc, mass, diameter, drag_model,
-            max_range, time_step, wind_speed, wind_direction,
-            temperature, pressure, humidity, altitude,
-            output, full, auto_zero, sight_height, bore_height, ignore_ground_impact,
+            velocity,
+            angle,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            max_range,
+            time_step,
+            wind_speed,
+            wind_direction,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            output,
+            full,
+            auto_zero,
+            sight_height,
+            bore_height,
+            ignore_ground_impact,
             use_bc_segments,
-            enable_magnus, enable_coriolis, enable_spin_drift,
-            enable_wind_shear, sample_trajectory, sample_interval,
-            enable_pitch_damping, enable_precession, use_cluster_bc, twist_rate, twist_right, latitude,
-            use_euler, use_rk4_fixed,
-            shooting_angle, use_powder_sensitivity,
-            powder_temp_sensitivity, powder_temp
+            enable_magnus,
+            enable_coriolis,
+            enable_spin_drift,
+            enable_wind_shear,
+            sample_trajectory,
+            sample_interval,
+            enable_pitch_damping,
+            enable_precession,
+            use_cluster_bc,
+            twist_rate,
+            twist_right,
+            latitude,
+            use_euler,
+            use_rk4_fixed,
+            shooting_angle,
+            use_powder_sensitivity,
+            powder_temp_sensitivity,
+            powder_temp,
         } => {
             // Rename for clarity
             let bullet_mass = mass;
@@ -526,23 +553,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Metric => 50.0,
             };
             let sight_height_value = sight_height.unwrap_or(sight_height_default);
-            let sight_height_metric = UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
+            let sight_height_metric =
+                UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
 
             // Bore height above ground: default 5 feet (imperial) or 1.5 meters (metric)
             let bore_height_default = match cli.units {
-                UnitSystem::Imperial => 5.0,  // feet
-                UnitSystem::Metric => 1.5,    // meters
+                UnitSystem::Imperial => 5.0, // feet
+                UnitSystem::Metric => 1.5,   // meters
             };
             let bore_height_value = bore_height.unwrap_or(bore_height_default);
             let bore_height_metric = match cli.units {
-                UnitSystem::Imperial => bore_height_value * 0.3048,  // feet to meters
+                UnitSystem::Imperial => bore_height_value * 0.3048, // feet to meters
                 UnitSystem::Metric => bore_height_value,
             };
 
             // Calculate zero angle if auto-zero is specified
             let muzzle_angle = if let Some(zero_distance) = auto_zero {
-                let zero_distance_metric = UnitConverter::distance_to_metric(zero_distance, cli.units);
-                
+                let zero_distance_metric =
+                    UnitConverter::distance_to_metric(zero_distance, cli.units);
+
                 // Create inputs for zero calculation
                 let zero_inputs = BallisticInputs {
                     muzzle_velocity: velocity_metric,
@@ -552,54 +581,108 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sight_height: sight_height_metric,
                     ..Default::default()
                 };
-                
+
                 // Calculate zero angle
                 let zero_angle = ballistics_engine::calculate_zero_angle(
                     zero_inputs,
                     zero_distance_metric,
-                    0.0  // target height at zero distance
+                    0.0, // target height at zero distance
                 )?;
-                
+
                 // Convert to degrees for the trajectory function
                 zero_angle.to_degrees()
             } else {
                 angle
             };
-            
+
             run_trajectory(
-                velocity_metric, muzzle_angle, bc, mass_metric, diameter_metric, drag_model,
-                max_range_metric, time_step, wind_speed_metric, wind_direction,
-                temperature_metric, pressure_metric, humidity, altitude_metric,
-                output, full, cli.units, sight_height_metric, bore_height_metric, ignore_ground_impact,
+                velocity_metric,
+                muzzle_angle,
+                bc,
+                mass_metric,
+                diameter_metric,
+                drag_model,
+                max_range_metric,
+                time_step,
+                wind_speed_metric,
+                wind_direction,
+                temperature_metric,
+                pressure_metric,
+                humidity,
+                altitude_metric,
+                output,
+                full,
+                cli.units,
+                sight_height_metric,
+                bore_height_metric,
+                ignore_ground_impact,
                 use_bc_segments,
-                enable_magnus, enable_coriolis, enable_spin_drift,
-                enable_wind_shear, sample_trajectory, sample_interval,
-                enable_pitch_damping, enable_precession, use_cluster_bc, !use_euler, !use_rk4_fixed, twist_rate, twist_right, latitude,
-                shooting_angle, use_powder_sensitivity,
-                powder_temp_sensitivity, powder_temp
+                enable_magnus,
+                enable_coriolis,
+                enable_spin_drift,
+                enable_wind_shear,
+                sample_trajectory,
+                sample_interval,
+                enable_pitch_damping,
+                enable_precession,
+                use_cluster_bc,
+                !use_euler,
+                !use_rk4_fixed,
+                twist_rate,
+                twist_right,
+                latitude,
+                shooting_angle,
+                use_powder_sensitivity,
+                powder_temp_sensitivity,
+                powder_temp,
             )?;
-        },
-        
+        }
+
         Commands::MonteCarlo {
-            velocity, angle, bc, mass, diameter,
-            num_sims, velocity_std, angle_std, bc_std, wind_std,
-            wind_speed, wind_direction,
-            target_distance, output
+            velocity,
+            angle,
+            bc,
+            mass,
+            diameter,
+            num_sims,
+            velocity_std,
+            angle_std,
+            bc_std,
+            wind_std,
+            wind_speed,
+            wind_direction,
+            target_distance,
+            output,
         } => {
             let bullet_mass = mass;
             let bullet_diameter = diameter;
             run_monte_carlo(
-                velocity, angle, bc, bullet_mass, bullet_diameter,
-                num_sims, velocity_std, angle_std, bc_std, wind_std,
-                wind_speed, wind_direction,
-                target_distance, output
+                velocity,
+                angle,
+                bc,
+                bullet_mass,
+                bullet_diameter,
+                num_sims,
+                velocity_std,
+                angle_std,
+                bc_std,
+                wind_std,
+                wind_speed,
+                wind_direction,
+                target_distance,
+                output,
             )?;
-        },
-        
+        }
+
         Commands::Zero {
-            velocity, bc, mass, diameter,
-            target_distance, target_height, sight_height,
-            output
+            velocity,
+            bc,
+            mass,
+            diameter,
+            target_distance,
+            target_height,
+            sight_height,
+            output,
         } => {
             let bullet_mass = mass;
             let bullet_diameter = diameter;
@@ -607,7 +690,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
             let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
-            let target_distance_metric = UnitConverter::distance_to_metric(target_distance, cli.units);
+            let target_distance_metric =
+                UnitConverter::distance_to_metric(target_distance, cli.units);
             let target_height_metric = UnitConverter::distance_to_metric(target_height, cli.units);
             // Default sight height: 2 inches for imperial, 50mm for metric
             let sight_height_default = match cli.units {
@@ -615,45 +699,72 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Metric => 50.0,
             };
             let sight_height_value = sight_height.unwrap_or(sight_height_default);
-            let sight_height_metric = UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
-            
+            let sight_height_metric =
+                UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
+
             run_zero_calculation(
-                velocity_metric, bc, mass_metric, diameter_metric,
-                target_distance_metric, target_height_metric, sight_height_metric,
-                output, cli.units
+                velocity_metric,
+                bc,
+                mass_metric,
+                diameter_metric,
+                target_distance_metric,
+                target_height_metric,
+                sight_height_metric,
+                output,
+                cli.units,
             )?;
-        },
-        
+        }
+
         Commands::EstimateBC {
-            velocity, mass, diameter,
-            distance1, drop1, distance2, drop2,
-            output
+            velocity,
+            mass,
+            diameter,
+            distance1,
+            drop1,
+            distance2,
+            drop2,
+            output,
         } => {
             let bullet_mass = mass;
             let bullet_diameter = diameter;
             run_bc_estimation(
-                velocity, bullet_mass, bullet_diameter,
-                distance1, drop1, distance2, drop2,
-                output
+                velocity,
+                bullet_mass,
+                bullet_diameter,
+                distance1,
+                drop1,
+                distance2,
+                drop2,
+                output,
             )?;
-        },
-        
+        }
+
         Commands::GenerateBCSegments {
-            bc, mass, diameter, model, drag_model, output
+            bc,
+            mass,
+            diameter,
+            model,
+            drag_model,
+            output,
         } => {
             let bullet_mass = mass;
             let bullet_diameter = diameter;
             // Convert to metric if needed
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
             let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
-            
+
             run_bc_segment_generation(
-                bc, mass_metric, diameter_metric, 
-                &model, &drag_model, output, cli.units
+                bc,
+                mass_metric,
+                diameter_metric,
+                &model,
+                &drag_model,
+                output,
+                cli.units,
             )?;
-        },
+        }
     }
-    
+
     Ok(())
 }
 
@@ -676,8 +787,8 @@ fn run_trajectory(
     full: bool,
     units: UnitSystem,
     sight_height: f64,
-    bore_height: f64,  // Bore height above ground in meters
-    ignore_ground_impact: bool,  // Disable ground impact detection
+    bore_height: f64,           // Bore height above ground in meters
+    ignore_ground_impact: bool, // Disable ground impact detection
     use_bc_segments: bool,
     enable_magnus: bool,
     enable_coriolis: bool,
@@ -703,7 +814,7 @@ fn run_trajectory(
         DragModelArg::G1 => DragModel::G1,
         DragModelArg::G7 => DragModel::G7,
     };
-    
+
     let inputs = BallisticInputs {
         // Core ballistics parameters
         bc_value: bc,
@@ -711,7 +822,7 @@ fn run_trajectory(
         bullet_mass: mass,
         muzzle_velocity: velocity,
         bullet_diameter: diameter,
-        bullet_length: diameter * 4.5,  // Approximate length/diameter ratio
+        bullet_length: diameter * 4.5, // Approximate length/diameter ratio
 
         // Targeting and positioning
         muzzle_angle: angle.to_radians(),
@@ -719,9 +830,13 @@ fn run_trajectory(
         azimuth_angle: 0.0,
         shooting_angle: shooting_angle.to_radians(),
         sight_height,
-        muzzle_height: bore_height,  // Bore height above ground from --bore-height CLI option
+        muzzle_height: bore_height, // Bore height above ground from --bore-height CLI option
         target_height: 0.0,
-        ground_threshold: if ignore_ground_impact { f64::NEG_INFINITY } else { -bore_height },  // Ground is at -bore_height relative to bore, or disabled if --ignore-ground-impact
+        ground_threshold: if ignore_ground_impact {
+            f64::NEG_INFINITY
+        } else {
+            -bore_height
+        }, // Ground is at -bore_height relative to bore, or disabled if --ignore-ground-impact
 
         // Environmental conditions
         altitude,
@@ -749,12 +864,14 @@ fn run_trajectory(
         use_adaptive_rk45: use_rk45,
 
         // Advanced effects
-        enable_advanced_effects: enable_magnus || enable_coriolis,  // Either one enables the system
+        enable_advanced_effects: enable_magnus || enable_coriolis, // Either one enables the system
         use_powder_sensitivity,
-        powder_temp_sensitivity: if use_powder_sensitivity { 
-            UnitConverter::velocity_to_metric(powder_temp_sensitivity, units) / 
-            UnitConverter::temperature_to_metric(1.0, units) 
-        } else { 0.0 },
+        powder_temp_sensitivity: if use_powder_sensitivity {
+            UnitConverter::velocity_to_metric(powder_temp_sensitivity, units)
+                / UnitConverter::temperature_to_metric(1.0, units)
+        } else {
+            0.0
+        },
         powder_temp: UnitConverter::temperature_to_metric(powder_temp, units),
         tipoff_yaw: 0.0,
         tipoff_decay_distance: 50.0,
@@ -766,14 +883,14 @@ fn run_trajectory(
             let weight_grains = mass / 0.00006479891;
             let caliber_inches = diameter / 0.0254;
             let segments = BCSegmentEstimator::estimate_bc_segments(
-                bc, 
+                bc,
                 caliber_inches,
                 weight_grains,
-                "",  // No specific model
+                "", // No specific model
                 match drag_model {
                     DragModelArg::G1 => "G1",
                     DragModelArg::G7 => "G7",
-                }
+                },
             );
             Some(segments)
         } else {
@@ -782,7 +899,11 @@ fn run_trajectory(
         use_enhanced_spin_drift: enable_spin_drift,
         use_form_factor: false,
         enable_wind_shear,
-        wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
+        wind_shear_model: if enable_wind_shear {
+            "exponential".to_string()
+        } else {
+            "none".to_string()
+        },
         enable_trajectory_sampling: sample_trajectory,
         sample_interval,
         enable_pitch_damping,
@@ -793,14 +914,14 @@ fn run_trajectory(
         bc_type_str: None,
         custom_drag_table: None,
     };
-    
+
     // Set up wind conditions
     let wind = WindConditions {
         speed: wind_speed,
         direction: wind_direction.to_radians(),
         ..Default::default()
     };
-    
+
     // Set up atmospheric conditions
     let atmosphere = AtmosphericConditions {
         temperature,
@@ -809,38 +930,40 @@ fn run_trajectory(
         altitude,
         ..Default::default()
     };
-    
+
     // Create solver
     let mut solver = TrajectorySolver::new(inputs.clone(), wind, atmosphere.clone());
     solver.set_max_range(max_range);
     solver.set_time_step(time_step);
-    
+
     // Solve trajectory
     let result = solver.solve()?;
-    
+
     // Calculate stability coefficient if twist rate is provided
     let stability = if twist_rate.is_some() && twist_rate.unwrap() > 0.0 {
         ballistics_engine::stability::compute_stability_coefficient(
             &inputs,
-            (altitude, temperature, pressure, 1.0)
+            (altitude, temperature, pressure, 1.0),
         )
     } else {
         0.0
     };
-    
+
     // Calculate spin drift if enabled and twist rate is provided
     let spin_drift = if enable_spin_drift && twist_rate.is_some() && stability > 0.0 {
         // Calculate spin decay factor based on time of flight
-        use ballistics_engine::spin_decay::{SpinDecayParameters, calculate_spin_decay_correction_factor};
+        use ballistics_engine::spin_decay::{
+            calculate_spin_decay_correction_factor, SpinDecayParameters,
+        };
         let decay_params = SpinDecayParameters::new();
         let avg_velocity = (velocity + result.impact_velocity) / 2.0;
-        
+
         // Convert units for spin decay calculation
         let mass_grains = mass / 0.00006479891;
         let caliber_inches = diameter / 0.0254;
-        let length_inches = diameter * 4.5 / 0.0254;  // Approximate length
-        let air_density = 1.225;  // Standard air density at sea level
-        
+        let length_inches = diameter * 4.5 / 0.0254; // Approximate length
+        let air_density = 1.225; // Standard air density at sea level
+
         let decay_factor = calculate_spin_decay_correction_factor(
             result.time_of_flight,
             avg_velocity,
@@ -848,21 +971,21 @@ fn run_trajectory(
             mass_grains,
             caliber_inches,
             length_inches,
-            Some(&decay_params)
+            Some(&decay_params),
         );
-        
+
         // Calculate spin drift with decay
         ballistics_engine::stability::compute_spin_drift_with_decay(
             result.time_of_flight,
             stability,
             twist_rate.unwrap(),
             twist_right,
-            Some(decay_factor)
+            Some(decay_factor),
         )
     } else {
         0.0
     };
-    
+
     // Format output
     match output {
         OutputFormat::Json => {
@@ -872,31 +995,49 @@ fn run_trajectory(
                 time_of_flight: result.time_of_flight,
                 impact_velocity: result.impact_velocity,
                 impact_energy: result.impact_energy,
-                stability_coefficient: if stability > 0.0 { Some(stability) } else { None },
-                spin_drift: if spin_drift.abs() > 0.0001 { Some(spin_drift) } else { None },
+                stability_coefficient: if stability > 0.0 {
+                    Some(stability)
+                } else {
+                    None
+                },
+                spin_drift: if spin_drift.abs() > 0.0001 {
+                    Some(spin_drift)
+                } else {
+                    None
+                },
                 trajectory: if full {
-                    result.points.into_iter().map(|p| TrajectoryPoint {
-                        time: p.time,
-                        x: p.position.x,
-                        y: p.position.y,
-                        z: p.position.z,
-                        velocity: p.velocity_magnitude,
-                        energy: p.kinetic_energy,
-                    }).collect()
+                    result
+                        .points
+                        .into_iter()
+                        .map(|p| TrajectoryPoint {
+                            time: p.time,
+                            x: p.position.x,
+                            y: p.position.y,
+                            z: p.position.z,
+                            velocity: p.velocity_magnitude,
+                            energy: p.kinetic_energy,
+                        })
+                        .collect()
                 } else {
                     vec![]
                 },
             };
             println!("{}", serde_json::to_string_pretty(&trajectory_result)?);
-        },
-        
+        }
+
         OutputFormat::Csv => {
             if full {
                 println!("time,x,y,z,velocity,energy");
                 for p in result.points {
-                    println!("{:.4},{:.2},{:.2},{:.2},{:.2},{:.2}",
-                        p.time, p.position.x, p.position.y, p.position.z,
-                        p.velocity_magnitude, p.kinetic_energy);
+                    println!(
+                        "{:.4},{:.2},{:.2},{:.2},{:.2},{:.2}",
+                        p.time,
+                        p.position.x,
+                        p.position.y,
+                        p.position.z,
+                        p.velocity_magnitude,
+                        p.kinetic_energy
+                    );
                 }
             } else {
                 println!("metric,value");
@@ -912,28 +1053,44 @@ fn run_trajectory(
                     println!("spin_drift,{:.4}", spin_drift);
                 }
             }
-        },
-        
+        }
+
         OutputFormat::Table => {
             // Convert outputs to user's units
             let range_display = UnitConverter::distance_from_metric(result.max_range, units);
             let height_display = UnitConverter::distance_from_metric(result.max_height, units);
-            let velocity_display = UnitConverter::velocity_from_metric(result.impact_velocity, units);
+            let velocity_display =
+                UnitConverter::velocity_from_metric(result.impact_velocity, units);
             let energy_display = UnitConverter::energy_from_metric(result.impact_energy, units);
-            
+
             let (range_unit, velocity_unit, energy_unit) = match units {
                 UnitSystem::Metric => ("m", "m/s", "J"),
                 UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
             };
-            
+
             println!("╔════════════════════════════════════════╗");
             println!("║         TRAJECTORY RESULTS             ║");
             println!("╠════════════════════════════════════════╣");
-            println!("║ Max Range:         {:>8.2} {:3}       ║", range_display, range_unit);
-            println!("║ Max Height:        {:>8.2} {:3}       ║", height_display, range_unit);
-            println!("║ Time of Flight:    {:>8.3} s          ║", result.time_of_flight);
-            println!("║ Impact Velocity:   {:>8.2} {:3}       ║", velocity_display, velocity_unit);
-            println!("║ Impact Energy:     {:>8.2} {:5}     ║", energy_display, energy_unit);
+            println!(
+                "║ Max Range:         {:>8.2} {:3}       ║",
+                range_display, range_unit
+            );
+            println!(
+                "║ Max Height:        {:>8.2} {:3}       ║",
+                height_display, range_unit
+            );
+            println!(
+                "║ Time of Flight:    {:>8.3} s          ║",
+                result.time_of_flight
+            );
+            println!(
+                "║ Impact Velocity:   {:>8.2} {:3}       ║",
+                velocity_display, velocity_unit
+            );
+            println!(
+                "║ Impact Energy:     {:>8.2} {:5}     ║",
+                energy_display, energy_unit
+            );
             if stability > 0.0 {
                 println!("╠════════════════════════════════════════╣");
                 println!("║ Stability (SG):    {:>8.2}            ║", stability);
@@ -950,10 +1107,13 @@ fn run_trajectory(
                 let drift_display = UnitConverter::distance_from_metric(spin_drift.abs(), units);
                 let direction = if spin_drift > 0.0 { "Right" } else { "Left" };
                 println!("╠════════════════════════════════════════╣");
-                println!("║ Spin Drift:        {:>8.2} {:3}       ║", drift_display, range_unit);
+                println!(
+                    "║ Spin Drift:        {:>8.2} {:3}       ║",
+                    drift_display, range_unit
+                );
                 println!("║ Direction:         {:>8}            ║", direction);
             }
-            
+
             // Display pitch damping analysis if available
             if let Some(min_damping) = result.min_pitch_damping {
                 println!("╠════════════════════════════════════════╣");
@@ -970,39 +1130,54 @@ fn run_trajectory(
                     println!("║ Entered at Mach:   {:>8.2}            ║", mach);
                 }
             }
-            
+
             // Display angular motion analysis if available
             if let Some(ref angular_state) = result.angular_state {
                 println!("╠════════════════════════════════════════╣");
                 println!("║       Angular Motion Analysis          ║");
                 println!("╠════════════════════════════════════════╣");
-                println!("║ Final Pitch Angle: {:>8.4} rad        ║", angular_state.pitch_angle);
-                println!("║ Final Yaw Angle:   {:>8.4} rad        ║", angular_state.yaw_angle);
+                println!(
+                    "║ Final Pitch Angle: {:>8.4} rad        ║",
+                    angular_state.pitch_angle
+                );
+                println!(
+                    "║ Final Yaw Angle:   {:>8.4} rad        ║",
+                    angular_state.yaw_angle
+                );
                 if let Some(max_yaw) = result.max_yaw_angle {
                     println!("║ Max Yaw Angle:     {:>8.4} rad        ║", max_yaw);
-                    println!("║                   ({:>8.2}°)          ║", max_yaw.to_degrees());
+                    println!(
+                        "║                   ({:>8.2}°)          ║",
+                        max_yaw.to_degrees()
+                    );
                 }
                 if let Some(max_prec) = result.max_precession_angle {
                     println!("║ Max Precession:    {:>8.4} rad        ║", max_prec);
                 }
-                println!("║ Nutation Phase:    {:>8.2} rad        ║", angular_state.nutation_phase);
+                println!(
+                    "║ Nutation Phase:    {:>8.2} rad        ║",
+                    angular_state.nutation_phase
+                );
             }
-            
+
             println!("╚════════════════════════════════════════╝");
-            
+
             // Check if trajectory hit ground
             if let Some(last_point) = result.points.last() {
                 let last_height = last_point.position.y;
                 let last_range = last_point.position.z;
-                
+
                 // Ground threshold is typically around 0, so if y is close to or below 0, it hit ground
                 if last_height <= 0.001 {
                     println!();
                     let range_display = UnitConverter::distance_from_metric(last_range, units);
-                    println!("Bullet struck ground at {:.0} {}", range_display, range_unit);
+                    println!(
+                        "Bullet struck ground at {:.0} {}",
+                        range_display, range_unit
+                    );
                 }
             }
-            
+
             if full && !result.points.is_empty() {
                 println!();
                 println!("Trajectory Points:");
@@ -1011,65 +1186,80 @@ fn run_trajectory(
                     UnitSystem::Imperial => ("(yd)", "(fps)", "(ft-lb)"),
                 };
                 println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
-                println!("│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│", dist_hdr, dist_hdr, vel_hdr, energy_hdr);
+                println!(
+                    "│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│",
+                    dist_hdr, dist_hdr, vel_hdr, energy_hdr
+                );
                 println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
-                
+
                 let step = if result.points.len() > 20 {
                     result.points.len() / 20
                 } else {
                     1
                 };
-                
+
                 for (i, p) in result.points.iter().enumerate() {
                     if i % step == 0 || i == result.points.len() - 1 {
                         let x_display = UnitConverter::distance_from_metric(p.position.x, units);
                         let y_display = UnitConverter::distance_from_metric(p.position.y, units);
-                        let vel_display = UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
-                        let energy_display = UnitConverter::energy_from_metric(p.kinetic_energy, units);
-                        
-                        println!("│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
-                            p.time, x_display, y_display, vel_display, energy_display);
+                        let vel_display =
+                            UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
+                        let energy_display =
+                            UnitConverter::energy_from_metric(p.kinetic_energy, units);
+
+                        println!(
+                            "│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
+                            p.time, x_display, y_display, vel_display, energy_display
+                        );
                     }
                 }
                 println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
             }
-            
+
             // Display sampled trajectory points if available
             if let Some(ref samples) = result.sampled_points {
                 if !samples.is_empty() {
                     println!();
-                    println!("Sampled Trajectory (every {:.0} {})", 
+                    println!(
+                        "Sampled Trajectory (every {:.0} {})",
                         UnitConverter::distance_from_metric(sample_interval, units),
                         match units {
                             UnitSystem::Metric => "m",
                             UnitSystem::Imperial => "yd",
-                        });
-                    
+                        }
+                    );
+
                     let (dist_hdr, drop_hdr, drift_hdr, vel_hdr) = match units {
                         UnitSystem::Metric => ("(m)", "(m)", "(m)", "(m/s)"),
                         UnitSystem::Imperial => ("(yd)", "(in)", "(in)", "(fps)"),
                     };
-                    
+
                     println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
-                    println!("│ Dist{:4} │ Drop{:4} │Drift{:4} │ Vel{:5} │  Flags   │", 
-                        dist_hdr, drop_hdr, drift_hdr, vel_hdr);
+                    println!(
+                        "│ Dist{:4} │ Drop{:4} │Drift{:4} │ Vel{:5} │  Flags   │",
+                        dist_hdr, drop_hdr, drift_hdr, vel_hdr
+                    );
                     println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
-                    
+
                     for sample in samples.iter() {
-                        let dist_display = UnitConverter::distance_from_metric(sample.distance_m, units);
+                        let dist_display =
+                            UnitConverter::distance_from_metric(sample.distance_m, units);
                         let drop_display = if units == UnitSystem::Imperial {
-                            sample.drop_m * 39.3701  // Convert to inches for imperial
+                            sample.drop_m * 39.3701 // Convert to inches for imperial
                         } else {
                             sample.drop_m
                         };
                         let drift_display = if units == UnitSystem::Imperial {
-                            sample.wind_drift_m * 39.3701  // Convert to inches for imperial
+                            sample.wind_drift_m * 39.3701 // Convert to inches for imperial
                         } else {
                             sample.wind_drift_m
                         };
-                        let vel_display = UnitConverter::velocity_from_metric(sample.velocity_mps, units);
-                        
-                        let flags_str = sample.flags.iter()
+                        let vel_display =
+                            UnitConverter::velocity_from_metric(sample.velocity_mps, units);
+
+                        let flags_str = sample
+                            .flags
+                            .iter()
                             .map(|f| match f {
                                 trajectory_sampling::TrajectoryFlag::ZeroCrossing => "Zero",
                                 trajectory_sampling::TrajectoryFlag::MachTransition => "Mach",
@@ -1077,18 +1267,27 @@ fn run_trajectory(
                             })
                             .collect::<Vec<_>>()
                             .join(",");
-                        
-                        println!("│ {:>8.1} │ {:>8.2} │ {:>8.2} │ {:>8.1} │ {:8} │",
-                            dist_display, drop_display, drift_display, vel_display, 
-                            if flags_str.is_empty() { "-" } else { &flags_str });
+
+                        println!(
+                            "│ {:>8.1} │ {:>8.2} │ {:>8.2} │ {:>8.1} │ {:8} │",
+                            dist_display,
+                            drop_display,
+                            drift_display,
+                            vel_display,
+                            if flags_str.is_empty() {
+                                "-"
+                            } else {
+                                &flags_str
+                            }
+                        );
                     }
-                    
+
                     println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
                 }
             }
-        },
+        }
     }
-    
+
     Ok(())
 }
 
@@ -1117,13 +1316,13 @@ fn run_monte_carlo(
         bullet_diameter: diameter,
         ..Default::default()
     };
-    
+
     // Create base wind conditions
     let base_wind = WindConditions {
         speed: wind_speed,
         direction: wind_direction.to_radians(),
     };
-    
+
     // Set up Monte Carlo parameters
     let mc_params = MonteCarloParams {
         num_simulations: num_sims,
@@ -1134,36 +1333,45 @@ fn run_monte_carlo(
         target_distance,
         base_wind_speed: wind_speed,
         base_wind_direction: wind_direction.to_radians(),
-        azimuth_std_dev: angle_std.to_radians() * 0.5,  // Use half of elevation std for horizontal spread
+        azimuth_std_dev: angle_std.to_radians() * 0.5, // Use half of elevation std for horizontal spread
     };
-    
+
     // Run Monte Carlo simulation
     let results = ballistics_engine::run_monte_carlo_with_wind(base_inputs, base_wind, mc_params)?;
-    
+
     // Calculate statistics
     let mean_range = results.ranges.iter().sum::<f64>() / results.ranges.len() as f64;
-    let variance_range: f64 = results.ranges.iter()
+    let variance_range: f64 = results
+        .ranges
+        .iter()
         .map(|r| (r - mean_range).powi(2))
-        .sum::<f64>() / results.ranges.len() as f64;
+        .sum::<f64>()
+        / results.ranges.len() as f64;
     let std_range = variance_range.sqrt();
-    
-    let mean_velocity = results.impact_velocities.iter().sum::<f64>() / results.impact_velocities.len() as f64;
-    let variance_velocity: f64 = results.impact_velocities.iter()
+
+    let mean_velocity =
+        results.impact_velocities.iter().sum::<f64>() / results.impact_velocities.len() as f64;
+    let variance_velocity: f64 = results
+        .impact_velocities
+        .iter()
         .map(|v| (v - mean_velocity).powi(2))
-        .sum::<f64>() / results.impact_velocities.len() as f64;
+        .sum::<f64>()
+        / results.impact_velocities.len() as f64;
     let std_velocity = variance_velocity.sqrt();
-    
+
     // Calculate CEP (simplified - actual CEP calculation would need lateral dispersion)
     let cep = std_range * 1.1774; // Approximation for circular normal distribution
-    
+
     // Calculate hit probability if target distance specified
     let hit_probability = target_distance.map(|target| {
-        let hits = results.ranges.iter()
+        let hits = results
+            .ranges
+            .iter()
             .filter(|r| (*r - target).abs() < 1.0) // Within 1m of target
             .count();
         hits as f64 / results.ranges.len() as f64
     });
-    
+
     match output {
         MonteCarloOutput::Summary => {
             println!("╔════════════════════════════════════════╗");
@@ -1179,8 +1387,8 @@ fn run_monte_carlo(
                 println!("║ Hit Probability:   {:>8.1} %          ║", prob * 100.0);
             }
             println!("╚════════════════════════════════════════╝");
-        },
-        
+        }
+
         MonteCarloOutput::Full => {
             let mc_result = MonteCarloResult {
                 mean_range,
@@ -1191,21 +1399,38 @@ fn run_monte_carlo(
                 hit_probability,
             };
             println!("{}", serde_json::to_string_pretty(&mc_result)?);
-        },
-        
+        }
+
         MonteCarloOutput::Statistics => {
             println!("range_min,range_max,range_mean,range_std,vel_min,vel_max,vel_mean,vel_std");
             let range_min = results.ranges.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-            let range_max = results.ranges.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-            let vel_min = results.impact_velocities.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-            let vel_max = results.impact_velocities.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-            
-            println!("{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
-                range_min, range_max, mean_range, std_range,
-                vel_min, vel_max, mean_velocity, std_velocity);
-        },
+            let range_max = results
+                .ranges
+                .iter()
+                .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let vel_min = results
+                .impact_velocities
+                .iter()
+                .fold(f64::INFINITY, |a, &b| a.min(b));
+            let vel_max = results
+                .impact_velocities
+                .iter()
+                .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+
+            println!(
+                "{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}",
+                range_min,
+                range_max,
+                mean_range,
+                std_range,
+                vel_min,
+                vel_max,
+                mean_velocity,
+                std_velocity
+            );
+        }
     }
-    
+
     Ok(())
 }
 
@@ -1229,21 +1454,18 @@ fn run_zero_calculation(
         sight_height,
         ..Default::default()
     };
-    
+
     // Calculate zero angle
-    let zero_angle = ballistics_engine::calculate_zero_angle(
-        inputs.clone(),
-        target_distance,
-        target_height
-    )?;
-    
+    let zero_angle =
+        ballistics_engine::calculate_zero_angle(inputs.clone(), target_distance, target_height)?;
+
     // Calculate trajectory at zero angle to get additional info
     let mut zeroed_inputs = inputs;
     zeroed_inputs.muzzle_angle = zero_angle;
-    
+
     let solver = TrajectorySolver::new(zeroed_inputs, Default::default(), Default::default());
     let trajectory = solver.solve()?;
-    
+
     match output {
         OutputFormat::Json => {
             let result = serde_json::json!({
@@ -1258,43 +1480,65 @@ fn run_zero_calculation(
                     .unwrap_or(trajectory.max_range),
             });
             println!("{}", serde_json::to_string_pretty(&result)?);
-        },
-        
+        }
+
         OutputFormat::Csv => {
             println!("metric,value,unit");
             println!("zero_angle,{:.4},degrees", zero_angle.to_degrees());
             println!("zero_angle_moa,{:.2},MOA", zero_angle.to_degrees() * 60.0);
             println!("zero_angle_mrad,{:.2},mrad", zero_angle * 1000.0);
             println!("max_ordinate,{:.3},meters", trajectory.max_height);
-        },
-        
+        }
+
         OutputFormat::Table => {
             // Convert distances back to display units
             let target_dist_display = UnitConverter::distance_from_metric(target_distance, units);
             let target_height_display = UnitConverter::distance_from_metric(target_height, units);
             let sight_height_display = UnitConverter::distance_from_metric(sight_height, units);
-            let max_ordinate_display = UnitConverter::distance_from_metric(trajectory.max_height, units);
-            
+            let max_ordinate_display =
+                UnitConverter::distance_from_metric(trajectory.max_height, units);
+
             let dist_unit = match units {
                 UnitSystem::Metric => "m",
                 UnitSystem::Imperial => "yd",
             };
-            
+
             println!("╔════════════════════════════════════════╗");
             println!("║          ZERO CALCULATION              ║");
             println!("╠════════════════════════════════════════╣");
-            println!("║ Target Distance:   {:>8.1} {:3}       ║", target_dist_display, dist_unit);
-            println!("║ Target Height:     {:>8.2} {:3}       ║", target_height_display, dist_unit);
-            println!("║ Sight Height:      {:>8.3} {:3}       ║", sight_height_display, dist_unit);
+            println!(
+                "║ Target Distance:   {:>8.1} {:3}       ║",
+                target_dist_display, dist_unit
+            );
+            println!(
+                "║ Target Height:     {:>8.2} {:3}       ║",
+                target_height_display, dist_unit
+            );
+            println!(
+                "║ Sight Height:      {:>8.3} {:3}       ║",
+                sight_height_display, dist_unit
+            );
             println!("╠════════════════════════════════════════╣");
-            println!("║ Zero Angle:        {:>8.4}°          ║", zero_angle.to_degrees());
-            println!("║ Zero Angle (MOA):  {:>8.2} MOA        ║", zero_angle.to_degrees() * 60.0);
-            println!("║ Zero Angle (mrad): {:>8.2} mrad       ║", zero_angle * 1000.0);
-            println!("║ Max Ordinate:      {:>8.3} {:3}       ║", max_ordinate_display, dist_unit);
+            println!(
+                "║ Zero Angle:        {:>8.4}°          ║",
+                zero_angle.to_degrees()
+            );
+            println!(
+                "║ Zero Angle (MOA):  {:>8.2} MOA        ║",
+                zero_angle.to_degrees() * 60.0
+            );
+            println!(
+                "║ Zero Angle (mrad): {:>8.2} mrad       ║",
+                zero_angle * 1000.0
+            );
+            println!(
+                "║ Max Ordinate:      {:>8.3} {:3}       ║",
+                max_ordinate_display, dist_unit
+            );
             println!("╚════════════════════════════════════════╝");
-        },
+        }
     }
-    
+
     Ok(())
 }
 
@@ -1308,28 +1552,33 @@ fn run_bc_segment_generation(
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
     use ballistics_engine::bc_estimation::BCSegmentEstimator;
-    
+
     // Convert mass to grains and diameter to inches for the estimation
     let weight_grains = mass / 0.00006479891;
     let caliber_inches = diameter / 0.0254;
-    
+
     // Generate BC segments
     let segments = BCSegmentEstimator::estimate_bc_segments(
-        bc, 
+        bc,
         caliber_inches,
         weight_grains,
         model,
-        drag_model
+        drag_model,
     );
-    
+
     match output {
         OutputFormat::Json => {
-            let segments_json: Vec<_> = segments.iter().map(|s| serde_json::json!({
-                "velocity_min_fps": s.velocity_min,
-                "velocity_max_fps": s.velocity_max,
-                "bc": s.bc_value
-            })).collect();
-            
+            let segments_json: Vec<_> = segments
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "velocity_min_fps": s.velocity_min,
+                        "velocity_max_fps": s.velocity_max,
+                        "bc": s.bc_value
+                    })
+                })
+                .collect();
+
             let result = serde_json::json!({
                 "base_bc": bc,
                 "mass_grains": weight_grains,
@@ -1338,17 +1587,20 @@ fn run_bc_segment_generation(
                 "drag_model": drag_model,
                 "segments": segments_json
             });
-            
+
             println!("{}", serde_json::to_string_pretty(&result)?);
-        },
-        
+        }
+
         OutputFormat::Csv => {
             println!("velocity_min_fps,velocity_max_fps,bc");
             for segment in &segments {
-                println!("{},{},{:.4}", segment.velocity_min, segment.velocity_max, segment.bc_value);
+                println!(
+                    "{},{},{:.4}",
+                    segment.velocity_min, segment.velocity_max, segment.bc_value
+                );
             }
-        },
-        
+        }
+
         OutputFormat::Table => {
             println!("╔════════════════════════════════════════╗");
             println!("║        BC SEGMENT GENERATION           ║");
@@ -1363,20 +1615,27 @@ fn run_bc_segment_generation(
             println!("╠════════════════════════════════════════╣");
             println!("║         VELOCITY SEGMENTS              ║");
             println!("╠════════════════════════════════════════╣");
-            
+
             for segment in &segments {
                 let vel_display = if units == UnitSystem::Imperial {
-                    format!("{:.0}-{:.0} fps", segment.velocity_min, segment.velocity_max)
+                    format!(
+                        "{:.0}-{:.0} fps",
+                        segment.velocity_min, segment.velocity_max
+                    )
                 } else {
-                    format!("{:.0}-{:.0} m/s", segment.velocity_min / 3.28084, segment.velocity_max / 3.28084)
+                    format!(
+                        "{:.0}-{:.0} m/s",
+                        segment.velocity_min / 3.28084,
+                        segment.velocity_max / 3.28084
+                    )
                 };
                 println!("║ {:18} → BC: {:.4}     ║", vel_display, segment.bc_value);
             }
-            
+
             println!("╚════════════════════════════════════════╝");
-        },
+        }
     }
-    
+
     Ok(())
 }
 
@@ -1391,18 +1650,11 @@ fn run_bc_estimation(
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
     // Create trajectory points for BC estimation
-    let points = vec![
-        (distance1, drop1),
-        (distance2, drop2),
-    ];
-    
+    let points = vec![(distance1, drop1), (distance2, drop2)];
+
     // Estimate BC
-    let estimated_bc = ballistics_engine::estimate_bc_from_trajectory(
-        velocity,
-        mass,
-        diameter,
-        &points,
-    )?;
+    let estimated_bc =
+        ballistics_engine::estimate_bc_from_trajectory(velocity, mass, diameter, &points)?;
 
     // Verify the estimation by running a trajectory
     let inputs = BallisticInputs {
@@ -1412,24 +1664,28 @@ fn run_bc_estimation(
         bullet_diameter: diameter,
         ..Default::default()
     };
-    
+
     let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
     let trajectory = solver.solve()?;
-    
+
     // Find drops at the specified distances (Z is downrange)
-    let calc_drop1 = trajectory.points.iter()
+    let calc_drop1 = trajectory
+        .points
+        .iter()
         .find(|p| p.position.z >= distance1)
         .map(|p| -p.position.y)
         .unwrap_or(0.0);
 
-    let calc_drop2 = trajectory.points.iter()
+    let calc_drop2 = trajectory
+        .points
+        .iter()
         .find(|p| p.position.z >= distance2)
         .map(|p| -p.position.y)
         .unwrap_or(0.0);
-    
+
     let error1 = ((calc_drop1 - drop1) / drop1 * 100.0).abs();
     let error2 = ((calc_drop2 - drop2) / drop2 * 100.0).abs();
-    
+
     match output {
         OutputFormat::Json => {
             let result = serde_json::json!({
@@ -1446,15 +1702,15 @@ fn run_bc_estimation(
                 }
             });
             println!("{}", serde_json::to_string_pretty(&result)?);
-        },
-        
+        }
+
         OutputFormat::Csv => {
             println!("metric,value");
             println!("estimated_bc,{:.4}", estimated_bc);
             println!("error_at_{}m_percent,{:.2}", distance1, error1);
             println!("error_at_{}m_percent,{:.2}", distance2, error2);
-        },
-        
+        }
+
         OutputFormat::Table => {
             println!("╔════════════════════════════════════════╗");
             println!("║         BC ESTIMATION RESULT           ║");
@@ -1471,8 +1727,8 @@ fn run_bc_estimation(
             println!("║   Calculated:      {:>8.3} m          ║", calc_drop2);
             println!("║   Error:           {:>8.2} %          ║", error2);
             println!("╚════════════════════════════════════════╝");
-        },
+        }
     }
-    
+
     Ok(())
 }

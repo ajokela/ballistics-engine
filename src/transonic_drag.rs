@@ -1,15 +1,14 @@
 /// Transonic drag modeling with shock wave effects
-/// 
+///
 /// This module implements physics-based corrections for drag in the transonic regime
 /// (Mach 0.8-1.2) where shock waves significantly affect the drag coefficient.
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProjectileShape {
-    Spitzer,    // Sharp pointed (most common)
-    RoundNose,  // Blunt/round nose
-    FlatBase,   // Flat base (wadcutter)
-    BoatTail,   // Boat tail design
+    Spitzer,   // Sharp pointed (most common)
+    RoundNose, // Blunt/round nose
+    FlatBase,  // Flat base (wadcutter)
+    BoatTail,  // Boat tail design
 }
 
 impl ProjectileShape {
@@ -26,7 +25,7 @@ impl ProjectileShape {
 }
 
 /// Calculate Prandtl-Glauert correction factor for compressibility effects
-/// 
+///
 /// This factor accounts for air compressibility effects in subsonic flow approaching Mach 1.
 /// Formula: 1/sqrt(1-M²) where M is Mach number
 ///
@@ -50,7 +49,7 @@ fn prandtl_glauert_correction(mach: f64) -> f64 {
 }
 
 /// Get the critical Mach number where transonic drag rise begins
-/// 
+///
 /// The critical Mach number is where local flow acceleration first reaches Mach 1,
 /// causing shock wave formation even though freestream velocity is still subsonic.
 /// These values are based on wind tunnel data and computational fluid dynamics.
@@ -60,17 +59,17 @@ fn critical_mach_number(shape: ProjectileShape) -> f64 {
         // Range: 0.83-0.87 depending on nose sharpness angle
         // Source: Aberdeen Proving Ground wind tunnel data
         ProjectileShape::Spitzer => 0.85,
-        
+
         // Blunt nose causes earlier shock formation due to rapid flow deceleration
         // Range: 0.72-0.78 depending on nose radius
         // Source: Classical aerodynamics literature (Hoerner, 1965)
         ProjectileShape::RoundNose => 0.75,
-        
+
         // Flat base creates additional pressure drag and early transonic effects
         // Range: 0.68-0.72, includes base drag contributions
         // Source: Experimental ballistics data
         ProjectileShape::FlatBase => 0.70,
-        
+
         // Tapered base (boat tail) reduces pressure drag, delays transonic rise
         // Range: 0.86-0.90 depending on boat tail angle (typically 7-9 degrees)
         // Source: Modern CFD validation studies
@@ -79,49 +78,49 @@ fn critical_mach_number(shape: ProjectileShape) -> f64 {
 }
 
 /// Calculate the transonic drag rise factor
-/// 
+///
 /// This models the sharp increase in drag as shock waves form and strengthen
 /// in the transonic regime. Based on empirical correlations and theoretical
 /// models from Anderson's "Modern Compressible Flow" and McCoy's work.
 pub fn transonic_drag_rise(mach: f64, shape: ProjectileShape) -> f64 {
     let m_crit = critical_mach_number(shape);
-    
+
     if mach < m_crit {
         // Below critical Mach, no significant drag rise
         return 1.0;
     }
-    
+
     if mach < 1.0 {
         // Subsonic drag rise (shock waves forming locally)
         // Use a more physically accurate model based on empirical data
-        
+
         // Progress through the drag rise region with safe division
         let denominator = 1.0 - m_crit;
         if denominator.abs() < f64::EPSILON {
             return 1.0; // No drag rise if critical Mach is 1.0
         }
         let progress = (mach - m_crit) / denominator;
-        
+
         if progress < 0.0 {
             return 1.0;
         }
-        
+
         // Different rise rates for different shapes
         let rise_factor = match shape {
             ProjectileShape::BoatTail => {
                 // Boat tail has gentler drag rise
                 1.0 + 1.2 * progress.powi(2)
-            },
+            }
             ProjectileShape::RoundNose => {
                 // Round nose has steeper drag rise
                 1.0 + 2.0 * progress.powf(1.5)
-            },
+            }
             _ => {
                 // Spitzer is in between
                 1.0 + 1.5 * progress.powf(1.8)
             }
         };
-        
+
         // Add compressibility effects near Mach 1
         let rise_factor = if mach > 0.92 {
             // Smoother transition
@@ -131,18 +130,18 @@ pub fn transonic_drag_rise(mach: f64, shape: ProjectileShape) -> f64 {
         } else {
             rise_factor
         };
-        
-        rise_factor.min(2.5)  // More realistic cap
+
+        rise_factor.min(2.5) // More realistic cap
     } else if mach < 1.2 {
         // Transonic/early supersonic (bow shock forming)
         // Peak drag occurs around Mach 1.0-1.1
-        
+
         // Shape-dependent peak location
         let peak_mach = match shape {
             ProjectileShape::Spitzer => 1.05,
             _ => 1.02,
         };
-        
+
         if mach <= peak_mach {
             // Rising to peak
             let base_rise = 1.8; // More realistic peak around 1.8x
@@ -169,21 +168,21 @@ pub fn transonic_drag_rise(mach: f64, shape: ProjectileShape) -> f64 {
 }
 
 /// Calculate the wave drag coefficient component
-/// 
+///
 /// Wave drag is the additional drag caused by shock waves in transonic/supersonic flow.
 /// This is additive to the base drag coefficient.
 fn wave_drag_coefficient(mach: f64, shape: ProjectileShape) -> f64 {
     if mach < 0.8 {
         return 0.0;
     }
-    
+
     if mach < 1.0 {
         // Subsonic wave drag (local shocks only)
         let m_crit = critical_mach_number(shape);
         if mach < m_crit {
             return 0.0;
         }
-        
+
         // Gradual onset of wave drag with safe division
         let denominator = 1.0 - m_crit;
         if denominator.abs() < f64::EPSILON {
@@ -196,28 +195,31 @@ fn wave_drag_coefficient(mach: f64, shape: ProjectileShape) -> f64 {
         // Supersonic wave drag
         // Based on modified Whitcomb area rule
         let fineness_ratio = 3.5; // Typical for bullets (length/diameter)
-        
+
         // Wave drag coefficient for cone-cylinder
         let cd_wave_base = 0.15 / fineness_ratio;
-        
+
         // Mach number correction (wave drag decreases with Mach)
         // Avoid division by zero at Mach 1.0
-        let mach_factor = 1.0 / (mach * mach - 1.0).max(crate::constants::MIN_MACH_THRESHOLD).sqrt();
-        
+        let mach_factor = 1.0
+            / (mach * mach - 1.0)
+                .max(crate::constants::MIN_MACH_THRESHOLD)
+                .sqrt();
+
         // Shape correction
         let shape_factor = match shape {
-            ProjectileShape::Spitzer => 0.8,     // Good for wave drag
-            ProjectileShape::RoundNose => 1.2,   // Poor for wave drag
-            ProjectileShape::FlatBase => 1.5,    // Very poor
-            ProjectileShape::BoatTail => 0.7,    // Best for wave drag
+            ProjectileShape::Spitzer => 0.8,   // Good for wave drag
+            ProjectileShape::RoundNose => 1.2, // Poor for wave drag
+            ProjectileShape::FlatBase => 1.5,  // Very poor
+            ProjectileShape::BoatTail => 0.7,  // Best for wave drag
         };
-        
+
         cd_wave_base * mach_factor * shape_factor
     }
 }
 
 /// Apply transonic corrections to a base drag coefficient
-/// 
+///
 /// This is the main function to use for correcting drag coefficients
 /// in the transonic regime.
 pub fn transonic_correction(
@@ -228,35 +230,35 @@ pub fn transonic_correction(
 ) -> f64 {
     // Get the drag rise factor
     let rise_factor = transonic_drag_rise(mach, shape);
-    
+
     // Apply to base drag
     let mut corrected_cd = base_cd * rise_factor;
-    
+
     // Add wave drag if requested
     if include_wave_drag && mach > 0.8 {
         let wave_cd = wave_drag_coefficient(mach, shape);
         corrected_cd += wave_cd;
     }
-    
+
     corrected_cd
 }
 
 /// Estimate projectile shape from physical parameters
-/// 
+///
 /// This is a simple heuristic based on typical bullet designs.
 pub fn get_projectile_shape(caliber: f64, weight_grains: f64, g_model: &str) -> ProjectileShape {
     // G7 is typically used for boat tail bullets
     if g_model == "G7" {
         return ProjectileShape::BoatTail;
     }
-    
+
     // Heavy for caliber often means longer, boat tail design
     let weight_per_caliber = weight_grains / caliber;
     if weight_per_caliber > 500.0 {
         // e.g., 175gr .308
         return ProjectileShape::BoatTail;
     }
-    
+
     // Default to spitzer for most rifle bullets
     if caliber < 0.35 {
         // Rifle calibers
@@ -277,7 +279,7 @@ mod tests {
         assert!((prandtl_glauert_correction(0.5) - 1.1547).abs() < 0.001);
         assert!((prandtl_glauert_correction(0.8) - 1.6667).abs() < 0.001);
         assert!((prandtl_glauert_correction(0.95) - 3.2026).abs() < 0.001);
-        
+
         // Test near Mach 1 capping
         assert_eq!(prandtl_glauert_correction(0.99), 10.0);
     }
@@ -292,18 +294,18 @@ mod tests {
     #[test]
     fn test_transonic_drag_rise() {
         let shape = ProjectileShape::Spitzer;
-        
+
         // Below critical Mach
         assert_eq!(transonic_drag_rise(0.8, shape), 1.0);
-        
+
         // In transonic rise
         let rise_0_9 = transonic_drag_rise(0.9, shape);
         assert!(rise_0_9 > 1.0 && rise_0_9 < 2.0);
-        
+
         // Near Mach 1
         let rise_0_98 = transonic_drag_rise(0.98, shape);
         assert!(rise_0_98 > 2.0);
-        
+
         // Past peak
         let rise_1_1 = transonic_drag_rise(1.1, shape);
         assert!(rise_1_1 > 1.5 && rise_1_1 < 2.5);
@@ -314,16 +316,25 @@ mod tests {
         // G7 should always return boat tail
         let shape = get_projectile_shape(0.308, 175.0, "G7");
         assert!(matches!(shape, ProjectileShape::BoatTail));
-        
+
         // Test that we get valid shapes for various inputs
         let shape1 = get_projectile_shape(0.308, 200.0, "G1");
-        assert!(matches!(shape1, ProjectileShape::Spitzer | ProjectileShape::BoatTail | ProjectileShape::RoundNose));
-        
+        assert!(matches!(
+            shape1,
+            ProjectileShape::Spitzer | ProjectileShape::BoatTail | ProjectileShape::RoundNose
+        ));
+
         let shape2 = get_projectile_shape(0.224, 55.0, "G1");
-        assert!(matches!(shape2, ProjectileShape::Spitzer | ProjectileShape::BoatTail | ProjectileShape::RoundNose));
-        
+        assert!(matches!(
+            shape2,
+            ProjectileShape::Spitzer | ProjectileShape::BoatTail | ProjectileShape::RoundNose
+        ));
+
         let shape3 = get_projectile_shape(0.50, 300.0, "G1");
-        assert!(matches!(shape3, ProjectileShape::Spitzer | ProjectileShape::BoatTail | ProjectileShape::RoundNose));
+        assert!(matches!(
+            shape3,
+            ProjectileShape::Spitzer | ProjectileShape::BoatTail | ProjectileShape::RoundNose
+        ));
     }
 }
 

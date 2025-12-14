@@ -1,9 +1,9 @@
-/// Drag coefficient calculations for ballistics using actual drag table data
-use std::path::Path;
+use crate::transonic_drag::{get_projectile_shape, transonic_correction, ProjectileShape};
+use crate::DragModel;
 use ndarray::ArrayD;
 use once_cell::sync::Lazy;
-use crate::DragModel;
-use crate::transonic_drag::{transonic_correction, get_projectile_shape, ProjectileShape};
+/// Drag coefficient calculations for ballistics using actual drag table data
+use std::path::Path;
 
 /// Drag table data structure
 #[derive(Debug, Clone)]
@@ -15,17 +15,20 @@ pub struct DragTable {
 impl DragTable {
     /// Create a new drag table from mach and cd arrays
     pub fn new(mach_values: Vec<f64>, cd_values: Vec<f64>) -> Self {
-        Self { mach_values, cd_values }
+        Self {
+            mach_values,
+            cd_values,
+        }
     }
 
     /// Interpolate drag coefficient for given Mach number using cubic spline-like interpolation
     pub fn interpolate(&self, mach: f64) -> f64 {
         let n = self.mach_values.len();
-        
+
         if n == 0 {
             return 0.5; // Fallback
         }
-        
+
         if n == 1 {
             return self.cd_values[0];
         }
@@ -34,20 +37,20 @@ impl DragTable {
         if mach <= self.mach_values[0] {
             // Linear extrapolation below range, but prevent negative values
             if n >= 2 {
-                let slope = (self.cd_values[1] - self.cd_values[0]) / 
-                           (self.mach_values[1] - self.mach_values[0]);
+                let slope = (self.cd_values[1] - self.cd_values[0])
+                    / (self.mach_values[1] - self.mach_values[0]);
                 let extrapolated = self.cd_values[0] + slope * (mach - self.mach_values[0]);
                 // Clamp to minimum reasonable value to prevent negative drag coefficients
                 return extrapolated.max(0.01);
             }
             return self.cd_values[0];
         }
-        
+
         if mach >= self.mach_values[n - 1] {
             // Linear extrapolation above range, but prevent negative values
             if n >= 2 {
-                let slope = (self.cd_values[n - 1] - self.cd_values[n - 2]) / 
-                           (self.mach_values[n - 1] - self.mach_values[n - 2]);
+                let slope = (self.cd_values[n - 1] - self.cd_values[n - 2])
+                    / (self.mach_values[n - 1] - self.mach_values[n - 2]);
                 let extrapolated = self.cd_values[n - 1] + slope * (mach - self.mach_values[n - 1]);
                 // Clamp to minimum reasonable value to prevent negative drag coefficients
                 return extrapolated.max(0.01);
@@ -80,16 +83,16 @@ impl DragTable {
         if idx + 1 >= self.mach_values.len() || idx + 1 >= self.cd_values.len() {
             return self.cd_values.get(idx).copied().unwrap_or(0.5);
         }
-        
+
         let x0 = self.mach_values[idx];
         let x1 = self.mach_values[idx + 1];
         let y0 = self.cd_values[idx];
         let y1 = self.cd_values[idx + 1];
-        
+
         if (x1 - x0).abs() < crate::constants::MIN_DIVISION_THRESHOLD {
             return y0;
         }
-        
+
         let t = (mach - x0) / (x1 - x0);
         y0 + t * (y1 - y0)
     }
@@ -97,24 +100,31 @@ impl DragTable {
     /// Cubic interpolation using 4 points (similar to cubic spline)
     pub fn cubic_interpolate(&self, mach: f64, idx: usize) -> f64 {
         // Ensure we have enough points for cubic interpolation
-        if idx == 0 || idx + 1 >= self.mach_values.len() || 
-           idx + 1 >= self.cd_values.len() {
+        if idx == 0 || idx + 1 >= self.mach_values.len() || idx + 1 >= self.cd_values.len() {
             // Fall back to linear interpolation if not enough points
             return self.linear_interpolate(mach, idx);
         }
-        
+
         // Use points at idx-1, idx, idx+1, idx+2
         let x = [
             self.mach_values[idx - 1],
             self.mach_values[idx],
             self.mach_values[idx + 1],
-            if idx + 2 < self.mach_values.len() { self.mach_values[idx + 2] } else { self.mach_values[idx + 1] }
+            if idx + 2 < self.mach_values.len() {
+                self.mach_values[idx + 2]
+            } else {
+                self.mach_values[idx + 1]
+            },
         ];
         let y = [
             self.cd_values[idx - 1],
             self.cd_values[idx],
             self.cd_values[idx + 1],
-            if idx + 2 < self.cd_values.len() { self.cd_values[idx + 2] } else { self.cd_values[idx + 1] }
+            if idx + 2 < self.cd_values.len() {
+                self.cd_values[idx + 2]
+            } else {
+                self.cd_values[idx + 1]
+            },
         ];
 
         // Catmull-Rom spline interpolation
@@ -137,7 +147,11 @@ impl DragTable {
 }
 
 /// Load drag table from NumPy binary file or CSV fallback
-pub fn load_drag_table(drag_tables_dir: &Path, filename: &str, fallback_data: &[(f64, f64)]) -> DragTable {
+pub fn load_drag_table(
+    drag_tables_dir: &Path,
+    filename: &str,
+    fallback_data: &[(f64, f64)],
+) -> DragTable {
     // Try to load NumPy binary file first
     let npy_path = drag_tables_dir.join(format!("{filename}.npy"));
     if let Ok(array) = ndarray_npy::read_npy::<_, ArrayD<f64>>(&npy_path) {
@@ -153,18 +167,17 @@ pub fn load_drag_table(drag_tables_dir: &Path, filename: &str, fallback_data: &[
     if let Ok(mut reader) = csv::Reader::from_path(&csv_path) {
         let mut mach_values = Vec::new();
         let mut cd_values = Vec::new();
-        
-        for result in reader.records() {
-            if let Ok(record) = result {
-                if record.len() >= 2 {
-                    if let (Ok(mach), Ok(cd)) = (record[0].parse::<f64>(), record[1].parse::<f64>()) {
-                        mach_values.push(mach);
-                        cd_values.push(cd);
-                    }
+
+        for record in reader.records().flatten() {
+            if record.len() >= 2 {
+                if let (Ok(mach), Ok(cd)) = (record[0].parse::<f64>(), record[1].parse::<f64>())
+                {
+                    mach_values.push(mach);
+                    cd_values.push(cd);
                 }
             }
         }
-        
+
         if !mach_values.is_empty() {
             return DragTable::new(mach_values, cd_values);
         }
@@ -181,18 +194,18 @@ fn find_drag_tables_dir() -> Option<std::path::PathBuf> {
     // Try common relative paths from the Rust crate location
     let candidates = [
         "../drag_tables",
-        "../../drag_tables", 
+        "../../drag_tables",
         "../../../drag_tables",
         "drag_tables",
     ];
-    
+
     for candidate in &candidates {
         let path = Path::new(candidate);
         if path.exists() && path.is_dir() {
             return Some(path.to_path_buf());
         }
     }
-    
+
     None
 }
 
@@ -272,22 +285,85 @@ static G7_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 /// MBA-156: Added for completeness with ballistics_rust
 static G6_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     let fallback_data = [
-        (0.0, 0.2617), (0.05, 0.2553), (0.10, 0.2491), (0.15, 0.2432), (0.20, 0.2376),
-        (0.25, 0.2324), (0.30, 0.2278), (0.35, 0.2238), (0.40, 0.2205), (0.45, 0.2177),
-        (0.50, 0.2155), (0.55, 0.2138), (0.60, 0.2126), (0.65, 0.2121), (0.70, 0.2122),
-        (0.75, 0.2132), (0.80, 0.2154), (0.85, 0.2194), (0.875, 0.2229), (0.90, 0.2297),
-        (0.925, 0.2449), (0.95, 0.2732), (0.975, 0.3141), (1.0, 0.3597), (1.025, 0.3994),
-        (1.05, 0.4261), (1.075, 0.4402), (1.10, 0.4465), (1.125, 0.4490), (1.15, 0.4497),
-        (1.175, 0.4494), (1.20, 0.4482), (1.225, 0.4464), (1.25, 0.4441), (1.30, 0.4390),
-        (1.35, 0.4336), (1.40, 0.4279), (1.45, 0.4221), (1.50, 0.4162), (1.55, 0.4102),
-        (1.60, 0.4042), (1.65, 0.3981), (1.70, 0.3919), (1.75, 0.3855), (1.80, 0.3788),
-        (1.85, 0.3721), (1.90, 0.3652), (1.95, 0.3583), (2.0, 0.3515), (2.05, 0.3447),
-        (2.10, 0.3381), (2.15, 0.3314), (2.20, 0.3249), (2.25, 0.3185), (2.30, 0.3122),
-        (2.35, 0.3060), (2.40, 0.3000), (2.45, 0.2941), (2.50, 0.2883), (2.60, 0.2772),
-        (2.70, 0.2668), (2.80, 0.2574), (2.90, 0.2487), (3.0, 0.2407), (3.10, 0.2333),
-        (3.20, 0.2265), (3.30, 0.2202), (3.40, 0.2144), (3.50, 0.2089), (3.60, 0.2039),
-        (3.70, 0.1991), (3.80, 0.1947), (3.90, 0.1905), (4.0, 0.1866), (4.20, 0.1794),
-        (4.40, 0.1730), (4.60, 0.1673), (4.80, 0.1621), (5.0, 0.1574),
+        (0.0, 0.2617),
+        (0.05, 0.2553),
+        (0.10, 0.2491),
+        (0.15, 0.2432),
+        (0.20, 0.2376),
+        (0.25, 0.2324),
+        (0.30, 0.2278),
+        (0.35, 0.2238),
+        (0.40, 0.2205),
+        (0.45, 0.2177),
+        (0.50, 0.2155),
+        (0.55, 0.2138),
+        (0.60, 0.2126),
+        (0.65, 0.2121),
+        (0.70, 0.2122),
+        (0.75, 0.2132),
+        (0.80, 0.2154),
+        (0.85, 0.2194),
+        (0.875, 0.2229),
+        (0.90, 0.2297),
+        (0.925, 0.2449),
+        (0.95, 0.2732),
+        (0.975, 0.3141),
+        (1.0, 0.3597),
+        (1.025, 0.3994),
+        (1.05, 0.4261),
+        (1.075, 0.4402),
+        (1.10, 0.4465),
+        (1.125, 0.4490),
+        (1.15, 0.4497),
+        (1.175, 0.4494),
+        (1.20, 0.4482),
+        (1.225, 0.4464),
+        (1.25, 0.4441),
+        (1.30, 0.4390),
+        (1.35, 0.4336),
+        (1.40, 0.4279),
+        (1.45, 0.4221),
+        (1.50, 0.4162),
+        (1.55, 0.4102),
+        (1.60, 0.4042),
+        (1.65, 0.3981),
+        (1.70, 0.3919),
+        (1.75, 0.3855),
+        (1.80, 0.3788),
+        (1.85, 0.3721),
+        (1.90, 0.3652),
+        (1.95, 0.3583),
+        (2.0, 0.3515),
+        (2.05, 0.3447),
+        (2.10, 0.3381),
+        (2.15, 0.3314),
+        (2.20, 0.3249),
+        (2.25, 0.3185),
+        (2.30, 0.3122),
+        (2.35, 0.3060),
+        (2.40, 0.3000),
+        (2.45, 0.2941),
+        (2.50, 0.2883),
+        (2.60, 0.2772),
+        (2.70, 0.2668),
+        (2.80, 0.2574),
+        (2.90, 0.2487),
+        (3.0, 0.2407),
+        (3.10, 0.2333),
+        (3.20, 0.2265),
+        (3.30, 0.2202),
+        (3.40, 0.2144),
+        (3.50, 0.2089),
+        (3.60, 0.2039),
+        (3.70, 0.1991),
+        (3.80, 0.1947),
+        (3.90, 0.1905),
+        (4.0, 0.1866),
+        (4.20, 0.1794),
+        (4.40, 0.1730),
+        (4.60, 0.1673),
+        (4.80, 0.1621),
+        (5.0, 0.1574),
     ];
 
     if let Some(drag_dir) = find_drag_tables_dir() {
@@ -304,22 +380,84 @@ static G6_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 /// MBA-156: Added for completeness with ballistics_rust
 static G8_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
     let fallback_data = [
-        (0.0, 0.2105), (0.05, 0.2105), (0.10, 0.2104), (0.15, 0.2104), (0.20, 0.2103),
-        (0.25, 0.2103), (0.30, 0.2103), (0.35, 0.2103), (0.40, 0.2103), (0.45, 0.2102),
-        (0.50, 0.2102), (0.55, 0.2102), (0.60, 0.2102), (0.65, 0.2102), (0.70, 0.2103),
-        (0.75, 0.2103), (0.80, 0.2104), (0.825, 0.2104), (0.85, 0.2105), (0.875, 0.2106),
-        (0.90, 0.2109), (0.925, 0.2183), (0.95, 0.2571), (0.975, 0.3358), (1.0, 0.4068),
-        (1.025, 0.4378), (1.05, 0.4476), (1.075, 0.4493), (1.10, 0.4477), (1.125, 0.4450),
-        (1.15, 0.4419), (1.20, 0.4353), (1.25, 0.4283), (1.30, 0.4208), (1.35, 0.4133),
-        (1.40, 0.4059), (1.45, 0.3986), (1.50, 0.3915), (1.55, 0.3845), (1.60, 0.3777),
-        (1.65, 0.3710), (1.70, 0.3645), (1.75, 0.3581), (1.80, 0.3519), (1.85, 0.3458),
-        (1.90, 0.3400), (1.95, 0.3343), (2.0, 0.3288), (2.05, 0.3234), (2.10, 0.3182),
-        (2.15, 0.3131), (2.20, 0.3081), (2.25, 0.3032), (2.30, 0.2983), (2.35, 0.2937),
-        (2.40, 0.2891), (2.45, 0.2845), (2.50, 0.2802), (2.60, 0.2720), (2.70, 0.2642),
-        (2.80, 0.2569), (2.90, 0.2499), (3.0, 0.2432), (3.10, 0.2368), (3.20, 0.2308),
-        (3.30, 0.2251), (3.40, 0.2197), (3.50, 0.2147), (3.60, 0.2101), (3.70, 0.2058),
-        (3.80, 0.2019), (3.90, 0.1983), (4.0, 0.1950), (4.20, 0.1890), (4.40, 0.1837),
-        (4.60, 0.1791), (4.80, 0.1750), (5.0, 0.1713),
+        (0.0, 0.2105),
+        (0.05, 0.2105),
+        (0.10, 0.2104),
+        (0.15, 0.2104),
+        (0.20, 0.2103),
+        (0.25, 0.2103),
+        (0.30, 0.2103),
+        (0.35, 0.2103),
+        (0.40, 0.2103),
+        (0.45, 0.2102),
+        (0.50, 0.2102),
+        (0.55, 0.2102),
+        (0.60, 0.2102),
+        (0.65, 0.2102),
+        (0.70, 0.2103),
+        (0.75, 0.2103),
+        (0.80, 0.2104),
+        (0.825, 0.2104),
+        (0.85, 0.2105),
+        (0.875, 0.2106),
+        (0.90, 0.2109),
+        (0.925, 0.2183),
+        (0.95, 0.2571),
+        (0.975, 0.3358),
+        (1.0, 0.4068),
+        (1.025, 0.4378),
+        (1.05, 0.4476),
+        (1.075, 0.4493),
+        (1.10, 0.4477),
+        (1.125, 0.4450),
+        (1.15, 0.4419),
+        (1.20, 0.4353),
+        (1.25, 0.4283),
+        (1.30, 0.4208),
+        (1.35, 0.4133),
+        (1.40, 0.4059),
+        (1.45, 0.3986),
+        (1.50, 0.3915),
+        (1.55, 0.3845),
+        (1.60, 0.3777),
+        (1.65, 0.3710),
+        (1.70, 0.3645),
+        (1.75, 0.3581),
+        (1.80, 0.3519),
+        (1.85, 0.3458),
+        (1.90, 0.3400),
+        (1.95, 0.3343),
+        (2.0, 0.3288),
+        (2.05, 0.3234),
+        (2.10, 0.3182),
+        (2.15, 0.3131),
+        (2.20, 0.3081),
+        (2.25, 0.3032),
+        (2.30, 0.2983),
+        (2.35, 0.2937),
+        (2.40, 0.2891),
+        (2.45, 0.2845),
+        (2.50, 0.2802),
+        (2.60, 0.2720),
+        (2.70, 0.2642),
+        (2.80, 0.2569),
+        (2.90, 0.2499),
+        (3.0, 0.2432),
+        (3.10, 0.2368),
+        (3.20, 0.2308),
+        (3.30, 0.2251),
+        (3.40, 0.2197),
+        (3.50, 0.2147),
+        (3.60, 0.2101),
+        (3.70, 0.2058),
+        (3.80, 0.2019),
+        (3.90, 0.1983),
+        (4.0, 0.1950),
+        (4.20, 0.1890),
+        (4.40, 0.1837),
+        (4.60, 0.1791),
+        (4.80, 0.1750),
+        (5.0, 0.1713),
     ];
 
     if let Some(drag_dir) = find_drag_tables_dir() {
@@ -345,7 +483,7 @@ pub fn get_drag_coefficient(mach: f64, drag_model: &DragModel) -> f64 {
 
 /// Get drag coefficient with optional transonic corrections
 pub fn get_drag_coefficient_with_transonic(
-    mach: f64, 
+    mach: f64,
     drag_model: &DragModel,
     apply_transonic_correction: bool,
     projectile_shape: Option<ProjectileShape>,
@@ -354,7 +492,7 @@ pub fn get_drag_coefficient_with_transonic(
 ) -> f64 {
     // Get base drag coefficient
     let base_cd = get_drag_coefficient(mach, drag_model);
-    
+
     // Apply transonic corrections if requested and in transonic regime
     if apply_transonic_correction && (0.8..=1.3).contains(&mach) {
         // Determine projectile shape if not provided
@@ -362,19 +500,23 @@ pub fn get_drag_coefficient_with_transonic(
             Some(s) => s,
             None => {
                 if let (Some(cal), Some(weight)) = (caliber, weight_grains) {
-                    get_projectile_shape(cal, weight, match drag_model {
-                        DragModel::G1 => "G1",
-                        DragModel::G6 => "G6",
-                        DragModel::G7 => "G7",
-                        DragModel::G8 => "G8",
-                        _ => "G1", // Default to G1
-                    })
+                    get_projectile_shape(
+                        cal,
+                        weight,
+                        match drag_model {
+                            DragModel::G1 => "G1",
+                            DragModel::G6 => "G6",
+                            DragModel::G7 => "G7",
+                            DragModel::G8 => "G8",
+                            _ => "G1", // Default to G1
+                        },
+                    )
                 } else {
                     ProjectileShape::Spitzer // Default
                 }
             }
         };
-        
+
         // Apply correction
         transonic_correction(mach, base_cd, shape, true)
     } else {
@@ -404,16 +546,17 @@ pub fn get_drag_coefficient_full(
         caliber,
         weight_grains,
     );
-    
+
     // Apply Reynolds corrections for low velocities (subsonic only)
     if apply_reynolds_correction && mach < 1.0 {
-        if let (Some(v), Some(cal), Some(rho), Some(temp)) = 
-            (velocity_mps, caliber, air_density_kg_m3, temperature_c) {
+        if let (Some(v), Some(cal), Some(rho), Some(temp)) =
+            (velocity_mps, caliber, air_density_kg_m3, temperature_c)
+        {
             use crate::reynolds::apply_reynolds_correction;
             cd = apply_reynolds_correction(cd, v, cal, rho, temp, mach);
         }
     }
-    
+
     cd
 }
 
@@ -442,7 +585,10 @@ mod tests {
             let cd_before = get_drag_coefficient(mach - 0.01, &DragModel::G1);
             let cd_after = get_drag_coefficient(mach + 0.01, &DragModel::G1);
             let difference = (cd_after - cd_before).abs();
-            assert!(difference < 0.05, "Large discontinuity at Mach {mach}: {cd_before} vs {cd_after}");
+            assert!(
+                difference < 0.05,
+                "Large discontinuity at Mach {mach}: {cd_before} vs {cd_after}"
+            );
         }
     }
 
@@ -451,17 +597,23 @@ mod tests {
         // Test extrapolation below range
         let cd_low = get_drag_coefficient(0.0, &DragModel::G1);
         assert!(cd_low > 0.01 && cd_low < 0.5, "Low Mach G1: {cd_low}");
-        
+
         // Test extrapolation above range - should be clamped to positive values
         let cd_high = get_drag_coefficient(10.0, &DragModel::G1);
         assert!(cd_high > 0.01, "High Mach G1 should be positive: {cd_high}");
-        
+
         // Same for G7
         let cd_low_g7 = get_drag_coefficient(0.0, &DragModel::G7);
-        assert!(cd_low_g7 > 0.01, "Low Mach G7 should be positive: {cd_low_g7}");
-        
+        assert!(
+            cd_low_g7 > 0.01,
+            "Low Mach G7 should be positive: {cd_low_g7}"
+        );
+
         let cd_high_g7 = get_drag_coefficient(20.0, &DragModel::G7);
-        assert!(cd_high_g7 >= 0.01, "High Mach G7 should be positive: {cd_high_g7}");
+        assert!(
+            cd_high_g7 >= 0.01,
+            "High Mach G7 should be positive: {cd_high_g7}"
+        );
     }
 
     #[test]
@@ -469,10 +621,10 @@ mod tests {
         let mach_vals = vec![0.5, 1.0, 1.5, 2.0];
         let cd_vals = vec![0.2, 0.5, 0.4, 0.3];
         let table = DragTable::new(mach_vals, cd_vals);
-        
+
         // Test exact interpolation
         assert!((table.interpolate(1.0) - 0.5).abs() < 1e-10);
-        
+
         // Test interpolation between points
         let cd_interp = table.interpolate(1.25);
         assert!(cd_interp > 0.4 && cd_interp < 0.5);
@@ -488,7 +640,7 @@ mod tests {
     #[test]
     fn test_drag_table_single_point() {
         let table = DragTable::new(vec![1.0], vec![0.4]);
-        
+
         // Should return the single value for any Mach
         assert_eq!(table.interpolate(0.5), 0.4);
         assert_eq!(table.interpolate(1.0), 0.4);
@@ -498,19 +650,19 @@ mod tests {
     #[test]
     fn test_drag_table_two_points() {
         let table = DragTable::new(vec![1.0, 2.0], vec![0.4, 0.6]);
-        
+
         // Exact matches
         assert!((table.interpolate(1.0) - 0.4).abs() < 1e-10);
         assert!((table.interpolate(2.0) - 0.6).abs() < 1e-10);
-        
+
         // Linear interpolation
         let mid = table.interpolate(1.5);
         assert!((mid - 0.5).abs() < 1e-10);
-        
+
         // Extrapolation
         let below = table.interpolate(0.5);
         assert!(below.abs() > 1e-10); // Should have some value
-        
+
         let above = table.interpolate(3.0);
         assert!(above.abs() > 1e-10); // Should have some value
     }
@@ -518,11 +670,11 @@ mod tests {
     #[test]
     fn test_linear_interpolation() {
         let table = DragTable::new(vec![0.0, 1.0, 2.0], vec![0.2, 0.5, 0.3]);
-        
+
         // Test linear interpolation between first two points
         let result = table.linear_interpolate(0.5, 0);
         assert!((result - 0.35).abs() < 1e-10);
-        
+
         // Test edge case with zero denominator
         let table_same = DragTable::new(vec![1.0, 1.0], vec![0.4, 0.6]);
         let result_same = table_same.linear_interpolate(1.0, 0);
@@ -532,17 +684,14 @@ mod tests {
     #[test]
     fn test_cubic_interpolation() {
         // Create a table with enough points for cubic interpolation
-        let table = DragTable::new(
-            vec![0.5, 1.0, 1.5, 2.0, 2.5],
-            vec![0.2, 0.4, 0.6, 0.5, 0.3]
-        );
-        
+        let table = DragTable::new(vec![0.5, 1.0, 1.5, 2.0, 2.5], vec![0.2, 0.4, 0.6, 0.5, 0.3]);
+
         // Test cubic interpolation in the middle
         let result = table.cubic_interpolate(1.25, 1);
-        
+
         // Should be between the neighboring values
         assert!(result > 0.3 && result < 0.7);
-        
+
         // Should be smooth (not exactly linear)
         let linear_result = table.linear_interpolate(1.25, 1);
         // Cubic and linear should be close but not identical for smooth curves
@@ -560,13 +709,13 @@ mod tests {
     #[test]
     fn test_load_drag_table_fallback() {
         use std::path::Path;
-        
+
         // Test with non-existent directory - should use fallback data
         let fake_dir = Path::new("/non/existent/directory");
         let fallback_data = [(0.5, 0.2), (1.0, 0.4), (1.5, 0.3)];
-        
+
         let table = load_drag_table(fake_dir, "test", &fallback_data);
-        
+
         // Should have fallback data
         assert_eq!(table.mach_values.len(), 3);
         assert_eq!(table.cd_values.len(), 3);
@@ -577,15 +726,21 @@ mod tests {
     #[test]
     fn test_known_drag_values() {
         // Test against known ballistic standard values
-        
+
         // G1 at Mach 1.0 should be around 0.4805
         let g1_mach1 = get_drag_coefficient(1.0, &DragModel::G1);
-        assert!((g1_mach1 - 0.4805).abs() < 0.01, "G1 at Mach 1.0: {g1_mach1}");
-        
+        assert!(
+            (g1_mach1 - 0.4805).abs() < 0.01,
+            "G1 at Mach 1.0: {g1_mach1}"
+        );
+
         // G7 at Mach 1.0 should be around 0.3803
         let g7_mach1 = get_drag_coefficient(1.0, &DragModel::G7);
-        assert!((g7_mach1 - 0.3803).abs() < 0.01, "G7 at Mach 1.0: {g7_mach1}");
-        
+        assert!(
+            (g7_mach1 - 0.3803).abs() < 0.01,
+            "G7 at Mach 1.0: {g7_mach1}"
+        );
+
         // G1 should generally be higher than G7 in transonic region
         assert!(g1_mach1 > g7_mach1, "G1 should be > G7 at Mach 1.0");
     }
@@ -593,37 +748,48 @@ mod tests {
     #[test]
     fn test_monotonicity_properties() {
         // Test general drag curve properties
-        
+
         // G1 should peak somewhere in transonic region
         let mach_values: Vec<f64> = (8..20).map(|i| i as f64 * 0.1).collect(); // 0.8 to 1.9
-        let g1_values: Vec<f64> = mach_values.iter()
+        let g1_values: Vec<f64> = mach_values
+            .iter()
             .map(|&m| get_drag_coefficient(m, &DragModel::G1))
             .collect();
-        
+
         // Find maximum
         let max_value = g1_values.iter().copied().fold(0.0_f64, f64::max);
-        let max_index = g1_values.iter().position(|&x| x == max_value)
+        let max_index = g1_values
+            .iter()
+            .position(|&x| x == max_value)
             .expect("Should find maximum in non-empty vector");
-        let peak_mach = mach_values.get(max_index).copied()
+        let peak_mach = mach_values
+            .get(max_index)
+            .copied()
             .expect("Index should be valid");
-        
+
         // Peak should be in reasonable range
-        assert!(peak_mach > 1.0 && peak_mach < 1.6, "G1 peak at Mach {peak_mach}");
-        assert!(max_value > 0.5 && max_value < 1.0, "G1 peak value: {max_value}");
+        assert!(
+            peak_mach > 1.0 && peak_mach < 1.6,
+            "G1 peak at Mach {peak_mach}"
+        );
+        assert!(
+            max_value > 0.5 && max_value < 1.0,
+            "G1 peak value: {max_value}"
+        );
     }
 
-    #[test] 
+    #[test]
     fn test_physical_constraints() {
         let test_machs = [0.1, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0, 5.0];
-        
+
         for &mach in &test_machs {
             let g1_cd = get_drag_coefficient(mach, &DragModel::G1);
             let g7_cd = get_drag_coefficient(mach, &DragModel::G7);
-            
+
             // All drag coefficients should be positive
             assert!(g1_cd > 0.0, "G1 CD negative at Mach {mach}: {g1_cd}");
             assert!(g7_cd > 0.0, "G7 CD negative at Mach {mach}: {g7_cd}");
-            
+
             // Should be in reasonable physical ranges
             assert!(g1_cd < 2.0, "G1 CD too high at Mach {mach}: {g1_cd}");
             assert!(g7_cd < 1.5, "G7 CD too high at Mach {mach}: {g7_cd}");
@@ -634,20 +800,24 @@ mod tests {
     fn test_performance_characteristics() {
         // This test ensures the implementation is efficient
         use std::time::Instant;
-        
+
         let start = Instant::now();
-        
+
         // Perform many calculations
         for i in 0..1000 {
             let mach = 0.5 + (i as f64) * 0.004; // 0.5 to 4.5
             let _g1 = get_drag_coefficient(mach, &DragModel::G1);
             let _g7 = get_drag_coefficient(mach, &DragModel::G7);
         }
-        
+
         let elapsed = start.elapsed();
-        
+
         // Should complete 2000 calculations quickly (within 100ms)
-        assert!(elapsed.as_millis() < 100, "Performance test took {}ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < 100,
+            "Performance test took {}ms",
+            elapsed.as_millis()
+        );
     }
 }
 
@@ -656,39 +826,39 @@ pub fn interpolated_bc(mach: f64, segments: &[(f64, f64)]) -> f64 {
     if segments.is_empty() {
         return crate::constants::BC_FALLBACK_CONSERVATIVE; // Conservative fallback based on database analysis
     }
-    
+
     // Get just the mach values
     let mach_values: Vec<f64> = segments.iter().map(|(m, _)| *m).collect();
-    
+
     // Double-check we have values after collection
     if mach_values.is_empty() || segments.is_empty() {
         return crate::constants::BC_FALLBACK_CONSERVATIVE; // Conservative fallback based on database analysis
     }
-    
+
     // Handle edge cases with safe indexing
     if let Some(first_mach) = mach_values.first() {
         if mach <= *first_mach {
             return segments.first().map(|(_, bc)| *bc).unwrap_or(0.5);
         }
     }
-    
+
     if let Some(last_mach) = mach_values.last() {
         if mach >= *last_mach {
             return segments.last().map(|(_, bc)| *bc).unwrap_or(0.5);
         }
     }
-    
+
     // Binary search to find the right segment with safe comparison
-    let idx = match mach_values.binary_search_by(|&m| {
-        m.partial_cmp(&mach).unwrap_or(std::cmp::Ordering::Equal)
-    }) {
+    let idx = match mach_values
+        .binary_search_by(|&m| m.partial_cmp(&mach).unwrap_or(std::cmp::Ordering::Equal))
+    {
         Ok(idx) => {
             // Exact match - safely get the BC value
             return segments.get(idx).map(|(_, bc)| *bc).unwrap_or(0.5);
         }
         Err(idx) => idx, // Insert position
     };
-    
+
     // Ensure idx is valid for interpolation
     if idx == 0 || idx >= segments.len() {
         // Shouldn't happen given the edge case checks above, but be defensive
@@ -696,7 +866,7 @@ pub fn interpolated_bc(mach: f64, segments: &[(f64, f64)]) -> f64 {
         let safe_idx = idx.saturating_sub(1).min(segments.len().saturating_sub(1));
         return segments.get(safe_idx).map(|(_, bc)| *bc).unwrap_or(0.5);
     }
-    
+
     // Linear interpolation between the two closest points with safe indexing
     match (segments.get(idx - 1), segments.get(idx)) {
         (Some((lo_mach, lo_bc)), Some((hi_mach, hi_bc))) => {

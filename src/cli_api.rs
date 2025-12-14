@@ -1,11 +1,15 @@
 // CLI API module - provides simplified interfaces for command-line tool
-use crate::DragModel;
-use crate::wind_shear::{WindShearProfile, WindShearModel, WindLayer};
-use crate::transonic_drag::{transonic_correction, get_projectile_shape, ProjectileShape};
-use crate::trajectory_sampling::{sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample};
-use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
-use crate::precession_nutation::{AngularState, PrecessionNutationParams, calculate_combined_angular_motion};
 use crate::cluster_bc::ClusterBCDegradation;
+use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
+use crate::precession_nutation::{
+    calculate_combined_angular_motion, AngularState, PrecessionNutationParams,
+};
+use crate::trajectory_sampling::{
+    sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample,
+};
+use crate::transonic_drag::{get_projectile_shape, transonic_correction, ProjectileShape};
+use crate::wind_shear::{WindLayer, WindShearModel, WindShearProfile};
+use crate::DragModel;
 use nalgebra::Vector3;
 use std::error::Error;
 use std::fmt;
@@ -47,7 +51,9 @@ impl From<String> for BallisticsError {
 
 impl From<&str> for BallisticsError {
     fn from(msg: &str) -> Self {
-        BallisticsError { message: msg.to_string() }
+        BallisticsError {
+            message: msg.to_string(),
+        }
     }
 }
 
@@ -57,47 +63,47 @@ impl From<&str> for BallisticsError {
 #[derive(Debug, Clone)]
 pub struct BallisticInputs {
     // Core ballistics parameters (using intuitive names)
-    pub bc_value: f64,              // Ballistic coefficient (G1, G7, etc.)
-    pub bc_type: DragModel,         // Drag model (G1, G7, G8, etc.)
-    pub bullet_mass: f64,           // kg
-    pub muzzle_velocity: f64,       // m/s
-    pub bullet_diameter: f64,       // meters
-    pub bullet_length: f64,         // meters
+    pub bc_value: f64,        // Ballistic coefficient (G1, G7, etc.)
+    pub bc_type: DragModel,   // Drag model (G1, G7, G8, etc.)
+    pub bullet_mass: f64,     // kg
+    pub muzzle_velocity: f64, // m/s
+    pub bullet_diameter: f64, // meters
+    pub bullet_length: f64,   // meters
 
     // Targeting and positioning
-    pub muzzle_angle: f64,          // radians (launch angle)
-    pub target_distance: f64,       // meters
-    pub azimuth_angle: f64,         // horizontal aiming angle in radians
-    pub shooting_angle: f64,        // uphill/downhill angle in radians
-    pub sight_height: f64,          // meters above bore
-    pub muzzle_height: f64,         // meters above ground
-    pub target_height: f64,         // meters above ground for zeroing
-    pub ground_threshold: f64,      // meters below which to stop
+    pub muzzle_angle: f64,     // radians (launch angle)
+    pub target_distance: f64,  // meters
+    pub azimuth_angle: f64,    // horizontal aiming angle in radians
+    pub shooting_angle: f64,   // uphill/downhill angle in radians
+    pub sight_height: f64,     // meters above bore
+    pub muzzle_height: f64,    // meters above ground
+    pub target_height: f64,    // meters above ground for zeroing
+    pub ground_threshold: f64, // meters below which to stop
 
     // Environmental conditions
-    pub altitude: f64,              // meters
-    pub temperature: f64,           // Celsius
-    pub pressure: f64,              // millibars/hPa
-    pub humidity: f64,              // relative humidity (0-1)
-    pub latitude: Option<f64>,      // degrees
+    pub altitude: f64,         // meters
+    pub temperature: f64,      // Celsius
+    pub pressure: f64,         // millibars/hPa
+    pub humidity: f64,         // relative humidity (0-1)
+    pub latitude: Option<f64>, // degrees
 
     // Wind conditions
-    pub wind_speed: f64,            // m/s
-    pub wind_angle: f64,            // radians (0=headwind, 90=from right)
+    pub wind_speed: f64, // m/s
+    pub wind_angle: f64, // radians (0=headwind, 90=from right)
 
     // Bullet characteristics
-    pub twist_rate: f64,            // inches per turn
-    pub is_twist_right: bool,       // right-hand twist
-    pub caliber_inches: f64,        // diameter in inches
-    pub weight_grains: f64,         // mass in grains
-    pub manufacturer: Option<String>, // Bullet manufacturer
-    pub bullet_model: Option<String>, // Bullet model name
-    pub bullet_id: Option<String>,  // Unique bullet identifier
+    pub twist_rate: f64,               // inches per turn
+    pub is_twist_right: bool,          // right-hand twist
+    pub caliber_inches: f64,           // diameter in inches
+    pub weight_grains: f64,            // mass in grains
+    pub manufacturer: Option<String>,  // Bullet manufacturer
+    pub bullet_model: Option<String>,  // Bullet model name
+    pub bullet_id: Option<String>,     // Unique bullet identifier
     pub bullet_cluster: Option<usize>, // BC cluster ID for cluster_bc module
 
     // Integration method selection
-    pub use_rk4: bool,              // Use RK4 integration instead of Euler
-    pub use_adaptive_rk45: bool,    // Use RK45 adaptive step size integration
+    pub use_rk4: bool,           // Use RK4 integration instead of Euler
+    pub use_adaptive_rk45: bool, // Use RK45 adaptive step size integration
 
     // Advanced effects flags
     pub enable_advanced_effects: bool,
@@ -107,17 +113,17 @@ pub struct BallisticInputs {
     pub tipoff_yaw: f64,            // radians
     pub tipoff_decay_distance: f64, // meters
     pub use_bc_segments: bool,
-    pub bc_segments: Option<Vec<(f64, f64)>>,  // Mach-BC pairs
-    pub bc_segments_data: Option<Vec<crate::BCSegmentData>>,  // Velocity-BC segments
+    pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-BC pairs
+    pub bc_segments_data: Option<Vec<crate::BCSegmentData>>, // Velocity-BC segments
     pub use_enhanced_spin_drift: bool,
     pub use_form_factor: bool,
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
     pub enable_trajectory_sampling: bool,
-    pub sample_interval: f64,       // meters
+    pub sample_interval: f64, // meters
     pub enable_pitch_damping: bool,
     pub enable_precession_nutation: bool,
-    pub use_cluster_bc: bool,       // Use cluster-based BC degradation
+    pub use_cluster_bc: bool, // Use cluster-based BC degradation
 
     // Custom drag model support
     pub custom_drag_table: Option<crate::drag::DragTable>,
@@ -141,7 +147,7 @@ impl Default for BallisticInputs {
             bullet_mass: mass_kg,
             muzzle_velocity: 800.0,
             bullet_diameter: diameter_m,
-            bullet_length: diameter_m * 4.0,  // Approximate
+            bullet_length: diameter_m * 4.0, // Approximate
 
             // Targeting and positioning
             muzzle_angle: muzzle_angle_rad,
@@ -149,15 +155,15 @@ impl Default for BallisticInputs {
             azimuth_angle: 0.0,
             shooting_angle: 0.0,
             sight_height: 0.05,
-            muzzle_height: 0.0,  // Default 0 - height is in sight_height
-            target_height: 0.0,  // Target at ground level by default
-            ground_threshold: -100.0,  // Effectively disable ground detection (allow bullet to drop 100m below start)
+            muzzle_height: 0.0,       // Default 0 - height is in sight_height
+            target_height: 0.0,       // Target at ground level by default
+            ground_threshold: -100.0, // Effectively disable ground detection (allow bullet to drop 100m below start)
 
             // Environmental conditions
             altitude: 0.0,
             temperature: 15.0,
-            pressure: 1013.25,  // Standard sea level pressure (millibars)
-            humidity: 0.5,  // 50% relative humidity
+            pressure: 1013.25, // Standard sea level pressure (millibars)
+            humidity: 0.5,     // 50% relative humidity
             latitude: None,
 
             // Wind conditions
@@ -165,18 +171,18 @@ impl Default for BallisticInputs {
             wind_angle: 0.0,
 
             // Bullet characteristics
-            twist_rate: 12.0,  // 1:12" typical
+            twist_rate: 12.0, // 1:12" typical
             is_twist_right: true,
-            caliber_inches: diameter_m / 0.0254,  // Convert to inches
-            weight_grains: mass_kg / 0.00006479891,  // Convert to grains
+            caliber_inches: diameter_m / 0.0254, // Convert to inches
+            weight_grains: mass_kg / 0.00006479891, // Convert to grains
             manufacturer: None,
             bullet_model: None,
             bullet_id: None,
             bullet_cluster: None,
 
             // Integration method selection
-            use_rk4: true,  // Use Runge-Kutta methods by default
-            use_adaptive_rk45: true,  // Default to RK45 adaptive for best accuracy
+            use_rk4: true,           // Use Runge-Kutta methods by default
+            use_adaptive_rk45: true, // Default to RK45 adaptive for best accuracy
 
             // Advanced effects (disabled by default)
             enable_advanced_effects: false,
@@ -193,10 +199,10 @@ impl Default for BallisticInputs {
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
             enable_trajectory_sampling: false,
-            sample_interval: 10.0,  // Default 10 meter intervals
+            sample_interval: 10.0, // Default 10 meter intervals
             enable_pitch_damping: false,
             enable_precession_nutation: false,
-            use_cluster_bc: false,  // Disabled by default for backward compatibility
+            use_cluster_bc: false, // Disabled by default for backward compatibility
 
             // Custom drag model support
             custom_drag_table: None,
@@ -210,8 +216,8 @@ impl Default for BallisticInputs {
 // Wind conditions
 #[derive(Debug, Clone)]
 pub struct WindConditions {
-    pub speed: f64,        // m/s
-    pub direction: f64,    // radians (0 = North, PI/2 = East)
+    pub speed: f64,     // m/s
+    pub direction: f64, // radians (0 = North, PI/2 = East)
 }
 
 impl Default for WindConditions {
@@ -226,10 +232,10 @@ impl Default for WindConditions {
 // Atmospheric conditions
 #[derive(Debug, Clone)]
 pub struct AtmosphericConditions {
-    pub temperature: f64,  // Celsius
-    pub pressure: f64,     // hPa
-    pub humidity: f64,     // percentage (0-100)
-    pub altitude: f64,     // meters
+    pub temperature: f64, // Celsius
+    pub pressure: f64,    // hPa
+    pub humidity: f64,    // percentage (0-100)
+    pub altitude: f64,    // meters
 }
 
 impl Default for AtmosphericConditions {
@@ -261,12 +267,12 @@ pub struct TrajectoryResult {
     pub impact_velocity: f64,
     pub impact_energy: f64,
     pub points: Vec<TrajectoryPoint>,
-    pub sampled_points: Option<Vec<TrajectorySample>>,  // Trajectory samples at regular intervals
-    pub min_pitch_damping: Option<f64>,  // Minimum pitch damping coefficient (for stability warning)
-    pub transonic_mach: Option<f64>,      // Mach number when entering transonic regime
-    pub angular_state: Option<AngularState>,  // Final angular state if precession/nutation enabled
-    pub max_yaw_angle: Option<f64>,           // Maximum yaw angle during flight (radians)
-    pub max_precession_angle: Option<f64>,    // Maximum precession angle (radians)
+    pub sampled_points: Option<Vec<TrajectorySample>>, // Trajectory samples at regular intervals
+    pub min_pitch_damping: Option<f64>, // Minimum pitch damping coefficient (for stability warning)
+    pub transonic_mach: Option<f64>,    // Mach number when entering transonic regime
+    pub angular_state: Option<AngularState>, // Final angular state if precession/nutation enabled
+    pub max_yaw_angle: Option<f64>,     // Maximum yaw angle during flight (radians)
+    pub max_precession_angle: Option<f64>, // Maximum precession angle (radians)
 }
 
 impl TrajectoryResult {
@@ -317,18 +323,22 @@ pub struct TrajectorySolver {
 }
 
 impl TrajectorySolver {
-    pub fn new(mut inputs: BallisticInputs, wind: WindConditions, atmosphere: AtmosphericConditions) -> Self {
+    pub fn new(
+        mut inputs: BallisticInputs,
+        wind: WindConditions,
+        atmosphere: AtmosphericConditions,
+    ) -> Self {
         // Compute derived fields from base units
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
         inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
-        
+
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
             Some(ClusterBCDegradation::new())
         } else {
             None
         };
-        
+
         Self {
             inputs,
             wind,
@@ -338,15 +348,15 @@ impl TrajectorySolver {
             cluster_bc,
         }
     }
-    
+
     pub fn set_max_range(&mut self, range: f64) {
         self.max_range = range;
     }
-    
+
     pub fn set_time_step(&mut self, step: f64) {
         self.time_step = step;
     }
-    
+
     fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {
         // Create wind shear profile based on surface wind
         let profile = WindShearProfile {
@@ -355,23 +365,23 @@ impl TrajectorySolver {
             } else if self.inputs.wind_shear_model == "power" {
                 WindShearModel::PowerLaw
             } else {
-                WindShearModel::PowerLaw  // Default to power law
+                WindShearModel::PowerLaw // Default to power law
             },
             surface_wind: WindLayer {
                 altitude_m: 0.0,
                 speed_mps: self.wind.speed,
                 direction_deg: self.wind.direction.to_degrees(),
             },
-            reference_height: 10.0,  // Standard meteorological measurement height
-            roughness_length: 0.03,  // Short grass
-            power_exponent: 1.0 / 7.0,  // Neutral stability
+            reference_height: 10.0, // Standard meteorological measurement height
+            roughness_length: 0.03, // Short grass
+            power_exponent: 1.0 / 7.0, // Neutral stability
             geostrophic_wind: None,
             custom_layers: Vec::new(),
         };
-        
+
         profile.get_wind_at_altitude(altitude_m)
     }
-    
+
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
         if self.inputs.use_rk4 {
             if self.inputs.use_adaptive_rk45 {
@@ -383,29 +393,33 @@ impl TrajectorySolver {
             self.solve_euler()
         }
     }
-    
+
     fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
         // Simple trajectory integration using Euler method
         let mut time = 0.0;
-        let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
+        let mut position = Vector3::new(
+            0.0,
+            self.inputs.sight_height + self.inputs.muzzle_height,
+            0.0,
+        );
         // Calculate initial velocity components with both elevation and azimuth
         // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: lateral (side deviation)
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: downrange (forward)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(), // X: lateral (side deviation)
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
+            horizontal_velocity * self.inputs.azimuth_angle.cos(), // Z: downrange (forward)
         );
 
         let mut points = Vec::new();
         let mut max_height = position.y;
-        let mut min_pitch_damping = 1.0;  // Track minimum pitch damping coefficient
-        let mut transonic_mach = None;    // Track when we enter transonic
+        let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
+        let mut transonic_mach = None; // Track when we enter transonic
 
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
             Some(AngularState {
-                pitch_angle: 0.001,  // Small initial disturbance
+                pitch_angle: 0.001, // Small initial disturbance
                 yaw_angle: 0.001,
                 pitch_rate: 0.0,
                 yaw_rate: 0.0,
@@ -423,20 +437,21 @@ impl TrajectorySolver {
 
         // Wind vector: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.sin(),  // X: lateral (crosswind)
+            self.wind.speed * self.wind.direction.sin(), // X: lateral (crosswind)
             0.0,
-            self.wind.speed * self.wind.direction.cos(),  // Z: downrange (head/tail wind)
+            self.wind.speed * self.wind.direction.cos(), // Z: downrange (head/tail wind)
         );
 
         // Main integration loop (Z is downrange)
         while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
-            let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
+            let kinetic_energy =
+                0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
 
             points.push(TrajectoryPoint {
                 time,
-                position: position.clone(),
+                position: position,
                 velocity_magnitude,
                 kinetic_energy,
             });
@@ -447,24 +462,24 @@ impl TrajectorySolver {
                 eprintln!("Trajectory point {}: time={:.3}s, lateral={:.2}m, vertical={:.2}m, downrange={:.2}m, vel={:.1}m/s",
                     points.len(), time, position.x, position.y, position.z, velocity_magnitude);
             }
-            
+
             // Track max height
             if position.y > max_height {
                 max_height = position.y;
             }
-            
+
             // Calculate pitch damping if enabled
             if self.inputs.enable_pitch_damping {
                 let temp_c = self.atmosphere.temperature;
                 let temp_k = temp_c + 273.15;
                 let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                 let mach = velocity_magnitude / speed_of_sound;
-                
+
                 // Track when we enter transonic
                 if transonic_mach.is_none() && mach < 1.2 && mach > 0.8 {
                     transonic_mach = Some(mach);
                 }
-                
+
                 // Calculate pitch damping coefficient
                 let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
                     model.as_str()
@@ -473,13 +488,13 @@ impl TrajectorySolver {
                 };
                 let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
                 let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
-                
+
                 // Track minimum (most critical for stability)
                 if pitch_damping < min_pitch_damping {
                     min_pitch_damping = pitch_damping;
                 }
             }
-            
+
             // Calculate precession/nutation if enabled
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
@@ -488,7 +503,7 @@ impl TrajectorySolver {
                     let temp_k = temp_c + 273.15;
                     let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                     let mach = velocity_magnitude / speed_of_sound;
-                    
+
                     // Calculate spin rate from twist rate and velocity
                     let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
                         let velocity_fps = velocity_magnitude * 3.28084;
@@ -497,14 +512,14 @@ impl TrajectorySolver {
                     } else {
                         0.0
                     };
-                    
+
                     // Create precession/nutation parameters
                     let params = PrecessionNutationParams {
                         mass_kg: self.inputs.bullet_mass,
                         caliber_m: self.inputs.bullet_diameter,
                         length_m: self.inputs.bullet_length,
                         spin_rate_rad_s,
-                        spin_inertia: 6.94e-8,      // Typical value
+                        spin_inertia: 6.94e-8,       // Typical value
                         transverse_inertia: 9.13e-7, // Typical value
                         velocity_mps: velocity_magnitude,
                         air_density_kg_m3: air_density,
@@ -512,16 +527,16 @@ impl TrajectorySolver {
                         pitch_damping_coeff: -0.8,
                         nutation_damping_factor: 0.05,
                     };
-                    
+
                     // Update angular state
                     *state = calculate_combined_angular_motion(
                         &params,
                         state,
                         time,
                         self.time_step,
-                        0.001,  // Initial disturbance
+                        0.001, // Initial disturbance
                     );
-                    
+
                     // Track maximums
                     if state.yaw_angle.abs() > max_yaw_angle {
                         max_yaw_angle = state.yaw_angle.abs();
@@ -531,22 +546,28 @@ impl TrajectorySolver {
                     }
                 }
             }
-            
+
             // Calculate drag with altitude-dependent wind if enabled
             let actual_wind = if self.inputs.enable_wind_shear {
                 self.get_wind_at_altitude(position.y)
             } else {
-                wind_vector.clone()
+                wind_vector
             };
             let velocity_rel = velocity - actual_wind;
             let velocity_rel_mag = velocity_rel.magnitude();
             let drag_coefficient = self.calculate_drag_coefficient(velocity_rel_mag);
-            
+
             // Calculate drag force
-            let drag_force = 0.5 * air_density * drag_coefficient * 
-                            self.inputs.bullet_diameter * self.inputs.bullet_diameter * 
-                            std::f64::consts::PI / 4.0 * velocity_rel_mag * velocity_rel_mag;
-            
+            let drag_force = 0.5
+                * air_density
+                * drag_coefficient
+                * self.inputs.bullet_diameter
+                * self.inputs.bullet_diameter
+                * std::f64::consts::PI
+                / 4.0
+                * velocity_rel_mag
+                * velocity_rel_mag;
+
             // Calculate acceleration
             let drag_acceleration = -drag_force / self.inputs.bullet_mass;
             let acceleration = Vector3::new(
@@ -554,81 +575,105 @@ impl TrajectorySolver {
                 drag_acceleration * velocity_rel.y / velocity_rel_mag - 9.80665,
                 drag_acceleration * velocity_rel.z / velocity_rel_mag,
             );
-            
+
             // Update state
             velocity += acceleration * self.time_step;
             position += velocity * self.time_step;
             time += self.time_step;
         }
-        
+
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
-        
+
         // Create trajectory sampling data if enabled
         let sampled_points = if self.inputs.enable_trajectory_sampling {
             let trajectory_data = TrajectoryData {
                 times: points.iter().map(|p| p.time).collect(),
-                positions: points.iter().map(|p| p.position.clone()).collect(),
-                velocities: points.iter().map(|p| {
-                    // Reconstruct velocity vectors from magnitude (approximate)
-                    Vector3::new(0.0, 0.0, p.velocity_magnitude)
-                }).collect(),
-                transonic_distances: Vec::new(),  // TODO: Track Mach transitions
+                positions: points.iter().map(|p| p.position).collect(),
+                velocities: points
+                    .iter()
+                    .map(|p| {
+                        // Reconstruct velocity vectors from magnitude (approximate)
+                        Vector3::new(0.0, 0.0, p.velocity_magnitude)
+                    })
+                    .collect(),
+                transonic_distances: Vec::new(), // TODO: Track Mach transitions
             };
-            
+
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.z,  // Z is downrange
+                target_distance_horiz_m: last_point.position.z, // Z is downrange
                 target_vertical_height_m: last_point.position.y,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
             };
-            
+
             // Sample at specified intervals
-            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.bullet_mass);
+            let samples = sample_trajectory(
+                &trajectory_data,
+                &outputs,
+                self.inputs.sample_interval,
+                self.inputs.bullet_mass,
+            );
             Some(samples)
         } else {
             None
         };
-        
+
         Ok(TrajectoryResult {
-            max_range: last_point.position.z,  // Z is downrange
+            max_range: last_point.position.z, // Z is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
             points,
             sampled_points,
-            min_pitch_damping: if self.inputs.enable_pitch_damping { Some(min_pitch_damping) } else { None },
-            transonic_mach: transonic_mach,
-            angular_state: angular_state,
-            max_yaw_angle: if self.inputs.enable_precession_nutation { Some(max_yaw_angle) } else { None },
-            max_precession_angle: if self.inputs.enable_precession_nutation { Some(max_precession_angle) } else { None },
+            min_pitch_damping: if self.inputs.enable_pitch_damping {
+                Some(min_pitch_damping)
+            } else {
+                None
+            },
+            transonic_mach,
+            angular_state,
+            max_yaw_angle: if self.inputs.enable_precession_nutation {
+                Some(max_yaw_angle)
+            } else {
+                None
+            },
+            max_precession_angle: if self.inputs.enable_precession_nutation {
+                Some(max_precession_angle)
+            } else {
+                None
+            },
         })
     }
-    
+
     fn solve_rk4(&self) -> Result<TrajectoryResult, BallisticsError> {
         // RK4 trajectory integration for better accuracy
         let mut time = 0.0;
-        let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
+        let mut position = Vector3::new(
+            0.0,
+            self.inputs.sight_height + self.inputs.muzzle_height,
+            0.0,
+        );
 
         // Calculate initial velocity components with both elevation and azimuth
         // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: lateral (side deviation)
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: downrange (forward)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(), // X: lateral (side deviation)
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
+            horizontal_velocity * self.inputs.azimuth_angle.cos(), // Z: downrange (forward)
         );
 
         let mut points = Vec::new();
         let mut max_height = position.y;
-        let mut min_pitch_damping = 1.0;  // Track minimum pitch damping coefficient
-        let mut transonic_mach = None;    // Track when we enter transonic
+        let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
+        let mut transonic_mach = None; // Track when we enter transonic
 
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
             Some(AngularState {
-                pitch_angle: 0.001,  // Small initial disturbance
+                pitch_angle: 0.001, // Small initial disturbance
                 yaw_angle: 0.001,
                 pitch_rate: 0.0,
                 yaw_rate: 0.0,
@@ -646,40 +691,41 @@ impl TrajectorySolver {
 
         // Wind vector: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.sin(),  // X: lateral (crosswind)
+            self.wind.speed * self.wind.direction.sin(), // X: lateral (crosswind)
             0.0,
-            self.wind.speed * self.wind.direction.cos(),  // Z: downrange (head/tail wind)
+            self.wind.speed * self.wind.direction.cos(), // Z: downrange (head/tail wind)
         );
 
         // Main RK4 integration loop (Z is downrange)
         while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
-            let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
-            
+            let kinetic_energy =
+                0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
+
             points.push(TrajectoryPoint {
                 time,
-                position: position.clone(),
+                position: position,
                 velocity_magnitude,
                 kinetic_energy,
             });
-            
+
             if position.y > max_height {
                 max_height = position.y;
             }
-            
+
             // Calculate pitch damping if enabled (RK4 solver)
             if self.inputs.enable_pitch_damping {
                 let temp_c = self.atmosphere.temperature;
                 let temp_k = temp_c + 273.15;
                 let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                 let mach = velocity_magnitude / speed_of_sound;
-                
+
                 // Track when we enter transonic
                 if transonic_mach.is_none() && mach < 1.2 && mach > 0.8 {
                     transonic_mach = Some(mach);
                 }
-                
+
                 // Calculate pitch damping coefficient
                 let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
                     model.as_str()
@@ -688,13 +734,13 @@ impl TrajectorySolver {
                 };
                 let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
                 let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
-                
+
                 // Track minimum (most critical for stability)
                 if pitch_damping < min_pitch_damping {
                     min_pitch_damping = pitch_damping;
                 }
             }
-            
+
             // Calculate precession/nutation if enabled (RK4 solver)
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
@@ -703,7 +749,7 @@ impl TrajectorySolver {
                     let temp_k = temp_c + 273.15;
                     let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                     let mach = velocity_magnitude / speed_of_sound;
-                    
+
                     // Calculate spin rate from twist rate and velocity
                     let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
                         let velocity_fps = velocity_magnitude * 3.28084;
@@ -712,14 +758,14 @@ impl TrajectorySolver {
                     } else {
                         0.0
                     };
-                    
+
                     // Create precession/nutation parameters
                     let params = PrecessionNutationParams {
                         mass_kg: self.inputs.bullet_mass,
                         caliber_m: self.inputs.bullet_diameter,
                         length_m: self.inputs.bullet_length,
                         spin_rate_rad_s,
-                        spin_inertia: 6.94e-8,      // Typical value
+                        spin_inertia: 6.94e-8,       // Typical value
                         transverse_inertia: 9.13e-7, // Typical value
                         velocity_mps: velocity_magnitude,
                         air_density_kg_m3: air_density,
@@ -727,16 +773,16 @@ impl TrajectorySolver {
                         pitch_damping_coeff: -0.8,
                         nutation_damping_factor: 0.05,
                     };
-                    
+
                     // Update angular state
                     *state = calculate_combined_angular_motion(
                         &params,
                         state,
                         time,
                         self.time_step,
-                        0.001,  // Initial disturbance
+                        0.001, // Initial disturbance
                     );
-                    
+
                     // Track maximums
                     if state.yaw_angle.abs() > max_yaw_angle {
                         max_yaw_angle = state.yaw_angle.abs();
@@ -746,106 +792,134 @@ impl TrajectorySolver {
                     }
                 }
             }
-            
+
             // RK4 method
             let dt = self.time_step;
-            
+
             // k1
             let acc1 = self.calculate_acceleration(&position, &velocity, air_density, &wind_vector);
-            
+
             // k2
             let pos2 = position + velocity * (dt * 0.5);
             let vel2 = velocity + acc1 * (dt * 0.5);
             let acc2 = self.calculate_acceleration(&pos2, &vel2, air_density, &wind_vector);
-            
+
             // k3
             let pos3 = position + vel2 * (dt * 0.5);
             let vel3 = velocity + acc2 * (dt * 0.5);
             let acc3 = self.calculate_acceleration(&pos3, &vel3, air_density, &wind_vector);
-            
+
             // k4
             let pos4 = position + vel3 * dt;
             let vel4 = velocity + acc3 * dt;
             let acc4 = self.calculate_acceleration(&pos4, &vel4, air_density, &wind_vector);
-            
+
             // Update position and velocity
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
             velocity += (acc1 + acc2 * 2.0 + acc3 * 2.0 + acc4) * (dt / 6.0);
             time += dt;
         }
-        
+
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
-        
+
         // Create trajectory sampling data if enabled
         let sampled_points = if self.inputs.enable_trajectory_sampling {
             let trajectory_data = TrajectoryData {
                 times: points.iter().map(|p| p.time).collect(),
-                positions: points.iter().map(|p| p.position.clone()).collect(),
-                velocities: points.iter().map(|p| {
-                    // Reconstruct velocity vectors from magnitude (approximate)
-                    Vector3::new(0.0, 0.0, p.velocity_magnitude)
-                }).collect(),
-                transonic_distances: Vec::new(),  // TODO: Track Mach transitions
+                positions: points.iter().map(|p| p.position).collect(),
+                velocities: points
+                    .iter()
+                    .map(|p| {
+                        // Reconstruct velocity vectors from magnitude (approximate)
+                        Vector3::new(0.0, 0.0, p.velocity_magnitude)
+                    })
+                    .collect(),
+                transonic_distances: Vec::new(), // TODO: Track Mach transitions
             };
-            
+
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.z,  // Z is downrange
+                target_distance_horiz_m: last_point.position.z, // Z is downrange
                 target_vertical_height_m: last_point.position.y,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
             };
-            
+
             // Sample at specified intervals
-            let samples = sample_trajectory(&trajectory_data, &outputs, self.inputs.sample_interval, self.inputs.bullet_mass);
+            let samples = sample_trajectory(
+                &trajectory_data,
+                &outputs,
+                self.inputs.sample_interval,
+                self.inputs.bullet_mass,
+            );
             Some(samples)
         } else {
             None
         };
-        
+
         Ok(TrajectoryResult {
-            max_range: last_point.position.z,  // Z is downrange
+            max_range: last_point.position.z, // Z is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
             points,
             sampled_points,
-            min_pitch_damping: if self.inputs.enable_pitch_damping { Some(min_pitch_damping) } else { None },
-            transonic_mach: transonic_mach,
-            angular_state: angular_state,
-            max_yaw_angle: if self.inputs.enable_precession_nutation { Some(max_yaw_angle) } else { None },
-            max_precession_angle: if self.inputs.enable_precession_nutation { Some(max_precession_angle) } else { None },
+            min_pitch_damping: if self.inputs.enable_pitch_damping {
+                Some(min_pitch_damping)
+            } else {
+                None
+            },
+            transonic_mach,
+            angular_state,
+            max_yaw_angle: if self.inputs.enable_precession_nutation {
+                Some(max_yaw_angle)
+            } else {
+                None
+            },
+            max_precession_angle: if self.inputs.enable_precession_nutation {
+                Some(max_precession_angle)
+            } else {
+                None
+            },
         })
     }
-    
+
     fn solve_rk45(&self) -> Result<TrajectoryResult, BallisticsError> {
         // RK45 adaptive step size integration (Dormand-Prince method)
         let mut time = 0.0;
-        let mut position = Vector3::new(0.0, self.inputs.sight_height + self.inputs.muzzle_height, 0.0);
+        let mut position = Vector3::new(
+            0.0,
+            self.inputs.sight_height + self.inputs.muzzle_height,
+            0.0,
+        );
 
         // Calculate initial velocity components
         // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(),  // X: lateral (side deviation)
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(),  // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.cos(),  // Z: downrange (forward)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(), // X: lateral (side deviation)
+            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
+            horizontal_velocity * self.inputs.azimuth_angle.cos(), // Z: downrange (forward)
         );
 
         let mut points = Vec::new();
         let mut max_height = position.y;
-        let mut dt = 0.001;  // Initial step size
-        let tolerance = 1e-6;  // Error tolerance
-        let safety_factor = 0.9;  // Safety factor for step size adjustment
-        let max_dt = 0.01;  // Maximum step size
-        let min_dt = 1e-6;   // Minimum step size
+        let mut dt = 0.001; // Initial step size
+        let tolerance = 1e-6; // Error tolerance
+        let safety_factor = 0.9; // Safety factor for step size adjustment
+        let max_dt = 0.01; // Maximum step size
+        let min_dt = 1e-6; // Minimum step size
 
         // Add a point counter to debug
         let mut iteration_count = 0;
         const MAX_ITERATIONS: usize = 100000;
 
-        while position.z < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {  // Z is downrange
+        while position.z < self.max_range
+            && position.y > self.inputs.ground_threshold
+            && time < 100.0
+        {
+            // Z is downrange
             iteration_count += 1;
             if iteration_count > MAX_ITERATIONS {
                 break; // Prevent infinite loop
@@ -857,7 +931,7 @@ impl TrajectorySolver {
 
             points.push(TrajectoryPoint {
                 time,
-                position: position.clone(),
+                position: position,
                 velocity_magnitude,
                 kinetic_energy,
             });
@@ -869,11 +943,11 @@ impl TrajectorySolver {
             // Get atmospheric conditions and wind: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
             let air_density = calculate_air_density(&self.atmosphere);
             let wind_vector = Vector3::new(
-                self.wind.speed * self.wind.direction.sin(),  // X: lateral (crosswind)
+                self.wind.speed * self.wind.direction.sin(), // X: lateral (crosswind)
                 0.0,
-                self.wind.speed * self.wind.direction.cos(),  // Z: downrange (head/tail wind)
+                self.wind.speed * self.wind.direction.cos(), // Z: downrange (head/tail wind)
             );
-            
+
             // RK45 step with adaptive step size
             let (new_pos, new_vel, new_dt) = self.rk45_step(
                 &position,
@@ -883,16 +957,16 @@ impl TrajectorySolver {
                 &wind_vector,
                 tolerance,
             );
-            
+
             // Update step size with safety factor and bounds
             dt = (safety_factor * new_dt).clamp(min_dt, max_dt);
-            
+
             // Update state
             position = new_pos;
             velocity = new_vel;
             time += dt;
         }
-        
+
         // Ensure we have at least one point
         if points.is_empty() {
             return Err(BallisticsError::from("No trajectory points calculated"));
@@ -901,13 +975,13 @@ impl TrajectorySolver {
         let last_point = points.last().unwrap();
 
         Ok(TrajectoryResult {
-            max_range: last_point.position.z,  // Z is downrange
+            max_range: last_point.position.z, // Z is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
             points,
-            sampled_points: None,  // Simplified - no trajectory sampling in RK45 for now
+            sampled_points: None, // Simplified - no trajectory sampling in RK45 for now
             min_pitch_damping: None,
             transonic_mach: None,
             angular_state: None,
@@ -915,7 +989,7 @@ impl TrajectorySolver {
             max_precession_angle: None,
         })
     }
-    
+
     fn rk45_step(
         &self,
         position: &Vector3<f64>,
@@ -946,14 +1020,14 @@ impl TrajectorySolver {
         const A74: f64 = 125.0 / 192.0;
         const A75: f64 = -2187.0 / 6784.0;
         const A76: f64 = 11.0 / 84.0;
-        
+
         // 5th order coefficients
         const B1: f64 = 35.0 / 384.0;
         const B3: f64 = 500.0 / 1113.0;
         const B4: f64 = 125.0 / 192.0;
         const B5: f64 = -2187.0 / 6784.0;
         const B6: f64 = 11.0 / 84.0;
-        
+
         // 4th order coefficients for error estimation
         const B1_ERR: f64 = 5179.0 / 57600.0;
         const B3_ERR: f64 = 7571.0 / 16695.0;
@@ -961,73 +1035,91 @@ impl TrajectorySolver {
         const B5_ERR: f64 = -92097.0 / 339200.0;
         const B6_ERR: f64 = 187.0 / 2100.0;
         const B7_ERR: f64 = 1.0 / 40.0;
-        
+
         // Compute RK45 stages
         let k1_v = self.calculate_acceleration(position, velocity, air_density, wind_vector);
-        let k1_p = velocity.clone();
-        
+        let k1_p = *velocity;
+
         let p2 = position + dt * A21 * k1_p;
         let v2 = velocity + dt * A21 * k1_v;
         let k2_v = self.calculate_acceleration(&p2, &v2, air_density, wind_vector);
         let k2_p = v2;
-        
+
         let p3 = position + dt * (A31 * k1_p + A32 * k2_p);
         let v3 = velocity + dt * (A31 * k1_v + A32 * k2_v);
         let k3_v = self.calculate_acceleration(&p3, &v3, air_density, wind_vector);
         let k3_p = v3;
-        
+
         let p4 = position + dt * (A41 * k1_p + A42 * k2_p + A43 * k3_p);
         let v4 = velocity + dt * (A41 * k1_v + A42 * k2_v + A43 * k3_v);
         let k4_v = self.calculate_acceleration(&p4, &v4, air_density, wind_vector);
         let k4_p = v4;
-        
+
         let p5 = position + dt * (A51 * k1_p + A52 * k2_p + A53 * k3_p + A54 * k4_p);
         let v5 = velocity + dt * (A51 * k1_v + A52 * k2_v + A53 * k3_v + A54 * k4_v);
         let k5_v = self.calculate_acceleration(&p5, &v5, air_density, wind_vector);
         let k5_p = v5;
-        
+
         let p6 = position + dt * (A61 * k1_p + A62 * k2_p + A63 * k3_p + A64 * k4_p + A65 * k5_p);
         let v6 = velocity + dt * (A61 * k1_v + A62 * k2_v + A63 * k3_v + A64 * k4_v + A65 * k5_v);
         let k6_v = self.calculate_acceleration(&p6, &v6, air_density, wind_vector);
         let k6_p = v6;
-        
+
         let p7 = position + dt * (A71 * k1_p + A73 * k3_p + A74 * k4_p + A75 * k5_p + A76 * k6_p);
         let v7 = velocity + dt * (A71 * k1_v + A73 * k3_v + A74 * k4_v + A75 * k5_v + A76 * k6_v);
         let k7_v = self.calculate_acceleration(&p7, &v7, air_density, wind_vector);
         let k7_p = v7;
-        
+
         // 5th order solution
         let new_pos = position + dt * (B1 * k1_p + B3 * k3_p + B4 * k4_p + B5 * k5_p + B6 * k6_p);
         let new_vel = velocity + dt * (B1 * k1_v + B3 * k3_v + B4 * k4_v + B5 * k5_v + B6 * k6_v);
-        
+
         // 4th order solution for error estimate
-        let pos_err = position + dt * (B1_ERR * k1_p + B3_ERR * k3_p + B4_ERR * k4_p + B5_ERR * k5_p + B6_ERR * k6_p + B7_ERR * k7_p);
-        let vel_err = velocity + dt * (B1_ERR * k1_v + B3_ERR * k3_v + B4_ERR * k4_v + B5_ERR * k5_v + B6_ERR * k6_v + B7_ERR * k7_v);
-        
+        let pos_err = position
+            + dt * (B1_ERR * k1_p
+                + B3_ERR * k3_p
+                + B4_ERR * k4_p
+                + B5_ERR * k5_p
+                + B6_ERR * k6_p
+                + B7_ERR * k7_p);
+        let vel_err = velocity
+            + dt * (B1_ERR * k1_v
+                + B3_ERR * k3_v
+                + B4_ERR * k4_v
+                + B5_ERR * k5_v
+                + B6_ERR * k6_v
+                + B7_ERR * k7_v);
+
         // Estimate error
         let pos_error = (new_pos - pos_err).magnitude();
         let vel_error = (new_vel - vel_err).magnitude();
         let error = (pos_error + vel_error) / (1.0 + position.magnitude() + velocity.magnitude());
-        
+
         // Calculate new step size
         let dt_new = if error < tolerance {
             dt * (tolerance / error).powf(0.2).min(2.0)
         } else {
             dt * (tolerance / error).powf(0.25).max(0.1)
         };
-        
+
         (new_pos, new_vel, dt_new)
     }
-    
-    fn calculate_acceleration(&self, position: &Vector3<f64>, velocity: &Vector3<f64>, air_density: f64, wind_vector: &Vector3<f64>) -> Vector3<f64> {
+
+    fn calculate_acceleration(
+        &self,
+        position: &Vector3<f64>,
+        velocity: &Vector3<f64>,
+        air_density: f64,
+        wind_vector: &Vector3<f64>,
+    ) -> Vector3<f64> {
         // Calculate altitude-dependent wind if wind shear is enabled
         let actual_wind = if self.inputs.enable_wind_shear {
             self.get_wind_at_altitude(position.y)
         } else {
-            wind_vector.clone()
+            *wind_vector
         };
 
-        let relative_velocity = velocity - &actual_wind;
+        let relative_velocity = velocity - actual_wind;
         let velocity_magnitude = relative_velocity.magnitude();
 
         if velocity_magnitude < 0.001 {
@@ -1043,9 +1135,9 @@ impl TrajectorySolver {
             let velocity_fps = velocity_magnitude * 3.28084;
             cluster_bc.apply_correction(
                 self.inputs.bc_value,
-                self.inputs.caliber_inches * 0.0254,  // Convert back to meters for consistency
+                self.inputs.caliber_inches * 0.0254, // Convert back to meters for consistency
                 self.inputs.weight_grains,
-                velocity_fps
+                velocity_fps,
             )
         } else {
             self.inputs.bc_value
@@ -1054,14 +1146,15 @@ impl TrajectorySolver {
         // Use proper ballistics retardation formula
         // This matches the proven formula from fast_trajectory.rs
         // The standard retardation factor converts Cd to drag deceleration
-        let velocity_fps = velocity_magnitude * 3.28084;  // m/s to fps
-        let cd_to_retard = 0.000683 * 0.30;  // Standard ballistics constant
+        let velocity_fps = velocity_magnitude * 3.28084; // m/s to fps
+        let cd_to_retard = 0.000683 * 0.30; // Standard ballistics constant
         let standard_factor = cd * cd_to_retard;
-        let density_scale = air_density / 1.225;  // Scale relative to standard air (1.225 kg/m³)
+        let density_scale = air_density / 1.225; // Scale relative to standard air (1.225 kg/m³)
 
         // Drag acceleration in ft/s² then convert to m/s²
-        let a_drag_ft_s2 = (velocity_fps * velocity_fps) * standard_factor * density_scale / effective_bc;
-        let a_drag_m_s2 = a_drag_ft_s2 * 0.3048;  // ft/s² to m/s²
+        let a_drag_ft_s2 =
+            (velocity_fps * velocity_fps) * standard_factor * density_scale / effective_bc;
+        let a_drag_m_s2 = a_drag_ft_s2 * 0.3048; // ft/s² to m/s²
 
         // Apply drag opposite to velocity direction
         let drag_acceleration = -a_drag_m_s2 * (relative_velocity / velocity_magnitude);
@@ -1069,13 +1162,13 @@ impl TrajectorySolver {
         // Total acceleration = drag + gravity
         drag_acceleration + Vector3::new(0.0, -9.81, 0.0)
     }
-    
+
     fn calculate_drag_coefficient(&self, velocity: f64) -> f64 {
         // Calculate speed of sound based on atmospheric temperature
         let temp_c = self.atmosphere.temperature;
         let temp_k = temp_c + 273.15;
-        let gamma = 1.4;  // Ratio of specific heats for air
-        let r_specific = 287.05;  // Specific gas constant for air (J/kg·K)
+        let gamma = 1.4; // Ratio of specific heats for air
+        let r_specific = 287.05; // Specific gas constant for air (J/kg·K)
         let speed_of_sound = (gamma * r_specific * temp_k).sqrt();
         let mach = velocity / speed_of_sound;
 
@@ -1087,7 +1180,8 @@ impl TrajectorySolver {
             // Try to determine shape from bullet model string
             if model.to_lowercase().contains("boat") || model.to_lowercase().contains("bt") {
                 ProjectileShape::BoatTail
-            } else if model.to_lowercase().contains("round") || model.to_lowercase().contains("rn") {
+            } else if model.to_lowercase().contains("round") || model.to_lowercase().contains("rn")
+            {
                 ProjectileShape::RoundNose
             } else if model.to_lowercase().contains("flat") || model.to_lowercase().contains("fb") {
                 ProjectileShape::FlatBase
@@ -1095,16 +1189,16 @@ impl TrajectorySolver {
                 // Use heuristic based on caliber, weight, and drag model
                 get_projectile_shape(
                     self.inputs.bullet_diameter,
-                    self.inputs.bullet_mass / 0.00006479891,  // Convert kg to grains
-                    &self.inputs.bc_type.to_string()
+                    self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
+                    &self.inputs.bc_type.to_string(),
                 )
             }
         } else {
             // Use heuristic based on caliber, weight, and drag model
             get_projectile_shape(
                 self.inputs.bullet_diameter,
-                self.inputs.bullet_mass / 0.00006479891,  // Convert kg to grains
-                &self.inputs.bc_type.to_string()
+                self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
+                &self.inputs.bc_type.to_string(),
             )
         };
 
@@ -1126,7 +1220,7 @@ pub struct MonteCarloParams {
     pub target_distance: Option<f64>,
     pub base_wind_speed: f64,
     pub base_wind_direction: f64,
-    pub azimuth_std_dev: f64,  // Horizontal aiming variation in radians
+    pub azimuth_std_dev: f64, // Horizontal aiming variation in radians
 }
 
 impl Default for MonteCarloParams {
@@ -1140,7 +1234,7 @@ impl Default for MonteCarloParams {
             target_distance: None,
             base_wind_speed: 0.0,
             base_wind_direction: 0.0,
-            azimuth_std_dev: 0.001,  // Default horizontal spread ~0.057 degrees
+            azimuth_std_dev: 0.001, // Default horizontal spread ~0.057 degrees
         }
     }
 }
@@ -1180,14 +1274,16 @@ pub fn run_monte_carlo_with_wind(
     let mut impact_positions = Vec::new();
 
     // First, calculate baseline trajectory with no variations
-    let baseline_solver = TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), Default::default());
+    let baseline_solver =
+        TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), Default::default());
     let baseline_result = baseline_solver.solve()?;
 
     // Determine target distance: use explicit target or baseline max range
     let target_distance = params.target_distance.unwrap_or(baseline_result.max_range);
 
     // Get baseline position at target distance (interpolated)
-    let baseline_at_target = baseline_result.position_at_range(target_distance)
+    let baseline_at_target = baseline_result
+        .position_at_range(target_distance)
         .ok_or("Could not interpolate baseline at target distance")?;
 
     // Create normal distributions for variations
@@ -1199,8 +1295,9 @@ pub fn run_monte_carlo_with_wind(
         .map_err(|e| format!("Invalid BC distribution: {}", e))?;
     let wind_speed_dist = Normal::new(base_wind.speed, params.wind_speed_std_dev)
         .map_err(|e| format!("Invalid wind speed distribution: {}", e))?;
-    let wind_dir_dist = Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1)  // Small variation in direction
-        .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
+    let wind_dir_dist =
+        Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1) // Small variation in direction
+            .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
     let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
         .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
 
@@ -1214,7 +1311,7 @@ pub fn run_monte_carlo_with_wind(
         inputs.muzzle_velocity = velocity_dist.sample(&mut rng).max(0.0);
         inputs.muzzle_angle = angle_dist.sample(&mut rng);
         inputs.bc_value = bc_dist.sample(&mut rng).max(0.01);
-        inputs.azimuth_angle = azimuth_dist.sample(&mut rng);  // Add horizontal variation
+        inputs.azimuth_angle = azimuth_dist.sample(&mut rng); // Add horizontal variation
 
         // Create varied wind (now based on base wind conditions)
         let wind = WindConditions {
@@ -1234,9 +1331,9 @@ pub fn run_monte_carlo_with_wind(
                     // Calculate deviation from baseline at the SAME target distance
                     // X = lateral deviation (windage), Y = vertical deviation (elevation)
                     let mut deviation = Vector3::new(
-                        pos_at_target.x - baseline_at_target.x,  // Lateral deviation
-                        pos_at_target.y - baseline_at_target.y,  // Vertical deviation
-                        0.0,  // Z deviation is 0 since we're comparing at same range
+                        pos_at_target.x - baseline_at_target.x, // Lateral deviation
+                        pos_at_target.y - baseline_at_target.y, // Vertical deviation
+                        0.0, // Z deviation is 0 since we're comparing at same range
                     );
 
                     // Add additional pointing error to simulate realistic group sizes
@@ -1246,7 +1343,7 @@ pub fn run_monte_carlo_with_wind(
 
                     impact_positions.push(deviation);
                 }
-            },
+            }
             Err(_) => {
                 // Skip failed simulations
                 continue;
@@ -1315,9 +1412,9 @@ pub fn calculate_zero_angle_with_conditions(
 
     // Binary search for the angle that hits the target
     // Use only positive angles to ensure proper ballistic arc (upward trajectory)
-    let mut low_angle = 0.0;   // radians (horizontal)
-    let mut high_angle = 0.2;  // radians (about 11 degrees)
-    let tolerance = 0.00001;   // radians
+    let mut low_angle = 0.0; // radians (horizontal)
+    let mut high_angle = 0.2; // radians (about 11 degrees)
+    let tolerance = 0.00001; // radians
     let max_iterations = 50;
 
     // MBA-194: Validate bracketing before starting binary search
@@ -1359,27 +1456,33 @@ pub fn calculate_zero_angle_with_conditions(
                 }
             }
             // If signs are opposite, we have valid bracketing - proceed
-        },
+        }
         (None, Some(_hh)) => {
             // Low angle doesn't reach target, high does - this is fine
             // Binary search will increase low_angle until trajectory reaches
-        },
+        }
         (Some(_lh), None) => {
             // High angle doesn't reach target - shouldn't happen
-            return Err("Cannot find zero angle: high angle trajectory doesn't reach target distance".into());
-        },
+            return Err(
+                "Cannot find zero angle: high angle trajectory doesn't reach target distance"
+                    .into(),
+            );
+        }
         (None, None) => {
             // Neither reaches target - target too far
-            return Err("Cannot find zero angle: trajectory cannot reach target distance at any angle".into());
+            return Err(
+                "Cannot find zero angle: trajectory cannot reach target distance at any angle"
+                    .into(),
+            );
         }
     }
 
     for _iteration in 0..max_iterations {
         let mid_angle = (low_angle + high_angle) / 2.0;
-        
+
         let mut test_inputs = inputs.clone();
         test_inputs.muzzle_angle = mid_angle;
-        
+
         let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
         // Make sure we calculate far enough to reach the target
         solver.set_max_range(target_distance * 2.0);
@@ -1402,7 +1505,7 @@ pub fn calculate_zero_angle_with_conditions(
                 break;
             }
         }
-        
+
         match height_at_target {
             Some(height) => {
                 let error = height - target_height;
@@ -1430,7 +1533,7 @@ pub fn calculate_zero_angle_with_conditions(
                 } else {
                     low_angle = mid_angle;
                 }
-            },
+            }
             None => {
                 // Trajectory didn't reach target distance, increase angle
                 low_angle = mid_angle;
@@ -1442,7 +1545,7 @@ pub fn calculate_zero_angle_with_conditions(
             }
         }
     }
-    
+
     Err("Failed to find zero angle".into())
 }
 
@@ -1457,11 +1560,11 @@ pub fn estimate_bc_from_trajectory(
     let mut best_bc = 0.5;
     let mut best_error = f64::MAX;
     let mut found_valid = false;
-    
+
     // Try different BC values
     for bc in (100..1000).step_by(10) {
         let bc_value = bc as f64 / 1000.0;
-        
+
         let inputs = BallisticInputs {
             muzzle_velocity: velocity,
             bc_value,
@@ -1469,16 +1572,16 @@ pub fn estimate_bc_from_trajectory(
             bullet_diameter: diameter,
             ..Default::default()
         };
-        
+
         let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
         // Set max range for BC estimation
         solver.set_max_range(points.last().map(|(d, _)| *d * 1.5).unwrap_or(1000.0));
-        
+
         let result = match solver.solve() {
             Ok(r) => r,
             Err(_) => continue, // Skip this BC value if solve fails
         };
-        
+
         // Calculate error
         let mut total_error = 0.0;
         for (target_dist, target_drop) in points {
@@ -1491,31 +1594,32 @@ pub fn estimate_bc_from_trajectory(
                         let p1 = &result.points[i - 1];
                         let p2 = &result.points[i];
                         let t = (target_dist - p1.position.z) / (p2.position.z - p1.position.z);
-                        calculated_drop = Some(-(p1.position.y + t * (p2.position.y - p1.position.y)));
+                        calculated_drop =
+                            Some(-(p1.position.y + t * (p2.position.y - p1.position.y)));
                     } else {
                         calculated_drop = Some(-result.points[i].position.y);
                     }
                     break;
                 }
             }
-            
+
             if let Some(drop) = calculated_drop {
                 let error = (drop - target_drop).abs();
                 total_error += error * error;
             }
         }
-        
+
         if total_error < best_error {
             best_error = total_error;
             best_bc = bc_value;
             found_valid = true;
         }
     }
-    
+
     if !found_valid {
         return Err(BallisticsError::from("Unable to estimate BC from provided data. Check that drop values are in correct units.".to_string()));
     }
-    
+
     Ok(best_bc)
 }
 
@@ -1525,16 +1629,16 @@ fn calculate_air_density(atmosphere: &AtmosphericConditions) -> f64 {
     // P / (R * T) where R is specific gas constant for dry air
     let r_specific = 287.058; // J/(kg·K)
     let temperature_k = atmosphere.temperature + 273.15;
-    
+
     // Convert pressure from hPa to Pa
     let pressure_pa = atmosphere.pressure * 100.0;
-    
+
     // Basic density calculation
     let density = pressure_pa / (r_specific * temperature_k);
-    
+
     // Altitude correction (simplified)
     let altitude_factor = (-atmosphere.altitude / 8000.0).exp();
-    
+
     density * altitude_factor
 }
 
