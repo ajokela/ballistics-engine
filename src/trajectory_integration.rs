@@ -11,16 +11,11 @@ use std::collections::HashMap;
 
 use crate::derivatives::compute_derivatives;
 use crate::wind::WindSegment;
-use crate::DragModel;
 use crate::BallisticInputs;
+use crate::DragModel;
 
 /// RK4 integration step
-fn rk4_step(
-    state: &Vector6<f64>,
-    t: f64,
-    dt: f64,
-    params: &TrajectoryParams,
-) -> Vector6<f64> {
+fn rk4_step(state: &Vector6<f64>, t: f64, dt: f64, params: &TrajectoryParams) -> Vector6<f64> {
     // RK4 integration
     let k1 = compute_derivatives_vec(state, t, params);
     let k2 = compute_derivatives_vec(&(state + dt * 0.5 * k1), t + dt * 0.5, params);
@@ -79,16 +74,33 @@ fn rk45_step(
     let k1 = compute_derivatives_vec(state, t, params);
     let k2 = compute_derivatives_vec(&(state + dt * A21 * k1), t + dt * 0.2, params);
     let k3 = compute_derivatives_vec(&(state + dt * (A31 * k1 + A32 * k2)), t + dt * 0.3, params);
-    let k4 = compute_derivatives_vec(&(state + dt * (A41 * k1 + A42 * k2 + A43 * k3)), t + dt * 0.8, params);
-    let k5 = compute_derivatives_vec(&(state + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4)), t + dt * 8.0/9.0, params);
-    let k6 = compute_derivatives_vec(&(state + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5)), t + dt, params);
-    let k7 = compute_derivatives_vec(&(state + dt * (A71 * k1 + A73 * k3 + A74 * k4 + A75 * k5 + A76 * k6)), t + dt, params);
+    let k4 = compute_derivatives_vec(
+        &(state + dt * (A41 * k1 + A42 * k2 + A43 * k3)),
+        t + dt * 0.8,
+        params,
+    );
+    let k5 = compute_derivatives_vec(
+        &(state + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4)),
+        t + dt * 8.0 / 9.0,
+        params,
+    );
+    let k6 = compute_derivatives_vec(
+        &(state + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5)),
+        t + dt,
+        params,
+    );
+    let k7 = compute_derivatives_vec(
+        &(state + dt * (A71 * k1 + A73 * k3 + A74 * k4 + A75 * k5 + A76 * k6)),
+        t + dt,
+        params,
+    );
 
     // 5th order solution
     let y_new = state + dt * (B1 * k1 + B3 * k3 + B4 * k4 + B5 * k5 + B6 * k6);
 
     // 4th order solution for error estimate
-    let y_err = state + dt * (B1_ERR * k1 + B3_ERR * k3 + B4_ERR * k4 + B5_ERR * k5 + B6_ERR * k6 + B7_ERR * k7);
+    let y_err = state
+        + dt * (B1_ERR * k1 + B3_ERR * k3 + B4_ERR * k4 + B5_ERR * k5 + B6_ERR * k6 + B7_ERR * k7);
 
     // Error estimate
     let error = (y_new - y_err).norm() / (1.0 + state.norm());
@@ -115,14 +127,14 @@ pub struct TrajectoryParams {
     pub enable_spin_drift: bool,
     pub enable_magnus: bool,
     pub enable_coriolis: bool,
-    pub target_distance_m: f64,  // Target horizontal distance in meters
+    pub target_distance_m: f64, // Target horizontal distance in meters
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
     pub shooter_altitude_m: f64,
-    pub is_twist_right: bool,  // True for right-hand twist, false for left-hand
-    pub custom_drag_table: Option<crate::drag::DragTable>,  // Custom Drag Model (CDM) data
-    pub bc_segments: Option<Vec<(f64, f64)>>,  // Mach-based BC segments: (mach, bc)
-    pub use_bc_segments: bool,  // Whether to use BC segment interpolation
+    pub is_twist_right: bool, // True for right-hand twist, false for left-hand
+    pub custom_drag_table: Option<crate::drag::DragTable>, // Custom Drag Model (CDM) data
+    pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
+    pub use_bc_segments: bool, // Whether to use BC segment interpolation
 }
 
 /// Convert state to Vector6 and call compute_derivatives
@@ -131,7 +143,6 @@ fn compute_derivatives_vec(
     t: f64,
     params: &TrajectoryParams,
 ) -> Vector6<f64> {
-
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
 
@@ -152,9 +163,9 @@ fn compute_derivatives_vec(
             let wind_angle_rad = seg.1.to_radians();
             // Z IS DOWNRANGE: x=lateral, y=vertical, z=downrange
             Vector3::new(
-                -wind_speed_mps * wind_angle_rad.sin(),  // x (lateral - crosswind component)
-                0.0,                                      // y (vertical)
-                -wind_speed_mps * wind_angle_rad.cos(),  // z (downrange - head/tail component)
+                -wind_speed_mps * wind_angle_rad.sin(), // x (lateral - crosswind component)
+                0.0,                                    // y (vertical)
+                -wind_speed_mps * wind_angle_rad.cos(), // z (downrange - head/tail component)
             )
         }
     } else {
@@ -164,14 +175,16 @@ fn compute_derivatives_vec(
     // Create a minimal BallisticInputs struct for the derivatives function
     let inputs = BallisticInputs {
         bc_value: params.bc,
-        bc_type: params.drag_model.clone(),
+        bc_type: params.drag_model,
         bullet_mass: params.mass_kg / 0.00006479891, // kg to grains
-        muzzle_velocity: vel.norm() * 3.28084, // m/s to fps
-        bullet_diameter: 0.308, // default
-        bullet_length: 1.24, // default
-        twist_rate: 10.0, // default
+        muzzle_velocity: vel.norm() * 3.28084,       // m/s to fps
+        bullet_diameter: 0.308,                      // default
+        bullet_length: 1.24,                         // default
+        twist_rate: 10.0,                            // default
         is_twist_right: params.is_twist_right,
-        enable_advanced_effects: params.enable_spin_drift || params.enable_magnus || params.enable_coriolis,
+        enable_advanced_effects: params.enable_spin_drift
+            || params.enable_magnus
+            || params.enable_coriolis,
         altitude: params.atmos_params.0,
         temperature: params.atmos_params.1,
         pressure: params.atmos_params.2,
@@ -179,8 +192,16 @@ fn compute_derivatives_vec(
         tipoff_yaw: 0.0,
         target_distance: 1000.0, // default
         muzzle_angle: 0.0,
-        wind_speed: if !params.wind_segments.is_empty() { params.wind_segments[0].0 } else { 0.0 },
-        wind_angle: if !params.wind_segments.is_empty() { params.wind_segments[0].1 } else { 0.0 },
+        wind_speed: if !params.wind_segments.is_empty() {
+            params.wind_segments[0].0
+        } else {
+            0.0
+        },
+        wind_angle: if !params.wind_segments.is_empty() {
+            params.wind_segments[0].1
+        } else {
+            0.0
+        },
         latitude: None,
         shooting_angle: 0.0,
         azimuth_angle: 0.0,
@@ -232,8 +253,12 @@ fn compute_derivatives_vec(
     );
 
     Vector6::new(
-        deriv_result[0], deriv_result[1], deriv_result[2],
-        deriv_result[3], deriv_result[4], deriv_result[5],
+        deriv_result[0],
+        deriv_result[1],
+        deriv_result[2],
+        deriv_result[3],
+        deriv_result[4],
+        deriv_result[5],
     )
 }
 
@@ -247,8 +272,12 @@ pub fn integrate_trajectory(
     max_step: f64,
 ) -> Vec<(f64, Vector6<f64>)> {
     let mut state = Vector6::new(
-        initial_state[0], initial_state[1], initial_state[2],
-        initial_state[3], initial_state[4], initial_state[5],
+        initial_state[0],
+        initial_state[1],
+        initial_state[2],
+        initial_state[3],
+        initial_state[4],
+        initial_state[5],
     );
 
     let mut t = t_span.0;
@@ -256,7 +285,7 @@ pub fn integrate_trajectory(
     let mut dt = (t_end - t) / 1000.0; // Initial step size
 
     let mut trajectory = Vec::with_capacity(10000);
-    trajectory.push((t, state.clone()));
+    trajectory.push((t, state));
 
     match method {
         "RK4" => {
@@ -286,18 +315,19 @@ pub fn integrate_trajectory(
                     }
 
                     trajectory.push((t + dt_to_target, corrected_state));
-                    break;  // Stop at target
+                    break; // Stop at target
                 }
 
                 state = new_state;
                 t += dt;
-                trajectory.push((t, state.clone()));
+                trajectory.push((t, state));
 
                 // Check if we've reached or passed the target
-                if state[2] >= params.target_distance_m {  // z is downrange
+                if state[2] >= params.target_distance_m {
+                    // z is downrange
                     // Add final point exactly at target
                     let mut final_state = state;
-                    final_state[2] = params.target_distance_m;  // z is downrange
+                    final_state[2] = params.target_distance_m; // z is downrange
                     trajectory.push((t, final_state));
                     break;
                 }
@@ -310,27 +340,28 @@ pub fn integrate_trajectory(
         }
         "RK45" | _ => {
             // Adaptive RK45 with better sampling
-            let mut last_save_z = 0.0;  // z is downrange
+            let mut last_save_z = 0.0; // z is downrange
             let save_interval_m = params.target_distance_m / 50.0; // Save ~50 points minimum
 
             // OPTIMIZATION: Adjust max step size when wind shear is enabled
             // This improves numerical stability at long ranges
-            let effective_max_step = if params.enable_wind_shear && params.wind_shear_model != "none" {
-                // Use smaller steps for wind shear, but not TOO small
-                if params.target_distance_m > 800.0 {
-                    0.01  // Smaller steps for long range with shear (10ms)
+            let effective_max_step =
+                if params.enable_wind_shear && params.wind_shear_model != "none" {
+                    // Use smaller steps for wind shear, but not TOO small
+                    if params.target_distance_m > 800.0 {
+                        0.01 // Smaller steps for long range with shear (10ms)
+                    } else {
+                        0.02 // Normal steps for medium range with shear (20ms)
+                    }
                 } else {
-                    0.02  // Normal steps for medium range with shear (20ms)
-                }
-            } else {
-                max_step  // Use provided max_step when no wind shear
-            };
+                    max_step // Use provided max_step when no wind shear
+                };
 
             // Set initial step size - ensure it's reasonable
-            dt = dt.min(effective_max_step).max(0.0001);  // At least 0.1ms to avoid infinite loops
+            dt = dt.min(effective_max_step).max(0.0001); // At least 0.1ms to avoid infinite loops
 
             // Safety check: maximum iterations to prevent infinite loops
-            let max_iterations = 100000;  // Should be more than enough for any realistic trajectory
+            let max_iterations = 100000; // Should be more than enough for any realistic trajectory
             let mut iteration_count = 0;
 
             while t < t_end && iteration_count < max_iterations {
@@ -350,7 +381,8 @@ pub fn integrate_trajectory(
                     let dt_to_target = dt * alpha;
 
                     // Take a smaller step to reach target exactly
-                    let (final_state, _, _) = rk45_step(&state, t, dt_to_target, &params, tolerance);
+                    let (final_state, _, _) =
+                        rk45_step(&state, t, dt_to_target, &params, tolerance);
 
                     // Make sure we don't overshoot
                     let mut corrected_state = final_state;
@@ -359,7 +391,7 @@ pub fn integrate_trajectory(
                     }
 
                     trajectory.push((t + dt_to_target, corrected_state));
-                    break;  // Stop at target - no more points after this
+                    break; // Stop at target - no more points after this
                 }
 
                 // Update state
@@ -367,8 +399,10 @@ pub fn integrate_trajectory(
                 t += dt;
 
                 // Save trajectory point if we've moved enough distance
-                if state[2] - last_save_z >= save_interval_m || state[2] >= params.target_distance_m {  // z is downrange
-                    trajectory.push((t, state.clone()));
+                if state[2] - last_save_z >= save_interval_m || state[2] >= params.target_distance_m
+                {
+                    // z is downrange
+                    trajectory.push((t, state));
                     last_save_z = state[2];
                 }
 
@@ -376,10 +410,11 @@ pub fn integrate_trajectory(
                 dt = dt_new.min(effective_max_step).max(0.0001); // Use effective max step, min 0.1ms
 
                 // Stop if we've reached the target
-                if state[2] >= params.target_distance_m {  // z is downrange
+                if state[2] >= params.target_distance_m {
+                    // z is downrange
                     // Add final point at target distance
                     let mut final_state = state;
-                    final_state[2] = params.target_distance_m;  // z is downrange
+                    final_state[2] = params.target_distance_m; // z is downrange
                     trajectory.push((t, final_state));
                     break;
                 }
@@ -392,9 +427,15 @@ pub fn integrate_trajectory(
 
             // Warn if we hit the iteration limit
             if iteration_count >= max_iterations {
-                eprintln!("WARNING: Trajectory integration hit maximum iteration limit ({} iterations)", max_iterations);
+                eprintln!(
+                    "WARNING: Trajectory integration hit maximum iteration limit ({} iterations)",
+                    max_iterations
+                );
                 eprintln!("  Final time: {}, Target time: {}", t, t_end);
-                eprintln!("  Final position: z={}, Target: {}m", state[2], params.target_distance_m);
+                eprintln!(
+                    "  Final position: z={}, Target: {}m",
+                    state[2], params.target_distance_m
+                );
             }
         }
     }
@@ -433,36 +474,33 @@ pub fn solve_trajectory_rust(
         enable_magnus,
         enable_coriolis,
         target_distance_m,
-        enable_wind_shear: false,  // Default for test function
+        enable_wind_shear: false, // Default for test function
         wind_shear_model: "none".to_string(),
         shooter_altitude_m: 0.0,
-        is_twist_right: true,  // Default for test function
-        custom_drag_table: None,  // No CDM for test function
-        bc_segments: None,  // No BC segments for legacy function
+        is_twist_right: true,    // Default for test function
+        custom_drag_table: None, // No CDM for test function
+        bc_segments: None,       // No BC segments for legacy function
         use_bc_segments: false,
     };
 
-    let trajectory = integrate_trajectory(
-        initial_state,
-        t_span,
-        params,
-        &method,
-        tolerance,
-        max_step,
-    );
+    let trajectory =
+        integrate_trajectory(initial_state, t_span, params, &method, tolerance, max_step);
 
     // Convert to Python-friendly format
-    trajectory.into_iter().map(|(t, state)| {
-        let mut point = HashMap::new();
-        point.insert("t".to_string(), t);
-        point.insert("x".to_string(), state[0]);
-        point.insert("y".to_string(), state[1]);
-        point.insert("z".to_string(), state[2]);
-        point.insert("vx".to_string(), state[3]);
-        point.insert("vy".to_string(), state[4]);
-        point.insert("vz".to_string(), state[5]);
-        point
-    }).collect()
+    trajectory
+        .into_iter()
+        .map(|(t, state)| {
+            let mut point = HashMap::new();
+            point.insert("t".to_string(), t);
+            point.insert("x".to_string(), state[0]);
+            point.insert("y".to_string(), state[1]);
+            point.insert("z".to_string(), state[2]);
+            point.insert("vx".to_string(), state[3]);
+            point.insert("vy".to_string(), state[4]);
+            point.insert("vz".to_string(), state[5]);
+            point
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -499,25 +537,29 @@ mod tests {
         println!("Initial state: {:?}", initial_state);
         println!("Target distance: {} m", params.target_distance_m);
 
-        let trajectory = integrate_trajectory(
-            initial_state,
-            (0.0, 10.0),
-            params,
-            "RK45",
-            1e-6,
-            0.01,
-        );
+        let trajectory =
+            integrate_trajectory(initial_state, (0.0, 10.0), params, "RK45", 1e-6, 0.01);
 
         println!("Trajectory has {} points", trajectory.len());
 
         // Should have more than just initial point
-        assert!(trajectory.len() > 1, "Trajectory should have more than 1 point, but has {}", trajectory.len());
+        assert!(
+            trajectory.len() > 1,
+            "Trajectory should have more than 1 point, but has {}",
+            trajectory.len()
+        );
 
         // Check that we actually moved downrange
         if let Some((_, final_state)) = trajectory.last() {
             println!("Final state: z={}", final_state[2]);
-            assert!(final_state[2] > 0.0, "Final z should be positive (bullet moved downrange)");
-            assert!(final_state[2] >= 900.0, "Final z should be near target distance");
+            assert!(
+                final_state[2] > 0.0,
+                "Final z should be positive (bullet moved downrange)"
+            );
+            assert!(
+                final_state[2] >= 900.0,
+                "Final z should be near target distance"
+            );
         }
     }
 }

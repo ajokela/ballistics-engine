@@ -63,48 +63,51 @@ pub fn sample_trajectory(
     } else {
         step_m
     };
-    
+
     // Use the input target distance as the limit for sampling
     let max_dist = outputs.target_distance_horiz_m;
     if max_dist < 1e-9 {
         return Vec::new();
     }
-    
+
     // Extract trajectory arrays for vectorized operations
     let x_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.x).collect();
     let y_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.y).collect();
     let z_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.z).collect();
-    
+
     // Calculate speeds and energies
-    let speeds: Vec<f64> = trajectory_data.velocities.iter()
+    let speeds: Vec<f64> = trajectory_data
+        .velocities
+        .iter()
         .map(|v| v.norm())
         .collect();
-    let energies: Vec<f64> = speeds.iter()
+    let energies: Vec<f64> = speeds
+        .iter()
         .map(|&speed| 0.5 * mass_kg * speed * speed)
         .collect();
-    
+
     // Generate sampling distances
     // Calculate number of steps to reach target without exceeding it
     let num_steps = (max_dist / step_size).ceil() as usize + 1;
     let distances: Vec<f64> = (0..num_steps)
         .map(|i| i as f64 * step_size)
-        .filter(|&d| d <= max_dist + 0.1)  // Stop exactly at target (with tiny tolerance for rounding)
+        .filter(|&d| d <= max_dist + 0.1) // Stop exactly at target (with tiny tolerance for rounding)
         .collect();
-    
+
     // Vectorized interpolation for all trajectory data
     let mut samples = Vec::with_capacity(distances.len());
-    
+
     // Get initial height (muzzle height) for proper LOS calculation
     let muzzle_y = if !y_vals.is_empty() { y_vals[0] } else { 0.0 };
-    
+
     for &distance in &distances {
         // Interpolate using x (downrange) as the independent variable - STANDARD BALLISTICS CONVENTION
-        let y_interp = interpolate(&x_vals, &y_vals, distance);  // vertical at downrange distance
-        let wind_drift = interpolate(&x_vals, &z_vals, distance);  // lateral drift at downrange distance
-        let velocity = interpolate(&x_vals, &speeds, distance);  // velocity at downrange distance
-        let time = interpolate(&x_vals, &trajectory_data.times, distance);  // time at downrange distance
-        let energy = interpolate(&x_vals, &energies, distance);  // energy at downrange distance
-        
+        let y_interp = interpolate(&x_vals, &y_vals, distance); // vertical at downrange distance
+        let wind_drift = interpolate(&x_vals, &z_vals, distance); // lateral drift at downrange distance
+        let velocity = interpolate(&x_vals, &speeds, distance); // velocity at downrange distance
+        let time = interpolate(&x_vals, &trajectory_data.times, distance); // time at downrange distance
+        let energy = interpolate(&x_vals, &energies, distance); // energy at downrange distance
+
         // Calculate line-of-sight y-coordinate and drop
         // The LOS is the straight line from initial position to target
         // For coordinate shots: goes from muzzle_y to target_vertical_height_m
@@ -113,8 +116,8 @@ pub fn sample_trajectory(
         // - Negative drop means bullet is above LOS (has risen)
         // Therefore: drop = LOS - actual (not actual - LOS)
         let los_y = muzzle_y + (outputs.target_vertical_height_m - muzzle_y) * distance / max_dist;
-        let drop = los_y - y_interp;  // LOS - actual: positive when bullet is below LOS
-        
+        let drop = los_y - y_interp; // LOS - actual: positive when bullet is below LOS
+
         samples.push(TrajectorySample {
             distance_m: distance,
             drop_m: drop,
@@ -125,10 +128,10 @@ pub fn sample_trajectory(
             flags: Vec::new(), // Flags will be added later
         });
     }
-    
+
     // Add flags using vectorized detection
     add_trajectory_flags(&mut samples, &trajectory_data.transonic_distances, max_dist);
-    
+
     samples
 }
 
@@ -137,23 +140,23 @@ fn interpolate(x_vals: &[f64], y_vals: &[f64], x: f64) -> f64 {
     if x_vals.is_empty() || y_vals.is_empty() {
         return 0.0;
     }
-    
+
     if x_vals.len() != y_vals.len() {
         return 0.0;
     }
-    
+
     if x <= x_vals[0] {
         return y_vals[0];
     }
-    
+
     if x >= x_vals[x_vals.len() - 1] {
         return y_vals[y_vals.len() - 1];
     }
-    
+
     // Binary search for the correct interval
     let mut left = 0;
     let mut right = x_vals.len() - 1;
-    
+
     while right - left > 1 {
         let mid = (left + right) / 2;
         if x_vals[mid] <= x {
@@ -162,17 +165,17 @@ fn interpolate(x_vals: &[f64], y_vals: &[f64], x: f64) -> f64 {
             right = mid;
         }
     }
-    
+
     // Linear interpolation
     let x1 = x_vals[left];
     let x2 = x_vals[right];
     let y1 = y_vals[left];
     let y2 = y_vals[right];
-    
+
     if (x2 - x1).abs() < f64::EPSILON {
         return y1;
     }
-    
+
     y1 + (y2 - y1) * (x - x1) / (x2 - x1)
 }
 
@@ -183,24 +186,24 @@ fn add_trajectory_flags(
     target_distance_input_m: f64,
 ) {
     let tolerance = 1e-6;
-    
+
     // 1. Zero crossings - vectorized detection
     detect_zero_crossings(samples, tolerance);
-    
+
     // 2. Mach transitions
     for &transonic_dist in transonic_distances {
         if let Some(idx) = find_closest_sample_index(samples, transonic_dist) {
             samples[idx].flags.push(TrajectoryFlag::MachTransition);
         }
     }
-    
+
     // 3. Apex - find the point with maximum height between muzzle and target
     // Since drop is positive when bullet is below LOS and negative when above,
     // the apex is where drop is minimum (most negative)
     if samples.len() > 2 {
         // Use the target distance passed as parameter
         let target_distance_m = target_distance_input_m;
-        
+
         // Find the index of maximum height (minimum drop, most negative) within target distance
         // Exclude first point (always 0 for auto-zeroing)
         let mut min_drop = f64::INFINITY;
@@ -218,7 +221,7 @@ fn add_trajectory_flags(
                 apex_idx = i;
             }
         }
-        
+
         // Mark the apex
         samples[apex_idx].flags.push(TrajectoryFlag::Apex);
     }
@@ -229,35 +232,35 @@ fn detect_zero_crossings(samples: &mut [TrajectorySample], tolerance: f64) {
     if samples.len() < 2 {
         return;
     }
-    
+
     let drops: Vec<f64> = samples.iter().map(|s| s.drop_m).collect();
-    
+
     // Find crossing indices where drop changes sign
     for i in 0..(drops.len() - 1) {
         let current = drops[i];
         let next = drops[i + 1];
-        
+
         // Check for sign change crossings
-        let crosses_zero = (current < -tolerance && next >= -tolerance) ||
-                          (current > tolerance && next <= tolerance);
-        
+        let crosses_zero = (current < -tolerance && next >= -tolerance)
+            || (current > tolerance && next <= tolerance);
+
         if crosses_zero {
             samples[i + 1].flags.push(TrajectoryFlag::ZeroCrossing);
         }
     }
-    
+
     // Find points very close to zero
     for (i, &drop) in drops.iter().enumerate() {
         if drop.abs() <= tolerance {
             samples[i].flags.push(TrajectoryFlag::ZeroCrossing);
         }
     }
-    
+
     // Remove duplicate zero crossing flags
     for sample in samples.iter_mut() {
         let mut unique_flags = Vec::new();
         let mut seen = HashSet::new();
-        
+
         for flag in &sample.flags {
             if seen.insert(flag.clone()) {
                 unique_flags.push(flag.clone());
@@ -272,13 +275,13 @@ fn find_closest_sample_index(samples: &[TrajectorySample], target_distance: f64)
     if samples.is_empty() {
         return None;
     }
-    
+
     // Binary search for the closest distance
     let distances: Vec<f64> = samples.iter().map(|s| s.distance_m).collect();
-    
+
     let mut left = 0;
     let mut right = distances.len();
-    
+
     while left < right {
         let mid = (left + right) / 2;
         if distances[mid] < target_distance {
@@ -287,10 +290,10 @@ fn find_closest_sample_index(samples: &[TrajectorySample], target_distance: f64)
             right = mid;
         }
     }
-    
+
     // Find the closest point (could be left-1 or left)
     let mut best_idx = left.min(distances.len() - 1);
-    
+
     if left > 0 {
         let left_dist = (distances[left - 1] - target_distance).abs();
         let right_dist = (distances[best_idx] - target_distance).abs();
@@ -300,14 +303,15 @@ fn find_closest_sample_index(samples: &[TrajectorySample], target_distance: f64)
             best_idx = left - 1;
         }
     }
-    
+
     Some(best_idx)
 }
 
 /// Convert trajectory samples to Python-compatible format
 pub fn trajectory_samples_to_dicts(samples: &[TrajectorySample]) -> Vec<TrajectoryDict> {
-    samples.iter().map(|sample| {
-        TrajectoryDict {
+    samples
+        .iter()
+        .map(|sample| TrajectoryDict {
             distance_m: sample.distance_m,
             drop_m: sample.drop_m,
             wind_drift_m: sample.wind_drift_m,
@@ -315,8 +319,8 @@ pub fn trajectory_samples_to_dicts(samples: &[TrajectorySample]) -> Vec<Trajecto
             energy_j: sample.energy_j,
             time_s: sample.time_s,
             flags: sample.flags.iter().map(|f| f.to_string()).collect(),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Python-compatible trajectory sample structure
@@ -334,21 +338,21 @@ pub struct TrajectoryDict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_interpolate() {
         let x_vals = vec![0.0, 1.0, 2.0, 3.0];
         let y_vals = vec![0.0, 10.0, 20.0, 30.0];
-        
+
         assert_eq!(interpolate(&x_vals, &y_vals, 0.5), 5.0);
         assert_eq!(interpolate(&x_vals, &y_vals, 1.5), 15.0);
         assert_eq!(interpolate(&x_vals, &y_vals, 2.5), 25.0);
-        
+
         // Test boundary conditions
-        assert_eq!(interpolate(&x_vals, &y_vals, -1.0), 0.0);  // Below range
-        assert_eq!(interpolate(&x_vals, &y_vals, 4.0), 30.0);  // Above range
+        assert_eq!(interpolate(&x_vals, &y_vals, -1.0), 0.0); // Below range
+        assert_eq!(interpolate(&x_vals, &y_vals, 4.0), 30.0); // Above range
     }
-    
+
     #[test]
     fn test_find_closest_sample_index() {
         let samples = vec![
@@ -380,18 +384,18 @@ mod tests {
                 flags: Vec::new(),
             },
         ];
-        
+
         assert_eq!(find_closest_sample_index(&samples, 5.0), Some(0));
         assert_eq!(find_closest_sample_index(&samples, 12.0), Some(1));
         assert_eq!(find_closest_sample_index(&samples, 18.0), Some(2));
     }
-    
+
     #[test]
     fn test_detect_zero_crossings() {
         let mut samples = vec![
             TrajectorySample {
                 distance_m: 0.0,
-                drop_m: 1.0,  // Positive
+                drop_m: 1.0, // Positive
                 wind_drift_m: 0.0,
                 velocity_mps: 100.0,
                 energy_j: 1000.0,
@@ -400,7 +404,7 @@ mod tests {
             },
             TrajectorySample {
                 distance_m: 10.0,
-                drop_m: -0.5,  // Negative - crossing here
+                drop_m: -0.5, // Negative - crossing here
                 wind_drift_m: 0.1,
                 velocity_mps: 95.0,
                 energy_j: 950.0,
@@ -409,7 +413,7 @@ mod tests {
             },
             TrajectorySample {
                 distance_m: 20.0,
-                drop_m: -2.0,  // Still negative
+                drop_m: -2.0, // Still negative
                 wind_drift_m: 0.2,
                 velocity_mps: 90.0,
                 energy_j: 900.0,
@@ -417,15 +421,15 @@ mod tests {
                 flags: Vec::new(),
             },
         ];
-        
+
         detect_zero_crossings(&mut samples, 1e-6);
-        
+
         // Should have a zero crossing flag at index 1
         assert!(!samples[0].flags.contains(&TrajectoryFlag::ZeroCrossing));
         assert!(samples[1].flags.contains(&TrajectoryFlag::ZeroCrossing));
         assert!(!samples[2].flags.contains(&TrajectoryFlag::ZeroCrossing));
     }
-    
+
     #[test]
     fn test_sample_trajectory_basic() {
         // Create simple test trajectory data
@@ -433,9 +437,9 @@ mod tests {
         let trajectory_data = TrajectoryData {
             times: vec![0.0, 1.0, 2.0],
             positions: vec![
-                Vector3::new(0.0, 0.0, 0.0),      // x=0 (start), y=0 (vertical), z=0 (lateral)
-                Vector3::new(100.0, 10.0, 1.0),   // x=100 (mid - apex region), y=10, z=1 (drift)
-                Vector3::new(200.0, 5.0, 2.0),    // x=200 (end), y=5, z=2 (drift)
+                Vector3::new(0.0, 0.0, 0.0), // x=0 (start), y=0 (vertical), z=0 (lateral)
+                Vector3::new(100.0, 10.0, 1.0), // x=100 (mid - apex region), y=10, z=1 (drift)
+                Vector3::new(200.0, 5.0, 2.0), // x=200 (end), y=5, z=2 (drift)
             ],
             velocities: vec![
                 Vector3::new(1.0, 10.0, 100.0),
@@ -444,16 +448,16 @@ mod tests {
             ],
             transonic_distances: vec![150.0],
         };
-        
+
         let outputs = TrajectoryOutputs {
             target_distance_horiz_m: 200.0,
             target_vertical_height_m: 0.0,
             time_of_flight_s: 2.0,
             max_ord_dist_horiz_m: 100.0,
         };
-        
+
         let samples = sample_trajectory(&trajectory_data, &outputs, 50.0, 0.1);
-        
+
         // Should have samples at 0, 50, 100, 150, 200 meters
         assert_eq!(samples.len(), 5);
         assert_eq!(samples[0].distance_m, 0.0);
@@ -461,10 +465,10 @@ mod tests {
         assert_eq!(samples[2].distance_m, 100.0);
         assert_eq!(samples[3].distance_m, 150.0);
         assert_eq!(samples[4].distance_m, 200.0);
-        
+
         // Check that interpolation is working
         assert!(samples[1].velocity_mps > 90.0 && samples[1].velocity_mps < 100.0);
-        
+
         // Check flags
         assert!(samples[2].flags.contains(&TrajectoryFlag::Apex)); // At apex distance
         assert!(samples[3].flags.contains(&TrajectoryFlag::MachTransition)); // At transonic distance

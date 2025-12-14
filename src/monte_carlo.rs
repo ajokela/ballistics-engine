@@ -5,11 +5,11 @@
 //!
 //! MBA-157: Upstreamed from ballistics_rust for shared use across the ecosystem
 
-use crate::BallisticInputs;
-use crate::fast_trajectory::{fast_integrate, FastIntegrationParams};
-use crate::wind::WindSock;
 use crate::atmosphere::calculate_atmosphere;
 use crate::constants::{FPS_TO_MPS, GRAINS_TO_KG};
+use crate::fast_trajectory::{fast_integrate, FastIntegrationParams};
+use crate::wind::WindSock;
+use crate::BallisticInputs;
 use nalgebra::Vector3;
 
 const YARDS_TO_METERS: f64 = 0.9144;
@@ -17,21 +17,23 @@ const YARDS_TO_METERS: f64 = 0.9144;
 /// Simple trajectory output for Monte Carlo analysis
 #[derive(Debug, Clone)]
 pub struct TrajectoryOutput {
-    pub drop: f64,           // meters
-    pub wind_drift: f64,     // meters
-    pub time: f64,           // seconds
-    pub velocity: f64,       // m/s
-    pub energy: f64,         // joules
-    pub mach: f64,           // mach number
-    pub spin_drift: f64,     // meters
-    pub distance: f64,       // meters
+    pub drop: f64,       // meters
+    pub wind_drift: f64, // meters
+    pub time: f64,       // seconds
+    pub velocity: f64,   // m/s
+    pub energy: f64,     // joules
+    pub mach: f64,       // mach number
+    pub spin_drift: f64, // meters
+    pub distance: f64,   // meters
 }
 
 /// Solve trajectory for Monte Carlo run
 ///
 /// This function evaluates a single trajectory with the given inputs and returns
 /// simplified output suitable for statistical analysis.
-pub fn solve_trajectory_for_monte_carlo(inputs: &BallisticInputs) -> Result<TrajectoryOutput, String> {
+pub fn solve_trajectory_for_monte_carlo(
+    inputs: &BallisticInputs,
+) -> Result<TrajectoryOutput, String> {
     // Convert inputs to metric
     let target_distance_m = inputs.target_distance * YARDS_TO_METERS;
     let muzzle_velocity_mps = inputs.muzzle_velocity * FPS_TO_MPS;
@@ -39,17 +41,19 @@ pub fn solve_trajectory_for_monte_carlo(inputs: &BallisticInputs) -> Result<Traj
 
     // Calculate atmosphere at altitude
     let (air_density, speed_of_sound) = calculate_atmosphere(
-        inputs.altitude * 0.3048,  // feet to meters
+        inputs.altitude * 0.3048, // feet to meters
         Some(inputs.temperature),
         Some(inputs.pressure),
         inputs.humidity,
     );
 
     // Create wind segments
+    // WindSock expects tuple: (speed_kmh, angle_deg, until_distance_m)
+    // Python sends wind_speed in km/h and wind_angle in degrees
     let wind_segments = vec![(
-        0.0,  // range_m
-        inputs.wind_speed * 0.44704,  // wind_speed (mph to m/s)
-        inputs.wind_angle,  // wind_angle
+        inputs.wind_speed,           // speed in km/h (from Python)
+        inputs.wind_angle,           // angle in degrees (from Python)
+        target_distance_m * 2.0,     // wind extends beyond target
     )];
     let wind_sock = WindSock::new(wind_segments);
 
@@ -63,8 +67,16 @@ pub fn solve_trajectory_for_monte_carlo(inputs: &BallisticInputs) -> Result<Traj
 
     let initial_position = Vector3::new(0.0, inputs.sight_height * 0.0254, 0.0);
     let mut initial_state_array = [0.0; 6];
-    initial_state_array[0..3].copy_from_slice(&[initial_position.x, initial_position.y, initial_position.z]);
-    initial_state_array[3..6].copy_from_slice(&[initial_velocity.x, initial_velocity.y, initial_velocity.z]);
+    initial_state_array[0..3].copy_from_slice(&[
+        initial_position.x,
+        initial_position.y,
+        initial_position.z,
+    ]);
+    initial_state_array[3..6].copy_from_slice(&[
+        initial_velocity.x,
+        initial_velocity.y,
+        initial_velocity.z,
+    ]);
 
     // Get atmospheric parameters (temperature, pressure, density, sound_speed)
     let temp_c = inputs.temperature;
@@ -75,7 +87,7 @@ pub fn solve_trajectory_for_monte_carlo(inputs: &BallisticInputs) -> Result<Traj
         initial_state: initial_state_array,
         t_span: (0.0, 30.0),
         horiz: target_distance_m,
-        vert: 0.0,  // Target at ground level
+        vert: 0.0, // Target at ground level
         atmo_params: (temp_c, pressure_hpa, air_density, speed_of_sound),
     };
 
@@ -90,9 +102,9 @@ pub fn solve_trajectory_for_monte_carlo(inputs: &BallisticInputs) -> Result<Traj
     // FastSolution.y is Vec<Vec<f64>> where y[i] is the ith state variable across all time points
     let final_idx = solution.t.len() - 1;
 
-    let final_x = solution.y[0][final_idx];  // lateral drift
-    let final_y = solution.y[1][final_idx];  // vertical
-    let final_z = solution.y[2][final_idx];  // downrange
+    let final_x = solution.y[0][final_idx]; // lateral drift
+    let final_y = solution.y[1][final_idx]; // vertical
+    let final_z = solution.y[2][final_idx]; // downrange
 
     let final_vx = solution.y[3][final_idx];
     let final_vy = solution.y[4][final_idx];
@@ -114,7 +126,7 @@ pub fn solve_trajectory_for_monte_carlo(inputs: &BallisticInputs) -> Result<Traj
         velocity: final_speed,
         energy: final_energy,
         mach: final_mach,
-        spin_drift: final_x,  // Approximation for now
+        spin_drift: final_x, // Approximation for now
         distance: final_z,
     })
 }
@@ -133,7 +145,8 @@ pub fn calculate_cep(wind_drift_values: &[f64], drop_values: &[f64]) -> f64 {
     let mean_y = drop_values.iter().sum::<f64>() / drop_values.len() as f64;
 
     // Calculate distance from each point to mean
-    let mut distances: Vec<f64> = wind_drift_values.iter()
+    let mut distances: Vec<f64> = wind_drift_values
+        .iter()
         .zip(drop_values.iter())
         .map(|(x, y)| {
             let dx = x - mean_x;
@@ -152,7 +165,10 @@ pub fn calculate_cep(wind_drift_values: &[f64], drop_values: &[f64]) -> f64 {
 /// Calculate 95% confidence ellipse parameters using covariance matrix
 ///
 /// Returns (center_x, center_y, semi_major_axis, semi_minor_axis, rotation_degrees)
-pub fn calculate_confidence_ellipse(wind_drift_values: &[f64], drop_values: &[f64]) -> (f64, f64, f64, f64, f64) {
+pub fn calculate_confidence_ellipse(
+    wind_drift_values: &[f64],
+    drop_values: &[f64],
+) -> (f64, f64, f64, f64, f64) {
     if wind_drift_values.len() != drop_values.len() || wind_drift_values.len() < 2 {
         return (0.0, 0.0, 0.0, 0.0, 0.0);
     }
@@ -186,8 +202,8 @@ pub fn calculate_confidence_ellipse(wind_drift_values: &[f64], drop_values: &[f6
     let det = cov_xx * cov_yy - cov_xy * cov_xy;
     let discriminant = (trace * trace / 4.0 - det).max(0.0).sqrt();
 
-    let lambda1 = trace / 2.0 + discriminant;  // Larger eigenvalue
-    let lambda2 = trace / 2.0 - discriminant;  // Smaller eigenvalue
+    let lambda1 = trace / 2.0 + discriminant; // Larger eigenvalue
+    let lambda2 = trace / 2.0 - discriminant; // Smaller eigenvalue
 
     // 95% confidence interval chi-square value for 2 DOF is 5.991
     let scale_factor = 5.991_f64.sqrt();
@@ -196,7 +212,11 @@ pub fn calculate_confidence_ellipse(wind_drift_values: &[f64], drop_values: &[f6
 
     // Calculate rotation angle (angle of major axis)
     let rotation_rad = if cov_xy.abs() < 1e-10 {
-        if cov_xx >= cov_yy { 0.0 } else { std::f64::consts::PI / 2.0 }
+        if cov_xx >= cov_yy {
+            0.0
+        } else {
+            std::f64::consts::PI / 2.0
+        }
     } else {
         ((lambda1 - cov_xx) / cov_xy).atan()
     };
@@ -210,7 +230,7 @@ pub fn calculate_confidence_ellipse(wind_drift_values: &[f64], drop_values: &[f6
 pub fn sample_points_for_visualization(
     wind_drift_values: &[f64],
     drop_values: &[f64],
-    max_points: usize
+    max_points: usize,
 ) -> Vec<(f64, f64)> {
     let n = wind_drift_values.len();
     if n == 0 {
@@ -219,7 +239,8 @@ pub fn sample_points_for_visualization(
 
     if n <= max_points {
         // Return all points
-        wind_drift_values.iter()
+        wind_drift_values
+            .iter()
             .zip(drop_values.iter())
             .map(|(x, y)| (*x, *y))
             .collect()

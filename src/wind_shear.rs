@@ -45,9 +45,9 @@ impl WindLayer {
 pub struct WindShearProfile {
     pub model: WindShearModel,
     pub surface_wind: WindLayer,
-    pub reference_height: f64,    // Standard meteorological measurement height
-    pub roughness_length: f64,    // Surface roughness (0.03 = short grass)
-    pub power_exponent: f64,      // Power law exponent (1/7 for neutral stability)
+    pub reference_height: f64, // Standard meteorological measurement height
+    pub roughness_length: f64, // Surface roughness (0.03 = short grass)
+    pub power_exponent: f64,   // Power law exponent (1/7 for neutral stability)
     pub geostrophic_wind: Option<WindLayer>, // Wind above boundary layer
     pub custom_layers: Vec<WindLayer>,
 }
@@ -89,7 +89,7 @@ impl WindShearProfile {
         // Use absolute altitude, but add small offset only if very close to ground
         let effective_altitude = if altitude_m < 0.0 {
             // For negative altitudes, use a small positive value
-            0.001  // 1mm above ground
+            0.001 // 1mm above ground
         } else if altitude_m < 0.001 {
             // Very small positive altitudes
             0.001
@@ -103,8 +103,11 @@ impl WindShearProfile {
         }
 
         // Calculate speed ratio
-        let speed_ratio = if effective_altitude > self.roughness_length && self.reference_height > self.roughness_length {
-            (effective_altitude / self.roughness_length).ln() / (self.reference_height / self.roughness_length).ln()
+        let speed_ratio = if effective_altitude > self.roughness_length
+            && self.reference_height > self.roughness_length
+        {
+            (effective_altitude / self.roughness_length).ln()
+                / (self.reference_height / self.roughness_length).ln()
         } else {
             1.0
         };
@@ -167,9 +170,9 @@ impl WindShearProfile {
 
         // Convert to vector (X=lateral, Y=vertical, Z=downrange)
         Vector3::new(
-            -speed * direction_rad.sin(),  // X (lateral - crosswind)
+            -speed * direction_rad.sin(), // X (lateral - crosswind)
             0.0,
-            -speed * direction_rad.cos(),  // Z (downrange - head/tail)
+            -speed * direction_rad.cos(), // Z (downrange - head/tail)
         )
     }
 
@@ -234,8 +237,12 @@ impl WindShearWindSock {
             shooter_altitude_m: 0.0,
         }
     }
-    
-    pub fn with_shooter_altitude(segments: Vec<(f64, f64, f64)>, shear_profile: Option<WindShearProfile>, shooter_altitude_m: f64) -> Self {
+
+    pub fn with_shooter_altitude(
+        segments: Vec<(f64, f64, f64)>,
+        shear_profile: Option<WindShearProfile>,
+        shooter_altitude_m: f64,
+    ) -> Self {
         Self {
             segments,
             shear_profile,
@@ -246,8 +253,8 @@ impl WindShearWindSock {
     /// Get wind vector for 3D position
     /// Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
     pub fn vector_for_position(&self, position: Vector3<f64>) -> Vector3<f64> {
-        let range_m = position.z;  // Z is downrange
-        let altitude_m = position.y;  // Relative to shooter
+        let range_m = position.z; // Z is downrange
+        let altitude_m = position.y; // Relative to shooter
 
         // Get base wind at this range
         let base_wind = self.get_range_wind(range_m);
@@ -261,7 +268,8 @@ impl WindShearWindSock {
 
                 // Scale the base wind by altitude profile
                 if base_wind.norm() > 0.0 {
-                    let scale_factor = altitude_vec.norm() / profile.surface_wind.speed_mps.max(1e-9);
+                    let scale_factor =
+                        altitude_vec.norm() / profile.surface_wind.speed_mps.max(1e-9);
                     return base_wind * scale_factor;
                 }
 
@@ -284,9 +292,9 @@ impl WindShearWindSock {
             if range_m <= until_dist {
                 let ang = angle_deg.to_radians();
                 return Vector3::new(
-                    -speed_mps * ang.sin(),  // X (lateral - crosswind)
+                    -speed_mps * ang.sin(), // X (lateral - crosswind)
                     0.0,
-                    -speed_mps * ang.cos(),  // Z (downrange - head/tail)
+                    -speed_mps * ang.cos(), // Z (downrange - head/tail)
                 );
             }
         }
@@ -312,14 +320,14 @@ impl WindShearWindSock {
 /// Wind vector in m/s [x_downrange, y_vertical, z_lateral]
 pub fn get_wind_at_position(
     position: &Vector3<f64>,
-    wind_segments: &[(f64, f64, f64)],  // (speed_kmh, angle_deg, until_distance_m)
+    wind_segments: &[(f64, f64, f64)], // (speed_kmh, angle_deg, until_distance_m)
     enable_wind_shear: bool,
     wind_shear_model: &str,
     shooter_altitude_m: f64,
 ) -> Vector3<f64> {
     // Z IS DOWNRANGE
     let range_m = position[2];
-    let altitude_m = position[1];  // Y is vertical, relative to shooter
+    let altitude_m = position[1]; // Y is vertical, relative to shooter
 
     // Find appropriate wind segment based on range
     let base_wind = if wind_segments.is_empty() {
@@ -337,16 +345,16 @@ pub fn get_wind_at_position(
     };
 
     // Convert base wind from km/h to m/s
-    let base_speed_mps = base_wind.0 * 0.2777778;  // km/h to m/s
+    let base_speed_mps = base_wind.0 * 0.2777778; // km/h to m/s
     let base_direction_deg = base_wind.1;
 
     if !enable_wind_shear || wind_shear_model == "none" {
         // No shear - return constant wind
         let ang = base_direction_deg.to_radians();
         return Vector3::new(
-            -base_speed_mps * ang.sin(),  // x (lateral)
-            0.0,                           // y (vertical)
-            -base_speed_mps * ang.cos(),  // z (downrange)
+            -base_speed_mps * ang.sin(), // x (lateral)
+            0.0,                         // y (vertical)
+            -base_speed_mps * ang.cos(), // z (downrange)
         );
     }
 
@@ -374,7 +382,7 @@ pub fn get_wind_at_position(
         // Near ground level - use base wind directly with reduction
         let ang = base_direction_deg.to_radians();
         return Vector3::new(
-            -base_speed_mps * ang.sin() * 0.5,  // Reduced at ground
+            -base_speed_mps * ang.sin() * 0.5, // Reduced at ground
             0.0,
             -base_speed_mps * ang.cos() * 0.5,
         );
@@ -387,11 +395,7 @@ pub fn get_wind_at_position(
         let altitude_factor = (1.0 + absolute_altitude_m / 100.0).min(2.0).max(0.1);
         let sheared_speed = base_speed_mps * altitude_factor;
         let ang = base_direction_deg.to_radians();
-        return Vector3::new(
-            -sheared_speed * ang.sin(),
-            0.0,
-            -sheared_speed * ang.cos(),
-        );
+        return Vector3::new(-sheared_speed * ang.sin(), 0.0, -sheared_speed * ang.cos());
     }
 
     // For normal ranges, use full shear model with clamped altitude
@@ -416,9 +420,15 @@ mod tests {
         };
 
         let vec = layer_headwind.to_vector();
-        assert!((vec.x).abs() < 1e-6, "0° wind (headwind) should have zero lateral (X) component");
+        assert!(
+            (vec.x).abs() < 1e-6,
+            "0° wind (headwind) should have zero lateral (X) component"
+        );
         assert_eq!(vec.y, 0.0);
-        assert!((vec.z - (-10.0)).abs() < 1e-6, "0° wind should be headwind (negative Z downrange)");
+        assert!(
+            (vec.z - (-10.0)).abs() < 1e-6,
+            "0° wind should be headwind (negative Z downrange)"
+        );
 
         // Test 90° wind (from right)
         let layer_crosswind = WindLayer {
@@ -428,9 +438,15 @@ mod tests {
         };
 
         let vec_cross = layer_crosswind.to_vector();
-        assert!((vec_cross.x - (-10.0)).abs() < 1e-6, "90° wind should have negative X lateral (from right)");
+        assert!(
+            (vec_cross.x - (-10.0)).abs() < 1e-6,
+            "90° wind should have negative X lateral (from right)"
+        );
         assert_eq!(vec_cross.y, 0.0);
-        assert!((vec_cross.z).abs() < 1e-6, "90° wind (crosswind) should have zero downrange (Z) component");
+        assert!(
+            (vec_cross.z).abs() < 1e-6,
+            "90° wind (crosswind) should have zero downrange (Z) component"
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ impl std::fmt::Display for DragModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_drag_model_from_str() {
         // Test valid drag models
@@ -49,7 +49,7 @@ mod tests {
         assert_eq!(DragModel::from_str("GI"), Some(DragModel::GI));
         assert_eq!(DragModel::from_str("GS"), Some(DragModel::GS));
     }
-    
+
     #[test]
     fn test_drag_model_from_str_case_insensitive() {
         // Test case insensitivity
@@ -61,7 +61,7 @@ mod tests {
         assert_eq!(DragModel::from_str("GI"), Some(DragModel::GI));
         assert_eq!(DragModel::from_str("Gs"), Some(DragModel::GS));
     }
-    
+
     #[test]
     fn test_drag_model_from_str_invalid() {
         // Test invalid inputs
@@ -72,7 +72,7 @@ mod tests {
         assert_eq!(DragModel::from_str("invalid"), None);
         assert_eq!(DragModel::from_str("123"), None);
     }
-    
+
     #[test]
     fn test_drag_model_display() {
         // Test Display implementation
@@ -85,7 +85,7 @@ mod tests {
         assert_eq!(format!("{}", DragModel::GI), "GI");
         assert_eq!(format!("{}", DragModel::GS), "GS");
     }
-    
+
     #[test]
     fn test_drag_model_equality() {
         // Test PartialEq implementation
@@ -93,36 +93,36 @@ mod tests {
         assert_eq!(DragModel::G7, DragModel::G7);
         assert_ne!(DragModel::G1, DragModel::G7);
         assert_ne!(DragModel::G5, DragModel::G6);
-        
+
         // Test that from_str produces equal values
         let g1_from_str = DragModel::from_str("G1").unwrap();
         assert_eq!(g1_from_str, DragModel::G1);
     }
-    
+
     #[test]
     fn test_drag_model_clone() {
         // Test Clone implementation
         let original = DragModel::G7;
         let cloned = original.clone();
         assert_eq!(original, cloned);
-        
+
         // Both should be independent
         assert_eq!(format!("{}", original), "G7");
         assert_eq!(format!("{}", cloned), "G7");
     }
-    
+
     #[test]
     fn test_drag_model_copy() {
         // Test Copy implementation
         let original = DragModel::G1;
         let copied = original; // This uses Copy
         let also_copied = original; // Can still use original
-        
+
         assert_eq!(original, copied);
         assert_eq!(original, also_copied);
         assert_eq!(copied, also_copied);
     }
-    
+
     #[test]
     fn test_drag_model_debug() {
         // Test Debug implementation
