@@ -43,7 +43,7 @@ jobs:
         shasum -a 256 ./ballistics-${VERSION}-macos-${{ matrix.arch }} | cut -d' ' -f1 > ./ballistics-${VERSION}-macos-${{ matrix.arch }}.sha256
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: macos-${{ matrix.arch }}
         path: |
@@ -99,7 +99,7 @@ jobs:
         sha256sum ballistics-${VERSION}-linux-${{ matrix.arch }} | cut -d' ' -f1 > ballistics-${VERSION}-linux-${{ matrix.arch }}.sha256
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: linux-${{ matrix.arch }}
         path: |
@@ -131,7 +131,7 @@ jobs:
         $hash.Hash.ToLower() | Out-File -FilePath ballistics-$VERSION-windows-x86_64.exe.sha256 -NoNewline
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: windows-x86_64
         path: |
@@ -166,7 +166,7 @@ jobs:
           sha256 ./ballistics-${VERSION}-freebsd-x86_64 > ./ballistics-${VERSION}-freebsd-x86_64.sha256
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: freebsd-x86_64
         path: |
@@ -201,7 +201,7 @@ jobs:
           sha256 ./ballistics-${VERSION}-netbsd-x86_64 > ./ballistics-${VERSION}-netbsd-x86_64.sha256
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: netbsd-x86_64
         path: |
@@ -418,7 +418,7 @@ jobs:
     
     - name: Upload artifacts
       if: always()
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: openbsd-x86_64
         path: |
