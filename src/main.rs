@@ -1026,31 +1026,60 @@ fn run_trajectory(
         }
 
         OutputFormat::Csv => {
+            // Determine unit labels for CSV header
+            let (dist_unit, vel_unit, energy_unit) = match units {
+                UnitSystem::Metric => ("m", "m/s", "J"),
+                UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+            };
+
             if full {
-                println!("time,x,y,z,velocity,energy");
+                println!(
+                    "time_s,x_{},y_{},z_{},velocity_{},energy_{}",
+                    dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
+                );
                 for p in result.points {
+                    let x = UnitConverter::distance_from_metric(p.position.x, units);
+                    let y = UnitConverter::distance_from_metric(p.position.y, units);
+                    let z = UnitConverter::distance_from_metric(p.position.z, units);
+                    let vel = UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
+                    let energy = UnitConverter::energy_from_metric(p.kinetic_energy, units);
                     println!(
                         "{:.4},{:.2},{:.2},{:.2},{:.2},{:.2}",
-                        p.time,
-                        p.position.x,
-                        p.position.y,
-                        p.position.z,
-                        p.velocity_magnitude,
-                        p.kinetic_energy
+                        p.time, x, y, z, vel, energy
                     );
                 }
             } else {
-                println!("metric,value");
-                println!("max_range,{:.2}", result.max_range);
-                println!("max_height,{:.2}", result.max_height);
-                println!("time_of_flight,{:.4}", result.time_of_flight);
-                println!("impact_velocity,{:.2}", result.impact_velocity);
-                println!("impact_energy,{:.2}", result.impact_energy);
+                println!("metric,value,unit");
+                println!(
+                    "max_range,{:.2},{}",
+                    UnitConverter::distance_from_metric(result.max_range, units),
+                    dist_unit
+                );
+                println!(
+                    "max_height,{:.2},{}",
+                    UnitConverter::distance_from_metric(result.max_height, units),
+                    dist_unit
+                );
+                println!("time_of_flight,{:.4},s", result.time_of_flight);
+                println!(
+                    "impact_velocity,{:.2},{}",
+                    UnitConverter::velocity_from_metric(result.impact_velocity, units),
+                    vel_unit
+                );
+                println!(
+                    "impact_energy,{:.2},{}",
+                    UnitConverter::energy_from_metric(result.impact_energy, units),
+                    energy_unit
+                );
                 if stability > 0.0 {
-                    println!("stability_coefficient,{:.2}", stability);
+                    println!("stability_coefficient,{:.2},", stability);
                 }
                 if spin_drift.abs() > 0.0001 {
-                    println!("spin_drift,{:.4}", spin_drift);
+                    println!(
+                        "spin_drift,{:.4},{}",
+                        UnitConverter::distance_from_metric(spin_drift, units),
+                        dist_unit
+                    );
                 }
             }
         }
