@@ -1,0 +1,611 @@
+//! HTTP client for Flask API communication
+//!
+//! This module provides an HTTP client for routing trajectory calculations
+//! through the Flask API instead of local computation, giving CLI users
+//! access to ML-enhanced predictions.
+
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Request structure for trajectory calculation via Flask API
+#[derive(Debug, Clone, Serialize)]
+pub struct TrajectoryRequest {
+    /// Ballistic coefficient value
+    pub bc_value: f64,
+    /// BC type: "G1" or "G7"
+    pub bc_type: String,
+    /// Bullet mass in grams
+    pub bullet_mass: f64,
+    /// Muzzle velocity in m/s
+    pub muzzle_velocity: f64,
+    /// Target distance in meters
+    pub target_distance: f64,
+    /// Zero range in meters (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zero_range: Option<f64>,
+    /// Wind speed in m/s (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wind_speed: Option<f64>,
+    /// Wind angle in degrees (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wind_angle: Option<f64>,
+    /// Temperature in Celsius (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Pressure in hPa/mbar (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<f64>,
+    /// Humidity percentage 0-100 (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub humidity: Option<f64>,
+    /// Altitude in meters (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub altitude: Option<f64>,
+    /// Latitude for Coriolis calculations (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    /// Shooting angle in degrees (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shooting_angle: Option<f64>,
+    /// Barrel twist rate in inches per turn (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twist_rate: Option<f64>,
+    /// Bullet diameter in meters (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bullet_diameter: Option<f64>,
+    /// Bullet length in meters (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bullet_length: Option<f64>,
+}
+
+/// Response structure from Flask API trajectory calculation
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrajectoryResponse {
+    /// Array of trajectory points
+    pub trajectory: Vec<ApiTrajectoryPoint>,
+    /// Zero angle in radians
+    pub zero_angle: f64,
+    /// Total time of flight in seconds
+    pub time_of_flight: f64,
+    /// BC confidence score (0-1) if available
+    #[serde(default)]
+    pub bc_confidence: Option<f64>,
+    /// List of ML corrections applied
+    #[serde(default)]
+    pub ml_corrections_applied: Option<Vec<String>>,
+    /// Maximum ordinate (height) in meters
+    #[serde(default)]
+    pub max_ordinate: Option<f64>,
+    /// Impact velocity in m/s
+    #[serde(default)]
+    pub impact_velocity: Option<f64>,
+    /// Impact energy in Joules
+    #[serde(default)]
+    pub impact_energy: Option<f64>,
+}
+
+/// A single point in the trajectory from API response
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiTrajectoryPoint {
+    /// Range/distance in meters
+    pub range: f64,
+    /// Drop below line of sight in meters (negative = below)
+    pub drop: f64,
+    /// Wind drift in meters
+    pub drift: f64,
+    /// Velocity at this point in m/s
+    pub velocity: f64,
+    /// Kinetic energy at this point in Joules
+    pub energy: f64,
+    /// Time of flight to this point in seconds
+    pub time: f64,
+}
+
+/// Error types for API communication
+#[derive(Debug)]
+pub enum ApiError {
+    /// Network connectivity error
+    NetworkError(String),
+    /// Request timed out
+    Timeout,
+    /// Invalid or unparseable response
+    InvalidResponse(String),
+    /// HTTP error from server (status code, message)
+    ServerError(u16, String),
+    /// Request building error
+    RequestError(String),
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            ApiError::Timeout => write!(f, "Request timed out"),
+            ApiError::InvalidResponse(msg) => write!(f, "Invalid response: {}", msg),
+            ApiError::ServerError(code, msg) => write!(f, "Server error {}: {}", code, msg),
+            ApiError::RequestError(msg) => write!(f, "Request error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// HTTP client for Flask API communication
+pub struct ApiClient {
+    base_url: String,
+    timeout: Duration,
+}
+
+impl ApiClient {
+    /// Create a new API client
+    ///
+    /// # Arguments
+    /// * `base_url` - Base URL of the Flask API (e.g., "https://api.ballistics.7.62x51mm.sh")
+    /// * `timeout_secs` - Request timeout in seconds
+    pub fn new(base_url: &str, timeout_secs: u64) -> Self {
+        // Normalize URL by removing trailing slash
+        let base_url = base_url.trim_end_matches('/').to_string();
+
+        Self {
+            base_url,
+            timeout: Duration::from_secs(timeout_secs),
+        }
+    }
+
+    /// Calculate trajectory via Flask API
+    ///
+    /// # Arguments
+    /// * `request` - Trajectory calculation request parameters
+    ///
+    /// # Returns
+    /// * `Ok(TrajectoryResponse)` - Successful calculation with trajectory data
+    /// * `Err(ApiError)` - Error during API communication
+    #[cfg(feature = "online")]
+    pub fn calculate_trajectory(
+        &self,
+        request: &TrajectoryRequest,
+    ) -> Result<TrajectoryResponse, ApiError> {
+        // Flask API uses GET /v1/calculate with query parameters (imperial units)
+        let url = format!("{}/v1/calculate", self.base_url);
+
+        // Convert metric values to imperial for API
+        let velocity_fps = request.muzzle_velocity / 0.3048; // m/s to fps
+        let mass_grains = request.bullet_mass / 0.0647989; // grams to grains
+        let distance_yards = request.target_distance / 0.9144; // meters to yards
+
+        let mut req = ureq::get(&url)
+            .set("Accept", "application/json")
+            .set("User-Agent", "ballistics-cli/0.13.19")
+            .timeout(self.timeout)
+            .query("bc_value", &request.bc_value.to_string())
+            .query("bc_type", &request.bc_type)
+            .query("bullet_mass", &format!("{:.1}", mass_grains))
+            .query("muzzle_velocity", &format!("{:.1}", velocity_fps))
+            .query("target_distance", &format!("{:.1}", distance_yards));
+
+        // Add optional parameters
+        if let Some(zero_range) = request.zero_range {
+            let zero_yards = zero_range / 0.9144;
+            req = req.query("zero_distance", &format!("{:.1}", zero_yards));
+        }
+        if let Some(wind_speed) = request.wind_speed {
+            let wind_mph = wind_speed * 2.23694; // m/s to mph
+            req = req.query("wind_speed", &format!("{:.1}", wind_mph));
+        }
+        if let Some(wind_angle) = request.wind_angle {
+            req = req.query("wind_angle", &format!("{:.1}", wind_angle));
+        }
+        if let Some(temp) = request.temperature {
+            let temp_f = temp * 9.0 / 5.0 + 32.0; // Celsius to Fahrenheit
+            req = req.query("temperature", &format!("{:.1}", temp_f));
+        }
+        if let Some(pressure) = request.pressure {
+            let pressure_inhg = pressure / 33.8639; // hPa to inHg
+            req = req.query("pressure", &format!("{:.2}", pressure_inhg));
+        }
+        if let Some(humidity) = request.humidity {
+            req = req.query("humidity", &format!("{:.1}", humidity));
+        }
+        if let Some(altitude) = request.altitude {
+            let altitude_ft = altitude / 0.3048; // meters to feet
+            req = req.query("altitude", &format!("{:.1}", altitude_ft));
+        }
+        if let Some(shooting_angle) = request.shooting_angle {
+            req = req.query("shooting_angle", &format!("{:.1}", shooting_angle));
+        }
+        if let Some(latitude) = request.latitude {
+            req = req.query("latitude", &format!("{:.2}", latitude));
+        }
+        if let Some(twist_rate) = request.twist_rate {
+            req = req.query("twist_rate", &format!("{:.1}", twist_rate));
+        }
+        if let Some(diameter) = request.bullet_diameter {
+            let diameter_in = diameter / 0.0254; // meters to inches
+            req = req.query("bullet_diameter", &format!("{:.3}", diameter_in));
+        }
+
+        let response = req.call().map_err(|e| match e {
+            ureq::Error::Status(code, response) => {
+                let body = response.into_string().unwrap_or_default();
+                ApiError::ServerError(code, body)
+            }
+            ureq::Error::Transport(transport) => {
+                // Check for timeout by looking at the error message
+                let msg = transport.to_string();
+                if msg.contains("timed out") || msg.contains("timeout") {
+                    ApiError::Timeout
+                } else {
+                    ApiError::NetworkError(msg)
+                }
+            }
+        })?;
+
+        let body = response
+            .into_string()
+            .map_err(|e| ApiError::InvalidResponse(e.to_string()))?;
+
+        // Parse the Flask API response and convert to our format
+        let api_response: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))?;
+
+        // Convert Flask API response to our TrajectoryResponse format
+        self.convert_api_response(&api_response)
+    }
+
+    /// Helper to extract a value from a nested {value: x, unit: y} structure or plain number
+    #[cfg(feature = "online")]
+    fn extract_value(val: &serde_json::Value) -> Option<f64> {
+        // Try nested {value: x} first, then plain number
+        val.get("value")
+            .and_then(|v| v.as_f64())
+            .or_else(|| val.as_f64())
+    }
+
+    #[cfg(feature = "online")]
+    fn convert_api_response(&self, api_response: &serde_json::Value) -> Result<TrajectoryResponse, ApiError> {
+        // Get results object
+        let results = api_response.get("results");
+
+        // Extract trajectory points from Flask API response
+        // The Flask API returns trajectory in "trajectory" array with nested value objects
+        let trajectory_array = api_response.get("trajectory")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| ApiError::InvalidResponse("Missing trajectory array".to_string()))?;
+
+        let trajectory: Vec<ApiTrajectoryPoint> = trajectory_array
+            .iter()
+            .filter_map(|point| {
+                // Flask API returns nested {value: x, unit: y} objects in imperial units
+                let range_yards = point.get("distance")
+                    .and_then(Self::extract_value)?;
+                let drop_inches = point.get("drop")
+                    .and_then(Self::extract_value)
+                    .unwrap_or(0.0);
+                let drift_inches = point.get("wind_drift")
+                    .and_then(Self::extract_value)
+                    .unwrap_or(0.0);
+                let velocity_fps = point.get("velocity")
+                    .and_then(Self::extract_value)?;
+                let energy_ftlbs = point.get("energy")
+                    .and_then(Self::extract_value)
+                    .unwrap_or(0.0);
+                let time = point.get("time")
+                    .and_then(Self::extract_value)
+                    .unwrap_or(0.0);
+
+                Some(ApiTrajectoryPoint {
+                    range: range_yards * 0.9144,        // yards to meters
+                    drop: drop_inches * 0.0254,          // inches to meters
+                    drift: drift_inches * 0.0254,        // inches to meters
+                    velocity: velocity_fps * 0.3048,     // fps to m/s
+                    energy: energy_ftlbs * 1.35582,      // ft-lbs to Joules
+                    time,
+                })
+            })
+            .collect();
+
+        // Extract summary values from results object
+        let zero_angle = results
+            .and_then(|r| r.get("barrel_angle"))
+            .and_then(Self::extract_value)
+            .unwrap_or(0.0)
+            .to_radians();
+
+        let time_of_flight = results
+            .and_then(|r| r.get("time_of_flight"))
+            .and_then(Self::extract_value)
+            .unwrap_or_else(|| trajectory.last().map(|p| p.time).unwrap_or(0.0));
+
+        let bc_confidence = api_response.get("bc_confidence")
+            .and_then(|v| v.as_f64());
+
+        let ml_corrections = api_response.get("ml_corrections_applied")
+            .or_else(|| api_response.get("corrections_applied"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+
+        // max_height is directly a number in results
+        let max_ordinate = results
+            .and_then(|r| r.get("max_height"))
+            .and_then(|v| v.as_f64())
+            .map(|h| h * 0.0254); // inches to meters
+
+        let impact_velocity = results
+            .and_then(|r| r.get("final_velocity"))
+            .and_then(Self::extract_value)
+            .map(|v| v * 0.3048); // fps to m/s
+
+        let impact_energy = results
+            .and_then(|r| r.get("final_energy"))
+            .and_then(Self::extract_value)
+            .map(|e| e * 1.35582); // ft-lbs to Joules
+
+        Ok(TrajectoryResponse {
+            trajectory,
+            zero_angle,
+            time_of_flight,
+            bc_confidence,
+            ml_corrections_applied: ml_corrections,
+            max_ordinate,
+            impact_velocity,
+            impact_energy,
+        })
+    }
+
+    /// Check API health
+    #[cfg(feature = "online")]
+    pub fn health_check(&self) -> Result<bool, ApiError> {
+        let url = format!("{}/health", self.base_url);
+
+        let response = ureq::get(&url)
+            .timeout(Duration::from_secs(5))
+            .call()
+            .map_err(|e| match e {
+                ureq::Error::Status(code, response) => {
+                    let body = response.into_string().unwrap_or_default();
+                    ApiError::ServerError(code, body)
+                }
+                ureq::Error::Transport(transport) => {
+                    let msg = transport.to_string();
+                    if msg.contains("timed out") || msg.contains("timeout") {
+                        ApiError::Timeout
+                    } else {
+                        ApiError::NetworkError(msg)
+                    }
+                }
+            })?;
+
+        Ok(response.status() == 200)
+    }
+}
+
+/// Builder for TrajectoryRequest
+#[derive(Default)]
+pub struct TrajectoryRequestBuilder {
+    bc_value: Option<f64>,
+    bc_type: Option<String>,
+    bullet_mass: Option<f64>,
+    muzzle_velocity: Option<f64>,
+    target_distance: Option<f64>,
+    zero_range: Option<f64>,
+    wind_speed: Option<f64>,
+    wind_angle: Option<f64>,
+    temperature: Option<f64>,
+    pressure: Option<f64>,
+    humidity: Option<f64>,
+    altitude: Option<f64>,
+    latitude: Option<f64>,
+    shooting_angle: Option<f64>,
+    twist_rate: Option<f64>,
+    bullet_diameter: Option<f64>,
+    bullet_length: Option<f64>,
+}
+
+impl TrajectoryRequestBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bc_value(mut self, value: f64) -> Self {
+        self.bc_value = Some(value);
+        self
+    }
+
+    pub fn bc_type(mut self, value: &str) -> Self {
+        self.bc_type = Some(value.to_string());
+        self
+    }
+
+    pub fn bullet_mass(mut self, value: f64) -> Self {
+        self.bullet_mass = Some(value);
+        self
+    }
+
+    pub fn muzzle_velocity(mut self, value: f64) -> Self {
+        self.muzzle_velocity = Some(value);
+        self
+    }
+
+    pub fn target_distance(mut self, value: f64) -> Self {
+        self.target_distance = Some(value);
+        self
+    }
+
+    pub fn zero_range(mut self, value: f64) -> Self {
+        self.zero_range = Some(value);
+        self
+    }
+
+    pub fn wind_speed(mut self, value: f64) -> Self {
+        self.wind_speed = Some(value);
+        self
+    }
+
+    pub fn wind_angle(mut self, value: f64) -> Self {
+        self.wind_angle = Some(value);
+        self
+    }
+
+    pub fn temperature(mut self, value: f64) -> Self {
+        self.temperature = Some(value);
+        self
+    }
+
+    pub fn pressure(mut self, value: f64) -> Self {
+        self.pressure = Some(value);
+        self
+    }
+
+    pub fn humidity(mut self, value: f64) -> Self {
+        self.humidity = Some(value);
+        self
+    }
+
+    pub fn altitude(mut self, value: f64) -> Self {
+        self.altitude = Some(value);
+        self
+    }
+
+    pub fn latitude(mut self, value: f64) -> Self {
+        self.latitude = Some(value);
+        self
+    }
+
+    pub fn shooting_angle(mut self, value: f64) -> Self {
+        self.shooting_angle = Some(value);
+        self
+    }
+
+    pub fn twist_rate(mut self, value: f64) -> Self {
+        self.twist_rate = Some(value);
+        self
+    }
+
+    pub fn bullet_diameter(mut self, value: f64) -> Self {
+        self.bullet_diameter = Some(value);
+        self
+    }
+
+    pub fn bullet_length(mut self, value: f64) -> Self {
+        self.bullet_length = Some(value);
+        self
+    }
+
+    /// Build the TrajectoryRequest
+    ///
+    /// # Returns
+    /// * `Ok(TrajectoryRequest)` - Valid request
+    /// * `Err(String)` - Missing required fields
+    pub fn build(self) -> Result<TrajectoryRequest, String> {
+        let bc_value = self.bc_value.ok_or("bc_value is required")?;
+        let bc_type = self.bc_type.ok_or("bc_type is required")?;
+        let bullet_mass = self.bullet_mass.ok_or("bullet_mass is required")?;
+        let muzzle_velocity = self.muzzle_velocity.ok_or("muzzle_velocity is required")?;
+        let target_distance = self.target_distance.ok_or("target_distance is required")?;
+
+        Ok(TrajectoryRequest {
+            bc_value,
+            bc_type,
+            bullet_mass,
+            muzzle_velocity,
+            target_distance,
+            zero_range: self.zero_range,
+            wind_speed: self.wind_speed,
+            wind_angle: self.wind_angle,
+            temperature: self.temperature,
+            pressure: self.pressure,
+            humidity: self.humidity,
+            altitude: self.altitude,
+            latitude: self.latitude,
+            shooting_angle: self.shooting_angle,
+            twist_rate: self.twist_rate,
+            bullet_diameter: self.bullet_diameter,
+            bullet_length: self.bullet_length,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_request_builder_required_fields() {
+        let result = TrajectoryRequestBuilder::new()
+            .bc_value(0.238)
+            .bc_type("G7")
+            .bullet_mass(9.07) // 140gr in grams
+            .muzzle_velocity(860.0)
+            .target_distance(1000.0)
+            .build();
+
+        assert!(result.is_ok());
+        let request = result.unwrap();
+        assert_eq!(request.bc_value, 0.238);
+        assert_eq!(request.bc_type, "G7");
+    }
+
+    #[test]
+    fn test_request_builder_missing_fields() {
+        let result = TrajectoryRequestBuilder::new()
+            .bc_value(0.238)
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_request_builder_all_optional_fields() {
+        let result = TrajectoryRequestBuilder::new()
+            .bc_value(0.238)
+            .bc_type("G7")
+            .bullet_mass(9.07)
+            .muzzle_velocity(860.0)
+            .target_distance(1000.0)
+            .zero_range(100.0)
+            .wind_speed(5.0)
+            .wind_angle(90.0)
+            .temperature(15.0)
+            .pressure(1013.25)
+            .humidity(50.0)
+            .altitude(500.0)
+            .latitude(45.0)
+            .shooting_angle(0.0)
+            .twist_rate(10.0)
+            .bullet_diameter(0.00671)
+            .bullet_length(0.035)
+            .build();
+
+        assert!(result.is_ok());
+        let request = result.unwrap();
+        assert_eq!(request.zero_range, Some(100.0));
+        assert_eq!(request.wind_speed, Some(5.0));
+        assert_eq!(request.latitude, Some(45.0));
+    }
+
+    #[test]
+    fn test_api_client_url_normalization() {
+        let client1 = ApiClient::new("https://api.example.com/", 10);
+        assert_eq!(client1.base_url, "https://api.example.com");
+
+        let client2 = ApiClient::new("https://api.example.com", 10);
+        assert_eq!(client2.base_url, "https://api.example.com");
+    }
+
+    #[test]
+    fn test_api_error_display() {
+        assert_eq!(
+            format!("{}", ApiError::NetworkError("connection refused".to_string())),
+            "Network error: connection refused"
+        );
+        assert_eq!(format!("{}", ApiError::Timeout), "Request timed out");
+        assert_eq!(
+            format!("{}", ApiError::ServerError(500, "Internal error".to_string())),
+            "Server error 500: Internal error"
+        );
+    }
+}
