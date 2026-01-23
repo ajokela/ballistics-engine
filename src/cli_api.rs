@@ -974,6 +974,40 @@ impl TrajectorySolver {
 
         let last_point = points.last().unwrap();
 
+        // Generate sampled trajectory points if enabled
+        let sampled_points = if self.inputs.enable_trajectory_sampling {
+            // Build trajectory data for sampling
+            let trajectory_data = TrajectoryData {
+                times: points.iter().map(|p| p.time).collect(),
+                positions: points.iter().map(|p| p.position).collect(),
+                velocities: points
+                    .iter()
+                    .map(|p| {
+                        // Approximate velocity direction from position changes
+                        Vector3::new(0.0, 0.0, p.velocity_magnitude)
+                    })
+                    .collect(),
+                transonic_distances: Vec::new(),
+            };
+
+            let outputs = TrajectoryOutputs {
+                target_distance_horiz_m: last_point.position.z,
+                target_vertical_height_m: last_point.position.y,
+                time_of_flight_s: last_point.time,
+                max_ord_dist_horiz_m: max_height,
+            };
+
+            let samples = sample_trajectory(
+                &trajectory_data,
+                &outputs,
+                self.inputs.sample_interval,
+                self.inputs.bullet_mass,
+            );
+            Some(samples)
+        } else {
+            None
+        };
+
         Ok(TrajectoryResult {
             max_range: last_point.position.z, // Z is downrange
             max_height,
@@ -981,7 +1015,7 @@ impl TrajectorySolver {
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
             points,
-            sampled_points: None, // Simplified - no trajectory sampling in RK45 for now
+            sampled_points,
             min_pitch_damping: None,
             transonic_mach: None,
             angular_state: None,

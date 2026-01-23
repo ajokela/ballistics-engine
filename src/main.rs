@@ -1033,20 +1033,41 @@ fn run_trajectory(
             };
 
             if full {
-                println!(
-                    "time_s,x_{},y_{},z_{},velocity_{},energy_{}",
-                    dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
-                );
-                for p in result.points {
-                    let x = UnitConverter::distance_from_metric(p.position.x, units);
-                    let y = UnitConverter::distance_from_metric(p.position.y, units);
-                    let z = UnitConverter::distance_from_metric(p.position.z, units);
-                    let vel = UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
-                    let energy = UnitConverter::energy_from_metric(p.kinetic_energy, units);
+                // Check if we have sampled points (from --sample-trajectory)
+                if let Some(ref sampled) = result.sampled_points {
+                    // Output sampled trajectory at regular distance intervals
                     println!(
-                        "{:.4},{:.2},{:.2},{:.2},{:.2},{:.2}",
-                        p.time, x, y, z, vel, energy
+                        "distance_{},drop_{},drift_{},velocity_{},energy_{},time_s",
+                        dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
                     );
+                    for s in sampled {
+                        let distance = UnitConverter::distance_from_metric(s.distance_m, units);
+                        let drop = UnitConverter::distance_from_metric(s.drop_m, units);
+                        let drift = UnitConverter::distance_from_metric(s.wind_drift_m, units);
+                        let vel = UnitConverter::velocity_from_metric(s.velocity_mps, units);
+                        let energy = UnitConverter::energy_from_metric(s.energy_j, units);
+                        println!(
+                            "{:.2},{:.2},{:.2},{:.2},{:.2},{:.4}",
+                            distance, drop, drift, vel, energy, s.time_s
+                        );
+                    }
+                } else {
+                    // Output raw trajectory points (all integration steps)
+                    println!(
+                        "time_s,x_{},y_{},z_{},velocity_{},energy_{}",
+                        dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
+                    );
+                    for p in result.points {
+                        let x = UnitConverter::distance_from_metric(p.position.x, units);
+                        let y = UnitConverter::distance_from_metric(p.position.y, units);
+                        let z = UnitConverter::distance_from_metric(p.position.z, units);
+                        let vel = UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
+                        let energy = UnitConverter::energy_from_metric(p.kinetic_energy, units);
+                        println!(
+                            "{:.4},{:.2},{:.2},{:.2},{:.2},{:.2}",
+                            p.time, x, y, z, vel, energy
+                        );
+                    }
                 }
             } else {
                 println!("metric,value,unit");
