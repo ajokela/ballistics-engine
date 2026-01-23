@@ -71,6 +71,10 @@ pub mod monte_carlo;
 pub mod stability;
 pub mod stability_advanced;
 
+// Online mode: HTTP client for Flask API (feature-gated)
+#[cfg(feature = "online")]
+pub mod api_client;
+
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;
 

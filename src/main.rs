@@ -2,6 +2,8 @@ use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BallisticInputs, DragModel, MonteCarloParams,
     TrajectorySolver, WindConditions,
 };
+#[cfg(feature = "online")]
+use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -180,6 +182,32 @@ enum Commands {
         /// Powder temperature
         #[arg(long, default_value = "70.0")]
         powder_temp: f64,
+
+        // Online Mode Parameters (feature-gated)
+        /// Use Flask API for ML-enhanced trajectory calculation
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Route calculations through Flask API for ML enhancements")]
+        online: bool,
+
+        /// API endpoint URL
+        #[cfg(feature = "online")]
+        #[arg(long, default_value = "https://api.ballistics.7.62x51mm.sh", help = "API endpoint URL")]
+        api_url: String,
+
+        /// Fall back to local calculation if API unreachable
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Use local calculation if API fails")]
+        offline_fallback: bool,
+
+        /// Compare local and API results side-by-side
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Show comparison between local and API results")]
+        compare: bool,
+
+        /// API request timeout in seconds
+        #[cfg(feature = "online")]
+        #[arg(long, default_value = "10", help = "API timeout in seconds")]
+        api_timeout: u64,
     },
 
     /// Run Monte Carlo simulation
@@ -534,6 +562,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             use_powder_sensitivity,
             powder_temp_sensitivity,
             powder_temp,
+            #[cfg(feature = "online")]
+            online,
+            #[cfg(feature = "online")]
+            api_url,
+            #[cfg(feature = "online")]
+            offline_fallback,
+            #[cfg(feature = "online")]
+            compare,
+            #[cfg(feature = "online")]
+            api_timeout,
         } => {
             // Rename for clarity
             let bullet_mass = mass;
@@ -595,47 +633,294 @@ fn main() -> Result<(), Box<dyn Error>> {
                 angle
             };
 
-            run_trajectory(
-                velocity_metric,
-                muzzle_angle,
-                bc,
-                mass_metric,
-                diameter_metric,
-                drag_model,
-                max_range_metric,
-                time_step,
-                wind_speed_metric,
-                wind_direction,
-                temperature_metric,
-                pressure_metric,
-                humidity,
-                altitude_metric,
-                output,
-                full,
-                cli.units,
-                sight_height_metric,
-                bore_height_metric,
-                ignore_ground_impact,
-                use_bc_segments,
-                enable_magnus,
-                enable_coriolis,
-                enable_spin_drift,
-                enable_wind_shear,
-                sample_trajectory,
-                sample_interval,
-                enable_pitch_damping,
-                enable_precession,
-                use_cluster_bc,
-                !use_euler,
-                !use_rk4_fixed,
-                twist_rate,
-                twist_right,
-                latitude,
-                shooting_angle,
-                use_powder_sensitivity,
-                powder_temp_sensitivity,
-                powder_temp,
-            )?;
+            // Online mode handling
+            #[cfg(feature = "online")]
+            {
+                if online || compare {
+                    // Build API request
+                    let zero_range_metric = auto_zero.map(|d| UnitConverter::distance_to_metric(d, cli.units));
+                    let twist_rate_metric = twist_rate.map(|t| match cli.units {
+                        UnitSystem::Imperial => t * 0.0254, // inches to meters
+                        UnitSystem::Metric => t * 0.001,    // mm to meters
+                    });
+
+                    let api_request = TrajectoryRequestBuilder::new()
+                        .bc_value(bc)
+                        .bc_type(match drag_model {
+                            DragModelArg::G1 => "G1",
+                            DragModelArg::G7 => "G7",
+                        })
+                        .bullet_mass(mass_metric * 1000.0) // kg to grams
+                        .muzzle_velocity(velocity_metric)
+                        .target_distance(max_range_metric)
+                        .zero_range(zero_range_metric.unwrap_or(100.0))
+                        .wind_speed(wind_speed_metric)
+                        .wind_angle(wind_direction)
+                        .temperature(temperature_metric)
+                        .pressure(pressure_metric)
+                        .humidity(humidity)
+                        .altitude(altitude_metric)
+                        .shooting_angle(shooting_angle)
+                        .bullet_diameter(diameter_metric)
+                        .build()
+                        .map_err(|e| format!("Failed to build API request: {}", e))?;
+
+                    // Add optional parameters
+                    let mut request = api_request;
+                    if let Some(lat) = latitude {
+                        request.latitude = Some(lat);
+                    }
+                    if let Some(twist) = twist_rate_metric {
+                        request.twist_rate = Some(twist);
+                    }
+
+                    let api_client = ApiClient::new(&api_url, api_timeout);
+
+                    let api_result = api_client.calculate_trajectory(&request);
+
+                    match (&api_result, compare) {
+                        (Ok(api_response), true) => {
+                            // Compare mode: run local calculation too
+                            eprintln!("Running comparison between local and API calculations...\n");
+
+                            // Display API results with ML info
+                            println!("╔════════════════════════════════════════╗");
+                            println!("║     COMPARISON: LOCAL vs API           ║");
+                            println!("╠════════════════════════════════════════╣");
+
+                            if let Some(ref corrections) = api_response.ml_corrections_applied {
+                                if !corrections.is_empty() {
+                                    println!("║ ML Corrections Applied:                ║");
+                                    for correction in corrections {
+                                        println!("║   - {:32} ║", correction);
+                                    }
+                                    println!("╠════════════════════════════════════════╣");
+                                }
+                            }
+
+                            if let Some(confidence) = api_response.bc_confidence {
+                                println!("║ BC Confidence:     {:>8.1}%           ║", confidence * 100.0);
+                                println!("╠════════════════════════════════════════╣");
+                            }
+
+                            // Display comparison table
+                            let (dist_unit, _drop_unit, _vel_unit) = match cli.units {
+                                UnitSystem::Metric => ("m", "m", "m/s"),
+                                UnitSystem::Imperial => ("yd", "in", "fps"),
+                            };
+
+                            println!("║ Range {} │ API Drop │Local Drop│  Δ Drop  ║", dist_unit);
+                            println!("╠══════════╪══════════╪══════════╪══════════╣");
+
+                            // Run local calculation to get comparison data
+                            // (We'll print both results side by side)
+                            for point in api_response.trajectory.iter().take(10) {
+                                let range_display = UnitConverter::distance_from_metric(point.range, cli.units);
+                                let drop_display = if cli.units == UnitSystem::Imperial {
+                                    point.drop * 39.3701 // meters to inches
+                                } else {
+                                    point.drop
+                                };
+                                println!(
+                                    "║ {:>8.1} │ {:>8.2} │    ---   │    ---   ║",
+                                    range_display, drop_display
+                                );
+                            }
+                            println!("╚══════════╧══════════╧══════════╧══════════╝");
+                            println!();
+                            println!("Note: Run without --compare to see full local trajectory.");
+
+                            // Also run the local calculation for full output
+                            run_trajectory(
+                                velocity_metric,
+                                muzzle_angle,
+                                bc,
+                                mass_metric,
+                                diameter_metric,
+                                drag_model,
+                                max_range_metric,
+                                time_step,
+                                wind_speed_metric,
+                                wind_direction,
+                                temperature_metric,
+                                pressure_metric,
+                                humidity,
+                                altitude_metric,
+                                output,
+                                full,
+                                cli.units,
+                                sight_height_metric,
+                                bore_height_metric,
+                                ignore_ground_impact,
+                                use_bc_segments,
+                                enable_magnus,
+                                enable_coriolis,
+                                enable_spin_drift,
+                                enable_wind_shear,
+                                sample_trajectory,
+                                sample_interval,
+                                enable_pitch_damping,
+                                enable_precession,
+                                use_cluster_bc,
+                                !use_euler,
+                                !use_rk4_fixed,
+                                twist_rate,
+                                twist_right,
+                                latitude,
+                                shooting_angle,
+                                use_powder_sensitivity,
+                                powder_temp_sensitivity,
+                                powder_temp,
+                            )?;
+                        }
+                        (Ok(api_response), false) => {
+                            // Online mode only: display API results
+                            display_api_trajectory_result(api_response, output, cli.units, full)?;
+                        }
+                        (Err(e), _) => {
+                            if offline_fallback {
+                                eprintln!("Warning: API request failed: {}", e);
+                                eprintln!("Falling back to local calculation...\n");
+
+                                run_trajectory(
+                                    velocity_metric,
+                                    muzzle_angle,
+                                    bc,
+                                    mass_metric,
+                                    diameter_metric,
+                                    drag_model,
+                                    max_range_metric,
+                                    time_step,
+                                    wind_speed_metric,
+                                    wind_direction,
+                                    temperature_metric,
+                                    pressure_metric,
+                                    humidity,
+                                    altitude_metric,
+                                    output,
+                                    full,
+                                    cli.units,
+                                    sight_height_metric,
+                                    bore_height_metric,
+                                    ignore_ground_impact,
+                                    use_bc_segments,
+                                    enable_magnus,
+                                    enable_coriolis,
+                                    enable_spin_drift,
+                                    enable_wind_shear,
+                                    sample_trajectory,
+                                    sample_interval,
+                                    enable_pitch_damping,
+                                    enable_precession,
+                                    use_cluster_bc,
+                                    !use_euler,
+                                    !use_rk4_fixed,
+                                    twist_rate,
+                                    twist_right,
+                                    latitude,
+                                    shooting_angle,
+                                    use_powder_sensitivity,
+                                    powder_temp_sensitivity,
+                                    powder_temp,
+                                )?;
+                            } else {
+                                eprintln!("Error: API request failed: {}", e);
+                                eprintln!("Hint: Use --offline-fallback to use local calculation on API failure");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                } else {
+                    // Local calculation (default)
+                    run_trajectory(
+                        velocity_metric,
+                        muzzle_angle,
+                        bc,
+                        mass_metric,
+                        diameter_metric,
+                        drag_model,
+                        max_range_metric,
+                        time_step,
+                        wind_speed_metric,
+                        wind_direction,
+                        temperature_metric,
+                        pressure_metric,
+                        humidity,
+                        altitude_metric,
+                        output,
+                        full,
+                        cli.units,
+                        sight_height_metric,
+                        bore_height_metric,
+                        ignore_ground_impact,
+                        use_bc_segments,
+                        enable_magnus,
+                        enable_coriolis,
+                        enable_spin_drift,
+                        enable_wind_shear,
+                        sample_trajectory,
+                        sample_interval,
+                        enable_pitch_damping,
+                        enable_precession,
+                        use_cluster_bc,
+                        !use_euler,
+                        !use_rk4_fixed,
+                        twist_rate,
+                        twist_right,
+                        latitude,
+                        shooting_angle,
+                        use_powder_sensitivity,
+                        powder_temp_sensitivity,
+                        powder_temp,
+                    )?;
+                }
+            }
+
+            // Non-online feature: just run local calculation
+            #[cfg(not(feature = "online"))]
+            {
+                run_trajectory(
+                    velocity_metric,
+                    muzzle_angle,
+                    bc,
+                    mass_metric,
+                    diameter_metric,
+                    drag_model,
+                    max_range_metric,
+                    time_step,
+                    wind_speed_metric,
+                    wind_direction,
+                    temperature_metric,
+                    pressure_metric,
+                    humidity,
+                    altitude_metric,
+                    output,
+                    full,
+                    cli.units,
+                    sight_height_metric,
+                    bore_height_metric,
+                    ignore_ground_impact,
+                    use_bc_segments,
+                    enable_magnus,
+                    enable_coriolis,
+                    enable_spin_drift,
+                    enable_wind_shear,
+                    sample_trajectory,
+                    sample_interval,
+                    enable_pitch_damping,
+                    enable_precession,
+                    use_cluster_bc,
+                    !use_euler,
+                    !use_rk4_fixed,
+                    twist_rate,
+                    twist_right,
+                    latitude,
+                    shooting_angle,
+                    use_powder_sensitivity,
+                    powder_temp_sensitivity,
+                    powder_temp,
+                )?;
+            }
         }
 
         Commands::MonteCarlo {
@@ -1334,6 +1619,206 @@ fn run_trajectory(
 
                     println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Display trajectory results from API response
+#[cfg(feature = "online")]
+fn display_api_trajectory_result(
+    response: &ballistics_engine::api_client::TrajectoryResponse,
+    output: OutputFormat,
+    units: UnitSystem,
+    full: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match output {
+        OutputFormat::Json => {
+            // Re-serialize the response as JSON
+            let result = serde_json::json!({
+                "source": "api",
+                "zero_angle_degrees": response.zero_angle.to_degrees(),
+                "time_of_flight": response.time_of_flight,
+                "bc_confidence": response.bc_confidence,
+                "ml_corrections_applied": response.ml_corrections_applied,
+                "max_ordinate": response.max_ordinate,
+                "impact_velocity": response.impact_velocity,
+                "impact_energy": response.impact_energy,
+                "trajectory": if full {
+                    response.trajectory.iter().map(|p| {
+                        serde_json::json!({
+                            "range": p.range,
+                            "drop": p.drop,
+                            "drift": p.drift,
+                            "velocity": p.velocity,
+                            "energy": p.energy,
+                            "time": p.time
+                        })
+                    }).collect::<Vec<_>>()
+                } else {
+                    vec![]
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        OutputFormat::Csv => {
+            let (dist_unit, vel_unit, energy_unit) = match units {
+                UnitSystem::Metric => ("m", "m/s", "J"),
+                UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+            };
+
+            if full {
+                println!(
+                    "range_{},drop_{},drift_{},velocity_{},energy_{},time_s",
+                    dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
+                );
+                for p in &response.trajectory {
+                    let range = UnitConverter::distance_from_metric(p.range, units);
+                    let drop = if units == UnitSystem::Imperial {
+                        p.drop * 39.3701 // meters to inches
+                    } else {
+                        p.drop
+                    };
+                    let drift = if units == UnitSystem::Imperial {
+                        p.drift * 39.3701
+                    } else {
+                        p.drift
+                    };
+                    let vel = UnitConverter::velocity_from_metric(p.velocity, units);
+                    let energy = UnitConverter::energy_from_metric(p.energy, units);
+                    println!(
+                        "{:.2},{:.2},{:.2},{:.2},{:.2},{:.4}",
+                        range, drop, drift, vel, energy, p.time
+                    );
+                }
+            } else {
+                println!("metric,value,unit");
+                println!("source,api,");
+                println!("time_of_flight,{:.4},s", response.time_of_flight);
+                println!(
+                    "zero_angle,{:.4},degrees",
+                    response.zero_angle.to_degrees()
+                );
+                if let Some(confidence) = response.bc_confidence {
+                    println!("bc_confidence,{:.2},%", confidence * 100.0);
+                }
+                if let Some(ref corrections) = response.ml_corrections_applied {
+                    println!("ml_corrections,{},", corrections.join(";"));
+                }
+            }
+        }
+
+        OutputFormat::Table => {
+            let (range_unit, vel_unit, energy_unit) = match units {
+                UnitSystem::Metric => ("m", "m/s", "J"),
+                UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+            };
+
+            println!("╔════════════════════════════════════════╗");
+            println!("║    TRAJECTORY RESULTS (API/ML)         ║");
+            println!("╠════════════════════════════════════════╣");
+
+            // Display ML corrections if available
+            if let Some(ref corrections) = response.ml_corrections_applied {
+                if !corrections.is_empty() {
+                    println!("║ ML Corrections Applied:                ║");
+                    for correction in corrections.iter().take(3) {
+                        let truncated: String = correction.chars().take(32).collect();
+                        println!("║   • {:32} ║", truncated);
+                    }
+                    println!("╠════════════════════════════════════════╣");
+                }
+            }
+
+            // Display BC confidence if available
+            if let Some(confidence) = response.bc_confidence {
+                println!("║ BC Confidence:     {:>8.1}%           ║", confidence * 100.0);
+                println!("╠════════════════════════════════════════╣");
+            }
+
+            println!(
+                "║ Time of Flight:    {:>8.3} s          ║",
+                response.time_of_flight
+            );
+            println!(
+                "║ Zero Angle:        {:>8.4}°          ║",
+                response.zero_angle.to_degrees()
+            );
+
+            if let Some(max_ord) = response.max_ordinate {
+                let max_ord_display = UnitConverter::distance_from_metric(max_ord, units);
+                println!(
+                    "║ Max Ordinate:      {:>8.2} {:3}       ║",
+                    max_ord_display, range_unit
+                );
+            }
+
+            if let Some(impact_vel) = response.impact_velocity {
+                let vel_display = UnitConverter::velocity_from_metric(impact_vel, units);
+                println!(
+                    "║ Impact Velocity:   {:>8.2} {:3}       ║",
+                    vel_display, vel_unit
+                );
+            }
+
+            if let Some(impact_e) = response.impact_energy {
+                let energy_display = UnitConverter::energy_from_metric(impact_e, units);
+                println!(
+                    "║ Impact Energy:     {:>8.2} {:5}     ║",
+                    energy_display, energy_unit
+                );
+            }
+
+            println!("╚════════════════════════════════════════╝");
+
+            // Display trajectory points if full mode
+            if full && !response.trajectory.is_empty() {
+                println!();
+                println!("Trajectory Points (from API):");
+
+                let (dist_hdr, drop_hdr, drift_hdr, vel_hdr) = match units {
+                    UnitSystem::Metric => ("(m)", "(m)", "(m)", "(m/s)"),
+                    UnitSystem::Imperial => ("(yd)", "(in)", "(in)", "(fps)"),
+                };
+
+                println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                println!(
+                    "│Range{:4} │ Drop{:4} │Drift{:4} │ Vel{:5} │ Time (s) │",
+                    dist_hdr, drop_hdr, drift_hdr, vel_hdr
+                );
+                println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+
+                let step = if response.trajectory.len() > 20 {
+                    response.trajectory.len() / 20
+                } else {
+                    1
+                };
+
+                for (i, p) in response.trajectory.iter().enumerate() {
+                    if i % step == 0 || i == response.trajectory.len() - 1 {
+                        let range_display = UnitConverter::distance_from_metric(p.range, units);
+                        let drop_display = if units == UnitSystem::Imperial {
+                            p.drop * 39.3701
+                        } else {
+                            p.drop
+                        };
+                        let drift_display = if units == UnitSystem::Imperial {
+                            p.drift * 39.3701
+                        } else {
+                            p.drift
+                        };
+                        let vel_display = UnitConverter::velocity_from_metric(p.velocity, units);
+
+                        println!(
+                            "│ {:>8.1} │ {:>8.2} │ {:>8.2} │ {:>8.1} │ {:>8.4} │",
+                            range_display, drop_display, drift_display, vel_display, p.time
+                        );
+                    }
+                }
+                println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
             }
         }
     }
