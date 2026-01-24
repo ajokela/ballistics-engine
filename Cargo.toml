@@ -4,7 +4,7 @@ exclude = ["ballistics-engine-rb", "ballistics-engine-py"]
 
 [package]
 name = "ballistics-engine"
-version = "0.13.21"
+version = "0.13.22"
 edition = "2021"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
@@ -40,7 +40,7 @@ exclude = [
 ]
 
 [features]
-default = []
+default = ["online"]
 online = ["dep:ureq"]
 
 [dependencies]
