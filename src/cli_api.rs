@@ -602,14 +602,17 @@ impl TrajectorySolver {
                 transonic_distances: Vec::new(), // TODO: Track Mach transitions
             };
 
+            // For LOS calculation in ground-referenced coordinates:
+            // sight_position_m is the sight's actual y-position above ground
+            // (muzzle_height + sight_height, not just sight_height)
+            // For flat shots, target is at same height as the sight (horizontal LOS)
+            let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
             let outputs = TrajectoryOutputs {
                 target_distance_horiz_m: last_point.position.z, // Z is downrange
-                // For LOS calculation: target height is where the shooter is aiming
-                // For a flat shot (target_height = 0), this is sight_height (horizontal LOS)
-                target_vertical_height_m: self.inputs.sight_height,
+                target_vertical_height_m: sight_position_m,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
-                sight_height_m: self.inputs.sight_height,
+                sight_height_m: sight_position_m,
             };
 
             // Sample at specified intervals
@@ -846,14 +849,17 @@ impl TrajectorySolver {
                 transonic_distances: Vec::new(), // TODO: Track Mach transitions
             };
 
+            // For LOS calculation in ground-referenced coordinates:
+            // sight_position_m is the sight's actual y-position above ground
+            // (muzzle_height + sight_height, not just sight_height)
+            // For flat shots, target is at same height as the sight (horizontal LOS)
+            let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
             let outputs = TrajectoryOutputs {
                 target_distance_horiz_m: last_point.position.z, // Z is downrange
-                // For LOS calculation: target height is where the shooter is aiming
-                // For a flat shot (target_height = 0), this is sight_height (horizontal LOS)
-                target_vertical_height_m: self.inputs.sight_height,
+                target_vertical_height_m: sight_position_m,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
-                sight_height_m: self.inputs.sight_height,
+                sight_height_m: sight_position_m,
             };
 
             // Sample at specified intervals
@@ -1003,13 +1009,17 @@ impl TrajectorySolver {
                 transonic_distances: Vec::new(),
             };
 
+            // For LOS calculation in ground-referenced coordinates:
+            // sight_position_m is the sight's actual y-position above ground
+            // (muzzle_height + sight_height, not just sight_height)
+            // For flat shots, target is at same height as the sight (horizontal LOS)
+            let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
             let outputs = TrajectoryOutputs {
                 target_distance_horiz_m: last_point.position.z,
-                // For LOS calculation: target height is sight_height for a flat shot
-                target_vertical_height_m: self.inputs.sight_height,
+                target_vertical_height_m: sight_position_m,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
-                sight_height_m: self.inputs.sight_height,
+                sight_height_m: sight_position_m,
             };
 
             let samples = sample_trajectory(
@@ -1252,8 +1262,11 @@ impl TrajectorySolver {
         };
 
         // Apply transonic corrections
-        // Enable wave drag if advanced effects are enabled
-        let include_wave_drag = self.inputs.enable_advanced_effects;
+        // Note: Wave drag is disabled because G7/G1 drag functions already include
+        // transonic effects. Adding wave drag on top would double-count the drag rise.
+        // Wave drag should only be enabled for custom drag functions that don't
+        // include transonic behavior.
+        let include_wave_drag = false;
         transonic_correction(mach, base_cd, projectile_shape, include_wave_drag)
     }
 }
