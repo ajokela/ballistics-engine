@@ -26,6 +26,12 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install ballistics-engine
+```
+
 ### From Source
 
 ```bash
@@ -35,6 +41,17 @@ cargo build --release
 ```
 
 The binary will be at: `target/release/ballistics`
+
+### Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `online` | ✅ Yes | HTTP client for API integration (`--online` flag) |
+
+To build without network capabilities:
+```bash
+cargo build --release --no-default-features
+```
 
 ## Quick Start
 
@@ -238,6 +255,38 @@ Estimate ballistic coefficient from observed trajectory data:
 ```
 
 ## Advanced Features
+
+### Online Mode (API Integration)
+
+The CLI can query a remote ballistics API server instead of calculating locally. This enables access to enhanced BC data, ML-augmented predictions, and doppler-derived drag curves.
+
+```bash
+# Use online mode to query the Flask API
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --online \
+  --max-range 1000
+
+# Custom API endpoint
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --online \
+  --api-url https://your-api.example.com/v1/calculate \
+  --max-range 1000
+```
+
+**Default API**: `https://api.ballistics.7.62x51mm.sh/v1/calculate`
+
+Online mode benefits:
+- **Enhanced BC data** - Access to doppler-derived ballistic coefficients
+- **ML predictions** - Machine learning augmented trajectory calculations
+- **BC segments** - Velocity-dependent BC modeling from measured data
+- **Form factor corrections** - Bullet-specific drag adjustments
+
+To disable online mode and use local calculations only:
+```bash
+cargo install ballistics-engine --no-default-features
+```
 
 ### Integration Methods
 
