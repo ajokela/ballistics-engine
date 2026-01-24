@@ -397,9 +397,11 @@ impl TrajectorySolver {
     fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
         // Simple trajectory integration using Euler method
         let mut time = 0.0;
+        // Bullet starts at the BORE position, which is muzzle_height above ground
+        // The sight is sight_height ABOVE the bore, so we don't add sight_height here
         let mut position = Vector3::new(
             0.0,
-            self.inputs.sight_height + self.inputs.muzzle_height,
+            self.inputs.muzzle_height, // Bore position above ground (NOT + sight_height)
             0.0,
         );
         // Calculate initial velocity components with both elevation and azimuth
@@ -602,9 +604,12 @@ impl TrajectorySolver {
 
             let outputs = TrajectoryOutputs {
                 target_distance_horiz_m: last_point.position.z, // Z is downrange
-                target_vertical_height_m: last_point.position.y,
+                // For LOS calculation: target height is where the shooter is aiming
+                // For a flat shot (target_height = 0), this is sight_height (horizontal LOS)
+                target_vertical_height_m: self.inputs.sight_height,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
+                sight_height_m: self.inputs.sight_height,
             };
 
             // Sample at specified intervals
@@ -650,9 +655,12 @@ impl TrajectorySolver {
     fn solve_rk4(&self) -> Result<TrajectoryResult, BallisticsError> {
         // RK4 trajectory integration for better accuracy
         let mut time = 0.0;
+        // Bullet starts at the BORE position, which is muzzle_height above ground
+        // The sight is sight_height ABOVE the bore, so we don't add sight_height here
+        // The sight_height affects the LOS calculation and zero angle, not the starting position
         let mut position = Vector3::new(
             0.0,
-            self.inputs.sight_height + self.inputs.muzzle_height,
+            self.inputs.muzzle_height, // Bore position above ground (NOT + sight_height)
             0.0,
         );
 
@@ -840,9 +848,12 @@ impl TrajectorySolver {
 
             let outputs = TrajectoryOutputs {
                 target_distance_horiz_m: last_point.position.z, // Z is downrange
-                target_vertical_height_m: last_point.position.y,
+                // For LOS calculation: target height is where the shooter is aiming
+                // For a flat shot (target_height = 0), this is sight_height (horizontal LOS)
+                target_vertical_height_m: self.inputs.sight_height,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
+                sight_height_m: self.inputs.sight_height,
             };
 
             // Sample at specified intervals
@@ -888,9 +899,11 @@ impl TrajectorySolver {
     fn solve_rk45(&self) -> Result<TrajectoryResult, BallisticsError> {
         // RK45 adaptive step size integration (Dormand-Prince method)
         let mut time = 0.0;
+        // Bullet starts at the BORE position, which is muzzle_height above ground
+        // The sight is sight_height ABOVE the bore, so we don't add sight_height here
         let mut position = Vector3::new(
             0.0,
-            self.inputs.sight_height + self.inputs.muzzle_height,
+            self.inputs.muzzle_height, // Bore position above ground (NOT + sight_height)
             0.0,
         );
 
@@ -992,9 +1005,11 @@ impl TrajectorySolver {
 
             let outputs = TrajectoryOutputs {
                 target_distance_horiz_m: last_point.position.z,
-                target_vertical_height_m: last_point.position.y,
+                // For LOS calculation: target height is sight_height for a flat shot
+                target_vertical_height_m: self.inputs.sight_height,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
+                sight_height_m: self.inputs.sight_height,
             };
 
             let samples = sample_trajectory(

@@ -621,10 +621,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
 
                 // Calculate zero angle
+                // Target height is sight_height because the bullet must cross the LOS at zero distance
+                // The LOS is at y = sight_height (sight is above bore by sight_height)
+                // So the bullet (starting at y = 0 = bore level) must rise to y = sight_height at zero distance
                 let zero_angle = ballistics_engine::calculate_zero_angle(
                     zero_inputs,
                     zero_distance_metric,
-                    0.0, // target height at zero distance
+                    sight_height_metric, // target height at zero distance (LOS height)
                 )?;
 
                 // Convert to degrees for the trajectory function
