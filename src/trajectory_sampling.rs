@@ -47,6 +47,9 @@ pub struct TrajectoryOutputs {
     pub target_vertical_height_m: f64,
     pub time_of_flight_s: f64,
     pub max_ord_dist_horiz_m: f64,
+    /// Height of sight above bore (meters). Used for LOS calculation.
+    /// For a flat shot, the LOS is horizontal at y = sight_height_m.
+    pub sight_height_m: f64,
 }
 
 /// Sample trajectory at regular distance intervals with vectorized operations
@@ -97,9 +100,6 @@ pub fn sample_trajectory(
     // Vectorized interpolation for all trajectory data
     let mut samples = Vec::with_capacity(distances.len());
 
-    // Get initial height (muzzle height) for proper LOS calculation
-    let muzzle_y = if !y_vals.is_empty() { y_vals[0] } else { 0.0 };
-
     for &distance in &distances {
         // Interpolate using z (downrange) as the independent variable
         // Coordinate system: x=lateral (wind drift), y=vertical, z=downrange
@@ -110,13 +110,21 @@ pub fn sample_trajectory(
         let energy = interpolate(&z_vals, &energies, distance); // energy at downrange distance
 
         // Calculate line-of-sight y-coordinate and drop
-        // The LOS is the straight line from initial position to target
-        // For coordinate shots: goes from muzzle_y to target_vertical_height_m
+        // The LOS is a straight line from the SIGHT to the target
+        // The sight is at y = sight_height_m above the bore (which starts at y = 0)
+        // For a flat shot: LOS is horizontal at y = sight_height_m
+        // For elevated/depressed shots: LOS slopes from sight_height_m to target_vertical_height_m
+        //
         // Drop convention:
         // - Positive drop means bullet is below LOS (has dropped)
         // - Negative drop means bullet is above LOS (has risen)
         // Therefore: drop = LOS - actual (not actual - LOS)
-        let los_y = muzzle_y + (outputs.target_vertical_height_m - muzzle_y) * distance / max_dist;
+        //
+        // LOS interpolation: starts at sight_height_m (z=0), ends at target_vertical_height_m (z=max_dist)
+        // Note: For a properly zeroed flat shot, target_vertical_height_m should equal sight_height_m
+        // (bullet ends at LOS at target distance for a point-blank shot)
+        let los_y = outputs.sight_height_m
+            + (outputs.target_vertical_height_m - outputs.sight_height_m) * distance / max_dist;
         let drop = los_y - y_interp; // LOS - actual: positive when bullet is below LOS
 
         samples.push(TrajectorySample {
@@ -455,6 +463,7 @@ mod tests {
             target_vertical_height_m: 0.0,
             time_of_flight_s: 2.0,
             max_ord_dist_horiz_m: 100.0,
+            sight_height_m: 0.0, // For test: assume bore-referenced coordinates
         };
 
         let samples = sample_trajectory(&trajectory_data, &outputs, 50.0, 0.1);
