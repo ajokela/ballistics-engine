@@ -6,14 +6,14 @@ fn get_cli_binary() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("target");
     path.push("debug");
-    path.push("ballistics-cli");
+    path.push("ballistics");
 
     if !path.exists() {
         // Try release build
         path.pop();
         path.pop();
         path.push("release");
-        path.push("ballistics-cli");
+        path.push("ballistics");
     }
 
     path
@@ -92,7 +92,7 @@ fn test_cli_help() {
         stdout.contains("monte-carlo"),
         "Should list monte-carlo command"
     );
-    assert!(stdout.contains("info"), "Should list info command");
+    assert!(stdout.contains("zero"), "Should list zero command");
 }
 
 #[test]
