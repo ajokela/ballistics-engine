@@ -6,7 +6,11 @@ use ballistics_engine::{
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::error::Error;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "ballistics")]
@@ -26,9 +30,29 @@ struct Cli {
 enum Commands {
     /// Calculate a single trajectory
     Trajectory {
+        /// Load parameters from CSV profile file (gun_profiles.csv format)
+        #[arg(long, value_name = "FILE")]
+        profile: Option<PathBuf>,
+
+        /// Row name to load from profile CSV (matches first column, e.g., "R700_65CM")
+        #[arg(long, value_name = "NAME")]
+        profile_row: Option<String>,
+
+        /// Load location/environmental data from CSV file
+        #[arg(long, value_name = "FILE")]
+        location: Option<PathBuf>,
+
+        /// Site name to load from location CSV (matches first column, e.g., "KF_LR")
+        #[arg(long, value_name = "NAME")]
+        site: Option<String>,
+
         /// Initial velocity (fps or m/s based on --units)
         #[arg(short = 'v', long)]
-        velocity: f64,
+        velocity: Option<f64>,
+
+        /// Velocity adjustment (added to base velocity for truing from chronograph data)
+        #[arg(long, default_value = "0.0")]
+        velocity_adjustment: f64,
 
         /// Launch angle (degrees)
         #[arg(short = 'a', long, default_value = "0.0")]
@@ -36,7 +60,11 @@ enum Commands {
 
         /// Ballistic coefficient
         #[arg(short = 'b', long)]
-        bc: f64,
+        bc: Option<f64>,
+
+        /// BC adjustment factor (multiplier for truing, e.g., 0.85 = 85% of stated BC)
+        #[arg(long, default_value = "1.0")]
+        bc_adjustment: f64,
 
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long)]
@@ -518,14 +546,83 @@ impl UnitConverter {
     }
 }
 
+/// Parse a CSV file and return row matching the first column value
+fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String>, Box<dyn Error>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    // Parse header - first non-empty line (strip leading # if present, as Glenn's format uses #COLUMN_NAME)
+    let mut headers: Vec<String> = Vec::new();
+    for line in lines.by_ref() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Strip leading # from header line (Glenn's format: #RIFLE_NAME,BULLET_NAME,...)
+        let header_line = trimmed.trim_start_matches('#');
+        headers = header_line.split(',').map(|s| s.trim().to_uppercase()).collect();
+        break;
+    }
+
+    if headers.is_empty() {
+        return Err("CSV file has no header row".into());
+    }
+
+    let _first_col = headers.first().ok_or("CSV has no columns")?.clone();
+
+    // Parse data rows and find matching row
+    for line in lines {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let values: Vec<&str> = trimmed.split(',').collect();
+
+        // Check if first column matches
+        if let Some(first_val) = values.first() {
+            if first_val.trim().eq_ignore_ascii_case(row_name) {
+                let mut row: HashMap<String, String> = HashMap::new();
+                for (i, header) in headers.iter().enumerate() {
+                    if i < values.len() {
+                        row.insert(header.clone(), values[i].trim().to_string());
+                    }
+                }
+                return Ok(row);
+            }
+        }
+    }
+    Err(format!("Row '{}' not found in CSV", row_name).into())
+}
+
+/// Get f64 value from HashMap, trying multiple key names
+fn csv_get_f64(map: &HashMap<String, String>, keys: &[&str], default: f64) -> f64 {
+    for key in keys {
+        if let Some(val) = map.get(&key.to_uppercase()) {
+            if let Ok(v) = val.parse::<f64>() {
+                return v;
+            }
+        }
+    }
+    default
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Trajectory {
+            profile,
+            profile_row,
+            location,
+            site,
             velocity,
+            velocity_adjustment,
             angle,
             bc,
+            bc_adjustment,
             mass,
             diameter,
             drag_model,
@@ -573,18 +670,81 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(feature = "online")]
             api_timeout,
         } => {
+            // Load profile from CSV if specified
+            let profile_data: HashMap<String, String> = if let (Some(path), Some(row)) = (&profile, &profile_row) {
+                match load_csv_row(path, row) {
+                    Ok(data) => {
+                        eprintln!("Loaded profile '{}' from {:?}", row, path);
+                        data
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load profile: {}", e);
+                        HashMap::new()
+                    }
+                }
+            } else {
+                HashMap::new()
+            };
+
+            // Load location from CSV if specified
+            let location_data: HashMap<String, String> = if let (Some(path), Some(site_name)) = (&location, &site) {
+                match load_csv_row(path, site_name) {
+                    Ok(data) => {
+                        eprintln!("Loaded location '{}' from {:?}", site_name, path);
+                        data
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load location: {}", e);
+                        HashMap::new()
+                    }
+                }
+            } else {
+                HashMap::new()
+            };
+
+            // Merge values: CLI args override profile/location, profile/location override defaults
+            let final_velocity = velocity.unwrap_or_else(|| csv_get_f64(&profile_data, &["VELOCITY", "MV", "MUZZLE_VELOCITY"], 2800.0));
+            let final_velocity_adj = if velocity_adjustment != 0.0 { velocity_adjustment } else { csv_get_f64(&profile_data, &["VELOCITY_ADJ", "VEL_ADJ"], 0.0) };
+            let final_bc = bc.unwrap_or_else(|| csv_get_f64(&profile_data, &["BC"], 0.5));
+            let final_bc_adj = if bc_adjustment != 1.0 { bc_adjustment } else { csv_get_f64(&profile_data, &["BC_ADJ", "BC_ADJUSTMENT"], 1.0) };
+            let final_mass = mass;
+            let final_diameter = diameter;
+            let final_max_range = max_range;
+            let final_wind_speed = wind_speed;
+            let final_wind_dir = wind_direction;
+
+            // Location overrides (environmental conditions)
+            let final_temperature = if temperature != 59.0 { temperature } else { csv_get_f64(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"], csv_get_f64(&profile_data, &["ZERO_TEMP"], 59.0)) };
+            let final_pressure = if pressure != 29.92 { pressure } else { csv_get_f64(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"], 29.92) };
+            let final_humidity = if humidity != 50.0 { humidity } else { csv_get_f64(&location_data, &["HUMIDITY"], 50.0) };
+            let final_altitude = if altitude != 0.0 { altitude } else { csv_get_f64(&location_data, &["ALTITUDE", "ALT"], csv_get_f64(&profile_data, &["ZERO_ALT"], 0.0)) };
+
+            // Apply truing adjustments
+            let trued_velocity = final_velocity + final_velocity_adj;
+            let trued_bc = final_bc * final_bc_adj;
+
+            // Show effective values if using profile/location
+            if !profile_data.is_empty() || !location_data.is_empty() {
+                eprintln!("Effective values: velocity={:.1} (trued={:.1}), BC={:.3} (trued={:.4})",
+                    final_velocity, trued_velocity, final_bc, trued_bc);
+                if !location_data.is_empty() {
+                    eprintln!("                  altitude={:.0}, temp={:.1}, pressure={:.2}",
+                        final_altitude, final_temperature, final_pressure);
+                }
+            }
+
             // Rename for clarity
-            let bullet_mass = mass;
-            let bullet_diameter = diameter;
-            // Convert inputs to metric
-            let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
+            let bullet_mass = final_mass;
+            let bullet_diameter = final_diameter;
+            // Convert inputs to metric (using trued/final values)
+            let velocity_metric = UnitConverter::velocity_to_metric(trued_velocity, cli.units);
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
             let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
-            let max_range_metric = UnitConverter::distance_to_metric(max_range, cli.units);
-            let wind_speed_metric = UnitConverter::wind_to_metric(wind_speed, cli.units);
-            let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
-            let pressure_metric = UnitConverter::pressure_to_metric(pressure, cli.units);
-            let altitude_metric = UnitConverter::altitude_to_metric(altitude, cli.units);
+            let max_range_metric = UnitConverter::distance_to_metric(final_max_range, cli.units);
+            let wind_speed_metric = UnitConverter::wind_to_metric(final_wind_speed, cli.units);
+            let temperature_metric = UnitConverter::temperature_to_metric(final_temperature, cli.units);
+            let pressure_metric = UnitConverter::pressure_to_metric(final_pressure, cli.units);
+            let altitude_metric = UnitConverter::altitude_to_metric(final_altitude, cli.units);
             // Default sight height: 2 inches for imperial, 50mm for metric
             let sight_height_default = match cli.units {
                 UnitSystem::Imperial => 2.0,
@@ -613,7 +773,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Create inputs for zero calculation
                 let zero_inputs = BallisticInputs {
                     muzzle_velocity: velocity_metric,
-                    bc_value: bc,
+                    bc_value: trued_bc,
                     bullet_mass: mass_metric,
                     bullet_diameter: diameter_metric,
                     sight_height: sight_height_metric,
@@ -648,7 +808,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     });
 
                     let api_request = TrajectoryRequestBuilder::new()
-                        .bc_value(bc)
+                        .bc_value(trued_bc)
                         .bc_type(match drag_model {
                             DragModelArg::G1 => "G1",
                             DragModelArg::G7 => "G7",
@@ -737,7 +897,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             run_trajectory(
                                 velocity_metric,
                                 muzzle_angle,
-                                bc,
+                                trued_bc,
                                 mass_metric,
                                 diameter_metric,
                                 drag_model,
@@ -788,7 +948,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 run_trajectory(
                                     velocity_metric,
                                     muzzle_angle,
-                                    bc,
+                                    trued_bc,
                                     mass_metric,
                                     diameter_metric,
                                     drag_model,
@@ -838,7 +998,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     run_trajectory(
                         velocity_metric,
                         muzzle_angle,
-                        bc,
+                        trued_bc,
                         mass_metric,
                         diameter_metric,
                         drag_model,
@@ -885,7 +1045,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 run_trajectory(
                     velocity_metric,
                     muzzle_angle,
-                    bc,
+                    trued_bc,
                     mass_metric,
                     diameter_metric,
                     drag_model,
