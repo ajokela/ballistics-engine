@@ -77,7 +77,66 @@ Calculate ballistic trajectories with advanced physics modeling:
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
   --use-bc-segments \
   --auto-zero 600
+```
 
+#### BC and Velocity Truing
+
+Adjust BC and velocity based on real-world chrono data and field observations:
+
+```bash
+# BC truing - multiply stated BC by adjustment factor (e.g., 0.85 = 85%)
+./ballistics trajectory -v 2822 -b 0.270 -m 140 -d 0.264 \
+  --bc-adjustment 0.85
+
+# Velocity truing - add offset to base velocity from chronograph data
+./ballistics trajectory -v 2822 -b 0.270 -m 140 -d 0.264 \
+  --velocity-adjustment 53   # Adds 53 fps to base velocity
+
+# Combined truing
+./ballistics trajectory -v 2822 -b 0.270 -m 140 -d 0.264 \
+  --bc-adjustment 0.85 \
+  --velocity-adjustment 53
+# Result: velocity=2875 fps, BC=0.2295
+```
+
+#### CSV Profile and Location Support
+
+Load gun profiles and shooting locations from CSV files for batch processing:
+
+**Gun Profile CSV Format** (`gun_profiles.csv`):
+```csv
+#RIFLE_NAME,VELOCITY,BC,BC_TYPE,BULLET_WEIGHT,CALIBER,ZERO_TEMP,ZERO_ALT,VELOCITY_ADJ,BC_ADJ
+AR22,1115,0.138,G1,40,0.22,32,1370,1,1.0
+R700_65CM,2822,0.270,G7,140,0.264,57,1806,53,0.85
+```
+
+**Location CSV Format** (`locations.csv`):
+```csv
+LOCATION_NAME,ALTITUDE,PRESSURE,TARGET_TEMP
+KF_LR,2506,27.29,32
+Home_Range,500,29.92,70
+```
+
+**Usage:**
+```bash
+# Load from profile CSV
+./ballistics trajectory \
+  --profile gun_profiles.csv \
+  --profile-row R700_65CM \
+  -m 140 -d 0.264 \
+  --max-range 1000
+
+# Load profile + location
+./ballistics trajectory \
+  --profile gun_profiles.csv --profile-row R700_65CM \
+  --location locations.csv --site KF_LR \
+  -m 140 -d 0.264
+
+# CLI args override CSV values
+./ballistics trajectory \
+  --profile gun_profiles.csv --profile-row R700_65CM \
+  --velocity 2900 \   # Overrides CSV velocity
+  -m 140 -d 0.264
 ```
 
 ### Zero Calculation

@@ -5,6 +5,25 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.23] - 2026-01-25
+
+### Added
+- **BC Truing** - `--bc-adjustment` parameter for multiplying BC by a correction factor (e.g., 0.85)
+- **Velocity Truing** - `--velocity-adjustment` parameter for adding offset to base velocity from chronograph data
+- **CSV Profile Import** - `--profile` and `--profile-row` to load gun configurations from CSV files
+- **CSV Location Import** - `--location` and `--site` to load shooting location environmental data from CSV files
+- CSV parser handles Glenn's format (header with `#` prefix, comma-separated values)
+
+### Changed
+- `--velocity` and `--bc` are now optional when using `--profile` (loaded from CSV)
+- Integration tests now use main `ballistics` binary instead of `ballistics-cli`
+
+**Related Tickets:**
+- MBA-591: CLI: Add --bc-adjustment parameter for BC truing
+- MBA-592: CLI: Add --velocity-adjustment parameter
+- MBA-593: CLI: Add CSV profile import (--profile)
+- MBA-594: CLI: Add location presets (--location)
+
 ## [0.5.0] - 2025-01-31
 
 ### Added
