@@ -89,3 +89,7 @@ Desktop.ini
 CLAUDE.md
 
 ballistics/
+
+# Benchmark files
+bench_allocators.sh
+benchmark_results/
