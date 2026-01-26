@@ -200,9 +200,17 @@ enum Commands {
         #[arg(long, default_value = "true")]
         twist_right: bool,
 
-        /// Latitude for Coriolis effect (degrees, -90 to 90)
+        /// Latitude for Coriolis effect and weather zones (degrees, -90 to 90)
         #[arg(long)]
         latitude: Option<f64>,
+
+        /// Longitude for weather zones (degrees, -180 to 180)
+        #[arg(long)]
+        longitude: Option<f64>,
+
+        /// Shot direction/azimuth for Coriolis and weather zones (degrees, 0=North, 90=East)
+        #[arg(long)]
+        shot_direction: Option<f64>,
 
         /// Shooting angle (degrees, positive = uphill, negative = downhill)
         #[arg(long, default_value = "0.0")]
@@ -682,6 +690,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             twist_rate,
             twist_right,
             latitude,
+            longitude,
+            shot_direction,
             use_euler,
             use_rk4_fixed,
             shooting_angle,
@@ -878,6 +888,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let mut request = api_request;
                     if let Some(lat) = latitude {
                         request.latitude = Some(lat);
+                    }
+                    if let Some(lon) = longitude {
+                        request.longitude = Some(lon);
+                    }
+                    if let Some(dir) = shot_direction {
+                        request.shot_direction = Some(dir);
                     }
                     if let Some(twist) = twist_rate_metric {
                         request.twist_rate = Some(twist);
