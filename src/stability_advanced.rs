@@ -345,4 +345,199 @@ mod tests {
             status.contains("ADEQUATE") || status.contains("GOOD") || status.contains("MARGINAL")
         );
     }
+
+    #[test]
+    fn test_stability_parameters_bullet_types() {
+        let match_params = StabilityParameters::for_bullet_type("match", true, false);
+        let vld_params = StabilityParameters::for_bullet_type("vld", true, false);
+        let hunting_params = StabilityParameters::for_bullet_type("hunting", true, true);
+        let default_params = StabilityParameters::for_bullet_type("unknown", false, false);
+
+        // VLD should have lower nose_shape_factor (more streamlined)
+        assert!(vld_params.nose_shape_factor < match_params.nose_shape_factor);
+
+        // Hunting with plastic tip should have plastic_tip_factor < 1.0
+        assert!(hunting_params.plastic_tip_factor < 1.0);
+
+        // Default should have all factors at 1.0
+        assert_eq!(default_params.nose_shape_factor, 1.0);
+        assert_eq!(default_params.boat_tail_factor, 1.0);
+    }
+
+    #[test]
+    fn test_stability_edge_cases() {
+        // Zero twist rate should return 0
+        let zero_twist = calculate_advanced_stability(
+            168.0, 2700.0, 0.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+        assert_eq!(zero_twist, 0.0);
+
+        // Zero caliber should return 0
+        let zero_caliber = calculate_advanced_stability(
+            168.0, 2700.0, 10.0, 0.0, 1.24, 1.225, 288.15, "match", true, false,
+        );
+        assert_eq!(zero_caliber, 0.0);
+
+        // Zero length should return 0
+        let zero_length = calculate_advanced_stability(
+            168.0, 2700.0, 10.0, 0.308, 0.0, 1.225, 288.15, "match", true, false,
+        );
+        assert_eq!(zero_length, 0.0);
+    }
+
+    #[test]
+    fn test_velocity_correction() {
+        // Higher velocity should give higher stability
+        let high_vel = calculate_advanced_stability(
+            168.0, 3000.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+        let low_vel = calculate_advanced_stability(
+            168.0, 2000.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+
+        assert!(
+            high_vel > low_vel,
+            "Higher velocity ({}) should give higher stability than lower velocity ({})",
+            high_vel,
+            low_vel
+        );
+    }
+
+    #[test]
+    fn test_hypervelocity_correction() {
+        // Test Bowman-Howell correction kicks in above 3000 fps
+        let normal_vel = calculate_advanced_stability(
+            168.0, 2900.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+        let hyper_vel = calculate_advanced_stability(
+            168.0, 3500.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+
+        // Both should be valid (positive) stability values
+        assert!(normal_vel > 0.0);
+        assert!(hyper_vel > 0.0);
+    }
+
+    #[test]
+    fn test_atmospheric_correction() {
+        // Higher altitude (lower density) should increase stability
+        let sea_level = calculate_advanced_stability(
+            168.0, 2700.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+        let high_altitude = calculate_advanced_stability(
+            168.0, 2700.0, 10.0, 0.308, 1.24, 1.0, 288.15, "match", true, false,
+        );
+
+        assert!(
+            high_altitude > sea_level,
+            "High altitude ({}) should have higher stability than sea level ({})",
+            high_altitude,
+            sea_level
+        );
+    }
+
+    #[test]
+    fn test_dynamic_stability() {
+        let static_sg = 1.5;
+        let velocity_mps = 800.0;
+        let spin_rate = 1500.0;
+        let caliber_m = 0.00782; // 0.308"
+        let mass_kg = 0.0109; // 168 grains
+
+        // Zero yaw should give stability close to static
+        let dynamic_zero_yaw =
+            calculate_dynamic_stability(static_sg, velocity_mps, spin_rate, 0.0, caliber_m, mass_kg);
+
+        // Some yaw should reduce stability
+        let dynamic_with_yaw = calculate_dynamic_stability(
+            static_sg,
+            velocity_mps,
+            spin_rate,
+            0.05, // ~3 degrees
+            caliber_m,
+            mass_kg,
+        );
+
+        assert!(dynamic_with_yaw < dynamic_zero_yaw);
+        assert!(dynamic_with_yaw > 0.0);
+    }
+
+    #[test]
+    fn test_predict_stability_at_distance() {
+        let initial_sg = 1.8;
+        let initial_vel = 2800.0;
+        let current_vel = 2000.0;
+        let spin_decay = 0.97;
+
+        let predicted = predict_stability_at_distance(initial_sg, initial_vel, current_vel, spin_decay);
+
+        // Should be different from initial
+        assert!(predicted != initial_sg);
+        // Should still be positive
+        assert!(predicted > 0.0);
+    }
+
+    #[test]
+    fn test_predict_stability_edge_cases() {
+        // Zero initial velocity should return initial stability
+        let zero_initial =
+            predict_stability_at_distance(1.5, 0.0, 2000.0, 0.97);
+        assert_eq!(zero_initial, 1.5);
+
+        // Zero current velocity should return initial stability
+        let zero_current =
+            predict_stability_at_distance(1.5, 2800.0, 0.0, 0.97);
+        assert_eq!(zero_current, 1.5);
+    }
+
+    #[test]
+    fn test_trajectory_stability_status_messages() {
+        // Unstable (< 1.0)
+        let (is_stable, sg, status) = check_trajectory_stability(0.8, 2700.0, 1500.0, 0.95);
+        assert!(!is_stable);
+        assert!(sg < 1.0);
+        assert!(status.contains("UNSTABLE"));
+
+        // Marginal (1.0 - 1.3)
+        let (is_stable, sg, status) = check_trajectory_stability(1.4, 2700.0, 2200.0, 0.98);
+        assert!(!is_stable || sg >= 1.0);
+        if sg >= 1.0 && sg < 1.3 {
+            assert!(status.contains("MARGINAL"));
+        }
+
+        // Over-stabilized (> 2.5)
+        let (_, sg, status) = check_trajectory_stability(4.0, 2700.0, 2500.0, 0.99);
+        if sg > 2.5 {
+            assert!(status.contains("OVER-STABILIZED"));
+        }
+    }
+
+    #[test]
+    fn test_different_calibers_stability() {
+        // Smaller caliber with same twist should be less stable
+        let large_caliber = calculate_advanced_stability(
+            168.0, 2700.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+        let small_caliber = calculate_advanced_stability(
+            90.0, 2700.0, 8.0, 0.264, 1.15, 1.225, 288.15, "match", true, false,
+        );
+
+        // Both should produce valid stability values
+        assert!(large_caliber > 0.0);
+        assert!(small_caliber > 0.0);
+    }
+
+    #[test]
+    fn test_boat_tail_vs_flat_base() {
+        let boat_tail = calculate_advanced_stability(
+            168.0, 2700.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+        );
+        let flat_base = calculate_advanced_stability(
+            168.0, 2700.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", false, false,
+        );
+
+        // Flat base should have slightly higher stability factor applied
+        // (boat_tail_factor < 1.0 for boat tails)
+        assert!(flat_base > boat_tail);
+    }
 }

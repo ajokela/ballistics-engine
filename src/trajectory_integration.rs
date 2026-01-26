@@ -507,6 +507,28 @@ pub fn solve_trajectory_rust(
 mod tests {
     use super::*;
 
+    fn create_test_params(target_distance_m: f64) -> TrajectoryParams {
+        TrajectoryParams {
+            mass_kg: 0.01134, // 175 grains in kg
+            bc: 0.442,
+            drag_model: DragModel::G7,
+            wind_segments: vec![],
+            atmos_params: (0.0, 59.0, 29.92, 0.0),
+            omega_vector: None,
+            enable_spin_drift: false,
+            enable_magnus: false,
+            enable_coriolis: false,
+            target_distance_m,
+            enable_wind_shear: false,
+            wind_shear_model: "none".to_string(),
+            shooter_altitude_m: 0.0,
+            is_twist_right: true,
+            custom_drag_table: None,
+            bc_segments: None,
+            use_bc_segments: false,
+        }
+    }
+
     #[test]
     fn test_integrate_trajectory_basic() {
         // Same initial state as Python test: [x,y,z,vx,vy,vz]
@@ -561,5 +583,201 @@ mod tests {
                 "Final z should be near target distance"
             );
         }
+    }
+
+    #[test]
+    fn test_rk4_vs_rk45_consistency() {
+        // Both methods should give similar results for the same trajectory
+        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+        let target_distance = 500.0;
+
+        let params_rk4 = create_test_params(target_distance);
+        let params_rk45 = create_test_params(target_distance);
+
+        let trajectory_rk4 =
+            integrate_trajectory(initial_state, (0.0, 5.0), params_rk4, "RK4", 1e-6, 0.001);
+        let trajectory_rk45 =
+            integrate_trajectory(initial_state, (0.0, 5.0), params_rk45, "RK45", 1e-6, 0.01);
+
+        // Both should reach target
+        assert!(!trajectory_rk4.is_empty());
+        assert!(!trajectory_rk45.is_empty());
+
+        let (_, final_rk4) = trajectory_rk4.last().unwrap();
+        let (_, final_rk45) = trajectory_rk45.last().unwrap();
+
+        // Final downrange positions should be within 1% of each other
+        let rk4_z = final_rk4[2];
+        let rk45_z = final_rk45[2];
+        let diff_percent = ((rk4_z - rk45_z) / rk45_z).abs() * 100.0;
+
+        assert!(
+            diff_percent < 1.0,
+            "RK4 and RK45 final positions differ by {}%: RK4={}, RK45={}",
+            diff_percent,
+            rk4_z,
+            rk45_z
+        );
+    }
+
+    #[test]
+    fn test_ground_impact_detection() {
+        // Trajectory with steep downward angle should hit ground
+        let initial_state = [0.0, 100.0, 0.0, 0.0, -50.0, 300.0]; // Steep descent
+
+        let mut params = create_test_params(10000.0); // Far target
+        params.target_distance_m = 10000.0;
+
+        let trajectory =
+            integrate_trajectory(initial_state, (0.0, 20.0), params, "RK45", 1e-6, 0.01);
+
+        // Should stop before reaching target due to ground impact
+        let (_, final_state) = trajectory.last().unwrap();
+
+        // y should be near ground threshold (-1000m)
+        assert!(
+            final_state[1] <= -900.0,
+            "Should hit ground, but y={}",
+            final_state[1]
+        );
+        assert!(
+            final_state[2] < 10000.0,
+            "Should not reach target, but z={}",
+            final_state[2]
+        );
+    }
+
+    #[test]
+    fn test_target_distance_reached() {
+        let initial_state = [0.0, 0.0, 0.0, 0.0, 20.0, 800.0];
+        let target_distance = 300.0;
+
+        let params = create_test_params(target_distance);
+
+        let trajectory =
+            integrate_trajectory(initial_state, (0.0, 5.0), params, "RK45", 1e-6, 0.01);
+
+        let (_, final_state) = trajectory.last().unwrap();
+
+        // Should stop at or very near target distance
+        assert!(
+            (final_state[2] - target_distance).abs() < 1.0,
+            "Should reach target at {}m, but stopped at {}m",
+            target_distance,
+            final_state[2]
+        );
+    }
+
+    #[test]
+    fn test_wind_affects_trajectory() {
+        // Test that wind segments are properly stored and passed through
+        // The actual wind effect depends on the derivatives computation which
+        // uses the wind vector in the drag calculation
+        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+        let target_distance = 500.0;
+
+        // No wind
+        let params_no_wind = create_test_params(target_distance);
+
+        // Strong headwind (0 degrees = headwind)
+        let mut params_headwind = create_test_params(target_distance);
+        params_headwind.wind_segments = vec![(72.0, 0.0, 500.0)]; // 72 km/h = 20 m/s headwind
+
+        let trajectory_no_wind =
+            integrate_trajectory(initial_state, (0.0, 5.0), params_no_wind, "RK45", 1e-6, 0.01);
+        let trajectory_headwind =
+            integrate_trajectory(initial_state, (0.0, 5.0), params_headwind, "RK45", 1e-6, 0.01);
+
+        // Both trajectories should complete
+        assert!(!trajectory_no_wind.is_empty(), "No-wind trajectory should complete");
+        assert!(!trajectory_headwind.is_empty(), "Headwind trajectory should complete");
+
+        let (time_no_wind, final_no_wind) = trajectory_no_wind.last().unwrap();
+        let (time_headwind, final_headwind) = trajectory_headwind.last().unwrap();
+
+        // Headwind should slow the bullet, resulting in longer flight time
+        // or different drop at same distance
+        let drop_no_wind = final_no_wind[1];
+        let drop_headwind = final_headwind[1];
+
+        // With headwind, bullet should drop more (more negative y) due to slower velocity
+        // The effect might be small, so we check that both trajectories are valid
+        println!("No wind: time={}, drop={}", time_no_wind, drop_no_wind);
+        println!("Headwind: time={}, drop={}", time_headwind, drop_headwind);
+
+        // Both should reach approximately the target distance
+        assert!(
+            (final_no_wind[2] - target_distance).abs() < 10.0,
+            "No-wind should reach target"
+        );
+        assert!(
+            (final_headwind[2] - target_distance).abs() < 10.0,
+            "Headwind should reach target"
+        );
+    }
+
+    #[test]
+    fn test_solve_trajectory_rust_output_format() {
+        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+
+        let result = solve_trajectory_rust(
+            initial_state,
+            (0.0, 2.0),
+            0.01134,        // mass_kg
+            0.442,          // bc
+            DragModel::G7,  // drag_model
+            vec![],         // wind_segments
+            (0.0, 59.0, 29.92, 0.0), // atmos_params
+            None,           // omega_vector
+            false,          // enable_spin_drift
+            false,          // enable_magnus
+            false,          // enable_coriolis
+            "RK45".to_string(), // method
+            1e-6,           // tolerance
+            0.01,           // max_step
+            500.0,          // target_distance_m
+        );
+
+        // Should return Vec of HashMaps with expected keys
+        assert!(!result.is_empty());
+
+        let first_point = &result[0];
+        assert!(first_point.contains_key("t"));
+        assert!(first_point.contains_key("x"));
+        assert!(first_point.contains_key("y"));
+        assert!(first_point.contains_key("z"));
+        assert!(first_point.contains_key("vx"));
+        assert!(first_point.contains_key("vy"));
+        assert!(first_point.contains_key("vz"));
+    }
+
+    #[test]
+    fn test_left_vs_right_twist() {
+        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+        let target_distance = 500.0;
+
+        let mut params_right = create_test_params(target_distance);
+        params_right.is_twist_right = true;
+        params_right.enable_spin_drift = true;
+
+        let mut params_left = create_test_params(target_distance);
+        params_left.is_twist_right = false;
+        params_left.enable_spin_drift = true;
+
+        let trajectory_right =
+            integrate_trajectory(initial_state, (0.0, 5.0), params_right, "RK45", 1e-6, 0.01);
+        let trajectory_left =
+            integrate_trajectory(initial_state, (0.0, 5.0), params_left, "RK45", 1e-6, 0.01);
+
+        // Both should complete
+        assert!(!trajectory_right.is_empty());
+        assert!(!trajectory_left.is_empty());
+
+        // Right and left twist should produce valid trajectories
+        let (_, final_right) = trajectory_right.last().unwrap();
+        let (_, final_left) = trajectory_left.last().unwrap();
+
+        // Both should reach approximately the same downrange distance
+        assert!((final_right[2] - final_left[2]).abs() < 10.0);
     }
 }

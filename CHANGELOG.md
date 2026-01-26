@@ -5,6 +5,18 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.29] - 2026-01-26
+
+### Added
+- **Expanded Test Coverage** - Added 36 new unit tests to modules with lighter coverage:
+  - `trajectory_integration`: RK4/RK45 consistency, ground impact detection, target distance, wind handling (+6 tests)
+  - `fast_trajectory`: Solution interpolation edge cases, BC segment boundaries, event arrays (+6 tests)
+  - `stability_advanced`: Bullet type parameters, atmospheric corrections, dynamic stability (+11 tests)
+  - `spin_drift_advanced`: Drift direction, edge cases, transonic correction, yaw of repose (+13 tests)
+
+### Changed
+- Total test count increased from 156 to 192 tests
+
 ## [0.13.28] - 2026-01-26
 
 ### Fixed
