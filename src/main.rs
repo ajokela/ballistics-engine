@@ -758,7 +758,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let final_diameter = diameter;
             let final_max_range = max_range;
             let final_wind_speed = wind_speed;
-            let final_wind_dir = wind_direction;
+            let final_wind_direction = if wind_direction != 90.0 { wind_direction } else { csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 90.0) };
 
             // Location overrides (environmental conditions)
             let final_temperature = if temperature != 59.0 { temperature } else { csv_get_f64(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"], csv_get_f64(&profile_data, &["ZERO_TEMP"], 59.0)) };
@@ -865,10 +865,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .target_distance(max_range_metric)
                         .zero_range(zero_range_metric.unwrap_or(100.0))
                         .wind_speed(wind_speed_metric)
-                        .wind_angle(wind_direction)
+                        .wind_angle(final_wind_direction)
                         .temperature(temperature_metric)
                         .pressure(pressure_metric)
-                        .humidity(humidity)
+                        .humidity(final_humidity)
                         .altitude(altitude_metric)
                         .shooting_angle(shooting_angle)
                         .bullet_diameter(diameter_metric)
@@ -966,10 +966,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 max_range_metric,
                                 time_step,
                                 wind_speed_metric,
-                                wind_direction,
+                                final_wind_direction,
                                 temperature_metric,
                                 pressure_metric,
-                                humidity,
+                                final_humidity,
                                 altitude_metric,
                                 output,
                                 full,
@@ -1017,10 +1017,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     max_range_metric,
                                     time_step,
                                     wind_speed_metric,
-                                    wind_direction,
+                                    final_wind_direction,
                                     temperature_metric,
                                     pressure_metric,
-                                    humidity,
+                                    final_humidity,
                                     altitude_metric,
                                     output,
                                     full,
@@ -1067,10 +1067,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         max_range_metric,
                         time_step,
                         wind_speed_metric,
-                        wind_direction,
+                        final_wind_direction,
                         temperature_metric,
                         pressure_metric,
-                        humidity,
+                        final_humidity,
                         altitude_metric,
                         output,
                         full,
@@ -1114,10 +1114,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     max_range_metric,
                     time_step,
                     wind_speed_metric,
-                    wind_direction,
+                    final_wind_direction,
                     temperature_metric,
                     pressure_metric,
-                    humidity,
+                    final_humidity,
                     altitude_metric,
                     output,
                     full,
