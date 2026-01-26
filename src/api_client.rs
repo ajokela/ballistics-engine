@@ -44,6 +44,12 @@ pub struct TrajectoryRequest {
     /// Latitude for Coriolis calculations (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latitude: Option<f64>,
+    /// Longitude for weather zones (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
+    /// Shot direction/azimuth in degrees (optional, 0=North, 90=East)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shot_direction: Option<f64>,
     /// Shooting angle in degrees (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shooting_angle: Option<f64>,
@@ -230,6 +236,12 @@ impl ApiClient {
         }
         if let Some(latitude) = request.latitude {
             req = req.query("latitude", &format!("{:.2}", latitude));
+        }
+        if let Some(longitude) = request.longitude {
+            req = req.query("longitude", &format!("{:.2}", longitude));
+        }
+        if let Some(shot_direction) = request.shot_direction {
+            req = req.query("shot_direction", &format!("{:.1}", shot_direction));
         }
         if let Some(twist_rate) = request.twist_rate {
             req = req.query("twist_rate", &format!("{:.1}", twist_rate));
@@ -431,6 +443,8 @@ pub struct TrajectoryRequestBuilder {
     humidity: Option<f64>,
     altitude: Option<f64>,
     latitude: Option<f64>,
+    longitude: Option<f64>,
+    shot_direction: Option<f64>,
     shooting_angle: Option<f64>,
     twist_rate: Option<f64>,
     bullet_diameter: Option<f64>,
@@ -512,6 +526,16 @@ impl TrajectoryRequestBuilder {
         self
     }
 
+    pub fn longitude(mut self, value: f64) -> Self {
+        self.longitude = Some(value);
+        self
+    }
+
+    pub fn shot_direction(mut self, value: f64) -> Self {
+        self.shot_direction = Some(value);
+        self
+    }
+
     pub fn shooting_angle(mut self, value: f64) -> Self {
         self.shooting_angle = Some(value);
         self
@@ -583,6 +607,8 @@ impl TrajectoryRequestBuilder {
             humidity: self.humidity,
             altitude: self.altitude,
             latitude: self.latitude,
+            longitude: self.longitude,
+            shot_direction: self.shot_direction,
             shooting_angle: self.shooting_angle,
             twist_rate: self.twist_rate,
             bullet_diameter: self.bullet_diameter,
