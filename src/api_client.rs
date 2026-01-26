@@ -56,6 +56,9 @@ pub struct TrajectoryRequest {
     /// Bullet length in meters (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bullet_length: Option<f64>,
+    /// Ground threshold in meters (optional, negative = ignore ground impact)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ground_threshold: Option<f64>,
 }
 
 /// Response structure from Flask API trajectory calculation
@@ -222,6 +225,11 @@ impl ApiClient {
         if let Some(diameter) = request.bullet_diameter {
             let diameter_in = diameter / 0.0254; // meters to inches
             req = req.query("bullet_diameter", &format!("{:.3}", diameter_in));
+        }
+        if let Some(threshold) = request.ground_threshold {
+            // Ground threshold is in meters - API expects meters (will be converted by parse_ballistic_inputs)
+            // Use a very large negative value when ignoring ground impact
+            req = req.query("ground_threshold", &format!("{:.1}", threshold));
         }
 
         let response = req.call().map_err(|e| match e {
@@ -403,6 +411,7 @@ pub struct TrajectoryRequestBuilder {
     twist_rate: Option<f64>,
     bullet_diameter: Option<f64>,
     bullet_length: Option<f64>,
+    ground_threshold: Option<f64>,
 }
 
 impl TrajectoryRequestBuilder {
@@ -495,6 +504,11 @@ impl TrajectoryRequestBuilder {
         self
     }
 
+    pub fn ground_threshold(mut self, value: f64) -> Self {
+        self.ground_threshold = Some(value);
+        self
+    }
+
     /// Build the TrajectoryRequest
     ///
     /// # Returns
@@ -525,6 +539,7 @@ impl TrajectoryRequestBuilder {
             twist_rate: self.twist_rate,
             bullet_diameter: self.bullet_diameter,
             bullet_length: self.bullet_length,
+            ground_threshold: self.ground_threshold,
         })
     }
 }
