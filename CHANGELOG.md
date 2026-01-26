@@ -5,6 +5,11 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.28] - 2026-01-26
+
+### Fixed
+- **Wind Direction CSV Override** - Fixed default check comparing against 90.0 instead of 0.0 (the actual CLI default), which prevented location CSV wind direction overrides from working
+
 ## [0.13.27] - 2026-01-26
 
 ### Fixed
