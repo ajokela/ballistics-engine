@@ -1,3 +1,12 @@
+// Allocator selection based on features
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "mimalloc", not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BallisticInputs, DragModel, MonteCarloParams,
     TrajectorySolver, WindConditions,
@@ -825,6 +834,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .altitude(altitude_metric)
                         .shooting_angle(shooting_angle)
                         .bullet_diameter(diameter_metric)
+                        .ground_threshold(if ignore_ground_impact {
+                            f64::NEG_INFINITY
+                        } else {
+                            -100.0 // default ground threshold in meters
+                        })
                         .build()
                         .map_err(|e| format!("Failed to build API request: {}", e))?;
 
