@@ -245,6 +245,26 @@ enum Commands {
         #[cfg(feature = "online")]
         #[arg(long, default_value = "10", help = "API timeout in seconds")]
         api_timeout: u64,
+
+        /// Enable weather zones (requires latitude, longitude, and shot-direction)
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Enable automatic weather zone generation")]
+        enable_weather_zones: bool,
+
+        /// Enable 3D weather corrections (altitude-dependent atmospheric changes)
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Enable 3D weather with altitude corrections")]
+        enable_3d_weather: bool,
+
+        /// Wind shear model to use
+        #[cfg(feature = "online")]
+        #[arg(long, default_value = "logarithmic", help = "Wind shear model: none, logarithmic, power_law, ekman_spiral")]
+        wind_shear_model: String,
+
+        /// Weather zone interpolation method
+        #[cfg(feature = "online")]
+        #[arg(long, default_value = "linear", help = "Weather zone interpolation: linear, cubic, step")]
+        weather_zone_interpolation: String,
     },
 
     /// Run Monte Carlo simulation
@@ -678,6 +698,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             compare,
             #[cfg(feature = "online")]
             api_timeout,
+            #[cfg(feature = "online")]
+            enable_weather_zones,
+            #[cfg(feature = "online")]
+            enable_3d_weather,
+            #[cfg(feature = "online")]
+            wind_shear_model,
+            #[cfg(feature = "online")]
+            weather_zone_interpolation,
         } => {
             // Load profile from CSV if specified
             let profile_data: HashMap<String, String> = if let (Some(path), Some(row)) = (&profile, &profile_row) {
@@ -839,6 +867,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         } else {
                             -100.0 // default ground threshold in meters
                         })
+                        .enable_weather_zones(enable_weather_zones)
+                        .enable_3d_weather(enable_3d_weather)
+                        .wind_shear_model(&wind_shear_model)
+                        .weather_zone_interpolation(&weather_zone_interpolation)
                         .build()
                         .map_err(|e| format!("Failed to build API request: {}", e))?;
 

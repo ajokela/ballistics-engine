@@ -59,6 +59,18 @@ pub struct TrajectoryRequest {
     /// Ground threshold in meters (optional, negative = ignore ground impact)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ground_threshold: Option<f64>,
+    /// Enable weather zones (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_weather_zones: Option<bool>,
+    /// Enable 3D weather corrections (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_3d_weather: Option<bool>,
+    /// Wind shear model (optional: none, logarithmic, power_law, ekman_spiral)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wind_shear_model: Option<String>,
+    /// Weather zone interpolation method (optional: linear, cubic, step)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weather_zone_interpolation: Option<String>,
 }
 
 /// Response structure from Flask API trajectory calculation
@@ -230,6 +242,18 @@ impl ApiClient {
             // Ground threshold is in meters - API expects meters (will be converted by parse_ballistic_inputs)
             // Use a very large negative value when ignoring ground impact
             req = req.query("ground_threshold", &format!("{:.1}", threshold));
+        }
+        if let Some(enable) = request.enable_weather_zones {
+            req = req.query("enable_weather_zones", if enable { "true" } else { "false" });
+        }
+        if let Some(enable) = request.enable_3d_weather {
+            req = req.query("enable_3d_weather", if enable { "true" } else { "false" });
+        }
+        if let Some(ref model) = request.wind_shear_model {
+            req = req.query("wind_shear_model", model);
+        }
+        if let Some(ref method) = request.weather_zone_interpolation {
+            req = req.query("weather_zone_interpolation", method);
         }
 
         let response = req.call().map_err(|e| match e {
@@ -412,6 +436,10 @@ pub struct TrajectoryRequestBuilder {
     bullet_diameter: Option<f64>,
     bullet_length: Option<f64>,
     ground_threshold: Option<f64>,
+    enable_weather_zones: Option<bool>,
+    enable_3d_weather: Option<bool>,
+    wind_shear_model: Option<String>,
+    weather_zone_interpolation: Option<String>,
 }
 
 impl TrajectoryRequestBuilder {
@@ -509,6 +537,26 @@ impl TrajectoryRequestBuilder {
         self
     }
 
+    pub fn enable_weather_zones(mut self, value: bool) -> Self {
+        self.enable_weather_zones = Some(value);
+        self
+    }
+
+    pub fn enable_3d_weather(mut self, value: bool) -> Self {
+        self.enable_3d_weather = Some(value);
+        self
+    }
+
+    pub fn wind_shear_model(mut self, value: &str) -> Self {
+        self.wind_shear_model = Some(value.to_string());
+        self
+    }
+
+    pub fn weather_zone_interpolation(mut self, value: &str) -> Self {
+        self.weather_zone_interpolation = Some(value.to_string());
+        self
+    }
+
     /// Build the TrajectoryRequest
     ///
     /// # Returns
@@ -540,6 +588,10 @@ impl TrajectoryRequestBuilder {
             bullet_diameter: self.bullet_diameter,
             bullet_length: self.bullet_length,
             ground_threshold: self.ground_threshold,
+            enable_weather_zones: self.enable_weather_zones,
+            enable_3d_weather: self.enable_3d_weather,
+            wind_shear_model: self.wind_shear_model,
+            weather_zone_interpolation: self.weather_zone_interpolation,
         })
     }
 }
