@@ -309,4 +309,233 @@ mod tests {
         assert!(transonic > 0.8 && transonic < 1.0);
         assert!(supersonic > 0.7 && supersonic < 1.0);
     }
+
+    #[test]
+    fn test_spin_drift_direction() {
+        // Right twist should produce positive drift
+        let right_drift = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+
+        // Left twist should produce negative drift
+        let left_drift = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, false, "match",
+        );
+
+        assert!(right_drift > 0.0, "Right twist should give positive drift");
+        assert!(left_drift < 0.0, "Left twist should give negative drift");
+        assert!(
+            (right_drift.abs() - left_drift.abs()).abs() < 0.001,
+            "Magnitude should be equal"
+        );
+    }
+
+    #[test]
+    fn test_spin_drift_edge_cases() {
+        // Zero time should give zero drift
+        let zero_time = calculate_advanced_spin_drift(
+            1.5, 0.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+        assert_eq!(zero_time, 0.0);
+
+        // Zero stability should give zero drift
+        let zero_stability = calculate_advanced_spin_drift(
+            0.0, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+        assert_eq!(zero_stability, 0.0);
+
+        // Zero muzzle velocity should give zero drift
+        let zero_muzzle_vel = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 0.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+        assert_eq!(zero_muzzle_vel, 0.0);
+
+        // Zero air density should give zero drift
+        let zero_density = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 0.0, true, "match",
+        );
+        assert_eq!(zero_density, 0.0);
+    }
+
+    #[test]
+    fn test_spin_drift_coefficients_bullet_types() {
+        let match_coeffs = SpinDriftCoefficients::for_bullet_type("match");
+        let vld_coeffs = SpinDriftCoefficients::for_bullet_type("vld");
+        let flat_base_coeffs = SpinDriftCoefficients::for_bullet_type("flat_base");
+        let default_coeffs = SpinDriftCoefficients::for_bullet_type("unknown");
+
+        // VLD should have lower Litz coefficient
+        assert!(vld_coeffs.litz_coefficient < match_coeffs.litz_coefficient);
+
+        // Flat base should have higher Litz coefficient
+        assert!(flat_base_coeffs.litz_coefficient > match_coeffs.litz_coefficient);
+
+        // Default should match match type
+        assert_eq!(default_coeffs.litz_coefficient, match_coeffs.litz_coefficient);
+    }
+
+    #[test]
+    fn test_spin_drift_increases_with_time() {
+        let drift_short = calculate_advanced_spin_drift(
+            1.5, 0.5, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+        let drift_medium = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+        let drift_long = calculate_advanced_spin_drift(
+            1.5, 2.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+
+        assert!(drift_medium > drift_short, "Drift should increase with time");
+        assert!(drift_long > drift_medium, "Drift should increase with time");
+    }
+
+    #[test]
+    fn test_advanced_yaw_of_repose() {
+        let yaw = calculate_advanced_yaw_of_repose(
+            1.5,     // stability
+            800.0,   // velocity m/s
+            5.0,     // crosswind m/s
+            1500.0,  // spin rate rad/s
+            1.225,   // air density
+            0.00782, // caliber m
+        );
+
+        // Should give small angle in radians
+        assert!(yaw.abs() < 0.1, "Yaw should be small angle, got {}", yaw);
+    }
+
+    #[test]
+    fn test_yaw_of_repose_edge_cases() {
+        // Zero stability should give zero yaw
+        let zero_stability = calculate_advanced_yaw_of_repose(0.5, 800.0, 5.0, 1500.0, 1.225, 0.00782);
+        assert_eq!(zero_stability, 0.0);
+
+        // Zero velocity should give zero yaw
+        let zero_velocity = calculate_advanced_yaw_of_repose(1.5, 0.0, 5.0, 1500.0, 1.225, 0.00782);
+        assert_eq!(zero_velocity, 0.0);
+
+        // No crosswind should still give small yaw (trajectory curvature)
+        let no_wind = calculate_advanced_yaw_of_repose(1.5, 800.0, 0.0, 1500.0, 1.225, 0.00782);
+        assert!(no_wind > 0.0, "Should have natural yaw from trajectory curvature");
+    }
+
+    #[test]
+    fn test_transonic_correction_continuity() {
+        // Test continuity across transonic region boundaries
+        let just_below_transonic = calculate_transonic_correction(0.79, 0.75);
+        let just_at_transonic_start = calculate_transonic_correction(0.80, 0.75);
+
+        // Should be continuous at 0.8 Mach
+        assert!(
+            (just_below_transonic - just_at_transonic_start).abs() < 0.01,
+            "Should be continuous at transonic start"
+        );
+
+        let just_below_supersonic = calculate_transonic_correction(1.19, 0.75);
+        let just_at_supersonic = calculate_transonic_correction(1.21, 0.75);
+
+        // Values should be reasonably close
+        assert!(just_below_supersonic > 0.0);
+        assert!(just_at_supersonic > 0.0);
+    }
+
+    #[test]
+    fn test_ml_correction_placeholder() {
+        // Test the ML correction placeholder function
+        let base_drift = 0.1;
+        let corrected = apply_ml_correction(base_drift, 1.5, 2.5, 1.0, 0.308, 168.0);
+
+        // Should return reasonable multiplied value
+        assert!(corrected > 0.0);
+
+        // Test specific heuristics
+        // Over-stabilized subsonic
+        let over_stab_subsonic = apply_ml_correction(0.1, 3.0, 0.8, 1.0, 0.308, 168.0);
+        assert!(over_stab_subsonic < 0.1, "Over-stabilized subsonic should drift less");
+
+        // Long flight subsonic
+        let long_subsonic = apply_ml_correction(0.1, 1.5, 0.85, 2.5, 0.308, 168.0);
+        assert!(long_subsonic > 0.1, "Long subsonic flight should need more correction");
+
+        // Light small caliber
+        let light_small = apply_ml_correction(0.1, 1.5, 2.5, 1.0, 0.224, 55.0);
+        assert!(light_small < 0.1, "Light small caliber should drift less");
+    }
+
+    #[test]
+    fn test_density_affects_drift() {
+        // Lower density (higher altitude) should increase drift
+        let sea_level = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+        let high_altitude = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.0, true, "match",
+        );
+
+        assert!(
+            high_altitude > sea_level,
+            "Higher altitude (lower density) should increase drift"
+        );
+    }
+
+    #[test]
+    fn test_different_bullet_types_drift() {
+        let match_drift = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "match",
+        );
+        let vld_drift = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "vld",
+        );
+        let flat_base_drift = calculate_advanced_spin_drift(
+            1.5, 1.0, 700.0, 850.0, 1500.0, 0.00308, 0.0108, 1.225, true, "flat_base",
+        );
+
+        // VLD should drift less than match (lower coefficient)
+        assert!(vld_drift < match_drift, "VLD should drift less than match");
+
+        // Flat base should drift more (higher coefficient)
+        assert!(flat_base_drift > match_drift, "Flat base should drift more");
+    }
+
+    #[test]
+    fn test_litz_drift_low_stability() {
+        // Stability <= 1.0 should return zero from Litz formula
+        let low_stability = calculate_litz_drift(0.9, 1.0, 1.25);
+        assert_eq!(low_stability, 0.0);
+
+        let exactly_one = calculate_litz_drift(1.0, 1.0, 1.25);
+        assert_eq!(exactly_one, 0.0);
+
+        // Just above 1.0 should give positive result
+        let above_one = calculate_litz_drift(1.1, 1.0, 1.25);
+        assert!(above_one > 0.0);
+    }
+
+    #[test]
+    fn test_aerodynamic_jump_correction_edge_cases() {
+        // Zero mach should return zero
+        let zero_mach = calculate_aerodynamic_jump_correction(0.0, 1500.0, 0.00308, 0.0108, 0.85);
+        assert_eq!(zero_mach, 0.0);
+
+        // Valid inputs should return non-zero
+        let valid = calculate_aerodynamic_jump_correction(2.5, 1500.0, 0.00308, 0.0108, 0.85);
+        assert!(valid != 0.0);
+    }
+
+    #[test]
+    fn test_yaw_damping_factor() {
+        // Higher stability should damp faster
+        let low_stability_damping = calculate_yaw_damping_factor(1.2, 1.0, 0.92);
+        let high_stability_damping = calculate_yaw_damping_factor(2.0, 1.0, 0.92);
+
+        // Higher stability = faster damping = higher value closer to 1.0
+        assert!(high_stability_damping >= low_stability_damping);
+
+        // Result should be bounded 0.5-1.0
+        assert!(low_stability_damping >= 0.5);
+        assert!(low_stability_damping <= 1.0);
+        assert!(high_stability_damping >= 0.5);
+        assert!(high_stability_damping <= 1.0);
+    }
 }

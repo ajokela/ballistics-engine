@@ -550,4 +550,139 @@ mod tests {
         assert_eq!(get_bc_from_velocity_segments(-100.0, &segments), 0.5); // Below min
         assert_eq!(get_bc_from_velocity_segments(3500.0, &segments), 0.55); // Above max
     }
+
+    #[test]
+    fn test_fast_solution_interpolation_edge_cases() {
+        let times = vec![0.0, 1.0, 2.0, 3.0];
+        let states = vec![
+            [0.0, 0.0, 0.0, 800.0, 50.0, 0.0],
+            [800.0, 40.0, 100.0, 750.0, 30.0, 0.0],
+            [1550.0, 60.0, 200.0, 700.0, 10.0, 0.0],
+            [2250.0, 50.0, 300.0, 650.0, -10.0, 0.0],
+        ];
+
+        let solution = FastSolution::from_trajectory_data(times, states, [vec![], vec![], vec![]]);
+
+        // Test interpolation before first point
+        let result_before = solution.sol(&[-0.5]);
+        assert!((result_before[0][0] - 0.0).abs() < 1e-10); // Should clamp to first
+
+        // Test interpolation after last point
+        let result_after = solution.sol(&[5.0]);
+        assert!((result_after[0][0] - 2250.0).abs() < 1e-10); // Should clamp to last
+
+        // Test interpolation at exact points
+        let result_exact = solution.sol(&[1.0]);
+        assert!((result_exact[0][0] - 800.0).abs() < 1e-10);
+
+        // Test multiple query points
+        let result_multi = solution.sol(&[0.5, 1.5, 2.5]);
+        assert_eq!(result_multi[0].len(), 3);
+    }
+
+    #[test]
+    fn test_fast_solution_from_trajectory_data() {
+        let times = vec![0.0, 0.5, 1.0];
+        let states = vec![
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            [20.0, 21.0, 22.0, 23.0, 24.0, 25.0],
+        ];
+        let t_events = [vec![1.0], vec![0.5], vec![]];
+
+        let solution = FastSolution::from_trajectory_data(times.clone(), states, t_events);
+
+        // Check that data is stored correctly
+        assert_eq!(solution.t, times);
+        assert_eq!(solution.y.len(), 6); // 6 state components
+        assert_eq!(solution.y[0].len(), 3); // 3 time points
+        assert!(solution.success);
+
+        // Verify column-major storage
+        assert_eq!(solution.y[0][0], 0.0); // x at t=0
+        assert_eq!(solution.y[1][0], 1.0); // y at t=0
+        assert_eq!(solution.y[0][2], 20.0); // x at t=1.0
+    }
+
+    #[test]
+    fn test_bc_segments_boundary_conditions() {
+        // Test with single segment
+        let single_segment = vec![BCSegmentData {
+            velocity_min: 1000.0,
+            velocity_max: 2000.0,
+            bc_value: 0.5,
+        }];
+
+        assert_eq!(get_bc_from_velocity_segments(500.0, &single_segment), 0.5); // Below
+        assert_eq!(get_bc_from_velocity_segments(1500.0, &single_segment), 0.5); // In range
+        assert_eq!(get_bc_from_velocity_segments(2500.0, &single_segment), 0.5); // Above
+
+        // Test with exact boundary values
+        // Note: When velocity matches boundary, first matching segment wins
+        let segments = vec![
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 999.0,  // Exclusive upper bound to avoid overlap
+                bc_value: 0.45,
+            },
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.50,
+            },
+        ];
+
+        assert_eq!(get_bc_from_velocity_segments(1000.0, &segments), 0.50); // At second segment start
+        assert_eq!(get_bc_from_velocity_segments(0.0, &segments), 0.45); // At min
+        assert_eq!(get_bc_from_velocity_segments(999.0, &segments), 0.45); // At first segment max
+    }
+
+    #[test]
+    fn test_bc_segments_empty_fallback() {
+        let empty_segments: Vec<BCSegmentData> = vec![];
+
+        // With empty segments, should return fallback value
+        let result = get_bc_from_velocity_segments(1500.0, &empty_segments);
+        assert_eq!(result, 0.5); // Fallback value
+    }
+
+    #[test]
+    fn test_fast_integration_params() {
+        // Verify FastIntegrationParams struct can be constructed
+        let params = FastIntegrationParams {
+            horiz: 1000.0,
+            vert: 0.0,
+            initial_state: [0.0, 0.0, 0.0, 0.0, 50.0, 800.0],
+            t_span: (0.0, 5.0),
+            atmo_params: (0.0, 59.0, 29.92, 0.0),
+        };
+
+        assert_eq!(params.horiz, 1000.0);
+        assert_eq!(params.t_span.0, 0.0);
+        assert_eq!(params.t_span.1, 5.0);
+        assert_eq!(params.initial_state[5], 800.0); // vz
+    }
+
+    #[test]
+    fn test_fast_solution_event_arrays() {
+        let times = vec![0.0, 1.0, 2.0];
+        let states = vec![
+            [0.0, 0.0, 0.0, 800.0, 50.0, 0.0],
+            [800.0, 40.0, 500.0, 750.0, 30.0, 0.0],
+            [1500.0, 20.0, 1000.0, 700.0, 10.0, 0.0],
+        ];
+
+        // Create solution with events
+        let t_events = [
+            vec![2.0],  // target_hit at t=2
+            vec![0.5],  // max_ord at t=0.5
+            vec![],     // no ground_hit
+        ];
+
+        let solution = FastSolution::from_trajectory_data(times, states, t_events);
+
+        assert_eq!(solution.t_events[0], vec![2.0]); // Target hit
+        assert_eq!(solution.t_events[1], vec![0.5]); // Max ordinate
+        assert!(solution.t_events[2].is_empty()); // No ground hit
+    }
 }
