@@ -17,9 +17,187 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+
+// ============================================================================
+// Terms of Service Acceptance Module (for --online feature)
+// ============================================================================
+
+#[cfg(feature = "online")]
+const TOS_URL: &str = "https://ballistics.rs/terms.txt";
+
+#[cfg(feature = "online")]
+const TOS_VERSION: &str = "2026-01-26";
+
+/// Structure to store TOS acceptance status
+#[cfg(feature = "online")]
+#[derive(Debug, Serialize, Deserialize)]
+struct TosAcceptance {
+    accepted: bool,
+    accepted_version: String,
+    accepted_at: String,
+    terms_hash: String,
+}
+
+/// Get the path to the TOS acceptance file
+#[cfg(feature = "online")]
+fn get_tos_file_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".ballistics").join("tos.json"))
+}
+
+/// Check if the user has already accepted the current TOS
+#[cfg(feature = "online")]
+fn check_tos_accepted() -> bool {
+    let Some(tos_path) = get_tos_file_path() else {
+        return false;
+    };
+
+    if !tos_path.exists() {
+        return false;
+    }
+
+    match fs::read_to_string(&tos_path) {
+        Ok(content) => {
+            match serde_json::from_str::<TosAcceptance>(&content) {
+                Ok(acceptance) => {
+                    // Check if accepted and version matches
+                    acceptance.accepted && acceptance.accepted_version == TOS_VERSION
+                }
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Fetch the TOS text from the server
+#[cfg(feature = "online")]
+fn fetch_tos_text() -> Result<String, String> {
+    let response = ureq::get(TOS_URL)
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|e| format!("Failed to fetch Terms of Service: {}", e))?;
+
+    response
+        .into_string()
+        .map_err(|e| format!("Failed to read Terms of Service: {}", e))
+}
+
+/// Calculate a simple hash of the TOS text for tracking changes
+#[cfg(feature = "online")]
+fn hash_tos(text: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// Save TOS acceptance to file
+#[cfg(feature = "online")]
+fn save_tos_acceptance(accepted: bool, terms_hash: &str) -> Result<(), String> {
+    let Some(tos_path) = get_tos_file_path() else {
+        return Err("Could not determine home directory".to_string());
+    };
+
+    // Create .ballistics directory if it doesn't exist
+    if let Some(parent) = tos_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create .ballistics directory: {}", e))?;
+    }
+
+    let acceptance = TosAcceptance {
+        accepted,
+        accepted_version: TOS_VERSION.to_string(),
+        accepted_at: chrono_lite_timestamp(),
+        terms_hash: terms_hash.to_string(),
+    };
+
+    let json = serde_json::to_string_pretty(&acceptance)
+        .map_err(|e| format!("Failed to serialize TOS acceptance: {}", e))?;
+
+    fs::write(&tos_path, json)
+        .map_err(|e| format!("Failed to write TOS acceptance file: {}", e))?;
+
+    Ok(())
+}
+
+/// Get current timestamp without chrono dependency
+#[cfg(feature = "online")]
+fn chrono_lite_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+
+    format!("{}", duration.as_secs())
+}
+
+/// Display TOS and prompt for acceptance
+#[cfg(feature = "online")]
+fn prompt_tos_acceptance() -> Result<bool, String> {
+    eprintln!("\n");
+    eprintln!("================================================================================");
+    eprintln!("                    TERMS OF SERVICE ACCEPTANCE REQUIRED");
+    eprintln!("================================================================================");
+    eprintln!();
+    eprintln!("The --online feature sends data to a proprietary cloud service.");
+    eprintln!("Before using this feature, you must accept the Terms of Service.");
+    eprintln!();
+    eprintln!("Fetching Terms of Service from {}...", TOS_URL);
+    eprintln!();
+
+    // Fetch TOS
+    let tos_text = fetch_tos_text()?;
+    let terms_hash = hash_tos(&tos_text);
+
+    // Display TOS
+    eprintln!("{}", tos_text);
+    eprintln!();
+    eprintln!("================================================================================");
+    eprintln!();
+
+    // Prompt for acceptance
+    eprint!("Do you accept the Terms of Service? [y/N]: ");
+    io::stderr().flush().ok();
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("Failed to read input: {}", e))?;
+
+    let accepted = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
+
+    // Save acceptance status
+    save_tos_acceptance(accepted, &terms_hash)?;
+
+    if accepted {
+        eprintln!();
+        eprintln!("Terms of Service accepted. This will not be shown again unless the terms change.");
+        eprintln!();
+    } else {
+        eprintln!();
+        eprintln!("Terms of Service not accepted. The --online feature cannot be used.");
+        eprintln!("You can still use local calculations by omitting the --online flag.");
+        eprintln!();
+    }
+
+    Ok(accepted)
+}
+
+/// Check TOS acceptance and prompt if needed. Returns true if online mode can proceed.
+#[cfg(feature = "online")]
+fn ensure_tos_accepted() -> Result<bool, String> {
+    if check_tos_accepted() {
+        return Ok(true);
+    }
+
+    prompt_tos_acceptance()
+}
 
 #[derive(Parser)]
 #[command(name = "ballistics")]
@@ -847,6 +1025,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(feature = "online")]
             {
                 if online || compare {
+                    // Check TOS acceptance before proceeding with online mode
+                    match ensure_tos_accepted() {
+                        Ok(true) => {
+                            // TOS accepted, continue with online mode
+                        }
+                        Ok(false) => {
+                            // TOS not accepted, exit
+                            return Err("Cannot use --online without accepting Terms of Service.".into());
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Could not verify TOS acceptance: {}", e);
+                            eprintln!("Proceeding with online mode...");
+                        }
+                    }
+
                     // Build API request
                     let zero_range_metric = auto_zero.map(|d| UnitConverter::distance_to_metric(d, cli.units));
                     let twist_rate_metric = twist_rate.map(|t| match cli.units {
