@@ -178,7 +178,7 @@ impl ApiClient {
 
         let mut req = ureq::get(&url)
             .set("Accept", "application/json")
-            .set("User-Agent", "ballistics-cli/0.13.19")
+            .set("User-Agent", "ballistics-cli/0.13.24")
             .timeout(self.timeout)
             .query("bc_value", &request.bc_value.to_string())
             .query("bc_type", &request.bc_type)

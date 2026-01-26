@@ -4,7 +4,7 @@ exclude = ["ballistics-engine-rb", "ballistics-engine-py"]
 
 [package]
 name = "ballistics-engine"
-version = "0.13.23"
+version = "0.13.24"
 edition = "2021"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
@@ -42,6 +42,8 @@ exclude = [
 [features]
 default = ["online"]
 online = ["dep:ureq"]
+jemalloc = ["dep:tikv-jemallocator"]
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 nalgebra = "0.34"
@@ -59,6 +61,11 @@ rand_distr = "0.4"
 
 # Optional: HTTP client for online mode
 ureq = { version = "2.12", optional = true, features = ["json"] }
+
+# Optional: Alternative allocators for benchmarking
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
+mimalloc = { version = "0.1", optional = true }
 
 # WASM dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
