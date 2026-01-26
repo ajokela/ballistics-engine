@@ -758,7 +758,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let final_diameter = diameter;
             let final_max_range = max_range;
             let final_wind_speed = wind_speed;
-            let final_wind_direction = if wind_direction != 90.0 { wind_direction } else { csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 90.0) };
+            let final_wind_direction = if wind_direction != 0.0 { wind_direction } else { csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0) };
 
             // Location overrides (environmental conditions)
             let final_temperature = if temperature != 59.0 { temperature } else { csv_get_f64(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"], csv_get_f64(&profile_data, &["ZERO_TEMP"], 59.0)) };
