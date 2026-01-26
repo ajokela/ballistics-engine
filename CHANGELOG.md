@@ -5,6 +5,18 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.30] - 2026-01-26
+
+### Added
+- **Terms of Service Acceptance** - When using `--online` for the first time, users must accept the Terms of Service from https://ballistics.rs/terms.txt
+  - TOS is fetched from the server and displayed in the terminal
+  - User must type 'y' or 'yes' to accept
+  - Acceptance is stored in `~/.ballistics/tos.json`
+  - Subsequent runs skip the prompt unless TOS version changes
+
+### Dependencies
+- Added `dirs` crate for cross-platform home directory detection
+
 ## [0.13.29] - 2026-01-26
 
 ### Added

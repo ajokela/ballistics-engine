@@ -260,8 +260,10 @@ Estimate ballistic coefficient from observed trajectory data:
 
 The CLI can query a remote ballistics API server instead of calculating locally. This enables access to enhanced BC data, ML-augmented predictions, and doppler-derived drag curves.
 
+> **Important:** The `--online` feature connects to a **proprietary cloud service** that is not covered by the MIT license. When using `--online`, trajectory parameters and your IP address are transmitted to our servers. See [ONLINE_SERVICE.md](ONLINE_SERVICE.md) for full terms, privacy policy, and data handling practices.
+
 ```bash
-# Use online mode to query the Flask API
+# Use online mode to query the API
 ./ballistics trajectory \
   -v 2700 -b 0.475 -m 168 -d 0.308 \
   --online \
@@ -283,7 +285,12 @@ Online mode benefits:
 - **BC segments** - Velocity-dependent BC modeling from measured data
 - **Form factor corrections** - Bullet-specific drag adjustments
 
-To disable online mode and use local calculations only:
+**Data transmitted when using --online:**
+- All trajectory parameters (BC, mass, velocity, wind, atmospheric conditions, etc.)
+- Your IP address and client version
+- Request logs retained for 30 days, then deleted
+
+To use only local calculations (no network, no data transmission):
 ```bash
 cargo install ballistics-engine --no-default-features
 ```
@@ -679,6 +686,8 @@ Contributions are welcome! Please:
 ## License
 
 This project is licensed under the MIT License - see LICENSE file for details.
+
+**Note:** The MIT license applies to the open source ballistics-engine library, CLI, and FFI bindings. The `--online` feature connects to a proprietary cloud service with separate terms. See [ONLINE_SERVICE.md](ONLINE_SERVICE.md) for details.
 
 ## Acknowledgments
 
