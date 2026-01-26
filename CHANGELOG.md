@@ -5,6 +5,57 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.27] - 2026-01-26
+
+### Fixed
+- **Location CSV Overrides** - Fixed bug where `final_humidity` and `final_wind_direction` were set but not used, causing location CSV overrides for humidity and wind direction to be ignored
+- **Compiler Warnings** - Eliminated all unused variable warnings in main.rs
+
+### Changed
+- Location CSV now properly overrides humidity (`HUMIDITY` column) and wind direction (`WIND_DIR` column)
+
+**Related Tickets:**
+- MBA-600: Fix unused variable warnings in ballistics-engine CLI
+
+## [0.13.26] - 2026-01-26
+
+### Added
+- **Longitude Parameter** - `--longitude` for weather zone features (degrees, -180 to 180)
+- **Shot Direction Parameter** - `--shot-direction` for azimuth (0=North, 90=East)
+
+### Notes
+- Negative values require equals format: `--longitude=-115.2`
+- These parameters are required when using `--enable-weather-zones` or `--enable-3d-weather`
+
+**Related Tickets:**
+- MBA-601: Add weather integration control parameter for --online CLI mode
+
+## [0.13.25] - 2026-01-26
+
+### Added
+- **Weather Zone Control** - `--enable-weather-zones` flag for automatic weather zone generation
+- **3D Weather Control** - `--enable-3d-weather` flag for altitude-dependent atmospheric corrections
+- **Wind Shear Model Selection** - `--wind-shear-model` parameter (none, logarithmic, power_law, ekman_spiral)
+- **Weather Zone Interpolation** - `--weather-zone-interpolation` parameter (linear, cubic, step)
+
+### Notes
+- All weather parameters are passed through to Flask API when using `--online` mode
+- Weather features require latitude, longitude, and shot-direction to be specified
+
+**Related Tickets:**
+- MBA-601: Add weather integration control parameter for --online CLI mode
+
+## [0.13.24] - 2026-01-26
+
+### Fixed
+- **Online Mode Ground Impact** - Fixed `--ignore-ground-impact` flag not being passed to Flask API when using `--online` mode, causing trajectories to be truncated when bullet dropped below -100m threshold
+
+### Added
+- `ground_threshold` field in API client TrajectoryRequest
+
+**Related Tickets:**
+- Online solver returning partial results investigation
+
 ## [0.13.23] - 2026-01-25
 
 ### Added

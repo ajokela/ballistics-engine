@@ -246,14 +246,34 @@ All commands support three output formats via `-o`:
 | --enable-spin-drift | Enable enhanced spin drift | false | - | - |
 | --twist-rate | Barrel twist rate | 12 | inches/turn | inches/turn |
 | --twist-right | Right-hand twist | false | - | - |
-| --latitude | Latitude for Coriolis | None | degrees | degrees |
-| --shooting-angle | Azimuth angle | 0 | degrees | degrees |
+| --latitude | Latitude for Coriolis/weather | None | degrees | degrees |
+| --longitude | Longitude for weather zones | None | degrees | degrees |
+| --shot-direction | Shot azimuth (0=N, 90=E) | None | degrees | degrees |
+| --shooting-angle | Incline angle (up/down) | 0 | degrees | degrees |
 | --enable-wind-shear | Wind shear with altitude | false | - | - |
 | --sample-trajectory | Sample at regular intervals | false | - | - |
 | --sample-interval | Sampling interval | 10 | yards/meters | yards/meters |
 | --enable-pitch-damping | Transonic stability analysis | false | - | - |
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
+
+### Online Mode Parameters (--online)
+
+When using `--online`, calculations are routed through the Flask API for ML-enhanced predictions:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| --online | Route through Flask API | false |
+| --api-url | API endpoint URL | https://api.ballistics.7.62x51mm.sh |
+| --api-timeout | Request timeout (seconds) | 10 |
+| --offline-fallback | Fall back to local if API fails | false |
+| --compare | Compare local vs API results | false |
+| --enable-weather-zones | Enable weather zone generation | false |
+| --enable-3d-weather | Enable altitude weather corrections | false |
+| --wind-shear-model | Wind shear model (none/logarithmic/power_law/ekman_spiral) | logarithmic |
+| --weather-zone-interpolation | Zone interpolation (linear/cubic/step) | linear |
+
+**Note:** Weather features require `--latitude`, `--longitude`, and `--shot-direction`. Negative values need equals format: `--longitude=-115.2`
 
 
 ## Practical Examples
@@ -392,6 +412,32 @@ All commands support three output formats via `-o`:
   --pressure 25.5 \
   --humidity 30 \
   --max-range 3000
+```
+
+### Online Mode with ML Enhancements
+```bash
+# Basic online calculation
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 --max-range 1000 \
+  --online
+
+# Online with weather zones and 3D weather
+./ballistics trajectory \
+  -v 2850 -b 0.690 -m 230 -d 0.338 \
+  --drag-model g7 \
+  --auto-zero 100 --max-range 2000 \
+  --latitude 36.6 --longitude=-115.2 --shot-direction 90 \
+  --enable-weather-zones \
+  --enable-3d-weather \
+  --wind-shear-model logarithmic \
+  --online
+
+# Compare local vs API results
+./ballistics trajectory \
+  -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 --max-range 1000 \
+  --online --compare
 ```
 
 ### Extreme Weather Conditions
