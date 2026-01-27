@@ -75,6 +75,9 @@ pub mod stability_advanced;
 #[cfg(feature = "online")]
 pub mod api_client;
 
+// BC correction table for offline mode
+pub mod bc_table;
+
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;
 
