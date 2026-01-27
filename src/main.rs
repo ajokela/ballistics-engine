@@ -13,6 +13,7 @@ use ballistics_engine::{
 };
 #[cfg(feature = "online")]
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder};
+use ballistics_engine::bc_table::BcCorrectionTable;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use strsim::levenshtein;
@@ -370,6 +371,14 @@ enum Commands {
         /// Use cluster-based BC degradation for improved accuracy
         #[arg(long)]
         use_cluster_bc: bool,
+
+        /// Path to BC correction table file for offline ML-enhanced corrections
+        #[arg(long, value_name = "FILE", help = "Use precomputed BC correction table instead of online API")]
+        bc_table: Option<PathBuf>,
+
+        /// Bullet length in inches (for BC table lookup; estimated from diameter if not provided)
+        #[arg(long)]
+        bullet_length: Option<f64>,
 
         /// Barrel twist rate (inches per turn, e.g., 10 for 1:10)
         #[arg(long)]
@@ -947,6 +956,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             enable_pitch_damping,
             enable_precession,
             use_cluster_bc,
+            bc_table,
+            bullet_length,
             twist_rate,
             twist_right,
             latitude,
@@ -1034,12 +1045,72 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Apply truing adjustments
             let trued_velocity = final_velocity + final_velocity_adj;
-            let trued_bc = final_bc * final_bc_adj;
+            let mut trued_bc = final_bc * final_bc_adj;
 
-            // Show effective values if using profile/location
-            if !profile_data.is_empty() || !location_data.is_empty() {
-                eprintln!("Effective values: velocity={:.1} (trued={:.1}), BC={:.3} (trued={:.4})",
-                    final_velocity, trued_velocity, final_bc, trued_bc);
+            // Apply BC correction from table if provided
+            let bc_table_correction: Option<f64> = if let Some(table_path) = &bc_table {
+                match BcCorrectionTable::load(table_path) {
+                    Ok(table) => {
+                        // Get bullet length: CLI arg > CSV profile > estimate from diameter
+                        let bullet_length_in = bullet_length
+                            .or_else(|| {
+                                let len = csv_get_f64(&profile_data, &["BULLET_LENGTH", "LENGTH"], 0.0);
+                                if len > 0.0 { Some(len) } else { None }
+                            })
+                            .unwrap_or_else(|| {
+                                // Estimate: typical rifle bullets are ~3.5 calibers long
+                                diameter * 3.5
+                            });
+
+                        // Get bullet mass in grains
+                        let mass_grains = match cli.units {
+                            UnitSystem::Imperial => mass, // already in grains
+                            UnitSystem::Metric => mass * 15.4324, // grams to grains
+                        };
+
+                        // BC type string
+                        let bc_type_str = match drag_model {
+                            DragModelArg::G1 => "G1",
+                            DragModelArg::G7 => "G7",
+                        };
+
+                        // Lookup correction factor
+                        let correction = table.lookup(
+                            final_bc,
+                            bc_type_str,
+                            mass_grains,
+                            bullet_length_in,
+                            trued_velocity, // Use muzzle velocity for initial lookup
+                        );
+
+                        eprintln!("BC Table: Loaded {} (v{}, {})",
+                            table_path.display(), table.version(), table.dimensions_str());
+                        eprintln!("BC Table: correction={:.4} for BC={:.3} {} {}gr {:.3}\" @ {:.0}fps",
+                            correction, final_bc, bc_type_str, mass_grains, bullet_length_in, trued_velocity);
+
+                        // Apply correction
+                        trued_bc *= correction;
+                        Some(correction)
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load BC table: {}", e);
+                        eprintln!("         Continuing without BC correction table.");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Show effective values if using profile/location or BC table
+            if !profile_data.is_empty() || !location_data.is_empty() || bc_table_correction.is_some() {
+                let bc_info = if let Some(corr) = bc_table_correction {
+                    format!("BC={:.3} (table-corrected={:.4}, factor={:.4})", final_bc, trued_bc, corr)
+                } else {
+                    format!("BC={:.3} (trued={:.4})", final_bc, trued_bc)
+                };
+                eprintln!("Effective values: velocity={:.1} (trued={:.1}), {}",
+                    final_velocity, trued_velocity, bc_info);
                 if !location_data.is_empty() {
                     eprintln!("                  altitude={:.0}, temp={:.1}, pressure={:.2}",
                         final_altitude, final_temperature, final_pressure);
