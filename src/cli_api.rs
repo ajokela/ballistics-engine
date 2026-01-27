@@ -1188,24 +1188,37 @@ impl TrajectorySolver {
         // Get drag coefficient from drag model (Mach-indexed from drag tables)
         let cd = self.calculate_drag_coefficient(velocity_magnitude);
 
-        // Apply cluster BC correction if enabled
+        // Convert velocity to fps for BC lookups
+        let velocity_fps = velocity_magnitude * 3.28084;
+
+        // Look up BC from segments if available (highest priority - most accurate)
+        let base_bc = if let Some(ref segments) = self.inputs.bc_segments_data {
+            // Find matching segment for current velocity
+            segments
+                .iter()
+                .find(|seg| velocity_fps >= seg.velocity_min && velocity_fps < seg.velocity_max)
+                .map(|seg| seg.bc_value)
+                .unwrap_or(self.inputs.bc_value)
+        } else {
+            self.inputs.bc_value
+        };
+
+        // Apply cluster BC correction if enabled (on top of segment BC)
         let effective_bc = if let Some(ref cluster_bc) = self.cluster_bc {
-            // Convert velocity to fps for cluster BC calculation
-            let velocity_fps = velocity_magnitude * 3.28084;
             cluster_bc.apply_correction(
-                self.inputs.bc_value,
+                base_bc,
                 self.inputs.caliber_inches * 0.0254, // Convert back to meters for consistency
                 self.inputs.weight_grains,
                 velocity_fps,
             )
         } else {
-            self.inputs.bc_value
+            base_bc
         };
 
         // Use proper ballistics retardation formula
         // This matches the proven formula from fast_trajectory.rs
         // The standard retardation factor converts Cd to drag deceleration
-        let velocity_fps = velocity_magnitude * 3.28084; // m/s to fps
+        // Note: velocity_fps already calculated above for BC segment lookup
         let cd_to_retard = 0.000683 * 0.30; // Standard ballistics constant
         let standard_factor = cd * cd_to_retard;
         let density_scale = air_density / 1.225; // Scale relative to standard air (1.225 kg/m³)
