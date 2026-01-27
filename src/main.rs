@@ -238,7 +238,7 @@ enum Commands {
         velocity: Option<f64>,
 
         /// Velocity adjustment (added to base velocity for truing from chronograph data)
-        #[arg(long, default_value = "0.0")]
+        #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
         velocity_adjustment: f64,
 
         /// Launch angle (degrees)
@@ -944,6 +944,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             let final_humidity = if humidity != 50.0 { humidity } else { csv_get_f64(&location_data, &["HUMIDITY"], 50.0) };
             let final_altitude = if altitude != 0.0 { altitude } else { csv_get_f64(&location_data, &["ALTITUDE", "ALT"], csv_get_f64(&profile_data, &["ZERO_ALT"], 0.0)) };
 
+            // Get zero range: CLI --auto-zero overrides profile ZERO_RANGE
+            let final_auto_zero: Option<f64> = auto_zero.or_else(|| {
+                let zero_from_csv = csv_get_f64(&profile_data, &["ZERO_RANGE", "ZERO_DISTANCE", "ZERO"], 0.0);
+                if zero_from_csv > 0.0 { Some(zero_from_csv) } else { None }
+            });
+
             // Apply truing adjustments
             let trued_velocity = final_velocity + final_velocity_adj;
             let trued_bc = final_bc * final_bc_adj;
@@ -990,8 +996,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Metric => bore_height_value,
             };
 
-            // Calculate zero angle if auto-zero is specified
-            let muzzle_angle = if let Some(zero_distance) = auto_zero {
+            // Calculate zero angle if auto-zero is specified (from CLI or profile)
+            let muzzle_angle = if let Some(zero_distance) = final_auto_zero {
                 let zero_distance_metric =
                     UnitConverter::distance_to_metric(zero_distance, cli.units);
 
@@ -1041,7 +1047,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
 
                     // Build API request
-                    let zero_range_metric = auto_zero.map(|d| UnitConverter::distance_to_metric(d, cli.units));
+                    let zero_range_metric = final_auto_zero.map(|d| UnitConverter::distance_to_metric(d, cli.units));
                     let twist_rate_metric = twist_rate.map(|t| match cli.units {
                         UnitSystem::Imperial => t * 0.0254, // inches to meters
                         UnitSystem::Metric => t * 0.001,    // mm to meters
