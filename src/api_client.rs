@@ -77,6 +77,10 @@ pub struct TrajectoryRequest {
     /// Weather zone interpolation method (optional: linear, cubic, step)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weather_zone_interpolation: Option<String>,
+    /// Sample/trajectory step interval in meters (optional)
+    /// Will be converted to yards for API as trajectory_step
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_interval: Option<f64>,
 }
 
 /// Response structure from Flask API trajectory calculation
@@ -267,6 +271,11 @@ impl ApiClient {
         if let Some(ref method) = request.weather_zone_interpolation {
             req = req.query("weather_zone_interpolation", method);
         }
+        if let Some(sample_interval) = request.sample_interval {
+            // Convert from meters to yards for the Flask API (trajectory_step is in yards)
+            let step_yards = sample_interval / 0.9144;
+            req = req.query("trajectory_step", &format!("{:.4}", step_yards));
+        }
 
         let response = req.call().map_err(|e| match e {
             ureq::Error::Status(code, response) => {
@@ -454,6 +463,7 @@ pub struct TrajectoryRequestBuilder {
     enable_3d_weather: Option<bool>,
     wind_shear_model: Option<String>,
     weather_zone_interpolation: Option<String>,
+    sample_interval: Option<f64>,
 }
 
 impl TrajectoryRequestBuilder {
@@ -581,6 +591,11 @@ impl TrajectoryRequestBuilder {
         self
     }
 
+    pub fn sample_interval(mut self, value: f64) -> Self {
+        self.sample_interval = Some(value);
+        self
+    }
+
     /// Build the TrajectoryRequest
     ///
     /// # Returns
@@ -618,6 +633,7 @@ impl TrajectoryRequestBuilder {
             enable_3d_weather: self.enable_3d_weather,
             wind_shear_model: self.wind_shear_model,
             weather_zone_interpolation: self.weather_zone_interpolation,
+            sample_interval: self.sample_interval,
         })
     }
 }

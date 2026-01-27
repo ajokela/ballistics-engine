@@ -1288,6 +1288,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .enable_3d_weather(enable_3d_weather)
                         .wind_shear_model(&wind_shear_model)
                         .weather_zone_interpolation(&weather_zone_interpolation)
+                        .sample_interval(sample_interval)
                         .build()
                         .map_err(|e| format!("Failed to build API request: {}", e))?;
 
