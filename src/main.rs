@@ -15,6 +15,7 @@ use ballistics_engine::{
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use strsim::levenshtein;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, File};
@@ -761,6 +762,74 @@ impl UnitConverter {
     }
 }
 
+// ============================================================================
+// Fuzzy Column Name Matching (MBA-614)
+// ============================================================================
+
+/// Known column names for gun profiles and locations
+const KNOWN_COLUMNS: &[&str] = &[
+    // Gun profile columns
+    "RIFLE_NAME", "BULLET_NAME", "CALIBER", "BULLET_LENGTH", "VELOCITY",
+    "MUZZLE_VELOCITY", "MV", "ZERO_TEMP", "ZERO_ALT", "ZERO_RANGE",
+    "ZERO_DISTANCE", "ZERO", "BC", "BC_TYPE", "BC_ADJ", "BC_ADJUSTMENT",
+    "BULLET_WEIGHT", "WIND_SPEED", "TARGET_SPEED", "WIND_ANGLE",
+    "SIGHT_HEIGHT", "BARREL_TWIST", "TWIST_RATE", "TWIST", "VELOCITY_ADJ",
+    "VEL_ADJ", "RANGE_MIN", "RANGE_MAX", "RANGE_INCR", "GUN_MPH", "COA",
+    "POWDER_NAME", "POWDER_CHARGE", "PLASTIC_TIP_LENGTH", "JBM_BULLET_ID",
+    "SPIN_DRIFT", "CHART_TYPE", "REGENERATE", "V_OFFSET_MIL", "H_OFFSET_MIL",
+    "LATITUDE", "LONGITUDE", "DRAG_MODEL",
+    // Location columns
+    "LOCATION_NAME", "ALTITUDE", "ALT", "PRESSURE", "PRESSURE(HPA OR INHG)",
+    "TARGET_TEMP", "TEMPERATURE", "TEMP", "HUMIDITY", "DA", "DENSITY_ALTITUDE",
+    "WIND_DIR", "WIND_DIRECTION",
+];
+
+/// Find the closest matching known column name using Levenshtein distance
+/// Returns Some((known_name, distance)) if a match within max_distance is found
+fn find_closest_column(unknown: &str, max_distance: usize) -> Option<(&'static str, usize)> {
+    let unknown_upper = unknown.to_uppercase();
+
+    // First check for exact match
+    for &known in KNOWN_COLUMNS {
+        if known == unknown_upper {
+            return Some((known, 0));
+        }
+    }
+
+    // Find closest match within max_distance
+    KNOWN_COLUMNS
+        .iter()
+        .filter_map(|&known| {
+            let dist = levenshtein(&unknown_upper, known);
+            if dist <= max_distance && dist > 0 {
+                Some((known, dist))
+            } else {
+                None
+            }
+        })
+        .min_by_key(|(_, dist)| *dist)
+}
+
+/// Normalize a column header, suggesting corrections for typos
+/// Returns (normalized_name, was_corrected, original_name)
+fn normalize_column_header(header: &str) -> (String, bool, String) {
+    let upper = header.trim().to_uppercase();
+
+    // Check if it's a known column or close match
+    if let Some((known, dist)) = find_closest_column(&upper, 2) {
+        if dist == 0 {
+            // Exact match
+            (known.to_string(), false, header.to_string())
+        } else {
+            // Fuzzy match - return corrected name
+            (known.to_string(), true, header.to_string())
+        }
+    } else {
+        // Unknown column, keep as-is
+        (upper, false, header.to_string())
+    }
+}
+
 /// Parse a CSV file and return row matching the first column value
 fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String>, Box<dyn Error>> {
     let file = File::open(path)?;
@@ -769,6 +838,7 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
 
     // Parse header - first non-empty line (strip leading # if present, as Glenn's format uses #COLUMN_NAME)
     let mut headers: Vec<String> = Vec::new();
+    let mut corrections: Vec<(String, String)> = Vec::new();
     for line in lines.by_ref() {
         let line = line?;
         let trimmed = line.trim();
@@ -777,8 +847,20 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
         }
         // Strip leading # from header line (Glenn's format: #RIFLE_NAME,BULLET_NAME,...)
         let header_line = trimmed.trim_start_matches('#');
-        headers = header_line.split(',').map(|s| s.trim().to_uppercase()).collect();
+        for raw_header in header_line.split(',') {
+            let (normalized, was_corrected, original) = normalize_column_header(raw_header);
+            if was_corrected {
+                corrections.push((original, normalized.clone()));
+            }
+            headers.push(normalized);
+        }
         break;
+    }
+
+    // Print warnings for any corrected column names
+    for (original, corrected) in &corrections {
+        eprintln!("Warning: Column '{}' not recognized - did you mean '{}'? Using {}.",
+                  original.trim(), corrected, corrected);
     }
 
     if headers.is_empty() {
