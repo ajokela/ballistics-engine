@@ -8,8 +8,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use ballistics_engine::{
-    trajectory_sampling, AtmosphericConditions, BallisticInputs, DragModel, MonteCarloParams,
-    TrajectorySolver, WindConditions,
+    trajectory_sampling, AtmosphericConditions, BallisticInputs, BCSegmentData, DragModel,
+    MonteCarloParams, TrajectorySolver, WindConditions,
 };
 #[cfg(feature = "online")]
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder};
@@ -1048,6 +1048,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut trued_bc = final_bc * final_bc_adj;
 
             // Apply BC correction from table if provided
+            // Generate velocity-dependent BC segments from the table for accurate trajectory
+            let mut bc_table_segments: Option<Vec<BCSegmentData>> = None;
             let bc_table_correction: Option<f64> = if let Some(table_path) = &bc_table {
                 match BcCorrectionTable::load(table_path) {
                     Ok(table) => {
@@ -1074,23 +1076,76 @@ fn main() -> Result<(), Box<dyn Error>> {
                             DragModelArg::G7 => "G7",
                         };
 
-                        // Lookup correction factor
-                        let correction = table.lookup(
+                        // Velocity breakpoints for BC segments (denser in transonic region)
+                        // These match the table's velocity bins for optimal interpolation
+                        let velocity_breakpoints: Vec<f64> = vec![
+                            trued_velocity, // Muzzle velocity
+                            2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0,
+                            1700.0, 1600.0, 1500.0, 1400.0, 1350.0, 1300.0, 1250.0,
+                            1200.0, 1150.0, 1100.0, 1050.0, 1000.0, 950.0, 900.0,
+                            850.0, 800.0, 700.0, 600.0, 500.0,
+                        ];
+
+                        // Filter breakpoints to be below muzzle velocity and sort descending
+                        let mut valid_velocities: Vec<f64> = velocity_breakpoints
+                            .into_iter()
+                            .filter(|&v| v <= trued_velocity && v >= 500.0)
+                            .collect();
+                        valid_velocities.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                        valid_velocities.dedup();
+
+                        // Generate BC segments from table
+                        let mut segments: Vec<BCSegmentData> = Vec::new();
+                        for i in 0..valid_velocities.len().saturating_sub(1) {
+                            let vel_max = valid_velocities[i];
+                            let vel_min = valid_velocities[i + 1];
+                            let vel_mid = (vel_max + vel_min) / 2.0;
+
+                            // Lookup correction at midpoint velocity
+                            let correction = table.lookup(
+                                final_bc,
+                                bc_type_str,
+                                mass_grains,
+                                bullet_length_in,
+                                vel_mid,
+                            );
+
+                            // Calculate corrected BC for this segment
+                            let segment_bc = final_bc * correction;
+
+                            segments.push(BCSegmentData {
+                                velocity_min: vel_min,
+                                velocity_max: vel_max,
+                                bc_value: segment_bc,
+                            });
+                        }
+
+                        // Get correction at muzzle velocity for display
+                        let muzzle_correction = table.lookup(
                             final_bc,
                             bc_type_str,
                             mass_grains,
                             bullet_length_in,
-                            trued_velocity, // Use muzzle velocity for initial lookup
+                            trued_velocity,
                         );
 
                         eprintln!("BC Table: Loaded {} (v{}, {})",
                             table_path.display(), table.version(), table.dimensions_str());
-                        eprintln!("BC Table: correction={:.4} for BC={:.3} {} {}gr {:.3}\" @ {:.0}fps",
-                            correction, final_bc, bc_type_str, mass_grains, bullet_length_in, trued_velocity);
+                        eprintln!("BC Table: Generated {} velocity-dependent BC segments", segments.len());
+                        eprintln!("BC Table: Muzzle correction={:.4} for BC={:.3} {} {}gr {:.3}\" @ {:.0}fps",
+                            muzzle_correction, final_bc, bc_type_str, mass_grains, bullet_length_in, trued_velocity);
 
-                        // Apply correction
-                        trued_bc *= correction;
-                        Some(correction)
+                        // Show BC range if segments were generated
+                        if !segments.is_empty() {
+                            let min_bc = segments.iter().map(|s| s.bc_value).fold(f64::INFINITY, f64::min);
+                            let max_bc = segments.iter().map(|s| s.bc_value).fold(f64::NEG_INFINITY, f64::max);
+                            eprintln!("BC Table: BC range {:.5} - {:.5} across velocity envelope", min_bc, max_bc);
+                            bc_table_segments = Some(segments);
+                        }
+
+                        // Still apply correction to trued_bc for display purposes
+                        trued_bc *= muzzle_correction;
+                        Some(muzzle_correction)
                     }
                     Err(e) => {
                         eprintln!("Warning: Failed to load BC table: {}", e);
@@ -1348,6 +1403,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 use_powder_sensitivity,
                                 powder_temp_sensitivity,
                                 powder_temp,
+                                bc_table_segments.clone(),
                             )?;
                         }
                         (Ok(api_response), false) => {
@@ -1399,6 +1455,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     use_powder_sensitivity,
                                     powder_temp_sensitivity,
                                     powder_temp,
+                                    bc_table_segments.clone(),
                                 )?;
                             } else {
                                 eprintln!("Error: API request failed: {}", e);
@@ -1449,6 +1506,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         use_powder_sensitivity,
                         powder_temp_sensitivity,
                         powder_temp,
+                        bc_table_segments.clone(),
                     )?;
                 }
             }
@@ -1496,6 +1554,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     use_powder_sensitivity,
                     powder_temp_sensitivity,
                     powder_temp,
+                    bc_table_segments.clone(),
                 )?;
             }
         }
@@ -1670,6 +1729,7 @@ fn run_trajectory(
     use_powder_sensitivity: bool,
     powder_temp_sensitivity: f64,
     powder_temp: f64,
+    bc_table_segments: Option<Vec<BCSegmentData>>, // BC segments from table lookup
 ) -> Result<(), Box<dyn Error>> {
     // Create ballistic inputs with all required fields
     let drag_model_enum = match drag_model {
@@ -1737,10 +1797,14 @@ fn run_trajectory(
         powder_temp: UnitConverter::temperature_to_metric(powder_temp, units),
         tipoff_yaw: 0.0,
         tipoff_decay_distance: 50.0,
-        use_bc_segments,
+        // Use BC segments if: 1) table generated them (parameter), 2) --use-bc-segments flag, 3) neither
+        use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
         bc_segments: None,
-        bc_segments_data: if use_bc_segments {
-            // Generate BC segments automatically
+        bc_segments_data: if let Some(segments) = bc_table_segments {
+            // Use segments passed from BC table (highest priority)
+            Some(segments)
+        } else if use_bc_segments {
+            // Generate BC segments automatically from estimator
             use ballistics_engine::bc_estimation::BCSegmentEstimator;
             let weight_grains = mass / 0.00006479891;
             let caliber_inches = diameter / 0.0254;
