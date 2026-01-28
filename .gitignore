@@ -94,3 +94,6 @@ ballistics/
 bench_allocators.sh
 benchmark_results/
 data/bc_corrections_transonic.bin
+
+# BC5D binary tables (large files, downloaded separately)
+data/bc_tables/*.bin
