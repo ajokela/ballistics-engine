@@ -13,7 +13,10 @@ use ballistics_engine::{
 };
 #[cfg(feature = "online")]
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder};
+#[cfg(feature = "online")]
+use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::bc_table::BcCorrectionTable;
+use ballistics_engine::bc_table_5d::Bc5dTableManager;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use strsim::levenshtein;
@@ -375,6 +378,25 @@ enum Commands {
         /// Path to BC correction table file for offline ML-enhanced corrections
         #[arg(long, value_name = "FILE", help = "Use precomputed BC correction table instead of online API")]
         bc_table: Option<PathBuf>,
+
+        /// Directory containing caliber-specific BC5D tables (e.g., bc5d_308.bin)
+        #[arg(long, value_name = "DIR", help = "Use caliber-specific 5D BC correction tables")]
+        bc_table_dir: Option<PathBuf>,
+
+        /// Enable auto-download of BC5D correction tables when needed
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Auto-download BC5D tables when needed")]
+        bc_table_auto: bool,
+
+        /// Base URL for BC5D table downloads
+        #[cfg(feature = "online")]
+        #[arg(long, default_value = "https://ballistics.tools/downloads/bc5d", help = "Base URL for BC5D table downloads")]
+        bc_table_url: String,
+
+        /// Force re-download of BC5D tables even if cached
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Force re-download even if cached")]
+        bc_table_refresh: bool,
 
         /// Bullet length in inches (for BC table lookup; estimated from diameter if not provided)
         #[arg(long)]
@@ -957,6 +979,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             enable_precession,
             use_cluster_bc,
             bc_table,
+            bc_table_dir,
+            #[cfg(feature = "online")]
+            bc_table_auto,
+            #[cfg(feature = "online")]
+            bc_table_url,
+            #[cfg(feature = "online")]
+            bc_table_refresh,
             bullet_length,
             twist_rate,
             twist_right,
@@ -1157,9 +1186,147 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None
             };
 
+            // Apply BC correction from 5D caliber-specific table if provided (and bc_table wasn't used)
+            // Determine effective table directory: explicit --bc-table-dir, or auto-download cache
+            #[cfg(feature = "online")]
+            let effective_bc_table_dir: Option<PathBuf> = if bc_table_dir.is_some() {
+                bc_table_dir.clone()
+            } else if bc_table_auto {
+                // Auto-download mode: ensure table is available, use cache directory
+                match Bc5dDownloader::new(&bc_table_url, bc_table_refresh) {
+                    Ok(mut downloader) => {
+                        match downloader.ensure_table(diameter) {
+                            Ok(table_path) => {
+                                // Return the parent directory (cache dir) as table directory
+                                table_path.parent().map(|p| p.to_path_buf())
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: {}", e);
+                                eprintln!("         Continuing without BC5D correction table.");
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: BC5D table download failed: {}", e);
+                        eprintln!("         Continuing without BC5D correction table.");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            #[cfg(not(feature = "online"))]
+            let effective_bc_table_dir: Option<PathBuf> = bc_table_dir.clone();
+
+            let bc_table_5d_correction: Option<f64> = if bc_table_correction.is_none() {
+                if let Some(table_dir) = &effective_bc_table_dir {
+                    let mut manager = Bc5dTableManager::new(table_dir);
+
+                    // Get bullet mass in grains
+                    let mass_grains = match cli.units {
+                        UnitSystem::Imperial => mass, // already in grains
+                        UnitSystem::Metric => mass * 15.4324, // grams to grains
+                    };
+
+                    // BC type string
+                    let bc_type_str = match drag_model {
+                        DragModelArg::G1 => "G1",
+                        DragModelArg::G7 => "G7",
+                    };
+
+                    match manager.get_table(diameter) {
+                        Ok(table) => {
+                            // Show table info
+                            eprintln!("BC5D Table: Loaded caliber {:.3} (v{}, API {}, {})",
+                                table.caliber(), table.version(), table.api_version(), table.dimensions_str());
+
+                            // Velocity breakpoints for BC segments (denser in transonic region)
+                            let velocity_breakpoints: Vec<f64> = vec![
+                                trued_velocity, // Muzzle velocity
+                                2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0,
+                                1700.0, 1600.0, 1500.0, 1400.0, 1350.0, 1300.0, 1250.0,
+                                1200.0, 1150.0, 1100.0, 1050.0, 1000.0, 950.0, 900.0,
+                                850.0, 800.0, 700.0, 600.0, 500.0,
+                            ];
+
+                            // Filter breakpoints to be below muzzle velocity and sort descending
+                            let mut valid_velocities: Vec<f64> = velocity_breakpoints
+                                .into_iter()
+                                .filter(|&v| v <= trued_velocity && v >= 500.0)
+                                .collect();
+                            valid_velocities.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                            valid_velocities.dedup();
+
+                            // Generate BC segments from 5D table
+                            let mut segments: Vec<BCSegmentData> = Vec::new();
+                            for i in 0..valid_velocities.len().saturating_sub(1) {
+                                let vel_max = valid_velocities[i];
+                                let vel_min = valid_velocities[i + 1];
+                                let vel_mid = (vel_max + vel_min) / 2.0;
+
+                                // Lookup from 5D table (includes muzzle velocity dimension)
+                                let effective_bc = table.get_effective_bc(
+                                    mass_grains,
+                                    final_bc,
+                                    trued_velocity, // Muzzle velocity for this shot
+                                    vel_mid,        // Current velocity at this segment
+                                    bc_type_str,
+                                );
+
+                                segments.push(BCSegmentData {
+                                    velocity_min: vel_min,
+                                    velocity_max: vel_max,
+                                    bc_value: effective_bc,
+                                });
+                            }
+
+                            // Get correction at muzzle velocity for display
+                            let muzzle_correction = table.lookup(
+                                mass_grains,
+                                final_bc,
+                                trued_velocity,
+                                trued_velocity,
+                                bc_type_str,
+                            );
+
+                            eprintln!("BC5D Table: Generated {} velocity-dependent BC segments", segments.len());
+                            eprintln!("BC5D Table: Muzzle correction={:.4} for BC={:.3} {} {}gr @ {:.0}fps",
+                                muzzle_correction, final_bc, bc_type_str, mass_grains, trued_velocity);
+
+                            // Show BC range if segments were generated
+                            if !segments.is_empty() {
+                                let min_bc = segments.iter().map(|s| s.bc_value).fold(f64::INFINITY, f64::min);
+                                let max_bc = segments.iter().map(|s| s.bc_value).fold(f64::NEG_INFINITY, f64::max);
+                                eprintln!("BC5D Table: BC range {:.5} - {:.5} across velocity envelope", min_bc, max_bc);
+                                bc_table_segments = Some(segments);
+                            }
+
+                            // Apply correction to trued_bc for display purposes
+                            trued_bc *= muzzle_correction;
+                            Some(muzzle_correction)
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to load BC5D table for caliber {:.3}: {}", diameter, e);
+                            eprintln!("         Available calibers: {:?}", manager.available_calibers());
+                            eprintln!("         Continuing without BC5D correction table.");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None // bc_table was already used
+            };
+
+            // Combine corrections for display
+            let combined_bc_correction = bc_table_correction.or(bc_table_5d_correction);
+
             // Show effective values if using profile/location or BC table
-            if !profile_data.is_empty() || !location_data.is_empty() || bc_table_correction.is_some() {
-                let bc_info = if let Some(corr) = bc_table_correction {
+            if !profile_data.is_empty() || !location_data.is_empty() || combined_bc_correction.is_some() {
+                let bc_info = if let Some(corr) = combined_bc_correction {
                     format!("BC={:.3} (table-corrected={:.4}, factor={:.4})", final_bc, trued_bc, corr)
                 } else {
                     format!("BC={:.3} (trued={:.4})", final_bc, trued_bc)

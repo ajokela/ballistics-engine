@@ -79,6 +79,49 @@ Calculate ballistic trajectories with advanced physics modeling:
   --auto-zero 600
 ```
 
+#### BC5D Correction Tables
+
+BC5D (5-Dimensional BC Correction) tables provide ML-derived, velocity-dependent BC corrections for specific calibers. These tables capture how BC changes throughout the flight envelope based on weight, BC, muzzle velocity, current velocity, and drag model.
+
+**Auto-Download Mode (Requires `--online` feature):**
+
+Tables are automatically downloaded from the server and cached locally:
+
+```bash
+# Auto-download tables (downloads on first use)
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-table-auto
+
+# Force re-download cached tables
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-table-auto --bc-table-refresh
+
+# Use custom server URL
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --bc-table-auto \
+  --bc-table-url https://your-server.com/bc5d
+```
+
+**Local Directory Mode:**
+
+```bash
+# Use predownloaded tables from a local directory
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --bc-table-dir ./bc_tables/
+```
+
+**Available Calibers:** .224, .243, .264, .277, .284, .308, .338
+
+**Cache Locations:**
+- macOS: `~/Library/Caches/ballistics-engine/bc5d/`
+- Linux: `~/.cache/ballistics-engine/bc5d/`
+- Windows: `%LOCALAPPDATA%\ballistics-engine\cache\bc5d\`
+
+When a caliber isn't available, you'll see a helpful message:
+```
+Warning: No BC5D table available for caliber 0.375 (9.5mm)
+         Available calibers: .224, .243, .264, .277, .284, .308, .338
+         Continuing without BC5D correction table.
+```
+
 #### BC and Velocity Truing
 
 Adjust BC and velocity based on real-world chrono data and field observations:
@@ -274,6 +317,19 @@ When using `--online`, calculations are routed through the Flask API for ML-enha
 | --weather-zone-interpolation | Zone interpolation (linear/cubic/step) | linear |
 
 **Note:** Weather features require `--latitude`, `--longitude`, and `--shot-direction`. Negative values need equals format: `--longitude=-115.2`
+
+### BC5D Table Parameters
+
+BC5D (5-Dimensional BC Correction) tables provide ML-derived corrections for improved accuracy:
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| --bc-table-dir | Directory with BC5D table files | None |
+| --bc-table-auto | Auto-download BC5D tables (online feature) | false |
+| --bc-table-url | Base URL for BC5D downloads (online feature) | https://ballistics.tools/downloads/bc5d |
+| --bc-table-refresh | Force re-download even if cached (online feature) | false |
+
+**Note:** `--bc-table-auto`, `--bc-table-url`, and `--bc-table-refresh` require the `online` feature. Use `--bc-table-dir` for fully offline operation with pre-downloaded tables.
 
 
 ## Practical Examples

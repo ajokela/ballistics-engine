@@ -75,8 +75,15 @@ pub mod stability_advanced;
 #[cfg(feature = "online")]
 pub mod api_client;
 
+// BC5D table auto-download (feature-gated)
+#[cfg(feature = "online")]
+pub mod bc_table_download;
+
 // BC correction table for offline mode
 pub mod bc_table;
+
+// 5D BC correction tables (caliber-specific, ML-derived)
+pub mod bc_table_5d;
 
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;

@@ -14,12 +14,35 @@ The ballistics-engine includes an optional `--online` flag that sends trajectory
 | CLI tool | MIT (Open Source) | No |
 | Local physics solver | MIT (Open Source) | No |
 | FFI bindings | MIT (Open Source) | No |
+| BC5D table downloader | MIT (Open Source) | First download only |
+| **BC5D table data files** | **Free to use** | **First download only** |
 | **Online API service** | **Proprietary** | **Yes** |
 | **ML models** | **Proprietary** | **Yes** |
 
 The online service (API, ML models, cloud infrastructure) is **proprietary software** and is not covered by the MIT license. The source code for the online service will not be made available.
 
-## Data Collection (--online flag only)
+BC5D table data files are free to download and use, but the ML models used to generate them are proprietary. Once downloaded, tables work fully offline.
+
+## Data Collection
+
+### BC5D Table Downloads (--bc-table-auto flag)
+
+When you use `--bc-table-auto`, BC5D correction tables are downloaded from `ballistics.tools`:
+
+**Data transmitted:**
+- HTTP GET requests for manifest.json and caliber-specific .bin files
+- Your IP address (standard HTTP request)
+- No trajectory parameters or personal data
+
+**Data stored locally:**
+- Downloaded tables are cached in platform-specific directories
+- macOS: `~/Library/Caches/ballistics-engine/bc5d/`
+- Linux: `~/.cache/ballistics-engine/bc5d/`
+- Windows: `%LOCALAPPDATA%\ballistics-engine\cache\bc5d\`
+
+Tables are static files (~1-1.5 MB each) and are not personalized. Once cached, subsequent calculations use local files without network access.
+
+### Online API (--online flag)
 
 When you use the `--online` flag, the following data is transmitted to `api.ballistics.7.62x51mm.sh`:
 
@@ -66,8 +89,8 @@ The online service is hosted on Google Cloud Platform (Cloud Run) in the United 
 
 To use ballistics-engine without any network communication:
 
-### Option 1: Don't use --online
-Simply omit the `--online` flag. All local calculations work without network access.
+### Option 1: Don't use online flags
+Simply omit `--online` and `--bc-table-auto`. All local calculations work without network access.
 
 ```bash
 # Local calculation (no network)
@@ -75,14 +98,28 @@ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1000
 
 # Online calculation (sends data to API)
 ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1000 --online
+
+# BC5D with auto-download (downloads tables once)
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-table-auto
 ```
 
-### Option 2: Build without online feature
+### Option 2: Use pre-downloaded BC5D tables
+Download BC5D tables once, then use `--bc-table-dir` for fully offline operation:
+
+```bash
+# Download tables manually (one-time)
+curl -O https://ballistics.tools/downloads/bc5d/bc5d_308.bin
+
+# Use local tables (no network)
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-table-dir ./bc_tables/
+```
+
+### Option 3: Build without online feature
 ```bash
 cargo install ballistics-engine --no-default-features
 ```
 
-This removes the `--online` flag entirely from the CLI.
+This removes `--online`, `--bc-table-auto`, `--bc-table-url`, and `--bc-table-refresh` flags entirely from the CLI.
 
 ## No Warranty
 

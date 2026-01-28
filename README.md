@@ -557,6 +557,32 @@ Example:
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --use-bc-segments --max-range 1000
 ```
 
+### BC5D Correction Tables
+
+BC5D tables provide ML-derived, 5-dimensional BC corrections indexed by weight, BC, muzzle velocity, current velocity, and drag model. Tables are caliber-specific and capture the complete velocity-dependent behavior.
+
+**Auto-Download Mode** (requires `online` feature):
+```bash
+# Downloads tables automatically on first use
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-table-auto
+
+# Force refresh cached tables
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-table-auto --bc-table-refresh
+```
+
+**Offline Mode** with pre-downloaded tables:
+```bash
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-table-dir ./bc_tables/
+```
+
+**Available calibers:** .224, .243, .264, .277, .284, .308, .338
+
+**Cache locations:**
+- macOS: `~/Library/Caches/ballistics-engine/bc5d/`
+- Linux: `~/.cache/ballistics-engine/bc5d/`
+- Windows: `%LOCALAPPDATA%\ballistics-engine\cache\bc5d\`
+
+Tables are approximately 1-1.5 MB each and include CRC32 validation to ensure data integrity.
 
 ### Advanced Physics Modeling
 
