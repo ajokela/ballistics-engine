@@ -12,7 +12,7 @@ use ballistics_engine::{
     MonteCarloParams, TrajectorySolver, WindConditions,
 };
 #[cfg(feature = "online")]
-use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder};
+use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder, TrueVelocityRequest};
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::bc_table::BcCorrectionTable;
@@ -635,6 +635,78 @@ enum Commands {
         /// Drag model (G1 or G7)
         #[arg(long, default_value = "G1")]
         drag_model: String,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Calculate effective muzzle velocity from observed drop (online mode)
+    #[cfg(feature = "online")]
+    TrueVelocity {
+        /// Measured drop in MILs at the target range
+        #[arg(long)]
+        measured_drop: f64,
+
+        /// Range at which drop was measured (yards for imperial, meters for metric)
+        #[arg(long)]
+        range: f64,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: f64,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Bullet weight (grains for imperial, grams for metric)
+        #[arg(short = 'm', long)]
+        mass: f64,
+
+        /// Bullet diameter/caliber (inches for imperial, mm for metric)
+        #[arg(short = 'd', long)]
+        diameter: f64,
+
+        /// Chronograph velocity for comparison (fps for imperial, m/s for metric)
+        #[arg(long)]
+        chrono_velocity: Option<f64>,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long, default_value = "100.0")]
+        zero_distance: f64,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long, default_value = "2.0")]
+        sight_height: f64,
+
+        /// Temperature (Fahrenheit for imperial, Celsius for metric)
+        #[arg(long, default_value = "59.0")]
+        temperature: f64,
+
+        /// Pressure (inHg for imperial, hPa for metric)
+        #[arg(long, default_value = "29.92")]
+        pressure: f64,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+
+        /// Altitude (feet for imperial, meters for metric)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Unit system
+        #[arg(long, default_value = "imperial")]
+        units: UnitSystem,
+
+        /// API endpoint URL
+        #[arg(long, default_value = "https://api.ballistics.7.62x51mm.sh")]
+        api_url: String,
+
+        /// API request timeout in seconds
+        #[arg(long, default_value = "10")]
+        api_timeout: u64,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -1851,6 +1923,171 @@ fn main() -> Result<(), Box<dyn Error>> {
                 output,
                 cli.units,
             )?;
+        }
+
+        #[cfg(feature = "online")]
+        Commands::TrueVelocity {
+            measured_drop,
+            range,
+            bc,
+            drag_model,
+            mass,
+            diameter,
+            chrono_velocity,
+            zero_distance,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            units,
+            api_url,
+            api_timeout,
+            output,
+        } => {
+            // Check TOS acceptance first
+            if !check_tos_accepted() {
+                if !prompt_tos_acceptance()? {
+                    eprintln!("Cannot use online features without accepting Terms of Service.");
+                    std::process::exit(1);
+                }
+            }
+
+            // Convert to imperial for API (API expects imperial units)
+            let range_yd = match units {
+                UnitSystem::Imperial => range,
+                UnitSystem::Metric => range / 0.9144, // meters to yards
+            };
+            let weight_gr = match units {
+                UnitSystem::Imperial => mass,
+                UnitSystem::Metric => mass / 0.0647989, // grams to grains
+            };
+            let caliber_in = match units {
+                UnitSystem::Imperial => diameter,
+                UnitSystem::Metric => diameter / 25.4, // mm to inches
+            };
+            let chrono_fps = chrono_velocity.map(|v| match units {
+                UnitSystem::Imperial => v,
+                UnitSystem::Metric => v / 0.3048, // m/s to fps
+            });
+            let zero_yd = match units {
+                UnitSystem::Imperial => zero_distance,
+                UnitSystem::Metric => zero_distance / 0.9144,
+            };
+            let sight_in = match units {
+                UnitSystem::Imperial => sight_height,
+                UnitSystem::Metric => sight_height / 25.4, // mm to inches
+            };
+            let temp_f = match units {
+                UnitSystem::Imperial => temperature,
+                UnitSystem::Metric => temperature * 9.0 / 5.0 + 32.0, // C to F
+            };
+            let press_inhg = match units {
+                UnitSystem::Imperial => pressure,
+                UnitSystem::Metric => pressure / 33.8639, // hPa to inHg
+            };
+            let alt_ft = match units {
+                UnitSystem::Imperial => altitude,
+                UnitSystem::Metric => altitude / 0.3048, // meters to feet
+            };
+
+            let drag_str = match drag_model {
+                DragModelArg::G1 => "G1",
+                DragModelArg::G7 => "G7",
+            };
+
+            let request = TrueVelocityRequest {
+                measured_drop_mil: measured_drop,
+                range_yd,
+                bc,
+                drag_model: drag_str.to_string(),
+                weight_gr,
+                caliber: caliber_in,
+                zero_range_yd: Some(zero_yd),
+                chrono_velocity_fps: chrono_fps,
+                altitude_ft: Some(alt_ft),
+                temperature_f: Some(temp_f),
+                pressure_inhg: Some(press_inhg),
+                humidity: Some(humidity),
+                sight_height_in: Some(sight_in),
+                use_bc_enhancement: Some(true),
+            };
+
+            let api_client = ApiClient::new(&api_url, api_timeout);
+
+            eprintln!("Calculating effective velocity via API...");
+
+            match api_client.true_velocity(&request) {
+                Ok(response) => {
+                    // Convert output velocity back to user's units if needed
+                    let effective_vel = match units {
+                        UnitSystem::Imperial => response.effective_velocity_fps,
+                        UnitSystem::Metric => response.effective_velocity_fps * 0.3048,
+                    };
+                    let vel_unit = match units {
+                        UnitSystem::Imperial => "fps",
+                        UnitSystem::Metric => "m/s",
+                    };
+
+                    match output {
+                        OutputFormat::Json => {
+                            let json_output = serde_json::json!({
+                                "effective_velocity": effective_vel,
+                                "velocity_unit": vel_unit,
+                                "velocity_adjustment_fps": response.velocity_adjustment_fps,
+                                "adjustment_percent": response.adjustment_percent,
+                                "confidence": response.confidence,
+                                "iterations": response.iterations,
+                                "final_error_mil": response.final_error_mil,
+                                "calculated_drop_mil": response.calculated_drop_mil,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json_output)?);
+                        }
+                        OutputFormat::Csv => {
+                            println!("effective_velocity,unit,adjustment_fps,adjustment_pct,confidence,iterations,final_error_mil,calculated_drop_mil");
+                            println!("{:.1},{},{},{},{:.3},{},{:.4},{:.2}",
+                                effective_vel,
+                                vel_unit,
+                                response.velocity_adjustment_fps.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                                response.adjustment_percent.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                                response.confidence,
+                                response.iterations,
+                                response.final_error_mil,
+                                response.calculated_drop_mil,
+                            );
+                        }
+                        OutputFormat::Table => {
+                            println!();
+                            println!("╔════════════════════════════════════════════════════════════╗");
+                            println!("║           VELOCITY TRUING RESULTS                          ║");
+                            println!("╠════════════════════════════════════════════════════════════╣");
+                            println!("║  Effective Muzzle Velocity: {:>8.1} {:>4}                 ║", effective_vel, vel_unit);
+                            if let Some(adj) = response.velocity_adjustment_fps {
+                                let adj_display = match units {
+                                    UnitSystem::Imperial => adj,
+                                    UnitSystem::Metric => adj * 0.3048,
+                                };
+                                println!("║  Adjustment from Chrono:    {:>+8.1} {:>4}                 ║", adj_display, vel_unit);
+                                if let Some(pct) = response.adjustment_percent {
+                                    println!("║  Adjustment Percentage:     {:>+8.2}%                      ║", pct);
+                                }
+                            }
+                            println!("╠════════════════════════════════════════════════════════════╣");
+                            println!("║  Confidence:                {:>8.1}%                      ║", response.confidence * 100.0);
+                            println!("║  Iterations:                {:>8}                        ║", response.iterations);
+                            println!("║  Final Error:               {:>8.4} MIL                  ║", response.final_error_mil);
+                            println!("║  Calculated Drop:           {:>8.2} MIL                  ║", response.calculated_drop_mil);
+                            println!("║  Measured Drop:             {:>8.2} MIL                  ║", measured_drop);
+                            println!("╚════════════════════════════════════════════════════════════╝");
+                            println!();
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("API Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 
