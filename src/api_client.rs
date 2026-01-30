@@ -126,6 +126,68 @@ pub struct ApiTrajectoryPoint {
     pub time: f64,
 }
 
+/// Request structure for velocity truing via Flask API
+#[derive(Debug, Clone, Serialize)]
+pub struct TrueVelocityRequest {
+    /// Measured drop in MILs at the target range
+    pub measured_drop_mil: f64,
+    /// Range at which drop was measured (yards)
+    pub range_yd: f64,
+    /// Ballistic coefficient
+    pub bc: f64,
+    /// Drag model ("G1" or "G7")
+    pub drag_model: String,
+    /// Bullet weight in grains
+    pub weight_gr: f64,
+    /// Bullet caliber/diameter in inches
+    pub caliber: f64,
+    /// Zero range in yards (default: 100)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zero_range_yd: Option<f64>,
+    /// Chronograph velocity in fps (optional, for comparison)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chrono_velocity_fps: Option<f64>,
+    /// Altitude in feet (default: 0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub altitude_ft: Option<f64>,
+    /// Temperature in Fahrenheit (default: 59)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_f: Option<f64>,
+    /// Barometric pressure in inHg (default: 29.92)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure_inhg: Option<f64>,
+    /// Humidity percentage (default: 50)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub humidity: Option<f64>,
+    /// Sight height in inches (default: 2.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sight_height_in: Option<f64>,
+    /// Enable BC enhancement (default: true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_bc_enhancement: Option<bool>,
+}
+
+/// Response structure from Flask API velocity truing
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrueVelocityResponse {
+    /// Effective muzzle velocity in fps
+    pub effective_velocity_fps: f64,
+    /// Velocity adjustment from chrono (if chrono provided)
+    #[serde(default)]
+    pub velocity_adjustment_fps: Option<f64>,
+    /// Adjustment as percentage (if chrono provided)
+    #[serde(default)]
+    pub adjustment_percent: Option<f64>,
+    /// Confidence in the result (0-1)
+    pub confidence: f64,
+    /// Number of iterations to converge
+    pub iterations: i32,
+    /// Final error in MILs after convergence
+    pub final_error_mil: f64,
+    /// Calculated drop at the effective velocity
+    pub calculated_drop_mil: f64,
+}
+
 /// Error types for API communication
 #[derive(Debug)]
 pub enum ApiError {
@@ -433,6 +495,53 @@ impl ApiClient {
             })?;
 
         Ok(response.status() == 200)
+    }
+
+    /// Calculate true/effective muzzle velocity via Flask API
+    ///
+    /// # Arguments
+    /// * `request` - Velocity truing request parameters
+    ///
+    /// # Returns
+    /// * `Ok(TrueVelocityResponse)` - Successful calculation with effective velocity
+    /// * `Err(ApiError)` - Error during API communication
+    #[cfg(feature = "online")]
+    pub fn true_velocity(
+        &self,
+        request: &TrueVelocityRequest,
+    ) -> Result<TrueVelocityResponse, ApiError> {
+        let url = format!("{}/v1/true-velocity", self.base_url);
+
+        let body = serde_json::to_string(request)
+            .map_err(|e| ApiError::RequestError(format!("Failed to serialize request: {}", e)))?;
+
+        let response = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json")
+            .set("User-Agent", "ballistics-cli/0.13.31")
+            .timeout(self.timeout)
+            .send_string(&body)
+            .map_err(|e| match e {
+                ureq::Error::Status(code, response) => {
+                    let body = response.into_string().unwrap_or_default();
+                    ApiError::ServerError(code, body)
+                }
+                ureq::Error::Transport(transport) => {
+                    let msg = transport.to_string();
+                    if msg.contains("timed out") || msg.contains("timeout") {
+                        ApiError::Timeout
+                    } else {
+                        ApiError::NetworkError(msg)
+                    }
+                }
+            })?;
+
+        let response_body = response
+            .into_string()
+            .map_err(|e| ApiError::InvalidResponse(format!("Failed to read response: {}", e)))?;
+
+        serde_json::from_str(&response_body)
+            .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))
     }
 }
 
