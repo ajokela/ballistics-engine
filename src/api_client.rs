@@ -178,8 +178,8 @@ pub struct TrueVelocityResponse {
     /// Adjustment as percentage (if chrono provided)
     #[serde(default)]
     pub adjustment_percent: Option<f64>,
-    /// Confidence in the result (0-1)
-    pub confidence: f64,
+    /// Confidence in the result ("high", "medium", "low")
+    pub confidence: String,
     /// Number of iterations to converge
     pub iterations: i32,
     /// Final error in MILs after convergence
