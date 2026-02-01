@@ -8,7 +8,7 @@
 //! ```no_run
 //! use ballistics_engine::bc_table_download::Bc5dDownloader;
 //!
-//! let downloader = Bc5dDownloader::new(
+//! let mut downloader = Bc5dDownloader::new(
 //!     "https://ballistics.tools/downloads/bc5d",
 //!     false
 //! ).unwrap();
