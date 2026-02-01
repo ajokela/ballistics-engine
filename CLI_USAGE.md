@@ -329,7 +329,7 @@ Calculated Drop:       5.10 MIL
 
 ## Output Formats
 
-All commands support three output formats via `-o`:
+All commands support four output formats via `-o`:
 
 ### Table Format (default)
 ```bash
@@ -345,6 +345,40 @@ All commands support three output formats via `-o`:
 ```bash
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o csv > trajectory.csv
 ```
+
+### PDF Dope Card Format
+Generate a printable dope card with two-column layout, color-coded values, and alternating row stripes for field readability:
+
+```bash
+./ballistics trajectory -v 2550 -b 0.236 -m 175 -d 0.308 --drag-model g7 \
+  --auto-zero 100 --max-range 1000 \
+  --wind-speed 5 --wind-direction 90 \
+  --temperature 55 --pressure 27.32 --altitude 2500 \
+  --sample-trajectory --sample-interval 9.144 \
+  --ignore-ground-impact \
+  --target-speed 4 \
+  --powder "IMR4320" --bullet-name "SMK" \
+  --location-name "General" \
+  --profile-row "R700_308" \
+  -o pdf --output-file dope_card.pdf
+```
+
+**PDF-specific options:**
+| Parameter | Description |
+|-----------|-------------|
+| `--output-file` | Output file path (required for PDF) |
+| `--target-speed` | Target speed in mph for lead calculation |
+| `--powder` | Powder type (shown in footer) |
+| `--bullet-name` | Bullet name (shown in footer) |
+| `--location-name` | Location name (shown in header) |
+| `--profile-row` | Rifle name (shown in header) |
+
+**PDF features:**
+- Two-column table layout with Range, Drop MIL, Wind MIL, Lead MIL
+- Color coding: Black=Range, Red=Drop, Green=Wind, Blue=Lead
+- Alternating row stripes for easy tracking in field conditions
+- Header with rifle, location, density altitude, atmospheric data
+- Footer with timestamp, load data, BC, and velocity
 
 ## Parameters Reference
 
