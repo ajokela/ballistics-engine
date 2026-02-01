@@ -641,8 +641,7 @@ enum Commands {
         output: OutputFormat,
     },
 
-    /// Calculate effective muzzle velocity from observed drop (online mode)
-    #[cfg(feature = "online")]
+    /// Calculate effective muzzle velocity from observed drop
     TrueVelocity {
         /// Measured drop in MILs at the target range
         #[arg(long)]
@@ -700,13 +699,42 @@ enum Commands {
         #[arg(long, default_value = "imperial")]
         units: UnitSystem,
 
+        /// Directory containing caliber-specific BC5D tables (e.g., bc5d_308.bin)
+        #[arg(long, value_name = "DIR", help = "Use caliber-specific 5D BC correction tables")]
+        bc_table_dir: Option<PathBuf>,
+
+        /// Enable auto-download of BC5D correction tables when needed
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Auto-download BC5D tables when needed")]
+        bc_table_auto: bool,
+
+        /// Base URL for BC5D table downloads
+        #[cfg(feature = "online")]
+        #[arg(long, default_value = "https://ballistics.tools/downloads/bc5d", help = "Base URL for BC5D table downloads")]
+        bc_table_url: String,
+
+        /// Force offline mode (use local calculation, skip API)
+        #[arg(long, help = "Force offline mode using local calculation")]
+        offline: bool,
+
+        /// Fall back to local calculation if API fails
+        #[cfg(feature = "online")]
+        #[arg(long, help = "Use local calculation if API fails")]
+        offline_fallback: bool,
+
         /// API endpoint URL
+        #[cfg(feature = "online")]
         #[arg(long, default_value = "https://api.ballistics.7.62x51mm.sh")]
         api_url: String,
 
         /// API request timeout in seconds
+        #[cfg(feature = "online")]
         #[arg(long, default_value = "10")]
         api_timeout: u64,
+
+        /// Bullet length in inches (for BC table lookup; estimated from diameter if not provided)
+        #[arg(long)]
+        bullet_length: Option<f64>,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -1925,7 +1953,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
         }
 
-        #[cfg(feature = "online")]
         Commands::TrueVelocity {
             measured_drop,
             range,
@@ -1941,19 +1968,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             humidity,
             altitude,
             units,
+            bc_table_dir,
+            #[cfg(feature = "online")]
+            bc_table_auto,
+            #[cfg(feature = "online")]
+            bc_table_url,
+            offline,
+            #[cfg(feature = "online")]
+            offline_fallback,
+            #[cfg(feature = "online")]
             api_url,
+            #[cfg(feature = "online")]
             api_timeout,
+            bullet_length,
             output,
         } => {
-            // Check TOS acceptance first
-            if !check_tos_accepted() {
-                if !prompt_tos_acceptance()? {
-                    eprintln!("Cannot use online features without accepting Terms of Service.");
-                    std::process::exit(1);
-                }
-            }
-
-            // Convert to imperial for API (API expects imperial units)
+            // Convert to imperial for calculations (internal calculations use imperial)
             let range_yd = match units {
                 UnitSystem::Imperial => range,
                 UnitSystem::Metric => range / 0.9144, // meters to yards
@@ -1996,95 +2026,294 @@ fn main() -> Result<(), Box<dyn Error>> {
                 DragModelArg::G7 => "G7",
             };
 
-            let request = TrueVelocityRequest {
-                measured_drop_mil: measured_drop,
-                range_yd,
-                bc,
-                drag_model: drag_str.to_string(),
-                weight_gr,
-                caliber: caliber_in,
-                zero_range_yd: Some(zero_yd),
-                chrono_velocity_fps: chrono_fps,
-                altitude_ft: Some(alt_ft),
-                temperature_f: Some(temp_f),
-                pressure_inhg: Some(press_inhg),
-                humidity: Some(humidity),
-                sight_height_in: Some(sight_in),
-                use_bc_enhancement: Some(true),
+            // Load BC5D tables if available
+            // Determine effective table directory: explicit --bc-table-dir, or auto-download cache
+            #[cfg(feature = "online")]
+            let effective_bc_table_dir: Option<PathBuf> = if bc_table_dir.is_some() {
+                bc_table_dir.clone()
+            } else if bc_table_auto {
+                // Auto-download mode: ensure table is available, use cache directory
+                match Bc5dDownloader::new(&bc_table_url, false) {
+                    Ok(mut downloader) => {
+                        match downloader.ensure_table(caliber_in) {
+                            Ok(table_path) => {
+                                // Return the parent directory (cache dir) as table directory
+                                table_path.parent().map(|p| p.to_path_buf())
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: {}", e);
+                                eprintln!("         Continuing without BC5D correction table.");
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: BC5D table download failed: {}", e);
+                        eprintln!("         Continuing without BC5D correction table.");
+                        None
+                    }
+                }
+            } else {
+                None
             };
 
-            let api_client = ApiClient::new(&api_url, api_timeout);
+            #[cfg(not(feature = "online"))]
+            let effective_bc_table_dir: Option<PathBuf> = bc_table_dir.clone();
 
-            eprintln!("Calculating effective velocity via API...");
+            // Load BC segments from BC5D table if available
+            let bc_segments: Option<Vec<BCSegmentData>> = if let Some(table_dir) = &effective_bc_table_dir {
+                let mut manager = Bc5dTableManager::new(table_dir);
 
-            match api_client.true_velocity(&request) {
-                Ok(response) => {
-                    // Convert output velocity back to user's units if needed
-                    let effective_vel = match units {
-                        UnitSystem::Imperial => response.effective_velocity_fps,
-                        UnitSystem::Metric => response.effective_velocity_fps * 0.3048,
-                    };
-                    let vel_unit = match units {
-                        UnitSystem::Imperial => "fps",
-                        UnitSystem::Metric => "m/s",
-                    };
+                // Velocity breakpoints for BC segments (denser in transonic region)
+                // These cover the typical rifle velocity envelope
+                let velocity_breakpoints: Vec<f64> = vec![
+                    4000.0, 3500.0, 3000.0, 2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0,
+                    1700.0, 1600.0, 1500.0, 1400.0, 1350.0, 1300.0, 1250.0,
+                    1200.0, 1150.0, 1100.0, 1050.0, 1000.0, 950.0, 900.0,
+                    850.0, 800.0, 700.0, 600.0, 500.0,
+                ];
 
-                    match output {
-                        OutputFormat::Json => {
-                            let json_output = serde_json::json!({
-                                "effective_velocity": effective_vel,
-                                "velocity_unit": vel_unit,
-                                "velocity_adjustment_fps": response.velocity_adjustment_fps,
-                                "adjustment_percent": response.adjustment_percent,
-                                "confidence": response.confidence,
-                                "iterations": response.iterations,
-                                "final_error_mil": response.final_error_mil,
-                                "calculated_drop_mil": response.calculated_drop_mil,
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json_output)?);
+                // Filter breakpoints and sort descending
+                let mut valid_velocities: Vec<f64> = velocity_breakpoints
+                    .into_iter()
+                    .filter(|&v| v >= 500.0)
+                    .collect();
+                valid_velocities.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                valid_velocities.dedup();
+
+                // Use the highest velocity as reference muzzle velocity for BC5D lookup
+                // This provides the broadest correction curve coverage
+                let reference_muzzle_velocity = valid_velocities.first().copied().unwrap_or(3000.0);
+
+                // Generate BC segments from table
+                let mut segments: Vec<BCSegmentData> = Vec::new();
+                let mut any_correction_found = false;
+
+                for i in 0..valid_velocities.len().saturating_sub(1) {
+                    let vel_max = valid_velocities[i];
+                    let vel_min = valid_velocities[i + 1];
+                    let vel_mid = (vel_max + vel_min) / 2.0;
+
+                    // Lookup correction at midpoint velocity
+                    // signature: lookup(caliber, weight_grains, base_bc, muzzle_velocity, current_velocity, drag_type)
+                    if let Ok(correction) = manager.lookup(caliber_in, weight_gr, bc, reference_muzzle_velocity, vel_mid, drag_str) {
+                        any_correction_found = true;
+                        // Calculate corrected BC for this segment
+                        let segment_bc = bc * correction;
+
+                        segments.push(BCSegmentData {
+                            velocity_min: vel_min,
+                            velocity_max: vel_max,
+                            bc_value: segment_bc,
+                        });
+                    }
+                }
+
+                if any_correction_found && !segments.is_empty() {
+                    // Use bullet_length for diagnostics if provided
+                    let bullet_length_in = bullet_length.unwrap_or_else(|| caliber_in * 3.5);
+                    eprintln!("BC5D Table: Generated {} velocity-dependent BC segments", segments.len());
+                    eprintln!("BC5D Table: {:.3}\" caliber, {:.1}gr, {:.3}\" length (est)", caliber_in, weight_gr, bullet_length_in);
+                    let min_bc = segments.iter().map(|s| s.bc_value).fold(f64::INFINITY, f64::min);
+                    let max_bc = segments.iter().map(|s| s.bc_value).fold(f64::NEG_INFINITY, f64::max);
+                    eprintln!("BC5D Table: BC range {:.5} - {:.5} across velocity envelope", min_bc, max_bc);
+                    Some(segments)
+                } else {
+                    eprintln!("Warning: No BC5D table data found for caliber {:.3}\"", caliber_in);
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Determine if we should use local calculation
+            // Use local if: --offline flag, OR no online feature, OR (no online flag and has bc_table_dir)
+            #[cfg(feature = "online")]
+            let use_local = offline;
+            #[cfg(not(feature = "online"))]
+            let use_local = true; // Always use local when online feature not available
+
+            if use_local {
+                // Run local calculation
+                eprintln!("Calculating effective velocity locally...");
+
+                match calculate_true_velocity_local(
+                    measured_drop,
+                    range_yd,
+                    bc,
+                    drag_model,
+                    weight_gr,
+                    caliber_in,
+                    zero_yd,
+                    sight_in,
+                    temp_f,
+                    press_inhg,
+                    humidity,
+                    alt_ft,
+                    &bc_segments,
+                ) {
+                    Ok(result) => {
+                        // Calculate velocity adjustment if chrono provided
+                        let velocity_adjustment = chrono_fps.map(|c| result.effective_velocity_fps - c);
+                        let adjustment_percent = chrono_fps.map(|c| (result.effective_velocity_fps - c) / c * 100.0);
+
+                        // Convert output velocity back to user's units if needed
+                        let effective_vel = match units {
+                            UnitSystem::Imperial => result.effective_velocity_fps,
+                            UnitSystem::Metric => result.effective_velocity_fps * 0.3048,
+                        };
+                        let vel_unit = match units {
+                            UnitSystem::Imperial => "fps",
+                            UnitSystem::Metric => "m/s",
+                        };
+
+                        display_true_velocity_result(
+                            effective_vel,
+                            vel_unit,
+                            velocity_adjustment,
+                            adjustment_percent,
+                            &result.confidence,
+                            result.iterations,
+                            result.final_error_mil,
+                            result.calculated_drop_mil,
+                            measured_drop,
+                            units,
+                            output,
+                            bc_segments.is_some(),
+                        )?;
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Local calculation failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Online mode
+                #[cfg(feature = "online")]
+                {
+                    // Check TOS acceptance first
+                    if !check_tos_accepted() {
+                        if !prompt_tos_acceptance()? {
+                            eprintln!("Cannot use online features without accepting Terms of Service.");
+                            std::process::exit(1);
                         }
-                        OutputFormat::Csv => {
-                            println!("effective_velocity,unit,adjustment_fps,adjustment_pct,confidence,iterations,final_error_mil,calculated_drop_mil");
-                            println!("{:.1},{},{},{},{:.3},{},{:.4},{:.2}",
+                    }
+
+                    let request = TrueVelocityRequest {
+                        measured_drop_mil: measured_drop,
+                        range_yd,
+                        bc,
+                        drag_model: drag_str.to_string(),
+                        weight_gr,
+                        caliber: caliber_in,
+                        zero_range_yd: Some(zero_yd),
+                        chrono_velocity_fps: chrono_fps,
+                        altitude_ft: Some(alt_ft),
+                        temperature_f: Some(temp_f),
+                        pressure_inhg: Some(press_inhg),
+                        humidity: Some(humidity),
+                        sight_height_in: Some(sight_in),
+                        use_bc_enhancement: Some(true),
+                    };
+
+                    let api_client = ApiClient::new(&api_url, api_timeout);
+
+                    eprintln!("Calculating effective velocity via API...");
+
+                    match api_client.true_velocity(&request) {
+                        Ok(response) => {
+                            // Convert output velocity back to user's units if needed
+                            let effective_vel = match units {
+                                UnitSystem::Imperial => response.effective_velocity_fps,
+                                UnitSystem::Metric => response.effective_velocity_fps * 0.3048,
+                            };
+                            let vel_unit = match units {
+                                UnitSystem::Imperial => "fps",
+                                UnitSystem::Metric => "m/s",
+                            };
+
+                            display_true_velocity_result(
                                 effective_vel,
                                 vel_unit,
-                                response.velocity_adjustment_fps.map(|v| format!("{:.1}", v)).unwrap_or_default(),
-                                response.adjustment_percent.map(|v| format!("{:.2}", v)).unwrap_or_default(),
-                                response.confidence,
+                                response.velocity_adjustment_fps,
+                                response.adjustment_percent,
+                                &response.confidence,
                                 response.iterations,
                                 response.final_error_mil,
                                 response.calculated_drop_mil,
-                            );
+                                measured_drop,
+                                units,
+                                output,
+                                false,
+                            )?;
                         }
-                        OutputFormat::Table => {
-                            println!();
-                            println!("╔════════════════════════════════════════════════════════════╗");
-                            println!("║           VELOCITY TRUING RESULTS                          ║");
-                            println!("╠════════════════════════════════════════════════════════════╣");
-                            println!("║  Effective Muzzle Velocity: {:>8.1} {:>4}                 ║", effective_vel, vel_unit);
-                            if let Some(adj) = response.velocity_adjustment_fps {
-                                let adj_display = match units {
-                                    UnitSystem::Imperial => adj,
-                                    UnitSystem::Metric => adj * 0.3048,
-                                };
-                                println!("║  Adjustment from Chrono:    {:>+8.1} {:>4}                 ║", adj_display, vel_unit);
-                                if let Some(pct) = response.adjustment_percent {
-                                    println!("║  Adjustment Percentage:     {:>+8.2}%                      ║", pct);
+                        Err(e) => {
+                            if offline_fallback {
+                                eprintln!("Warning: API request failed: {}", e);
+                                eprintln!("Falling back to local calculation...\n");
+
+                                match calculate_true_velocity_local(
+                                    measured_drop,
+                                    range_yd,
+                                    bc,
+                                    drag_model,
+                                    weight_gr,
+                                    caliber_in,
+                                    zero_yd,
+                                    sight_in,
+                                    temp_f,
+                                    press_inhg,
+                                    humidity,
+                                    alt_ft,
+                                    &bc_segments,
+                                ) {
+                                    Ok(result) => {
+                                        let velocity_adjustment = chrono_fps.map(|c| result.effective_velocity_fps - c);
+                                        let adjustment_percent = chrono_fps.map(|c| (result.effective_velocity_fps - c) / c * 100.0);
+
+                                        let effective_vel = match units {
+                                            UnitSystem::Imperial => result.effective_velocity_fps,
+                                            UnitSystem::Metric => result.effective_velocity_fps * 0.3048,
+                                        };
+                                        let vel_unit = match units {
+                                            UnitSystem::Imperial => "fps",
+                                            UnitSystem::Metric => "m/s",
+                                        };
+
+                                        display_true_velocity_result(
+                                            effective_vel,
+                                            vel_unit,
+                                            velocity_adjustment,
+                                            adjustment_percent,
+                                            &result.confidence,
+                                            result.iterations,
+                                            result.final_error_mil,
+                                            result.calculated_drop_mil,
+                                            measured_drop,
+                                            units,
+                                            output,
+                                            bc_segments.is_some(),
+                                        )?;
+                                    }
+                                    Err(fallback_err) => {
+                                        eprintln!("Error: Fallback calculation also failed: {}", fallback_err);
+                                        std::process::exit(1);
+                                    }
                                 }
+                            } else {
+                                eprintln!("API Error: {}", e);
+                                eprintln!("Hint: Use --offline for local calculation or --offline-fallback for automatic fallback");
+                                std::process::exit(1);
                             }
-                            println!("╠════════════════════════════════════════════════════════════╣");
-                            println!("║  Confidence:                {:>8.1}%                      ║", response.confidence * 100.0);
-                            println!("║  Iterations:                {:>8}                        ║", response.iterations);
-                            println!("║  Final Error:               {:>8.4} MIL                  ║", response.final_error_mil);
-                            println!("║  Calculated Drop:           {:>8.2} MIL                  ║", response.calculated_drop_mil);
-                            println!("║  Measured Drop:             {:>8.2} MIL                  ║", measured_drop);
-                            println!("╚════════════════════════════════════════════════════════════╝");
-                            println!();
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!("API Error: {}", e);
+
+                #[cfg(not(feature = "online"))]
+                {
+                    // This branch should never be reached since use_local is always true
+                    // when online feature is not available, but add for completeness
+                    eprintln!("Error: Online mode not available (compile with --features online)");
                     std::process::exit(1);
                 }
             }
@@ -3312,4 +3541,319 @@ fn run_bc_estimation(
     }
 
     Ok(())
+}
+
+/// Display velocity truing results in the specified format
+fn display_true_velocity_result(
+    effective_vel: f64,
+    vel_unit: &str,
+    velocity_adjustment: Option<f64>,
+    adjustment_percent: Option<f64>,
+    confidence: &str,
+    iterations: i32,
+    final_error_mil: f64,
+    calculated_drop_mil: f64,
+    measured_drop: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+    used_bc_table: bool,
+) -> Result<(), Box<dyn Error>> {
+    match output {
+        OutputFormat::Json => {
+            let mut json_output = serde_json::json!({
+                "effective_velocity": effective_vel,
+                "velocity_unit": vel_unit,
+                "confidence": confidence,
+                "iterations": iterations,
+                "final_error_mil": final_error_mil,
+                "calculated_drop_mil": calculated_drop_mil,
+                "measured_drop_mil": measured_drop,
+                "used_bc_table": used_bc_table,
+            });
+            if let Some(adj) = velocity_adjustment {
+                let adj_display = match units {
+                    UnitSystem::Imperial => adj,
+                    UnitSystem::Metric => adj * 0.3048,
+                };
+                json_output["velocity_adjustment"] = serde_json::json!(adj_display);
+            }
+            if let Some(pct) = adjustment_percent {
+                json_output["adjustment_percent"] = serde_json::json!(pct);
+            }
+            println!("{}", serde_json::to_string_pretty(&json_output)?);
+        }
+        OutputFormat::Csv => {
+            println!("effective_velocity,unit,adjustment,adjustment_pct,confidence,iterations,final_error_mil,calculated_drop_mil,used_bc_table");
+            println!("{:.1},{},{},{},{},{},{:.4},{:.2},{}",
+                effective_vel,
+                vel_unit,
+                velocity_adjustment.map(|v| {
+                    let adj = match units {
+                        UnitSystem::Imperial => v,
+                        UnitSystem::Metric => v * 0.3048,
+                    };
+                    format!("{:.1}", adj)
+                }).unwrap_or_default(),
+                adjustment_percent.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                confidence,
+                iterations,
+                final_error_mil,
+                calculated_drop_mil,
+                used_bc_table,
+            );
+        }
+        OutputFormat::Table => {
+            println!();
+            println!("╔════════════════════════════════════════════════════════════╗");
+            println!("║           VELOCITY TRUING RESULTS                          ║");
+            println!("╠════════════════════════════════════════════════════════════╣");
+            println!("║  Effective Muzzle Velocity: {:>8.1} {:>4}                 ║", effective_vel, vel_unit);
+            if let Some(adj) = velocity_adjustment {
+                let adj_display = match units {
+                    UnitSystem::Imperial => adj,
+                    UnitSystem::Metric => adj * 0.3048,
+                };
+                println!("║  Adjustment from Chrono:    {:>+8.1} {:>4}                 ║", adj_display, vel_unit);
+                if let Some(pct) = adjustment_percent {
+                    println!("║  Adjustment Percentage:     {:>+8.2}%                      ║", pct);
+                }
+            }
+            println!("╠════════════════════════════════════════════════════════════╣");
+            println!("║  Confidence:                {:>8}                        ║", confidence);
+            println!("║  Iterations:                {:>8}                        ║", iterations);
+            println!("║  Final Error:               {:>8.4} MIL                  ║", final_error_mil);
+            println!("║  Calculated Drop:           {:>8.2} MIL                  ║", calculated_drop_mil);
+            println!("║  Measured Drop:             {:>8.2} MIL                  ║", measured_drop);
+            if used_bc_table {
+                println!("╠════════════════════════════════════════════════════════════╣");
+                println!("║  BC5D Table:                     Yes                       ║");
+            }
+            println!("╚════════════════════════════════════════════════════════════╝");
+            println!();
+        }
+    }
+
+    Ok(())
+}
+
+/// Calculate drop at a given muzzle velocity using trajectory solver
+/// Returns drop in MILs at the target range
+fn calculate_drop_at_velocity(
+    velocity_fps: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_distance_yd: f64,
+    range_yd: f64,
+    sight_height_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+) -> Result<f64, Box<dyn Error>> {
+    // Convert to SI units
+    let velocity_ms = velocity_fps * 0.3048;
+    let mass_kg = mass_gr * 0.0000647989;
+    let diameter_m = diameter_in * 0.0254;
+    let zero_m = zero_distance_yd * 0.9144;
+    let range_m = range_yd * 0.9144;
+    let sight_height_m = sight_height_in * 0.0254;
+    let altitude_m = altitude_ft * 0.3048;
+    let temperature_c = (temperature_f - 32.0) * 5.0 / 9.0;
+    let pressure_hpa = pressure_inhg * 33.8639; // Convert inHg to hPa
+
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    // Create base inputs - match defaults used by trajectory command
+    let mut inputs = BallisticInputs {
+        muzzle_velocity: velocity_ms,
+        bc_value: bc,
+        bc_type: drag_model_enum,
+        bullet_mass: mass_kg,
+        bullet_diameter: diameter_m,
+        bullet_length: diameter_m * 4.5, // Approximate
+        sight_height: sight_height_m,
+        target_distance: range_m + 100.0, // Overshoot to ensure we have data
+        use_bc_segments: bc_segments.is_some(),
+        bc_segments_data: bc_segments.clone(),
+        use_rk4: true,
+        muzzle_angle: 0.0, // Will be set by zero angle calculation
+        ..Default::default() // Uses muzzle_height: 0.0 by default
+    };
+
+    // Set up atmospheric conditions
+    // AtmosphericConditions expects: temperature in Celsius, pressure in hPa, humidity 0-100, altitude in meters
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity, // Already 0-100 from input
+        altitude: altitude_m,
+        ..Default::default()
+    };
+
+    let wind = WindConditions::default();
+
+    // Calculate zero angle for the zero distance
+    // Target height is sight_height because the bullet must cross the LOS at zero distance
+    // The LOS is at y = sight_height (sight is above bore by sight_height)
+    // So the bullet (starting at y = 0 = bore level) must rise to y = sight_height at zero distance
+    let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+        inputs.clone(),
+        zero_m,
+        sight_height_m, // target height at zero distance (LOS height)
+        wind.clone(),
+        atmosphere.clone(),
+    )?;
+
+    // Set the calculated zero angle
+    inputs.muzzle_angle = zero_angle;
+
+    // Create solver and solve
+    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    solver.set_max_range(range_m + 100.0);
+    solver.set_time_step(0.0001);
+
+    let result = solver.solve()?;
+
+    // Find the point at target range
+    let target_point = result.points.iter()
+        .find(|p| p.position.z >= range_m)
+        .ok_or("Trajectory didn't reach target range")?;
+
+    // Calculate drop relative to line of sight (LOS)
+    // Using the same formula as the Flask API (true_velocity.py):
+    //   los_height = z * tan(barrel_angle) - sight_height
+    //   drop = los_height - bullet_y
+    //
+    // The barrel_angle is the zero_angle we calculated earlier.
+    // This formula accounts for the angled barrel and scope offset.
+    let barrel_angle = zero_angle;
+    let z = target_point.position.z;
+    let bullet_y = target_point.position.y;
+
+    // LOS height at range z
+    let los_height = z * barrel_angle.tan() - sight_height_m;
+
+    // Drop = LOS height - bullet position (positive = below LOS)
+    let drop_m = los_height - bullet_y;
+
+    // Convert to MILs: mil = (drop_inches / 36 / range_yards) * 1000
+    // Or equivalently: mil = (drop_m / range_m) * 1000
+    let drop_mil = (drop_m / z) * 1000.0;
+
+    Ok(drop_mil)
+}
+
+/// Result of local velocity truing calculation
+struct TrueVelocityLocalResult {
+    effective_velocity_fps: f64,
+    iterations: i32,
+    final_error_mil: f64,
+    calculated_drop_mil: f64,
+    confidence: String,
+}
+
+/// Calculate true velocity using local binary search
+/// Returns (effective_velocity_fps, iterations, final_error_mil, calculated_drop_mil)
+fn calculate_true_velocity_local(
+    measured_drop_mil: f64,
+    range_yd: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_distance_yd: f64,
+    sight_height_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+) -> Result<TrueVelocityLocalResult, Box<dyn Error>> {
+    // Binary search between velocity bounds
+    let mut velocity_low = 1500.0;
+    let mut velocity_high = 4500.0;
+    let tolerance_mil = 0.01; // 0.01 MIL tolerance
+    let max_iterations = 50;
+
+    let mut iterations = 0;
+    let mut last_error = 0.0;
+    let mut last_calculated_drop = 0.0;
+
+    for i in 0..max_iterations {
+        iterations = i + 1;
+        let test_velocity = (velocity_low + velocity_high) / 2.0;
+
+        // Run trajectory at test velocity
+        let calculated_drop_mil = calculate_drop_at_velocity(
+            test_velocity,
+            bc,
+            drag_model,
+            mass_gr,
+            diameter_in,
+            zero_distance_yd,
+            range_yd,
+            sight_height_in,
+            temperature_f,
+            pressure_inhg,
+            humidity,
+            altitude_ft,
+            bc_segments,
+        )?;
+
+        last_calculated_drop = calculated_drop_mil;
+        let error = calculated_drop_mil - measured_drop_mil;
+        last_error = error;
+
+        if error.abs() < tolerance_mil {
+            // Converged
+            let confidence = if error.abs() < 0.005 {
+                "high"
+            } else {
+                "medium"
+            };
+
+            return Ok(TrueVelocityLocalResult {
+                effective_velocity_fps: test_velocity,
+                iterations,
+                final_error_mil: error,
+                calculated_drop_mil,
+                confidence: confidence.to_string(),
+            });
+        }
+
+        // Higher calculated drop = bullet is slower = need higher velocity
+        // Lower calculated drop = bullet is faster = need lower velocity
+        if calculated_drop_mil > measured_drop_mil {
+            // Bullet dropping more than observed = slower than actual
+            // Need higher velocity
+            velocity_low = test_velocity;
+        } else {
+            // Bullet dropping less = faster than actual
+            // Need lower velocity
+            velocity_high = test_velocity;
+        }
+
+        // Check for convergence issues
+        if (velocity_high - velocity_low).abs() < 0.5 {
+            break;
+        }
+    }
+
+    // Did not converge within tolerance, return best estimate
+    let final_velocity = (velocity_low + velocity_high) / 2.0;
+    let confidence = if last_error.abs() < 0.1 { "medium" } else { "low" };
+
+    Ok(TrueVelocityLocalResult {
+        effective_velocity_fps: final_velocity,
+        iterations,
+        final_error_mil: last_error,
+        calculated_drop_mil: last_calculated_drop,
+        confidence: confidence.to_string(),
+    })
 }
