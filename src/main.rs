@@ -7,6 +7,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod pdf_dope_card;
+use pdf_dope_card::{DopeCardConfig, DopeCardRow, calculate_density_altitude, yards_to_mil, calculate_lead_mil};
+
 use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BallisticInputs, BCSegmentData, DragModel,
     MonteCarloParams, TrajectorySolver, WindConditions,
@@ -483,6 +486,27 @@ enum Commands {
         #[cfg(feature = "online")]
         #[arg(long, default_value = "linear", help = "Weather zone interpolation: linear, cubic, step")]
         weather_zone_interpolation: String,
+
+        // PDF Dope Card Parameters
+        /// Target speed in mph (for lead calculation in PDF output)
+        #[arg(long, default_value = "0.0")]
+        target_speed: f64,
+
+        /// Powder type/name (for PDF metadata)
+        #[arg(long)]
+        powder: Option<String>,
+
+        /// Bullet name (for PDF metadata)
+        #[arg(long)]
+        bullet_name: Option<String>,
+
+        /// Location name for PDF header (overrides --site for display)
+        #[arg(long)]
+        location_name: Option<String>,
+
+        /// Output file path (required for PDF format)
+        #[arg(long, value_name = "FILE")]
+        output_file: Option<PathBuf>,
     },
 
     /// Run Monte Carlo simulation
@@ -761,6 +785,7 @@ enum OutputFormat {
     Json,
     Csv,
     Table,
+    Pdf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -1116,6 +1141,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_shear_model,
             #[cfg(feature = "online")]
             weather_zone_interpolation,
+            // PDF dope card parameters
+            target_speed,
+            powder,
+            bullet_name,
+            location_name,
+            output_file,
         } => {
             // Load profile from CSV if specified
             let profile_data: HashMap<String, String> = if let (Some(path), Some(row)) = (&profile, &profile_row) {
@@ -1471,6 +1502,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Metric => bore_height_value,
             };
 
+            // Construct PDF metadata if PDF output is requested
+            let pdf_metadata = if matches!(output, OutputFormat::Pdf) {
+                // Get rifle name from profile_row or use a default
+                let rifle_name = profile_row.clone().unwrap_or_else(|| "Rifle".to_string());
+                // Get location name: CLI > site > default
+                let loc_name = location_name.clone()
+                    .or_else(|| site.clone())
+                    .unwrap_or_else(|| "Field".to_string());
+                // Get powder and bullet from CLI, or from profile if available
+                let powder_name = powder.clone()
+                    .or_else(|| profile_data.get("POWDER_NAME").cloned())
+                    .unwrap_or_default();
+                let bullet_display = bullet_name.clone()
+                    .or_else(|| profile_data.get("BULLET_NAME").cloned())
+                    .unwrap_or_default();
+
+                Some(PdfMetadata {
+                    rifle_name,
+                    location_name: loc_name,
+                    powder: powder_name,
+                    bullet_name: bullet_display,
+                    target_speed_mph: target_speed,
+                    output_file: output_file.clone(),
+                    velocity_fps: trued_velocity,
+                    temperature_f: final_temperature,
+                    pressure_inhg: final_pressure,
+                    altitude_ft: final_altitude,
+                    wind_speed_mph: final_wind_speed,
+                    weight_gr: bullet_mass,
+                })
+            } else {
+                None
+            };
+
             // Calculate zero angle if auto-zero is specified (from CLI or profile)
             let muzzle_angle = if let Some(zero_distance) = final_auto_zero {
                 let zero_distance_metric =
@@ -1672,6 +1737,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 powder_temp_sensitivity,
                                 powder_temp,
                                 bc_table_segments.clone(),
+                                pdf_metadata.clone(),
                             )?;
                         }
                         (Ok(api_response), false) => {
@@ -1724,6 +1790,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     powder_temp_sensitivity,
                                     powder_temp,
                                     bc_table_segments.clone(),
+                                    pdf_metadata.clone(),
                                 )?;
                             } else {
                                 eprintln!("Error: API request failed: {}", e);
@@ -1775,6 +1842,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         powder_temp_sensitivity,
                         powder_temp,
                         bc_table_segments.clone(),
+                        pdf_metadata.clone(),
                     )?;
                 }
             }
@@ -1823,6 +1891,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     powder_temp_sensitivity,
                     powder_temp,
                     bc_table_segments.clone(),
+                    pdf_metadata.clone(),
                 )?;
             }
         }
@@ -2323,6 +2392,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// PDF-specific metadata for dope card generation
+#[derive(Debug, Clone, Default)]
+struct PdfMetadata {
+    rifle_name: String,
+    location_name: String,
+    powder: String,
+    bullet_name: String,
+    target_speed_mph: f64,
+    output_file: Option<PathBuf>,
+    // Original imperial values for header display
+    velocity_fps: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    altitude_ft: f64,
+    wind_speed_mph: f64,
+    weight_gr: f64,
+}
+
 fn run_trajectory(
     velocity: f64,
     angle: f64,
@@ -2364,6 +2451,7 @@ fn run_trajectory(
     powder_temp_sensitivity: f64,
     powder_temp: f64,
     bc_table_segments: Option<Vec<BCSegmentData>>, // BC segments from table lookup
+    pdf_metadata: Option<PdfMetadata>,             // PDF dope card metadata
 ) -> Result<(), Box<dyn Error>> {
     // Create ballistic inputs with all required fields
     let drag_model_enum = match drag_model {
@@ -2896,6 +2984,83 @@ fn run_trajectory(
                 }
             }
         }
+
+        OutputFormat::Pdf => {
+            // PDF output requires metadata and output file
+            let pdf_meta = pdf_metadata.ok_or("PDF output requires metadata (use --target-speed, --powder, --bullet-name, etc.)")?;
+            let output_path = pdf_meta.output_file.as_ref().ok_or("PDF output requires --output-file")?;
+
+            // Get sampled trajectory points (required for dope card)
+            let sampled = result.sampled_points.as_ref().ok_or(
+                "PDF output requires --sample-trajectory flag for trajectory data"
+            )?;
+
+            // Calculate density altitude
+            let da_ft = calculate_density_altitude(
+                pdf_meta.altitude_ft,
+                pdf_meta.pressure_inhg,
+                pdf_meta.temperature_f,
+            );
+
+            // Build PDF config
+            let pdf_config = DopeCardConfig {
+                rifle_name: pdf_meta.rifle_name.clone(),
+                location: pdf_meta.location_name.clone(),
+                density_altitude_ft: da_ft,
+                pressure_inhg: pdf_meta.pressure_inhg,
+                pressure_hpa: pdf_meta.pressure_inhg * 33.8639,
+                temperature_f: pdf_meta.temperature_f,
+                altitude_ft: pdf_meta.altitude_ft,
+                wind_speed_mph: pdf_meta.wind_speed_mph,
+                target_speed_mph: pdf_meta.target_speed_mph,
+                solver_mode: if cfg!(feature = "online") { "online".to_string() } else { "offline".to_string() },
+                powder: pdf_meta.powder.clone(),
+                bullet: pdf_meta.bullet_name.clone(),
+                weight_gr: pdf_meta.weight_gr,
+                bc,
+                drag_model: match drag_model {
+                    DragModelArg::G1 => "G1".to_string(),
+                    DragModelArg::G7 => "G7".to_string(),
+                },
+                velocity_fps: pdf_meta.velocity_fps,
+            };
+
+            // Convert sampled trajectory to dope card rows
+            // Filter from zero range onwards (typically 100 yards)
+            let rows: Vec<DopeCardRow> = sampled.iter()
+                .filter(|s| s.distance_m >= UnitConverter::distance_to_metric(100.0, UnitSystem::Imperial))
+                .map(|s| {
+                    // Convert distance to yards for range
+                    let range_yd = UnitConverter::distance_from_metric(s.distance_m, UnitSystem::Imperial);
+                    // Convert drop to yards (s.drop_m is already in meters, negative = below line of sight)
+                    let drop_yd = s.drop_m / 0.9144; // meters to yards
+                    // Convert drift to yards
+                    let drift_yd = s.wind_drift_m / 0.9144;
+
+                    DopeCardRow {
+                        range_yd: range_yd.round() as u32,
+                        // Drop MIL: positive = dial up (bullet is below line of sight)
+                        drop_mil: yards_to_mil(-drop_yd, range_yd),
+                        // Wind MIL: positive = dial right for wind from right
+                        wind_mil: yards_to_mil(drift_yd, range_yd),
+                        // Lead MIL for moving target
+                        lead_mil: calculate_lead_mil(pdf_meta.target_speed_mph, s.time_s, range_yd),
+                    }
+                })
+                .collect();
+
+            if rows.is_empty() {
+                return Err("No trajectory data available for PDF output. Ensure --sample-trajectory is enabled and range > 100 yards.".into());
+            }
+
+            // Generate PDF
+            let pdf_bytes = pdf_dope_card::generate_dope_card_pdf(&pdf_config, &rows)?;
+
+            // Write to file
+            std::fs::write(output_path, &pdf_bytes)?;
+            eprintln!("PDF dope card written to: {}", output_path.display());
+            eprintln!("  {} ranges from {} to {} yards", rows.len(), rows.first().map(|r| r.range_yd).unwrap_or(0), rows.last().map(|r| r.range_yd).unwrap_or(0));
+        }
     }
 
     Ok(())
@@ -3095,6 +3260,11 @@ fn display_api_trajectory_result(
                 }
                 println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
             }
+        }
+
+        OutputFormat::Pdf => {
+            eprintln!("Error: PDF output is not supported for API trajectory results.");
+            eprintln!("Hint: Use local calculation (without --online) for PDF dope card generation.");
         }
     }
 
@@ -3347,6 +3517,11 @@ fn run_zero_calculation(
             );
             println!("╚════════════════════════════════════════╝");
         }
+
+        OutputFormat::Pdf => {
+            eprintln!("Error: PDF output is not supported for zero calculation.");
+            eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
+        }
     }
 
     Ok(())
@@ -3444,6 +3619,11 @@ fn run_bc_segment_generation(
 
             println!("╚════════════════════════════════════════╝");
         }
+
+        OutputFormat::Pdf => {
+            eprintln!("Error: PDF output is not supported for BC segment generation.");
+            eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
+        }
     }
 
     Ok(())
@@ -3538,6 +3718,11 @@ fn run_bc_estimation(
             println!("║   Error:           {:>8.2} %          ║", error2);
             println!("╚════════════════════════════════════════╝");
         }
+
+        OutputFormat::Pdf => {
+            eprintln!("Error: PDF output is not supported for BC estimation.");
+            eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
+        }
     }
 
     Ok(())
@@ -3630,6 +3815,11 @@ fn display_true_velocity_result(
             }
             println!("╚════════════════════════════════════════════════════════════╝");
             println!();
+        }
+
+        OutputFormat::Pdf => {
+            eprintln!("Error: PDF output is not supported for velocity truing results.");
+            eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
         }
     }
 
