@@ -61,8 +61,8 @@ rand_distr = "0.4"
 dirs = "6.0"
 strsim = "0.11"
 
-# PDF generation for dope cards
-genpdf = "0.2"
+# PDF generation for dope cards (using printpdf directly for filled shape support)
+printpdf = "0.7"
 
 # Optional: HTTP client for online mode
 ureq = { version = "2.12", optional = true, features = ["json"] }
