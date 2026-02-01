@@ -22,7 +22,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
   - **Transonic Analysis**: Pitch damping coefficients and stability warnings
   - **Trajectory Sampling**: Regular interval data collection for analysis
   - **Form Factor Corrections**: Bullet-specific drag adjustments
-- **Multiple Output Formats** - JSON, CSV, and formatted tables
+- **Multiple Output Formats** - JSON, CSV, formatted tables, and printable PDF dope cards
 
 ## Installation
 
