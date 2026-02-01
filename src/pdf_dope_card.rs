@@ -137,14 +137,16 @@ pub fn generate_dope_card_pdf(
     let font_bold_data = find_font_file("LiberationSans-Bold")?;
     let font_bold = doc.add_external_font(&*font_bold_data)?;
 
-    // Calculate rows per page (accounting for header and footer)
+    // Calculate visual rows per page (accounting for header and footer)
+    // Each visual row shows 2 data points (left + right columns)
     let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 30.0; // Leave space for header/footer
-    let rows_per_page = ((usable_height / ROW_HEIGHT) as usize).min(52);
-    let total_pages = (rows.len() + rows_per_page - 1) / rows_per_page;
+    let visual_rows_per_page = ((usable_height / ROW_HEIGHT) as usize).min(52);
+    let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
+    let total_pages = (rows.len() + data_rows_per_page - 1) / data_rows_per_page;
 
     for page_num in 0..total_pages {
-        let start_idx = page_num * rows_per_page;
-        let end_idx = std::cmp::min(start_idx + rows_per_page, rows.len());
+        let start_idx = page_num * data_rows_per_page;
+        let end_idx = std::cmp::min(start_idx + data_rows_per_page, rows.len());
         let page_rows = &rows[start_idx..end_idx];
 
         let (current_page, current_layer) = if page_num == 0 {
