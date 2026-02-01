@@ -78,9 +78,22 @@ pub fn calculate_lead_mil(target_speed_mph: f64, time_of_flight_s: f64, range_yd
 }
 
 /// Calculate density altitude from environmental conditions
-pub fn calculate_density_altitude(altitude_ft: f64, pressure_inhg: f64, temp_f: f64) -> f64 {
-    let pressure_alt = altitude_ft + (29.92 - pressure_inhg) * 1000.0;
+///
+/// MBA-643: Fixed to interpret pressure as STATION PRESSURE (actual local pressure),
+/// not altimeter setting (sea-level corrected). This matches how weather stations
+/// and most ballistic tools report pressure.
+///
+/// Formula: PA = 145442 * (1 - (P/29.92)^0.190284)
+///          DA = PA + 120 * (OAT - ISA_temp)
+pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f: f64) -> f64 {
+    // Calculate pressure altitude from station pressure using barometric formula
+    // This is the altitude in standard atmosphere that has the given pressure
+    let pressure_alt = 145442.0 * (1.0 - (pressure_inhg / 29.92_f64).powf(0.190284));
+
+    // ISA temperature at pressure altitude (lapse rate: 3.57°F per 1000 ft)
     let isa_temp_f = 59.0 - (pressure_alt / 1000.0) * 3.57;
+
+    // Density altitude = pressure altitude + temperature correction
     pressure_alt + 120.0 * (temp_f - isa_temp_f)
 }
 
@@ -452,11 +465,24 @@ mod tests {
 
     #[test]
     fn test_density_altitude() {
+        // MBA-643: Test with Glenn's reference conditions
+        // altitude=2500ft, pressure=27.32inHg (station), temp=55°F
+        // Glenn's tool: DA ≈ 2835 ft
         let da = calculate_density_altitude(2500.0, 27.32, 55.0);
-        assert!(da > 0.0, "DA should be positive");
+        assert!(da > 2500.0 && da < 3500.0,
+            "DA should be ~3000 ft for near-standard conditions, got {}", da);
+
+        // Higher temp should increase DA
         let da_hot = calculate_density_altitude(2500.0, 27.32, 95.0);
         assert!(da_hot > da, "Higher temp should increase DA");
+
+        // Lower pressure (thinner air) should increase DA
         let da_low_press = calculate_density_altitude(2500.0, 25.0, 55.0);
         assert!(da_low_press > da, "Lower pressure should increase DA");
+
+        // Standard conditions at sea level: DA ≈ 0
+        let da_standard = calculate_density_altitude(0.0, 29.92, 59.0);
+        assert!(da_standard.abs() < 100.0,
+            "Standard conditions should give DA near 0, got {}", da_standard);
     }
 }
