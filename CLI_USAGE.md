@@ -239,6 +239,94 @@ Estimate ballistic coefficient from observed trajectory:
   --distance2 200 --drop2 0.023
 ```
 
+### True Velocity Calculation
+
+Find the effective muzzle velocity that produces a measured drop at a known range. This helps "true" your ballistic system by identifying discrepancies between chronograph readings and real-world ballistic performance.
+
+```bash
+# Basic true velocity calculation (offline)
+./ballistics true-velocity \
+  --measured-drop 5.1    # Measured drop in MILs
+  --range 600            # Range where drop was measured (yards)
+  --bc 0.27              # Ballistic coefficient
+  --drag-model g7        # G7 drag model
+  --mass 140             # Bullet mass (grains)
+  --diameter 0.264       # Bullet diameter (inches)
+  --offline              # Use local calculation
+
+# With chronograph velocity for comparison
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --chrono-velocity 2822 \  # Compare against chrono reading
+  --offline
+
+# With BC5D tables for improved accuracy
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --bc-table-auto \        # Auto-download BC5D tables
+  --offline
+
+# Using online API (with fallback)
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --offline-fallback       # Try API, fall back to local if fails
+
+# Metric units
+./ballistics true-velocity --units metric \
+  --measured-drop 5.1 --range 549 \  # 549 meters ≈ 600 yards
+  --bc 0.27 --drag-model g7 \
+  --mass 9.07 --diameter 6.71 \      # grams, mm
+  --offline
+```
+
+#### True Velocity Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| --measured-drop | Measured drop in MILs (positive = below LOS) | Required |
+| --range | Range where drop was measured | Required |
+| --bc | Ballistic coefficient | Required |
+| --drag-model | Drag model (G1/G7) | g1 |
+| --mass | Bullet mass | Required |
+| --diameter | Bullet diameter | Required |
+| --chrono-velocity | Chronograph velocity for comparison | None |
+| --zero-range | Zero range | 100 yd/m |
+| --sight-height | Sight height above bore | 2.0 in/50mm |
+| --bullet-length | Bullet length (for BC5D lookup) | Auto-calculated |
+| --offline | Force offline mode (local calculation) | false |
+| --offline-fallback | Fall back to local if API fails | false |
+| --bc-table-dir | Directory with BC5D tables | None |
+| --bc-table-auto | Auto-download BC5D tables | false |
+
+#### Output
+
+The command outputs:
+- **Effective Velocity**: The calculated muzzle velocity that produces the measured drop
+- **Velocity Adjustment**: Difference from chrono velocity (if provided)
+- **Adjustment Percent**: Percentage adjustment from chrono
+- **Confidence**: High/Medium/Low based on convergence quality
+- **Iterations**: Number of iterations to converge
+- **Final Error**: Remaining error in MILs
+
+Example output:
+```
+True Velocity Results
+═════════════════════
+Effective Velocity:    2740 fps
+Chrono Velocity:       2822 fps
+Velocity Adjustment:   -82 fps (-2.91%)
+Confidence:            high
+Iterations:            12
+Final Error:           0.001 MIL
+Calculated Drop:       5.10 MIL
+```
+
 ## Output Formats
 
 All commands support three output formats via `-o`:
@@ -330,6 +418,31 @@ BC5D (5-Dimensional BC Correction) tables provide ML-derived corrections for imp
 | --bc-table-refresh | Force re-download even if cached (online feature) | false |
 
 **Note:** `--bc-table-auto`, `--bc-table-url`, and `--bc-table-refresh` require the `online` feature. Use `--bc-table-dir` for fully offline operation with pre-downloaded tables.
+
+### True Velocity Command
+
+| Parameter | Description | Default | Imperial | Metric |
+|-----------|-------------|---------|----------|--------|
+| --measured-drop | Measured drop in MILs | Required | MIL | MIL |
+| --range | Range where drop was measured | Required | yards | meters |
+| -b, --bc | Ballistic coefficient | Required | - | - |
+| --drag-model | Drag model (G1/G7) | g1 | - | - |
+| -m, --mass | Bullet mass | Required | grains | grams |
+| -d, --diameter | Bullet diameter | Required | inches | mm |
+| --chrono-velocity | Chronograph velocity for comparison | None | fps | m/s |
+| --zero-range | Zero range | 100 | yards | meters |
+| --sight-height | Sight height above bore | 2.0 | inches | mm |
+| --bullet-length | Bullet length (for BC5D lookup) | auto | inches | mm |
+| --temperature | Temperature | 59 | °F | °C |
+| --pressure | Barometric pressure | 29.92 | inHg | hPa |
+| --humidity | Relative humidity | 50 | % | % |
+| --altitude | Altitude | 0 | feet | meters |
+| --offline | Force offline mode | false | - | - |
+| --offline-fallback | Fall back to local if API fails | false | - | - |
+| --bc-table-dir | Directory with BC5D tables | None | - | - |
+| --bc-table-auto | Auto-download BC5D tables | false | - | - |
+
+**Note:** The true-velocity command works in both online and offline modes. Use `--offline` for fully local calculation, or omit for API-based calculation (requires `online` feature).
 
 
 ## Practical Examples

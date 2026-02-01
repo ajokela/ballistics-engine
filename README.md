@@ -254,6 +254,36 @@ Estimate ballistic coefficient from observed trajectory data:
   --distance2 200 --drop2 0.023  # Second data point
 ```
 
+### True Velocity (Velocity Truing)
+
+Calculate the effective muzzle velocity that produces a measured drop at a known range. This helps "true" your ballistic system by identifying discrepancies between chronograph readings and real-world performance.
+
+```bash
+# Basic offline calculation
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --offline
+
+# With chronograph comparison
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --chrono-velocity 2822 \
+  --offline
+
+# With BC5D tables for improved accuracy
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --bc-table-auto --offline
+```
+
+Use case: A shooter measures 5.1 MIL of drop at 600 yards. Their chronograph showed 2822 fps. The command calculates the effective velocity is actually ~2740 fps, suggesting a -82 fps adjustment for accurate ballistic predictions.
+
 ## Advanced Features
 
 ### Online Mode (API Integration)
