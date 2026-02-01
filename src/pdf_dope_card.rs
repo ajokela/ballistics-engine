@@ -3,11 +3,10 @@
 //! Generates printable dope cards in Glenn's proven field-ready format.
 //! Format: Two-column layout with Range, Drop MIL, Wind MIL, Lead MIL
 //! Color coding: Black=Range, Red=Drop, Green=Wind, Blue=Lead
+//! Row striping for improved readability.
 
-use genpdf::elements::{Break, Paragraph, TableLayout};
-use genpdf::fonts;
-use genpdf::style::{Color, Style};
-use genpdf::{Document, Element};
+use printpdf::*;
+use std::io::BufWriter;
 
 /// Configuration for the dope card PDF
 #[derive(Debug, Clone)]
@@ -39,11 +38,26 @@ pub struct DopeCardRow {
     pub lead_mil: f64,
 }
 
-// Define colors matching Glenn's format
-const COLOR_BLACK: Color = Color::Rgb(0, 0, 0);
-const COLOR_RED: Color = Color::Rgb(200, 0, 0);
-const COLOR_GREEN: Color = Color::Rgb(0, 128, 0);
-const COLOR_BLUE: Color = Color::Rgb(0, 0, 200);
+// Page dimensions (Letter size in mm)
+const PAGE_WIDTH: f32 = 215.9;
+const PAGE_HEIGHT: f32 = 279.4;
+const MARGIN: f32 = 10.0;
+
+// Font sizes
+const HEADER_FONT_SIZE: f32 = 9.0;
+const TABLE_FONT_SIZE: f32 = 8.0;
+const FOOTER_FONT_SIZE: f32 = 8.0;
+
+// Table layout
+const ROW_HEIGHT: f32 = 4.5;
+const COL_WIDTH: f32 = 24.0; // Width per column (8 columns total)
+
+// Colors (RGB 0.0-1.0)
+const COLOR_BLACK: (f32, f32, f32) = (0.0, 0.0, 0.0);
+const COLOR_RED: (f32, f32, f32) = (0.78, 0.0, 0.0);
+const COLOR_GREEN: (f32, f32, f32) = (0.0, 0.5, 0.0);
+const COLOR_BLUE: (f32, f32, f32) = (0.0, 0.0, 0.78);
+const COLOR_STRIPE: (f32, f32, f32) = (0.94, 0.94, 0.94); // Light gray for alternating rows
 
 /// Convert drop in yards to MILs
 pub fn yards_to_mil(drop_yd: f64, range_yd: f64) -> f64 {
@@ -70,46 +84,62 @@ pub fn calculate_density_altitude(altitude_ft: f64, pressure_inhg: f64, temp_f: 
     pressure_alt + 120.0 * (temp_f - isa_temp_f)
 }
 
-/// Generate a dope card PDF matching Glenn's format
+/// Find font file in various locations
+fn find_font_file(font_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let locations = vec![
+        format!("./fonts/{}.ttf", font_name),
+        format!("../fonts/{}.ttf", font_name),
+    ];
+
+    // Try exe directory
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let font_path = exe_dir.join("fonts").join(format!("{}.ttf", font_name));
+            if font_path.exists() {
+                return Ok(std::fs::read(font_path)?);
+            }
+        }
+    }
+
+    // Try home directory
+    if let Some(home) = dirs::home_dir() {
+        let font_path = home
+            .join(".ballistics")
+            .join("fonts")
+            .join(format!("{}.ttf", font_name));
+        if font_path.exists() {
+            return Ok(std::fs::read(font_path)?);
+        }
+    }
+
+    // Try standard locations
+    for loc in locations {
+        if std::path::Path::new(&loc).exists() {
+            return Ok(std::fs::read(&loc)?);
+        }
+    }
+
+    Err(format!("Font {} not found", font_name).into())
+}
+
+/// Generate a dope card PDF matching Glenn's format with row striping
 pub fn generate_dope_card_pdf(
     config: &DopeCardConfig,
     rows: &[DopeCardRow],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // Try multiple font locations
-    let font_family = fonts::from_files("./fonts", "LiberationSans", None)
-        .or_else(|_| fonts::from_files("../fonts", "LiberationSans", None))
-        .or_else(|_| {
-            if let Ok(exe_path) = std::env::current_exe() {
-                if let Some(exe_dir) = exe_path.parent() {
-                    let fonts_dir = exe_dir.join("fonts");
-                    return fonts::from_files(fonts_dir, "LiberationSans", None);
-                }
-            }
-            Err(genpdf::error::Error::new(
-                "Font not found at exe path",
-                std::io::Error::new(std::io::ErrorKind::NotFound, "Font directory not found"),
-            ))
-        })
-        .or_else(|_| {
-            if let Some(home) = dirs::home_dir() {
-                let fonts_dir = home.join(".ballistics").join("fonts");
-                return fonts::from_files(fonts_dir, "LiberationSans", None);
-            }
-            Err(genpdf::error::Error::new(
-                "Font not found in home",
-                std::io::Error::new(std::io::ErrorKind::NotFound, "Font directory not found"),
-            ))
-        })?;
+    let (doc, page1, layer1) =
+        PdfDocument::new(&format!("{} Dope Card", config.rifle_name), Mm(PAGE_WIDTH), Mm(PAGE_HEIGHT), "Layer 1");
 
-    let mut doc = Document::new(font_family);
-    doc.set_title(format!("{} Dope Card", config.rifle_name));
-    doc.set_paper_size(genpdf::Size::new(215.9, 279.4)); // Letter size
+    // Load font
+    let font_data = find_font_file("LiberationSans-Regular")?;
+    let font = doc.add_external_font(&*font_data)?;
 
-    // Set minimal decoration with just margins
-    doc.set_minimal_conformance();
+    let font_bold_data = find_font_file("LiberationSans-Bold")?;
+    let font_bold = doc.add_external_font(&*font_bold_data)?;
 
-    // Calculate rows per page
-    let rows_per_page = 52;
+    // Calculate rows per page (accounting for header and footer)
+    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 30.0; // Leave space for header/footer
+    let rows_per_page = ((usable_height / ROW_HEIGHT) as usize).min(52);
     let total_pages = (rows.len() + rows_per_page - 1) / rows_per_page;
 
     for page_num in 0..total_pages {
@@ -117,23 +147,36 @@ pub fn generate_dope_card_pdf(
         let end_idx = std::cmp::min(start_idx + rows_per_page, rows.len());
         let page_rows = &rows[start_idx..end_idx];
 
-        if page_num > 0 {
-            doc.push(Break::new(1.5));
-        }
+        let (current_page, current_layer) = if page_num == 0 {
+            (page1, layer1)
+        } else {
+            doc.add_page(Mm(PAGE_WIDTH), Mm(PAGE_HEIGHT), &format!("Page {}", page_num + 1))
+        };
 
-        add_header(&mut doc, config, page_num + 1, total_pages);
-        add_dope_table(&mut doc, page_rows);
-        add_footer(&mut doc, config);
+        let layer = doc.get_page(current_page).get_layer(current_layer);
+
+        render_page(&layer, &font, &font_bold, config, page_rows, page_num + 1, total_pages)?;
     }
 
     let mut buffer = Vec::new();
-    doc.render(&mut buffer)?;
+    doc.save(&mut BufWriter::new(&mut buffer))?;
     Ok(buffer)
 }
 
-fn add_header(doc: &mut Document, config: &DopeCardConfig, page: usize, _total_pages: usize) {
+fn render_page(
+    layer: &PdfLayerReference,
+    font: &IndirectFontRef,
+    font_bold: &IndirectFontRef,
+    config: &DopeCardConfig,
+    rows: &[DopeCardRow],
+    page: usize,
+    _total_pages: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut y = PAGE_HEIGHT - MARGIN;
+
+    // Header line 1
     let header1 = format!(
-        "{} Loc: {} DA:{:.0} ft Pressure:{:.2}/{:.2} Temp:{:.2} Alt:{:.0} Wind:{:.0} Mph",
+        "{} Loc: {} DA:{:.0} ft Pressure:{:.2}/{:.0} Temp:{:.0} Alt:{:.0} Wind:{:.0} Mph",
         config.rifle_name,
         config.location,
         config.density_altitude_ft,
@@ -143,90 +186,52 @@ fn add_header(doc: &mut Document, config: &DopeCardConfig, page: usize, _total_p
         config.altitude_ft,
         config.wind_speed_mph
     );
+    draw_centered_text(layer, font, HEADER_FONT_SIZE, y, &header1, COLOR_BLACK);
+    y -= 4.0;
 
-    let mut p1 = Paragraph::new(header1);
-    p1.set_alignment(genpdf::Alignment::Center);
-    doc.push(p1);
-
+    // Header line 2
     let header2 = format!(
-        "TargetSpeed:{:.0} Solver: {} — Pg {}",
-        config.target_speed_mph,
-        config.solver_mode,
-        page
+        "TargetSpeed:{:.0} Solver: {} - Pg {}",
+        config.target_speed_mph, config.solver_mode, page
     );
+    draw_centered_text(layer, font, HEADER_FONT_SIZE, y, &header2, COLOR_BLACK);
+    y -= 6.0;
 
-    let mut p2 = Paragraph::new(header2);
-    p2.set_alignment(genpdf::Alignment::Center);
-    doc.push(p2);
+    // Table start position
+    let table_x = (PAGE_WIDTH - (8.0 * COL_WIDTH)) / 2.0;
 
-    doc.push(Break::new(0.5));
-}
+    // Draw table header
+    draw_table_header(layer, font_bold, table_x, y);
+    y -= ROW_HEIGHT;
 
-fn add_dope_table(doc: &mut Document, rows: &[DopeCardRow]) {
+    // Split rows into left and right columns
     let mid = (rows.len() + 1) / 2;
     let (left_rows, right_rows) = rows.split_at(mid);
 
-    let mut table = TableLayout::new(vec![1, 1, 1, 1, 1, 1, 1, 1]);
-    table.set_cell_decorator(genpdf::elements::FrameCellDecorator::new(false, false, false));
-
-    // Header row
-    {
-        let header_style = Style::new().bold();
-        let mut row = table.row();
-        row.push_element(create_cell("Range\nYd", header_style.clone().with_color(COLOR_BLACK)));
-        row.push_element(create_cell("Drop\nMIL", header_style.clone().with_color(COLOR_RED)));
-        row.push_element(create_cell("Wind\nMIL", header_style.clone().with_color(COLOR_GREEN)));
-        row.push_element(create_cell("Lead\nMIL", header_style.clone().with_color(COLOR_BLUE)));
-        row.push_element(create_cell("Range\nYd", header_style.clone().with_color(COLOR_BLACK)));
-        row.push_element(create_cell("Drop\nMIL", header_style.clone().with_color(COLOR_RED)));
-        row.push_element(create_cell("Wind\nMIL", header_style.clone().with_color(COLOR_GREEN)));
-        row.push_element(create_cell("Lead\nMIL", header_style.with_color(COLOR_BLUE)));
-        row.push().expect("Failed to push header row");
-    }
-
-    // Data rows
+    // Draw data rows with striping
     for i in 0..left_rows.len() {
         let left = &left_rows[i];
         let right = right_rows.get(i);
 
-        let mut row = table.row();
-
-        // Left column
-        row.push_element(create_cell(&left.range_yd.to_string(), Style::new().with_color(COLOR_BLACK)));
-        row.push_element(create_cell(&format!("{:.1}", left.drop_mil), Style::new().with_color(COLOR_RED)));
-        row.push_element(create_cell(&format!("{:.1}", left.wind_mil), Style::new().with_color(COLOR_GREEN)));
-        row.push_element(create_cell(&format!("{:.1}", left.lead_mil), Style::new().with_color(COLOR_BLUE)));
-
-        // Right column
-        if let Some(r) = right {
-            row.push_element(create_cell(&r.range_yd.to_string(), Style::new().with_color(COLOR_BLACK)));
-            row.push_element(create_cell(&format!("{:.1}", r.drop_mil), Style::new().with_color(COLOR_RED)));
-            row.push_element(create_cell(&format!("{:.1}", r.wind_mil), Style::new().with_color(COLOR_GREEN)));
-            row.push_element(create_cell(&format!("{:.1}", r.lead_mil), Style::new().with_color(COLOR_BLUE)));
-        } else {
-            row.push_element(create_cell("", Style::new()));
-            row.push_element(create_cell("", Style::new()));
-            row.push_element(create_cell("", Style::new()));
-            row.push_element(create_cell("", Style::new()));
+        // Draw stripe background for alternating rows
+        if i % 2 == 1 {
+            draw_row_stripe(layer, table_x, y, 8.0 * COL_WIDTH, ROW_HEIGHT);
         }
 
-        row.push().expect("Failed to push data row");
+        // Draw left side data
+        draw_data_row(layer, font, table_x, y, left, true);
+
+        // Draw right side data
+        if let Some(r) = right {
+            draw_data_row(layer, font, table_x + 4.0 * COL_WIDTH, y, r, false);
+        }
+
+        y -= ROW_HEIGHT;
     }
 
-    doc.push(table);
-}
-
-fn create_cell(text: &str, style: Style) -> impl Element {
-    let mut p = Paragraph::new(text);
-    p.set_alignment(genpdf::Alignment::Center);
-    p.styled(style)
-}
-
-fn add_footer(doc: &mut Document, config: &DopeCardConfig) {
-    doc.push(Break::new(0.5));
-
+    // Footer
+    y -= 2.0;
     let timestamp = get_timestamp();
-
     let footer1 = format!(
         "{} Powder:{} Bullet:{} Weight:{:.0} BC:{:.3} Type:{}",
         timestamp,
@@ -236,16 +241,111 @@ fn add_footer(doc: &mut Document, config: &DopeCardConfig) {
         config.bc,
         config.drag_model.to_lowercase()
     );
-
-    let mut f1 = Paragraph::new(footer1);
-    f1.set_alignment(genpdf::Alignment::Center);
-    doc.push(f1);
+    draw_centered_text(layer, font, FOOTER_FONT_SIZE, y, &footer1, COLOR_BLACK);
+    y -= 4.0;
 
     let footer2 = format!("Velocity:{:.0} fps", config.velocity_fps);
+    draw_centered_text(layer, font, FOOTER_FONT_SIZE, y, &footer2, COLOR_BLACK);
 
-    let mut f2 = Paragraph::new(footer2);
-    f2.set_alignment(genpdf::Alignment::Center);
-    doc.push(f2);
+    Ok(())
+}
+
+fn draw_row_stripe(layer: &PdfLayerReference, x: f32, y: f32, width: f32, height: f32) {
+    use printpdf::path::PaintMode;
+
+    let points = vec![
+        (Point::new(Mm(x), Mm(y)), false),
+        (Point::new(Mm(x + width), Mm(y)), false),
+        (Point::new(Mm(x + width), Mm(y - height)), false),
+        (Point::new(Mm(x), Mm(y - height)), false),
+    ];
+
+    let rect = Polygon {
+        rings: vec![points],
+        mode: PaintMode::Fill,
+        winding_order: printpdf::path::WindingOrder::NonZero,
+    };
+
+    layer.set_fill_color(Color::Rgb(Rgb::new(
+        COLOR_STRIPE.0,
+        COLOR_STRIPE.1,
+        COLOR_STRIPE.2,
+        None,
+    )));
+    layer.add_polygon(rect);
+}
+
+fn draw_table_header(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32) {
+    let headers = [
+        ("Range", COLOR_BLACK),
+        ("Drop", COLOR_RED),
+        ("Wind", COLOR_GREEN),
+        ("Lead", COLOR_BLUE),
+        ("Range", COLOR_BLACK),
+        ("Drop", COLOR_RED),
+        ("Wind", COLOR_GREEN),
+        ("Lead", COLOR_BLUE),
+    ];
+    let sub_headers = ["Yd", "MIL", "MIL", "MIL", "Yd", "MIL", "MIL", "MIL"];
+
+    for (i, ((header, color), sub)) in headers.iter().zip(sub_headers.iter()).enumerate() {
+        let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
+        draw_text(layer, font, TABLE_FONT_SIZE, col_x, y, header, *color, true);
+        draw_text(layer, font, TABLE_FONT_SIZE - 1.0, col_x, y - 3.0, sub, *color, true);
+    }
+}
+
+fn draw_data_row(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32, row: &DopeCardRow, _is_left: bool) {
+    let values = [
+        (row.range_yd.to_string(), COLOR_BLACK),
+        (format!("{:.1}", row.drop_mil), COLOR_RED),
+        (format!("{:.1}", row.wind_mil), COLOR_GREEN),
+        (format!("{:.1}", row.lead_mil), COLOR_BLUE),
+    ];
+
+    for (i, (value, color)) in values.iter().enumerate() {
+        let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
+        draw_text(layer, font, TABLE_FONT_SIZE, col_x, y - 2.5, value, *color, true);
+    }
+}
+
+fn draw_text(
+    layer: &PdfLayerReference,
+    font: &IndirectFontRef,
+    size: f32,
+    x: f32,
+    y: f32,
+    text: &str,
+    color: (f32, f32, f32),
+    center: bool,
+) {
+    layer.set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
+
+    // Approximate centering by estimating text width
+    let text_width = if center {
+        text.len() as f32 * size * 0.3  // Rough approximation
+    } else {
+        0.0
+    };
+
+    layer.use_text(text, size, Mm(x - text_width / 2.0), Mm(y), font);
+}
+
+fn draw_centered_text(
+    layer: &PdfLayerReference,
+    font: &IndirectFontRef,
+    size: f32,
+    y: f32,
+    text: &str,
+    color: (f32, f32, f32),
+) {
+    layer.set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
+
+    // Center on page
+    let text_width = text.len() as f32 * size * 0.28;
+    let x = (PAGE_WIDTH - text_width) / 2.0;
+
+    layer.use_text(text, size, Mm(x), Mm(y), font);
 }
 
 fn get_timestamp() -> String {
@@ -285,7 +385,9 @@ fn get_timestamp() -> String {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
 
-    let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month_names = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let day_names = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
 
     let mut month = 0;
@@ -348,13 +450,8 @@ mod tests {
 
     #[test]
     fn test_density_altitude() {
-        // Note: The DA formula used here may differ from Glenn's reference tool.
-        // Our formula uses standard altimeter setting approach which gives higher values.
-        // Glenn's DA of 2835 might use station pressure approach.
-        // For now, just verify the function produces reasonable positive values.
         let da = calculate_density_altitude(2500.0, 27.32, 55.0);
         assert!(da > 0.0, "DA should be positive");
-        // Also test that higher temps and lower pressures increase DA
         let da_hot = calculate_density_altitude(2500.0, 27.32, 95.0);
         assert!(da_hot > da, "Higher temp should increase DA");
         let da_low_press = calculate_density_altitude(2500.0, 25.0, 55.0);
