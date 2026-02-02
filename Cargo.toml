@@ -40,8 +40,9 @@ exclude = [
 ]
 
 [features]
-default = ["online"]
+default = ["online", "pdf"]
 online = ["dep:ureq"]
+pdf = ["dep:printpdf"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 
@@ -61,8 +62,8 @@ rand_distr = "0.4"
 dirs = "6.0"
 strsim = "0.11"
 
-# PDF generation for dope cards (using printpdf directly for filled shape support)
-printpdf = "0.7"
+# PDF generation for dope cards (optional, not WASM compatible)
+printpdf = { version = "0.7", optional = true }
 
 # Optional: HTTP client for online mode
 ureq = { version = "2.12", optional = true, features = ["json"] }

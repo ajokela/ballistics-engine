@@ -7,7 +7,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(feature = "pdf")]
 mod pdf_dope_card;
+#[cfg(feature = "pdf")]
 use pdf_dope_card::{DopeCardConfig, DopeCardRow, calculate_density_altitude, yards_to_mil, calculate_lead_mil};
 
 use ballistics_engine::{
