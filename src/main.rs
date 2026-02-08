@@ -212,7 +212,7 @@ fn ensure_tos_accepted() -> Result<bool, String> {
 #[derive(Parser)]
 #[command(name = "ballistics")]
 #[command(author = "Ballistics Engine Team")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "High-performance ballistics trajectory calculator", long_about = None)]
 struct Cli {
     /// Unit system for input/output (metric or imperial)
