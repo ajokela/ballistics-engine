@@ -207,16 +207,17 @@ pub fn generate_dope_card_pdf(
     let font_bold_data = find_font_file("LiberationSans-Bold")?;
     let font_bold = doc.add_external_font(&*font_bold_data)?;
 
-    // Compute scaled font sizes and row height (clamp to 0.5–3.0)
+    // Only scale the data table — header/footer stay at base size
+    // so they don't overflow or consume disproportionate page space
     let font_scale = config.font_scale.clamp(0.5, 3.0);
-    let header_size = HEADER_FONT_SIZE * font_scale;
-    let table_size = TABLE_FONT_SIZE * font_scale;
-    let footer_size = FOOTER_FONT_SIZE * font_scale;
-    let row_height = ROW_HEIGHT * font_scale;
+    let header_size = HEADER_FONT_SIZE;           // UNSCALED
+    let table_size = TABLE_FONT_SIZE * font_scale; // SCALED
+    let footer_size = FOOTER_FONT_SIZE;           // UNSCALED
+    let row_height = ROW_HEIGHT * font_scale;     // SCALED
 
     // Calculate visual rows per page (accounting for header and footer)
     // Each visual row shows 2 data points (left + right columns)
-    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 30.0 * font_scale; // Leave space for header/footer
+    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 30.0; // Leave space for header/footer (fixed)
     let visual_rows_per_page = ((usable_height / row_height) as usize).min(52);
     let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
     let total_pages = (rows.len() + data_rows_per_page - 1) / data_rows_per_page;
@@ -272,7 +273,7 @@ fn render_page(
         config.wind_speed_mph
     );
     draw_centered_text(layer, font, header_size, y, &header1, COLOR_BLACK);
-    y -= 4.0 * font_scale;
+    y -= 4.0;
 
     // Header line 2
     let header2 = format!(
@@ -280,7 +281,7 @@ fn render_page(
         config.target_speed_mph, config.solver_mode, page
     );
     draw_centered_text(layer, font, header_size, y, &header2, COLOR_BLACK);
-    y -= 6.0 * font_scale;
+    y -= 6.0;
 
     // Table start position
     let table_x = (PAGE_WIDTH - (8.0 * COL_WIDTH)) / 2.0;
@@ -315,7 +316,7 @@ fn render_page(
     }
 
     // Footer
-    y -= 2.0 * font_scale;
+    y -= 2.0;
     let timestamp = get_timestamp();
     let footer1 = format!(
         "{} Powder:{} Bullet:{} Weight:{:.0} BC:{:.3} Type:{}",
@@ -327,7 +328,7 @@ fn render_page(
         config.drag_model.to_lowercase()
     );
     draw_centered_text(layer, font, footer_size, y, &footer1, COLOR_BLACK);
-    y -= 4.0 * font_scale;
+    y -= 4.0;
 
     let footer2 = format!("Velocity:{:.0} fps", config.velocity_fps);
     draw_centered_text(layer, font, footer_size, y, &footer2, COLOR_BLACK);
