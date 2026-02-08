@@ -32,6 +32,34 @@ pub struct DopeCardConfig {
     pub drag_model: String,
     pub velocity_fps: f64,
     pub font_scale: f32,
+    pub bold_data: bool,
+}
+
+/// Preset font size profiles for dope cards
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FontSizePreset {
+    Small,
+    Medium,
+    Large,
+}
+
+impl FontSizePreset {
+    pub fn scale(&self) -> f32 {
+        match self {
+            Self::Small => 0.8,
+            Self::Medium => 1.0,
+            Self::Large => 1.4,
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "small" | "s" => Some(Self::Small),
+            "medium" | "m" => Some(Self::Medium),
+            "large" | "l" => Some(Self::Large),
+            _ => None,
+        }
+    }
 }
 
 /// A single row in the dope card table
@@ -192,6 +220,31 @@ fn find_in_directory(dir: &str, filename: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Truncate a string for header display, appending "..." if too long
+fn truncate_for_header(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        s.to_string()
+    } else if max_chars <= 3 {
+        s[..max_chars].to_string()
+    } else {
+        format!("{}...", &s[..max_chars - 3])
+    }
+}
+
+/// Draw a light gray separator line across the page width
+fn draw_separator_line(layer: &PdfLayerReference, y: f32) {
+    let line = Line {
+        points: vec![
+            (Point::new(Mm(MARGIN), Mm(y)), false),
+            (Point::new(Mm(PAGE_WIDTH - MARGIN), Mm(y)), false),
+        ],
+        is_closed: false,
+    };
+    layer.set_outline_color(Color::Rgb(Rgb::new(0.7, 0.7, 0.7, None)));
+    layer.set_outline_thickness(0.3);
+    layer.add_line(line);
+}
+
 /// Generate a dope card PDF matching Glenn's format with row striping
 pub fn generate_dope_card_pdf(
     config: &DopeCardConfig,
@@ -217,7 +270,7 @@ pub fn generate_dope_card_pdf(
 
     // Calculate visual rows per page (accounting for header and footer)
     // Each visual row shows 2 data points (left + right columns)
-    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 30.0; // Leave space for header/footer (fixed)
+    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 36.0; // Leave space for header/footer + separators
     let visual_rows_per_page = ((usable_height / row_height) as usize).min(52);
     let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
     let total_pages = (rows.len() + data_rows_per_page - 1) / data_rows_per_page;
@@ -236,7 +289,7 @@ pub fn generate_dope_card_pdf(
         let layer = doc.get_page(current_page).get_layer(current_layer);
 
         render_page(&layer, &font, &font_bold, config, page_rows, page_num + 1, total_pages,
-                     header_size, table_size, footer_size, row_height, font_scale)?;
+                     header_size, table_size, footer_size, row_height, font_scale, config.bold_data)?;
     }
 
     let mut buffer = Vec::new();
@@ -257,11 +310,12 @@ fn render_page(
     footer_size: f32,
     row_height: f32,
     font_scale: f32,
+    bold_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut y = PAGE_HEIGHT - MARGIN;
 
-    // Header line 1
-    let header1 = format!(
+    // Header line 1 (auto-truncate long text)
+    let header1 = truncate_for_header(&format!(
         "{} Loc: {} DA:{:.0} ft Pressure:{:.2}/{:.0} Temp:{:.0} Alt:{:.0} Wind:{:.0} Mph",
         config.rifle_name,
         config.location,
@@ -271,7 +325,7 @@ fn render_page(
         config.temperature_f,
         config.altitude_ft,
         config.wind_speed_mph
-    );
+    ), 77);
     draw_centered_text(layer, font, header_size, y, &header1, COLOR_BLACK);
     y -= 4.0;
 
@@ -281,7 +335,11 @@ fn render_page(
         config.target_speed_mph, config.solver_mode, page
     );
     draw_centered_text(layer, font, header_size, y, &header2, COLOR_BLACK);
-    y -= 6.0;
+    y -= 1.0;
+
+    // Separator line after header
+    draw_separator_line(layer, y);
+    y -= 5.0;
 
     // Table start position
     let table_x = (PAGE_WIDTH - (8.0 * COL_WIDTH)) / 2.0;
@@ -294,6 +352,9 @@ fn render_page(
     let mid = (rows.len() + 1) / 2;
     let (left_rows, right_rows) = rows.split_at(mid);
 
+    // Select font for data rows (bold or regular)
+    let data_font = if bold_data { font_bold } else { font };
+
     // Draw data rows with striping
     for i in 0..left_rows.len() {
         let left = &left_rows[i];
@@ -305,33 +366,36 @@ fn render_page(
         }
 
         // Draw left side data
-        draw_data_row(layer, font, table_x, y, left, true, table_size, font_scale);
+        draw_data_row(layer, data_font, table_x, y, left, true, table_size, font_scale);
 
         // Draw right side data
         if let Some(r) = right {
-            draw_data_row(layer, font, table_x + 4.0 * COL_WIDTH, y, r, false, table_size, font_scale);
+            draw_data_row(layer, data_font, table_x + 4.0 * COL_WIDTH, y, r, false, table_size, font_scale);
         }
 
         y -= row_height;
     }
 
-    // Footer
-    y -= 2.0;
-    let timestamp = get_timestamp();
+    // Separator line before footer
+    draw_separator_line(layer, y - 1.0);
+    y -= 5.0;
+
+    // Footer line 1: load data
     let footer1 = format!(
-        "{} Powder:{} Bullet:{} Weight:{:.0} BC:{:.3} Type:{}",
-        timestamp,
+        "Powder:{} Bullet:{} Weight:{:.0}gr BC:{:.3} ({}) Vel:{:.0}fps",
         config.powder,
         config.bullet,
         config.weight_gr,
         config.bc,
-        config.drag_model.to_lowercase()
+        config.drag_model.to_lowercase(),
+        config.velocity_fps,
     );
     draw_centered_text(layer, font, footer_size, y, &footer1, COLOR_BLACK);
     y -= 4.0;
 
-    let footer2 = format!("Velocity:{:.0} fps", config.velocity_fps);
-    draw_centered_text(layer, font, footer_size, y, &footer2, COLOR_BLACK);
+    // Footer line 2: timestamp
+    let timestamp = get_timestamp();
+    draw_centered_text(layer, font, footer_size, y, &timestamp, COLOR_BLACK);
 
     Ok(())
 }
