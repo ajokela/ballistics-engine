@@ -10,7 +10,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(feature = "pdf")]
 mod pdf_dope_card;
 #[cfg(feature = "pdf")]
-use pdf_dope_card::{DopeCardConfig, DopeCardRow, calculate_density_altitude, yards_to_mil, calculate_lead_mil};
+use pdf_dope_card::{DopeCardConfig, DopeCardRow, FontSizePreset, calculate_density_altitude, yards_to_mil, calculate_lead_mil};
 
 use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BallisticInputs, BCSegmentData, DragModel,
@@ -513,6 +513,14 @@ enum Commands {
         /// Font scale factor for PDF output (1.0 = default, 1.5 = 50% larger)
         #[arg(long, default_value = "1.0")]
         font_scale: f32,
+
+        /// Font size preset (small, medium, large) — overridden by --font-scale if both given
+        #[arg(long, value_name = "SIZE")]
+        font_preset: Option<String>,
+
+        /// Use bold font for data cells in PDF output
+        #[arg(long)]
+        bold_data: bool,
     },
 
     /// Run Monte Carlo simulation
@@ -1154,6 +1162,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             location_name,
             output_file,
             font_scale,
+            font_preset,
+            bold_data,
         } => {
             // Load profile from CSV if specified
             let profile_data: HashMap<String, String> = if let (Some(path), Some(row)) = (&profile, &profile_row) {
@@ -1525,6 +1535,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .or_else(|| profile_data.get("BULLET_NAME").cloned())
                     .unwrap_or_default();
 
+                // Resolve effective font scale: --font-scale overrides --font-preset
+                #[cfg(feature = "pdf")]
+                let effective_font_scale = if font_scale != 1.0 {
+                    font_scale
+                } else if let Some(ref preset) = font_preset {
+                    FontSizePreset::from_str(preset).map(|p| p.scale()).unwrap_or_else(|| {
+                        eprintln!("Warning: Unknown font preset '{}', using medium", preset);
+                        1.0
+                    })
+                } else {
+                    1.0
+                };
+                #[cfg(not(feature = "pdf"))]
+                let effective_font_scale = font_scale;
+
                 Some(PdfMetadata {
                     rifle_name,
                     location_name: loc_name,
@@ -1538,7 +1563,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     altitude_ft: final_altitude,
                     wind_speed_mph: final_wind_speed,
                     weight_gr: bullet_mass,
-                    font_scale,
+                    font_scale: effective_font_scale,
+                    bold_data,
                 })
             } else {
                 None
@@ -2417,6 +2443,7 @@ struct PdfMetadata {
     wind_speed_mph: f64,
     weight_gr: f64,
     font_scale: f32,
+    bold_data: bool,
 }
 
 fn run_trajectory(
@@ -3033,6 +3060,7 @@ fn run_trajectory(
                 },
                 velocity_fps: pdf_meta.velocity_fps,
                 font_scale: pdf_meta.font_scale,
+                bold_data: pdf_meta.bold_data,
             };
 
             // Convert sampled trajectory to dope card rows
