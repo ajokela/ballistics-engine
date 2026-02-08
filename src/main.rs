@@ -509,6 +509,10 @@ enum Commands {
         /// Output file path (required for PDF format)
         #[arg(long, value_name = "FILE")]
         output_file: Option<PathBuf>,
+
+        /// Font scale factor for PDF output (1.0 = default, 1.5 = 50% larger)
+        #[arg(long, default_value = "1.0")]
+        font_scale: f32,
     },
 
     /// Run Monte Carlo simulation
@@ -1149,6 +1153,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             bullet_name,
             location_name,
             output_file,
+            font_scale,
         } => {
             // Load profile from CSV if specified
             let profile_data: HashMap<String, String> = if let (Some(path), Some(row)) = (&profile, &profile_row) {
@@ -1533,6 +1538,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     altitude_ft: final_altitude,
                     wind_speed_mph: final_wind_speed,
                     weight_gr: bullet_mass,
+                    font_scale,
                 })
             } else {
                 None
@@ -2410,6 +2416,7 @@ struct PdfMetadata {
     altitude_ft: f64,
     wind_speed_mph: f64,
     weight_gr: f64,
+    font_scale: f32,
 }
 
 fn run_trajectory(
@@ -3025,6 +3032,7 @@ fn run_trajectory(
                     DragModelArg::G7 => "G7".to_string(),
                 },
                 velocity_fps: pdf_meta.velocity_fps,
+                font_scale: pdf_meta.font_scale,
             };
 
             // Convert sampled trajectory to dope card rows
