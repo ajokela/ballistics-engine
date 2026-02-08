@@ -8,6 +8,10 @@
 use printpdf::*;
 use std::io::BufWriter;
 
+// Embed Liberation Sans fonts directly into the binary (SIL Open Font License)
+static FONT_REGULAR: &[u8] = include_bytes!("../fonts/LiberationSans-Regular.ttf");
+static FONT_BOLD: &[u8] = include_bytes!("../fonts/LiberationSans-Bold.ttf");
+
 /// Configuration for the dope card PDF
 #[derive(Debug, Clone)]
 pub struct DopeCardConfig {
@@ -97,17 +101,15 @@ pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f:
     pressure_alt + 120.0 * (temp_f - isa_temp_f)
 }
 
-/// Find font file in various locations
+/// Find font file - tries external locations first (for user overrides),
+/// then falls back to embedded fonts compiled into the binary.
 fn find_font_file(font_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let locations = vec![
-        format!("./fonts/{}.ttf", font_name),
-        format!("../fonts/{}.ttf", font_name),
-    ];
+    let ttf = format!("{}.ttf", font_name);
 
     // Try exe directory
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let font_path = exe_dir.join("fonts").join(format!("{}.ttf", font_name));
+            let font_path = exe_dir.join("fonts").join(&ttf);
             if font_path.exists() {
                 return Ok(std::fs::read(font_path)?);
             }
@@ -116,23 +118,77 @@ fn find_font_file(font_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>
 
     // Try home directory
     if let Some(home) = dirs::home_dir() {
-        let font_path = home
-            .join(".ballistics")
-            .join("fonts")
-            .join(format!("{}.ttf", font_name));
+        let font_path = home.join(".ballistics").join("fonts").join(&ttf);
         if font_path.exists() {
             return Ok(std::fs::read(font_path)?);
         }
     }
 
-    // Try standard locations
-    for loc in locations {
-        if std::path::Path::new(&loc).exists() {
-            return Ok(std::fs::read(&loc)?);
+    // Try working directory
+    for prefix in &["./fonts", "../fonts"] {
+        let font_path = std::path::Path::new(prefix).join(&ttf);
+        if font_path.exists() {
+            return Ok(std::fs::read(font_path)?);
         }
     }
 
-    Err(format!("Font {} not found", font_name).into())
+    // Try system font directories
+    #[cfg(target_os = "linux")]
+    {
+        for dir in &["/usr/share/fonts", "/usr/local/share/fonts"] {
+            if let Some(path) = find_in_directory(dir, &ttf) {
+                return Ok(std::fs::read(path)?);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for dir in &["/Library/Fonts", "/System/Library/Fonts"] {
+            let font_path = std::path::Path::new(dir).join(&ttf);
+            if font_path.exists() {
+                return Ok(std::fs::read(font_path)?);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(windir) = std::env::var("WINDIR") {
+            let font_path = std::path::Path::new(&windir).join("Fonts").join(&ttf);
+            if font_path.exists() {
+                return Ok(std::fs::read(font_path)?);
+            }
+        }
+    }
+
+    // Fall back to embedded fonts
+    match font_name {
+        "LiberationSans-Regular" => Ok(FONT_REGULAR.to_vec()),
+        "LiberationSans-Bold" => Ok(FONT_BOLD.to_vec()),
+        _ => Err(format!("Font {} not found", font_name).into()),
+    }
+}
+
+/// Recursively search a directory for a font file by name
+#[cfg(target_os = "linux")]
+fn find_in_directory(dir: &str, filename: &str) -> Option<std::path::PathBuf> {
+    let dir_path = std::path::Path::new(dir);
+    if !dir_path.is_dir() {
+        return None;
+    }
+    for entry in std::fs::read_dir(dir_path).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.file_name().map_or(false, |n| n == filename) {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_in_directory(path.to_str()?, filename) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 /// Generate a dope card PDF matching Glenn's format with row striping
