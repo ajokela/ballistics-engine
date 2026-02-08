@@ -31,6 +31,7 @@ pub struct DopeCardConfig {
     pub bc: f64,
     pub drag_model: String,
     pub velocity_fps: f64,
+    pub font_scale: f32,
 }
 
 /// A single row in the dope card table
@@ -206,10 +207,17 @@ pub fn generate_dope_card_pdf(
     let font_bold_data = find_font_file("LiberationSans-Bold")?;
     let font_bold = doc.add_external_font(&*font_bold_data)?;
 
+    // Compute scaled font sizes and row height (clamp to 0.5–3.0)
+    let font_scale = config.font_scale.clamp(0.5, 3.0);
+    let header_size = HEADER_FONT_SIZE * font_scale;
+    let table_size = TABLE_FONT_SIZE * font_scale;
+    let footer_size = FOOTER_FONT_SIZE * font_scale;
+    let row_height = ROW_HEIGHT * font_scale;
+
     // Calculate visual rows per page (accounting for header and footer)
     // Each visual row shows 2 data points (left + right columns)
-    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 30.0; // Leave space for header/footer
-    let visual_rows_per_page = ((usable_height / ROW_HEIGHT) as usize).min(52);
+    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 30.0 * font_scale; // Leave space for header/footer
+    let visual_rows_per_page = ((usable_height / row_height) as usize).min(52);
     let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
     let total_pages = (rows.len() + data_rows_per_page - 1) / data_rows_per_page;
 
@@ -226,7 +234,8 @@ pub fn generate_dope_card_pdf(
 
         let layer = doc.get_page(current_page).get_layer(current_layer);
 
-        render_page(&layer, &font, &font_bold, config, page_rows, page_num + 1, total_pages)?;
+        render_page(&layer, &font, &font_bold, config, page_rows, page_num + 1, total_pages,
+                     header_size, table_size, footer_size, row_height, font_scale)?;
     }
 
     let mut buffer = Vec::new();
@@ -242,6 +251,11 @@ fn render_page(
     rows: &[DopeCardRow],
     page: usize,
     _total_pages: usize,
+    header_size: f32,
+    table_size: f32,
+    footer_size: f32,
+    row_height: f32,
+    font_scale: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut y = PAGE_HEIGHT - MARGIN;
 
@@ -257,23 +271,23 @@ fn render_page(
         config.altitude_ft,
         config.wind_speed_mph
     );
-    draw_centered_text(layer, font, HEADER_FONT_SIZE, y, &header1, COLOR_BLACK);
-    y -= 4.0;
+    draw_centered_text(layer, font, header_size, y, &header1, COLOR_BLACK);
+    y -= 4.0 * font_scale;
 
     // Header line 2
     let header2 = format!(
         "TargetSpeed:{:.0} Solver: {} - Pg {}",
         config.target_speed_mph, config.solver_mode, page
     );
-    draw_centered_text(layer, font, HEADER_FONT_SIZE, y, &header2, COLOR_BLACK);
-    y -= 6.0;
+    draw_centered_text(layer, font, header_size, y, &header2, COLOR_BLACK);
+    y -= 6.0 * font_scale;
 
     // Table start position
     let table_x = (PAGE_WIDTH - (8.0 * COL_WIDTH)) / 2.0;
 
     // Draw table header
-    draw_table_header(layer, font_bold, table_x, y);
-    y -= ROW_HEIGHT;
+    draw_table_header(layer, font_bold, table_x, y, table_size, font_scale);
+    y -= row_height;
 
     // Split rows into left and right columns
     let mid = (rows.len() + 1) / 2;
@@ -286,22 +300,22 @@ fn render_page(
 
         // Draw stripe background for alternating rows
         if i % 2 == 1 {
-            draw_row_stripe(layer, table_x, y, 8.0 * COL_WIDTH, ROW_HEIGHT);
+            draw_row_stripe(layer, table_x, y, 8.0 * COL_WIDTH, row_height);
         }
 
         // Draw left side data
-        draw_data_row(layer, font, table_x, y, left, true);
+        draw_data_row(layer, font, table_x, y, left, true, table_size, font_scale);
 
         // Draw right side data
         if let Some(r) = right {
-            draw_data_row(layer, font, table_x + 4.0 * COL_WIDTH, y, r, false);
+            draw_data_row(layer, font, table_x + 4.0 * COL_WIDTH, y, r, false, table_size, font_scale);
         }
 
-        y -= ROW_HEIGHT;
+        y -= row_height;
     }
 
     // Footer
-    y -= 2.0;
+    y -= 2.0 * font_scale;
     let timestamp = get_timestamp();
     let footer1 = format!(
         "{} Powder:{} Bullet:{} Weight:{:.0} BC:{:.3} Type:{}",
@@ -312,11 +326,11 @@ fn render_page(
         config.bc,
         config.drag_model.to_lowercase()
     );
-    draw_centered_text(layer, font, FOOTER_FONT_SIZE, y, &footer1, COLOR_BLACK);
-    y -= 4.0;
+    draw_centered_text(layer, font, footer_size, y, &footer1, COLOR_BLACK);
+    y -= 4.0 * font_scale;
 
     let footer2 = format!("Velocity:{:.0} fps", config.velocity_fps);
-    draw_centered_text(layer, font, FOOTER_FONT_SIZE, y, &footer2, COLOR_BLACK);
+    draw_centered_text(layer, font, footer_size, y, &footer2, COLOR_BLACK);
 
     Ok(())
 }
@@ -346,7 +360,7 @@ fn draw_row_stripe(layer: &PdfLayerReference, x: f32, y: f32, width: f32, height
     layer.add_polygon(rect);
 }
 
-fn draw_table_header(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32) {
+fn draw_table_header(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32, table_size: f32, font_scale: f32) {
     let headers = [
         ("Range", COLOR_BLACK),
         ("Drop", COLOR_RED),
@@ -361,12 +375,12 @@ fn draw_table_header(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, 
 
     for (i, ((header, color), sub)) in headers.iter().zip(sub_headers.iter()).enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
-        draw_text(layer, font, TABLE_FONT_SIZE, col_x, y, header, *color, true);
-        draw_text(layer, font, TABLE_FONT_SIZE - 1.0, col_x, y - 3.0, sub, *color, true);
+        draw_text(layer, font, table_size, col_x, y, header, *color, true);
+        draw_text(layer, font, table_size - 1.0, col_x, y - 3.0 * font_scale, sub, *color, true);
     }
 }
 
-fn draw_data_row(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32, row: &DopeCardRow, _is_left: bool) {
+fn draw_data_row(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32, row: &DopeCardRow, _is_left: bool, table_size: f32, font_scale: f32) {
     let values = [
         (row.range_yd.to_string(), COLOR_BLACK),
         (format!("{:.1}", row.drop_mil), COLOR_RED),
@@ -376,7 +390,7 @@ fn draw_data_row(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f
 
     for (i, (value, color)) in values.iter().enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
-        draw_text(layer, font, TABLE_FONT_SIZE, col_x, y - 2.5, value, *color, true);
+        draw_text(layer, font, table_size, col_x, y - 2.5 * font_scale, value, *color, true);
     }
 }
 
