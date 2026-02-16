@@ -778,6 +778,297 @@ enum Commands {
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
     },
+
+    /// Calculate Maximum Point-Blank Range (MPBR)
+    Mpbr {
+        /// Load parameters from saved profile
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Initial velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long)]
+        velocity: Option<f64>,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: Option<f64>,
+
+        /// Mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long)]
+        mass: Option<f64>,
+
+        /// Diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long)]
+        diameter: Option<f64>,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Vital zone diameter (inches for imperial, cm for metric)
+        #[arg(long, default_value = "8.0")]
+        vital_zone: f64,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units)
+        #[arg(long, default_value = "59.0")]
+        temperature: f64,
+
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long, default_value = "29.92")]
+        pressure: f64,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Generate come-up (elevation adjustment) table
+    ComeUps {
+        /// Load parameters from saved profile
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Initial velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long)]
+        velocity: Option<f64>,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: Option<f64>,
+
+        /// Mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long)]
+        mass: Option<f64>,
+
+        /// Diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long)]
+        diameter: Option<f64>,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long)]
+        zero_distance: f64,
+
+        /// Start range (yards or meters)
+        #[arg(long, default_value = "100.0")]
+        start: f64,
+
+        /// End range (yards or meters)
+        #[arg(long, default_value = "1200.0")]
+        end: f64,
+
+        /// Range step (yards or meters)
+        #[arg(long, default_value = "50.0")]
+        step: f64,
+
+        /// Adjustment unit (mil or moa)
+        #[arg(long, default_value = "mil")]
+        adjustment_unit: AdjustmentUnit,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units)
+        #[arg(long, default_value = "59.0")]
+        temperature: f64,
+
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long, default_value = "29.92")]
+        pressure: f64,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Wind speed (mph or m/s based on --units)
+        #[arg(long, default_value = "0.0")]
+        wind_speed: f64,
+
+        /// Wind direction (degrees, 0=headwind, 90=from right)
+        #[arg(long, default_value = "0.0")]
+        wind_direction: f64,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Generate wind drift card (wind deflection at multiple speeds)
+    WindCard {
+        /// Load parameters from saved profile
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Initial velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long)]
+        velocity: Option<f64>,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: Option<f64>,
+
+        /// Mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long)]
+        mass: Option<f64>,
+
+        /// Diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long)]
+        diameter: Option<f64>,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long)]
+        zero_distance: f64,
+
+        /// Comma-separated wind speeds to calculate (mph or m/s)
+        #[arg(long, default_value = "5,10,15,20")]
+        wind_speeds: String,
+
+        /// Start range (yards or meters)
+        #[arg(long, default_value = "100.0")]
+        start: f64,
+
+        /// End range (yards or meters)
+        #[arg(long, default_value = "1000.0")]
+        end: f64,
+
+        /// Range step (yards or meters)
+        #[arg(long, default_value = "100.0")]
+        step: f64,
+
+        /// Adjustment unit (mil or moa)
+        #[arg(long, default_value = "mil")]
+        adjustment_unit: AdjustmentUnit,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units)
+        #[arg(long, default_value = "59.0")]
+        temperature: f64,
+
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long, default_value = "29.92")]
+        pressure: f64,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Manage saved ballistic profiles
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileAction {
+    /// Save a new profile
+    Save {
+        /// Profile name (used for recall)
+        name: String,
+
+        /// Initial velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long)]
+        velocity: f64,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: f64,
+
+        /// Mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long)]
+        mass: f64,
+
+        /// Diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long)]
+        diameter: f64,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Barrel twist rate (inches per turn)
+        #[arg(long)]
+        twist_rate: Option<f64>,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Default zero distance (yards for imperial, meters for metric)
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        /// Default temperature
+        #[arg(long, default_value = "59.0")]
+        temperature: f64,
+
+        /// Default pressure
+        #[arg(long, default_value = "29.92")]
+        pressure: f64,
+
+        /// Default humidity
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+
+        /// Default altitude
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Bullet name/description
+        #[arg(long)]
+        bullet_name: Option<String>,
+    },
+
+    /// List all saved profiles
+    List,
+
+    /// Show details of a saved profile
+    Show {
+        /// Profile name
+        name: String,
+    },
+
+    /// Delete a saved profile
+    Delete {
+        /// Profile name
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
@@ -808,6 +1099,50 @@ enum MonteCarloOutput {
     Full,
     Statistics,
 }
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AdjustmentUnit {
+    /// Milliradians (1 MIL = 3.6 inches at 100 yards)
+    Mil,
+    /// Minutes of Angle (1 MOA = 1.047 inches at 100 yards)
+    Moa,
+}
+
+/// Saved ballistic profile for quick recall
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfileData {
+    name: String,
+    velocity: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    drag_model: String,
+    #[serde(default)]
+    twist_rate: Option<f64>,
+    #[serde(default)]
+    sight_height: Option<f64>,
+    #[serde(default)]
+    zero_distance: Option<f64>,
+    #[serde(default = "default_unit_system")]
+    units: String,
+    #[serde(default = "default_temperature")]
+    temperature: f64,
+    #[serde(default = "default_pressure")]
+    pressure: f64,
+    #[serde(default = "default_humidity")]
+    humidity: f64,
+    #[serde(default)]
+    altitude: f64,
+    #[serde(default)]
+    bullet_name: Option<String>,
+    #[serde(default)]
+    created: Option<String>,
+}
+
+fn default_unit_system() -> String { "imperial".to_string() }
+fn default_temperature() -> f64 { 59.0 }
+fn default_pressure() -> f64 { 29.92 }
+fn default_humidity() -> f64 { 50.0 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TrajectoryPoint {
@@ -1074,6 +1409,98 @@ fn csv_get_f64(map: &HashMap<String, String>, keys: &[&str], default: f64) -> f6
         }
     }
     default
+}
+
+// ============================================================================
+// Profile Management Helpers
+// ============================================================================
+
+/// Get the profiles directory (~/.ballistics/profiles/)
+fn get_profiles_dir() -> Result<PathBuf, Box<dyn Error>> {
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let dir = home.join(".ballistics").join("profiles");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Save a profile to disk
+fn save_profile(profile: &ProfileData) -> Result<PathBuf, Box<dyn Error>> {
+    let dir = get_profiles_dir()?;
+    let path = dir.join(format!("{}.json", profile.name));
+    let json = serde_json::to_string_pretty(profile)?;
+    fs::write(&path, json)?;
+    Ok(path)
+}
+
+/// Load a profile by name
+fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
+    let dir = get_profiles_dir()?;
+    let path = dir.join(format!("{}.json", name));
+    if !path.exists() {
+        return Err(format!("Profile '{}' not found. Use 'ballistics profile list' to see available profiles.", name).into());
+    }
+    let content = fs::read_to_string(&path)?;
+    let profile: ProfileData = serde_json::from_str(&content)?;
+    Ok(profile)
+}
+
+/// List all saved profiles
+fn list_profiles() -> Result<Vec<ProfileData>, Box<dyn Error>> {
+    let dir = get_profiles_dir()?;
+    let mut profiles = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(profile) = serde_json::from_str::<ProfileData>(&content) {
+                    profiles.push(profile);
+                }
+            }
+        }
+    }
+    profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(profiles)
+}
+
+/// Delete a profile by name
+fn delete_profile(name: &str) -> Result<(), Box<dyn Error>> {
+    let dir = get_profiles_dir()?;
+    let path = dir.join(format!("{}.json", name));
+    if !path.exists() {
+        return Err(format!("Profile '{}' not found.", name).into());
+    }
+    fs::remove_file(&path)?;
+    Ok(())
+}
+
+/// Convert drop to adjustment unit (MIL or MOA)
+fn drop_to_adjustment(drop_yd: f64, range_yd: f64, unit: AdjustmentUnit) -> f64 {
+    if range_yd < 1.0 {
+        return 0.0;
+    }
+    match unit {
+        AdjustmentUnit::Mil => (drop_yd / range_yd) * 1000.0,
+        AdjustmentUnit::Moa => (drop_yd / range_yd) * 3438.0,
+    }
+}
+
+/// Get a timestamp string without chrono
+fn timestamp_string() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{}", secs)
+}
+
+/// Parse the drag model string from a profile
+fn parse_drag_model_arg(s: &str) -> DragModelArg {
+    match s.to_uppercase().as_str() {
+        "G7" => DragModelArg::G7,
+        _ => DragModelArg::G1,
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -2418,6 +2845,281 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // when online feature is not available, but add for completeness
                     eprintln!("Error: Online mode not available (compile with --features online)");
                     std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Mpbr {
+            profile,
+            velocity,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            vital_zone,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            output,
+        } => {
+            // Load profile if specified
+            let profile_data = profile.as_ref().map(|name| {
+                load_profile(name).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                })
+            });
+
+            let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
+                .unwrap_or_else(|| { eprintln!("Error: --velocity is required (or use --profile)"); std::process::exit(1); });
+            let final_bc = resolve_param(bc, &profile_data, |p| p.bc)
+                .unwrap_or_else(|| { eprintln!("Error: --bc is required (or use --profile)"); std::process::exit(1); });
+            let final_mass = resolve_param(mass, &profile_data, |p| p.mass)
+                .unwrap_or_else(|| { eprintln!("Error: --mass is required (or use --profile)"); std::process::exit(1); });
+            let final_diameter = resolve_param(diameter, &profile_data, |p| p.diameter)
+                .unwrap_or_else(|| { eprintln!("Error: --diameter is required (or use --profile)"); std::process::exit(1); });
+            let final_sight_height = sight_height
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_height))
+                .unwrap_or(match cli.units { UnitSystem::Imperial => 2.0, UnitSystem::Metric => 50.0 });
+            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
+                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
+            } else {
+                drag_model
+            };
+
+            handle_mpbr(
+                final_velocity, final_bc, final_mass, final_diameter,
+                final_drag_model, vital_zone, final_sight_height,
+                temperature, pressure, humidity, altitude,
+                cli.units, output,
+            )?;
+        }
+
+        Commands::ComeUps {
+            profile,
+            velocity,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            zero_distance,
+            start,
+            end,
+            step,
+            adjustment_unit,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            wind_speed,
+            wind_direction,
+            output,
+        } => {
+            let profile_data = profile.as_ref().map(|name| {
+                load_profile(name).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                })
+            });
+
+            let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
+                .unwrap_or_else(|| { eprintln!("Error: --velocity is required (or use --profile)"); std::process::exit(1); });
+            let final_bc = resolve_param(bc, &profile_data, |p| p.bc)
+                .unwrap_or_else(|| { eprintln!("Error: --bc is required (or use --profile)"); std::process::exit(1); });
+            let final_mass = resolve_param(mass, &profile_data, |p| p.mass)
+                .unwrap_or_else(|| { eprintln!("Error: --mass is required (or use --profile)"); std::process::exit(1); });
+            let final_diameter = resolve_param(diameter, &profile_data, |p| p.diameter)
+                .unwrap_or_else(|| { eprintln!("Error: --diameter is required (or use --profile)"); std::process::exit(1); });
+            let final_sight_height = sight_height
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_height))
+                .unwrap_or(match cli.units { UnitSystem::Imperial => 2.0, UnitSystem::Metric => 50.0 });
+            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
+                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
+            } else {
+                drag_model
+            };
+
+            handle_come_ups(
+                final_velocity, final_bc, final_mass, final_diameter,
+                final_drag_model, zero_distance, start, end, step,
+                adjustment_unit, final_sight_height,
+                temperature, pressure, humidity, altitude,
+                wind_speed, wind_direction,
+                cli.units, output,
+            )?;
+        }
+
+        Commands::WindCard {
+            profile,
+            velocity,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            zero_distance,
+            wind_speeds,
+            start,
+            end,
+            step,
+            adjustment_unit,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            output,
+        } => {
+            let profile_data = profile.as_ref().map(|name| {
+                load_profile(name).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                })
+            });
+
+            let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
+                .unwrap_or_else(|| { eprintln!("Error: --velocity is required (or use --profile)"); std::process::exit(1); });
+            let final_bc = resolve_param(bc, &profile_data, |p| p.bc)
+                .unwrap_or_else(|| { eprintln!("Error: --bc is required (or use --profile)"); std::process::exit(1); });
+            let final_mass = resolve_param(mass, &profile_data, |p| p.mass)
+                .unwrap_or_else(|| { eprintln!("Error: --mass is required (or use --profile)"); std::process::exit(1); });
+            let final_diameter = resolve_param(diameter, &profile_data, |p| p.diameter)
+                .unwrap_or_else(|| { eprintln!("Error: --diameter is required (or use --profile)"); std::process::exit(1); });
+            let final_sight_height = sight_height
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_height))
+                .unwrap_or(match cli.units { UnitSystem::Imperial => 2.0, UnitSystem::Metric => 50.0 });
+            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
+                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
+            } else {
+                drag_model
+            };
+
+            // Parse wind speeds
+            let ws_vec: Vec<f64> = wind_speeds.split(',')
+                .filter_map(|s| s.trim().parse::<f64>().ok())
+                .collect();
+            if ws_vec.is_empty() {
+                eprintln!("Error: --wind-speeds must contain at least one valid number (e.g., '5,10,15,20')");
+                std::process::exit(1);
+            }
+
+            handle_wind_card(
+                final_velocity, final_bc, final_mass, final_diameter,
+                final_drag_model, zero_distance, &ws_vec,
+                start, end, step,
+                adjustment_unit, final_sight_height,
+                temperature, pressure, humidity, altitude,
+                cli.units, output,
+            )?;
+        }
+
+        Commands::Profile { action } => {
+            match action {
+                ProfileAction::Save {
+                    name, velocity, bc, mass, diameter, drag_model,
+                    twist_rate, sight_height, zero_distance,
+                    temperature, pressure, humidity, altitude,
+                    bullet_name,
+                } => {
+                    let drag_str = match drag_model {
+                        DragModelArg::G1 => "G1",
+                        DragModelArg::G7 => "G7",
+                    };
+                    let units_str = match cli.units {
+                        UnitSystem::Imperial => "imperial",
+                        UnitSystem::Metric => "metric",
+                    };
+
+                    let profile = ProfileData {
+                        name: name.clone(),
+                        velocity,
+                        bc,
+                        mass,
+                        diameter,
+                        drag_model: drag_str.to_string(),
+                        twist_rate,
+                        sight_height,
+                        zero_distance,
+                        units: units_str.to_string(),
+                        temperature,
+                        pressure,
+                        humidity,
+                        altitude,
+                        bullet_name,
+                        created: Some(timestamp_string()),
+                    };
+
+                    let path = save_profile(&profile)?;
+                    eprintln!("Profile '{}' saved to {:?}", name, path);
+                }
+
+                ProfileAction::List => {
+                    let profiles = list_profiles()?;
+                    if profiles.is_empty() {
+                        println!("No saved profiles. Use 'ballistics profile save <name> ...' to create one.");
+                    } else {
+                        println!("Saved Profiles:");
+                        println!("┌────────────────────┬────────┬───────┬────────┬──────────┬──────────┐");
+                        println!("│ Name               │ Vel    │ BC    │ Mass   │ Diameter │ Drag     │");
+                        println!("├────────────────────┼────────┼───────┼────────┼──────────┼──────────┤");
+                        for p in &profiles {
+                            println!("│ {:<18} │{:>7.0} │{:>6.3} │{:>7.1} │{:>9.3} │ {:<8} │",
+                                     p.name, p.velocity, p.bc, p.mass, p.diameter, p.drag_model);
+                        }
+                        println!("└────────────────────┴────────┴───────┴────────┴──────────┴──────────┘");
+                    }
+                }
+
+                ProfileAction::Show { name } => {
+                    let profile = load_profile(&name)?;
+                    println!();
+                    println!("Profile: {}", profile.name);
+                    println!("╔════════════════════════════════════════╗");
+                    println!("║  Velocity:      {:>10.1} {:<10}  ║",
+                        profile.velocity,
+                        if profile.units == "metric" { "m/s" } else { "fps" });
+                    println!("║  BC:            {:>10.4}             ║", profile.bc);
+                    println!("║  Mass:          {:>10.1} {:<10}  ║",
+                        profile.mass,
+                        if profile.units == "metric" { "g" } else { "gr" });
+                    println!("║  Diameter:      {:>10.3} {:<10}  ║",
+                        profile.diameter,
+                        if profile.units == "metric" { "mm" } else { "in" });
+                    println!("║  Drag model:    {:>10}             ║", profile.drag_model);
+                    if let Some(tw) = profile.twist_rate {
+                        println!("║  Twist rate:    {:>10.1}             ║", tw);
+                    }
+                    if let Some(sh) = profile.sight_height {
+                        println!("║  Sight height:  {:>10.2} {:<10}  ║",
+                            sh,
+                            if profile.units == "metric" { "mm" } else { "in" });
+                    }
+                    if let Some(zd) = profile.zero_distance {
+                        println!("║  Zero distance: {:>10.0} {:<10}  ║",
+                            zd,
+                            if profile.units == "metric" { "m" } else { "yd" });
+                    }
+                    if let Some(ref bn) = profile.bullet_name {
+                        println!("║  Bullet:        {:<24}  ║", bn);
+                    }
+                    println!("║  Temperature:   {:>10.1} {:<10}  ║",
+                        profile.temperature,
+                        if profile.units == "metric" { "°C" } else { "°F" });
+                    println!("║  Pressure:      {:>10.2} {:<10}  ║",
+                        profile.pressure,
+                        if profile.units == "metric" { "hPa" } else { "inHg" });
+                    println!("║  Humidity:      {:>10.1}%            ║", profile.humidity);
+                    println!("║  Altitude:      {:>10.0} {:<10}  ║",
+                        profile.altitude,
+                        if profile.units == "metric" { "m" } else { "ft" });
+                    println!("╚════════════════════════════════════════╝");
+                }
+
+                ProfileAction::Delete { name } => {
+                    delete_profile(&name)?;
+                    eprintln!("Profile '{}' deleted.", name);
                 }
             }
         }
@@ -4084,4 +4786,771 @@ fn calculate_true_velocity_local(
         calculated_drop_mil: last_calculated_drop,
         confidence: confidence.to_string(),
     })
+}
+
+// ============================================================================
+// MPBR, Come-Ups, Wind Card Handler Functions
+// ============================================================================
+
+/// Shared: build BallisticInputs + atmosphere + wind from common parameters (all in metric)
+fn build_trajectory_components(
+    velocity: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    drag_model: DragModelArg,
+    sight_height: f64,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    max_range: f64,
+    sample_interval: f64,
+) -> (BallisticInputs, WindConditions, AtmosphericConditions) {
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    let inputs = BallisticInputs {
+        bc_value: bc,
+        bc_type: drag_model_enum,
+        bullet_mass: mass,
+        muzzle_velocity: velocity,
+        bullet_diameter: diameter,
+        bullet_length: diameter * 4.5,
+        muzzle_angle: 0.0,
+        target_distance: max_range,
+        sight_height,
+        altitude,
+        temperature,
+        pressure,
+        humidity,
+        wind_speed,
+        wind_angle: wind_direction,
+        use_rk4: true,             // Required for non-Euler solver
+        use_adaptive_rk45: true,   // Use RK45 adaptive (default solver)
+        enable_trajectory_sampling: true,
+        sample_interval,
+        caliber_inches: diameter / 0.0254,
+        weight_grains: mass / 0.00006479891,
+        twist_rate: 12.0,
+        is_twist_right: true,
+        ..Default::default()
+    };
+
+    // wind_direction is in degrees (matching BallisticInputs convention)
+    let wind = WindConditions {
+        speed: wind_speed,
+        direction: wind_direction.to_radians(), // WindConditions expects radians
+        ..Default::default()
+    };
+
+    let atmosphere = AtmosphericConditions {
+        temperature,
+        pressure,
+        humidity,
+        altitude,
+        ..Default::default()
+    };
+
+    (inputs, wind, atmosphere)
+}
+
+/// Run a trajectory and return sampled points at the given zero angle
+fn run_sampled_trajectory(
+    velocity: f64, bc: f64, mass: f64, diameter: f64,
+    drag_model: DragModelArg, sight_height: f64,
+    temperature: f64, pressure: f64, humidity: f64, altitude: f64,
+    wind_speed: f64, wind_direction: f64,
+    max_range: f64, sample_interval: f64,
+    zero_angle_rad: f64,
+) -> Result<Vec<trajectory_sampling::TrajectorySample>, Box<dyn Error>> {
+    let (mut inputs, wind, atmosphere) = build_trajectory_components(
+        velocity, bc, mass, diameter, drag_model, sight_height,
+        temperature, pressure, humidity, altitude,
+        wind_speed, wind_direction, max_range, sample_interval,
+    );
+    inputs.muzzle_angle = zero_angle_rad;
+
+    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    solver.set_max_range(max_range);
+    solver.set_time_step(0.001);
+    let result = solver.solve()?;
+
+    Ok(result.sampled_points.unwrap_or_default())
+}
+
+/// Resolve bullet parameters: CLI arg overrides profile value
+fn resolve_param(cli_val: Option<f64>, profile: &Option<ProfileData>, getter: fn(&ProfileData) -> f64) -> Option<f64> {
+    cli_val.or_else(|| profile.as_ref().map(getter))
+}
+
+/// MPBR handler
+fn handle_mpbr(
+    velocity: f64, bc: f64, mass: f64, diameter: f64,
+    drag_model: DragModelArg,
+    vital_zone: f64, // in user units (inches or cm)
+    sight_height: f64, // in user units
+    temperature: f64, pressure: f64, humidity: f64, altitude: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Convert everything to metric
+    let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
+    let mass_kg = UnitConverter::mass_to_metric(mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
+    let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
+    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
+    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
+
+    // Vital zone to meters
+    let vital_zone_m = match units {
+        UnitSystem::Imperial => vital_zone * 0.0254, // inches to meters
+        UnitSystem::Metric => vital_zone * 0.01,     // cm to meters
+    };
+    let half_vital_m = vital_zone_m / 2.0;
+
+    // Binary search on zero distance to find the one where max ordinate ≈ half vital zone
+    let mut zero_low_m = UnitConverter::distance_to_metric(50.0, units);
+    let mut zero_high_m = UnitConverter::distance_to_metric(2000.0, units);
+    let tolerance_m = 0.001; // ~0.04 inches
+    let max_iter = 60;
+
+    let mut best_zero_m = 0.0;
+    let mut best_max_ord_m = 0.0;
+    let mut best_max_ord_dist_m = 0.0;
+
+    for _ in 0..max_iter {
+        let test_zero_m = (zero_low_m + zero_high_m) / 2.0;
+
+        // Create inputs for zero calculation at test_zero_m
+        let drag_model_enum = match drag_model {
+            DragModelArg::G1 => DragModel::G1,
+            DragModelArg::G7 => DragModel::G7,
+        };
+
+        let zero_inputs = BallisticInputs {
+            bc_value: bc,
+            bc_type: drag_model_enum,
+            bullet_mass: mass_kg,
+            muzzle_velocity: velocity_m,
+            bullet_diameter: diameter_m,
+            bullet_length: diameter_m * 4.5,
+            sight_height: sight_height_m,
+            use_rk4: true,
+            ..Default::default()
+        };
+
+        let atmosphere = AtmosphericConditions {
+            temperature: temperature_c,
+            pressure: pressure_hpa,
+            humidity,
+            altitude: altitude_m,
+            ..Default::default()
+        };
+
+        let zero_angle = match ballistics_engine::calculate_zero_angle_with_conditions(
+            zero_inputs, test_zero_m, sight_height_m,
+            WindConditions::default(), atmosphere,
+        ) {
+            Ok(a) => a,
+            Err(_) => {
+                zero_high_m = test_zero_m;
+                continue;
+            }
+        };
+
+        // Run trajectory with this zero, sampling every ~1 yard
+        let samples = match run_sampled_trajectory(
+            velocity_m, bc, mass_kg, diameter_m, drag_model, sight_height_m,
+            temperature_c, pressure_hpa, humidity, altitude_m,
+            0.0, 0.0,
+            test_zero_m * 1.5, // max range past zero
+            UnitConverter::distance_to_metric(1.0, UnitSystem::Imperial), // ~1 yd sample interval
+            zero_angle,
+        ) {
+            Ok(s) => s,
+            Err(_) => {
+                zero_high_m = test_zero_m;
+                continue;
+            }
+        };
+
+        // Find max ordinate (highest point above LOS)
+        // drop_m in samples is relative to LOS (negative = below LOS, but in the coordinate system
+        // the y-position grows then drops, so we need to find max height above LOS)
+        // Actually, drop_m is the height of the bullet relative to line of sight at that distance
+        // At the zero crossing: drop_m ≈ 0. Between muzzle and zero, drop_m > 0 (above LOS).
+        // Beyond zero, drop_m < 0 (below LOS).
+        // NOTE: In the sampling system, drop_m is defined as bullet_y - los_y, so positive = above LOS
+        let mut max_ord_m: f64 = 0.0;
+        let mut max_ord_dist_m: f64 = 0.0;
+        for s in &samples {
+            // drop_m is the drop value; when bullet is above LOS, this value represents height above LOS
+            // In the sampling code, drop_m = bullet_y - line_of_sight_y
+            // When zeroed, the bullet rises above LOS then falls back.
+            // A negative drop_m means below LOS. We want the max POSITIVE value (highest above LOS).
+            let height_above_los = -s.drop_m; // drop_m is negative when above LOS in standard convention
+            if height_above_los > max_ord_m {
+                max_ord_m = height_above_los;
+                max_ord_dist_m = s.distance_m;
+            }
+        }
+
+        // Check: if max_ord is 0 but we have points above bore, try the other sign convention
+        if max_ord_m < 0.001 {
+            // Try positive drop_m as "above LOS"
+            for s in &samples {
+                if s.drop_m > max_ord_m {
+                    max_ord_m = s.drop_m;
+                    max_ord_dist_m = s.distance_m;
+                }
+            }
+        }
+
+        best_zero_m = test_zero_m;
+        best_max_ord_m = max_ord_m;
+        best_max_ord_dist_m = max_ord_dist_m;
+
+        let diff = max_ord_m - half_vital_m;
+        if diff.abs() < tolerance_m {
+            break;
+        }
+
+        if max_ord_m > half_vital_m {
+            // Max ordinate too high → zero closer (reduce zero distance)
+            zero_high_m = test_zero_m;
+        } else {
+            // Max ordinate too low → zero farther (increase zero distance)
+            zero_low_m = test_zero_m;
+        }
+    }
+
+    // Now run the final trajectory at optimal zero to find MPBR, near zero, far zero
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    let final_inputs = BallisticInputs {
+        bc_value: bc,
+        bc_type: drag_model_enum,
+        bullet_mass: mass_kg,
+        muzzle_velocity: velocity_m,
+        bullet_diameter: diameter_m,
+        bullet_length: diameter_m * 4.5,
+        sight_height: sight_height_m,
+        use_rk4: true,
+        ..Default::default()
+    };
+
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        altitude: altitude_m,
+        ..Default::default()
+    };
+
+    let final_zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+        final_inputs, best_zero_m, sight_height_m,
+        WindConditions::default(), atmosphere,
+    )?;
+
+    let final_samples = run_sampled_trajectory(
+        velocity_m, bc, mass_kg, diameter_m, drag_model, sight_height_m,
+        temperature_c, pressure_hpa, humidity, altitude_m,
+        0.0, 0.0,
+        best_zero_m * 2.0,
+        UnitConverter::distance_to_metric(1.0, UnitSystem::Imperial),
+        final_zero_angle,
+    )?;
+
+    // Find near zero crossing (first time trajectory crosses from below LOS to above)
+    // Find far zero crossing (where trajectory drops back to LOS)
+    // Find MPBR (where drop exceeds -half_vital_m)
+    let mut near_zero_m: f64 = 0.0;
+    let mut far_zero_m: f64 = 0.0;
+    let mut mpbr_m: f64 = 0.0;
+    let mut impact_vel_mps: f64 = 0.0;
+    let mut impact_energy_j: f64 = 0.0;
+    let mut found_near = false;
+    let mut found_far = false;
+
+    // Determine sign convention by checking if samples near the midpoint are positive or negative
+    // The bullet should be ABOVE LOS in the middle of the trajectory
+    let sign_flip = if final_samples.len() > 10 {
+        let mid = &final_samples[final_samples.len() / 3];
+        mid.drop_m < 0.0 // if drop_m is negative in the middle, we need to flip sign
+    } else {
+        false
+    };
+
+    for i in 1..final_samples.len() {
+        let prev_drop = if sign_flip { -final_samples[i-1].drop_m } else { final_samples[i-1].drop_m };
+        let curr_drop = if sign_flip { -final_samples[i].drop_m } else { final_samples[i].drop_m };
+
+        // Near zero: trajectory goes from negative/zero to positive (crossing LOS upward)
+        if !found_near && prev_drop <= 0.0 && curr_drop > 0.0 && final_samples[i].distance_m > 5.0 {
+            // Interpolate
+            let frac = (-prev_drop) / (curr_drop - prev_drop);
+            near_zero_m = final_samples[i-1].distance_m + frac * (final_samples[i].distance_m - final_samples[i-1].distance_m);
+            found_near = true;
+        }
+
+        // Far zero: trajectory goes from positive to negative (crossing LOS downward)
+        if found_near && !found_far && prev_drop > 0.0 && curr_drop <= 0.0 {
+            let frac = prev_drop / (prev_drop - curr_drop);
+            far_zero_m = final_samples[i-1].distance_m + frac * (final_samples[i].distance_m - final_samples[i-1].distance_m);
+            found_far = true;
+        }
+
+        // MPBR: where drop goes below -half_vital_m
+        if found_far && curr_drop < -half_vital_m && mpbr_m == 0.0 {
+            let frac = (-half_vital_m - prev_drop) / (curr_drop - prev_drop);
+            mpbr_m = final_samples[i-1].distance_m + frac * (final_samples[i].distance_m - final_samples[i-1].distance_m);
+            impact_vel_mps = final_samples[i].velocity_mps;
+            impact_energy_j = final_samples[i].energy_j;
+        }
+    }
+
+    // Convert outputs for display
+    let mpbr_display = UnitConverter::distance_from_metric(mpbr_m, units);
+    let optimal_zero_display = UnitConverter::distance_from_metric(best_zero_m, units);
+    let near_zero_display = UnitConverter::distance_from_metric(near_zero_m, units);
+    let far_zero_display = UnitConverter::distance_from_metric(far_zero_m, units);
+    let max_ord_display = match units {
+        UnitSystem::Imperial => best_max_ord_m / 0.0254, // meters to inches
+        UnitSystem::Metric => best_max_ord_m * 100.0,    // meters to cm
+    };
+    let max_ord_dist_display = UnitConverter::distance_from_metric(best_max_ord_dist_m, units);
+    let impact_vel_display = UnitConverter::velocity_from_metric(impact_vel_mps, units);
+    let impact_energy_display = UnitConverter::energy_from_metric(impact_energy_j, units);
+
+    let (dist_unit, vel_unit, energy_unit, size_unit) = match units {
+        UnitSystem::Imperial => ("yd", "fps", "ft-lb", "in"),
+        UnitSystem::Metric => ("m", "m/s", "J", "cm"),
+    };
+
+    let vital_zone_display = match units {
+        UnitSystem::Imperial => vital_zone, // already in inches
+        UnitSystem::Metric => vital_zone,   // already in cm
+    };
+
+    match output {
+        OutputFormat::Json => {
+            let json = serde_json::json!({
+                "mpbr": mpbr_display,
+                "mpbr_unit": dist_unit,
+                "optimal_zero": optimal_zero_display,
+                "near_zero": near_zero_display,
+                "far_zero": far_zero_display,
+                "max_ordinate": max_ord_display,
+                "max_ordinate_unit": size_unit,
+                "max_ordinate_distance": max_ord_dist_display,
+                "impact_velocity": impact_vel_display,
+                "impact_velocity_unit": vel_unit,
+                "impact_energy": impact_energy_display,
+                "impact_energy_unit": energy_unit,
+                "vital_zone": vital_zone_display,
+                "vital_zone_unit": size_unit,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        OutputFormat::Csv => {
+            println!("metric,value,unit");
+            println!("mpbr,{:.1},{}", mpbr_display, dist_unit);
+            println!("optimal_zero,{:.1},{}", optimal_zero_display, dist_unit);
+            println!("near_zero,{:.1},{}", near_zero_display, dist_unit);
+            println!("far_zero,{:.1},{}", far_zero_display, dist_unit);
+            println!("max_ordinate,{:.1},{}", max_ord_display, size_unit);
+            println!("max_ordinate_distance,{:.1},{}", max_ord_dist_display, dist_unit);
+            println!("impact_velocity,{:.0},{}", impact_vel_display, vel_unit);
+            println!("impact_energy,{:.0},{}", impact_energy_display, energy_unit);
+        }
+        OutputFormat::Table | OutputFormat::Pdf => {
+            println!();
+            println!("MPBR Analysis (vital zone: {:.1} {})", vital_zone_display, size_unit);
+            println!("╔════════════════════════════════════════╗");
+            println!("║  MPBR:            {:>6.0} {:<14}║", mpbr_display, dist_unit);
+            println!("║  Optimal zero:    {:>6.0} {:<14}║", optimal_zero_display, dist_unit);
+            println!("║  Near zero:       {:>6.0} {:<14}║", near_zero_display, dist_unit);
+            println!("║  Far zero:        {:>6.0} {:<14}║", far_zero_display, dist_unit);
+            println!("║  Max ordinate:    {:>6.1} {} at {:.0} {}  ║", max_ord_display, size_unit, max_ord_dist_display, dist_unit);
+            println!("║  Impact velocity: {:>6.0} {:<14}║", impact_vel_display, vel_unit);
+            println!("║  Impact energy:   {:>6.0} {:<14}║", impact_energy_display, energy_unit);
+            println!("╚════════════════════════════════════════╝");
+        }
+    }
+
+    Ok(())
+}
+
+/// Come-ups handler
+fn handle_come_ups(
+    velocity: f64, bc: f64, mass: f64, diameter: f64,
+    drag_model: DragModelArg,
+    zero_distance: f64, start: f64, end: f64, step: f64,
+    adjustment_unit: AdjustmentUnit,
+    sight_height: f64,
+    temperature: f64, pressure: f64, humidity: f64, altitude: f64,
+    wind_speed: f64, wind_direction: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Convert to metric
+    let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
+    let mass_kg = UnitConverter::mass_to_metric(mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
+    let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
+    let zero_distance_m = UnitConverter::distance_to_metric(zero_distance, units);
+    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
+    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
+    let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
+    let end_m = UnitConverter::distance_to_metric(end, units);
+    let sample_m = UnitConverter::distance_to_metric(step, units);
+
+    // Calculate zero angle
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    let zero_inputs = BallisticInputs {
+        bc_value: bc,
+        bc_type: drag_model_enum,
+        bullet_mass: mass_kg,
+        muzzle_velocity: velocity_m,
+        bullet_diameter: diameter_m,
+        bullet_length: diameter_m * 4.5,
+        sight_height: sight_height_m,
+        use_rk4: true,
+        ..Default::default()
+    };
+
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        altitude: altitude_m,
+        ..Default::default()
+    };
+
+    let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+        zero_inputs, zero_distance_m, sight_height_m,
+        WindConditions::default(), atmosphere,
+    )?;
+
+    // Run trajectory with sampling
+    let samples = run_sampled_trajectory(
+        velocity_m, bc, mass_kg, diameter_m, drag_model, sight_height_m,
+        temperature_c, pressure_hpa, humidity, altitude_m,
+        wind_speed_m, wind_direction, // degrees, converted internally
+        end_m * 1.1, sample_m,
+        zero_angle,
+    )?;
+
+    // Build output rows at the requested range intervals
+    let adj_label = match adjustment_unit {
+        AdjustmentUnit::Mil => "MIL",
+        AdjustmentUnit::Moa => "MOA",
+    };
+
+    let (dist_unit, vel_unit, energy_unit) = match units {
+        UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+        UnitSystem::Metric => ("m", "m/s", "J"),
+    };
+
+    struct ComeUpRow {
+        range: f64,
+        drop_adj: f64,
+        come_up: f64,
+        velocity: f64,
+        energy: f64,
+        time: f64,
+    }
+
+    let mut rows: Vec<ComeUpRow> = Vec::new();
+    let mut current_range = start;
+    let mut prev_drop_adj: f64 = 0.0;
+
+    while current_range <= end + 0.1 {
+        let range_m = UnitConverter::distance_to_metric(current_range, units);
+
+        // Find closest sampled point
+        let closest = samples.iter().min_by(|a, b| {
+            (a.distance_m - range_m).abs().partial_cmp(&(b.distance_m - range_m).abs()).unwrap()
+        });
+
+        if let Some(sample) = closest {
+            if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
+                let drop_yd = UnitConverter::distance_from_metric(sample.drop_m, units);
+                let range_display = UnitConverter::distance_from_metric(sample.distance_m, units);
+                let drop_adj = drop_to_adjustment(drop_yd, range_display, adjustment_unit);
+                let come_up = drop_adj - prev_drop_adj;
+
+                rows.push(ComeUpRow {
+                    range: current_range,
+                    drop_adj,
+                    come_up,
+                    velocity: UnitConverter::velocity_from_metric(sample.velocity_mps, units),
+                    energy: UnitConverter::energy_from_metric(sample.energy_j, units),
+                    time: sample.time_s,
+                });
+
+                prev_drop_adj = drop_adj;
+            }
+        }
+
+        current_range += step;
+    }
+
+    match output {
+        OutputFormat::Json => {
+            let json_rows: Vec<serde_json::Value> = rows.iter().map(|r| {
+                serde_json::json!({
+                    "range": r.range,
+                    "drop": r.drop_adj,
+                    "come_up": r.come_up,
+                    "velocity": r.velocity,
+                    "energy": r.energy,
+                    "time": r.time,
+                })
+            }).collect();
+            let json = serde_json::json!({
+                "zero_distance": zero_distance,
+                "adjustment_unit": adj_label,
+                "distance_unit": dist_unit,
+                "velocity_unit": vel_unit,
+                "energy_unit": energy_unit,
+                "data": json_rows,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        OutputFormat::Csv => {
+            println!("range_{},drop_{},come_up_{},velocity_{},energy_{},time_s",
+                     dist_unit, adj_label.to_lowercase(), adj_label.to_lowercase(), vel_unit, energy_unit);
+            for r in &rows {
+                println!("{:.0},{:.3},{:.3},{:.0},{:.0},{:.3}",
+                         r.range, r.drop_adj, r.come_up, r.velocity, r.energy, r.time);
+            }
+        }
+        OutputFormat::Table | OutputFormat::Pdf => {
+            println!();
+            println!("Come-Up Table (zero: {:.0} {}, {})", zero_distance, dist_unit, adj_label);
+            println!("┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐");
+            println!("│Range ({:>2})|Drop ({:>3})|Come-Up   │ Vel ({:>3})│Energy    │ Time (s) │",
+                     dist_unit, adj_label, vel_unit);
+            println!("├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤");
+            for (i, r) in rows.iter().enumerate() {
+                let come_up_str = if i == 0 {
+                    "    —     ".to_string()
+                } else {
+                    format!("{:>9.3} ", r.come_up)
+                };
+                println!("│{:>9.0} │{:>9.3} │{}│{:>9.0} │{:>9.0} │{:>9.3} │",
+                         r.range, r.drop_adj, come_up_str, r.velocity, r.energy, r.time);
+            }
+            println!("└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘");
+        }
+    }
+
+    Ok(())
+}
+
+/// Wind card handler
+fn handle_wind_card(
+    velocity: f64, bc: f64, mass: f64, diameter: f64,
+    drag_model: DragModelArg,
+    zero_distance: f64, wind_speeds: &[f64],
+    start: f64, end: f64, step: f64,
+    adjustment_unit: AdjustmentUnit,
+    sight_height: f64,
+    temperature: f64, pressure: f64, humidity: f64, altitude: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Convert to metric
+    let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
+    let mass_kg = UnitConverter::mass_to_metric(mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
+    let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
+    let zero_distance_m = UnitConverter::distance_to_metric(zero_distance, units);
+    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
+    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
+    let end_m = UnitConverter::distance_to_metric(end, units);
+    let sample_m = UnitConverter::distance_to_metric(step, units);
+
+    // Calculate zero angle (no wind)
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    let zero_inputs = BallisticInputs {
+        bc_value: bc,
+        bc_type: drag_model_enum,
+        bullet_mass: mass_kg,
+        muzzle_velocity: velocity_m,
+        bullet_diameter: diameter_m,
+        bullet_length: diameter_m * 4.5,
+        sight_height: sight_height_m,
+        use_rk4: true,
+        ..Default::default()
+    };
+
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        altitude: altitude_m,
+        ..Default::default()
+    };
+
+    let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+        zero_inputs, zero_distance_m, sight_height_m,
+        WindConditions::default(), atmosphere,
+    )?;
+
+    let adj_label = match adjustment_unit {
+        AdjustmentUnit::Mil => "MIL",
+        AdjustmentUnit::Moa => "MOA",
+    };
+
+    let (dist_unit, wind_unit) = match units {
+        UnitSystem::Imperial => ("yd", "mph"),
+        UnitSystem::Metric => ("m", "m/s"),
+    };
+
+    // For each wind speed, run trajectory with 90° crosswind and collect drift
+    // wind_direction = 90° means full value crosswind from the right
+    let crosswind_deg = 90.0; // degrees (converted to radians internally)
+
+    // Collect data: rows = ranges, columns = wind speeds
+    struct WindRow {
+        range: f64,
+        drifts: Vec<f64>, // drift in adjustment units per wind speed
+    }
+
+    let mut ranges: Vec<f64> = Vec::new();
+    let mut current = start;
+    while current <= end + 0.1 {
+        ranges.push(current);
+        current += step;
+    }
+
+    let mut all_drifts: Vec<Vec<f64>> = vec![Vec::new(); ranges.len()];
+
+    for &ws in wind_speeds {
+        let ws_m = UnitConverter::wind_to_metric(ws, units);
+
+        let samples = run_sampled_trajectory(
+            velocity_m, bc, mass_kg, diameter_m, drag_model, sight_height_m,
+            temperature_c, pressure_hpa, humidity, altitude_m,
+            ws_m, crosswind_deg,
+            end_m * 1.1, sample_m,
+            zero_angle,
+        )?;
+
+        for (ri, &range_display) in ranges.iter().enumerate() {
+            let range_m = UnitConverter::distance_to_metric(range_display, units);
+
+            let closest = samples.iter().min_by(|a, b| {
+                (a.distance_m - range_m).abs().partial_cmp(&(b.distance_m - range_m).abs()).unwrap()
+            });
+
+            let drift_adj = if let Some(sample) = closest {
+                if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
+                    let drift_yd = UnitConverter::distance_from_metric(sample.wind_drift_m, units);
+                    drop_to_adjustment(drift_yd, range_display, adjustment_unit)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            all_drifts[ri].push(drift_adj);
+        }
+    }
+
+    let wind_rows: Vec<WindRow> = ranges.iter().enumerate().map(|(i, &range)| {
+        WindRow { range, drifts: all_drifts[i].clone() }
+    }).collect();
+
+    match output {
+        OutputFormat::Json => {
+            let json_rows: Vec<serde_json::Value> = wind_rows.iter().map(|r| {
+                let mut row = serde_json::json!({ "range": r.range });
+                for (j, &ws) in wind_speeds.iter().enumerate() {
+                    row[format!("wind_{}", ws)] = serde_json::json!(r.drifts.get(j).unwrap_or(&0.0));
+                }
+                row
+            }).collect();
+            let json = serde_json::json!({
+                "zero_distance": zero_distance,
+                "adjustment_unit": adj_label,
+                "distance_unit": dist_unit,
+                "wind_unit": wind_unit,
+                "wind_speeds": wind_speeds,
+                "crosswind": "full-value (90°)",
+                "data": json_rows,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        OutputFormat::Csv => {
+            let ws_headers: Vec<String> = wind_speeds.iter().map(|ws| format!("wind_{}_{}", ws, wind_unit)).collect();
+            println!("range_{},{}", dist_unit, ws_headers.join(","));
+            for r in &wind_rows {
+                let drift_strs: Vec<String> = r.drifts.iter().map(|d| format!("{:.1}", d)).collect();
+                println!("{:.0},{}", r.range, drift_strs.join(","));
+            }
+        }
+        OutputFormat::Table | OutputFormat::Pdf => {
+            println!();
+            println!("Wind Card (zero: {:.0} {}, {}, full-value crosswind)", zero_distance, dist_unit, adj_label);
+
+            // Header
+            let col_width = 10;
+            let range_header = format!("Range ({:>2})", dist_unit);
+            let mut header = format!("┌{:─>w$}", "", w = col_width);
+            for _ in wind_speeds { header += &format!("┬{:─>w$}", "", w = col_width); }
+            header += "┐";
+            println!("{}", header);
+
+            let mut label_row = format!("│{:<w$}", range_header, w = col_width);
+            for ws in wind_speeds {
+                label_row += &format!("│{:>8} {} ", ws, wind_unit);
+            }
+            label_row += "│";
+            println!("{}", label_row);
+
+            let mut sep = format!("├{:─>w$}", "", w = col_width);
+            for _ in wind_speeds { sep += &format!("┼{:─>w$}", "", w = col_width); }
+            sep += "┤";
+            println!("{}", sep);
+
+            for r in &wind_rows {
+                let mut row_str = format!("│{:>9.0} ", r.range);
+                for d in &r.drifts {
+                    row_str += &format!("│{:>9.1} ", d);
+                }
+                row_str += "│";
+                println!("{}", row_str);
+            }
+
+            let mut footer = format!("└{:─>w$}", "", w = col_width);
+            for _ in wind_speeds { footer += &format!("┴{:─>w$}", "", w = col_width); }
+            footer += "┘";
+            println!("{}", footer);
+        }
+    }
+
+    Ok(())
 }
