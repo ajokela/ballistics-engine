@@ -1386,6 +1386,76 @@ struct TrajectoryResult {
     trajectory: Vec<TrajectoryPoint>,
 }
 
+/// Configuration struct for run_trajectory(), replacing the 31+ parameter signature.
+/// All distance/velocity/mass/temperature values should be in metric units
+/// (converted before construction), except where noted.
+struct TrajectoryConfig {
+    // Core ballistic params (metric)
+    velocity: f64,
+    angle: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    drag_model: DragModelArg,
+    max_range: f64,
+    time_step: f64,
+
+    // Environment (metric)
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
+
+    // Wind (metric)
+    wind_speed: f64,
+    wind_direction: f64,
+
+    // Output
+    output: OutputFormat,
+    full: bool,
+    units: UnitSystem,
+
+    // Sight / bore geometry (metric)
+    sight_height: f64,
+    bore_height: f64,
+    ignore_ground_impact: bool,
+
+    // BC options
+    use_bc_segments: bool,
+    use_cluster_bc: bool,
+    bc_table_segments: Option<Vec<BCSegmentData>>,
+
+    // Advanced physics toggles
+    enable_magnus: bool,
+    enable_coriolis: bool,
+    enable_spin_drift: bool,
+    enable_wind_shear: bool,
+    enable_pitch_damping: bool,
+    enable_precession: bool,
+
+    // Sampling
+    sample_trajectory: bool,
+    sample_interval: f64,
+
+    // Integration method
+    use_rk4: bool,
+    use_rk45: bool,
+
+    // Bullet / rifling
+    twist_rate: Option<f64>,
+    twist_right: bool,
+    latitude: Option<f64>,
+    shooting_angle: f64,
+
+    // Powder sensitivity
+    use_powder_sensitivity: bool,
+    powder_temp_sensitivity: f64,
+    powder_temp: f64,
+
+    // PDF metadata
+    pdf_metadata: Option<PdfMetadata>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct MonteCarloResult {
     mean_range: f64,
@@ -2194,6 +2264,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                 angle
             };
 
+
+            // Construct TrajectoryConfig once, used by all code paths
+            let traj_config = TrajectoryConfig {
+                velocity: velocity_metric,
+                angle: muzzle_angle,
+                bc: trued_bc,
+                mass: mass_metric,
+                diameter: diameter_metric,
+                drag_model,
+                max_range: max_range_metric,
+                time_step,
+                temperature: temperature_metric,
+                pressure: pressure_metric,
+                humidity: final_humidity,
+                altitude: altitude_metric,
+                wind_speed: wind_speed_metric,
+                wind_direction: final_wind_direction,
+                output,
+                full,
+                units: cli.units,
+                sight_height: sight_height_metric,
+                bore_height: bore_height_metric,
+                ignore_ground_impact,
+                use_bc_segments,
+                use_cluster_bc,
+                bc_table_segments: bc_table_segments.clone(),
+                enable_magnus,
+                enable_coriolis,
+                enable_spin_drift,
+                enable_wind_shear,
+                enable_pitch_damping,
+                enable_precession,
+                sample_trajectory,
+                sample_interval,
+                use_rk4: !use_euler,
+                use_rk45: !use_rk4_fixed,
+                twist_rate,
+                twist_right,
+                latitude,
+                shooting_angle,
+                use_powder_sensitivity,
+                powder_temp_sensitivity,
+                powder_temp,
+                pdf_metadata: pdf_metadata.clone(),
+            };
+
             // Online mode handling
             #[cfg(feature = "online")]
             {
@@ -2442,49 +2558,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 eprintln!("Warning: API request failed: {}", e);
                                 eprintln!("Falling back to local calculation...\n");
 
-                                run_trajectory(
-                                    velocity_metric,
-                                    muzzle_angle,
-                                    trued_bc,
-                                    mass_metric,
-                                    diameter_metric,
-                                    drag_model,
-                                    max_range_metric,
-                                    time_step,
-                                    wind_speed_metric,
-                                    final_wind_direction,
-                                    temperature_metric,
-                                    pressure_metric,
-                                    final_humidity,
-                                    altitude_metric,
-                                    output,
-                                    full,
-                                    cli.units,
-                                    sight_height_metric,
-                                    bore_height_metric,
-                                    ignore_ground_impact,
-                                    use_bc_segments,
-                                    enable_magnus,
-                                    enable_coriolis,
-                                    enable_spin_drift,
-                                    enable_wind_shear,
-                                    sample_trajectory,
-                                    sample_interval,
-                                    enable_pitch_damping,
-                                    enable_precession,
-                                    use_cluster_bc,
-                                    !use_euler,
-                                    !use_rk4_fixed,
-                                    twist_rate,
-                                    twist_right,
-                                    latitude,
-                                    shooting_angle,
-                                    use_powder_sensitivity,
-                                    powder_temp_sensitivity,
-                                    powder_temp,
-                                    bc_table_segments.clone(),
-                                    pdf_metadata.clone(),
-                                )?;
+                                run_trajectory(&traj_config)?;
                             } else {
                                 eprintln!("Error: API request failed: {}", e);
                                 eprintln!("Hint: Use --offline-fallback to use local calculation on API failure");
@@ -2494,98 +2568,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 } else {
                     // Local calculation (default)
-                    run_trajectory(
-                        velocity_metric,
-                        muzzle_angle,
-                        trued_bc,
-                        mass_metric,
-                        diameter_metric,
-                        drag_model,
-                        max_range_metric,
-                        time_step,
-                        wind_speed_metric,
-                        final_wind_direction,
-                        temperature_metric,
-                        pressure_metric,
-                        final_humidity,
-                        altitude_metric,
-                        output,
-                        full,
-                        cli.units,
-                        sight_height_metric,
-                        bore_height_metric,
-                        ignore_ground_impact,
-                        use_bc_segments,
-                        enable_magnus,
-                        enable_coriolis,
-                        enable_spin_drift,
-                        enable_wind_shear,
-                        sample_trajectory,
-                        sample_interval,
-                        enable_pitch_damping,
-                        enable_precession,
-                        use_cluster_bc,
-                        !use_euler,
-                        !use_rk4_fixed,
-                        twist_rate,
-                        twist_right,
-                        latitude,
-                        shooting_angle,
-                        use_powder_sensitivity,
-                        powder_temp_sensitivity,
-                        powder_temp,
-                        bc_table_segments.clone(),
-                        pdf_metadata.clone(),
-                    )?;
+                    run_trajectory(&traj_config)?;
                 }
             }
 
             // Non-online feature: just run local calculation
             #[cfg(not(feature = "online"))]
             {
-                run_trajectory(
-                    velocity_metric,
-                    muzzle_angle,
-                    trued_bc,
-                    mass_metric,
-                    diameter_metric,
-                    drag_model,
-                    max_range_metric,
-                    time_step,
-                    wind_speed_metric,
-                    final_wind_direction,
-                    temperature_metric,
-                    pressure_metric,
-                    final_humidity,
-                    altitude_metric,
-                    output,
-                    full,
-                    cli.units,
-                    sight_height_metric,
-                    bore_height_metric,
-                    ignore_ground_impact,
-                    use_bc_segments,
-                    enable_magnus,
-                    enable_coriolis,
-                    enable_spin_drift,
-                    enable_wind_shear,
-                    sample_trajectory,
-                    sample_interval,
-                    enable_pitch_damping,
-                    enable_precession,
-                    use_cluster_bc,
-                    !use_euler,
-                    !use_rk4_fixed,
-                    twist_rate,
-                    twist_right,
-                    latitude,
-                    shooting_angle,
-                    use_powder_sensitivity,
-                    powder_temp_sensitivity,
-                    powder_temp,
-                    bc_table_segments.clone(),
-                    pdf_metadata.clone(),
-                )?;
+                run_trajectory(&traj_config)?;
             }
         }
 
@@ -3525,49 +3515,52 @@ fn generate_bc5d_segments(
     }
 }
 
-fn run_trajectory(
-    velocity: f64,
-    angle: f64,
-    bc: f64,
-    mass: f64,
-    diameter: f64,
-    drag_model: DragModelArg,
-    max_range: f64,
-    time_step: f64,
-    wind_speed: f64,
-    wind_direction: f64,
-    temperature: f64,
-    pressure: f64,
-    humidity: f64,
-    altitude: f64,
-    output: OutputFormat,
-    full: bool,
-    units: UnitSystem,
-    sight_height: f64,
-    bore_height: f64,           // Bore height above ground in meters
-    ignore_ground_impact: bool, // Disable ground impact detection
-    use_bc_segments: bool,
-    enable_magnus: bool,
-    enable_coriolis: bool,
-    enable_spin_drift: bool,
-    enable_wind_shear: bool,
-    sample_trajectory: bool,
-    sample_interval: f64,
-    enable_pitch_damping: bool,
-    enable_precession: bool,
-    use_cluster_bc: bool,
-    use_rk4: bool,
-    use_rk45: bool,
-    twist_rate: Option<f64>,
-    twist_right: bool,
-    latitude: Option<f64>,
-    shooting_angle: f64,
-    use_powder_sensitivity: bool,
-    powder_temp_sensitivity: f64,
-    powder_temp: f64,
-    bc_table_segments: Option<Vec<BCSegmentData>>, // BC segments from table lookup
-    pdf_metadata: Option<PdfMetadata>,             // PDF dope card metadata
-) -> Result<(), Box<dyn Error>> {
+fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
+    // Destructure config for convenient access throughout the function
+    let TrajectoryConfig {
+        velocity,
+        angle,
+        bc,
+        mass,
+        diameter,
+        drag_model,
+        max_range,
+        time_step,
+        temperature,
+        pressure,
+        humidity,
+        altitude,
+        wind_speed,
+        wind_direction,
+        output,
+        full,
+        units,
+        sight_height,
+        bore_height,
+        ignore_ground_impact,
+        use_bc_segments,
+        use_cluster_bc,
+        ref bc_table_segments,
+        enable_magnus,
+        enable_coriolis,
+        enable_spin_drift,
+        enable_wind_shear,
+        enable_pitch_damping,
+        enable_precession,
+        sample_trajectory,
+        sample_interval,
+        use_rk4,
+        use_rk45,
+        twist_rate,
+        twist_right,
+        latitude,
+        shooting_angle,
+        use_powder_sensitivity,
+        powder_temp_sensitivity,
+        powder_temp,
+        ref pdf_metadata,
+    } = *config;
+
     // Create ballistic inputs with all required fields
     let drag_model_enum = match drag_model {
         DragModelArg::G1 => DragModel::G1,
@@ -3637,9 +3630,9 @@ fn run_trajectory(
         // Use BC segments if: 1) table generated them (parameter), 2) --use-bc-segments flag, 3) neither
         use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
         bc_segments: None,
-        bc_segments_data: if let Some(segments) = bc_table_segments {
+        bc_segments_data: if let Some(ref segments) = *bc_table_segments {
             // Use segments passed from BC table (highest priority)
-            Some(segments)
+            Some(segments.clone())
         } else if use_bc_segments {
             // Generate BC segments automatically from estimator
             use ballistics_engine::bc_estimation::BCSegmentEstimator;
@@ -4102,7 +4095,7 @@ fn run_trajectory(
 
         OutputFormat::Pdf => {
             // PDF output requires metadata and output file
-            let pdf_meta = pdf_metadata.ok_or("PDF output requires metadata (use --target-speed, --powder, --bullet-name, etc.)")?;
+            let pdf_meta = pdf_metadata.as_ref().ok_or("PDF output requires metadata (use --target-speed, --powder, --bullet-name, etc.)")?;
             let output_path = pdf_meta.output_file.as_ref().ok_or("PDF output requires --output-file")?;
 
             // Get sampled trajectory points (required for dope card)
