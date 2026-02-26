@@ -22,7 +22,7 @@ use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder, TrueVel
 use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::bc_table::BcCorrectionTable;
 use ballistics_engine::bc_table_5d::Bc5dTableManager;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use strsim::levenshtein;
 use std::collections::HashMap;
@@ -998,6 +998,13 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
+    },
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -3144,6 +3151,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     eprintln!("Profile '{}' deleted.", name);
                 }
             }
+        }
+
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "ballistics", &mut std::io::stdout());
         }
     }
 
