@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use strsim::levenshtein;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 // ============================================================================
@@ -215,6 +215,75 @@ fn ensure_tos_accepted() -> Result<bool, String> {
     prompt_tos_acceptance()
 }
 
+// ============================================================================
+// Custom Value Parsers for f64 Range Validation (MBA-732)
+// ============================================================================
+
+/// Create a value parser that validates an f64 is within [min, max].
+fn f64_range(min: f64, max: f64) -> clap::builder::ValueParser {
+    clap::builder::ValueParser::new(F64RangeParser { min, max })
+}
+
+#[derive(Clone, Debug)]
+struct F64RangeParser {
+    min: f64,
+    max: f64,
+}
+
+impl clap::builder::TypedValueParser for F64RangeParser {
+    type Value = f64;
+
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let s = value.to_str().ok_or_else(|| {
+            let mut err = clap::Error::new(clap::error::ErrorKind::InvalidUtf8);
+            if let Some(a) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(a.get_id().to_string()),
+                );
+            }
+            err
+        })?;
+        let inner: f64 = s.parse().map_err(|_| {
+            let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation);
+            if let Some(a) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(a.get_id().to_string()),
+                );
+            }
+            err.insert(
+                clap::error::ContextKind::InvalidValue,
+                clap::error::ContextValue::String(format!("'{}' is not a valid number", s)),
+            );
+            err
+        })?;
+        if inner < self.min || inner > self.max {
+            let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation);
+            if let Some(a) = arg {
+                err.insert(
+                    clap::error::ContextKind::InvalidArg,
+                    clap::error::ContextValue::String(a.get_id().to_string()),
+                );
+            }
+            err.insert(
+                clap::error::ContextKind::InvalidValue,
+                clap::error::ContextValue::String(format!(
+                    "{} is not in range {:.6}..={:.6}",
+                    inner, self.min, self.max
+                )),
+            );
+            return Err(err);
+        }
+        Ok(inner)
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "ballistics")]
 #[command(author = "Ballistics Engine Team")]
@@ -250,7 +319,7 @@ enum Commands {
         site: Option<String>,
 
         /// Initial velocity (fps or m/s based on --units)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: Option<f64>,
 
         /// Velocity adjustment (added to base velocity for truing from chronograph data)
@@ -262,7 +331,7 @@ enum Commands {
         angle: f64,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: Option<f64>,
 
         /// BC adjustment factor (multiplier for truing, e.g., 0.85 = 85% of stated BC)
@@ -270,11 +339,11 @@ enum Commands {
         bc_adjustment: f64,
 
         /// Mass (grains for imperial, grams for metric)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: f64,
 
         /// Drag model (G1, G7, Custom)
@@ -286,7 +355,7 @@ enum Commands {
         max_range: f64,
 
         /// Time step (seconds)
-        #[arg(long, default_value = "0.001")]
+        #[arg(long, default_value = "0.001", value_parser = f64_range(0.00001, 0.1))]
         time_step: f64,
 
         /// Wind speed (mph or m/s based on --units)
@@ -298,15 +367,15 @@ enum Commands {
         wind_direction: f64,
 
         /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
+        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
         temperature: f64,
 
         /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
+        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
         pressure: f64,
 
         /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -422,11 +491,11 @@ enum Commands {
         twist_right: bool,
 
         /// Latitude for Coriolis effect and weather zones (degrees, -90 to 90)
-        #[arg(long)]
+        #[arg(long, value_parser = f64_range(-90.0, 90.0), allow_hyphen_values = true)]
         latitude: Option<f64>,
 
         /// Longitude for weather zones (degrees, -180 to 180)
-        #[arg(long)]
+        #[arg(long, value_parser = f64_range(-180.0, 180.0), allow_hyphen_values = true)]
         longitude: Option<f64>,
 
         /// Shot direction/azimuth for Coriolis and weather zones (degrees, 0=North, 90=East)
@@ -532,7 +601,7 @@ enum Commands {
     /// Run Monte Carlo simulation
     MonteCarlo {
         /// Base velocity (m/s)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: f64,
 
         /// Launch angle (degrees)
@@ -540,15 +609,15 @@ enum Commands {
         angle: f64,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
         /// Mass (kg)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
         /// Diameter (meters)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: f64,
 
         /// Number of simulations
@@ -591,19 +660,19 @@ enum Commands {
     /// Calculate zero angle for a target
     Zero {
         /// Initial velocity (fps for imperial, m/s for metric)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: f64,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
         /// Mass (grains for imperial, grams for metric)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: f64,
 
         /// Target distance (yards for imperial, meters for metric)
@@ -618,6 +687,22 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
+        /// Temperature (Fahrenheit or Celsius based on --units)
+        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
+        temperature: f64,
+
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
+        pressure: f64,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
@@ -626,15 +711,15 @@ enum Commands {
     /// Estimate BC from trajectory data
     EstimateBC {
         /// Initial velocity (m/s)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: f64,
 
         /// Mass (kg)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
         /// Diameter (meters)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: f64,
 
         /// Distance 1 (meters)
@@ -661,15 +746,15 @@ enum Commands {
     /// Generate BC segments for velocity-dependent BC
     GenerateBCSegments {
         /// Base ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
         /// Projectile mass (kg)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
         /// Projectile diameter (meters)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: f64,
 
         /// Bullet model/name (e.g., "SMK", "ELD-M", "VLD")
@@ -696,7 +781,7 @@ enum Commands {
         range: f64,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
         /// Drag model (G1, G7)
@@ -704,11 +789,11 @@ enum Commands {
         drag_model: DragModelArg,
 
         /// Bullet weight (grains for imperial, grams for metric)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
         /// Bullet diameter/caliber (inches for imperial, mm for metric)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: f64,
 
         /// Chronograph velocity for comparison (fps for imperial, m/s for metric)
@@ -724,15 +809,15 @@ enum Commands {
         sight_height: f64,
 
         /// Temperature (Fahrenheit for imperial, Celsius for metric)
-        #[arg(long, default_value = "59.0")]
+        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
         temperature: f64,
 
         /// Pressure (inHg for imperial, hPa for metric)
-        #[arg(long, default_value = "29.92")]
+        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
         pressure: f64,
 
         /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Altitude (feet for imperial, meters for metric)
@@ -792,19 +877,19 @@ enum Commands {
         profile: Option<String>,
 
         /// Initial velocity (fps or m/s based on --units)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: Option<f64>,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: Option<f64>,
 
         /// Mass (grains for imperial, grams for metric)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: Option<f64>,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: Option<f64>,
 
         /// Drag model (G1, G7)
@@ -820,15 +905,15 @@ enum Commands {
         sight_height: Option<f64>,
 
         /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
+        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
         temperature: f64,
 
         /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
+        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
         pressure: f64,
 
         /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -847,19 +932,19 @@ enum Commands {
         profile: Option<String>,
 
         /// Initial velocity (fps or m/s based on --units)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: Option<f64>,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: Option<f64>,
 
         /// Mass (grains for imperial, grams for metric)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: Option<f64>,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: Option<f64>,
 
         /// Drag model (G1, G7)
@@ -891,15 +976,15 @@ enum Commands {
         sight_height: Option<f64>,
 
         /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
+        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
         temperature: f64,
 
         /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
+        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
         pressure: f64,
 
         /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -926,19 +1011,19 @@ enum Commands {
         profile: Option<String>,
 
         /// Initial velocity (fps or m/s based on --units)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: Option<f64>,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: Option<f64>,
 
         /// Mass (grains for imperial, grams for metric)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: Option<f64>,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: Option<f64>,
 
         /// Drag model (G1, G7)
@@ -1096,15 +1181,15 @@ enum Commands {
         sight_height: Option<f64>,
 
         /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
+        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
         temperature: f64,
 
         /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
+        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
         pressure: f64,
 
         /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -1138,19 +1223,19 @@ enum ProfileAction {
         name: String,
 
         /// Initial velocity (fps or m/s based on --units)
-        #[arg(short = 'v', long)]
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: f64,
 
         /// Ballistic coefficient
-        #[arg(short = 'b', long)]
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
         /// Mass (grains for imperial, grams for metric)
-        #[arg(short = 'm', long)]
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
         diameter: f64,
 
         /// Drag model (G1, G7)
@@ -1170,15 +1255,15 @@ enum ProfileAction {
         zero_distance: Option<f64>,
 
         /// Default temperature
-        #[arg(long, default_value = "59.0")]
+        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
         temperature: f64,
 
         /// Default pressure
-        #[arg(long, default_value = "29.92")]
+        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
         pressure: f64,
 
         /// Default humidity
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Default altitude
@@ -2556,6 +2641,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             target_distance,
             target_height,
             sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
             output,
         } => {
             let bullet_mass = mass;
@@ -2575,6 +2664,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let sight_height_value = sight_height.unwrap_or(sight_height_default);
             let sight_height_metric =
                 UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
+            // Convert atmospheric conditions to metric
+            let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
+            let pressure_metric = UnitConverter::pressure_to_metric(pressure, cli.units);
+            let altitude_metric = UnitConverter::altitude_to_metric(altitude, cli.units);
 
             run_zero_calculation(
                 velocity_metric,
@@ -2584,6 +2677,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 target_distance_metric,
                 target_height_metric,
                 sight_height_metric,
+                temperature_metric,
+                pressure_metric,
+                humidity,
+                altitude_metric,
                 output,
                 cli.units,
             )?;
@@ -4442,6 +4539,10 @@ fn run_zero_calculation(
     target_distance: f64,
     target_height: f64,
     sight_height: f64,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
     output: OutputFormat,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
@@ -4452,18 +4553,37 @@ fn run_zero_calculation(
         bullet_mass: mass,
         bullet_diameter: diameter,
         sight_height,
+        temperature,
+        pressure,
+        humidity,
+        altitude,
         ..Default::default()
     };
 
-    // Calculate zero angle
+    // Set up atmospheric conditions
+    let atmosphere = AtmosphericConditions {
+        temperature,
+        pressure,
+        humidity,
+        altitude,
+        ..Default::default()
+    };
+
+    // Calculate zero angle with atmospheric conditions
     let zero_angle =
-        ballistics_engine::calculate_zero_angle(inputs.clone(), target_distance, target_height)?;
+        ballistics_engine::calculate_zero_angle_with_conditions(
+            inputs.clone(),
+            target_distance,
+            target_height,
+            WindConditions::default(),
+            atmosphere.clone(),
+        )?;
 
     // Calculate trajectory at zero angle to get additional info
     let mut zeroed_inputs = inputs;
     zeroed_inputs.muzzle_angle = zero_angle;
 
-    let solver = TrajectorySolver::new(zeroed_inputs, Default::default(), Default::default());
+    let solver = TrajectorySolver::new(zeroed_inputs, Default::default(), atmosphere);
     let trajectory = solver.solve()?;
 
     match output {
