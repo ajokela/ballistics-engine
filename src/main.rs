@@ -994,6 +994,128 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Analyze gyroscopic stability (Miller stability factor)
+    Stability {
+        /// Load parameters from saved profile
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Bullet mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long)]
+        mass: Option<f64>,
+
+        /// Bullet diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long)]
+        diameter: Option<f64>,
+
+        /// Bullet length (inches for imperial, mm for metric)
+        #[arg(short = 'l', long)]
+        length: f64,
+
+        /// Barrel twist rate (inches/turn for imperial, mm/turn for metric)
+        #[arg(short = 't', long)]
+        twist_rate: f64,
+
+        /// Muzzle velocity (fps for imperial, m/s for metric; default: 2700 fps / 823 m/s)
+        #[arg(short = 'v', long)]
+        velocity: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units)
+        #[arg(long, default_value = "59.0")]
+        temperature: f64,
+
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long, default_value = "29.92")]
+        pressure: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Generate comprehensive range table (drop, wind, velocity, energy, ToF)
+    RangeTable {
+        /// Load parameters from saved profile
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Initial velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long)]
+        velocity: Option<f64>,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long)]
+        bc: Option<f64>,
+
+        /// Mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long)]
+        mass: Option<f64>,
+
+        /// Diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long)]
+        diameter: Option<f64>,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long)]
+        zero_distance: f64,
+
+        /// Start range (yards or meters)
+        #[arg(long, default_value = "100.0")]
+        start: f64,
+
+        /// End range (yards or meters)
+        #[arg(long, default_value = "1200.0")]
+        end: f64,
+
+        /// Range step (yards or meters)
+        #[arg(long, default_value = "50.0")]
+        step: f64,
+
+        /// Wind speed (mph or m/s based on --units)
+        #[arg(long, default_value = "10.0")]
+        wind_speed: f64,
+
+        /// Wind direction (degrees, 0=headwind, 90=from right)
+        #[arg(long, default_value = "90.0")]
+        wind_direction: f64,
+
+        /// Adjustment unit (mil or moa)
+        #[arg(long, default_value = "mil")]
+        adjustment_unit: AdjustmentUnit,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units)
+        #[arg(long, default_value = "59.0")]
+        temperature: f64,
+
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long, default_value = "29.92")]
+        pressure: f64,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Manage saved ballistic profiles
     Profile {
         #[command(subcommand)]
@@ -1349,31 +1471,29 @@ fn normalize_column_header(header: &str) -> (String, bool, String) {
 }
 
 /// Parse a CSV file and return row matching the first column value
+/// Parse a CSV file and return row matching the first column value.
+/// Uses the `csv` crate for proper quoting/escaping support (MBA-730).
 fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String>, Box<dyn Error>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
+    use csv::ReaderBuilder;
 
-    // Parse header - first non-empty line (strip leading # if present, as Glenn's format uses #COLUMN_NAME)
-    let mut headers: Vec<String> = Vec::new();
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .comment(Some(b'#'))
+        .flexible(true)
+        .from_path(path)?;
+
+    // Normalize headers and track fuzzy corrections
     let mut corrections: Vec<(String, String)> = Vec::new();
-    for line in lines.by_ref() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Strip leading # from header line (Glenn's format: #RIFLE_NAME,BULLET_NAME,...)
-        let header_line = trimmed.trim_start_matches('#');
-        for raw_header in header_line.split(',') {
-            let (normalized, was_corrected, original) = normalize_column_header(raw_header);
+    let headers: Vec<String> = reader.headers()?
+        .iter()
+        .map(|h| {
+            let (normalized, was_corrected, original) = normalize_column_header(h);
             if was_corrected {
                 corrections.push((original, normalized.clone()));
             }
-            headers.push(normalized);
-        }
-        break;
-    }
+            normalized
+        })
+        .collect();
 
     // Print warnings for any corrected column names
     for (original, corrected) in &corrections {
@@ -1385,27 +1505,20 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
         return Err("CSV file has no header row".into());
     }
 
-    let _first_col = headers.first().ok_or("CSV has no columns")?.clone();
-
     // Parse data rows and find matching row
-    for line in lines {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let values: Vec<&str> = trimmed.split(',').collect();
-
-        // Check if first column matches
-        if let Some(first_val) = values.first() {
-            if first_val.trim().eq_ignore_ascii_case(row_name) {
-                let mut row: HashMap<String, String> = HashMap::new();
+    for record in reader.records() {
+        let record = record?;
+        if let Some(name) = record.get(0) {
+            if name.eq_ignore_ascii_case(row_name) {
+                let mut map = HashMap::new();
                 for (i, header) in headers.iter().enumerate() {
-                    if i < values.len() {
-                        row.insert(header.clone(), values[i].trim().to_string());
+                    if let Some(val) = record.get(i) {
+                        if !val.is_empty() {
+                            map.insert(header.clone(), val.to_string());
+                        }
                     }
                 }
-                return Ok(row);
+                return Ok(map);
             }
         }
     }
@@ -1808,99 +1921,54 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(not(feature = "online"))]
             let effective_bc_table_dir: Option<PathBuf> = bc_table_dir.clone();
 
+            // Apply BC correction from 5D caliber-specific table if provided (MBA-744: uses shared helper)
             let bc_table_5d_correction: Option<f64> = if bc_table_correction.is_none() {
                 if let Some(table_dir) = &effective_bc_table_dir {
                     let mut manager = Bc5dTableManager::new(table_dir);
 
-                    // Get bullet mass in grains
                     let mass_grains = match cli.units {
-                        UnitSystem::Imperial => mass, // already in grains
-                        UnitSystem::Metric => mass * 15.4324, // grams to grains
+                        UnitSystem::Imperial => mass,
+                        UnitSystem::Metric => mass * 15.4324,
                     };
 
-                    // BC type string
                     let bc_type_str = match drag_model {
                         DragModelArg::G1 => "G1",
                         DragModelArg::G7 => "G7",
                     };
 
-                    match manager.get_table(diameter) {
-                        Ok(table) => {
-                            // Show table info
-                            eprintln!("BC5D Table: Loaded caliber {:.3} (v{}, API {}, {})",
-                                table.caliber(), table.version(), table.api_version(), table.dimensions_str());
+                    // Print table info if available
+                    if let Ok(table) = manager.get_table(diameter) {
+                        eprintln!("BC5D Table: Loaded caliber {:.3} (v{}, API {}, {})",
+                            table.caliber(), table.version(), table.api_version(), table.dimensions_str());
+                    }
 
-                            // Velocity breakpoints for BC segments (denser in transonic region)
-                            let velocity_breakpoints: Vec<f64> = vec![
-                                trued_velocity, // Muzzle velocity
-                                2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0,
-                                1700.0, 1600.0, 1500.0, 1400.0, 1350.0, 1300.0, 1250.0,
-                                1200.0, 1150.0, 1100.0, 1050.0, 1000.0, 950.0, 900.0,
-                                850.0, 800.0, 700.0, 600.0, 500.0,
-                            ];
+                    let bullet_length_in = bullet_length
+                        .or_else(|| {
+                            let csv_len = csv_get_f64(&profile_data, &["BULLET_LENGTH", "LENGTH"], 0.0);
+                            if csv_len > 0.0 { Some(csv_len) } else { None }
+                        })
+                        .unwrap_or(diameter * 3.5);
 
-                            // Filter breakpoints to be below muzzle velocity and sort descending
-                            let mut valid_velocities: Vec<f64> = velocity_breakpoints
-                                .into_iter()
-                                .filter(|&v| v <= trued_velocity && v >= 500.0)
-                                .collect();
-                            valid_velocities.sort_by(|a, b| b.partial_cmp(a).unwrap());
-                            valid_velocities.dedup();
+                    if let Some(segments) = generate_bc5d_segments(
+                        &mut manager,
+                        diameter,
+                        final_bc,
+                        bc_type_str,
+                        mass_grains,
+                        Some(trued_velocity),
+                        Some(bullet_length_in),
+                    ) {
+                        bc_table_segments = Some(segments);
 
-                            // Generate BC segments from 5D table
-                            let mut segments: Vec<BCSegmentData> = Vec::new();
-                            for i in 0..valid_velocities.len().saturating_sub(1) {
-                                let vel_max = valid_velocities[i];
-                                let vel_min = valid_velocities[i + 1];
-                                let vel_mid = (vel_max + vel_min) / 2.0;
-
-                                // Lookup from 5D table (includes muzzle velocity dimension)
-                                let effective_bc = table.get_effective_bc(
-                                    mass_grains,
-                                    final_bc,
-                                    trued_velocity, // Muzzle velocity for this shot
-                                    vel_mid,        // Current velocity at this segment
-                                    bc_type_str,
-                                );
-
-                                segments.push(BCSegmentData {
-                                    velocity_min: vel_min,
-                                    velocity_max: vel_max,
-                                    bc_value: effective_bc,
-                                });
-                            }
-
-                            // Get correction at muzzle velocity for display
-                            let muzzle_correction = table.lookup(
-                                mass_grains,
-                                final_bc,
-                                trued_velocity,
-                                trued_velocity,
-                                bc_type_str,
-                            );
-
-                            eprintln!("BC5D Table: Generated {} velocity-dependent BC segments", segments.len());
-                            eprintln!("BC5D Table: Muzzle correction={:.4} for BC={:.3} {} {}gr @ {:.0}fps",
-                                muzzle_correction, final_bc, bc_type_str, mass_grains, trued_velocity);
-
-                            // Show BC range if segments were generated
-                            if !segments.is_empty() {
-                                let min_bc = segments.iter().map(|s| s.bc_value).fold(f64::INFINITY, f64::min);
-                                let max_bc = segments.iter().map(|s| s.bc_value).fold(f64::NEG_INFINITY, f64::max);
-                                eprintln!("BC5D Table: BC range {:.5} - {:.5} across velocity envelope", min_bc, max_bc);
-                                bc_table_segments = Some(segments);
-                            }
-
-                            // Apply correction to trued_bc for display purposes
-                            trued_bc *= muzzle_correction;
-                            Some(muzzle_correction)
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: Failed to load BC5D table for caliber {:.3}: {}", diameter, e);
-                            eprintln!("         Available calibers: {:?}", manager.available_calibers());
-                            eprintln!("         Continuing without BC5D correction table.");
-                            None
-                        }
+                        let muzzle_correction = manager.lookup(
+                            diameter, mass_grains, final_bc, trued_velocity, trued_velocity, bc_type_str
+                        ).unwrap_or(1.0);
+                        eprintln!("BC5D Table: Muzzle correction={:.4} for BC={:.3} {} {}gr @ {:.0}fps",
+                            muzzle_correction, final_bc, bc_type_str, mass_grains, trued_velocity);
+                        trued_bc *= muzzle_correction;
+                        Some(muzzle_correction)
+                    } else {
+                        None
                     }
                 } else {
                     None
@@ -2119,8 +2187,102 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     match (&api_result, compare) {
                         (Ok(api_response), true) => {
-                            // Compare mode: run local calculation too
+                            // Compare mode: run local calculation first, then display side-by-side (MBA-720)
                             eprintln!("Running comparison between local and API calculations...\n");
+
+                            // Run local trajectory to get comparison data BEFORE displaying the table
+                            let local_result = {
+                                let drag_model_enum = match drag_model {
+                                    DragModelArg::G1 => DragModel::G1,
+                                    DragModelArg::G7 => DragModel::G7,
+                                };
+
+                                let local_inputs = BallisticInputs {
+                                    bc_value: trued_bc,
+                                    bc_type: drag_model_enum,
+                                    bullet_mass: mass_metric,
+                                    muzzle_velocity: velocity_metric,
+                                    bullet_diameter: diameter_metric,
+                                    bullet_length: diameter_metric * 4.5,
+                                    muzzle_angle: muzzle_angle.to_radians(),
+                                    target_distance: max_range_metric,
+                                    azimuth_angle: 0.0,
+                                    shooting_angle: shooting_angle.to_radians(),
+                                    sight_height: sight_height_metric,
+                                    muzzle_height: bore_height_metric,
+                                    target_height: 0.0,
+                                    ground_threshold: if ignore_ground_impact { f64::NEG_INFINITY } else { -bore_height_metric },
+                                    altitude: altitude_metric,
+                                    temperature: temperature_metric,
+                                    pressure: pressure_metric,
+                                    humidity: final_humidity,
+                                    latitude,
+                                    wind_speed: wind_speed_metric,
+                                    wind_angle: final_wind_direction,
+                                    twist_rate: twist_rate.unwrap_or(12.0),
+                                    is_twist_right: twist_right,
+                                    caliber_inches: diameter_metric / 0.0254,
+                                    weight_grains: mass_metric / 0.00006479891,
+                                    manufacturer: None,
+                                    bullet_model: None,
+                                    bullet_id: None,
+                                    bullet_cluster: None,
+                                    use_rk4: !use_euler,
+                                    use_adaptive_rk45: !use_rk4_fixed,
+                                    enable_advanced_effects: enable_magnus || enable_coriolis,
+                                    use_powder_sensitivity,
+                                    powder_temp_sensitivity: if use_powder_sensitivity {
+                                        UnitConverter::velocity_to_metric(powder_temp_sensitivity, cli.units)
+                                            / UnitConverter::temperature_to_metric(1.0, cli.units)
+                                    } else { 0.0 },
+                                    powder_temp: UnitConverter::temperature_to_metric(powder_temp, cli.units),
+                                    tipoff_yaw: 0.0,
+                                    tipoff_decay_distance: 50.0,
+                                    use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
+                                    bc_segments: None,
+                                    bc_segments_data: bc_table_segments.clone().or_else(|| {
+                                        if use_bc_segments {
+                                            use ballistics_engine::bc_estimation::BCSegmentEstimator;
+                                            Some(BCSegmentEstimator::estimate_bc_segments(
+                                                trued_bc,
+                                                diameter_metric / 0.0254,
+                                                mass_metric / 0.00006479891,
+                                                "",
+                                                match drag_model { DragModelArg::G1 => "G1", DragModelArg::G7 => "G7" },
+                                            ))
+                                        } else { None }
+                                    }),
+                                    use_enhanced_spin_drift: enable_spin_drift,
+                                    use_form_factor: false,
+                                    enable_wind_shear,
+                                    wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
+                                    enable_trajectory_sampling: sample_trajectory,
+                                    sample_interval,
+                                    enable_pitch_damping,
+                                    enable_precession_nutation: enable_precession,
+                                    use_cluster_bc,
+                                    bc_type_str: None,
+                                    custom_drag_table: None,
+                                };
+
+                                let local_wind = WindConditions {
+                                    speed: wind_speed_metric,
+                                    direction: final_wind_direction.to_radians(),
+                                    ..Default::default()
+                                };
+                                let local_atmo = AtmosphericConditions {
+                                    temperature: temperature_metric,
+                                    pressure: pressure_metric,
+                                    humidity: final_humidity,
+                                    altitude: altitude_metric,
+                                    ..Default::default()
+                                };
+
+                                let mut local_solver = TrajectorySolver::new(local_inputs, local_wind, local_atmo);
+                                local_solver.set_max_range(max_range_metric);
+                                local_solver.set_time_step(time_step);
+                                local_solver.solve().ok()
+                            };
 
                             // Display API results with ML info
                             println!("╔════════════════════════════════════════╗");
@@ -2142,7 +2304,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 println!("╠════════════════════════════════════════╣");
                             }
 
-                            // Display comparison table
                             let (dist_unit, _drop_unit, _vel_unit) = match cli.units {
                                 UnitSystem::Metric => ("m", "m", "m/s"),
                                 UnitSystem::Imperial => ("yd", "in", "fps"),
@@ -2151,68 +2312,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                             println!("║ Range {} │ API Drop │Local Drop│  Δ Drop  ║", dist_unit);
                             println!("╠══════════╪══════════╪══════════╪══════════╣");
 
-                            // Run local calculation to get comparison data
-                            // (We'll print both results side by side)
                             for point in api_response.trajectory.iter().take(10) {
                                 let range_display = UnitConverter::distance_from_metric(point.range, cli.units);
-                                let drop_display = if cli.units == UnitSystem::Imperial {
-                                    point.drop * 39.3701 // meters to inches
+                                let api_drop_display = if cli.units == UnitSystem::Imperial {
+                                    point.drop * 39.3701
                                 } else {
                                     point.drop
                                 };
-                                println!(
-                                    "║ {:>8.1} │ {:>8.2} │    ---   │    ---   ║",
-                                    range_display, drop_display
-                                );
+
+                                if let Some(ref local_res) = local_result {
+                                    if let Some(pos) = local_res.position_at_range(point.range) {
+                                        let local_drop_display = if cli.units == UnitSystem::Imperial {
+                                            pos.y * 39.3701
+                                        } else {
+                                            pos.y
+                                        };
+                                        let delta = api_drop_display - local_drop_display;
+                                        println!(
+                                            "║ {:>8.1} │ {:>8.2} │ {:>8.2} │ {:>+8.2} ║",
+                                            range_display, api_drop_display, local_drop_display, delta
+                                        );
+                                    } else {
+                                        println!(
+                                            "║ {:>8.1} │ {:>8.2} │    ---   │    ---   ║",
+                                            range_display, api_drop_display
+                                        );
+                                    }
+                                } else {
+                                    println!(
+                                        "║ {:>8.1} │ {:>8.2} │  error   │    ---   ║",
+                                        range_display, api_drop_display
+                                    );
+                                }
                             }
                             println!("╚══════════╧══════════╧══════════╧══════════╝");
                             println!();
-                            println!("Note: Run without --compare to see full local trajectory.");
-
-                            // Also run the local calculation for full output
-                            run_trajectory(
-                                velocity_metric,
-                                muzzle_angle,
-                                trued_bc,
-                                mass_metric,
-                                diameter_metric,
-                                drag_model,
-                                max_range_metric,
-                                time_step,
-                                wind_speed_metric,
-                                final_wind_direction,
-                                temperature_metric,
-                                pressure_metric,
-                                final_humidity,
-                                altitude_metric,
-                                output,
-                                full,
-                                cli.units,
-                                sight_height_metric,
-                                bore_height_metric,
-                                ignore_ground_impact,
-                                use_bc_segments,
-                                enable_magnus,
-                                enable_coriolis,
-                                enable_spin_drift,
-                                enable_wind_shear,
-                                sample_trajectory,
-                                sample_interval,
-                                enable_pitch_damping,
-                                enable_precession,
-                                use_cluster_bc,
-                                !use_euler,
-                                !use_rk4_fixed,
-                                twist_rate,
-                                twist_right,
-                                latitude,
-                                shooting_angle,
-                                use_powder_sensitivity,
-                                powder_temp_sensitivity,
-                                powder_temp,
-                                bc_table_segments.clone(),
-                                pdf_metadata.clone(),
-                            )?;
                         }
                         (Ok(api_response), false) => {
                             // Online mode only: display API results
@@ -2619,68 +2753,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(not(feature = "online"))]
             let effective_bc_table_dir: Option<PathBuf> = bc_table_dir.clone();
 
-            // Load BC segments from BC5D table if available
+            // Load BC segments from BC5D table if available (MBA-744: uses shared helper)
             let bc_segments: Option<Vec<BCSegmentData>> = if let Some(table_dir) = &effective_bc_table_dir {
                 let mut manager = Bc5dTableManager::new(table_dir);
-
-                // Velocity breakpoints for BC segments (denser in transonic region)
-                // These cover the typical rifle velocity envelope
-                let velocity_breakpoints: Vec<f64> = vec![
-                    4000.0, 3500.0, 3000.0, 2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0,
-                    1700.0, 1600.0, 1500.0, 1400.0, 1350.0, 1300.0, 1250.0,
-                    1200.0, 1150.0, 1100.0, 1050.0, 1000.0, 950.0, 900.0,
-                    850.0, 800.0, 700.0, 600.0, 500.0,
-                ];
-
-                // Filter breakpoints and sort descending
-                let mut valid_velocities: Vec<f64> = velocity_breakpoints
-                    .into_iter()
-                    .filter(|&v| v >= 500.0)
-                    .collect();
-                valid_velocities.sort_by(|a, b| b.partial_cmp(a).unwrap());
-                valid_velocities.dedup();
-
-                // Use the highest velocity as reference muzzle velocity for BC5D lookup
-                // This provides the broadest correction curve coverage
-                let reference_muzzle_velocity = valid_velocities.first().copied().unwrap_or(3000.0);
-
-                // Generate BC segments from table
-                let mut segments: Vec<BCSegmentData> = Vec::new();
-                let mut any_correction_found = false;
-
-                for i in 0..valid_velocities.len().saturating_sub(1) {
-                    let vel_max = valid_velocities[i];
-                    let vel_min = valid_velocities[i + 1];
-                    let vel_mid = (vel_max + vel_min) / 2.0;
-
-                    // Lookup correction at midpoint velocity
-                    // signature: lookup(caliber, weight_grains, base_bc, muzzle_velocity, current_velocity, drag_type)
-                    if let Ok(correction) = manager.lookup(caliber_in, weight_gr, bc, reference_muzzle_velocity, vel_mid, drag_str) {
-                        any_correction_found = true;
-                        // Calculate corrected BC for this segment
-                        let segment_bc = bc * correction;
-
-                        segments.push(BCSegmentData {
-                            velocity_min: vel_min,
-                            velocity_max: vel_max,
-                            bc_value: segment_bc,
-                        });
-                    }
-                }
-
-                if any_correction_found && !segments.is_empty() {
-                    // Use bullet_length for diagnostics if provided
-                    let bullet_length_in = bullet_length.unwrap_or_else(|| caliber_in * 3.5);
-                    eprintln!("BC5D Table: Generated {} velocity-dependent BC segments", segments.len());
-                    eprintln!("BC5D Table: {:.3}\" caliber, {:.1}gr, {:.3}\" length (est)", caliber_in, weight_gr, bullet_length_in);
-                    let min_bc = segments.iter().map(|s| s.bc_value).fold(f64::INFINITY, f64::min);
-                    let max_bc = segments.iter().map(|s| s.bc_value).fold(f64::NEG_INFINITY, f64::max);
-                    eprintln!("BC5D Table: BC range {:.5} - {:.5} across velocity envelope", min_bc, max_bc);
-                    Some(segments)
-                } else {
-                    eprintln!("Warning: No BC5D table data found for caliber {:.3}\"", caliber_in);
-                    None
-                }
+                generate_bc5d_segments(
+                    &mut manager,
+                    caliber_in,
+                    bc,
+                    drag_str,
+                    weight_gr,
+                    None,
+                    bullet_length,
+                )
             } else {
                 None
             };
@@ -3044,6 +3128,97 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
         }
 
+
+        Commands::Stability {
+            profile,
+            mass,
+            diameter,
+            length,
+            twist_rate,
+            velocity,
+            temperature,
+            pressure,
+            altitude,
+            output,
+        } => {
+            let profile_data = profile.as_ref().map(|name| {
+                load_profile(name).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                })
+            });
+
+            let final_mass = resolve_param(mass, &profile_data, |p| p.mass)
+                .unwrap_or_else(|| { eprintln!("Error: --mass is required (or use --profile)"); std::process::exit(1); });
+            let final_diameter = resolve_param(diameter, &profile_data, |p| p.diameter)
+                .unwrap_or_else(|| { eprintln!("Error: --diameter is required (or use --profile)"); std::process::exit(1); });
+            let final_velocity = velocity.unwrap_or(match cli.units {
+                UnitSystem::Imperial => 2700.0,
+                UnitSystem::Metric => 823.0,
+            });
+
+            handle_stability(
+                final_mass, final_diameter, length, twist_rate, final_velocity,
+                temperature, pressure, altitude,
+                cli.units, output,
+            )?;
+        }
+
+        Commands::RangeTable {
+            profile,
+            velocity,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            zero_distance,
+            start,
+            end,
+            step,
+            wind_speed,
+            wind_direction,
+            adjustment_unit,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            output,
+        } => {
+            let profile_data = profile.as_ref().map(|name| {
+                load_profile(name).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                })
+            });
+
+            let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
+                .unwrap_or_else(|| { eprintln!("Error: --velocity is required (or use --profile)"); std::process::exit(1); });
+            let final_bc = resolve_param(bc, &profile_data, |p| p.bc)
+                .unwrap_or_else(|| { eprintln!("Error: --bc is required (or use --profile)"); std::process::exit(1); });
+            let final_mass = resolve_param(mass, &profile_data, |p| p.mass)
+                .unwrap_or_else(|| { eprintln!("Error: --mass is required (or use --profile)"); std::process::exit(1); });
+            let final_diameter = resolve_param(diameter, &profile_data, |p| p.diameter)
+                .unwrap_or_else(|| { eprintln!("Error: --diameter is required (or use --profile)"); std::process::exit(1); });
+            let final_sight_height = sight_height
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_height))
+                .unwrap_or(match cli.units { UnitSystem::Imperial => 2.0, UnitSystem::Metric => 50.0 });
+            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
+                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
+            } else {
+                drag_model
+            };
+
+            handle_range_table(
+                final_velocity, final_bc, final_mass, final_diameter,
+                final_drag_model, zero_distance, start, end, step,
+                wind_speed, wind_direction,
+                adjustment_unit, final_sight_height,
+                temperature, pressure, humidity, altitude,
+                cli.units, output,
+            )?;
+        }
+
         Commands::Profile { action } => {
             match action {
                 ProfileAction::Save {
@@ -3180,6 +3355,77 @@ struct PdfMetadata {
     weight_gr: f64,
     font_scale: f32,
     bold_data: bool,
+}
+
+
+// ============================================================================
+// BC5D Segment Generation Helper (MBA-744)
+// ============================================================================
+
+/// Generate velocity-dependent BC segments from a Bc5dTableManager.
+fn generate_bc5d_segments(
+    manager: &mut Bc5dTableManager,
+    caliber: f64,
+    base_bc: f64,
+    drag_type: &str,
+    weight_grains: f64,
+    muzzle_velocity_fps: Option<f64>,
+    bullet_length_in: Option<f64>,
+) -> Option<Vec<BCSegmentData>> {
+    let mut velocity_breakpoints: Vec<f64> = vec![
+        4000.0, 3500.0, 3000.0, 2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0,
+        1700.0, 1600.0, 1500.0, 1400.0, 1350.0, 1300.0, 1250.0,
+        1200.0, 1150.0, 1100.0, 1050.0, 1000.0, 950.0, 900.0,
+        850.0, 800.0, 700.0, 600.0, 500.0,
+    ];
+
+    if let Some(mv) = muzzle_velocity_fps {
+        velocity_breakpoints.push(mv);
+    }
+
+    let mut valid_velocities: Vec<f64> = velocity_breakpoints
+        .into_iter()
+        .filter(|&v| {
+            v >= 500.0 && muzzle_velocity_fps.map_or(true, |mv| v <= mv)
+        })
+        .collect();
+    valid_velocities.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    valid_velocities.dedup();
+
+    let reference_muzzle_velocity = valid_velocities.first().copied().unwrap_or(3000.0);
+
+    let mut segments: Vec<BCSegmentData> = Vec::new();
+    let mut any_correction_found = false;
+
+    for i in 0..valid_velocities.len().saturating_sub(1) {
+        let vel_max = valid_velocities[i];
+        let vel_min = valid_velocities[i + 1];
+        let vel_mid = (vel_max + vel_min) / 2.0;
+
+        if let Ok(correction) = manager.lookup(caliber, weight_grains, base_bc, reference_muzzle_velocity, vel_mid, drag_type) {
+            any_correction_found = true;
+            let segment_bc = base_bc * correction;
+
+            segments.push(BCSegmentData {
+                velocity_min: vel_min,
+                velocity_max: vel_max,
+                bc_value: segment_bc,
+            });
+        }
+    }
+
+    if any_correction_found && !segments.is_empty() {
+        let length_display = bullet_length_in.unwrap_or_else(|| caliber * 3.5);
+        eprintln!("BC5D Table: Generated {} velocity-dependent BC segments", segments.len());
+        eprintln!("BC5D Table: {:.3}\" caliber, {:.1}gr, {:.3}\" length (est)", caliber, weight_grains, length_display);
+        let min_bc = segments.iter().map(|s| s.bc_value).fold(f64::INFINITY, f64::min);
+        let max_bc = segments.iter().map(|s| s.bc_value).fold(f64::NEG_INFINITY, f64::max);
+        eprintln!("BC5D Table: BC range {:.5} - {:.5} across velocity envelope", min_bc, max_bc);
+        Some(segments)
+    } else {
+        eprintln!("Warning: No BC5D table data found for caliber {:.3}\"", caliber);
+        None
+    }
 }
 
 fn run_trajectory(
@@ -5583,6 +5829,360 @@ fn handle_wind_card(
             for _ in wind_speeds { footer += &format!("┴{:─>w$}", "", w = col_width); }
             footer += "┘";
             println!("{}", footer);
+        }
+    }
+
+    Ok(())
+}
+
+
+// ============================================================================
+// Stability Analysis Handler (MBA-734)
+// ============================================================================
+
+/// Calculate the Miller stability factor and minimum twist rates
+fn handle_stability(
+    mass: f64, diameter: f64, length: f64, twist_rate: f64, velocity: f64,
+    temperature: f64, pressure: f64, altitude: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Convert to metric (SI) for the stability calculation
+    let mass_kg = UnitConverter::mass_to_metric(mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
+    let length_m = UnitConverter::sight_height_to_metric(length, units); // inches/mm to meters
+    let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
+    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
+    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
+
+    // Twist rate: for imperial it's inches/turn, for metric it's mm/turn
+    // compute_stability_coefficient expects twist_rate in inches/turn
+    let twist_rate_inches = match units {
+        UnitSystem::Imperial => twist_rate,
+        UnitSystem::Metric => twist_rate / 25.4, // mm to inches
+    };
+
+    // Build BallisticInputs for the stability calculation
+    let inputs = BallisticInputs {
+        bullet_mass: mass_kg,
+        bullet_diameter: diameter_m,
+        bullet_length: length_m,
+        muzzle_velocity: velocity_m,
+        twist_rate: twist_rate_inches,
+        ..Default::default()
+    };
+
+    let atmo_params = (altitude_m, temperature_c, pressure_hpa, 1.0);
+
+    // Calculate stability factor
+    let sg = ballistics_engine::stability::compute_stability_coefficient(&inputs, atmo_params);
+
+    let status = if sg >= 1.5 {
+        "Fully Stable"
+    } else if sg >= 1.0 {
+        "Marginally Stable"
+    } else {
+        "UNSTABLE"
+    };
+
+    // Calculate minimum twist rate for Sg=1.5 and Sg=1.0 by binary search.
+    // Lower twist number = faster spin = higher Sg.
+    let find_twist_for_sg = |target_sg: f64| -> f64 {
+        let mut low = 1.0_f64;   // 1 inch/turn (extremely fast)
+        let mut high = 40.0_f64; // 40 inches/turn (very slow)
+
+        for _ in 0..100 {
+            let mid = (low + high) / 2.0;
+            let test_inputs = BallisticInputs {
+                bullet_mass: mass_kg,
+                bullet_diameter: diameter_m,
+                bullet_length: length_m,
+                muzzle_velocity: velocity_m,
+                twist_rate: mid,
+                ..Default::default()
+            };
+            let test_sg = ballistics_engine::stability::compute_stability_coefficient(
+                &test_inputs, atmo_params,
+            );
+            if test_sg > target_sg {
+                low = mid;
+            } else {
+                high = mid;
+            }
+            if (test_sg - target_sg).abs() < 0.001 {
+                break;
+            }
+        }
+        (low + high) / 2.0
+    };
+
+    let min_twist_1_5 = find_twist_for_sg(1.5);
+    let min_twist_1_0 = find_twist_for_sg(1.0);
+
+    // Display units
+    let (len_unit, vel_unit, twist_display, min15_display, min10_display) = match units {
+        UnitSystem::Imperial => (
+            "\"",
+            "fps",
+            format!("1:{:.0}\" RH", twist_rate),
+            format!("1:{:.1}\"", min_twist_1_5),
+            format!("1:{:.1}\"", min_twist_1_0),
+        ),
+        UnitSystem::Metric => (
+            "mm",
+            "m/s",
+            format!("1:{:.0}mm RH", twist_rate),
+            format!("1:{:.1}mm", min_twist_1_5 * 25.4),
+            format!("1:{:.1}mm", min_twist_1_0 * 25.4),
+        ),
+    };
+
+    match output {
+        OutputFormat::Json => {
+            let json = serde_json::json!({
+                "stability_factor": (sg * 100.0).round() / 100.0,
+                "status": status,
+                "twist_rate": twist_rate,
+                "twist_rate_unit": if units == UnitSystem::Imperial { "in/turn" } else { "mm/turn" },
+                "min_twist_sg_1_5": (min_twist_1_5 * 100.0).round() / 100.0,
+                "min_twist_sg_1_0": (min_twist_1_0 * 100.0).round() / 100.0,
+                "bullet_length": length,
+                "bullet_diameter": diameter,
+                "bullet_mass": mass,
+                "muzzle_velocity": velocity,
+                "units": if units == UnitSystem::Imperial { "imperial" } else { "metric" },
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        OutputFormat::Csv => {
+            println!("sg,status,twist_rate,min_twist_sg1.5,min_twist_sg1.0,length,velocity");
+            println!("{:.2},{},{:.1},{:.1},{:.1},{:.3},{:.0}",
+                     sg, status, twist_rate, min_twist_1_5, min_twist_1_0, length, velocity);
+        }
+        OutputFormat::Table | OutputFormat::Pdf => {
+            println!();
+            println!("╔════════════════════════════════════════╗");
+            println!("║         Stability Analysis            ║");
+            println!("╠════════════════════════════════════════╣");
+            println!("║ Stability Factor (Sg):  {:>12.2}  ║", sg);
+            println!("║ Status:              {:>14}  ║", status);
+            println!("║ Twist Rate:          {:>14}  ║", twist_display);
+            println!("║ Min Twist (Sg=1.5):  {:>14}  ║", min15_display);
+            println!("║ Min Twist (Sg=1.0):  {:>14}  ║", min10_display);
+            println!("║ Bullet Length:     {:>12.3}{:>4}  ║", length, len_unit);
+            println!("║ Muzzle Velocity:     {:>10.0} {:<3}  ║", velocity, vel_unit);
+            println!("╚════════════════════════════════════════╝");
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Range Table Handler (MBA-733)
+// ============================================================================
+
+/// Generate a comprehensive range table combining drop, wind, velocity, energy, and ToF
+fn handle_range_table(
+    velocity: f64, bc: f64, mass: f64, diameter: f64,
+    drag_model: DragModelArg,
+    zero_distance: f64, start: f64, end: f64, step: f64,
+    wind_speed: f64, wind_direction: f64,
+    adjustment_unit: AdjustmentUnit,
+    sight_height: f64,
+    temperature: f64, pressure: f64, humidity: f64, altitude: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Convert to metric
+    let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
+    let mass_kg = UnitConverter::mass_to_metric(mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
+    let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
+    let zero_distance_m = UnitConverter::distance_to_metric(zero_distance, units);
+    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
+    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
+    let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
+    let end_m = UnitConverter::distance_to_metric(end, units);
+    let sample_m = UnitConverter::distance_to_metric(step, units);
+
+    // Calculate zero angle (no wind for clean zero)
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    let zero_inputs = BallisticInputs {
+        bc_value: bc,
+        bc_type: drag_model_enum,
+        bullet_mass: mass_kg,
+        muzzle_velocity: velocity_m,
+        bullet_diameter: diameter_m,
+        bullet_length: diameter_m * 4.5,
+        sight_height: sight_height_m,
+        use_rk4: true,
+        ..Default::default()
+    };
+
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        altitude: altitude_m,
+        ..Default::default()
+    };
+
+    let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+        zero_inputs, zero_distance_m, sight_height_m,
+        WindConditions::default(), atmosphere,
+    )?;
+
+    // Run trajectory WITH wind (for wind drift values)
+    let wind_samples = run_sampled_trajectory(
+        velocity_m, bc, mass_kg, diameter_m, drag_model, sight_height_m,
+        temperature_c, pressure_hpa, humidity, altitude_m,
+        wind_speed_m, wind_direction,
+        end_m * 1.1, sample_m,
+        zero_angle,
+    )?;
+
+    // Run trajectory WITHOUT wind (for pure drop)
+    let no_wind_samples = run_sampled_trajectory(
+        velocity_m, bc, mass_kg, diameter_m, drag_model, sight_height_m,
+        temperature_c, pressure_hpa, humidity, altitude_m,
+        0.0, 0.0,
+        end_m * 1.1, sample_m,
+        zero_angle,
+    )?;
+
+    // Build output rows
+    let adj_label = match adjustment_unit {
+        AdjustmentUnit::Mil => "MIL",
+        AdjustmentUnit::Moa => "MOA",
+    };
+
+    let (dist_unit, vel_unit, energy_unit, drop_unit, wind_unit_label) = match units {
+        UnitSystem::Imperial => ("yd", "fps", "ft-lb", "in", "mph"),
+        UnitSystem::Metric => ("m", "m/s", "J", "mm", "m/s"),
+    };
+
+    struct RangeRow {
+        range: f64,
+        drop_linear: f64,
+        drop_adj: f64,
+        wind_linear: f64,
+        wind_adj: f64,
+        velocity: f64,
+        energy: f64,
+        time: f64,
+    }
+
+    let mut rows: Vec<RangeRow> = Vec::new();
+    let mut current_range = start;
+
+    while current_range <= end + 0.1 {
+        let range_m = UnitConverter::distance_to_metric(current_range, units);
+
+        let nw_closest = no_wind_samples.iter().min_by(|a, b| {
+            (a.distance_m - range_m).abs().partial_cmp(&(b.distance_m - range_m).abs()).unwrap()
+        });
+
+        let w_closest = wind_samples.iter().min_by(|a, b| {
+            (a.distance_m - range_m).abs().partial_cmp(&(b.distance_m - range_m).abs()).unwrap()
+        });
+
+        if let (Some(nw), Some(w)) = (nw_closest, w_closest) {
+            if (nw.distance_m - range_m).abs() < sample_m * 1.5 {
+                let range_display = UnitConverter::distance_from_metric(nw.distance_m, units);
+
+                let drop_linear = match units {
+                    UnitSystem::Imperial => nw.drop_m / 0.0254,
+                    UnitSystem::Metric => nw.drop_m * 1000.0,
+                };
+
+                let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
+                let drop_adj = drop_to_adjustment(drop_yd, range_display, adjustment_unit);
+
+                let wind_linear = match units {
+                    UnitSystem::Imperial => w.wind_drift_m / 0.0254,
+                    UnitSystem::Metric => w.wind_drift_m * 1000.0,
+                };
+
+                let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
+                let wind_adj = drop_to_adjustment(drift_yd, range_display, adjustment_unit);
+
+                rows.push(RangeRow {
+                    range: current_range,
+                    drop_linear,
+                    drop_adj,
+                    wind_linear,
+                    wind_adj,
+                    velocity: UnitConverter::velocity_from_metric(nw.velocity_mps, units),
+                    energy: UnitConverter::energy_from_metric(nw.energy_j, units),
+                    time: nw.time_s,
+                });
+            }
+        }
+
+        current_range += step;
+    }
+
+    match output {
+        OutputFormat::Json => {
+            let json_rows: Vec<serde_json::Value> = rows.iter().map(|r| {
+                serde_json::json!({
+                    "range": r.range,
+                    "drop": r.drop_linear,
+                    "drop_adj": r.drop_adj,
+                    "wind_drift": r.wind_linear,
+                    "wind_adj": r.wind_adj,
+                    "velocity": r.velocity,
+                    "energy": r.energy,
+                    "time": r.time,
+                })
+            }).collect();
+            let json = serde_json::json!({
+                "zero_distance": zero_distance,
+                "wind_speed": wind_speed,
+                "wind_direction": wind_direction,
+                "adjustment_unit": adj_label,
+                "distance_unit": dist_unit,
+                "velocity_unit": vel_unit,
+                "energy_unit": energy_unit,
+                "drop_unit": drop_unit,
+                "data": json_rows,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        OutputFormat::Csv => {
+            println!("range_{},drop_{},drop_{},wind_{},wind_{},velocity_{},energy_{},tof_s",
+                     dist_unit, drop_unit, adj_label.to_lowercase(),
+                     drop_unit, adj_label.to_lowercase(),
+                     vel_unit, energy_unit);
+            for r in &rows {
+                println!("{:.0},{:.1},{:.3},{:.1},{:.2},{:.0},{:.0},{:.2}",
+                         r.range, r.drop_linear, r.drop_adj,
+                         r.wind_linear, r.wind_adj,
+                         r.velocity, r.energy, r.time);
+            }
+        }
+        OutputFormat::Table | OutputFormat::Pdf => {
+            println!();
+            println!("Range Table (zero: {:.0} {}, {:.0} {} crosswind)", zero_distance, dist_unit, wind_speed, wind_unit_label);
+            println!("┌───────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬───────┐");
+            println!("│Range  │Drop     │Drop     │Wind     │Wind     │Vel      │Energy   │ToF    │");
+            println!("│({:>2})   │({:>2})     │({:>3})    │({:>2})     │({:>3})    │({:>3})    │({:>4})   │(s)    │",
+                     dist_unit, drop_unit, adj_label, drop_unit, adj_label, vel_unit, energy_unit);
+            println!("├───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┤");
+            for r in &rows {
+                println!("│{:>6.0} │{:>8.1} │{:>8.3} │{:>8.1} │{:>8.2} │{:>8.0} │{:>8.0} │{:>6.2} │",
+                         r.range, r.drop_linear, r.drop_adj,
+                         r.wind_linear, r.wind_adj,
+                         r.velocity, r.energy, r.time);
+            }
+            println!("└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘");
         }
     }
 
