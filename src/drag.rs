@@ -1,7 +1,7 @@
 use crate::transonic_drag::{get_projectile_shape, transonic_correction, ProjectileShape};
 use crate::DragModel;
 use ndarray::ArrayD;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 /// Drag coefficient calculations for ballistics using actual drag table data
 use std::path::Path;
 
@@ -210,7 +210,7 @@ fn find_drag_tables_dir() -> Option<std::path::PathBuf> {
 }
 
 /// G1 drag table with lazy loading
-static G1_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
+static G1_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
     let fallback_data = [
         (0.0, 0.2629),
         (0.5, 0.2695),
@@ -246,7 +246,7 @@ static G1_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 });
 
 /// G7 drag table with lazy loading
-static G7_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
+static G7_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
     let fallback_data = [
         (0.0, 0.1198),
         (0.5, 0.1197),
@@ -283,7 +283,7 @@ static G7_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 
 /// G6 drag table - flat-base with 6 caliber secant ogive (military FMJ bullets)
 /// MBA-156: Added for completeness with ballistics_rust
-static G6_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
+static G6_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
     let fallback_data = [
         (0.0, 0.2617),
         (0.05, 0.2553),
@@ -378,7 +378,7 @@ static G6_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
 
 /// G8 drag table - flat-base with 10 caliber secant ogive
 /// MBA-156: Added for completeness with ballistics_rust
-static G8_DRAG_TABLE: Lazy<DragTable> = Lazy::new(|| {
+static G8_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
     let fallback_data = [
         (0.0, 0.2105),
         (0.05, 0.2105),
