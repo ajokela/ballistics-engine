@@ -262,7 +262,7 @@ impl ApiClient {
 
         let mut req = ureq::get(&url)
             .set("Accept", "application/json")
-            .set("User-Agent", "ballistics-cli/0.13.31")
+            .set("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
             .timeout(self.timeout)
             .query("bc_value", &request.bc_value.to_string())
             .query("bc_type", &request.bc_type)
@@ -518,7 +518,7 @@ impl ApiClient {
         let response = ureq::post(&url)
             .set("Content-Type", "application/json")
             .set("Accept", "application/json")
-            .set("User-Agent", "ballistics-cli/0.13.31")
+            .set("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
             .timeout(self.timeout)
             .send_string(&body)
             .map_err(|e| match e {
