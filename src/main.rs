@@ -343,7 +343,7 @@ enum Commands {
         mass: f64,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
         /// Drag model (G1, G7, Custom)
@@ -617,7 +617,7 @@ enum Commands {
         mass: f64,
 
         /// Diameter (meters)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
         /// Number of simulations
@@ -672,7 +672,7 @@ enum Commands {
         mass: f64,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
         /// Target distance (yards for imperial, meters for metric)
@@ -719,7 +719,7 @@ enum Commands {
         mass: f64,
 
         /// Diameter (meters)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
         /// Distance 1 (meters)
@@ -754,7 +754,7 @@ enum Commands {
         mass: f64,
 
         /// Projectile diameter (meters)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
         /// Bullet model/name (e.g., "SMK", "ELD-M", "VLD")
@@ -793,7 +793,7 @@ enum Commands {
         mass: f64,
 
         /// Bullet diameter/caliber (inches for imperial, mm for metric)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
         /// Chronograph velocity for comparison (fps for imperial, m/s for metric)
@@ -889,7 +889,7 @@ enum Commands {
         mass: Option<f64>,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
         /// Drag model (G1, G7)
@@ -944,7 +944,7 @@ enum Commands {
         mass: Option<f64>,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
         /// Drag model (G1, G7)
@@ -1023,7 +1023,7 @@ enum Commands {
         mass: Option<f64>,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
         /// Drag model (G1, G7)
@@ -1235,7 +1235,7 @@ enum ProfileAction {
         mass: f64,
 
         /// Diameter (inches for imperial, mm for metric)
-        #[arg(short = 'd', long, value_parser = f64_range(0.01, 4.0))]
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
         /// Drag model (G1, G7)
