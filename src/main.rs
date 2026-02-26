@@ -2375,20 +2375,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             let bullet_mass = mass;
             let bullet_diameter = diameter;
+            // Convert inputs to metric (MBA-716)
+            let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
+            let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
+            let velocity_std_metric = UnitConverter::velocity_to_metric(velocity_std, cli.units);
+            let wind_std_metric = UnitConverter::wind_to_metric(wind_std, cli.units);
+            let wind_speed_metric = UnitConverter::wind_to_metric(wind_speed, cli.units);
+            let target_distance_metric = target_distance.map(|d| UnitConverter::distance_to_metric(d, cli.units));
             run_monte_carlo(
-                velocity,
+                velocity_metric,
                 angle,
                 bc,
-                bullet_mass,
-                bullet_diameter,
+                mass_metric,
+                diameter_metric,
                 num_sims,
-                velocity_std,
+                velocity_std_metric,
                 angle_std,
                 bc_std,
-                wind_std,
-                wind_speed,
+                wind_std_metric,
+                wind_speed_metric,
                 wind_direction,
-                target_distance,
+                target_distance_metric,
                 output,
             )?;
         }
@@ -2446,14 +2454,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             let bullet_mass = mass;
             let bullet_diameter = diameter;
+            // Convert inputs to metric (MBA-716)
+            let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
+            let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
+            let distance1_metric = UnitConverter::distance_to_metric(distance1, cli.units);
+            let drop1_metric = UnitConverter::distance_to_metric(drop1, cli.units);
+            let distance2_metric = UnitConverter::distance_to_metric(distance2, cli.units);
+            let drop2_metric = UnitConverter::distance_to_metric(drop2, cli.units);
             run_bc_estimation(
-                velocity,
-                bullet_mass,
-                bullet_diameter,
-                distance1,
-                drop1,
-                distance2,
-                drop2,
+                velocity_metric,
+                mass_metric,
+                diameter_metric,
+                distance1_metric,
+                drop1_metric,
+                distance2_metric,
+                drop2_metric,
                 output,
             )?;
         }

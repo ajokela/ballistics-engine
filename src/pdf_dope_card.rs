@@ -563,7 +563,7 @@ fn get_timestamp() -> String {
     };
 
     format!(
-        "{} {} {:02} {:02}:{:02}:{:02} {} EST {}",
+        "{} {} {:02} {:02}:{:02}:{:02} {} UTC {}",
         day_names[day_of_week],
         month_names[month],
         day,
