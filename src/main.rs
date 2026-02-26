@@ -310,6 +310,10 @@ enum Commands {
         #[arg(long, value_name = "NAME")]
         profile_row: Option<String>,
 
+        /// Load a saved profile by name (from ~/.ballistics/profiles/)
+        #[arg(long, value_name = "NAME")]
+        saved_profile: Option<String>,
+
         /// Load location/environmental data from CSV file
         #[arg(long, value_name = "FILE")]
         location: Option<PathBuf>,
@@ -340,11 +344,11 @@ enum Commands {
 
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
-        mass: f64,
+        mass: Option<f64>,
 
         /// Diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
-        diameter: f64,
+        diameter: Option<f64>,
 
         /// Drag model (G1, G7, Custom)
         #[arg(long, default_value = "g1")]
@@ -1273,6 +1277,34 @@ enum ProfileAction {
         /// Bullet name/description
         #[arg(long)]
         bullet_name: Option<String>,
+
+        /// Wind speed (mph or m/s based on --units)
+        #[arg(long)]
+        wind_speed: Option<f64>,
+
+        /// Wind direction (degrees, 0=headwind, 90=from right)
+        #[arg(long)]
+        wind_direction: Option<f64>,
+
+        /// Shooting angle (degrees, positive = uphill, negative = downhill)
+        #[arg(long, allow_hyphen_values = true)]
+        shooting_angle: Option<f64>,
+
+        /// Auto-zero / zero distance for trajectory
+        #[arg(long)]
+        auto_zero: Option<f64>,
+
+        /// Right-hand twist (default: true)
+        #[arg(long)]
+        twist_right: Option<bool>,
+
+        /// Enable velocity-based BC segmentation
+        #[arg(long)]
+        use_bc_segments: Option<bool>,
+
+        /// Bullet length in inches (for BC table lookup)
+        #[arg(long)]
+        bullet_length: Option<f64>,
     },
 
     /// List all saved profiles
@@ -1357,6 +1389,20 @@ struct ProfileData {
     bullet_name: Option<String>,
     #[serde(default)]
     created: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wind_speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wind_direction: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shooting_angle: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_zero: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    twist_right: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    use_bc_segments: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bullet_length: Option<f64>,
 }
 
 fn default_unit_system() -> String { "imperial".to_string() }
@@ -1791,6 +1837,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Trajectory {
             profile,
             profile_row,
+            saved_profile,
             location,
             site,
             velocity,
@@ -1889,6 +1936,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 HashMap::new()
             };
 
+            // Load saved JSON profile if specified
+            let saved_profile_data: Option<ProfileData> = saved_profile.as_ref().map(|name| {
+                load_profile(name).unwrap_or_else(|e| { eprintln!("Error loading saved profile: {}", e); std::process::exit(1); })
+            });
+            if let Some(ref sp) = saved_profile_data { eprintln!("Loaded saved profile '{}'", sp.name); }
+
             // Load location from CSV if specified
             let location_data: HashMap<String, String> = if let (Some(path), Some(site_name)) = (&location, &site) {
                 match load_csv_row(path, site_name) {
@@ -1906,14 +1959,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
 
             // Merge values: CLI args override profile/location, profile/location override defaults
-            let final_velocity = velocity.unwrap_or_else(|| csv_get_f64(&profile_data, &["VELOCITY", "MV", "MUZZLE_VELOCITY"], 2800.0));
+            let final_velocity = velocity
+                .or_else(|| { let v = csv_get_f64(&profile_data, &["VELOCITY", "MV", "MUZZLE_VELOCITY"], 0.0); if v > 0.0 { Some(v) } else { None } })
+                .or_else(|| saved_profile_data.as_ref().map(|p| p.velocity))
+                .unwrap_or(2800.0);
             let final_velocity_adj = if velocity_adjustment != 0.0 { velocity_adjustment } else { csv_get_f64(&profile_data, &["VELOCITY_ADJ", "VEL_ADJ"], 0.0) };
-            let final_bc = bc.unwrap_or_else(|| csv_get_f64(&profile_data, &["BC"], 0.5));
+            let final_bc = bc
+                .or_else(|| { let v = csv_get_f64(&profile_data, &["BC"], 0.0); if v > 0.0 { Some(v) } else { None } })
+                .or_else(|| saved_profile_data.as_ref().map(|p| p.bc))
+                .unwrap_or(0.5);
             let final_bc_adj = if bc_adjustment != 1.0 { bc_adjustment } else { csv_get_f64(&profile_data, &["BC_ADJ", "BC_ADJUSTMENT"], 1.0) };
-            let final_mass = mass;
-            let final_diameter = diameter;
+            let final_mass = mass
+                .or_else(|| saved_profile_data.as_ref().map(|p| p.mass))
+                .unwrap_or_else(|| { eprintln!("Error: --mass is required (or use --saved-profile)"); std::process::exit(1); });
+            let final_diameter = diameter
+                .or_else(|| saved_profile_data.as_ref().map(|p| p.diameter))
+                .unwrap_or_else(|| { eprintln!("Error: --diameter is required (or use --saved-profile)"); std::process::exit(1); });
             let final_max_range = max_range;
-            let final_wind_speed = wind_speed;
+            let final_wind_speed = if wind_speed != 0.0 { wind_speed } else { saved_profile_data.as_ref().and_then(|p| p.wind_speed).unwrap_or(0.0) };
             let final_wind_direction = if wind_direction != 0.0 { wind_direction } else { csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0) };
 
             // Location overrides (environmental conditions)
@@ -1925,8 +1988,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Get zero range: CLI --auto-zero overrides profile ZERO_RANGE
             let final_auto_zero: Option<f64> = auto_zero.or_else(|| {
                 let zero_from_csv = csv_get_f64(&profile_data, &["ZERO_RANGE", "ZERO_DISTANCE", "ZERO"], 0.0);
-                if zero_from_csv > 0.0 { Some(zero_from_csv) } else { None }
+                if zero_from_csv > 0.0 { Some(zero_from_csv) } else { saved_profile_data.as_ref().and_then(|p| p.auto_zero.or(p.zero_distance)) }
             });
+
+            // Resolve additional params from saved profile (if not explicitly set via CLI)
+            let drag_model = if saved_profile_data.is_some() && velocity.is_none() && bc.is_none() {
+                saved_profile_data.as_ref().map(|p| parse_drag_model_arg(&p.drag_model)).unwrap_or(drag_model)
+            } else { drag_model };
+            let use_bc_segments = use_bc_segments || saved_profile_data.as_ref().and_then(|p| p.use_bc_segments).unwrap_or(false);
+            let twist_right = saved_profile_data.as_ref().and_then(|p| p.twist_right).unwrap_or(twist_right);
+            let shooting_angle = if shooting_angle != 0.0 { shooting_angle } else { saved_profile_data.as_ref().and_then(|p| p.shooting_angle).unwrap_or(0.0) };
+            let bullet_length = bullet_length.or_else(|| saved_profile_data.as_ref().and_then(|p| p.bullet_length));
+            let sight_height = sight_height.or_else(|| saved_profile_data.as_ref().and_then(|p| p.sight_height));
+            let twist_rate = twist_rate.or_else(|| saved_profile_data.as_ref().and_then(|p| p.twist_rate));
 
             // Apply truing adjustments
             let trued_velocity = final_velocity + final_velocity_adj;
@@ -1946,13 +2020,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                             })
                             .unwrap_or_else(|| {
                                 // Estimate: typical rifle bullets are ~3.5 calibers long
-                                diameter * 3.5
+                                final_diameter * 3.5
                             });
 
                         // Get bullet mass in grains
                         let mass_grains = match cli.units {
-                            UnitSystem::Imperial => mass, // already in grains
-                            UnitSystem::Metric => mass * 15.4324, // grams to grains
+                            UnitSystem::Imperial => final_mass, // already in grains
+                            UnitSystem::Metric => final_mass * 15.4324, // grams to grains
                         };
 
                         // BC type string
@@ -2051,7 +2125,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Auto-download mode: ensure table is available, use cache directory
                 match Bc5dDownloader::new(&bc_table_url, bc_table_refresh) {
                     Ok(mut downloader) => {
-                        match downloader.ensure_table(diameter) {
+                        match downloader.ensure_table(final_diameter) {
                             Ok(table_path) => {
                                 // Return the parent directory (cache dir) as table directory
                                 table_path.parent().map(|p| p.to_path_buf())
@@ -2082,8 +2156,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let mut manager = Bc5dTableManager::new(table_dir);
 
                     let mass_grains = match cli.units {
-                        UnitSystem::Imperial => mass,
-                        UnitSystem::Metric => mass * 15.4324,
+                        UnitSystem::Imperial => final_mass,
+                        UnitSystem::Metric => final_mass * 15.4324,
                     };
 
                     let bc_type_str = match drag_model {
@@ -2092,7 +2166,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     };
 
                     // Print table info if available
-                    if let Ok(table) = manager.get_table(diameter) {
+                    if let Ok(table) = manager.get_table(final_diameter) {
                         eprintln!("BC5D Table: Loaded caliber {:.3} (v{}, API {}, {})",
                             table.caliber(), table.version(), table.api_version(), table.dimensions_str());
                     }
@@ -2102,11 +2176,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let csv_len = csv_get_f64(&profile_data, &["BULLET_LENGTH", "LENGTH"], 0.0);
                             if csv_len > 0.0 { Some(csv_len) } else { None }
                         })
-                        .unwrap_or(diameter * 3.5);
+                        .unwrap_or(final_diameter * 3.5);
 
                     if let Some(segments) = generate_bc5d_segments(
                         &mut manager,
-                        diameter,
+                        final_diameter,
                         final_bc,
                         bc_type_str,
                         mass_grains,
@@ -2116,7 +2190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         bc_table_segments = Some(segments);
 
                         let muzzle_correction = manager.lookup(
-                            diameter, mass_grains, final_bc, trued_velocity, trued_velocity, bc_type_str
+                            final_diameter, mass_grains, final_bc, trued_velocity, trued_velocity, bc_type_str
                         ).unwrap_or(1.0);
                         eprintln!("BC5D Table: Muzzle correction={:.4} for BC={:.3} {} {}gr @ {:.0}fps",
                             muzzle_correction, final_bc, bc_type_str, mass_grains, trued_velocity);
@@ -2136,7 +2210,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let combined_bc_correction = bc_table_correction.or(bc_table_5d_correction);
 
             // Show effective values if using profile/location or BC table
-            if !profile_data.is_empty() || !location_data.is_empty() || combined_bc_correction.is_some() {
+            if !profile_data.is_empty() || !location_data.is_empty() || saved_profile_data.is_some() || combined_bc_correction.is_some() {
                 let bc_info = if let Some(corr) = combined_bc_correction {
                     format!("BC={:.3} (table-corrected={:.4}, factor={:.4})", final_bc, trued_bc, corr)
                 } else {
@@ -3313,6 +3387,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     twist_rate, sight_height, zero_distance,
                     temperature, pressure, humidity, altitude,
                     bullet_name,
+                    wind_speed, wind_direction, shooting_angle,
+                    auto_zero, twist_right, use_bc_segments, bullet_length,
                 } => {
                     let drag_str = match drag_model {
                         DragModelArg::G1 => "G1",
@@ -3340,6 +3416,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         altitude,
                         bullet_name,
                         created: Some(timestamp_string()),
+                        wind_speed, wind_direction, shooting_angle,
+                        auto_zero, twist_right, use_bc_segments, bullet_length,
                     };
 
                     let path = save_profile(&profile)?;
@@ -3394,6 +3472,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     if let Some(ref bn) = profile.bullet_name {
                         println!("║  Bullet:        {:<24}  ║", bn);
+                    }
+                    if let Some(ws) = profile.wind_speed {
+                        println!("║  Wind speed:    {:>10.1} {:<10}  ║",
+                            ws,
+                            if profile.units == "metric" { "m/s" } else { "mph" });
+                    }
+                    if let Some(wd) = profile.wind_direction {
+                        println!("║  Wind dir:      {:>10.1}°            ║", wd);
+                    }
+                    if let Some(sa) = profile.shooting_angle {
+                        println!("║  Shoot angle:   {:>10.1}°            ║", sa);
+                    }
+                    if let Some(az) = profile.auto_zero {
+                        println!("║  Auto-zero:     {:>10.0} {:<10}  ║",
+                            az,
+                            if profile.units == "metric" { "m" } else { "yd" });
+                    }
+                    if let Some(tr) = profile.twist_right {
+                        println!("║  Twist:         {:>10}             ║",
+                            if tr { "Right" } else { "Left" });
+                    }
+                    if let Some(ubc) = profile.use_bc_segments {
+                        println!("║  BC segments:   {:>10}             ║",
+                            if ubc { "Enabled" } else { "Disabled" });
+                    }
+                    if let Some(bl) = profile.bullet_length {
+                        println!("║  Bullet length: {:>10.3} {:<10}  ║",
+                            bl,
+                            if profile.units == "metric" { "mm" } else { "in" });
                     }
                     println!("║  Temperature:   {:>10.1} {:<10}  ║",
                         profile.temperature,
