@@ -181,10 +181,10 @@ pub fn update_spin_rate(
     initial_spin_rad_s: f64,
     time_elapsed_s: f64,
     velocity_mps: f64,
-    _air_density_kg_m3: f64,
+    air_density_kg_m3: f64,
     mass_grains: f64,
-    _caliber_inches: f64,
-    _length_inches: f64,
+    caliber_inches: f64,
+    length_inches: f64,
     decay_params: Option<&SpinDecayParameters>,
 ) -> f64 {
     if time_elapsed_s <= 0.0 {
@@ -196,6 +196,27 @@ pub fn update_spin_rate(
 
     // Velocity factor (higher velocity means more decay)
     let velocity_factor = velocity_mps / 850.0; // Normalized to 850 m/s
+
+    // Air density scaling: higher density = more aerodynamic damping
+    // Normalized to standard sea-level density (1.225 kg/m^3)
+    let density_factor = if air_density_kg_m3 > 0.0 {
+        air_density_kg_m3 / 1.225
+    } else {
+        1.0 // Standard conditions fallback
+    };
+
+    // Surface area factor from caliber and length
+    // Larger surface area relative to a reference .308 bullet = more skin-friction damping.
+    // Use sqrt of the ratio: skin-friction torque scales with surface area but rotational
+    // inertia also grows with size, so the net effect on decay rate is sub-linear.
+    // Reference: .308 caliber (0.308") x 1.3" length
+    let ref_surface = PI * 0.308 * 1.3; // reference lateral surface area (inches^2)
+    let surface_factor = if caliber_inches > 0.0 && length_inches > 0.0 {
+        let bullet_surface = PI * caliber_inches * length_inches;
+        (bullet_surface / ref_surface).sqrt()
+    } else {
+        1.0 // Standard conditions fallback
+    };
 
     // Base decay rate per second (empirical)
     let base_decay_rate = if let Some(params) = decay_params {
@@ -210,8 +231,11 @@ pub fn update_spin_rate(
         0.04 // Default to hunting bullet
     };
 
-    // Adjusted decay rate
-    let decay_rate_per_second = base_decay_rate * mass_factor * velocity_factor;
+    // Adjusted decay rate blending empirical model with physical parameters.
+    // At standard conditions (sea-level density, .308 reference bullet) the
+    // density_factor and surface_factor are both 1.0, preserving legacy behavior.
+    let decay_rate_per_second =
+        base_decay_rate * mass_factor * velocity_factor * density_factor * surface_factor;
 
     // Apply exponential decay
     let decay_factor = (-decay_rate_per_second * time_elapsed_s).exp();

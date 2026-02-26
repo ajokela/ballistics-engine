@@ -95,15 +95,21 @@ fn fetch_tos_text() -> Result<String, String> {
         .map_err(|e| format!("Failed to read Terms of Service: {}", e))
 }
 
-/// Calculate a simple hash of the TOS text for tracking changes
+/// Stable FNV-1a hash (not affected by Rust version changes unlike DefaultHasher)
+#[cfg(feature = "online")]
+fn fnv1a_hash(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Calculate a stable hash of the TOS text for tracking changes
 #[cfg(feature = "online")]
 fn hash_tos(text: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    format!("{:x}", fnv1a_hash(text.as_bytes()))
 }
 
 /// Save TOS acceptance to file

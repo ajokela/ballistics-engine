@@ -98,15 +98,17 @@ pub fn prepare_initial_conditions(
     };
     let t_span = (0.0, max_time);
 
-    // Omega vector for Coriolis (simplified - would need more complex calculation)
+    // Omega vector for Coriolis accounting for shot azimuth
     let omega_vector = if inputs.enable_advanced_effects {
-        // Simplified Coriolis vector calculation
+        // Project Earth's rotation vector into the shooter's local frame.
+        // azimuth_angle: 0 = North, pi/2 = East
         let latitude_rad = inputs.latitude.unwrap_or(0.0).to_radians();
+        let azimuth = inputs.azimuth_angle; // already in radians
         let earth_rotation_rate = 7.2921159e-5; // rad/s
         Some(Vector3::new(
-            0.0,
-            earth_rotation_rate * latitude_rad.cos(),
+            earth_rotation_rate * latitude_rad.cos() * azimuth.sin(),
             earth_rotation_rate * latitude_rad.sin(),
+            earth_rotation_rate * latitude_rad.cos() * azimuth.cos(),
         ))
     } else {
         None

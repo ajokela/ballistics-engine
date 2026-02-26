@@ -311,7 +311,18 @@ fn compute_derivatives(
     } else {
         // Calculate drag
         let v_fps = v_mag * MPS_TO_FPS;
-        let mach = v_mag / 340.0; // Approximate speed of sound
+
+        // Calculate speed of sound from altitude using standard lapse rate
+        // atmo_params: (base_alt, base_temp_c, base_press_hpa, base_ratio)
+        let altitude = inputs.altitude + pos.y;
+        let (_, speed_of_sound) = get_local_atmosphere(
+            altitude,
+            inputs.altitude, // base_alt approximation
+            inputs.temperature,
+            inputs.pressure,
+            if inputs.humidity > 0.0 { inputs.humidity } else { 1.0 },
+        );
+        let mach = v_mag / speed_of_sound;
 
         // Get BC value (potentially from segments)
         let bc_current = if has_bc_segments_data && inputs.bc_segments_data.is_some() {
@@ -390,13 +401,17 @@ pub fn fast_integrate_with_segments(
 
     // Get omega vector if advanced effects enabled
     let omega_vector = if inputs.enable_advanced_effects {
-        // Calculate omega based on latitude
+        // Calculate omega based on latitude and shot azimuth
+        // The Earth's rotation vector must be projected into the shooter's
+        // local frame which depends on azimuth (shooting direction).
+        // azimuth_angle: 0 = North, pi/2 = East
         let omega_earth = 7.2921159e-5; // rad/s
         let lat_rad = inputs.latitude.unwrap_or(0.0).to_radians();
+        let azimuth = inputs.azimuth_angle; // already in radians
         Some(Vector3::new(
-            0.0,
-            omega_earth * lat_rad.cos(),
+            omega_earth * lat_rad.cos() * azimuth.sin(),
             omega_earth * lat_rad.sin(),
+            omega_earth * lat_rad.cos() * azimuth.cos(),
         ))
     } else {
         None
