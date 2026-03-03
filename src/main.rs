@@ -507,7 +507,7 @@ enum Commands {
         shot_direction: Option<f64>,
 
         /// Shooting angle (degrees, positive = uphill, negative = downhill)
-        #[arg(long, default_value = "0.0")]
+        #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
         shooting_angle: f64,
 
         /// Enable powder temperature sensitivity
@@ -684,7 +684,7 @@ enum Commands {
         target_distance: f64,
 
         /// Target height (yards for imperial, meters for metric)
-        #[arg(long, default_value = "0.0")]
+        #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
         target_height: f64,
 
         /// Sight height above bore (inches for imperial, mm for metric)
@@ -731,7 +731,7 @@ enum Commands {
         distance1: f64,
 
         /// Drop at distance 1 (meters)
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         drop1: f64,
 
         /// Distance 2 (meters)
@@ -739,7 +739,7 @@ enum Commands {
         distance2: f64,
 
         /// Drop at distance 2 (meters)
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         drop2: f64,
 
         /// Output format
