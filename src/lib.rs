@@ -41,9 +41,7 @@ pub mod wind;
 pub mod wind_shear;
 // MBA-154: Make derivatives public for ballistics_rust wrapping
 pub mod derivatives;
-// MBA-154: Make trajectory_solver public for ballistics_rust wrapping
 pub mod trajectory_sampling;
-pub mod trajectory_solver;
 // MBA-154: Make fast_trajectory public for ballistics_rust wrapping
 pub mod fast_trajectory;
 // MBA-155: Add advanced integration methods (RK4, RK45)
