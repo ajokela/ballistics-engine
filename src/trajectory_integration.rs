@@ -161,11 +161,11 @@ fn compute_derivatives_vec(
             let seg = &params.wind_segments[0];
             let wind_speed_mps = seg.0 * 0.2777778; // km/h to m/s
             let wind_angle_rad = seg.1.to_radians();
-            // Z IS DOWNRANGE: x=lateral, y=vertical, z=downrange
+            // McCoy: x=downrange, y=vertical, z=lateral
             Vector3::new(
-                -wind_speed_mps * wind_angle_rad.sin(), // x (lateral - crosswind component)
+                -wind_speed_mps * wind_angle_rad.cos(), // x (downrange - head/tail component)
                 0.0,                                    // y (vertical)
-                -wind_speed_mps * wind_angle_rad.cos(), // z (downrange - head/tail component)
+                -wind_speed_mps * wind_angle_rad.sin(), // z (lateral - crosswind component)
             )
         }
     } else {
@@ -301,10 +301,10 @@ pub fn integrate_trajectory(
 
                 let new_state = rk4_step(&state, t, dt, &params);
 
-                // Check if we're about to pass the target (z is downrange)
-                if state[2] < params.target_distance_m && new_state[2] >= params.target_distance_m {
+                // Check if we're about to pass the target (X is downrange, McCoy)
+                if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
                     // Interpolate to find exact target crossing
-                    let alpha = (params.target_distance_m - state[2]) / (new_state[2] - state[2]);
+                    let alpha = (params.target_distance_m - state[0]) / (new_state[0] - state[0]);
                     let dt_to_target = dt * alpha;
 
                     // Take a smaller step to reach target exactly
@@ -312,8 +312,8 @@ pub fn integrate_trajectory(
 
                     // Ensure we don't overshoot
                     let mut corrected_state = final_state;
-                    if corrected_state[2] > params.target_distance_m {
-                        corrected_state[2] = params.target_distance_m;
+                    if corrected_state[0] > params.target_distance_m {
+                        corrected_state[0] = params.target_distance_m;
                     }
 
                     trajectory.push((t + dt_to_target, corrected_state));
@@ -325,11 +325,11 @@ pub fn integrate_trajectory(
                 trajectory.push((t, state));
 
                 // Check if we've reached or passed the target
-                if state[2] >= params.target_distance_m {
-                    // z is downrange
+                if state[0] >= params.target_distance_m {
+                    // X is downrange (McCoy)
                     // Add final point exactly at target
                     let mut final_state = state;
-                    final_state[2] = params.target_distance_m; // z is downrange
+                    final_state[0] = params.target_distance_m; // X is downrange
                     trajectory.push((t, final_state));
                     break;
                 }
@@ -342,7 +342,7 @@ pub fn integrate_trajectory(
         }
         "RK45" | _ => {
             // Adaptive RK45 with better sampling
-            let mut last_save_z = 0.0; // z is downrange
+            let mut last_save_x = 0.0; // X is downrange (McCoy)
             let save_interval_m = params.target_distance_m / 50.0; // Save ~50 points minimum
 
             // OPTIMIZATION: Adjust max step size when wind shear is enabled
@@ -376,10 +376,10 @@ pub fn integrate_trajectory(
 
                 let (new_state, dt_new, _error) = rk45_step(&state, t, dt, &params, tolerance);
 
-                // Check if we're about to pass the target (z is downrange)
-                if state[2] < params.target_distance_m && new_state[2] >= params.target_distance_m {
+                // Check if we're about to pass the target (X is downrange, McCoy)
+                if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
                     // Interpolate to find exact target crossing
-                    let alpha = (params.target_distance_m - state[2]) / (new_state[2] - state[2]);
+                    let alpha = (params.target_distance_m - state[0]) / (new_state[0] - state[0]);
                     let dt_to_target = dt * alpha;
 
                     // Take a smaller step to reach target exactly
@@ -388,8 +388,8 @@ pub fn integrate_trajectory(
 
                     // Make sure we don't overshoot
                     let mut corrected_state = final_state;
-                    if corrected_state[2] > params.target_distance_m {
-                        corrected_state[2] = params.target_distance_m;
+                    if corrected_state[0] > params.target_distance_m {
+                        corrected_state[0] = params.target_distance_m;
                     }
 
                     trajectory.push((t + dt_to_target, corrected_state));
@@ -401,22 +401,22 @@ pub fn integrate_trajectory(
                 t += dt;
 
                 // Save trajectory point if we've moved enough distance
-                if state[2] - last_save_z >= save_interval_m || state[2] >= params.target_distance_m
+                if state[0] - last_save_x >= save_interval_m || state[0] >= params.target_distance_m
                 {
-                    // z is downrange
+                    // X is downrange
                     trajectory.push((t, state));
-                    last_save_z = state[2];
+                    last_save_x = state[0];
                 }
 
                 // Limit dt for next step - ensure we get enough resolution
                 dt = dt_new.min(effective_max_step).max(0.0001); // Use effective max step, min 0.1ms
 
                 // Stop if we've reached the target
-                if state[2] >= params.target_distance_m {
-                    // z is downrange
+                if state[0] >= params.target_distance_m {
+                    // X is downrange (McCoy)
                     // Add final point at target distance
                     let mut final_state = state;
-                    final_state[2] = params.target_distance_m; // z is downrange
+                    final_state[0] = params.target_distance_m; // X is downrange
                     trajectory.push((t, final_state));
                     break;
                 }
@@ -435,8 +435,8 @@ pub fn integrate_trajectory(
                 );
                 eprintln!("  Final time: {}, Target time: {}", t, t_end);
                 eprintln!(
-                    "  Final position: z={}, Target: {}m",
-                    state[2], params.target_distance_m
+                    "  Final position: downrange(x)={}, Target: {}m",
+                    state[0], params.target_distance_m
                 );
             }
         }
@@ -533,9 +533,9 @@ mod tests {
 
     #[test]
     fn test_integrate_trajectory_basic() {
-        // Same initial state as Python test: [x,y,z,vx,vy,vz]
-        // z=0 (downrange start), vz=821.52 (downrange velocity)
-        let initial_state = [0.0, -0.038, 0.0, 0.0, 48.61, 821.52];
+        // Initial state [x,y,z,vx,vy,vz] (McCoy: X=downrange, Z=lateral)
+        // x=0 (downrange start), vx=821.52 (downrange velocity)
+        let initial_state = [0.0, -0.038, 0.0, 821.52, 48.61, 0.0];
 
         let params = TrajectoryParams {
             mass_kg: 0.01134, // 175 grains in kg
@@ -575,14 +575,14 @@ mod tests {
 
         // Check that we actually moved downrange
         if let Some((_, final_state)) = trajectory.last() {
-            println!("Final state: z={}", final_state[2]);
+            println!("Final state: downrange(x)={}", final_state[0]);
             assert!(
-                final_state[2] > 0.0,
-                "Final z should be positive (bullet moved downrange)"
+                final_state[0] > 0.0,
+                "Final x should be positive (bullet moved downrange)"
             );
             assert!(
-                final_state[2] >= 900.0,
-                "Final z should be near target distance"
+                final_state[0] >= 900.0,
+                "Final x should be near target distance"
             );
         }
     }
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn test_rk4_vs_rk45_consistency() {
         // Both methods should give similar results for the same trajectory
-        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 30.0, 0.0]; // McCoy: vx=downrange
         let target_distance = 500.0;
 
         let params_rk4 = create_test_params(target_distance);
@@ -609,8 +609,8 @@ mod tests {
         let (_, final_rk45) = trajectory_rk45.last().unwrap();
 
         // Final downrange positions should be within 1% of each other
-        let rk4_z = final_rk4[2];
-        let rk45_z = final_rk45[2];
+        let rk4_z = final_rk4[0];
+        let rk45_z = final_rk45[0];
         let diff_percent = ((rk4_z - rk45_z) / rk45_z).abs() * 100.0;
 
         assert!(
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn test_ground_impact_detection() {
         // Trajectory with steep downward angle should hit ground
-        let initial_state = [0.0, 100.0, 0.0, 0.0, -50.0, 300.0]; // Steep descent
+        let initial_state = [0.0, 100.0, 0.0, 300.0, -50.0, 0.0]; // McCoy: vx=downrange // Steep descent
 
         let mut params = create_test_params(10000.0); // Far target
         params.target_distance_m = 10000.0;
@@ -643,15 +643,15 @@ mod tests {
             final_state[1]
         );
         assert!(
-            final_state[2] < 10000.0,
+            final_state[0] < 10000.0,
             "Should not reach target, but z={}",
-            final_state[2]
+            final_state[0]
         );
     }
 
     #[test]
     fn test_target_distance_reached() {
-        let initial_state = [0.0, 0.0, 0.0, 0.0, 20.0, 800.0];
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 20.0, 0.0]; // McCoy: vx=downrange
         let target_distance = 300.0;
 
         let params = create_test_params(target_distance);
@@ -663,10 +663,10 @@ mod tests {
 
         // Should stop at or very near target distance
         assert!(
-            (final_state[2] - target_distance).abs() < 1.0,
+            (final_state[0] - target_distance).abs() < 1.0,
             "Should reach target at {}m, but stopped at {}m",
             target_distance,
-            final_state[2]
+            final_state[0]
         );
     }
 
@@ -675,7 +675,7 @@ mod tests {
         // Test that wind segments are properly stored and passed through
         // The actual wind effect depends on the derivatives computation which
         // uses the wind vector in the drag calculation
-        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 30.0, 0.0]; // McCoy: vx=downrange
         let target_distance = 500.0;
 
         // No wind
@@ -709,18 +709,18 @@ mod tests {
 
         // Both should reach approximately the target distance
         assert!(
-            (final_no_wind[2] - target_distance).abs() < 10.0,
+            (final_no_wind[0] - target_distance).abs() < 10.0,
             "No-wind should reach target"
         );
         assert!(
-            (final_headwind[2] - target_distance).abs() < 10.0,
+            (final_headwind[0] - target_distance).abs() < 10.0,
             "Headwind should reach target"
         );
     }
 
     #[test]
     fn test_solve_trajectory_rust_output_format() {
-        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 30.0, 0.0]; // McCoy: vx=downrange
 
         let result = solve_trajectory_rust(
             initial_state,
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_left_vs_right_twist() {
-        let initial_state = [0.0, 0.0, 0.0, 0.0, 30.0, 800.0];
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 30.0, 0.0]; // McCoy: vx=downrange
         let target_distance = 500.0;
 
         let mut params_right = create_test_params(target_distance);

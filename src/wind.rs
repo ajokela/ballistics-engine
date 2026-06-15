@@ -54,16 +54,16 @@ impl WindSock {
         let angle_rad = angle_deg * PI / 180.0;
 
         // Wind convention (matching trajectory coordinates):
-        // 0° = headwind (from front, affects -z downrange)
-        // 90° = wind from right (affects -x lateral)
-        // 180° = tailwind (from back, affects +z downrange)
-        // 270° = wind from left (affects +x lateral)
+        // 0° = headwind (from front, affects -x downrange)
+        // 90° = wind from right (affects -z lateral)
+        // 180° = tailwind (from back, affects +x downrange)
+        // 270° = wind from left (affects +z lateral)
         //
-        // Standard ballistics convention: x=lateral, y=vertical, z=downrange
+        // McCoy convention: x=downrange, y=vertical, z=lateral
         Vector3::new(
-            -speed_mps * angle_rad.sin(), // x (lateral - crosswind component)
+            -speed_mps * angle_rad.cos(), // x (downrange - head/tail component)
             0.0,                          // y (vertical)
-            -speed_mps * angle_rad.cos(), // z (downrange - head/tail component)
+            -speed_mps * angle_rad.sin(), // z (lateral - crosswind component)
         )
     }
 
@@ -134,17 +134,17 @@ mod tests {
         let vec_50 = sock.vector_for_range_stateless(50.0);
         println!("vec_50 = [{}, {}, {}]", vec_50[0], vec_50[1], vec_50[2]);
         assert!(vec_50.norm() > 0.0);
-        // 90° wind from right: should have negative X component, zero Y, small Z
+        // 90° wind from right (crosswind, McCoy): negative Z (lateral), zero Y, near-zero X (downrange)
         assert!(
-            vec_50[0] < 0.0,
-            "X component should be negative for 90° wind, got {}",
-            vec_50[0]
+            vec_50[2] < 0.0,
+            "Z (lateral) should be negative for 90° wind, got {}",
+            vec_50[2]
         );
         assert_eq!(vec_50[1], 0.0); // Zero Y component
         assert!(
-            vec_50[2].abs() < 0.01,
-            "Z component should be nearly zero for 90° wind, got {}",
-            vec_50[2]
+            vec_50[0].abs() < 0.01,
+            "X (downrange) should be nearly zero for 90° wind, got {}",
+            vec_50[0]
         );
 
         // No wind after 100m
@@ -165,7 +165,7 @@ mod tests {
         let vec_25 = sock.vector_for_range_stateless(25.0);
         println!("vec_25 = [{}, {}, {}]", vec_25[0], vec_25[1], vec_25[2]);
         assert!(vec_25.norm() > 0.0);
-        assert!(vec_25[0] < 0.0, "90° wind should have negative X"); // 90° wind from right
+        assert!(vec_25[2] < 0.0, "90° wind should have negative Z (lateral)"); // 90° wind from right
 
         let vec_75 = sock.vector_for_range_stateless(75.0);
         println!("vec_75 = [{}, {}, {}]", vec_75[0], vec_75[1], vec_75[2]);
@@ -177,14 +177,14 @@ mod tests {
         println!("vec_150 = [{}, {}, {}]", vec_150[0], vec_150[1], vec_150[2]);
         assert!(vec_150.norm() < vec_75.norm()); // 5 mph < 15 mph
         assert!(
-            vec_150[0].abs() < 0.01,
-            "180° wind should have near-zero X, got {}",
-            vec_150[0]
+            vec_150[2].abs() < 0.01,
+            "180° wind should have near-zero Z (lateral), got {}",
+            vec_150[2]
         ); // 180° wind (from behind)
         assert!(
-            vec_150[2] > 0.0,
-            "180° wind should have positive Z (tailwind), got {}",
-            vec_150[2]
+            vec_150[0] > 0.0,
+            "180° wind should have positive X (tailwind, downrange), got {}",
+            vec_150[0]
         ); // Tailwind
 
         let vec_250 = sock.vector_for_range_stateless(250.0);

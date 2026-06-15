@@ -3878,9 +3878,12 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         .into_iter()
                         .map(|p| TrajectoryPoint {
                             time: p.time,
-                            x: p.position.x,
+                            // Output contract is unchanged: the `x` field is lateral
+                            // (drift), `z` is downrange. With McCoy internals these map
+                            // to position.z (lateral) and position.x (downrange).
+                            x: p.position.z,
                             y: p.position.y,
-                            z: p.position.z,
+                            z: p.position.x,
                             velocity: p.velocity_magnitude,
                             energy: p.kinetic_energy,
                         })
@@ -3925,9 +3928,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
                     );
                     for p in result.points {
-                        let x = UnitConverter::distance_from_metric(p.position.x, units);
+                        // Output contract unchanged: x column is lateral, z is downrange.
+                        // McCoy internals: lateral=position.z, downrange=position.x.
+                        let x = UnitConverter::distance_from_metric(p.position.z, units);
                         let y = UnitConverter::distance_from_metric(p.position.y, units);
-                        let z = UnitConverter::distance_from_metric(p.position.z, units);
+                        let z = UnitConverter::distance_from_metric(p.position.x, units);
                         let vel = UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
                         let energy = UnitConverter::energy_from_metric(p.kinetic_energy, units);
                         println!(
@@ -4082,7 +4087,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             // Check if trajectory hit ground
             if let Some(last_point) = result.points.last() {
                 let last_height = last_point.position.y;
-                let last_range = last_point.position.z;
+                let last_range = last_point.position.x;
 
                 // Ground threshold is typically around 0, so if y is close to or below 0, it hit ground
                 if last_height <= 0.001 {
@@ -4117,7 +4122,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
                 for (i, p) in result.points.iter().enumerate() {
                     if i % step == 0 || i == result.points.len() - 1 {
-                        let x_display = UnitConverter::distance_from_metric(p.position.x, units);
+                        let x_display = UnitConverter::distance_from_metric(p.position.z, units); // X column = lateral (now position.z)
                         let y_display = UnitConverter::distance_from_metric(p.position.y, units);
                         let vel_display =
                             UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
@@ -4700,7 +4705,10 @@ fn run_zero_calculation(
                 "max_ordinate": trajectory.max_height,
                 "point_blank_range": trajectory.points.iter()
                     .find(|p| p.position.y < -0.05)
-                    .map(|p| p.position.x)
+                    // Preserves pre-existing behavior: this read the lateral component
+                    // (old position.x), which is now position.z. NOTE: this looks like a
+                    // latent bug (PBR should be downrange = position.x); fix separately.
+                    .map(|p| p.position.z)
                     .unwrap_or(trajectory.max_range),
             });
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -4902,18 +4910,18 @@ fn run_bc_estimation(
     let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
     let trajectory = solver.solve()?;
 
-    // Find drops at the specified distances (Z is downrange)
+    // Find drops at the specified distances (X is downrange)
     let calc_drop1 = trajectory
         .points
         .iter()
-        .find(|p| p.position.z >= distance1)
+        .find(|p| p.position.x >= distance1)
         .map(|p| -p.position.y)
         .unwrap_or(0.0);
 
     let calc_drop2 = trajectory
         .points
         .iter()
-        .find(|p| p.position.z >= distance2)
+        .find(|p| p.position.x >= distance2)
         .map(|p| -p.position.y)
         .unwrap_or(0.0);
 
@@ -5156,7 +5164,7 @@ fn calculate_drop_at_velocity(
 
     // Find the point at target range
     let target_point = result.points.iter()
-        .find(|p| p.position.z >= range_m)
+        .find(|p| p.position.x >= range_m)
         .ok_or("Trajectory didn't reach target range")?;
 
     // Calculate drop relative to line of sight (LOS)
@@ -5167,7 +5175,7 @@ fn calculate_drop_at_velocity(
     // The barrel_angle is the zero_angle we calculated earlier.
     // This formula accounts for the angled barrel and scope offset.
     let barrel_angle = zero_angle;
-    let z = target_point.position.z;
+    let z = target_point.position.x;
     let bullet_y = target_point.position.y;
 
     // LOS height at range z

@@ -29,13 +29,13 @@ pub struct WindLayer {
 
 impl WindLayer {
     /// Convert to wind vector [x, y, z] in m/s
-    /// STANDARD BALLISTICS CONVENTION: X=lateral, Y=vertical, Z=downrange
+    /// STANDARD BALLISTICS CONVENTION: X=downrange, Y=vertical, Z=lateral
     pub fn to_vector(&self) -> Vector3<f64> {
         let ang = self.direction_deg.to_radians();
         Vector3::new(
-            -self.speed_mps * ang.sin(), // X (lateral - crosswind component)
+            -self.speed_mps * ang.cos(), // X (downrange - head/tail component)
             0.0,                         // Y (vertical)
-            -self.speed_mps * ang.cos(), // Z (downrange - head/tail component)
+            -self.speed_mps * ang.sin(), // Z (lateral - crosswind component)
         )
     }
 }
@@ -168,11 +168,11 @@ impl WindShearProfile {
 
         let direction_rad = dir1 * (1.0 - ratio) + dir2 * ratio;
 
-        // Convert to vector (X=lateral, Y=vertical, Z=downrange)
+        // Convert to vector (X=downrange, Y=vertical, Z=lateral)
         Vector3::new(
-            -speed * direction_rad.sin(), // X (lateral - crosswind)
+            -speed * direction_rad.cos(), // X (downrange - head/tail)
             0.0,
-            -speed * direction_rad.cos(), // Z (downrange - head/tail)
+            -speed * direction_rad.sin(), // Z (lateral - crosswind)
         )
     }
 
@@ -251,9 +251,9 @@ impl WindShearWindSock {
     }
 
     /// Get wind vector for 3D position
-    /// Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
+    /// Standard ballistics coordinate system: X=downrange, Y=vertical, Z=lateral
     pub fn vector_for_position(&self, position: Vector3<f64>) -> Vector3<f64> {
-        let range_m = position.z; // Z is downrange
+        let range_m = position.x; // X is downrange (McCoy)
         let altitude_m = position.y; // Relative to shooter
 
         // Get base wind at this range
@@ -281,7 +281,7 @@ impl WindShearWindSock {
     }
 
     /// Get wind based on horizontal range
-    /// Returns wind vector in standard ballistics coordinates: X=lateral, Y=vertical, Z=downrange
+    /// Returns wind vector in standard ballistics coordinates: X=downrange, Y=vertical, Z=lateral
     fn get_range_wind(&self, range_m: f64) -> Vector3<f64> {
         if range_m.is_nan() || self.segments.is_empty() {
             return Vector3::zeros();
@@ -292,9 +292,9 @@ impl WindShearWindSock {
             if range_m <= until_dist {
                 let ang = angle_deg.to_radians();
                 return Vector3::new(
-                    -speed_mps * ang.sin(), // X (lateral - crosswind)
+                    -speed_mps * ang.cos(), // X (downrange - head/tail)
                     0.0,
-                    -speed_mps * ang.cos(), // Z (downrange - head/tail)
+                    -speed_mps * ang.sin(), // Z (lateral - crosswind)
                 );
             }
         }
@@ -325,8 +325,8 @@ pub fn get_wind_at_position(
     wind_shear_model: &str,
     shooter_altitude_m: f64,
 ) -> Vector3<f64> {
-    // Z IS DOWNRANGE
-    let range_m = position[2];
+    // X IS DOWNRANGE (McCoy)
+    let range_m = position[0];
     let altitude_m = position[1]; // Y is vertical, relative to shooter
 
     // Find appropriate wind segment based on range
@@ -352,9 +352,9 @@ pub fn get_wind_at_position(
         // No shear - return constant wind
         let ang = base_direction_deg.to_radians();
         return Vector3::new(
-            -base_speed_mps * ang.sin(), // x (lateral)
+            -base_speed_mps * ang.cos(), // x (downrange)
             0.0,                         // y (vertical)
-            -base_speed_mps * ang.cos(), // z (downrange)
+            -base_speed_mps * ang.sin(), // z (lateral)
         );
     }
 
@@ -382,9 +382,9 @@ pub fn get_wind_at_position(
         // Near ground level - use base wind directly with reduction
         let ang = base_direction_deg.to_radians();
         return Vector3::new(
-            -base_speed_mps * ang.sin() * 0.5, // Reduced at ground
+            -base_speed_mps * ang.cos() * 0.5, // Reduced at ground
             0.0,
-            -base_speed_mps * ang.cos() * 0.5,
+            -base_speed_mps * ang.sin() * 0.5,
         );
     }
 
@@ -395,7 +395,7 @@ pub fn get_wind_at_position(
         let altitude_factor = (1.0 + absolute_altitude_m / 100.0).min(2.0).max(0.1);
         let sheared_speed = base_speed_mps * altitude_factor;
         let ang = base_direction_deg.to_radians();
-        return Vector3::new(-sheared_speed * ang.sin(), 0.0, -sheared_speed * ang.cos());
+        return Vector3::new(-sheared_speed * ang.cos(), 0.0, -sheared_speed * ang.sin());
     }
 
     // For normal ranges, use full shear model with clamped altitude
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_wind_layer() {
-        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
+        // Standard ballistics coordinate system: X=downrange, Y=vertical, Z=lateral
         // Wind direction: 0°=headwind, 90°=from right, 180°=tailwind, 270°=from left
 
         // Test 0° wind (from north/front - headwind)
@@ -421,13 +421,13 @@ mod tests {
 
         let vec = layer_headwind.to_vector();
         assert!(
-            (vec.x).abs() < 1e-6,
-            "0° wind (headwind) should have zero lateral (X) component"
+            (vec.x - (-10.0)).abs() < 1e-6,
+            "0° wind should be headwind (negative X downrange)"
         );
         assert_eq!(vec.y, 0.0);
         assert!(
-            (vec.z - (-10.0)).abs() < 1e-6,
-            "0° wind should be headwind (negative Z downrange)"
+            (vec.z).abs() < 1e-6,
+            "0° wind (headwind) should have zero lateral (Z) component"
         );
 
         // Test 90° wind (from right)
@@ -439,13 +439,13 @@ mod tests {
 
         let vec_cross = layer_crosswind.to_vector();
         assert!(
-            (vec_cross.x - (-10.0)).abs() < 1e-6,
-            "90° wind should have negative X lateral (from right)"
+            (vec_cross.z - (-10.0)).abs() < 1e-6,
+            "90° wind should have negative Z lateral (from right)"
         );
         assert_eq!(vec_cross.y, 0.0);
         assert!(
-            (vec_cross.z).abs() < 1e-6,
-            "90° wind (crosswind) should have zero downrange (Z) component"
+            (vec_cross.x).abs() < 1e-6,
+            "90° wind (crosswind) should have zero downrange (X) component"
         );
     }
 

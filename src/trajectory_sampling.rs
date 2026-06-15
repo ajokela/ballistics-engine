@@ -73,10 +73,10 @@ pub fn sample_trajectory(
         return Vec::new();
     }
 
-    // Extract trajectory arrays for vectorized operations
-    let x_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.x).collect();
+    // Extract trajectory arrays for vectorized operations (McCoy: X=downrange, Z=lateral)
+    let downrange_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.x).collect();
     let y_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.y).collect();
-    let z_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.z).collect();
+    let lateral_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.z).collect();
 
     // Calculate speeds and energies
     let speeds: Vec<f64> = trajectory_data
@@ -101,13 +101,13 @@ pub fn sample_trajectory(
     let mut samples = Vec::with_capacity(distances.len());
 
     for &distance in &distances {
-        // Interpolate using z (downrange) as the independent variable
-        // Coordinate system: x=lateral (wind drift), y=vertical, z=downrange
-        let y_interp = interpolate(&z_vals, &y_vals, distance); // vertical at downrange distance
-        let wind_drift = interpolate(&z_vals, &x_vals, distance); // lateral drift at downrange distance
-        let velocity = interpolate(&z_vals, &speeds, distance); // velocity at downrange distance
-        let time = interpolate(&z_vals, &trajectory_data.times, distance); // time at downrange distance
-        let energy = interpolate(&z_vals, &energies, distance); // energy at downrange distance
+        // Interpolate using X (downrange) as the independent variable
+        // McCoy coordinate system: x=downrange, y=vertical, z=lateral (wind drift)
+        let y_interp = interpolate(&downrange_vals, &y_vals, distance); // vertical at downrange distance
+        let wind_drift = interpolate(&downrange_vals, &lateral_vals, distance); // lateral drift at downrange distance
+        let velocity = interpolate(&downrange_vals, &speeds, distance); // velocity at downrange distance
+        let time = interpolate(&downrange_vals, &trajectory_data.times, distance); // time at downrange distance
+        let energy = interpolate(&downrange_vals, &energies, distance); // energy at downrange distance
 
         // Calculate line-of-sight y-coordinate and drop
         // The LOS is a straight line from the SIGHT to the target
@@ -442,13 +442,13 @@ mod tests {
     #[test]
     fn test_sample_trajectory_basic() {
         // Create simple test trajectory data
-        // Coordinate system: x=lateral (wind drift), y=vertical, z=downrange
+        // McCoy coordinate system: x=downrange, y=vertical, z=lateral (wind drift)
         let trajectory_data = TrajectoryData {
             times: vec![0.0, 1.0, 2.0],
             positions: vec![
-                Vector3::new(0.0, 0.0, 0.0),     // x=0 (no drift), y=0 (vertical), z=0 (start)
-                Vector3::new(1.0, 10.0, 100.0),  // x=1 (drift), y=10 (apex height), z=100 (mid)
-                Vector3::new(2.0, 5.0, 200.0),   // x=2 (drift), y=5 (below apex), z=200 (end)
+                Vector3::new(0.0, 0.0, 0.0),     // x=0 (start), y=0 (vertical), z=0 (no drift)
+                Vector3::new(100.0, 10.0, 1.0),  // x=100 (mid downrange), y=10 (apex height), z=1 (drift)
+                Vector3::new(200.0, 5.0, 2.0),   // x=200 (end downrange), y=5 (below apex), z=2 (drift)
             ],
             velocities: vec![
                 Vector3::new(1.0, 10.0, 100.0),

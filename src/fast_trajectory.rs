@@ -174,8 +174,8 @@ pub fn fast_integrate(
         let pos = Vector3::new(state[0], state[1], state[2]);
         let _vel = Vector3::new(state[3], state[4], state[5]);
 
-        // Check termination conditions (z is downrange)
-        if pos.z >= params.horiz {
+        // Check termination conditions (X is downrange, McCoy)
+        if pos.x >= params.horiz {
             hit_target = true;
             times.push(t);
             states.push(state);
@@ -298,8 +298,8 @@ fn compute_derivatives(
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
 
-    // Get wind vector (based on downrange distance, which is Z coordinate)
-    let wind_vector = wind_sock.vector_for_range_stateless(pos.z);
+    // Get wind vector (based on downrange distance, which is X coordinate, McCoy)
+    let wind_vector = wind_sock.vector_for_range_stateless(pos.x);
 
     // Velocity relative to air
     let vel_adjusted = vel - wind_vector;
@@ -409,9 +409,9 @@ pub fn fast_integrate_with_segments(
         let lat_rad = inputs.latitude.unwrap_or(0.0).to_radians();
         let azimuth = inputs.azimuth_angle; // already in radians
         Some(Vector3::new(
-            omega_earth * lat_rad.cos() * azimuth.sin(),
-            omega_earth * lat_rad.sin(),
-            omega_earth * lat_rad.cos() * azimuth.cos(),
+            omega_earth * lat_rad.cos() * azimuth.cos(), // X: downrange component
+            omega_earth * lat_rad.sin(),                 // Y: vertical component
+            omega_earth * lat_rad.cos() * azimuth.sin(), // Z: lateral component
         ))
     } else {
         None
@@ -470,10 +470,10 @@ pub fn fast_integrate_with_segments(
         ];
 
         // Check termination conditions
-        // Z IS DOWNRANGE: state[0]=lateral, state[1]=vertical, state[2]=downrange
+        // McCoy: state[0]=downrange, state[1]=vertical, state[2]=lateral
 
         // Record FIRST time target is hit
-        if target_hit_time.is_none() && state[2] >= params.horiz {
+        if target_hit_time.is_none() && state[0] >= params.horiz {
             target_hit_time = Some(t);
         }
 
@@ -667,7 +667,7 @@ mod tests {
         let params = FastIntegrationParams {
             horiz: 1000.0,
             vert: 0.0,
-            initial_state: [0.0, 0.0, 0.0, 0.0, 50.0, 800.0],
+            initial_state: [0.0, 0.0, 0.0, 800.0, 50.0, 0.0], // McCoy: vx=downrange
             t_span: (0.0, 5.0),
             atmo_params: (0.0, 59.0, 29.92, 0.0),
         };
@@ -675,7 +675,7 @@ mod tests {
         assert_eq!(params.horiz, 1000.0);
         assert_eq!(params.t_span.0, 0.0);
         assert_eq!(params.t_span.1, 5.0);
-        assert_eq!(params.initial_state[5], 800.0); // vz
+        assert_eq!(params.initial_state[3], 800.0); // vx (downrange, McCoy)
     }
 
     #[test]
