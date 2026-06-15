@@ -2505,6 +2505,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     use_rk4: !use_euler,
                                     use_adaptive_rk45: !use_rk4_fixed,
                                     enable_advanced_effects: enable_magnus || enable_coriolis,
+                                    enable_magnus,
+                                    enable_coriolis,
                                     use_powder_sensitivity,
                                     powder_temp_sensitivity: if use_powder_sensitivity {
                                         UnitConverter::velocity_to_metric(powder_temp_sensitivity, cli.units)
@@ -3724,6 +3726,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
         // Advanced effects
         enable_advanced_effects: enable_magnus || enable_coriolis, // Either one enables the system
+        enable_magnus,
+        enable_coriolis,
         use_powder_sensitivity,
         powder_temp_sensitivity: if use_powder_sensitivity {
             UnitConverter::velocity_to_metric(powder_temp_sensitivity, units)

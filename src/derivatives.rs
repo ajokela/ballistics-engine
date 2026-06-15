@@ -81,7 +81,7 @@ fn calculate_spin_rate(twist_rate: f64, velocity_mps: f64) -> f64 {
 
 /// Calculate Magnus moment coefficient C_Lα based on Mach number
 /// Based on McCoy's 'Modern Exterior Ballistics' and empirical data
-fn calculate_magnus_moment_coefficient(mach: f64) -> f64 {
+pub(crate) fn calculate_magnus_moment_coefficient(mach: f64) -> f64 {
     // Magnus moment coefficient varies with Mach number
     // Values based on empirical data for spitzer bullets
 
