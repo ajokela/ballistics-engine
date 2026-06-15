@@ -280,7 +280,7 @@ pub struct TrajectoryResult {
 }
 
 impl TrajectoryResult {
-    /// Interpolate position at a given downrange distance (Z coordinate).
+    /// Interpolate position at a given downrange distance (X coordinate, McCoy).
     /// Returns the interpolated (x, y, z) position at that range.
     /// If the target range exceeds the trajectory, returns the last point.
     pub fn position_at_range(&self, target_range: f64) -> Option<Vector3<f64>> {
@@ -293,20 +293,20 @@ impl TrajectoryResult {
             let p1 = &self.points[i];
             let p2 = &self.points[i + 1];
 
-            // Check if target range is between these two points
-            if p1.position.z <= target_range && p2.position.z >= target_range {
+            // Check if target range is between these two points (X is downrange)
+            if p1.position.x <= target_range && p2.position.x >= target_range {
                 // Linear interpolation factor
-                let dz = p2.position.z - p1.position.z;
-                if dz.abs() < 1e-10 {
+                let dx = p2.position.x - p1.position.x;
+                if dx.abs() < 1e-10 {
                     return Some(p1.position);
                 }
-                let t = (target_range - p1.position.z) / dz;
+                let t = (target_range - p1.position.x) / dx;
 
-                // Interpolate X and Y, use exact target_range for Z
+                // Interpolate Y and Z, use exact target_range for X
                 return Some(Vector3::new(
-                    p1.position.x + t * (p2.position.x - p1.position.x),
-                    p1.position.y + t * (p2.position.y - p1.position.y),
                     target_range,
+                    p1.position.y + t * (p2.position.y - p1.position.y),
+                    p1.position.z + t * (p2.position.z - p1.position.z),
                 ));
             }
         }
@@ -404,8 +404,7 @@ impl TrajectorySolver {
     /// (not the WASM formatter) so it covers Euler/RK4/RK45 and all consumers.
     /// Uses the canonical SI fields and converts to grains/inches correctly,
     /// avoiding the kg/m-vs-grains/in unit bug in `calculate_enhanced_spin_drift`.
-    /// Frame: X = lateral (windage), so drift adds to `position.x`.
-    /// TODO(mccoy): move drift onto the lateral axis when migrating to McCoy.
+    /// Frame (McCoy): Z = lateral (windage), so drift adds to `position.z`.
     fn apply_spin_drift(&self, result: &mut TrajectoryResult) {
         if !self.inputs.use_enhanced_spin_drift {
             return;
@@ -434,7 +433,7 @@ impl TrajectorySolver {
                 continue;
             }
             let sd_in = 1.25 * (sg + 1.2) * p.time.powf(1.83); // Litz drift, inches
-            p.position.x += sign * sd_in * 0.0254; // in -> m, X = lateral
+            p.position.z += sign * sd_in * 0.0254; // in -> m, Z = lateral
         }
     }
 
@@ -449,12 +448,12 @@ impl TrajectorySolver {
             0.0,
         );
         // Calculate initial velocity components with both elevation and azimuth
-        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
+        // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(), // X: lateral (side deviation)
+            horizontal_velocity * self.inputs.azimuth_angle.cos(), // X: downrange (forward)
             self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.cos(), // Z: downrange (forward)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(), // Z: lateral (side deviation)
         );
 
         let mut points = Vec::new();
@@ -481,15 +480,15 @@ impl TrajectorySolver {
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
 
-        // Wind vector: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
+        // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.sin(), // X: lateral (crosswind)
+            self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
             0.0,
-            self.wind.speed * self.wind.direction.cos(), // Z: downrange (head/tail wind)
+            self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
-        // Main integration loop (Z is downrange)
-        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
+        // Main integration loop (X is downrange)
+        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
@@ -503,9 +502,9 @@ impl TrajectorySolver {
             });
 
             // Debug: Log first and every 100th point
-            // Coordinate system: X=lateral, Y=vertical, Z=downrange
+            // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral
             if points.len() == 1 || points.len() % 100 == 0 {
-                eprintln!("Trajectory point {}: time={:.3}s, lateral={:.2}m, vertical={:.2}m, downrange={:.2}m, vel={:.1}m/s",
+                eprintln!("Trajectory point {}: time={:.3}s, downrange={:.2}m, vertical={:.2}m, lateral={:.2}m, vel={:.1}m/s",
                     points.len(), time, position.x, position.y, position.z, velocity_magnitude);
             }
 
@@ -652,7 +651,7 @@ impl TrajectorySolver {
             // For flat shots, target is at same height as the sight (horizontal LOS)
             let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.z, // Z is downrange
+                target_distance_horiz_m: last_point.position.x, // X is downrange
                 target_vertical_height_m: sight_position_m,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
@@ -672,7 +671,7 @@ impl TrajectorySolver {
         };
 
         Ok(TrajectoryResult {
-            max_range: last_point.position.z, // Z is downrange
+            max_range: last_point.position.x, // X is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -712,12 +711,12 @@ impl TrajectorySolver {
         );
 
         // Calculate initial velocity components with both elevation and azimuth
-        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
+        // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(), // X: lateral (side deviation)
+            horizontal_velocity * self.inputs.azimuth_angle.cos(), // X: downrange (forward)
             self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.cos(), // Z: downrange (forward)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(), // Z: lateral (side deviation)
         );
 
         let mut points = Vec::new();
@@ -744,15 +743,15 @@ impl TrajectorySolver {
         // Calculate air density
         let air_density = calculate_air_density(&self.atmosphere);
 
-        // Wind vector: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
+        // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.sin(), // X: lateral (crosswind)
+            self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
             0.0,
-            self.wind.speed * self.wind.direction.cos(), // Z: downrange (head/tail wind)
+            self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
-        // Main RK4 integration loop (Z is downrange)
-        while position.z < self.max_range && position.y >= 0.0 && time < 100.0 {
+        // Main RK4 integration loop (X is downrange)
+        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
@@ -899,7 +898,7 @@ impl TrajectorySolver {
             // For flat shots, target is at same height as the sight (horizontal LOS)
             let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.z, // Z is downrange
+                target_distance_horiz_m: last_point.position.x, // X is downrange
                 target_vertical_height_m: sight_position_m,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
@@ -919,7 +918,7 @@ impl TrajectorySolver {
         };
 
         Ok(TrajectoryResult {
-            max_range: last_point.position.z, // Z is downrange
+            max_range: last_point.position.x, // X is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -958,12 +957,12 @@ impl TrajectorySolver {
         );
 
         // Calculate initial velocity components
-        // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
+        // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
         let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.sin(), // X: lateral (side deviation)
+            horizontal_velocity * self.inputs.azimuth_angle.cos(), // X: downrange (forward)
             self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.cos(), // Z: downrange (forward)
+            horizontal_velocity * self.inputs.azimuth_angle.sin(), // Z: lateral (side deviation)
         );
 
         let mut points = Vec::new();
@@ -978,11 +977,11 @@ impl TrajectorySolver {
         let mut iteration_count = 0;
         const MAX_ITERATIONS: usize = 100000;
 
-        while position.z < self.max_range
+        while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
             && time < 100.0
         {
-            // Z is downrange
+            // X is downrange
             iteration_count += 1;
             if iteration_count > MAX_ITERATIONS {
                 break; // Prevent infinite loop
@@ -1003,12 +1002,12 @@ impl TrajectorySolver {
                 max_height = position.y;
             }
 
-            // Get atmospheric conditions and wind: X=lateral (crosswind), Y=0, Z=downrange (head/tail wind)
+            // Wind (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
             let air_density = calculate_air_density(&self.atmosphere);
             let wind_vector = Vector3::new(
-                self.wind.speed * self.wind.direction.sin(), // X: lateral (crosswind)
+                self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
                 0.0,
-                self.wind.speed * self.wind.direction.cos(), // Z: downrange (head/tail wind)
+                self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
             );
 
             // RK45 step with adaptive step size
@@ -1059,7 +1058,7 @@ impl TrajectorySolver {
             // For flat shots, target is at same height as the sight (horizontal LOS)
             let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
             let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.z,
+                target_distance_horiz_m: last_point.position.x,
                 target_vertical_height_m: sight_position_m,
                 time_of_flight_s: last_point.time,
                 max_ord_dist_horiz_m: max_height,
@@ -1078,7 +1077,7 @@ impl TrajectorySolver {
         };
 
         Ok(TrajectoryResult {
-            max_range: last_point.position.z, // Z is downrange
+            max_range: last_point.position.x, // X is downrange
             max_height,
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
@@ -1278,20 +1277,24 @@ impl TrajectorySolver {
         // Total acceleration = drag + gravity
         let mut accel = drag_acceleration + Vector3::new(0.0, -9.81, 0.0);
 
-        // Coriolis (Earth rotation). Frame: X=lateral, Y=vertical, Z=downrange,
-        // azimuth 0 = North. Same omega convention as fast_trajectory.rs.
-        // TODO(mccoy): revisit axis labels when migrating this solver to McCoy.
+        // Coriolis (Earth rotation). McCoy frame: X=downrange, Y=vertical, Z=lateral,
+        // azimuth 0 = North. McCoy frame: X=downrange, Y=vertical, Z=lateral.
         if self.inputs.enable_coriolis {
             if let Some(lat_deg) = self.inputs.latitude {
                 let omega_earth = 7.2921159e-5_f64; // rad/s
                 let lat = lat_deg.to_radians();
                 let az = self.inputs.azimuth_angle;
                 let omega = Vector3::new(
-                    omega_earth * lat.cos() * az.sin(),
-                    omega_earth * lat.sin(),
-                    omega_earth * lat.cos() * az.cos(),
+                    omega_earth * lat.cos() * az.cos(), // X: downrange component
+                    omega_earth * lat.sin(),            // Y: vertical component
+                    omega_earth * lat.cos() * az.sin(), // Z: lateral component
                 );
-                accel += -2.0 * omega.cross(velocity);
+                // Coriolis is -2 Ω×v. Migrating from the engine's original
+                // left-handed (lateral, up, downrange) frame to McCoy right-handed
+                // (downrange, up, lateral) is a reflection, which negates the cross
+                // product; the +2 here reproduces the original deflection in the new
+                // frame (output-preserving relabel).
+                accel += 2.0 * omega.cross(velocity);
             }
         }
 
@@ -1319,11 +1322,11 @@ impl TrajectorySolver {
                 * area
                 * c_l;
 
-            // Horizontal direction perpendicular to velocity. up × v_unit = +X (right)
-            // for a downrange shot, matching the spin-drift sign convention.
+            // Horizontal direction perpendicular to velocity. In McCoy (RH) frame,
+            // v_unit × up = +Z (right) for a downrange shot, matching spin-drift sign.
             let velocity_unit = relative_velocity / velocity_magnitude;
             let up = Vector3::new(0.0, 1.0, 0.0);
-            let mut dir = up.cross(&velocity_unit);
+            let mut dir = velocity_unit.cross(&up);
             let dir_norm = dir.norm();
             if dir_norm > 1e-12 && magnus_force.abs() > 1e-12 {
                 dir /= dir_norm;
@@ -1505,12 +1508,12 @@ pub fn run_monte_carlo_with_wind(
 
                 // Interpolate position at target distance (not ground impact)
                 if let Some(pos_at_target) = result.position_at_range(target_distance) {
-                    // Calculate deviation from baseline at the SAME target distance
-                    // X = lateral deviation (windage), Y = vertical deviation (elevation)
+                    // Calculate deviation from baseline at the SAME target distance (McCoy)
+                    // X = downrange (0 here), Y = vertical (elevation), Z = lateral (windage)
                     let mut deviation = Vector3::new(
-                        pos_at_target.x - baseline_at_target.x, // Lateral deviation
+                        0.0, // X downrange deviation is 0 since we compare at same range
                         pos_at_target.y - baseline_at_target.y, // Vertical deviation
-                        0.0, // Z deviation is 0 since we're comparing at same range
+                        pos_at_target.z - baseline_at_target.z, // Lateral deviation (windage)
                     );
 
                     // Add additional pointing error to simulate realistic group sizes
@@ -1571,13 +1574,13 @@ pub fn calculate_zero_angle_with_conditions(
         solver.set_time_step(0.001);
         let result = solver.solve()?;
 
-        // Z is downrange in standard ballistics coordinates
+        // X is downrange in McCoy coordinates
         for i in 0..result.points.len() {
-            if result.points[i].position.z >= target_distance {
+            if result.points[i].position.x >= target_distance {
                 if i > 0 {
                     let p1 = &result.points[i - 1];
                     let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.z) / (p2.position.z - p1.position.z);
+                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
                     return Ok(Some(p1.position.y + t * (p2.position.y - p1.position.y)));
                 } else {
                     return Ok(Some(result.points[i].position.y));
@@ -1666,15 +1669,15 @@ pub fn calculate_zero_angle_with_conditions(
         solver.set_time_step(0.001);
         let result = solver.solve()?;
 
-        // Find the height at target distance (Z is downrange)
+        // Find the height at target distance (X is downrange)
         let mut height_at_target = None;
         for i in 0..result.points.len() {
-            if result.points[i].position.z >= target_distance {
+            if result.points[i].position.x >= target_distance {
                 if i > 0 {
                     // Linear interpolation
                     let p1 = &result.points[i - 1];
                     let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.z) / (p2.position.z - p1.position.z);
+                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
                     height_at_target = Some(p1.position.y + t * (p2.position.y - p1.position.y));
                 } else {
                     height_at_target = Some(result.points[i].position.y);
@@ -1765,12 +1768,12 @@ pub fn estimate_bc_from_trajectory(
             // Find drop at this distance
             let mut calculated_drop = None;
             for i in 0..result.points.len() {
-                if result.points[i].position.z >= *target_dist {
+                if result.points[i].position.x >= *target_dist {
                     if i > 0 {
                         // Linear interpolation
                         let p1 = &result.points[i - 1];
                         let p2 = &result.points[i];
-                        let t = (target_dist - p1.position.z) / (p2.position.z - p1.position.z);
+                        let t = (target_dist - p1.position.x) / (p2.position.x - p1.position.x);
                         calculated_drop =
                             Some(-(p1.position.y + t * (p2.position.y - p1.position.y)));
                     } else {

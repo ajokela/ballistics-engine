@@ -59,10 +59,11 @@ pub fn solve_trajectory_for_monte_carlo(
 
     // Set up initial state
     let muzzle_angle_rad = inputs.muzzle_angle;
+    // McCoy: X=downrange, Y=vertical, Z=lateral
     let initial_velocity = Vector3::new(
-        0.0,
-        muzzle_velocity_mps * muzzle_angle_rad.sin(),
         muzzle_velocity_mps * muzzle_angle_rad.cos(),
+        muzzle_velocity_mps * muzzle_angle_rad.sin(),
+        0.0,
     );
 
     let initial_position = Vector3::new(0.0, inputs.sight_height * 0.0254, 0.0);
@@ -102,9 +103,9 @@ pub fn solve_trajectory_for_monte_carlo(
     // FastSolution.y is Vec<Vec<f64>> where y[i] is the ith state variable across all time points
     let final_idx = solution.t.len() - 1;
 
-    let final_x = solution.y[0][final_idx]; // lateral drift
+    let final_downrange = solution.y[0][final_idx]; // McCoy: X=downrange
     let final_y = solution.y[1][final_idx]; // vertical
-    let final_z = solution.y[2][final_idx]; // downrange
+    let final_lateral = solution.y[2][final_idx]; // McCoy: Z=lateral drift
 
     let final_vx = solution.y[3][final_idx];
     let final_vy = solution.y[4][final_idx];
@@ -116,18 +117,18 @@ pub fn solve_trajectory_for_monte_carlo(
 
     // Calculate line-of-sight drop
     let sight_height_m = inputs.sight_height * 0.0254;
-    let los_y = sight_height_m + (0.0 - sight_height_m) * (final_z / target_distance_m);
+    let los_y = sight_height_m + (0.0 - sight_height_m) * (final_downrange / target_distance_m);
     let drop = los_y - final_y;
 
     Ok(TrajectoryOutput {
         drop,
-        wind_drift: final_x,
+        wind_drift: final_lateral,
         time: solution.t[final_idx],
         velocity: final_speed,
         energy: final_energy,
         mach: final_mach,
-        spin_drift: final_x, // Approximation for now
-        distance: final_z,
+        spin_drift: final_lateral, // Approximation for now
+        distance: final_downrange,
     })
 }
 

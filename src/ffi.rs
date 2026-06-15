@@ -241,13 +241,14 @@ pub extern "C" fn ballistics_calculate_trajectory(
                         kinetic_energy: point.kinetic_energy,
                     });
 
-                    // Debug: Log first, last, and every 100th point
-                    // Standard ballistics coordinate system: X=lateral, Y=vertical, Z=downrange
+                    // Debug: Log first, last, and every 100th point.
+                    // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral.
+                    // Raw position_x/_y/_z exported above are McCoy-ordered (X=downrange).
                     #[cfg(debug_assertions)]
                     if i == 0 || i == result.points.len() - 1 || i % 100 == 0 {
                         eprintln!(
                             "FFI point {}: lateral={:.2}m, vertical={:.2}m, downrange={:.2}m",
-                            i, point.position[0], point.position[1], point.position[2]
+                            i, point.position[2], point.position[1], point.position[0]
                         );
                     }
                 }
