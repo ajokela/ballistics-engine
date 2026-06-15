@@ -185,6 +185,8 @@ fn compute_derivatives_vec(
         enable_advanced_effects: params.enable_spin_drift
             || params.enable_magnus
             || params.enable_coriolis,
+        enable_magnus: params.enable_magnus,
+        enable_coriolis: params.enable_coriolis,
         altitude: params.atmos_params.0,
         temperature: params.atmos_params.1,
         pressure: params.atmos_params.2,

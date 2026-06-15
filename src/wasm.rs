@@ -458,11 +458,14 @@ impl WasmBallistics {
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
 
-        // Set advanced physics flags
-        // Magnus and Coriolis are controlled by enable_advanced_effects
+        // Set advanced physics flags. enable_advanced_effects remains the umbrella
+        // flag, but Magnus and Coriolis are now gated independently so enabling one
+        // does not silently enable the other.
         if enable_magnus || enable_coriolis {
             inputs.enable_advanced_effects = true;
         }
+        inputs.enable_magnus = enable_magnus;
+        inputs.enable_coriolis = enable_coriolis;
         // Set integration method: Euler < RK4 fixed < RK45 adaptive (default)
         if use_euler {
             inputs.use_rk4 = false;

@@ -172,6 +172,9 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.use_enhanced_spin_drift = inputs.enable_spin_drift != 0;
     ballistic_inputs.enable_advanced_effects =
         inputs.enable_magnus != 0 || inputs.enable_coriolis != 0;
+    // Gate Magnus and Coriolis independently so enabling one does not enable the other.
+    ballistic_inputs.enable_magnus = inputs.enable_magnus != 0;
+    ballistic_inputs.enable_coriolis = inputs.enable_coriolis != 0;
 
     ballistic_inputs
 }

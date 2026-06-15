@@ -107,6 +107,8 @@ pub struct BallisticInputs {
 
     // Advanced effects flags
     pub enable_advanced_effects: bool,
+    pub enable_magnus: bool,   // Magnus side force (independent of Coriolis)
+    pub enable_coriolis: bool, // Coriolis deflection (requires latitude)
     pub use_powder_sensitivity: bool,
     pub powder_temp_sensitivity: f64,
     pub powder_temp: f64,           // Celsius
@@ -186,6 +188,8 @@ impl Default for BallisticInputs {
 
             // Advanced effects (disabled by default)
             enable_advanced_effects: false,
+            enable_magnus: false,
+            enable_coriolis: false,
             use_powder_sensitivity: false,
             powder_temp_sensitivity: 0.0,
             powder_temp: 15.0,
@@ -383,14 +387,54 @@ impl TrajectorySolver {
     }
 
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
-        if self.inputs.use_rk4 {
+        let mut result = if self.inputs.use_rk4 {
             if self.inputs.use_adaptive_rk45 {
-                self.solve_rk45()
+                self.solve_rk45()?
             } else {
-                self.solve_rk4()
+                self.solve_rk4()?
             }
         } else {
-            self.solve_euler()
+            self.solve_euler()?
+        };
+        self.apply_spin_drift(&mut result);
+        Ok(result)
+    }
+
+    /// Gyroscopic spin drift via the empirical Litz model, applied in the engine
+    /// (not the WASM formatter) so it covers Euler/RK4/RK45 and all consumers.
+    /// Uses the canonical SI fields and converts to grains/inches correctly,
+    /// avoiding the kg/m-vs-grains/in unit bug in `calculate_enhanced_spin_drift`.
+    /// Frame: X = lateral (windage), so drift adds to `position.x`.
+    /// TODO(mccoy): move drift onto the lateral axis when migrating to McCoy.
+    fn apply_spin_drift(&self, result: &mut TrajectoryResult) {
+        if !self.inputs.use_enhanced_spin_drift {
+            return;
+        }
+        let d_in = self.inputs.bullet_diameter / 0.0254; // m -> in
+        let m_gr = self.inputs.bullet_mass / 0.00006479891; // kg -> grains
+        let twist_in = self.inputs.twist_rate; // inches/turn
+        if d_in <= 0.0 || m_gr <= 0.0 || twist_in <= 0.0 {
+            return;
+        }
+
+        let twist_cal = twist_in / d_in;
+        // Real length-to-diameter ratio when available, else 4.5 cal (typical match bullet).
+        let l_cal = if self.inputs.bullet_length > 0.0 {
+            self.inputs.bullet_length / self.inputs.bullet_diameter
+        } else {
+            4.5
+        };
+        // Miller stability factor (Sg).
+        let sg = 30.0 * m_gr
+            / (twist_cal * twist_cal * d_in.powi(3) * l_cal * (1.0 + l_cal * l_cal));
+        let sign = if self.inputs.is_twist_right { 1.0 } else { -1.0 };
+
+        for p in result.points.iter_mut() {
+            if p.time <= 0.0 {
+                continue;
+            }
+            let sd_in = 1.25 * (sg + 1.2) * p.time.powf(1.83); // Litz drift, inches
+            p.position.x += sign * sd_in * 0.0254; // in -> m, X = lateral
         }
     }
 
@@ -1232,7 +1276,65 @@ impl TrajectorySolver {
         let drag_acceleration = -a_drag_m_s2 * (relative_velocity / velocity_magnitude);
 
         // Total acceleration = drag + gravity
-        drag_acceleration + Vector3::new(0.0, -9.81, 0.0)
+        let mut accel = drag_acceleration + Vector3::new(0.0, -9.81, 0.0);
+
+        // Coriolis (Earth rotation). Frame: X=lateral, Y=vertical, Z=downrange,
+        // azimuth 0 = North. Same omega convention as fast_trajectory.rs.
+        // TODO(mccoy): revisit axis labels when migrating this solver to McCoy.
+        if self.inputs.enable_coriolis {
+            if let Some(lat_deg) = self.inputs.latitude {
+                let omega_earth = 7.2921159e-5_f64; // rad/s
+                let lat = lat_deg.to_radians();
+                let az = self.inputs.azimuth_angle;
+                let omega = Vector3::new(
+                    omega_earth * lat.cos() * az.sin(),
+                    omega_earth * lat.sin(),
+                    omega_earth * lat.cos() * az.cos(),
+                );
+                accel += -2.0 * omega.cross(velocity);
+            }
+        }
+
+        // Magnus side force (spinning projectile). SI units in this solver.
+        if self.inputs.enable_magnus
+            && self.inputs.bullet_diameter > 0.0
+            && self.inputs.twist_rate > 0.0
+        {
+            let (_, spin_rad_s) =
+                crate::spin_drift::calculate_spin_rate(velocity_magnitude, self.inputs.twist_rate);
+            let temp_k = self.atmosphere.temperature + 273.15;
+            let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+            let mach = velocity_magnitude / speed_of_sound;
+            let c_la = crate::derivatives::calculate_magnus_moment_coefficient(mach);
+
+            let diameter_m = self.inputs.bullet_diameter; // already meters
+            let spin_param = spin_rad_s * diameter_m / (2.0 * velocity_magnitude);
+            let c_l = spin_param * c_la;
+            let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
+            const MAGNUS_CALIBRATION_FACTOR: f64 = 1.8;
+            let magnus_force = MAGNUS_CALIBRATION_FACTOR
+                * 0.5
+                * air_density
+                * velocity_magnitude.powi(2)
+                * area
+                * c_l;
+
+            // Horizontal direction perpendicular to velocity. up × v_unit = +X (right)
+            // for a downrange shot, matching the spin-drift sign convention.
+            let velocity_unit = relative_velocity / velocity_magnitude;
+            let up = Vector3::new(0.0, 1.0, 0.0);
+            let mut dir = up.cross(&velocity_unit);
+            let dir_norm = dir.norm();
+            if dir_norm > 1e-12 && magnus_force.abs() > 1e-12 {
+                dir /= dir_norm;
+                if !self.inputs.is_twist_right {
+                    dir = -dir;
+                }
+                accel += (magnus_force / self.inputs.bullet_mass) * dir;
+            }
+        }
+
+        accel
     }
 
     fn calculate_drag_coefficient(&self, velocity: f64) -> f64 {
