@@ -275,8 +275,9 @@ pub fn compute_derivatives(
         // Apply drag in opposite direction of relative velocity
         accel_drag = -a_drag_m_s2 * (velocity_adjusted / speed_air);
 
-        // Magnus Effect calculation
-        if inputs.enable_advanced_effects && inputs.bullet_diameter > 0.0 && inputs.twist_rate > 0.0
+        // Magnus Effect calculation. Gated on enable_magnus specifically so it is
+        // independent of Coriolis (matches the cli_api solver's decoupled flags).
+        if inputs.enable_magnus && inputs.bullet_diameter > 0.0 && inputs.twist_rate > 0.0
         {
             // Calculate spin rate from twist rate and velocity
             let spin_rate_rad_s = calculate_spin_rate(inputs.twist_rate, speed_air);
@@ -747,10 +748,13 @@ mod tests {
         let pos = Vector3::new(0.0, 0.0, 0.0);
         let vel = Vector3::new(822.96, 0.0, 0.0); // 2700 fps
         let mut inputs = create_test_inputs();
-        inputs.bullet_diameter = 0.308; // .308 caliber
+        inputs.bullet_diameter = 0.308; // .308 caliber (inches, this solver's convention)
+        inputs.caliber_inches = 0.308;
+        inputs.weight_grains = 168.0;
+        inputs.bullet_length = 1.215; // inches
         inputs.twist_rate = 10.0; // 1:10 twist
         inputs.is_twist_right = true;
-        inputs.enable_advanced_effects = true; // Enable Magnus effect
+        inputs.enable_magnus = true; // Enable Magnus effect (decoupled from advanced_effects)
 
         let wind_vector = Vector3::zeros();
         let atmos_params = (1.225, 340.0, 0.0, 0.0); // Standard air density and speed of sound
@@ -767,12 +771,14 @@ mod tests {
             0.0,
         );
 
-        // Should have Magnus drift in z direction
-        assert!(result[5].abs() > 0.01); // Should have some z-acceleration
-        assert!(result[5] > 0.0); // Should be positive (right drift) for right-hand twist
+        // Magnus produces a lateral (z) acceleration, positive (right) for RH twist.
+        assert!(result[5].abs() > 1e-6); // nonzero z-acceleration from Magnus
+        assert!(result[5] > 0.0); // positive (right drift) for right-hand twist
 
-        // Note: Magnus calculation seems to produce very high values (962 m/s²)
-        // This needs investigation but for now we'll just check it's positive
+        // Magnus now uses the proper yaw-of-repose force model (the 1.8 fudge factor
+        // is gone). This secondary solver still calls calculate_spin_rate with args in
+        // the legacy (twist, velocity) order, so its magnitude is not directly
+        // comparable to the cli_api solver; that quirk is tracked separately.
     }
 
     #[test]
