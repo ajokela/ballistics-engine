@@ -6,13 +6,10 @@
 //! MBA-157: Upstreamed from ballistics_rust for shared use across the ecosystem
 
 use crate::atmosphere::calculate_atmosphere;
-use crate::constants::{FPS_TO_MPS, GRAINS_TO_KG};
 use crate::fast_trajectory::{fast_integrate, FastIntegrationParams};
 use crate::wind::WindSock;
 use crate::BallisticInputs;
 use nalgebra::Vector3;
-
-const YARDS_TO_METERS: f64 = 0.9144;
 
 /// Simple trajectory output for Monte Carlo analysis
 #[derive(Debug, Clone)]
@@ -34,26 +31,25 @@ pub struct TrajectoryOutput {
 pub fn solve_trajectory_for_monte_carlo(
     inputs: &BallisticInputs,
 ) -> Result<TrajectoryOutput, String> {
-    // Convert inputs to metric
-    let target_distance_m = inputs.target_distance * YARDS_TO_METERS;
-    let muzzle_velocity_mps = inputs.muzzle_velocity * FPS_TO_MPS;
-    let mass_kg = inputs.bullet_mass * GRAINS_TO_KG;
+    // BallisticInputs is SI-canonical (meters, m/s, kg, radians).
+    let target_distance_m = inputs.target_distance; // meters
+    let muzzle_velocity_mps = inputs.muzzle_velocity; // m/s
+    let mass_kg = inputs.bullet_mass; // kg
 
     // Calculate atmosphere at altitude
     let (air_density, speed_of_sound) = calculate_atmosphere(
-        inputs.altitude * 0.3048, // feet to meters
+        inputs.altitude, // meters
         Some(inputs.temperature),
         Some(inputs.pressure),
         inputs.humidity,
     );
 
-    // Create wind segments
-    // WindSock expects tuple: (speed_kmh, angle_deg, until_distance_m)
-    // Python sends wind_speed in km/h and wind_angle in degrees
+    // Create wind segments. WindSock expects (speed_kmh, angle_deg, until_distance_m);
+    // convert from the SI fields (m/s, radians) at this boundary.
     let wind_segments = vec![(
-        inputs.wind_speed,           // speed in km/h (from Python)
-        inputs.wind_angle,           // angle in degrees (from Python)
-        target_distance_m * 2.0,     // wind extends beyond target
+        inputs.wind_speed * 3.6,          // m/s -> km/h
+        inputs.wind_angle.to_degrees(),   // radians -> degrees
+        target_distance_m * 2.0,          // wind extends beyond target
     )];
     let wind_sock = WindSock::new(wind_segments);
 
@@ -66,7 +62,7 @@ pub fn solve_trajectory_for_monte_carlo(
         0.0,
     );
 
-    let initial_position = Vector3::new(0.0, inputs.sight_height * 0.0254, 0.0);
+    let initial_position = Vector3::new(0.0, inputs.sight_height, 0.0); // meters
     let mut initial_state_array = [0.0; 6];
     initial_state_array[0..3].copy_from_slice(&[
         initial_position.x,
@@ -79,17 +75,19 @@ pub fn solve_trajectory_for_monte_carlo(
         initial_velocity.z,
     ]);
 
-    // Get atmospheric parameters (temperature, pressure, density, sound_speed)
-    let temp_c = inputs.temperature;
-    let pressure_hpa = inputs.pressure;
-
-    // Create integration params
+    // Create integration params. fast_integrate's atmo_params is
+    // (base_alt_m, base_temp_c, base_press_hpa, base_ratio) — NOT
+    // (temp, pressure, density, sound). Packing it wrong scrambled the base
+    // density (~417 kg/m^3) and produced ~340x drag. base_ratio is the
+    // density relative to 1.225 (get_local_atmosphere returns base_ratio*1.225
+    // at the base altitude), so derive it from the computed air density.
+    let base_ratio = air_density / 1.225;
     let params = FastIntegrationParams {
         initial_state: initial_state_array,
         t_span: (0.0, 30.0),
         horiz: target_distance_m,
         vert: 0.0, // Target at ground level
-        atmo_params: (temp_c, pressure_hpa, air_density, speed_of_sound),
+        atmo_params: (inputs.altitude, inputs.temperature, inputs.pressure, base_ratio),
     };
 
     // Solve trajectory
@@ -116,7 +114,7 @@ pub fn solve_trajectory_for_monte_carlo(
     let final_energy = 0.5 * mass_kg * final_speed * final_speed;
 
     // Calculate line-of-sight drop
-    let sight_height_m = inputs.sight_height * 0.0254;
+    let sight_height_m = inputs.sight_height; // meters
     let los_y = sight_height_m + (0.0 - sight_height_m) * (final_downrange / target_distance_m);
     let drop = los_y - final_y;
 
