@@ -618,11 +618,19 @@ mod tests {
     use super::*;
 
     fn create_test_inputs() -> BallisticInputs {
+        // NOTE: this solver (compute_derivatives) reads the geometry/mass fields in
+        // IMPERIAL units — bullet_diameter & bullet_length in inches, bullet_mass in
+        // grains — unlike the cli_api solver which uses SI. Populate them accordingly
+        // (and the explicit caliber_inches/weight_grains/bullet_length the Magnus path
+        // also reads) so the fixture is self-consistent.
         BallisticInputs {
             muzzle_velocity: 800.0,
             bc_value: 0.5,
-            bullet_mass: 0.0109,      // 168 grains in kg
-            bullet_diameter: 0.00782, // 0.308 inches in meters
+            bullet_mass: 168.0,     // grains
+            bullet_diameter: 0.308, // inches
+            bullet_length: 1.215,   // inches
+            caliber_inches: 0.308,
+            weight_grains: 168.0,
             altitude: 1000.0,
             ..Default::default()
         }
@@ -748,13 +756,9 @@ mod tests {
         let pos = Vector3::new(0.0, 0.0, 0.0);
         let vel = Vector3::new(822.96, 0.0, 0.0); // 2700 fps
         let mut inputs = create_test_inputs();
-        inputs.bullet_diameter = 0.308; // .308 caliber (inches, this solver's convention)
-        inputs.caliber_inches = 0.308;
-        inputs.weight_grains = 168.0;
-        inputs.bullet_length = 1.215; // inches
         inputs.twist_rate = 10.0; // 1:10 twist
         inputs.is_twist_right = true;
-        inputs.enable_magnus = true; // Enable Magnus effect (decoupled from advanced_effects)
+        inputs.enable_magnus = true; // decoupled from enable_advanced_effects
 
         let wind_vector = Vector3::zeros();
         let atmos_params = (1.225, 340.0, 0.0, 0.0); // Standard air density and speed of sound
@@ -771,14 +775,20 @@ mod tests {
             0.0,
         );
 
-        // Magnus produces a lateral (z) acceleration, positive (right) for RH twist.
-        assert!(result[5].abs() > 1e-6); // nonzero z-acceleration from Magnus
-        assert!(result[5] > 0.0); // positive (right drift) for right-hand twist
-
-        // Magnus now uses the proper yaw-of-repose force model (the 1.8 fudge factor
-        // is gone). This secondary solver still calls calculate_spin_rate with args in
-        // the legacy (twist, velocity) order, so its magnitude is not directly
-        // comparable to the cli_api solver; that quirk is tracked separately.
+        // Magnus is a small lateral (z) acceleration, positive (right) for RH twist,
+        // using the proper yaw-of-repose force model (the old 1.8 fudge factor is gone).
+        // For this .308/168gr/1:10 case at ~2700 fps it is ~0.003 m/s² — a fraction of
+        // gravity, integrating to a sub-inch drift, consistent with the cli_api solver.
+        assert!(
+            result[5] > 0.0,
+            "Magnus should drift right for RH twist, got {}",
+            result[5]
+        );
+        assert!(
+            result[5] < 0.05,
+            "Magnus accel should be small/physical, got {}",
+            result[5]
+        );
     }
 
     #[test]
