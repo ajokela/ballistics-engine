@@ -176,11 +176,12 @@ fn compute_derivatives_vec(
     let inputs = BallisticInputs {
         bc_value: params.bc,
         bc_type: params.drag_model,
-        bullet_mass: params.mass_kg / 0.00006479891, // kg to grains
-        muzzle_velocity: vel.norm() * 3.28084,       // m/s to fps
-        bullet_diameter: 0.308,                      // default
-        bullet_length: 1.24,                         // default
-        twist_rate: 10.0,                            // default
+        // SI-canonical fields (kg, meters, m/s); imperial mirrors below.
+        bullet_mass: params.mass_kg, // kg
+        muzzle_velocity: vel.norm(), // m/s
+        bullet_diameter: 0.0078232,  // 0.308 in -> meters
+        bullet_length: 0.031496,     // 1.24 in -> meters
+        twist_rate: 10.0,            // inches/turn (twist stays imperial)
         is_twist_right: params.is_twist_right,
         enable_advanced_effects: params.enable_spin_drift
             || params.enable_magnus
