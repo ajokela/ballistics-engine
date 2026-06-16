@@ -281,16 +281,10 @@ pub fn compute_derivatives(
             // Calculate spin rate from twist rate and velocity
             let spin_rate_rad_s = calculate_spin_rate(inputs.twist_rate, speed_air);
 
-            // Calculate Magnus moment coefficient
-            let c_la = calculate_magnus_moment_coefficient(mach);
+            let c_np = calculate_magnus_moment_coefficient(mach);
 
             // Convert diameter to meters
             let diameter_m = inputs.bullet_diameter * INCHES_TO_METERS;
-
-            // Magnus force formula for spinning projectiles
-            // Based on McCoy's Modern Exterior Ballistics
-            // F_Magnus = C_L × ½ × ρ × V² × A
-            // where C_L = C_Lα × spin_parameter
 
             // Calculate spin parameter (dimensionless) with safe division
             let spin_param = if speed_air > 1e-9 {
@@ -299,20 +293,37 @@ pub fn compute_derivatives(
                 0.0 // No spin effect at zero speed
             };
 
-            // Calculate lift coefficient
-            let c_l = spin_param * c_la;
-
             // Calculate reference area
             let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
 
-            // Calculate Magnus force using standard lift equation
-            // F = 0.5 * ρ * V² * A * C_L
-            // Apply empirical calibration factor to match real-world data
-            // This accounts for the fact that bullets are not perfect cylinders
-            // and have complex flow patterns
-            const MAGNUS_CALIBRATION_FACTOR: f64 = 1.8; // Calibrated to produce 4-6 inches drift at 200 yards
+            // Yaw of repose for the proper Magnus force. This solver uses imperial
+            // input fields (caliber/length in inches, mass in grains).
+            let d_in = inputs.caliber_inches;
+            let m_gr = inputs.weight_grains;
+            let l_in = if inputs.bullet_length > 0.0 {
+                inputs.bullet_length
+            } else {
+                4.5 * d_in.max(1e-9)
+            };
+            let sg = crate::spin_drift::miller_stability(d_in, m_gr, inputs.twist_rate, l_in);
+            let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
+                sg,
+                speed_air,
+                spin_rate_rad_s,
+                0.0,
+                0.0,
+                air_density,
+                d_in,
+                l_in,
+                m_gr,
+                mach,
+                "match",
+                false,
+            );
+
+            // Proper McCoy Magnus FORCE: F = q S C_Npa (pd/2V) sin(alpha_R).
             let magnus_force_magnitude =
-                MAGNUS_CALIBRATION_FACTOR * 0.5 * air_density * speed_air.powi(2) * area * c_l;
+                0.5 * air_density * speed_air.powi(2) * area * c_np * spin_param * yaw_rad.sin();
 
             // Magnus force is perpendicular to both velocity and spin axis
             // For a bullet spinning around its axis of travel, the spin vector is aligned with velocity
