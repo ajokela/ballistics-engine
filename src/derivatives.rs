@@ -256,7 +256,7 @@ pub fn compute_derivatives(
             crate::reynolds::apply_reynolds_correction(
                 drag_factor,
                 speed_air,
-                inputs.caliber_inches, // preserve prior value; reynolds-unit bugfix is separate
+                inputs.caliber_inches, // inches (apply_reynolds_correction converts to meters internally)
                 air_density,
                 temperature_c,
                 mach,

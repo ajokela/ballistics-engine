@@ -195,13 +195,16 @@ fn compute_derivatives_vec(
         tipoff_yaw: 0.0,
         target_distance: 1000.0, // default
         muzzle_angle: 0.0,
+        // wind_segments are (km/h, degrees, ...); BallisticInputs wind fields are
+        // SI (m/s, radians). Convert so the struct honors its contract (these
+        // fields are not read on this path, but keep them consistent).
         wind_speed: if !params.wind_segments.is_empty() {
-            params.wind_segments[0].0
+            params.wind_segments[0].0 * 0.2777778 // km/h -> m/s
         } else {
             0.0
         },
         wind_angle: if !params.wind_segments.is_empty() {
-            params.wind_segments[0].1
+            params.wind_segments[0].1.to_radians() // degrees -> radians
         } else {
             0.0
         },
