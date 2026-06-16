@@ -416,16 +416,13 @@ impl TrajectorySolver {
             return;
         }
 
-        let twist_cal = twist_in / d_in;
-        // Real length-to-diameter ratio when available, else 4.5 cal (typical match bullet).
-        let l_cal = if self.inputs.bullet_length > 0.0 {
-            self.inputs.bullet_length / self.inputs.bullet_diameter
+        // Real length when available, else 4.5 cal (typical match bullet).
+        let length_in = if self.inputs.bullet_length > 0.0 {
+            self.inputs.bullet_length / 0.0254
         } else {
-            4.5
+            4.5 * d_in
         };
-        // Miller stability factor (Sg).
-        let sg = 30.0 * m_gr
-            / (twist_cal * twist_cal * d_in.powi(3) * l_cal * (1.0 + l_cal * l_cal));
+        let sg = crate::spin_drift::miller_stability(d_in, m_gr, twist_in, length_in);
         let sign = if self.inputs.is_twist_right { 1.0 } else { -1.0 };
 
         for p in result.points.iter_mut() {
