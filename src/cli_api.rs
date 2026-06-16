@@ -68,7 +68,7 @@ pub struct BallisticInputs {
     pub bullet_mass: f64,     // kg
     pub muzzle_velocity: f64, // m/s
     pub bullet_diameter: f64, // meters
-    pub bullet_length: f64,   // meters
+    pub bullet_length: f64,   // meters in the cli_api solver; inches in the derivatives/trajectory_integration path
 
     // Targeting and positioning
     pub muzzle_angle: f64,     // radians (launch angle)
