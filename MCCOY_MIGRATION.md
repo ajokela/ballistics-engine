@@ -90,3 +90,45 @@ then run that repo's test suite.
   comparison of `solve_trajectory_for_monte_carlo` with Coriolis+Magnus+spin
   enabled — **byte-identical**.
 - Full `cargo test` suite: 221 passing.
+
+---
+
+# SI Unit Unification — Downstream Notes (ballistics_rust)
+
+A follow-up release makes `bullet_mass`/`bullet_diameter`/`bullet_length`
+**SI-canonical (kg, meters, meters)** across the *entire* engine, including the
+secondary solver path that `ballistics_rust` drives. Previously that path read
+those fields as **grains/inches** (a hidden imperial sub-convention). The
+imperial mirror fields `caliber_inches` (inches) and `weight_grains` (grains)
+remain and must be kept in sync.
+
+## Breaking changes for ballistics_rust
+
+| API (engine) | Old contract | New contract |
+|---|---|---|
+| `derivatives::compute_derivatives` (driven directly in `ballistics_rust/src/lib.rs`) | `inputs.bullet_mass` grains, `bullet_diameter`/`bullet_length` inches | **kg, meters, meters**; also set `caliber_inches`/`weight_grains` (used by stability/Magnus/drag-shape helpers) |
+| `fast_trajectory::fast_integrate` | `inputs.bullet_mass` grains | **kg** |
+| `monte_carlo::solve_trajectory_for_monte_carlo` | inputs in **yards / fps / grains / feet / inches / km·h / degrees** | **meters / m·s / kg / meters(alt) / meters(sight) / m·s(wind) / radians(wind & azimuth)** |
+
+### What to change
+1. Wherever `ballistics_rust` builds a `BallisticInputs` for these calls, populate
+   `bullet_mass` in kg, `bullet_diameter`/`bullet_length` in meters, and also set
+   `caliber_inches`/`weight_grains` (the engine no longer derives them on this path).
+2. The Monte Carlo wrapper (`ballistics_rust/src/monte_carlo.rs`) historically fed
+   `solve_trajectory_for_monte_carlo` legacy imperial values — convert those to SI
+   before the call (target_distance m, muzzle_velocity m/s, mass kg, altitude m,
+   sight_height m, wind_speed m/s, wind_angle radians).
+
+## Bug fixes in this release (output changes even for correct callers)
+
+- **Enhanced spin drift**: a `×15.432358` (grams→grains) factor wrongly inflated
+  the grains mass, making spin decay ~3.93× too slow. Spin-drift magnitudes change
+  (grows with range).
+- **cluster_bc** (`use_cluster_bc=true`): caliber was passed in meters where
+  inches were expected, misclassifying every bullet. BC degradation changes.
+- **Monte Carlo trajectory**: `atmo_params` were packed in the wrong order and
+  `base_ratio` was set from humidity, scrambling base density to ~417 kg/m³
+  (~340× drag) — the Monte Carlo bullet previously collapsed at ~33 m. Now
+  `solve_trajectory_for_monte_carlo` agrees with the cli_api solver within ~0.3%.
+- **Reynolds correction** (subsonic tail, mach<1 & <200 m/s): diameter was passed
+  in inches where meters were expected.
