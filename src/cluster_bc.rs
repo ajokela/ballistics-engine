@@ -202,6 +202,21 @@ mod tests {
     }
 
     #[test]
+    fn test_caliber_must_be_inches_not_meters() {
+        // predict_cluster normalizes caliber against an INCHES range (0.172..0.750).
+        // Passing the caliber in meters (the old cli_api bug, caliber_inches * 0.0254)
+        // pins caliber_norm strongly negative and misclassifies every bullet. Guard it:
+        let cluster_bc = ClusterBCDegradation::new();
+        let inches = cluster_bc.predict_cluster(0.458, 500.0, 0.295);
+        let meters = cluster_bc.predict_cluster(0.458 * 0.0254, 500.0, 0.295);
+        assert_eq!(inches, 3, ".458/500gr in inches -> Heavy Magnum cluster");
+        assert_ne!(
+            meters, inches,
+            "caliber in meters must misclassify (caller must pass inches)"
+        );
+    }
+
+    #[test]
     fn test_bc_multiplier() {
         let cluster_bc = ClusterBCDegradation::new();
 

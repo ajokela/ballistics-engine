@@ -1247,7 +1247,7 @@ impl TrajectorySolver {
         let effective_bc = if let Some(ref cluster_bc) = self.cluster_bc {
             cluster_bc.apply_correction(
                 base_bc,
-                self.inputs.caliber_inches * 0.0254, // Convert back to meters for consistency
+                self.inputs.caliber_inches, // predict_cluster normalizes against an inches range
                 self.inputs.weight_grains,
                 velocity_fps,
             )
