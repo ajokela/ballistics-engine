@@ -309,7 +309,7 @@ pub fn calculate_enhanced_spin_drift(
         time_s,
         velocity_mps,
         air_density,
-        bullet_mass * 15.432358, // Convert to grains
+        bullet_mass, // already grains (update_spin_rate wants mass_grains)
         bullet_diameter,
         bullet_length,
         Some(&decay_params),
