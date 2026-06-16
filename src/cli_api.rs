@@ -1305,19 +1305,45 @@ impl TrajectorySolver {
             let temp_k = self.atmosphere.temperature + 273.15;
             let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
             let mach = velocity_magnitude / speed_of_sound;
-            let c_la = crate::derivatives::calculate_magnus_moment_coefficient(mach);
 
+            // Imperial conversions for the stability / yaw-of-repose helpers.
+            let d_in = self.inputs.bullet_diameter / 0.0254;
+            let m_gr = self.inputs.bullet_mass / 0.00006479891;
+            let l_in = if self.inputs.bullet_length > 0.0 {
+                self.inputs.bullet_length / 0.0254
+            } else {
+                4.5 * d_in
+            };
+            let sg = crate::spin_drift::miller_stability(d_in, m_gr, self.inputs.twist_rate, l_in);
+
+            // Yaw of repose (radians); zero for unstable bullets (Sg <= 1).
+            let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
+                sg,
+                velocity_magnitude,
+                spin_rad_s,
+                0.0, // crosswind handled elsewhere
+                0.0, // pitch rate not tracked
+                air_density,
+                d_in,
+                l_in,
+                m_gr,
+                mach,
+                "match",
+                false,
+            );
+
+            // Proper McCoy Magnus FORCE: F = q S C_Npa (pd/2V) sin(alpha_R).
             let diameter_m = self.inputs.bullet_diameter; // already meters
             let spin_param = spin_rad_s * diameter_m / (2.0 * velocity_magnitude);
-            let c_l = spin_param * c_la;
+            let c_np = crate::derivatives::calculate_magnus_moment_coefficient(mach);
             let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
-            const MAGNUS_CALIBRATION_FACTOR: f64 = 1.8;
-            let magnus_force = MAGNUS_CALIBRATION_FACTOR
-                * 0.5
+            let magnus_force = 0.5
                 * air_density
                 * velocity_magnitude.powi(2)
                 * area
-                * c_l;
+                * c_np
+                * spin_param
+                * yaw_rad.sin();
 
             // Horizontal direction perpendicular to velocity. In McCoy (RH) frame,
             // v_unit × up = +Z (right) for a downrange shot, matching spin-drift sign.
