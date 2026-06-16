@@ -9,7 +9,6 @@ use nalgebra::Vector3;
 
 // Physics constants
 const INCHES_PER_FOOT: f64 = 12.0;
-const INCHES_TO_METERS: f64 = 0.0254;
 const STANDARD_AIR_DENSITY_METRIC: f64 = 1.225; // kg/m³ at sea level
 
 // Magnus Effect Constants
@@ -171,12 +170,12 @@ pub fn compute_derivatives(
             if inputs.caliber_inches > 0.0 {
                 Some(inputs.caliber_inches)
             } else {
-                Some(inputs.bullet_diameter)
+                Some(inputs.bullet_diameter / 0.0254) // meters -> inches
             },
             if inputs.weight_grains > 0.0 {
                 Some(inputs.weight_grains)
             } else {
-                Some(inputs.bullet_mass * 15.432358)
+                Some(inputs.bullet_mass / 0.00006479891) // kg -> grains
             },
             Some(speed_air),
             Some(air_density),
@@ -228,8 +227,8 @@ pub fn compute_derivatives(
         let drag_factor = if mach > 0.7 && mach < 1.3 {
             // Estimate projectile shape from parameters
             let shape = crate::transonic_drag::get_projectile_shape(
-                inputs.bullet_diameter,
-                inputs.bullet_mass,
+                inputs.caliber_inches, // inches
+                inputs.weight_grains,  // grains
                 &inputs.bc_type.to_string(),
             );
 
@@ -257,7 +256,7 @@ pub fn compute_derivatives(
             crate::reynolds::apply_reynolds_correction(
                 drag_factor,
                 speed_air,
-                inputs.bullet_diameter,
+                inputs.caliber_inches, // preserve prior value; reynolds-unit bugfix is separate
                 air_density,
                 temperature_c,
                 mach,
@@ -284,8 +283,8 @@ pub fn compute_derivatives(
 
             let c_np = calculate_magnus_moment_coefficient(mach);
 
-            // Convert diameter to meters
-            let diameter_m = inputs.bullet_diameter * INCHES_TO_METERS;
+            // bullet_diameter is SI (meters)
+            let diameter_m = inputs.bullet_diameter;
 
             // Calculate spin parameter (dimensionless) with safe division
             let spin_param = if speed_air > 1e-9 {
@@ -297,12 +296,13 @@ pub fn compute_derivatives(
             // Calculate reference area
             let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
 
-            // Yaw of repose for the proper Magnus force. This solver uses imperial
-            // input fields (caliber/length in inches, mass in grains).
+            // Yaw of repose for the proper Magnus force. Stability/yaw helpers are
+            // imperial: use the explicit imperial mirror fields, and convert the SI
+            // bullet_length to inches at this boundary.
             let d_in = inputs.caliber_inches;
             let m_gr = inputs.weight_grains;
             let l_in = if inputs.bullet_length > 0.0 {
-                inputs.bullet_length
+                inputs.bullet_length / 0.0254 // meters -> inches
             } else {
                 4.5 * d_in.max(1e-9)
             };
@@ -353,7 +353,7 @@ pub fn compute_derivatives(
                 };
 
                 // Convert bullet mass to kg
-                let bullet_mass_kg = inputs.bullet_mass * GRAINS_TO_KG;
+                let bullet_mass_kg = inputs.bullet_mass; // already kg (SI)
 
                 // Calculate acceleration
                 accel_magnus = (magnus_force_magnitude / bullet_mass_kg) * magnus_direction;
@@ -412,12 +412,13 @@ pub fn compute_derivatives(
         };
 
         // Calculate enhanced spin drift components
+        // calculate_enhanced_spin_drift is imperial (grains/inches): convert at boundary.
         let spin_components = calculate_enhanced_spin_drift(
-            inputs.bullet_mass,
+            inputs.weight_grains,
             vel.norm(),
             inputs.twist_rate,
-            inputs.bullet_diameter,
-            inputs.bullet_length,
+            inputs.caliber_inches,
+            inputs.bullet_length / 0.0254, // meters -> inches
             inputs.is_twist_right,
             time,
             air_density,
@@ -523,8 +524,8 @@ pub fn interpolated_bc(
                 _ => "G1", // Default to G1 for other models
             };
             return calculate_bc_fallback(
-                Some(inputs.bullet_mass),
-                Some(inputs.bullet_diameter),
+                Some(inputs.weight_grains),  // grains
+                Some(inputs.caliber_inches), // inches
                 Some(bc_type_str),
             );
         }
@@ -588,7 +589,7 @@ fn get_bc_for_velocity(velocity_fps: f64, inputs: &BallisticInputs, bc_used: f64
         let model = if let Some(ref bullet_id) = inputs.bullet_id {
             bullet_id.clone()
         } else {
-            format!("{}gr bullet", inputs.bullet_mass as i32)
+            format!("{}gr bullet", inputs.weight_grains as i32)
         };
 
         // Estimate segments based on bullet characteristics
@@ -618,17 +619,15 @@ mod tests {
     use super::*;
 
     fn create_test_inputs() -> BallisticInputs {
-        // NOTE: this solver (compute_derivatives) reads the geometry/mass fields in
-        // IMPERIAL units — bullet_diameter & bullet_length in inches, bullet_mass in
-        // grains — unlike the cli_api solver which uses SI. Populate them accordingly
-        // (and the explicit caliber_inches/weight_grains/bullet_length the Magnus path
-        // also reads) so the fixture is self-consistent.
+        // SI-canonical geometry/mass (kg, meters) — same convention as the struct
+        // docs and cli_api — plus the explicit imperial mirror fields
+        // (caliber_inches/weight_grains) the stability/Magnus helpers read.
         BallisticInputs {
-            muzzle_velocity: 800.0,
+            muzzle_velocity: 800.0,         // m/s
             bc_value: 0.5,
-            bullet_mass: 168.0,     // grains
-            bullet_diameter: 0.308, // inches
-            bullet_length: 1.215,   // inches
+            bullet_mass: 168.0 * 0.00006479891, // kg (168 gr)
+            bullet_diameter: 0.308 * 0.0254,    // meters (.308 in)
+            bullet_length: 1.215 * 0.0254,      // meters
             caliber_inches: 0.308,
             weight_grains: 168.0,
             altitude: 1000.0,
