@@ -20,6 +20,28 @@ pub struct SpinDriftComponents {
     pub pitch_rate_rad_s: f64,       // Current pitch/yaw rate (rad/s)
 }
 
+/// Base Miller gyroscopic stability factor (no velocity/density correction).
+/// All inputs imperial: caliber/length in inches, mass in grains, twist in
+/// inches-per-turn. Returns 0.0 for non-positive inputs.
+///   Sg = 30 m / (t^2 d^3 l (1 + l^2)),  t,l in calibers, d in inches, m in grains
+pub(crate) fn miller_stability(
+    caliber_in: f64,
+    weight_gr: f64,
+    twist_in: f64,
+    length_in: f64,
+) -> f64 {
+    if caliber_in <= 0.0 || weight_gr <= 0.0 || twist_in <= 0.0 || length_in <= 0.0 {
+        return 0.0;
+    }
+    let twist_cal = twist_in / caliber_in;
+    let l_cal = length_in / caliber_in;
+    let denom = twist_cal * twist_cal * caliber_in.powi(3) * l_cal * (1.0 + l_cal * l_cal);
+    if denom == 0.0 {
+        return 0.0;
+    }
+    30.0 * weight_gr / denom
+}
+
 /// Calculate bullet spin rate from velocity and twist rate
 pub fn calculate_spin_rate(velocity_mps: f64, twist_rate_inches: f64) -> (f64, f64) {
     if twist_rate_inches <= 0.0 {
@@ -529,6 +551,23 @@ mod tests {
         assert!(components.total_drift_m.abs() > 0.0);
         assert!(components.spin_rate_rps > 0.0);
         assert!(components.stability_factor > 0.0);
+    }
+
+    #[test]
+    fn test_miller_stability_308_168gr() {
+        // .308, 168 gr, 1:12 twist, ~1.215 in length -> base Sg (no velocity/density correction)
+        // Formula: Sg = 30*m / (t^2 * d^3 * l * (1+l^2)), t and l in calibers
+        // twist_cal = 12/0.308 = 38.96, l_cal = 1.215/0.308 = 3.94 -> Sg ~ 1.74
+        let sg = miller_stability(0.308, 168.0, 12.0, 1.215);
+        assert!(sg > 1.5 && sg < 2.0, "expected base Sg ~1.74, got {}", sg);
+    }
+
+    #[test]
+    fn test_miller_stability_invalid_inputs_zero() {
+        assert_eq!(miller_stability(0.0, 168.0, 12.0, 1.2), 0.0);
+        assert_eq!(miller_stability(0.308, 0.0, 12.0, 1.2), 0.0);
+        assert_eq!(miller_stability(0.308, 168.0, 0.0, 1.2), 0.0);
+        assert_eq!(miller_stability(0.308, 168.0, 12.0, 0.0), 0.0);
     }
 
     #[test]
