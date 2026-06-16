@@ -5,7 +5,7 @@
 
 use crate::{
     atmosphere::get_local_atmosphere,
-    constants::{GRAINS_TO_KG, G_ACCEL_MPS2, MPS_TO_FPS},
+    constants::{G_ACCEL_MPS2, MPS_TO_FPS},
     drag::get_drag_coefficient,
     wind::WindSock,
     BCSegmentData, DragModel, InternalBallisticInputs as BallisticInputs,
@@ -108,7 +108,7 @@ pub fn fast_integrate(
     params: FastIntegrationParams,
 ) -> FastSolution {
     // Extract parameters
-    let _mass_kg = inputs.bullet_mass * GRAINS_TO_KG;
+    let _mass_kg = inputs.bullet_mass; // SI (kg)
     let bc = inputs.bc_value;
     let drag_model = &inputs.bc_type;
 
@@ -395,7 +395,7 @@ pub fn fast_integrate_with_segments(
     use crate::trajectory_integration::{integrate_trajectory, TrajectoryParams};
 
     // Extract parameters
-    let mass_kg = inputs.bullet_mass * GRAINS_TO_KG;
+    let mass_kg = inputs.bullet_mass; // SI (kg)
     let bc = inputs.bc_value;
     let drag_model = inputs.bc_type;
 
