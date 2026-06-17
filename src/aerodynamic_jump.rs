@@ -131,7 +131,11 @@ pub fn calculate_aerodynamic_jump(
 
     // Stabilization factor
     let caliber_in = caliber_m / 0.0254;
-    let sg_approx = 30.0 * mass_kg * 15.432 / (twist_rate_calibers.powi(2) * caliber_in.powi(3));
+    // mass_kg -> grains uses the kilograms->grains factor (15432.358), NOT the grams->grains
+    // factor (15.432); the latter made sg_approx ~1000x too small so stabilization_factor
+    // collapsed to ~0 for every real projectile. (Simplified Sg: length terms omitted.)
+    let sg_approx =
+        30.0 * mass_kg * 15432.358 / (twist_rate_calibers.powi(2) * caliber_in.powi(3));
     let stabilization_factor = (sg_approx / 1.5).min(1.0);
 
     AerodynamicJumpComponents {
