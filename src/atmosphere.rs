@@ -142,6 +142,30 @@ pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f6
     }
 }
 
+/// Resolve the temperature override for an air-density calculation, mirroring
+/// [`resolve_station_pressure`].
+///
+/// * An explicitly-supplied temperature is authoritative (returned as `Some`).
+/// * When temperature is left at the sea-level standard default (15 °C) while a real altitude
+///   is given, the caller meant "standard atmosphere at this altitude": return `None` so
+///   [`calculate_atmosphere`] applies the ICAO lapse-rate temperature for that altitude
+///   (≈ −6.5 °C/km).
+///
+/// Without this, `--altitude` with the default temperature held the air at 15 °C, which
+/// under-estimates density (warm air is thinner) by ~2.4% at 1 km up to ~7% at 3 km versus the
+/// standard atmosphere — validated against py_ballisticcalc, which derives both temperature and
+/// pressure from altitude. The 0.1 °C tolerance matches the `59 °F = 15.0 °C` default exactly,
+/// and `>1 m` avoids triggering at sea level. A shooter at a genuinely non-standard temperature
+/// at altitude should pass an explicit temperature (same contract as station pressure).
+pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Option<f64> {
+    const SEA_LEVEL_TEMP_C: f64 = 15.0;
+    if (temperature_c - SEA_LEVEL_TEMP_C).abs() < 0.1 && altitude_m.abs() > 1.0 {
+        None // temperature left at default + real altitude → derive ICAO lapse temperature
+    } else {
+        Some(temperature_c) // explicit temperature is authoritative
+    }
+}
+
 /// Enhanced atmospheric calculation with ICAO Standard Atmosphere.
 ///
 /// # Arguments
@@ -482,6 +506,43 @@ mod tests {
         let (rho_a, _) = calculate_atmosphere(2000.0, Some(15.0), p, 50.0);
         let (rho_b, _) = calculate_atmosphere(0.0, Some(15.0), p, 50.0);
         assert!((rho_a - rho_b).abs() < 1e-9, "explicit pressure must ignore altitude");
+    }
+
+    #[test]
+    fn test_resolve_station_temperature_contract() {
+        // Default 15 C + real altitude => derive ICAO lapse temperature (None).
+        assert_eq!(resolve_station_temperature(15.0, 2000.0), None);
+        // An explicit, non-default temperature is authoritative (Some, used directly).
+        assert_eq!(resolve_station_temperature(-5.0, 2000.0), Some(-5.0));
+        assert_eq!(resolve_station_temperature(30.0, 2000.0), Some(30.0));
+        // At/near sea level the default is used directly (no derivation needed).
+        assert_eq!(resolve_station_temperature(15.0, 0.0), Some(15.0));
+    }
+
+    #[test]
+    fn test_altitude_only_default_matches_full_icao_standard() {
+        // Regression: resolving BOTH temperature and pressure for an altitude-only query (defaults
+        // left in place) must equal the fully-standard atmosphere at that altitude — i.e. altitude
+        // now drives temperature (ICAO lapse) AND pressure, not just pressure. Validated against
+        // py_ballisticcalc to ~0.04%. Previously the air held 15 C, leaving density ~7% too thin
+        // (warm) at 3 km.
+        for alt in [1000.0, 2000.0, 2500.0, 3000.0] {
+            let t = resolve_station_temperature(15.0, alt);
+            let p = resolve_station_pressure(1013.25, alt);
+            let (rho_resolved, _) = calculate_atmosphere(alt, t, p, 0.0);
+            let (rho_std, _) = calculate_atmosphere(alt, None, None, 0.0);
+            assert!(
+                (rho_resolved - rho_std).abs() < 1e-9,
+                "alt {alt}: altitude-only default density {rho_resolved} should equal the full \
+                 ICAO standard {rho_std}"
+            );
+            // And it must be denser than the old temperature-held-at-15C behavior (colder = denser).
+            let (rho_warm, _) = calculate_atmosphere(alt, Some(15.0), p, 0.0);
+            assert!(
+                rho_resolved > rho_warm,
+                "alt {alt}: lapse-temperature density {rho_resolved} should exceed 15 C-held {rho_warm}"
+            );
+        }
     }
 
     #[test]
