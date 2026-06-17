@@ -483,7 +483,7 @@ impl TrajectorySolver {
         );
 
         // Main integration loop (X is downrange)
-        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
+        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
@@ -746,7 +746,7 @@ impl TrajectorySolver {
         );
 
         // Main RK4 integration loop (X is downrange)
-        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
+        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
