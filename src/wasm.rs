@@ -113,7 +113,10 @@ impl WasmBallistics {
 
         // Route to appropriate command handler
         match args[0] {
-            "version" => Ok("Ballistics Engine v0.4.2\nWASM Build\n".to_string()),
+            "version" => Ok(format!(
+                "Ballistics Engine v{}\nWASM Build\n",
+                env!("CARGO_PKG_VERSION")
+            )),
             "trajectory" => self.handle_trajectory_command(&args[1..], units),
             "zero" => self.handle_zero_command(&args[1..], units),
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
@@ -488,7 +491,12 @@ impl WasmBallistics {
 
         // Set additional parameters
         if let Some(rate) = twist_rate {
-            inputs.twist_rate = rate;
+            // inputs.twist_rate is inches/turn; convert metric mm/turn -> inches/turn
+            // (matches native CLI). Without this, a metric 254 mm/turn was read as 254 in/turn.
+            inputs.twist_rate = match units {
+                UnitSystem::Imperial => rate,
+                UnitSystem::Metric => rate / 25.4,
+            };
         }
         inputs.is_twist_right = twist_right;
         if let Some(lat) = latitude {
@@ -521,7 +529,9 @@ impl WasmBallistics {
                 wind.speed = wind_speed; // already m/s
             }
         }
-        wind.direction = wind_direction;
+        // WindConditions.direction is RADIANS (0=North, PI/2=East); --wind-direction is degrees.
+        // Convert (matches native CLI); previously a 90-degree crosswind was fed as 90 radians.
+        wind.direction = wind_direction.to_radians();
 
         // Set atmospheric conditions
         let mut atmosphere = AtmosphericConditions::default();
@@ -807,6 +817,7 @@ impl WasmBallistics {
             0.5
         };
         let mut wind_dir_std = 5.0;
+        let mut drag_model = "G1";
 
         // Parse arguments
         let mut i = 0;
@@ -900,6 +911,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--drag-model" => {
+                    if i + 1 < args.len() {
+                        drag_model = args[i + 1];
+                        i += 1;
+                    }
+                }
                 _ => {}
             }
             i += 1;
@@ -923,6 +940,10 @@ impl WasmBallistics {
         }
 
         inputs.bc_value = bc;
+        // Honor --drag-model (mirrors the trajectory/zero handlers); previously the Monte
+        // Carlo path silently always used the G1 default even when G7 was intended.
+        inputs.bc_type = DragModel::from_str(drag_model)
+            .ok_or_else(|| JsValue::from_str("Invalid drag model (expected G1 or G7)"))?;
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
 
         // Create Monte Carlo parameters
@@ -2054,7 +2075,10 @@ impl Calculator {
                     if let Some(drop) = point.get("drop_inches").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"drop_inches".into(), &drop.into())?;
                     }
-                    if let Some(windage) = point.get("windage_inches").and_then(|v| v.as_f64()) {
+                    // The JSON producer emits "drift_inches"/"time_seconds"; read those (the old
+                    // "windage_inches"/"time_sec" lookups always missed, dropping both fields).
+                    // Keep the public output keys (windage_inches/time_sec) unchanged.
+                    if let Some(windage) = point.get("drift_inches").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"windage_inches".into(), &windage.into())?;
                     }
                     if let Some(velocity) = point.get("velocity_fps").and_then(|v| v.as_f64()) {
@@ -2063,7 +2087,7 @@ impl Calculator {
                     if let Some(energy) = point.get("energy_ftlb").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"energy_ftlb".into(), &energy.into())?;
                     }
-                    if let Some(time) = point.get("time_sec").and_then(|v| v.as_f64()) {
+                    if let Some(time) = point.get("time_seconds").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"time_sec".into(), &time.into())?;
                     }
 
