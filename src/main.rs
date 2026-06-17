@@ -4125,7 +4125,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
                 for (i, p) in result.points.iter().enumerate() {
                     if i % step == 0 || i == result.points.len() - 1 {
-                        let x_display = UnitConverter::distance_from_metric(p.position.z, units); // X column = lateral (now position.z)
+                        let x_display = UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
                         let y_display = UnitConverter::distance_from_metric(p.position.y, units);
                         let vel_display =
                             UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
@@ -4261,15 +4261,17 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 .map(|s| {
                     // Convert distance to yards for range
                     let range_yd = UnitConverter::distance_from_metric(s.distance_m, UnitSystem::Imperial);
-                    // Convert drop to yards (s.drop_m is already in meters, negative = below line of sight)
+                    // Convert drop to yards (s.drop_m is already in meters, positive = below line of sight)
                     let drop_yd = s.drop_m / 0.9144; // meters to yards
                     // Convert drift to yards
                     let drift_yd = s.wind_drift_m / 0.9144;
 
                     DopeCardRow {
                         range_yd: range_yd.round() as u32,
-                        // Drop MIL: positive = dial up (bullet is below line of sight)
-                        drop_mil: yards_to_mil(-drop_yd, range_yd),
+                        // Drop MIL: positive = dial up (bullet below LOS). drop_m is already
+                        // positive-below-LOS (sample_trajectory: los_y - y_interp), matching the
+                        // come-up / range tables, so do NOT negate it (this column was sign-flipped).
+                        drop_mil: yards_to_mil(drop_yd, range_yd),
                         // Wind MIL: positive = dial right for wind from right
                         wind_mil: yards_to_mil(drift_yd, range_yd),
                         // Lead MIL for moving target
