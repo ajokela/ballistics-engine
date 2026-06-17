@@ -150,14 +150,12 @@ pub fn fast_integrate(
     times.push(0.0);
     states.push(params.initial_state);
 
-    // Get base atmospheric density
-    let (base_density, _) = get_local_atmosphere(
-        0.0,
-        params.atmo_params.0,
-        params.atmo_params.1,
-        params.atmo_params.2,
-        params.atmo_params.3,
-    );
+    // Base drag density = the muzzle (shooter-altitude) density. atmo_params.3 is base_ratio
+    // = air_density/1.225 at the shooter altitude (the MC caller computes it via
+    // calculate_atmosphere). Previously this called get_local_atmosphere with query alt 0.0
+    // while base_alt = shooter altitude, which re-scaled that ratio DOWN to sea level —
+    // discarding the correct altitude density and inflating drag for every elevated MC run.
+    let base_density = params.atmo_params.3 * 1.225;
 
     // Integration loop
     let mut hit_target = false;
