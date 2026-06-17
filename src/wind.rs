@@ -83,8 +83,9 @@ impl WindSock {
             return Vector3::zeros();
         }
 
-        // Check if we need to advance to next segment
-        if range_m >= self.next_range {
+        // Advance the cursor across however many segments the query skipped (a single `if`
+        // returned a stale vector when a monotonic query jumped past a whole short segment).
+        while range_m >= self.next_range && self.current < self.winds.len() {
             self.current += 1;
             if self.current >= self.winds.len() {
                 self.current_vec = Vector3::zeros();
