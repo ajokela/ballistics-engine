@@ -4,7 +4,7 @@ exclude = ["ballistics-engine-rb", "ballistics-engine-py"]
 
 [package]
 name = "ballistics-engine"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2021"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
@@ -36,7 +36,17 @@ exclude = [
     "*.xcframework",
     "doc/",
     "target/",
-    "*.bak"
+    "*.bak",
+    "releases/",
+    "docs/superpowers/",
+    ".cargo/",
+    ".github/",
+    "scripts/",
+    "analyze_drift.md",
+    "MCCOY_MIGRATION.md",
+    "test_drift.rs",
+    "test_user_drift.html",
+    "*.html"
 ]
 
 [features]
