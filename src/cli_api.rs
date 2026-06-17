@@ -589,44 +589,14 @@ impl TrajectorySolver {
                 }
             }
 
-            // Calculate drag with altitude-dependent wind if enabled
-            let actual_wind = if self.inputs.enable_wind_shear {
-                self.get_wind_at_altitude(position.y)
-            } else {
-                wind_vector
-            };
-            let velocity_rel = velocity - actual_wind;
-            let velocity_rel_mag = velocity_rel.magnitude();
-            let drag_coefficient = self.calculate_drag_coefficient(velocity_rel_mag);
-
-            // Calculate drag force
-            let drag_force = 0.5
-                * air_density
-                * drag_coefficient
-                * self.inputs.bullet_diameter
-                * self.inputs.bullet_diameter
-                * std::f64::consts::PI
-                / 4.0
-                * velocity_rel_mag
-                * velocity_rel_mag;
-
-            // Guard ~zero relative velocity (e.g. muzzle velocity 0): dividing each component
-            // by velocity_rel_mag below would be 0/0 = NaN. Mirror calculate_acceleration (the
-            // RK4/RK45 path) and take a gravity-only step. Inert for real trajectories.
-            if velocity_rel_mag < 0.001 {
-                velocity += Vector3::new(0.0, -9.80665, 0.0) * self.time_step;
-                position += velocity * self.time_step;
-                time += self.time_step;
-                continue;
-            }
-
-            // Calculate acceleration
-            let drag_acceleration = -drag_force / self.inputs.bullet_mass;
-            let acceleration = Vector3::new(
-                drag_acceleration * velocity_rel.x / velocity_rel_mag,
-                drag_acceleration * velocity_rel.y / velocity_rel_mag - 9.80665,
-                drag_acceleration * velocity_rel.z / velocity_rel_mag,
-            );
+            // Use the same acceleration kernel as RK4/RK45 so all three solvers share ONE drag
+            // model. solve_euler previously used a bespoke frontal-area drag (0.5*rho*Cd*A*v^2/m)
+            // that IGNORED the ballistic coefficient entirely (diverging up to ~2.3x from the
+            // BC-retardation RK4/RK45 path), and also omitted the Magnus/Coriolis terms.
+            // calculate_acceleration applies BC-retardation drag, gravity, Coriolis, Magnus, wind
+            // shear, and the zero-relative-velocity gravity-only guard.
+            let acceleration =
+                self.calculate_acceleration(&position, &velocity, air_density, &wind_vector);
 
             // Update state
             velocity += acceleration * self.time_step;
