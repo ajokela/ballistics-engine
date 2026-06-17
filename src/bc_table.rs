@@ -239,7 +239,9 @@ impl BcCorrectionTable {
         }
 
         // Binary search for interval
-        let idx = match bins.binary_search_by(|probe| probe.partial_cmp(&value).unwrap()) {
+        let idx = match bins
+            .binary_search_by(|probe| probe.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Equal))
+        {
             Ok(i) => i.saturating_sub(1).min(bins.len() - 2),
             Err(i) => i.saturating_sub(1).min(bins.len() - 2),
         };
