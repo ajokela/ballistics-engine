@@ -156,12 +156,16 @@ pub fn calculate_aerodynamic_jump(
 }
 
 /// Calculate sight corrections needed to compensate for aerodynamic jump
+// `!(x > 0.0)` is used intentionally instead of `x <= 0.0`: the negated form is also true for
+// NaN (NaN comparisons are always false), so it correctly rejects NaN as well as non-positive
+// inputs. `x <= 0.0` would let NaN through. Hence the clippy allow below.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn calculate_sight_correction_for_jump(
     jump_components: &AerodynamicJumpComponents,
     zero_range_m: f64,
     sight_height_m: f64,
 ) -> (f64, f64) {
-    // Guard a non-positive zero range (public API): 91.44 / 0 would be Inf, poisoning the
+    // Guard a non-positive (or NaN) zero range (public API): 91.44 / 0 would be Inf, poisoning the
     // returned corrections.
     if !(zero_range_m > 0.0) {
         return (0.0, 0.0);
