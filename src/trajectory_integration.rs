@@ -15,12 +15,18 @@ use crate::BallisticInputs;
 use crate::DragModel;
 
 /// RK4 integration step
-fn rk4_step(state: &Vector6<f64>, t: f64, dt: f64, params: &TrajectoryParams) -> Vector6<f64> {
+fn rk4_step(
+    state: &Vector6<f64>,
+    t: f64,
+    dt: f64,
+    params: &TrajectoryParams,
+    inputs: &BallisticInputs,
+) -> Vector6<f64> {
     // RK4 integration
-    let k1 = compute_derivatives_vec(state, t, params);
-    let k2 = compute_derivatives_vec(&(state + dt * 0.5 * k1), t + dt * 0.5, params);
-    let k3 = compute_derivatives_vec(&(state + dt * 0.5 * k2), t + dt * 0.5, params);
-    let k4 = compute_derivatives_vec(&(state + dt * k3), t + dt, params);
+    let k1 = compute_derivatives_vec(state, t, params, inputs);
+    let k2 = compute_derivatives_vec(&(state + dt * 0.5 * k1), t + dt * 0.5, params, inputs);
+    let k3 = compute_derivatives_vec(&(state + dt * 0.5 * k2), t + dt * 0.5, params, inputs);
+    let k4 = compute_derivatives_vec(&(state + dt * k3), t + dt, params, inputs);
 
     state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 }
@@ -31,6 +37,7 @@ fn rk45_step(
     t: f64,
     dt: f64,
     params: &TrajectoryParams,
+    inputs: &BallisticInputs,
     tol: f64,
 ) -> (Vector6<f64>, f64, f64) {
     // Dormand-Prince coefficients (same as scipy.integrate.solve_ivp RK45)
@@ -71,28 +78,33 @@ fn rk45_step(
     const B7_ERR: f64 = 1.0 / 40.0;
 
     // Compute stages
-    let k1 = compute_derivatives_vec(state, t, params);
-    let k2 = compute_derivatives_vec(&(state + dt * A21 * k1), t + dt * 0.2, params);
-    let k3 = compute_derivatives_vec(&(state + dt * (A31 * k1 + A32 * k2)), t + dt * 0.3, params);
+    let k1 = compute_derivatives_vec(state, t, params, inputs);
+    let k2 = compute_derivatives_vec(&(state + dt * A21 * k1), t + dt * 0.2, params, inputs);
+    let k3 =
+        compute_derivatives_vec(&(state + dt * (A31 * k1 + A32 * k2)), t + dt * 0.3, params, inputs);
     let k4 = compute_derivatives_vec(
         &(state + dt * (A41 * k1 + A42 * k2 + A43 * k3)),
         t + dt * 0.8,
         params,
+        inputs,
     );
     let k5 = compute_derivatives_vec(
         &(state + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4)),
         t + dt * 8.0 / 9.0,
         params,
+        inputs,
     );
     let k6 = compute_derivatives_vec(
         &(state + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5)),
         t + dt,
         params,
+        inputs,
     );
     let k7 = compute_derivatives_vec(
         &(state + dt * (A71 * k1 + A73 * k3 + A74 * k4 + A75 * k5 + A76 * k6)),
         t + dt,
         params,
+        inputs,
     );
 
     // 5th order solution
@@ -137,48 +149,17 @@ pub struct TrajectoryParams {
     pub use_bc_segments: bool, // Whether to use BC segment interpolation
 }
 
-/// Convert state to Vector6 and call compute_derivatives
-fn compute_derivatives_vec(
-    state: &Vector6<f64>,
-    t: f64,
-    params: &TrajectoryParams,
-) -> Vector6<f64> {
-    let pos = Vector3::new(state[0], state[1], state[2]);
-    let vel = Vector3::new(state[3], state[4], state[5]);
-
-    // Calculate wind at current position with shear support
-    let wind_vector = if !params.wind_segments.is_empty() {
-        if params.enable_wind_shear && params.wind_shear_model != "none" {
-            crate::wind_shear::get_wind_at_position(
-                &pos,
-                &params.wind_segments,
-                params.enable_wind_shear,
-                &params.wind_shear_model,
-                params.shooter_altitude_m,
-            )
-        } else {
-            // Simple constant wind (original implementation)
-            let seg = &params.wind_segments[0];
-            let wind_speed_mps = seg.0 * 0.2777778; // km/h to m/s
-            let wind_angle_rad = seg.1.to_radians();
-            // McCoy: x=downrange, y=vertical, z=lateral
-            Vector3::new(
-                -wind_speed_mps * wind_angle_rad.cos(), // x (downrange - head/tail component)
-                0.0,                                    // y (vertical)
-                -wind_speed_mps * wind_angle_rad.sin(), // z (lateral - crosswind component)
-            )
-        }
-    } else {
-        Vector3::zeros()
-    };
-
-    // Create a minimal BallisticInputs struct for the derivatives function
-    let inputs = BallisticInputs {
+/// Build the loop-invariant BallisticInputs for the derivatives function ONCE per integration,
+/// instead of rebuilding it (a "none".to_string() alloc plus bc_segments / custom_drag_table
+/// clones) on every derivative evaluation (4x per RK4 step, 7x per RK45 step). muzzle_velocity is
+/// set to 0.0 because compute_derivatives never reads it on this path; every other field depends
+/// only on `params`, so the struct is constant for the whole integration.
+fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
+    BallisticInputs {
         bc_value: params.bc,
         bc_type: params.drag_model,
-        // SI-canonical fields (kg, meters, m/s); imperial mirrors below.
         bullet_mass: params.mass_kg, // kg
-        muzzle_velocity: vel.norm(), // m/s
+        muzzle_velocity: 0.0,        // unread by compute_derivatives on this path
         bullet_diameter: 0.0078232,  // 0.308 in -> meters
         bullet_length: 0.031496,     // 1.24 in -> meters
         twist_rate: 10.0,            // inches/turn (twist stays imperial)
@@ -195,9 +176,6 @@ fn compute_derivatives_vec(
         tipoff_yaw: 0.0,
         target_distance: 1000.0, // default
         muzzle_angle: 0.0,
-        // wind_segments are (km/h, degrees, ...); BallisticInputs wind fields are
-        // SI (m/s, radians). Convert so the struct honors its contract (these
-        // fields are not read on this path, but keep them consistent).
         wind_speed: if !params.wind_segments.is_empty() {
             params.wind_segments[0].0 * 0.2777778 // km/h -> m/s
         } else {
@@ -230,10 +208,7 @@ fn compute_derivatives_vec(
         wind_shear_model: "none".to_string(),
         use_cluster_bc: false,
         bullet_cluster: None,
-
-        // Pass through custom drag table (CDM) from trajectory parameters
         custom_drag_table: params.custom_drag_table.clone(),
-
         bc_type_str: None,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
@@ -244,13 +219,51 @@ fn compute_derivatives_vec(
         sight_height: 0.0,
         muzzle_height: 0.0,
         target_height: 0.0,
+    }
+}
+
+/// Convert state to Vector6 and call compute_derivatives
+fn compute_derivatives_vec(
+    state: &Vector6<f64>,
+    t: f64,
+    params: &TrajectoryParams,
+    inputs: &BallisticInputs,
+) -> Vector6<f64> {
+    let pos = Vector3::new(state[0], state[1], state[2]);
+    let vel = Vector3::new(state[3], state[4], state[5]);
+
+    // Calculate wind at current position with shear support
+    let wind_vector = if !params.wind_segments.is_empty() {
+        if params.enable_wind_shear && params.wind_shear_model != "none" {
+            crate::wind_shear::get_wind_at_position(
+                &pos,
+                &params.wind_segments,
+                params.enable_wind_shear,
+                &params.wind_shear_model,
+                params.shooter_altitude_m,
+            )
+        } else {
+            // Simple constant wind (original implementation)
+            let seg = &params.wind_segments[0];
+            let wind_speed_mps = seg.0 * 0.2777778; // km/h to m/s
+            let wind_angle_rad = seg.1.to_radians();
+            // McCoy: x=downrange, y=vertical, z=lateral
+            Vector3::new(
+                -wind_speed_mps * wind_angle_rad.cos(), // x (downrange - head/tail component)
+                0.0,                                    // y (vertical)
+                -wind_speed_mps * wind_angle_rad.sin(), // z (lateral - crosswind component)
+            )
+        }
+    } else {
+        Vector3::zeros()
     };
 
-    // Call compute_derivatives - returns [f64; 6] directly
+    // Call compute_derivatives - returns [f64; 6] directly. `inputs` is built once per
+    // integration by build_inputs() and threaded in, instead of rebuilt every call.
     let deriv_result = compute_derivatives(
         pos,
         vel,
-        &inputs,
+        inputs,
         wind_vector,
         params.atmos_params,
         params.bc,
@@ -293,6 +306,10 @@ pub fn integrate_trajectory(
     let mut trajectory = Vec::with_capacity(10000);
     trajectory.push((t, state));
 
+    // Build the (loop-invariant) derivative inputs once for the whole integration, instead of
+    // rebuilding the struct on every derivative evaluation.
+    let inputs = build_inputs(&params);
+
     match method {
         "RK4" => {
             // Fixed step RK4 with target detection
@@ -303,7 +320,7 @@ pub fn integrate_trajectory(
                     dt = t_end - t;
                 }
 
-                let new_state = rk4_step(&state, t, dt, &params);
+                let new_state = rk4_step(&state, t, dt, &params, &inputs);
 
                 // Check if we're about to pass the target (X is downrange, McCoy)
                 if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
@@ -312,7 +329,7 @@ pub fn integrate_trajectory(
                     let dt_to_target = dt * alpha;
 
                     // Take a smaller step to reach target exactly
-                    let final_state = rk4_step(&state, t, dt_to_target, &params);
+                    let final_state = rk4_step(&state, t, dt_to_target, &params, &inputs);
 
                     // Ensure we don't overshoot
                     let mut corrected_state = final_state;
@@ -378,7 +395,8 @@ pub fn integrate_trajectory(
                     dt = t_end - t;
                 }
 
-                let (new_state, dt_new, _error) = rk45_step(&state, t, dt, &params, tolerance);
+                let (new_state, dt_new, _error) =
+                    rk45_step(&state, t, dt, &params, &inputs, tolerance);
 
                 // Check if we're about to pass the target (X is downrange, McCoy)
                 if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
@@ -388,7 +406,7 @@ pub fn integrate_trajectory(
 
                     // Take a smaller step to reach target exactly
                     let (final_state, _, _) =
-                        rk45_step(&state, t, dt_to_target, &params, tolerance);
+                        rk45_step(&state, t, dt_to_target, &params, &inputs, tolerance);
 
                     // Make sure we don't overshoot
                     let mut corrected_state = final_state;

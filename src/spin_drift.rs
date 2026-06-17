@@ -365,8 +365,12 @@ pub fn calculate_enhanced_spin_drift(
     let gyro_drift =
         calculate_gyroscopic_drift(stability, yaw_rad, velocity_mps, time_s, is_twist_right);
 
-    // Total drift
-    let total_drift = magnus_drift + gyro_drift;
+    // Total drift. gyro_drift already carries the twist-direction sign (from
+    // calculate_gyroscopic_drift); sign the Magnus term to the SAME convention so both
+    // contributions are consistently directed before being summed. (magnus_component_m is
+    // kept unsigned below for backward compatibility.)
+    let twist_sign = if is_twist_right { 1.0 } else { -1.0 };
+    let total_drift = twist_sign * magnus_drift + gyro_drift;
 
     // Drift rate (derivative)
     let drift_rate = if time_s > 0.0 {
@@ -411,16 +415,18 @@ pub fn apply_enhanced_spin_drift(
     derivatives: &mut [f64; 6],
     spin_components: &SpinDriftComponents,
     time_s: f64,
-    is_right_twist: bool,
+    _is_right_twist: bool,
 ) {
     if time_s > 0.1 {
         // Calculate acceleration from drift
         // Using second derivative of position
         let spin_accel_z = 2.0 * spin_components.drift_rate_mps / time_s;
 
-        // Apply based on twist direction
-        let sign = if is_right_twist { 1.0 } else { -1.0 };
-        derivatives[5] += sign * spin_accel_z;
+        // drift_rate_mps already carries the twist-direction sign (set in
+        // calculate_enhanced_spin_drift), so apply it directly. Multiplying by the twist
+        // sign again here previously CANCELED the gyroscopic sign (sign^2 = +1), so left-
+        // and right-twist barrels pushed spin drift the same way.
+        derivatives[5] += spin_accel_z;
     }
 }
 
@@ -588,6 +594,36 @@ mod tests {
             (right_drift.gyroscopic_component_m.abs() - left_drift.gyroscopic_component_m.abs())
                 .abs()
                 < 0.001
+        );
+    }
+
+    #[test]
+    fn test_applied_spin_drift_flips_with_twist() {
+        // Regression: the APPLIED lateral acceleration (derivatives[5]) must reverse
+        // direction with the twist hand. apply_enhanced_spin_drift previously multiplied by
+        // the twist sign a second time, canceling the gyroscopic sign so left- and right-
+        // twist barrels pushed the same way. The existing test only checks the component
+        // field, never the applied derivative.
+        let time_s = 1.0;
+        let right = calculate_enhanced_spin_drift(
+            168.0, 800.0, 10.0, 0.308, 1.2, true, time_s, 1.225, 0.0, 0.0, false,
+        );
+        let left = calculate_enhanced_spin_drift(
+            168.0, 800.0, 10.0, 0.308, 1.2, false, time_s, 1.225, 0.0, 0.0, false,
+        );
+
+        let mut d_right = [0.0_f64; 6];
+        let mut d_left = [0.0_f64; 6];
+        apply_enhanced_spin_drift(&mut d_right, &right, time_s, true);
+        apply_enhanced_spin_drift(&mut d_left, &left, time_s, false);
+
+        assert!(d_right[5].abs() > 0.0, "expected non-zero spin drift accel");
+        assert!(d_left[5].abs() > 0.0, "expected non-zero spin drift accel");
+        assert!(
+            d_right[5] * d_left[5] < 0.0,
+            "expected opposite-sign lateral accel for opposite twist, got {} and {}",
+            d_right[5],
+            d_left[5]
         );
     }
 }

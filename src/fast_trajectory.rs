@@ -127,16 +127,18 @@ pub fn fast_integrate(
         0.0001
     };
 
-    // Maximum time based on estimated flight time
-    let v0 = Vector3::new(
-        params.initial_state[3],
-        params.initial_state[4],
-        params.initial_state[5],
-    )
-    .norm();
-
-    let t_max = if v0 > 1e-6 && params.horiz > 0.0 {
-        (2.0 * params.horiz / v0).min(params.t_span.1)
+    // Maximum integration time. This bounds BOTH the step-array pre-allocation (n_steps) AND the
+    // integration loop itself (the loop runs for at most n_steps-1 iterations); the
+    // hit_target / hit_ground early-breaks below terminate the loop sooner for real shots. Estimate
+    // the flight time from the HORIZONTAL velocity with a 4x margin: the previous 2x estimate using
+    // the FULL muzzle speed truncated long-range trajectories once drag slowed the bullet (real
+    // time of flight to the target far exceeds horiz/v0), so Monte Carlo reported impact metrics
+    // at a too-short downrange. NOTE: the 4x factor is a heuristic, NOT a proven upper bound — it
+    // can still be exceeded by extreme high-drag / high-launch-angle shots, which would truncate
+    // the loop before impact.
+    let vx = params.initial_state[3]; // horizontal (downrange) velocity
+    let t_max = if vx > 1e-6 && params.horiz > 0.0 {
+        (4.0 * params.horiz / vx).min(params.t_span.1)
     } else {
         params.t_span.1
     };
@@ -150,14 +152,67 @@ pub fn fast_integrate(
     times.push(0.0);
     states.push(params.initial_state);
 
-    // Get base atmospheric density
-    let (base_density, _) = get_local_atmosphere(
-        0.0,
-        params.atmo_params.0,
-        params.atmo_params.1,
-        params.atmo_params.2,
-        params.atmo_params.3,
-    );
+    // Base drag density = the muzzle (shooter-altitude) density. atmo_params.3 is base_ratio
+    // = air_density/1.225 at the shooter altitude (the MC caller computes it via
+    // calculate_atmosphere). Previously this called get_local_atmosphere with query alt 0.0
+    // while base_alt = shooter altitude, which re-scaled that ratio DOWN to sea level —
+    // discarding the correct altitude density and inflating drag for every elevated MC run.
+    // Guard a missing/absent ratio (base_ratio <= 0, e.g. legacy or uninitialized atmo_params):
+    // fall back to the standard sea-level density rather than 0, so a zero ratio cannot collapse
+    // density_scale to 0 and silently disable drag entirely. (atmo_params.0 is base_alt here, not
+    // a density, so it is not a usable fallback.)
+    let base_density = if params.atmo_params.3 > 0.0 {
+        params.atmo_params.3 * 1.225
+    } else {
+        1.225 // standard sea-level air density (kg/m^3)
+    };
+
+    // Hoist invariants out of compute_derivatives (called 4x per step). Both the drag-model name
+    // and the projectile shape depend only on inputs, not on state/mach, so computing them per
+    // call wasted an allocation + heuristic every k1..k4. Mirrors cli_api.rs exactly.
+
+    // Drag-model name as a borrowed &'static str. DragModel's Display goes via Debug, which
+    // heap-allocates a String on every call; this match is bit-identical (Display == Debug ==
+    // variant name) with no per-step allocation.
+    let drag_model_str: &str = match drag_model {
+        DragModel::G1 => "G1",
+        DragModel::G2 => "G2",
+        DragModel::G5 => "G5",
+        DragModel::G6 => "G6",
+        DragModel::G7 => "G7",
+        DragModel::G8 => "G8",
+        DragModel::GI => "GI",
+        DragModel::GS => "GS",
+    };
+
+    // SI fallbacks for caliber/weight (SI-only MC callers may leave the imperial fields 0).
+    let caliber_in = if inputs.caliber_inches > 0.0 {
+        inputs.caliber_inches
+    } else {
+        inputs.bullet_diameter / 0.0254
+    };
+    let weight_gr = if inputs.weight_grains > 0.0 {
+        inputs.weight_grains
+    } else {
+        inputs.bullet_mass / 0.00006479891
+    };
+
+    // Projectile shape for transonic corrections. Consult inputs.bullet_model first (matching
+    // cli_api's canonical choice), then fall back to the caliber/weight/drag-model heuristic.
+    let projectile_shape = if let Some(ref model) = inputs.bullet_model {
+        let m = model.to_lowercase();
+        if m.contains("boat") || m.contains("bt") {
+            crate::transonic_drag::ProjectileShape::BoatTail
+        } else if m.contains("round") || m.contains("rn") {
+            crate::transonic_drag::ProjectileShape::RoundNose
+        } else if m.contains("flat") || m.contains("fb") {
+            crate::transonic_drag::ProjectileShape::FlatBase
+        } else {
+            crate::transonic_drag::get_projectile_shape(caliber_in, weight_gr, drag_model_str)
+        }
+    } else {
+        crate::transonic_drag::get_projectile_shape(caliber_in, weight_gr, drag_model_str)
+    };
 
     // Integration loop
     let mut hit_target = false;
@@ -202,6 +257,7 @@ pub fn fast_integrate(
             wind_sock,
             base_density,
             drag_model,
+            projectile_shape,
             bc,
             has_bc_segments,
             has_bc_segments_data,
@@ -217,6 +273,7 @@ pub fn fast_integrate(
             wind_sock,
             base_density,
             drag_model,
+            projectile_shape,
             bc,
             has_bc_segments,
             has_bc_segments_data,
@@ -232,6 +289,7 @@ pub fn fast_integrate(
             wind_sock,
             base_density,
             drag_model,
+            projectile_shape,
             bc,
             has_bc_segments,
             has_bc_segments_data,
@@ -247,6 +305,7 @@ pub fn fast_integrate(
             wind_sock,
             base_density,
             drag_model,
+            projectile_shape,
             bc,
             has_bc_segments,
             has_bc_segments_data,
@@ -291,6 +350,7 @@ fn compute_derivatives(
     wind_sock: &WindSock,
     base_density: f64,
     drag_model: &DragModel,
+    projectile_shape: crate::transonic_drag::ProjectileShape,
     bc: f64,
     has_bc_segments: bool,
     has_bc_segments_data: bool,
@@ -336,8 +396,18 @@ fn compute_derivatives(
         } else {
             bc
         };
+        // Guard bc_value == 0 (allowed on FFI/WASM/public MC surfaces): the division below
+        // would be Inf -> NaN. Mirrors cli_api's effective_bc.max(1e-6); inert for valid BCs.
+        let bc_current = bc_current.max(1e-6);
 
-        let drag_factor = get_drag_coefficient(mach, drag_model);
+        // Apply the transonic drag-rise correction once (mirrors derivatives.rs / cli_api) so
+        // the Monte Carlo / fast path doesn't under-predict drag near Mach 1. The projectile
+        // shape is invariant for the whole integration, so it is hoisted into fast_integrate and
+        // passed in rather than recomputed per call. wave_drag=false: the G1/G7 tables already
+        // embed the rise.
+        let base_cd = get_drag_coefficient(mach, drag_model);
+        let drag_factor =
+            crate::transonic_drag::transonic_correction(mach, base_cd, projectile_shape, false);
 
         // Calculate drag acceleration using proper ballistics formula
         let cd_to_retard = 0.000683 * 0.30;

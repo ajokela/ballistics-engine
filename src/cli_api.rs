@@ -149,7 +149,7 @@ impl Default for BallisticInputs {
             bullet_mass: mass_kg,
             muzzle_velocity: 800.0,
             bullet_diameter: diameter_m,
-            bullet_length: diameter_m * 4.0, // Approximate
+            bullet_length: diameter_m * 4.5, // Approximate (match the CLI's 4.5-caliber heuristic)
 
             // Targeting and positioning
             muzzle_angle: muzzle_angle_rad,
@@ -430,6 +430,19 @@ impl TrajectorySolver {
             let sd_in = 1.25 * (sg + 1.2) * p.time.powf(1.83); // Litz drift, inches
             p.position.z += sign * sd_in * 0.0254; // in -> m, Z = lateral
         }
+
+        // sampled_points are snapshotted from the PRE-drift trajectory inside each solver, so the
+        // sampled wind_drift_m column would omit the spin drift that result.points carry. Apply
+        // the same Litz drift to keep the two user-facing outputs consistent.
+        if let Some(samples) = result.sampled_points.as_mut() {
+            for s in samples.iter_mut() {
+                if s.time_s <= 0.0 {
+                    continue;
+                }
+                let sd_in = 1.25 * (sg + 1.2) * s.time_s.powf(1.83);
+                s.wind_drift_m += sign * sd_in * 0.0254;
+            }
+        }
     }
 
     fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
@@ -482,8 +495,14 @@ impl TrajectorySolver {
             self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
+        // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
+        // instead of re-deriving them (with a to_lowercase alloc) every integration step.
+        let pitch_coeffs = PitchDampingCoefficients::from_bullet_type(
+            self.inputs.bullet_model.as_deref().unwrap_or("default"),
+        );
+
         // Main integration loop (X is downrange)
-        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
+        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
@@ -496,8 +515,10 @@ impl TrajectorySolver {
                 kinetic_energy,
             });
 
-            // Debug: Log first and every 100th point
+            // Debug: log first and every 100th point. Debug builds only — this was ungated and
+            // polluted release/WASM stderr on the --use-euler path (the other solvers have none).
             // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral
+            #[cfg(debug_assertions)]
             if points.len() == 1 || points.len() % 100 == 0 {
                 eprintln!("Trajectory point {}: time={:.3}s, downrange={:.2}m, vertical={:.2}m, lateral={:.2}m, vel={:.1}m/s",
                     points.len(), time, position.x, position.y, position.z, velocity_magnitude);
@@ -521,13 +542,7 @@ impl TrajectorySolver {
                 }
 
                 // Calculate pitch damping coefficient
-                let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
-                    model.as_str()
-                } else {
-                    "default"
-                };
-                let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
-                let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
+                let pitch_damping = calculate_pitch_damping_coefficient(mach, &pitch_coeffs);
 
                 // Track minimum (most critical for stability)
                 if pitch_damping < min_pitch_damping {
@@ -587,34 +602,14 @@ impl TrajectorySolver {
                 }
             }
 
-            // Calculate drag with altitude-dependent wind if enabled
-            let actual_wind = if self.inputs.enable_wind_shear {
-                self.get_wind_at_altitude(position.y)
-            } else {
-                wind_vector
-            };
-            let velocity_rel = velocity - actual_wind;
-            let velocity_rel_mag = velocity_rel.magnitude();
-            let drag_coefficient = self.calculate_drag_coefficient(velocity_rel_mag);
-
-            // Calculate drag force
-            let drag_force = 0.5
-                * air_density
-                * drag_coefficient
-                * self.inputs.bullet_diameter
-                * self.inputs.bullet_diameter
-                * std::f64::consts::PI
-                / 4.0
-                * velocity_rel_mag
-                * velocity_rel_mag;
-
-            // Calculate acceleration
-            let drag_acceleration = -drag_force / self.inputs.bullet_mass;
-            let acceleration = Vector3::new(
-                drag_acceleration * velocity_rel.x / velocity_rel_mag,
-                drag_acceleration * velocity_rel.y / velocity_rel_mag - 9.80665,
-                drag_acceleration * velocity_rel.z / velocity_rel_mag,
-            );
+            // Use the same acceleration kernel as RK4/RK45 so all three solvers share ONE drag
+            // model. solve_euler previously used a bespoke frontal-area drag (0.5*rho*Cd*A*v^2/m)
+            // that IGNORED the ballistic coefficient entirely (diverging up to ~2.3x from the
+            // BC-retardation RK4/RK45 path), and also omitted the Magnus/Coriolis terms.
+            // calculate_acceleration applies BC-retardation drag, gravity, Coriolis, Magnus, wind
+            // shear, and the zero-relative-velocity gravity-only guard.
+            let acceleration =
+                self.calculate_acceleration(&position, &velocity, air_density, &wind_vector);
 
             // Update state
             velocity += acceleration * self.time_step;
@@ -745,8 +740,14 @@ impl TrajectorySolver {
             self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
+        // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
+        // instead of re-deriving them (with a to_lowercase alloc) every integration step.
+        let pitch_coeffs = PitchDampingCoefficients::from_bullet_type(
+            self.inputs.bullet_model.as_deref().unwrap_or("default"),
+        );
+
         // Main RK4 integration loop (X is downrange)
-        while position.x < self.max_range && position.y >= 0.0 && time < 100.0 {
+        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
@@ -776,13 +777,7 @@ impl TrajectorySolver {
                 }
 
                 // Calculate pitch damping coefficient
-                let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
-                    model.as_str()
-                } else {
-                    "default"
-                };
-                let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
-                let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
+                let pitch_damping = calculate_pitch_damping_coefficient(mach, &pitch_coeffs);
 
                 // Track minimum (most critical for stability)
                 if pitch_damping < min_pitch_damping {
@@ -972,6 +967,15 @@ impl TrajectorySolver {
         let mut iteration_count = 0;
         const MAX_ITERATIONS: usize = 100000;
 
+        // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
+        // are immutable); compute once instead of every iteration (mirrors solve_rk4).
+        let air_density = calculate_air_density(&self.atmosphere);
+        let wind_vector = Vector3::new(
+            self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
+            0.0,
+            self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
+        );
+
         while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
             && time < 100.0
@@ -997,15 +1001,7 @@ impl TrajectorySolver {
                 max_height = position.y;
             }
 
-            // Wind (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
-            let air_density = calculate_air_density(&self.atmosphere);
-            let wind_vector = Vector3::new(
-                self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
-                0.0,
-                self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
-            );
-
-            // RK45 step with adaptive step size
+            // RK45 step with adaptive step size (air_density / wind_vector hoisted above)
             let (new_pos, new_vel, new_dt) = self.rk45_step(
                 &position,
                 &velocity,
@@ -1015,13 +1011,16 @@ impl TrajectorySolver {
                 tolerance,
             );
 
-            // Update step size with safety factor and bounds
-            dt = (safety_factor * new_dt).clamp(min_dt, max_dt);
-
-            // Update state
+            // Advance state and time by the dt actually used for THIS step. (Previously dt
+            // was overwritten with the adapted next-step size BEFORE `time += dt`, so every
+            // reported time advanced by the NEXT step's dt — desyncing time from state and
+            // corrupting time_of_flight and per-point / sampled times.)
             position = new_pos;
             velocity = new_vel;
             time += dt;
+
+            // Adapt the step size for the NEXT iteration.
+            dt = (safety_factor * new_dt).clamp(min_dt, max_dt);
         }
 
         // Ensure we have at least one point
@@ -1220,7 +1219,7 @@ impl TrajectorySolver {
         let velocity_magnitude = relative_velocity.magnitude();
 
         if velocity_magnitude < 0.001 {
-            return Vector3::new(0.0, -9.81, 0.0);
+            return Vector3::new(0.0, -crate::constants::G_ACCEL_MPS2, 0.0);
         }
 
         // Get drag coefficient from drag model (Mach-indexed from drag tables)
@@ -1252,6 +1251,10 @@ impl TrajectorySolver {
         } else {
             base_bc
         };
+        // Guard bc_value == 0 (allowed on the FFI/WASM surfaces, which lack the CLI's 0.001
+        // lower bound): dividing by effective_bc below would be Inf -> NaN. Inert for valid
+        // BCs (>= 0.001).
+        let effective_bc = effective_bc.max(1e-6);
 
         // Use proper ballistics retardation formula
         // This matches the proven formula from fast_trajectory.rs
@@ -1270,7 +1273,7 @@ impl TrajectorySolver {
         let drag_acceleration = -a_drag_m_s2 * (relative_velocity / velocity_magnitude);
 
         // Total acceleration = drag + gravity
-        let mut accel = drag_acceleration + Vector3::new(0.0, -9.81, 0.0);
+        let mut accel = drag_acceleration + Vector3::new(0.0, -crate::constants::G_ACCEL_MPS2, 0.0);
 
         // Coriolis (Earth rotation). McCoy frame: X=downrange, Y=vertical, Z=lateral,
         // azimuth 0 = North. McCoy frame: X=downrange, Y=vertical, Z=lateral.
@@ -1373,30 +1376,45 @@ impl TrajectorySolver {
         // Get drag coefficient from the drag tables (Mach-indexed)
         let base_cd = crate::drag::get_drag_coefficient(mach, &self.inputs.bc_type);
 
+        // Borrowed &'static str for the drag-model name. bc_type.to_string() goes through
+        // Debug and heap-allocates a String on every call; this match is bit-identical
+        // (Display == Debug == variant name) with no per-step allocation.
+        let bc_type_str: &str = match self.inputs.bc_type {
+            crate::DragModel::G1 => "G1",
+            crate::DragModel::G2 => "G2",
+            crate::DragModel::G5 => "G5",
+            crate::DragModel::G6 => "G6",
+            crate::DragModel::G7 => "G7",
+            crate::DragModel::G8 => "G8",
+            crate::DragModel::GI => "GI",
+            crate::DragModel::GS => "GS",
+        };
+
         // Determine projectile shape for transonic corrections
         let projectile_shape = if let Some(ref model) = self.inputs.bullet_model {
-            // Try to determine shape from bullet model string
-            if model.to_lowercase().contains("boat") || model.to_lowercase().contains("bt") {
+            // Lowercase the model name once instead of allocating a new String per check
+            // (this runs 4-7x per integration step).
+            let m = model.to_lowercase();
+            if m.contains("boat") || m.contains("bt") {
                 ProjectileShape::BoatTail
-            } else if model.to_lowercase().contains("round") || model.to_lowercase().contains("rn")
-            {
+            } else if m.contains("round") || m.contains("rn") {
                 ProjectileShape::RoundNose
-            } else if model.to_lowercase().contains("flat") || model.to_lowercase().contains("fb") {
+            } else if m.contains("flat") || m.contains("fb") {
                 ProjectileShape::FlatBase
             } else {
                 // Use heuristic based on caliber, weight, and drag model
                 get_projectile_shape(
-                    self.inputs.bullet_diameter,
+                    self.inputs.caliber_inches, // INCHES — get_projectile_shape expects inches, not meters
                     self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
-                    &self.inputs.bc_type.to_string(),
+                    bc_type_str,
                 )
             }
         } else {
             // Use heuristic based on caliber, weight, and drag model
             get_projectile_shape(
-                self.inputs.bullet_diameter,
+                self.inputs.caliber_inches, // INCHES — get_projectile_shape expects inches, not meters
                 self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
-                &self.inputs.bc_type.to_string(),
+                bc_type_str,
             )
         };
 
@@ -1524,26 +1542,41 @@ pub fn run_monte_carlo_with_wind(
         let solver = TrajectorySolver::new(inputs, wind, Default::default());
         match solver.solve() {
             Ok(result) => {
+                // Skip samples that fell short of the target (e.g. a low muzzle-velocity draw):
+                // position_at_range would clamp to the ground-impact point (a large spurious
+                // deviation). Exclude such samples from ALL THREE result vectors so they stay
+                // equal-length and per-sample aligned — the FFI exposes them under ONE count
+                // (ranges.len()), so a shorter impact_positions would leave uninitialized tail
+                // slots read across the C ABI. The common case (all samples reach the target) is
+                // unaffected; range/velocity stats stay consistent with the dispersion stats.
+                if result.max_range < target_distance {
+                    continue;
+                }
+                // Position at target distance (not ground impact). Always Some here since
+                // max_range >= target_distance and an Ok result has a non-empty trajectory;
+                // skip defensively (keeping the vectors aligned) if it ever returns None.
+                let pos_at_target = match result.position_at_range(target_distance) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
                 ranges.push(result.max_range);
                 impact_velocities.push(result.impact_velocity);
 
-                // Interpolate position at target distance (not ground impact)
-                if let Some(pos_at_target) = result.position_at_range(target_distance) {
-                    // Calculate deviation from baseline at the SAME target distance (McCoy)
-                    // X = downrange (0 here), Y = vertical (elevation), Z = lateral (windage)
-                    let mut deviation = Vector3::new(
-                        0.0, // X downrange deviation is 0 since we compare at same range
-                        pos_at_target.y - baseline_at_target.y, // Vertical deviation
-                        pos_at_target.z - baseline_at_target.z, // Lateral deviation (windage)
-                    );
+                // Calculate deviation from baseline at the SAME target distance (McCoy)
+                // X = downrange (0 here), Y = vertical (elevation), Z = lateral (windage)
+                let mut deviation = Vector3::new(
+                    0.0, // X downrange deviation is 0 since we compare at same range
+                    pos_at_target.y - baseline_at_target.y, // Vertical deviation
+                    pos_at_target.z - baseline_at_target.z, // Lateral deviation (windage)
+                );
 
-                    // Add additional pointing error to simulate realistic group sizes
-                    // This represents the shooter's ability to aim consistently
-                    let pointing_error_y = pointing_error_dist.sample(&mut rng);
-                    deviation.y += pointing_error_y;
+                // Add additional pointing error to simulate realistic group sizes
+                // This represents the shooter's ability to aim consistently
+                let pointing_error_y = pointing_error_dist.sample(&mut rng);
+                deviation.y += pointing_error_y;
 
-                    impact_positions.push(deviation);
-                }
+                impact_positions.push(deviation);
             }
             Err(_) => {
                 // Skip failed simulations
@@ -1724,9 +1757,11 @@ pub fn calculate_zero_angle_with_conditions(
                         // Height error within 10mm - acceptable for practical use
                         return Ok(mid_angle);
                     }
-                    // Angle converged but height error too large - this shouldn't happen
-                    // with proper tolerance values, but return best effort
-                    return Ok(mid_angle);
+                    // Angle bracket collapsed but the height error is still too large: the
+                    // target is not actually reachable / was never bracketed. Returning
+                    // Ok(mid_angle) here reported a NOT-zeroed angle as success (callers use
+                    // it directly as muzzle_angle); surface it as an error instead.
+                    return Err("Zero angle did not converge: residual height error too large (target not reachable / not bracketed)".into());
                 }
 
                 if error > 0.0 {
@@ -1826,23 +1861,63 @@ pub fn estimate_bc_from_trajectory(
 
 // Helper function to calculate air density
 fn calculate_air_density(atmosphere: &AtmosphericConditions) -> f64 {
-    // Simplified air density calculation
-    // P / (R * T) where R is specific gas constant for dry air
-    let r_specific = 287.058; // J/(kg·K)
-    let temperature_k = atmosphere.temperature + 273.15;
-
-    // Convert pressure from hPa to Pa
-    let pressure_pa = atmosphere.pressure * 100.0;
-
-    // Basic density calculation
-    let density = pressure_pa / (r_specific * temperature_k);
-
-    // Altitude correction (simplified)
-    let altitude_factor = (-atmosphere.altitude / 8000.0).exp();
-
-    density * altitude_factor
+    // Use the shared atmosphere model so ALL solvers agree on air density. An explicitly-set
+    // pressure is the user's STATION pressure (already altitude-reduced), so the previous body's
+    // extra exp(-altitude/8000) factor double-counted altitude, and it ignored humidity entirely.
+    // resolve_station_pressure passes a real station pressure through unchanged (no double-count),
+    // but when pressure is left at the sea-level default it returns None so altitude still drives
+    // density via the ICAO standard — otherwise `--altitude` alone (no `--pressure`) silently gave
+    // sea-level density. Humidity (0-100) is always applied.
+    crate::atmosphere::calculate_atmosphere(
+        atmosphere.altitude,
+        Some(atmosphere.temperature),
+        crate::atmosphere::resolve_station_pressure(atmosphere.pressure, atmosphere.altitude),
+        atmosphere.humidity,
+    )
+    .0
 }
 
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod ground_termination_tests {
+    use super::*;
+
+    // Regression lock for the unified ground termination: solve_euler/solve_rk4/solve_rk45 all
+    // loop while `position.y > ground_threshold` (default -100.0), so they agree with RK45. A
+    // lofted shot that returns to launch level before reaching max_range must keep descending to
+    // the -100 m floor instead of stopping at y = 0 — and RK4-fixed and RK45 must behave the same.
+    #[test]
+    fn rk4_and_rk45_descend_to_ground_threshold() {
+        for adaptive in [false, true] {
+            let mut inputs = BallisticInputs::default();
+            inputs.muzzle_angle = 0.1; // ~5.7 deg: arcs up, then descends past launch level
+            inputs.use_rk4 = true;
+            inputs.use_adaptive_rk45 = adaptive;
+            assert_eq!(inputs.ground_threshold, -100.0, "default ground_threshold is -100 m");
+
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            // Huge max range: termination must be driven by ground_threshold, not the range cap.
+            solver.set_max_range(1.0e7);
+
+            let result = solver.solve().expect("solve should succeed");
+            let final_y = result
+                .points
+                .last()
+                .expect("trajectory has points")
+                .position
+                .y;
+            assert!(
+                final_y < -1.0,
+                "adaptive_rk45={adaptive}: final y = {final_y} m; a lofted shot should descend \
+                 past launch level toward the ground_threshold floor, not stop at y = 0"
+            );
+        }
+    }
+}

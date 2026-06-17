@@ -4,7 +4,6 @@ use crate::{
     calculate_zero_angle_with_conditions, run_monte_carlo, AtmosphericConditions, BallisticInputs,
     DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
-use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 
@@ -161,7 +160,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     // Set derived values
     ballistic_inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
     ballistic_inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
-    ballistic_inputs.bullet_length = inputs.bullet_diameter * 4.0;
+    ballistic_inputs.bullet_length = inputs.bullet_diameter * 4.5; // match the CLI 4.5-cal default
 
     // New advanced physics flags
     ballistic_inputs.enable_wind_shear = inputs.enable_wind_shear != 0;
@@ -490,6 +489,16 @@ pub extern "C" fn ballistics_monte_carlo(
     let inputs = unsafe { &*inputs };
     let params = unsafe { &*params };
 
+    // Reject an out-of-range simulation count. num_simulations is a c_int (i32) cast straight to
+    // usize: a negative value would wrap to a near-max usize, and even a large positive value (up
+    // to i32::MAX ~ 2.1e9) would drive billions of iterations with the result arrays scaling to
+    // match — an unbounded-loop / OOM DoS from a single FFI call. Bound it to a sane maximum.
+    // (n == 0 also yields NaN stats and a zero-size allocation.)
+    const MAX_SIMULATIONS: c_int = 1_000_000;
+    if params.num_simulations <= 0 || params.num_simulations > MAX_SIMULATIONS {
+        return ptr::null_mut();
+    }
+
     // Convert FFI inputs to internal types
     let ballistic_inputs = convert_inputs(inputs);
 
@@ -681,8 +690,8 @@ pub extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarl
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
-    let version = CString::new("0.3.0").unwrap();
-    let ptr = version.as_ptr();
-    std::mem::forget(version);
-    ptr
+    // Return a pointer to a static NUL-terminated string (the caller must NOT free it).
+    // Previously this leaked a freshly-allocated CString on every call and reported a
+    // stale hardcoded "0.3.0"; use the real crate version with no allocation.
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }

@@ -27,7 +27,11 @@ pub fn calculate_aerodynamic_jump(
     initial_yaw_rad: f64,
     air_density_kg_m3: f64,
 ) -> AerodynamicJumpComponents {
-    if muzzle_velocity_mps <= 0.0 || caliber_m <= 0.0 {
+    if muzzle_velocity_mps <= 0.0
+        || caliber_m <= 0.0
+        || mass_kg <= 0.0
+        || twist_rate_calibers <= 0.0
+    {
         return AerodynamicJumpComponents {
             vertical_jump_moa: 0.0,
             horizontal_jump_moa: 0.0,
@@ -81,12 +85,15 @@ pub fn calculate_aerodynamic_jump(
     // Total effective time
     let effective_time = exit_time + stabilization_time;
 
-    // Calculate jump displacement
-    let vertical_sign = if is_right_twist {
+    // Calculate jump displacement. Direction comes from the crosswind, falling back to the yaw
+    // direction when there is no crosswind — signum(0.0) == +1.0 would otherwise impose a phantom
+    // positive direction for pure-yaw (no-wind) inputs.
+    let dir_sign = if crosswind_mps != 0.0 {
         crosswind_mps.signum()
     } else {
-        -crosswind_mps.signum()
+        total_yaw_rad.signum()
     };
+    let vertical_sign = if is_right_twist { dir_sign } else { -dir_sign };
 
     // Magnus acceleration
     let magnus_accel = magnus_force / mass_kg;
@@ -131,7 +138,11 @@ pub fn calculate_aerodynamic_jump(
 
     // Stabilization factor
     let caliber_in = caliber_m / 0.0254;
-    let sg_approx = 30.0 * mass_kg * 15.432 / (twist_rate_calibers.powi(2) * caliber_in.powi(3));
+    // mass_kg -> grains uses the kilograms->grains factor (15432.358), NOT the grams->grains
+    // factor (15.432); the latter made sg_approx ~1000x too small so stabilization_factor
+    // collapsed to ~0 for every real projectile. (Simplified Sg: length terms omitted.)
+    let sg_approx =
+        30.0 * mass_kg * 15432.358 / (twist_rate_calibers.powi(2) * caliber_in.powi(3));
     let stabilization_factor = (sg_approx / 1.5).min(1.0);
 
     AerodynamicJumpComponents {
@@ -145,11 +156,20 @@ pub fn calculate_aerodynamic_jump(
 }
 
 /// Calculate sight corrections needed to compensate for aerodynamic jump
+// `!(x > 0.0)` is used intentionally instead of `x <= 0.0`: the negated form is also true for
+// NaN (NaN comparisons are always false), so it correctly rejects NaN as well as non-positive
+// inputs. `x <= 0.0` would let NaN through. Hence the clippy allow below.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn calculate_sight_correction_for_jump(
     jump_components: &AerodynamicJumpComponents,
     zero_range_m: f64,
     sight_height_m: f64,
 ) -> (f64, f64) {
+    // Guard a non-positive (or NaN) zero range (public API): 91.44 / 0 would be Inf, poisoning the
+    // returned corrections.
+    if !(zero_range_m > 0.0) {
+        return (0.0, 0.0);
+    }
     // Range factor
     let range_factor = 91.44 / zero_range_m; // 100 yards / zero range
 

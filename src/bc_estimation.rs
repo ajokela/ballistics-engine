@@ -105,10 +105,11 @@ impl BCSegmentEstimator {
             if model_lower.contains("bt") || model_lower.contains("boat") {
                 return BulletType::MatchBoatTail;
             }
-            // Check if high BC indicates boat tail
+            // Check if high BC indicates boat tail (guard sd>0: calculate_sectional_density
+            // returns 0 for non-positive caliber, which would make bc/sd == +Inf).
             if let Some(bc) = bc_value {
                 let sd = Self::calculate_sectional_density(weight, caliber);
-                if bc / sd > 1.6 {
+                if sd > 0.0 && bc / sd > 1.6 {
                     return BulletType::MatchBoatTail;
                 }
             }
@@ -158,17 +159,21 @@ impl BCSegmentEstimator {
             return BulletType::RoundNose;
         }
 
-        // Use BC value as hint if available
+        // Use BC value as hint if available. Guard sd>0 (zero for non-positive caliber)
+        // so a degenerate input falls through to Unknown instead of dividing by zero
+        // (bc/0 == +Inf, which would silently classify as VldHighBc).
         if let Some(bc) = bc_value {
             let sd = Self::calculate_sectional_density(weight, caliber);
-            let bc_to_sd_ratio = bc / sd;
+            if sd > 0.0 {
+                let bc_to_sd_ratio = bc / sd;
 
-            if bc_to_sd_ratio > 1.8 {
-                return BulletType::VldHighBc;
-            } else if bc_to_sd_ratio > 1.5 {
-                return BulletType::MatchBoatTail;
-            } else if bc_to_sd_ratio < 1.2 {
-                return BulletType::HuntingFlatBase;
+                if bc_to_sd_ratio > 1.8 {
+                    return BulletType::VldHighBc;
+                } else if bc_to_sd_ratio > 1.5 {
+                    return BulletType::MatchBoatTail;
+                } else if bc_to_sd_ratio < 1.2 {
+                    return BulletType::HuntingFlatBase;
+                }
             }
         }
 

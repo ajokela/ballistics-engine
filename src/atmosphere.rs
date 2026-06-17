@@ -118,6 +118,30 @@ fn calculate_icao_standard_atmosphere(altitude_m: f64) -> (f64, f64) {
     (temperature, pressure)
 }
 
+/// Resolve the station-pressure override for an air-density calculation.
+///
+/// Altitude and pressure are redundant inputs for density. The rule:
+/// * An explicitly-supplied pressure is the authoritative STATION pressure (already
+///   altitude-reduced); it is returned as `Some` and used directly, so altitude is NOT
+///   double-counted.
+/// * When pressure is left at the sea-level standard default (≈1013.25 hPa) while a real
+///   altitude is given, the caller meant "standard atmosphere at this altitude": return
+///   `None` so [`calculate_atmosphere`] derives the station pressure from altitude (ICAO
+///   standard) instead of silently using sea-level density.
+///
+/// Without this, `--altitude` with the default pressure produced sea-level density (altitude
+/// had no effect on drag). The ±0.5 hPa tolerance covers the `29.92 inHg ≈ 1013.21 hPa`
+/// conversion, and `>1 m` avoids triggering at sea level. (Mirrors the existing
+/// `pressure != 29.92` "user override" sentinel used elsewhere in the CLI.)
+pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f64> {
+    const SEA_LEVEL_HPA: f64 = 1013.25;
+    if (pressure_hpa - SEA_LEVEL_HPA).abs() < 0.5 && altitude_m.abs() > 1.0 {
+        None // pressure left at default + real altitude → derive station pressure from altitude
+    } else {
+        Some(pressure_hpa) // explicit station pressure is authoritative
+    }
+}
+
 /// Enhanced atmospheric calculation with ICAO Standard Atmosphere.
 ///
 /// # Arguments
@@ -166,11 +190,13 @@ pub fn calculate_atmosphere(
     // Calculate saturation vapor pressure (enhanced Magnus formula)
     let temp_c = temp_k - 273.15;
     let es_hpa = if temp_c >= 0.0 {
-        // Over water (Arden Buck equation)
-        6.1121 * (18.678 - temp_c / 234.5) * (temp_c / (257.14 + temp_c)).exp()
+        // Over water (Arden Buck): es = 6.1121 * exp[(18.678 - T/234.5) * (T/(257.14+T))].
+        // The ENTIRE product is the exponent; previously the linear factor sat OUTSIDE exp,
+        // over-estimating es by ~7x at 15C and corrupting humidity-dependent air density.
+        6.1121 * ((18.678 - temp_c / 234.5) * (temp_c / (257.14 + temp_c))).exp()
     } else {
-        // Over ice (Arden Buck equation)
-        6.1115 * (23.036 - temp_c / 333.7) * (temp_c / (279.82 + temp_c)).exp()
+        // Over ice (Arden Buck): es = 6.1115 * exp[(23.036 - T/333.7) * (T/(279.82+T))].
+        6.1115 * ((23.036 - temp_c / 333.7) * (temp_c / (279.82 + temp_c))).exp()
     };
 
     // Calculate actual vapor pressure
@@ -182,7 +208,9 @@ pub fn calculate_atmosphere(
 
     // Enhanced speed of sound calculation with humidity effects
     // Speed of sound in moist air (Cramer, 1993)
-    let mole_fraction_vapor = vapor_pressure_pa / pressure_pa;
+    // Guard pressure_pa == 0 (a 0 hPa override would otherwise give +Inf -> -Inf gamma -> NaN
+    // speed of sound) and cap the mole fraction at the physical maximum of 1.
+    let mole_fraction_vapor = (vapor_pressure_pa / pressure_pa.max(f64::MIN_POSITIVE)).min(1.0);
     let temp_c_abs = temp_k;
 
     // Heat capacity ratio for moist air
@@ -191,12 +219,11 @@ pub fn calculate_atmosphere(
     // Gas constant for moist air
     let r_moist = R_AIR * (1.0 + 0.6078 * mole_fraction_vapor);
 
-    // Speed of sound with enhanced humidity correction
-    let speed_of_sound_base = (gamma_moist * r_moist * temp_c_abs).sqrt();
-
-    // Additional humidity correction for molecular effects
-    let humidity_correction = 1.0 + 0.0001 * humidity_clamped * (temp_c / 20.0);
-    let speed_of_sound = speed_of_sound_base * humidity_correction;
+    // Speed of sound in moist air (Cramer, 1993) — physics-based correction only. The
+    // gamma_moist / r_moist terms above already yield the correct humid speed of sound; the
+    // previous extra empirical humidity_correction factor double-counted the humidity effect
+    // (roughly doubling it), over-predicting the public speed_of_sound and the reported MC Mach.
+    let speed_of_sound = (gamma_moist * r_moist * temp_c_abs).sqrt();
 
     (density, speed_of_sound)
 }
@@ -222,15 +249,19 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // Vapor pressure with clamping
     let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv;
 
-    // Mole fraction of water vapor
-    let x_v = p_v / pressure_hpa;
+    // Floor the pressure divisor (mirrors calculate_atmosphere): a 0 hPa pressure would
+    // otherwise make x_v = +Inf -> NaN density. No-op for all valid (>0) pressures.
+    let p_hpa = pressure_hpa.max(f64::MIN_POSITIVE);
+
+    // Mole fraction of water vapor (capped at the physical maximum of 1)
+    let x_v = (p_v / p_hpa).min(1.0);
 
     // Enhanced compressibility factor
-    let z = enhanced_compressibility_factor(pressure_hpa, t_k, x_v);
+    let z = enhanced_compressibility_factor(p_hpa, t_k, x_v);
 
     // Calculate density with enhanced precision
     // Note: parentheses are important here for correct operator precedence
-    let density = ((pressure_hpa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A));
+    let density = ((p_hpa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A));
 
     // Convert from SI units (pressure in Pa) to final density in kg/m³
     // pressure_hpa is in hPa, so multiply by 100 to get Pa
@@ -418,6 +449,39 @@ mod tests {
         let (density, speed) = calculate_atmosphere(0.0, None, None, 0.0);
         assert!((density - 1.225).abs() < 0.01);
         assert!((speed - 340.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_resolve_station_pressure_contract() {
+        // Default sea-level pressure + real altitude => derive from altitude (None).
+        assert_eq!(resolve_station_pressure(1013.25, 2000.0), None);
+        // 29.92 inHg ≈ 1013.21 hPa is also treated as the default (within tolerance).
+        assert_eq!(resolve_station_pressure(1013.21, 2000.0), None);
+        // An explicit, non-default station pressure is authoritative (Some, used directly).
+        assert_eq!(resolve_station_pressure(850.0, 2000.0), Some(850.0));
+        // At/near sea level the default is used directly (no derivation needed).
+        assert_eq!(resolve_station_pressure(1013.25, 0.0), Some(1013.25));
+    }
+
+    #[test]
+    fn test_altitude_affects_density_with_default_pressure() {
+        // Regression: with the default pressure, altitude MUST lower density (previously the
+        // air-density path ignored altitude whenever pressure was the sea-level default).
+        let press = resolve_station_pressure(1013.25, 0.0);
+        let (rho_sea, _) = calculate_atmosphere(0.0, Some(15.0), press, 50.0);
+        let press_alt = resolve_station_pressure(1013.25, 2000.0);
+        let (rho_2km, _) = calculate_atmosphere(2000.0, Some(15.0), press_alt, 50.0);
+        assert!(
+            rho_2km < rho_sea * 0.9,
+            "density at 2000 m ({rho_2km}) should be well below sea level ({rho_sea})"
+        );
+
+        // But an explicit station pressure stays authoritative (no altitude double-count):
+        // density with an explicit pressure is independent of the altitude field.
+        let p = resolve_station_pressure(900.0, 2000.0);
+        let (rho_a, _) = calculate_atmosphere(2000.0, Some(15.0), p, 50.0);
+        let (rho_b, _) = calculate_atmosphere(0.0, Some(15.0), p, 50.0);
+        assert!((rho_a - rho_b).abs() < 1e-9, "explicit pressure must ignore altitude");
     }
 
     #[test]

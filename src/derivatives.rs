@@ -135,22 +135,30 @@ pub fn compute_derivatives(
         // params[0] = air density, params[1] = speed of sound
         // params[2] and params[3] would be 0.0
         // BUT: we need to check if params[0] is a reasonable density value (< 2.0 kg/m³)
-        let (air_density, speed_of_sound) = if atmos_params.0 < MAX_REALISTIC_DENSITY
+        let (air_density, speed_of_sound, temperature_c) = if atmos_params.0 < MAX_REALISTIC_DENSITY
             && atmos_params.1 > MIN_REALISTIC_SPEED_OF_SOUND
             && atmos_params.2 == 0.0
             && atmos_params.3 == 0.0
         {
-            // Direct atmosphere values
-            get_direct_atmosphere(atmos_params.0, atmos_params.1)
+            // Direct atmosphere values: atmos_params.1 is the SPEED OF SOUND here, NOT Celsius,
+            // so back-compute temperature from it (c = sqrt(1.4*287.05*T_k)) for the Reynolds
+            // correction below — which previously read atmos_params.1 as temperature directly.
+            let (rho, sound) = get_direct_atmosphere(atmos_params.0, atmos_params.1);
+            (rho, sound, sound * sound / (1.4 * 287.05) - 273.15)
         } else {
             // Calculate from base parameters
-            get_local_atmosphere(
+            let (rho, sound) = get_local_atmosphere(
                 altitude_at_pos,
                 atmos_params.0, // base_alt
                 atmos_params.1, // base_temp_c
                 atmos_params.2, // base_press_hpa
                 atmos_params.3, // base_ratio
-            )
+            );
+            // LOCAL temperature at the projectile altitude, back-computed from the LOCAL speed of
+            // sound (get_local_atmosphere returns density/sound at altitude_at_pos but not temp;
+            // its sound = sqrt(1.4*287.05*T_k)). Using base_temp_c here would feed the Reynolds
+            // viscosity the shooter-altitude temperature while density/sound are local.
+            (rho, sound, sound * sound / (1.4 * 287.05) - 273.15)
         };
 
         // Calculate Mach number with safe division
@@ -164,8 +172,8 @@ pub fn compute_derivatives(
         let mut drag_factor = get_drag_coefficient_full(
             mach,
             &inputs.bc_type,
-            true, // apply transonic correction
-            true, // apply Reynolds correction
+            false, // transonic applied exactly once below (was double-applied here + in block)
+            false, // Reynolds applied once below (manual block ~243); was double-applied here + there
             None, // let it determine shape
             if inputs.caliber_inches > 0.0 {
                 Some(inputs.caliber_inches)
@@ -211,6 +219,13 @@ pub fn compute_derivatives(
             bc_val = interpolated_bc(mach, segments, Some(inputs));
         }
 
+        // Guard bc_val == 0 (allowed on the FFI/WASM/library surfaces, which lack the CLI's
+        // 0.001 floor, and a user-supplied BC segment can be 0): the drag division below would be
+        // Inf -> NaN, poisoning the whole trajectory. Mirrors the guards already in
+        // cli_api::calculate_acceleration and fast_trajectory::compute_derivatives. Inert for
+        // valid BCs (>= 0.001).
+        let bc_val = bc_val.max(1e-6);
+
         // Calculate yaw effect with safe division
         let yaw_deg = if inputs.tipoff_decay_distance.abs() > 1e-9 {
             inputs.tipoff_yaw * (-pos[0] / inputs.tipoff_decay_distance).exp()
@@ -223,40 +238,46 @@ pub fn compute_derivatives(
         // Calculate density scaling
         let density_scale = air_density / STANDARD_AIR_DENSITY;
 
-        // Apply transonic correction if in transonic regime
-        let drag_factor = if mach > 0.7 && mach < 1.3 {
-            // Estimate projectile shape from parameters
-            let shape = crate::transonic_drag::get_projectile_shape(
-                inputs.caliber_inches, // inches
-                inputs.weight_grains,  // grains
-                &inputs.bc_type.to_string(),
-            );
-
-            // Apply transonic correction
-            let corrected_cd = crate::transonic_drag::transonic_correction(
-                mach,
-                drag_factor,
-                shape,
-                true, // include_wave_drag
-            );
-
-            // The drag_factor is already a coefficient, so we need to calculate the correction ratio
-            corrected_cd / drag_factor
+        // Apply the transonic drag-rise correction exactly ONCE. The base Cd above is taken
+        // WITHOUT transonic correction (apply_transonic_correction=false), so this is the only
+        // application. Previously the correction was applied here AND inside
+        // get_drag_coefficient_full, which squared the drag-rise factor and double-counted wave
+        // drag across the transonic band (Cd ~3x too high near Mach 1). transonic_correction
+        // self-gates via the projectile's critical Mach (returns the input unchanged outside the
+        // band), and include_wave_drag=false matches cli_api::calculate_drag_coefficient — the
+        // G1/G7 tables already embed the transonic rise, so additive wave drag would double-count.
+        // Use the same SI fallbacks as the get_drag_coefficient_full call above (and
+        // fast_trajectory): an SI-only caller may leave caliber_inches/weight_grains at 0, so
+        // derive them from the SI bullet_diameter/bullet_mass rather than feeding zeros into
+        // get_projectile_shape (which would mis-classify the shape via weight/caliber).
+        let caliber_in = if inputs.caliber_inches > 0.0 {
+            inputs.caliber_inches
         } else {
-            1.0
-        } * drag_factor;
+            inputs.bullet_diameter / 0.0254 // meters -> inches
+        };
+        let weight_gr = if inputs.weight_grains > 0.0 {
+            inputs.weight_grains
+        } else {
+            inputs.bullet_mass / 0.00006479891 // kg -> grains
+        };
+        let shape = crate::transonic_drag::get_projectile_shape(
+            caliber_in,
+            weight_gr,
+            &inputs.bc_type.to_string(),
+        );
+        let drag_factor =
+            crate::transonic_drag::transonic_correction(mach, drag_factor, shape, false);
 
         // Apply Reynolds correction for low velocities
         let drag_factor = if mach < 1.0 && speed_air < 200.0 {
-            // Get temperature from atmospheric parameters
-            let temperature_c = atmos_params.1; // base_temp_c from atmos_params
-
-            // Apply Reynolds number correction
-
+            // temperature_c is derived per atmosphere mode above (base_temp_c, or back-computed
+            // from the speed of sound in direct-atmosphere mode where atmos_params.1 is NOT Celsius).
             crate::reynolds::apply_reynolds_correction(
                 drag_factor,
                 speed_air,
-                inputs.caliber_inches, // inches (apply_reynolds_correction converts to meters internally)
+                caliber_in, // inches, with SI fallback (shared with the transonic block above);
+                // apply_reynolds_correction converts to meters internally. SI-only callers leave
+                // caliber_inches at 0, which would otherwise feed 0 into the Reynolds calc.
                 air_density,
                 temperature_c,
                 mach,
@@ -536,9 +557,17 @@ pub fn interpolated_bc(
         return segments[0].1;
     }
 
-    // Sort segments by Mach number to ensure proper interpolation
-    let mut sorted_segments = segments.to_vec();
-    sorted_segments.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Ensure ascending-Mach order for interpolation. Fast path: when the segments are
+    // already sorted (the common case — they are normalized once at construction), borrow
+    // them and skip the per-call heap alloc + O(n log n) sort on the integration hot path.
+    let sorted_segments: std::borrow::Cow<[(f64, f64)]> =
+        if segments.windows(2).all(|w| w[0].0 <= w[1].0) {
+            std::borrow::Cow::Borrowed(segments)
+        } else {
+            let mut v = segments.to_vec();
+            v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            std::borrow::Cow::Owned(v)
+        };
 
     // Handle out-of-range cases first
     if mach <= sorted_segments[0].0 {

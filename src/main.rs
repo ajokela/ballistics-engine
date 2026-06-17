@@ -1,5 +1,11 @@
-// Allocator selection based on features
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+// Allocator selection based on features. jemalloc and mimalloc each define a #[global_allocator],
+// and a crate may have at most one — so when both features are enabled (e.g. `--all-features`,
+// which docs.rs uses by default) jemalloc yields to mimalloc to keep the build compiling.
+#[cfg(all(
+    feature = "jemalloc",
+    not(feature = "mimalloc"),
+    not(target_env = "msvc")
+))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -263,7 +269,7 @@ impl clap::builder::TypedValueParser for F64RangeParser {
             );
             err
         })?;
-        if inner < self.min || inner > self.max {
+        if !inner.is_finite() || inner < self.min || inner > self.max {
             let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation);
             if let Some(a) = arg {
                 err.insert(
@@ -2405,10 +2411,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     // Build API request
                     let zero_range_metric = final_auto_zero.map(|d| UnitConverter::distance_to_metric(d, cli.units));
-                    let twist_rate_metric = twist_rate.map(|t| match cli.units {
-                        UnitSystem::Imperial => t * 0.0254, // inches to meters
-                        UnitSystem::Metric => t * 0.001,    // mm to meters
-                    });
 
                     let api_request = TrajectoryRequestBuilder::new()
                         .bc_value(trued_bc)
@@ -2452,7 +2454,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(dir) = shot_direction {
                         request.shot_direction = Some(dir);
                     }
-                    if let Some(twist) = twist_rate_metric {
+                    // twist_rate is inches-per-turn for ALL unit systems (documented at the
+                    // --twist-rate flag, and used as-is by the local solver / TrajectoryConfig and
+                    // the compare-mode local inputs), and api_client sends it verbatim — so forward
+                    // the RAW value. The original code sent meters (~33x too small); converting
+                    // metric by /25.4 here would instead make the API disagree with local under
+                    // --compare. No conversion: all paths use the documented inches/turn.
+                    if let Some(twist) = twist_rate {
                         request.twist_rate = Some(twist);
                     }
 
@@ -4122,7 +4130,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
                 for (i, p) in result.points.iter().enumerate() {
                     if i % step == 0 || i == result.points.len() - 1 {
-                        let x_display = UnitConverter::distance_from_metric(p.position.z, units); // X column = lateral (now position.z)
+                        let x_display = UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
                         let y_display = UnitConverter::distance_from_metric(p.position.y, units);
                         let vel_display =
                             UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
@@ -4258,15 +4266,17 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 .map(|s| {
                     // Convert distance to yards for range
                     let range_yd = UnitConverter::distance_from_metric(s.distance_m, UnitSystem::Imperial);
-                    // Convert drop to yards (s.drop_m is already in meters, negative = below line of sight)
+                    // Convert drop to yards (s.drop_m is already in meters, positive = below line of sight)
                     let drop_yd = s.drop_m / 0.9144; // meters to yards
                     // Convert drift to yards
                     let drift_yd = s.wind_drift_m / 0.9144;
 
                     DopeCardRow {
                         range_yd: range_yd.round() as u32,
-                        // Drop MIL: positive = dial up (bullet is below line of sight)
-                        drop_mil: yards_to_mil(-drop_yd, range_yd),
+                        // Drop MIL: positive = dial up (bullet below LOS). drop_m is already
+                        // positive-below-LOS (sample_trajectory: los_y - y_interp), matching the
+                        // come-up / range tables, so do NOT negate it (this column was sign-flipped).
+                        drop_mil: yards_to_mil(drop_yd, range_yd),
                         // Wind MIL: positive = dial right for wind from right
                         wind_mil: yards_to_mil(drift_yd, range_yd),
                         // Lead MIL for moving target
@@ -4907,7 +4917,11 @@ fn run_bc_estimation(
         ..Default::default()
     };
 
-    let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+    let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+    // Bound the verification range like the estimator does (estimate_bc_from_trajectory caps at
+    // last_point * 1.5); the solver default of 1000 m otherwise gives a bogus 100% error for
+    // long-range inputs (no point reaches distance2, so calc_drop2 falls back to 0.0). Metric.
+    solver.set_max_range(distance1.max(distance2) * 1.5);
     let trajectory = solver.solve()?;
 
     // Find drops at the specified distances (X is downrange)
@@ -6152,6 +6166,14 @@ fn handle_stability(
     let min_twist_1_5 = find_twist_for_sg(1.5);
     let min_twist_1_0 = find_twist_for_sg(1.0);
 
+    // min_twist_* are in INCHES (compute_stability_coefficient treats twist_rate as inches/turn);
+    // convert to mm for metric so the JSON/CSV values match their labeled unit (the Table path
+    // already converts). Imperial is unchanged.
+    let (min15_out, min10_out) = match units {
+        UnitSystem::Imperial => (min_twist_1_5, min_twist_1_0),
+        UnitSystem::Metric => (min_twist_1_5 * 25.4, min_twist_1_0 * 25.4),
+    };
+
     // Display units
     let (len_unit, vel_unit, twist_display, min15_display, min10_display) = match units {
         UnitSystem::Imperial => (
@@ -6177,8 +6199,8 @@ fn handle_stability(
                 "status": status,
                 "twist_rate": twist_rate,
                 "twist_rate_unit": if units == UnitSystem::Imperial { "in/turn" } else { "mm/turn" },
-                "min_twist_sg_1_5": (min_twist_1_5 * 100.0).round() / 100.0,
-                "min_twist_sg_1_0": (min_twist_1_0 * 100.0).round() / 100.0,
+                "min_twist_sg_1_5": (min15_out * 100.0).round() / 100.0,
+                "min_twist_sg_1_0": (min10_out * 100.0).round() / 100.0,
                 "bullet_length": length,
                 "bullet_diameter": diameter,
                 "bullet_mass": mass,
@@ -6190,7 +6212,7 @@ fn handle_stability(
         OutputFormat::Csv => {
             println!("sg,status,twist_rate,min_twist_sg1.5,min_twist_sg1.0,length,velocity");
             println!("{:.2},{},{:.1},{:.1},{:.1},{:.3},{:.0}",
-                     sg, status, twist_rate, min_twist_1_5, min_twist_1_0, length, velocity);
+                     sg, status, twist_rate, min15_out, min10_out, length, velocity);
         }
         OutputFormat::Table | OutputFormat::Pdf => {
             println!();

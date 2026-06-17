@@ -125,8 +125,18 @@ impl BcCorrectionTable {
         let length_bins = read_f32_array(&mut reader, num_length)?;
         let velocity_bins = read_f32_array(&mut reader, num_velocity)?;
 
-        // Read data section
-        let total_cells = num_types * num_bc * num_mass * num_length * num_velocity;
+        // Read data section. Bound the product with checked arithmetic so a corrupt/hostile
+        // file cannot overflow (debug panic / release wrap to a too-short `data`, which then
+        // panics on the unchecked index in lookup()) or trigger a huge OOM allocation.
+        // Mirrors the bc_table_5d.rs hardening.
+        const MAX_TOTAL_CELLS: usize = 64_000_000; // ~256 MB of f32; far above any real table
+        let total_cells = num_types
+            .checked_mul(num_bc)
+            .and_then(|x| x.checked_mul(num_mass))
+            .and_then(|x| x.checked_mul(num_length))
+            .and_then(|x| x.checked_mul(num_velocity))
+            .filter(|&n| n <= MAX_TOTAL_CELLS)
+            .ok_or(BcTableError::InvalidDimensions)?;
         let data = read_f32_array(&mut reader, total_cells)?;
 
         Ok(BcCorrectionTable {
@@ -152,8 +162,11 @@ impl BcCorrectionTable {
     /// # Returns
     /// Correction factor (multiply published BC by this value)
     pub fn lookup(&self, bc: f64, bc_type: &str, mass: f64, length: f64, velocity: f64) -> f64 {
-        // Get type index (0 = G1, 1 = G7)
-        let type_idx = if bc_type.to_uppercase() == "G1" { 0 } else { 1 };
+        // Get type index (0 = G1, 1 = G7), clamped to the table's type axis so a
+        // G1-only table (num_types == 1) queried with "G7" stays in bounds instead of
+        // producing an out-of-range flat_index (mirrors Bc5dTable::lookup).
+        let type_idx =
+            (if bc_type.to_uppercase() == "G1" { 0 } else { 1 }).min(self.num_types.saturating_sub(1));
 
         // Find interpolation indices and weights for each dimension
         let (bc_idx, bc_weight) = self.interp_idx(bc as f32, &self.bc_bins);
@@ -182,7 +195,10 @@ impl BcCorrectionTable {
 
                         // Calculate flat index
                         let idx = self.flat_index(type_idx, i, j, k, l);
-                        result += w * self.data[idx] as f64;
+                        // Bounds-safe access (true defense-in-depth): the continuous axes are
+                        // clamped above and type_idx is clamped to num_types, so idx is always
+                        // in bounds for any valid table; the unwrap_or only guards corrupt data.
+                        result += w * self.data.get(idx).copied().unwrap_or(0.0) as f64;
                     }
                 }
             }
@@ -228,7 +244,9 @@ impl BcCorrectionTable {
         }
 
         // Binary search for interval
-        let idx = match bins.binary_search_by(|probe| probe.partial_cmp(&value).unwrap()) {
+        let idx = match bins
+            .binary_search_by(|probe| probe.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Equal))
+        {
             Ok(i) => i.saturating_sub(1).min(bins.len() - 2),
             Err(i) => i.saturating_sub(1).min(bins.len() - 2),
         };
@@ -297,8 +315,20 @@ fn read_u64<R: Read>(reader: &mut R) -> Result<u64, std::io::Error> {
 }
 
 fn read_f32_array<R: Read>(reader: &mut R, count: usize) -> Result<Vec<f32>, std::io::Error> {
+    // Defensive bounds: reject absurd lengths from corrupt/hostile files before allocating,
+    // and guard the byte-count multiply against overflow (mirrors bc_table_5d.rs).
+    const MAX_ELEMS: usize = 64_000_000; // 256 MB of f32
+    if count > MAX_ELEMS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "f32 array length too large",
+        ));
+    }
+    let byte_len = count.checked_mul(4).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "f32 array length overflow")
+    })?;
     let mut data = vec![0f32; count];
-    let mut buf = vec![0u8; count * 4];
+    let mut buf = vec![0u8; byte_len];
     reader.read_exact(&mut buf)?;
 
     for (i, chunk) in buf.chunks_exact(4).enumerate() {
