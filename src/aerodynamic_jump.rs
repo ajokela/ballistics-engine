@@ -157,6 +157,11 @@ pub fn calculate_sight_correction_for_jump(
     zero_range_m: f64,
     sight_height_m: f64,
 ) -> (f64, f64) {
+    // Guard a non-positive zero range (public API): 91.44 / 0 would be Inf, poisoning the
+    // returned corrections.
+    if !(zero_range_m > 0.0) {
+        return (0.0, 0.0);
+    }
     // Range factor
     let range_factor = 91.44 / zero_range_m; // 100 yards / zero range
 
