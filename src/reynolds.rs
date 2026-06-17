@@ -87,26 +87,23 @@ fn reynolds_drag_correction(reynolds_number: f64, mach: f64, _base_cd: f64) -> f
     }
 
     // Low Reynolds number correction
-    if reynolds_number < 1000.0 {
-        // Very low Re - Stokes flow region
-        // Cd increases dramatically
-        let correction = 24.0 / reynolds_number + 1.0;
-        // Limit correction to reasonable values
-        correction.min(5.0)
+    let correction = if reynolds_number < 1000.0 {
+        // Very low Re - Stokes flow region; Cd increases dramatically
+        24.0 / reynolds_number + 1.0
     } else if reynolds_number < 1e4 {
-        // Low Re - significant viscous effects
-        // Use power law interpolation
-        let n = -0.4;
-        (reynolds_number / RE_REF).powf(n)
+        // Low Re - significant viscous effects (power law)
+        (reynolds_number / RE_REF).powf(-0.4)
     } else if reynolds_number < 1e5 {
         // Moderate Re - transitional region
-        let n = -0.2;
-        (reynolds_number / RE_REF).powf(n)
+        (reynolds_number / RE_REF).powf(-0.2)
     } else {
         // High Re but below reference
-        let n = -0.1;
-        (reynolds_number / RE_REF).powf(n)
-    }
+        (reynolds_number / RE_REF).powf(-0.1)
+    };
+    // Cap the correction across ALL branches. Previously only the Stokes branch was capped at
+    // 5.0, so the Re=1000-1e4 power law spiked to ~16x at Re=1000 (and ~6x at Re=1e4) — a
+    // non-physical drag multiplier with a step discontinuity at the branch boundary.
+    correction.min(5.0)
 }
 
 /// Calculate drag coefficient with Reynolds number correction
