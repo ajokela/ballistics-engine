@@ -13,6 +13,9 @@ pub type WindSegment = (f64, f64, f64);
 pub struct WindSock {
     /// Sorted wind segments by distance
     winds: Vec<WindSegment>,
+    /// Precomputed wind vector for each segment (parallel to `winds`). The Monte-Carlo RK4
+    /// kernel queries wind 4x per step, so caching avoids recomputing sin/cos every call.
+    wind_vecs: Vec<Vector3<f64>>,
     /// Current segment index
     current: usize,
     /// Distance where next segment starts
@@ -30,15 +33,18 @@ impl WindSock {
         // Sort segments by distance, handling NaN safely by treating it as greater than any value
         segments.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Greater));
 
+        // Precompute each segment's wind vector once (depends only on its speed/angle).
+        let wind_vecs: Vec<Vector3<f64>> = segments.iter().map(Self::calc_vec).collect();
+
         let (current, next_range, current_vec) = if segments.is_empty() {
             (0, f64::INFINITY, Vector3::zeros())
         } else {
-            let vec = Self::calc_vec(&segments[0]);
-            (0, segments[0].2, vec)
+            (0, segments[0].2, wind_vecs[0])
         };
 
         WindSock {
             winds: segments,
+            wind_vecs,
             current,
             next_range,
             current_vec,
@@ -84,9 +90,8 @@ impl WindSock {
                 self.current_vec = Vector3::zeros();
                 self.next_range = f64::INFINITY;
             } else {
-                let seg = &self.winds[self.current];
-                self.current_vec = Self::calc_vec(seg);
-                self.next_range = seg.2;
+                self.current_vec = self.wind_vecs[self.current];
+                self.next_range = self.winds[self.current].2;
             }
         }
 
@@ -103,10 +108,10 @@ impl WindSock {
             return Vector3::zeros();
         }
 
-        // Find the appropriate segment
-        for segment in &self.winds {
+        // Find the appropriate segment (precomputed vector — no per-call trig).
+        for (i, segment) in self.winds.iter().enumerate() {
             if range_m < segment.2 {
-                return Self::calc_vec(segment);
+                return self.wind_vecs[i];
             }
         }
 
