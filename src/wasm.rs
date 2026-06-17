@@ -454,6 +454,10 @@ impl WasmBallistics {
                 inputs.target_height = target_height * 0.001; // mm to meters
             }
         }
+        // Derive bullet_length from diameter (4.5-caliber heuristic), mirroring the CLI and FFI.
+        // WASM otherwise left it at the struct default (~0.0343 m) regardless of --diameter,
+        // skewing the Miller Sg / enhanced spin drift / Magnus for non-default calibers.
+        inputs.bullet_length = inputs.bullet_diameter * 4.5;
 
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
@@ -736,6 +740,8 @@ impl WasmBallistics {
                 inputs.sight_height = sight_height * 0.001;
             }
         }
+        // Derive bullet_length from diameter (mirrors CLI/FFI); WASM left it at the default.
+        inputs.bullet_length = inputs.bullet_diameter * 4.5;
 
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
@@ -938,6 +944,9 @@ impl WasmBallistics {
                 inputs.bullet_diameter = diameter * 0.001;
             }
         }
+
+        // Derive bullet_length from diameter (mirrors CLI/FFI); WASM left it at the default.
+        inputs.bullet_length = inputs.bullet_diameter * 4.5;
 
         inputs.bc_value = bc;
         // Honor --drag-model (mirrors the trajectory/zero handlers); previously the Monte
