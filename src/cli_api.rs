@@ -482,6 +482,12 @@ impl TrajectorySolver {
             self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
+        // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
+        // instead of re-deriving them (with a to_lowercase alloc) every integration step.
+        let pitch_coeffs = PitchDampingCoefficients::from_bullet_type(
+            self.inputs.bullet_model.as_deref().unwrap_or("default"),
+        );
+
         // Main integration loop (X is downrange)
         while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
             // Store trajectory point
@@ -521,13 +527,7 @@ impl TrajectorySolver {
                 }
 
                 // Calculate pitch damping coefficient
-                let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
-                    model.as_str()
-                } else {
-                    "default"
-                };
-                let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
-                let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
+                let pitch_damping = calculate_pitch_damping_coefficient(mach, &pitch_coeffs);
 
                 // Track minimum (most critical for stability)
                 if pitch_damping < min_pitch_damping {
@@ -755,6 +755,12 @@ impl TrajectorySolver {
             self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
+        // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
+        // instead of re-deriving them (with a to_lowercase alloc) every integration step.
+        let pitch_coeffs = PitchDampingCoefficients::from_bullet_type(
+            self.inputs.bullet_model.as_deref().unwrap_or("default"),
+        );
+
         // Main RK4 integration loop (X is downrange)
         while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
             // Store trajectory point
@@ -786,13 +792,7 @@ impl TrajectorySolver {
                 }
 
                 // Calculate pitch damping coefficient
-                let bullet_type = if let Some(ref model) = self.inputs.bullet_model {
-                    model.as_str()
-                } else {
-                    "default"
-                };
-                let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
-                let pitch_damping = calculate_pitch_damping_coefficient(mach, &coeffs);
+                let pitch_damping = calculate_pitch_damping_coefficient(mach, &pitch_coeffs);
 
                 // Track minimum (most critical for stability)
                 if pitch_damping < min_pitch_damping {
@@ -1266,6 +1266,10 @@ impl TrajectorySolver {
         } else {
             base_bc
         };
+        // Guard bc_value == 0 (allowed on the FFI/WASM surfaces, which lack the CLI's 0.001
+        // lower bound): dividing by effective_bc below would be Inf -> NaN. Inert for valid
+        // BCs (>= 0.001).
+        let effective_bc = effective_bc.max(1e-6);
 
         // Use proper ballistics retardation formula
         // This matches the proven formula from fast_trajectory.rs
