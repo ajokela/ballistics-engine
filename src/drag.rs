@@ -470,14 +470,24 @@ static G8_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
     }
 });
 
-/// Get drag coefficient for given Mach number and drag model
+/// Get drag coefficient for given Mach number and drag model.
+///
+/// NOTE: only G1/G6/G7/G8 have dedicated tables. G2/G5/GI/GS currently fall back to the G1
+/// curve (no tables shipped yet), so callers requesting those models receive a G1
+/// approximation that is physically inaccurate (e.g. GS is the spherical/round-ball model).
+/// The fallback is made explicit below — rather than a silent `_` catch-all — so adding a new
+/// `DragModel` variant is a compile error until it is handled, and so the approximation is
+/// visible. Supplying real G2/G5/GI/GS tables is tracked separately.
 pub fn get_drag_coefficient(mach: f64, drag_model: &DragModel) -> f64 {
     match drag_model {
         DragModel::G1 => G1_DRAG_TABLE.interpolate(mach),
         DragModel::G6 => G6_DRAG_TABLE.interpolate(mach),
         DragModel::G7 => G7_DRAG_TABLE.interpolate(mach),
         DragModel::G8 => G8_DRAG_TABLE.interpolate(mach),
-        _ => G1_DRAG_TABLE.interpolate(mach), // Default to G1 for other models
+        // No dedicated tables yet — approximate with the G1 curve (flagged, see note above).
+        DragModel::G2 | DragModel::G5 | DragModel::GI | DragModel::GS => {
+            G1_DRAG_TABLE.interpolate(mach)
+        }
     }
 }
 
