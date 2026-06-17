@@ -2405,9 +2405,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     // Build API request
                     let zero_range_metric = final_auto_zero.map(|d| UnitConverter::distance_to_metric(d, cli.units));
-                    let twist_rate_metric = twist_rate.map(|t| match cli.units {
-                        UnitSystem::Imperial => t * 0.0254, // inches to meters
-                        UnitSystem::Metric => t * 0.001,    // mm to meters
+                    // The API documents twist_rate as inches-per-turn (api_client sends it
+                    // verbatim). Convert to inches, NOT meters — sending meters made a 1:10"
+                    // twist arrive as ~0.3 (~33x too small), corrupting API-side spin drift.
+                    let twist_rate_inches = twist_rate.map(|t| match cli.units {
+                        UnitSystem::Imperial => t,      // already inches/turn
+                        UnitSystem::Metric => t / 25.4, // mm/turn -> inches/turn
                     });
 
                     let api_request = TrajectoryRequestBuilder::new()
@@ -2452,7 +2455,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(dir) = shot_direction {
                         request.shot_direction = Some(dir);
                     }
-                    if let Some(twist) = twist_rate_metric {
+                    if let Some(twist) = twist_rate_inches {
                         request.twist_rate = Some(twist);
                     }
 
