@@ -182,6 +182,16 @@ impl WindShearProfile {
             return self.surface_wind.to_vector();
         }
 
+        // Clamp out-of-range queries to the nearest boundary layer instead of
+        // extrapolating. custom_layers is assumed sorted ascending by altitude (as the
+        // bracketing loop below already requires). The below-range case is handled by the
+        // loop (low_idx==high_idx==0); the above-range case otherwise interpolates between
+        // the TOP and FIRST layer (negative span) and extrapolates garbage.
+        let last = self.custom_layers.len() - 1;
+        if altitude_m >= self.custom_layers[last].altitude_m {
+            return self.custom_layers[last].to_vector();
+        }
+
         // Find bracketing layers
         let mut low_idx = 0;
         let mut high_idx = 0;
