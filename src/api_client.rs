@@ -317,16 +317,17 @@ impl ApiClient {
             req = req.query("bullet_diameter", &format!("{:.3}", diameter_in));
         }
         if let Some(threshold) = request.ground_threshold {
-            // Ground threshold is in meters. format!("{:.1}") on f64::NEG_INFINITY (set by
-            // --ignore-ground-impact) produces the literal "-inf", which most server-side
-            // numeric validators reject — silently dropping the ignore-ground intent. Send a
-            // large finite negative sentinel for non-finite thresholds.
-            let v = if threshold.is_finite() {
-                format!("{:.1}", threshold)
-            } else {
-                "-1000000000.0".to_string()
-            };
-            req = req.query("ground_threshold", &v);
+            // Ground threshold is in meters. --ignore-ground-impact sets f64::NEG_INFINITY, which
+            // format!("{:.1}") would render as the literal "-inf" (rejected by most server-side
+            // numeric validators, silently dropping the ignore-ground intent); send a large finite
+            // negative sentinel for THAT case only. Finite values pass through. Any other
+            // non-finite value (NaN or +Inf) is invalid input, not an ignore-ground request, so
+            // omit the parameter rather than silently mapping it to the sentinel.
+            if threshold.is_finite() {
+                req = req.query("ground_threshold", &format!("{:.1}", threshold));
+            } else if threshold == f64::NEG_INFINITY {
+                req = req.query("ground_threshold", "-1000000000.0");
+            }
         }
         if let Some(enable) = request.enable_weather_zones {
             req = req.query("enable_weather_zones", if enable { "true" } else { "false" });
