@@ -154,7 +154,11 @@ pub fn compute_derivatives(
                 atmos_params.2, // base_press_hpa
                 atmos_params.3, // base_ratio
             );
-            (rho, sound, atmos_params.1) // base_temp_c
+            // LOCAL temperature at the projectile altitude, back-computed from the LOCAL speed of
+            // sound (get_local_atmosphere returns density/sound at altitude_at_pos but not temp;
+            // its sound = sqrt(1.4*287.05*T_k)). Using base_temp_c here would feed the Reynolds
+            // viscosity the shooter-altitude temperature while density/sound are local.
+            (rho, sound, sound * sound / (1.4 * 287.05) - 273.15)
         };
 
         // Calculate Mach number with safe division
