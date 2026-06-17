@@ -554,7 +554,8 @@ fn get_timestamp() -> String {
     }
 
     let day = remaining_days + 1;
-    let day_of_week = ((days_since_epoch + 4) % 7) as usize;
+    // The Unix epoch (1970-01-01) was a Thursday and day_names is Thursday-first, so no offset.
+    let day_of_week = (days_since_epoch % 7) as usize;
 
     let (hour_12, am_pm) = if hours == 0 {
         (12, "AM")
