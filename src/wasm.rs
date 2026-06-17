@@ -550,7 +550,7 @@ impl WasmBallistics {
             match calculate_zero_angle_with_conditions(
                 inputs.clone(),
                 zero_distance_m,
-                inputs.target_height, // Use target height from inputs
+                inputs.muzzle_height + inputs.sight_height, // Zero crosses the line of sight (matches CLI)
                 wind.clone(),
                 atmosphere.clone(),
             ) {
