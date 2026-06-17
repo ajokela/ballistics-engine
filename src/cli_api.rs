@@ -149,7 +149,7 @@ impl Default for BallisticInputs {
             bullet_mass: mass_kg,
             muzzle_velocity: 800.0,
             bullet_diameter: diameter_m,
-            bullet_length: diameter_m * 4.0, // Approximate
+            bullet_length: diameter_m * 4.5, // Approximate (match the CLI's 4.5-caliber heuristic)
 
             // Targeting and positioning
             muzzle_angle: muzzle_angle_rad,
@@ -429,6 +429,19 @@ impl TrajectorySolver {
             }
             let sd_in = 1.25 * (sg + 1.2) * p.time.powf(1.83); // Litz drift, inches
             p.position.z += sign * sd_in * 0.0254; // in -> m, Z = lateral
+        }
+
+        // sampled_points are snapshotted from the PRE-drift trajectory inside each solver, so the
+        // sampled wind_drift_m column would omit the spin drift that result.points carry. Apply
+        // the same Litz drift to keep the two user-facing outputs consistent.
+        if let Some(samples) = result.sampled_points.as_mut() {
+            for s in samples.iter_mut() {
+                if s.time_s <= 0.0 {
+                    continue;
+                }
+                let sd_in = 1.25 * (sg + 1.2) * s.time_s.powf(1.83);
+                s.wind_drift_m += sign * sd_in * 0.0254;
+            }
         }
     }
 

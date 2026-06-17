@@ -160,7 +160,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     // Set derived values
     ballistic_inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
     ballistic_inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
-    ballistic_inputs.bullet_length = inputs.bullet_diameter * 4.0;
+    ballistic_inputs.bullet_length = inputs.bullet_diameter * 4.5; // match the CLI 4.5-cal default
 
     // New advanced physics flags
     ballistic_inputs.enable_wind_shear = inputs.enable_wind_shear != 0;
