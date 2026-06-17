@@ -536,9 +536,17 @@ pub fn interpolated_bc(
         return segments[0].1;
     }
 
-    // Sort segments by Mach number to ensure proper interpolation
-    let mut sorted_segments = segments.to_vec();
-    sorted_segments.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Ensure ascending-Mach order for interpolation. Fast path: when the segments are
+    // already sorted (the common case — they are normalized once at construction), borrow
+    // them and skip the per-call heap alloc + O(n log n) sort on the integration hot path.
+    let sorted_segments: std::borrow::Cow<[(f64, f64)]> =
+        if segments.windows(2).all(|w| w[0].0 <= w[1].0) {
+            std::borrow::Cow::Borrowed(segments)
+        } else {
+            let mut v = segments.to_vec();
+            v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            std::borrow::Cow::Owned(v)
+        };
 
     // Handle out-of-range cases first
     if mach <= sorted_segments[0].0 {
