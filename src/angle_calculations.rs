@@ -256,7 +256,11 @@ pub fn solve_muzzle_angle(
         candidate.muzzle_angle = angle_rad * RADIANS_TO_DEGREES;
         candidate.target_distance = zero_distance_los_m / YARDS_TO_METERS; // Convert back to yards
 
-        trajectory_func(&candidate).unwrap_or(1e6)
+        // NaN (not a finite sentinel) on trajectory failure: a large finite value like 1e6
+        // can fake a sign change and make the bracket/Brent solver lock onto the
+        // discontinuity and report a spurious root as success. NaN makes those comparisons
+        // false, so the solver fails gracefully (mirrors the zero_angle MBA-192 fix).
+        trajectory_func(&candidate).unwrap_or(f64::NAN)
     };
 
     // Check bounds
