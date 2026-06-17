@@ -215,6 +215,13 @@ pub fn compute_derivatives(
             bc_val = interpolated_bc(mach, segments, Some(inputs));
         }
 
+        // Guard bc_val == 0 (allowed on the FFI/WASM/library surfaces, which lack the CLI's
+        // 0.001 floor, and a user-supplied BC segment can be 0): the drag division below would be
+        // Inf -> NaN, poisoning the whole trajectory. Mirrors the guards already in
+        // cli_api::calculate_acceleration and fast_trajectory::compute_derivatives. Inert for
+        // valid BCs (>= 0.001).
+        let bc_val = bc_val.max(1e-6);
+
         // Calculate yaw effect with safe division
         let yaw_deg = if inputs.tipoff_decay_distance.abs() > 1e-9 {
             inputs.tipoff_yaw * (-pos[0] / inputs.tipoff_decay_distance).exp()
