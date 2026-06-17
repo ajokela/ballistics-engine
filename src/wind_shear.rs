@@ -304,6 +304,37 @@ impl WindShearWindSock {
     }
 }
 
+/// Boundary-layer wind-speed multiplier for a projectile flying `height_rel_launch_m` above the
+/// muzzle (McCoy Y / height relative to the line of departure).
+///
+/// The user-supplied wind is treated as the *operative* surface/flight wind: the multiplier is
+/// floored at 1.0 so the wind is never reduced below the input value, and only increases
+/// (logarithmically, or by the 1/7 power law) for trajectories that climb well above the standard
+/// 10 m meteorological reference height. This matches the uniform-wind convention used by standard
+/// ballistic solvers for flat fire, while still adding genuine shear for high-angle / ELR shots.
+///
+/// Height above ground is approximated as the bullet's height gained plus an assumed muzzle
+/// height. Shooter altitude above *sea level* is deliberately excluded: boundary-layer shear is
+/// relative to the local ground, and air-density effects of altitude are modelled separately.
+///
+/// This replaces the previous behaviour where the height-relative-to-line-of-sight (~0 for flat
+/// fire) was treated as a true above-ground altitude and clamped to zero below the roughness
+/// length, which zeroed the crosswind for almost the whole flight (~5x too little drift).
+pub fn boundary_layer_speed_ratio(height_rel_launch_m: f64, model: WindShearModel) -> f64 {
+    const Z0: f64 = 0.03; // surface roughness length (short grass)
+    const H_REF: f64 = 10.0; // standard meteorological reference height of the input wind
+    const MUZZLE_HEIGHT_M: f64 = 1.5; // approximate height of the bore above ground
+
+    let height_agl = (height_rel_launch_m + MUZZLE_HEIGHT_M).max(Z0 * 1.000_1);
+    let ratio = match model {
+        WindShearModel::PowerLaw => (height_agl / H_REF).powf(1.0 / 7.0),
+        WindShearModel::Logarithmic => (height_agl / Z0).ln() / (H_REF / Z0).ln(),
+        // Ekman / custom / none have no closed-form near-ground scaling here -> operative wind.
+        _ => 1.0,
+    };
+    ratio.max(1.0)
+}
+
 /// High-level API function to get wind at arbitrary position
 ///
 /// This is a convenience wrapper that handles wind segments, shear models,
@@ -358,49 +389,32 @@ pub fn get_wind_at_position(
         );
     }
 
-    // Create wind shear profile
-    let mut profile = WindShearProfile::default();
-    profile.model = match wind_shear_model {
+    // Wind shear enabled: scale the operative (input) wind by a boundary-layer profile keyed off
+    // HEIGHT ABOVE GROUND. `altitude_m` (position[1], McCoy Y) is the bullet's height gained
+    // relative to the muzzle; for flat fire it stays within a few metres of the ground, so the
+    // bullet must experience ~full surface wind. The previous implementation treated this
+    // height-relative-to-line-of-sight as a true above-ground altitude and clamped it to zero
+    // below the roughness length, zeroing the crosswind for almost the whole flight.
+    let model = match wind_shear_model {
         "logarithmic" => WindShearModel::Logarithmic,
         "power_law" | "powerlaw" => WindShearModel::PowerLaw,
         "ekman_spiral" | "ekman" => WindShearModel::EkmanSpiral,
         "custom_layers" | "custom" => WindShearModel::CustomLayers,
         _ => WindShearModel::None,
     };
-    profile.surface_wind = WindLayer {
-        altitude_m: 0.0,
-        speed_mps: base_speed_mps,
-        direction_deg: base_direction_deg,
-    };
 
-    // Calculate absolute altitude by adding shooter's altitude
-    let absolute_altitude_m = altitude_m + shooter_altitude_m;
+    // shooter_altitude_m is height above SEA LEVEL and is intentionally not used for the
+    // boundary-layer height (see boundary_layer_speed_ratio); kept in the signature for API
+    // stability and for callers that may pass it.
+    let _ = shooter_altitude_m;
 
-    // OPTIMIZATION: Skip complex shear for very small altitude changes
-    // This avoids numerical issues near ground level
-    if absolute_altitude_m.abs() < 0.1 && altitude_m.abs() < 0.1 {
-        // Near ground level - use base wind directly with reduction
-        let ang = base_direction_deg.to_radians();
-        return Vector3::new(
-            -base_speed_mps * ang.cos() * 0.5, // Reduced at ground
-            0.0,
-            -base_speed_mps * ang.sin() * 0.5,
-        );
-    }
-
-    // OPTIMIZATION: For long-range shots, use simplified model
-    // to avoid numerical instability in RK45 integration
-    if range_m > 800.0 {
-        // Use simplified linear interpolation for stability
-        let altitude_factor = (1.0 + absolute_altitude_m / 100.0).min(2.0).max(0.1);
-        let sheared_speed = base_speed_mps * altitude_factor;
-        let ang = base_direction_deg.to_radians();
-        return Vector3::new(-sheared_speed * ang.cos(), 0.0, -sheared_speed * ang.sin());
-    }
-
-    // For normal ranges, use full shear model with clamped altitude
-    let clamped_altitude = absolute_altitude_m.max(-10.0).min(1000.0);
-    profile.get_wind_at_altitude(clamped_altitude)
+    let speed_ratio = boundary_layer_speed_ratio(altitude_m, model);
+    let ang = base_direction_deg.to_radians();
+    Vector3::new(
+        -base_speed_mps * ang.cos() * speed_ratio, // x (downrange head/tail)
+        0.0,                                       // y (vertical)
+        -base_speed_mps * ang.sin() * speed_ratio, // z (lateral crosswind)
+    )
 }
 
 #[cfg(test)]
@@ -470,6 +484,38 @@ mod tests {
     }
 
     #[test]
+    fn test_boundary_layer_speed_ratio_flat_fire_full_wind() {
+        // Flat-fire trajectory: bullet stays within a few metres of launch height (and drops
+        // below the line of sight). The operative wind must NOT be attenuated -> ratio == 1.0.
+        for &h in &[-15.0, -11.3, -1.0, -0.2, 0.0, 0.14, 1.5, 5.0, 8.0] {
+            let r_log = boundary_layer_speed_ratio(h, WindShearModel::Logarithmic);
+            let r_pow = boundary_layer_speed_ratio(h, WindShearModel::PowerLaw);
+            assert!(
+                (r_log - 1.0).abs() < 1e-9,
+                "logarithmic ratio at h={h} should be 1.0 (full wind), got {r_log}"
+            );
+            assert!(
+                (r_pow - 1.0).abs() < 1e-9,
+                "power-law ratio at h={h} should be 1.0 (full wind), got {r_pow}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_boundary_layer_speed_ratio_increases_aloft() {
+        // Well above the 10 m reference height the wind shears UP and is monotonic in altitude.
+        let r100 = boundary_layer_speed_ratio(100.0, WindShearModel::Logarithmic);
+        let r300 = boundary_layer_speed_ratio(300.0, WindShearModel::Logarithmic);
+        assert!(r100 > 1.0, "ratio at 100 m should exceed 1.0, got {r100}");
+        assert!(r300 > r100, "ratio should increase with altitude: {r300} !> {r100}");
+        // Magnitude sanity: ~1.4x at ~100 m above ground for the logarithmic profile.
+        assert!(
+            (r100 - 1.40).abs() < 0.10,
+            "ratio at ~100 m should be ~1.4, got {r100}"
+        );
+    }
+
+    #[test]
     fn test_power_law_profile() {
         let mut profile = WindShearProfile::default();
         profile.model = WindShearModel::PowerLaw;
@@ -483,5 +529,27 @@ mod tests {
         let v100 = profile.get_wind_at_altitude(100.0).norm();
         let expected = 10.0 * (100.0_f64 / 10.0).powf(1.0 / 7.0);
         assert!((v100 - expected).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod fix_validation_tests {
+    use super::*;
+    use nalgebra::Vector3;
+
+    #[test]
+    fn test_get_wind_at_position_flat_fire_full_crosswind() {
+        // Flat-fire: bullet ~1 m below line of sight, mid-range, 90deg full-value crosswind.
+        // 16.09344 km/h = 4.4704 m/s (10 mph). With the fix, lateral (Z) wind must be ~full.
+        let pos = Vector3::new(457.0, -1.0, 0.0); // [downrange, vertical(rel LOS), lateral]
+        let segs = [(16.09344_f64, 90.0_f64, 1000.0_f64)];
+        let w = get_wind_at_position(&pos, &segs, true, "logarithmic", 0.0);
+        let expected = 16.09344 * 0.2777778; // m/s
+        println!("flat-fire wind vec = {:?}, |Z| = {}", w, w.z.abs());
+        assert!(
+            (w.z.abs() - expected).abs() < 0.05,
+            "lateral wind should be ~full {expected:.3} m/s, got {:.3}",
+            w.z.abs()
+        );
     }
 }
