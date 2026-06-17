@@ -1880,3 +1880,44 @@ fn calculate_air_density(atmosphere: &AtmosphericConditions) -> f64 {
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod ground_termination_tests {
+    use super::*;
+
+    // Regression lock for the unified ground termination: solve_euler/solve_rk4/solve_rk45 all
+    // loop while `position.y > ground_threshold` (default -100.0), so they agree with RK45. A
+    // lofted shot that returns to launch level before reaching max_range must keep descending to
+    // the -100 m floor instead of stopping at y = 0 — and RK4-fixed and RK45 must behave the same.
+    #[test]
+    fn rk4_and_rk45_descend_to_ground_threshold() {
+        for adaptive in [false, true] {
+            let mut inputs = BallisticInputs::default();
+            inputs.muzzle_angle = 0.1; // ~5.7 deg: arcs up, then descends past launch level
+            inputs.use_rk4 = true;
+            inputs.use_adaptive_rk45 = adaptive;
+            assert_eq!(inputs.ground_threshold, -100.0, "default ground_threshold is -100 m");
+
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            // Huge max range: termination must be driven by ground_threshold, not the range cap.
+            solver.set_max_range(1.0e7);
+
+            let result = solver.solve().expect("solve should succeed");
+            let final_y = result
+                .points
+                .last()
+                .expect("trajectory has points")
+                .position
+                .y;
+            assert!(
+                final_y < -1.0,
+                "adaptive_rk45={adaptive}: final y = {final_y} m; a lofted shot should descend \
+                 past launch level toward the ground_threshold floor, not stop at y = 0"
+            );
+        }
+    }
+}
