@@ -135,22 +135,26 @@ pub fn compute_derivatives(
         // params[0] = air density, params[1] = speed of sound
         // params[2] and params[3] would be 0.0
         // BUT: we need to check if params[0] is a reasonable density value (< 2.0 kg/m³)
-        let (air_density, speed_of_sound) = if atmos_params.0 < MAX_REALISTIC_DENSITY
+        let (air_density, speed_of_sound, temperature_c) = if atmos_params.0 < MAX_REALISTIC_DENSITY
             && atmos_params.1 > MIN_REALISTIC_SPEED_OF_SOUND
             && atmos_params.2 == 0.0
             && atmos_params.3 == 0.0
         {
-            // Direct atmosphere values
-            get_direct_atmosphere(atmos_params.0, atmos_params.1)
+            // Direct atmosphere values: atmos_params.1 is the SPEED OF SOUND here, NOT Celsius,
+            // so back-compute temperature from it (c = sqrt(1.4*287.05*T_k)) for the Reynolds
+            // correction below — which previously read atmos_params.1 as temperature directly.
+            let (rho, sound) = get_direct_atmosphere(atmos_params.0, atmos_params.1);
+            (rho, sound, sound * sound / (1.4 * 287.05) - 273.15)
         } else {
             // Calculate from base parameters
-            get_local_atmosphere(
+            let (rho, sound) = get_local_atmosphere(
                 altitude_at_pos,
                 atmos_params.0, // base_alt
                 atmos_params.1, // base_temp_c
                 atmos_params.2, // base_press_hpa
                 atmos_params.3, // base_ratio
-            )
+            );
+            (rho, sound, atmos_params.1) // base_temp_c
         };
 
         // Calculate Mach number with safe division
@@ -241,11 +245,8 @@ pub fn compute_derivatives(
 
         // Apply Reynolds correction for low velocities
         let drag_factor = if mach < 1.0 && speed_air < 200.0 {
-            // Get temperature from atmospheric parameters
-            let temperature_c = atmos_params.1; // base_temp_c from atmos_params
-
-            // Apply Reynolds number correction
-
+            // temperature_c is derived per atmosphere mode above (base_temp_c, or back-computed
+            // from the speed of sound in direct-atmosphere mode where atmos_params.1 is NOT Celsius).
             crate::reynolds::apply_reynolds_correction(
                 drag_factor,
                 speed_air,
