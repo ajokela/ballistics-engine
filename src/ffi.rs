@@ -489,6 +489,13 @@ pub extern "C" fn ballistics_monte_carlo(
     let inputs = unsafe { &*inputs };
     let params = unsafe { &*params };
 
+    // Reject a non-positive simulation count: num_simulations is a c_int (i32) cast
+    // straight to usize, so a negative value would wrap to a near-max usize and drive an
+    // unbounded loop / OOM. (n == 0 also yields NaN stats and a zero-size allocation.)
+    if params.num_simulations <= 0 {
+        return ptr::null_mut();
+    }
+
     // Convert FFI inputs to internal types
     let ballistic_inputs = convert_inputs(inputs);
 
