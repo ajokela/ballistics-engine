@@ -165,7 +165,7 @@ pub fn compute_derivatives(
             mach,
             &inputs.bc_type,
             false, // transonic applied exactly once below (was double-applied here + in block)
-            true,  // apply Reynolds correction
+            false, // Reynolds applied once below (manual block ~243); was double-applied here + there
             None, // let it determine shape
             if inputs.caliber_inches > 0.0 {
                 Some(inputs.caliber_inches)
