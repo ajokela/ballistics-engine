@@ -48,7 +48,10 @@ pub fn solve_trajectory_for_monte_carlo(
         inputs.altitude, // meters
         Some(inputs.temperature),
         Some(inputs.pressure),
-        inputs.humidity,
+        // BallisticInputs.humidity is a 0-1 fraction; calculate_atmosphere expects 0-100 percent
+        // (matching AtmosphericConditions.humidity). Passing the raw fraction under-applied
+        // humidity 100x.
+        (inputs.humidity * 100.0).clamp(0.0, 100.0),
     );
 
     // Create wind segments. WindSock expects (speed_kmh, angle_deg, until_distance_m);
@@ -109,6 +112,14 @@ pub fn solve_trajectory_for_monte_carlo(
     let final_idx = solution.t.len() - 1;
 
     let final_downrange = solution.y[0][final_idx]; // McCoy: X=downrange
+
+    // Exclude runs that did not reach the target distance (a short/steep/subsonic shot, or any
+    // residual time-budget truncation) instead of silently reporting their too-short impact
+    // metrics at the target downrange, which would poison the mean / stddev / CEP aggregation.
+    if final_downrange < target_distance_m * 0.999 {
+        return Err("trajectory did not reach target distance".to_string());
+    }
+
     let final_y = solution.y[1][final_idx]; // vertical
     let final_lateral = solution.y[2][final_idx]; // McCoy: Z=lateral drift
 
