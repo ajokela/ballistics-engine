@@ -334,8 +334,28 @@ fn compute_derivatives(
         } else {
             bc
         };
+        // Guard bc_value == 0 (allowed on FFI/WASM/public MC surfaces): the division below
+        // would be Inf -> NaN. Mirrors cli_api's effective_bc.max(1e-6); inert for valid BCs.
+        let bc_current = bc_current.max(1e-6);
 
-        let drag_factor = get_drag_coefficient(mach, drag_model);
+        // Apply the transonic drag-rise correction once (mirrors derivatives.rs / cli_api) so
+        // the Monte Carlo / fast path doesn't under-predict drag near Mach 1. SI fallbacks for
+        // caliber/weight (SI-only MC callers may leave the imperial fields 0). wave_drag=false:
+        // the G1/G7 tables already embed the rise.
+        let base_cd = get_drag_coefficient(mach, drag_model);
+        let caliber_in = if inputs.caliber_inches > 0.0 {
+            inputs.caliber_inches
+        } else {
+            inputs.bullet_diameter / 0.0254
+        };
+        let weight_gr = if inputs.weight_grains > 0.0 {
+            inputs.weight_grains
+        } else {
+            inputs.bullet_mass / 0.00006479891
+        };
+        let shape =
+            crate::transonic_drag::get_projectile_shape(caliber_in, weight_gr, &drag_model.to_string());
+        let drag_factor = crate::transonic_drag::transonic_correction(mach, base_cd, shape, false);
 
         // Calculate drag acceleration using proper ballistics formula
         let cd_to_retard = 0.000683 * 0.30;
