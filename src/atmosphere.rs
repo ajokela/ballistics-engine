@@ -225,15 +225,19 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // Vapor pressure with clamping
     let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv;
 
-    // Mole fraction of water vapor
-    let x_v = p_v / pressure_hpa;
+    // Floor the pressure divisor (mirrors calculate_atmosphere): a 0 hPa pressure would
+    // otherwise make x_v = +Inf -> NaN density. No-op for all valid (>0) pressures.
+    let p_hpa = pressure_hpa.max(f64::MIN_POSITIVE);
+
+    // Mole fraction of water vapor (capped at the physical maximum of 1)
+    let x_v = (p_v / p_hpa).min(1.0);
 
     // Enhanced compressibility factor
-    let z = enhanced_compressibility_factor(pressure_hpa, t_k, x_v);
+    let z = enhanced_compressibility_factor(p_hpa, t_k, x_v);
 
     // Calculate density with enhanced precision
     // Note: parentheses are important here for correct operator precedence
-    let density = ((pressure_hpa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A));
+    let density = ((p_hpa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A));
 
     // Convert from SI units (pressure in Pa) to final density in kg/m³
     // pressure_hpa is in hPa, so multiply by 100 to get Pa
