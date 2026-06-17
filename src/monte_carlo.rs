@@ -36,11 +36,13 @@ pub fn solve_trajectory_for_monte_carlo(
     let muzzle_velocity_mps = inputs.muzzle_velocity; // m/s
     let mass_kg = inputs.bullet_mass; // kg
 
-    // Guard a non-positive target distance: los_y (and the wind segment / params.horiz)
-    // divide by target_distance_m, so 0/NaN/negative would yield a silently-NaN result that
-    // poisons mean/stddev/CEP aggregation. Engine default is 100 m.
-    if !(target_distance_m > 0.0) {
-        return Err("target_distance must be positive".to_string());
+    // Guard a non-finite or non-positive target distance: los_y (and the wind segment /
+    // params.horiz) divide by or scale with target_distance_m, so 0/NaN/negative/+inf would
+    // yield a silently-NaN-or-inf result that poisons mean/stddev/CEP aggregation. The
+    // is_finite() check also rejects +inf, which `> 0.0` alone lets through. Engine default
+    // is 100 m.
+    if !(target_distance_m.is_finite() && target_distance_m > 0.0) {
+        return Err("target_distance must be a positive, finite distance".to_string());
     }
 
     // Calculate atmosphere at altitude
