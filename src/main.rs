@@ -1,5 +1,11 @@
-// Allocator selection based on features
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+// Allocator selection based on features. jemalloc and mimalloc each define a #[global_allocator],
+// and a crate may have at most one — so when both features are enabled (e.g. `--all-features`,
+// which docs.rs uses by default) jemalloc yields to mimalloc to keep the build compiling.
+#[cfg(all(
+    feature = "jemalloc",
+    not(feature = "mimalloc"),
+    not(target_env = "msvc")
+))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
