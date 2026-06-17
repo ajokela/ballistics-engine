@@ -1721,7 +1721,7 @@ impl Calculator {
             velocity_fps: 2700.0,
             mass_grains: 168.0,
             diameter_inches: 0.308,
-            drag_model: "G7".to_string(),
+            drag_model: "G1".to_string(), // G1 matches the G1-scale default BC (0.475) and the CLI default
 
             wind_speed_mph: 0.0,
             wind_direction_deg: 90.0,
