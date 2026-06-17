@@ -222,12 +222,16 @@ fn find_in_directory(dir: &str, filename: &str) -> Option<std::path::PathBuf> {
 
 /// Truncate a string for header display, appending "..." if too long
 fn truncate_for_header(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
+    // Count/truncate by CHARACTERS, not bytes. The header concatenates user-controlled
+    // rifle/location names; byte-slicing a multi-byte UTF-8 string at an offset that isn't a
+    // char boundary panics. Identical output for ASCII (byte len == char count).
+    if s.chars().count() <= max_chars {
         s.to_string()
     } else if max_chars <= 3 {
-        s[..max_chars].to_string()
+        s.chars().take(max_chars).collect()
     } else {
-        format!("{}...", &s[..max_chars - 3])
+        let head: String = s.chars().take(max_chars - 3).collect();
+        format!("{head}...")
     }
 }
 
@@ -550,7 +554,8 @@ fn get_timestamp() -> String {
     }
 
     let day = remaining_days + 1;
-    let day_of_week = ((days_since_epoch + 4) % 7) as usize;
+    // The Unix epoch (1970-01-01) was a Thursday and day_names is Thursday-first, so no offset.
+    let day_of_week = (days_since_epoch % 7) as usize;
 
     let (hour_12, am_pm) = if hours == 0 {
         (12, "AM")

@@ -36,12 +36,27 @@ pub fn solve_trajectory_for_monte_carlo(
     let muzzle_velocity_mps = inputs.muzzle_velocity; // m/s
     let mass_kg = inputs.bullet_mass; // kg
 
-    // Calculate atmosphere at altitude
+    // Guard a non-finite or non-positive target distance: los_y (and the wind segment /
+    // params.horiz) divide by or scale with target_distance_m, so 0/NaN/negative/+inf would
+    // yield a silently-NaN-or-inf result that poisons mean/stddev/CEP aggregation. The
+    // is_finite() check also rejects +inf, which `> 0.0` alone lets through. Engine default
+    // is 100 m.
+    if !(target_distance_m.is_finite() && target_distance_m > 0.0) {
+        return Err("target_distance must be a positive, finite distance".to_string());
+    }
+
+    // Calculate atmosphere at altitude. resolve_station_pressure keeps an explicit station
+    // pressure authoritative (no altitude double-count) but returns None when pressure is left
+    // at the sea-level default, so altitude still drives the base density via the ICAO standard
+    // (this base_ratio feeds the fast/Monte-Carlo kernel's base_density). Matches calculate_air_density.
     let (air_density, speed_of_sound) = calculate_atmosphere(
         inputs.altitude, // meters
         Some(inputs.temperature),
-        Some(inputs.pressure),
-        inputs.humidity,
+        crate::atmosphere::resolve_station_pressure(inputs.pressure, inputs.altitude),
+        // BallisticInputs.humidity is a 0-1 fraction; calculate_atmosphere expects 0-100 percent
+        // (matching AtmosphericConditions.humidity). Passing the raw fraction under-applied
+        // humidity 100x.
+        (inputs.humidity * 100.0).clamp(0.0, 100.0),
     );
 
     // Create wind segments. WindSock expects (speed_kmh, angle_deg, until_distance_m);
@@ -102,6 +117,14 @@ pub fn solve_trajectory_for_monte_carlo(
     let final_idx = solution.t.len() - 1;
 
     let final_downrange = solution.y[0][final_idx]; // McCoy: X=downrange
+
+    // Exclude runs that did not reach the target distance (a short/steep/subsonic shot, or any
+    // residual time-budget truncation) instead of silently reporting their too-short impact
+    // metrics at the target downrange, which would poison the mean / stddev / CEP aggregation.
+    if final_downrange < target_distance_m * 0.999 {
+        return Err("trajectory did not reach target distance".to_string());
+    }
+
     let final_y = solution.y[1][final_idx]; // vertical
     let final_lateral = solution.y[2][final_idx]; // McCoy: Z=lateral drift
 
@@ -265,6 +288,9 @@ pub fn percentile(sorted_values: &[f64], p: f64) -> f64 {
         return sorted_values[0];
     }
 
+    // Clamp p to [0,1]: percentile is public (callable from ballistics_rust / FFI). p > 1 made
+    // upper_idx exceed the slice and panic; p < 0 silently returned a wrong value.
+    let p = p.clamp(0.0, 1.0);
     let rank = p * (sorted_values.len() - 1) as f64;
     let lower_idx = rank.floor() as usize;
     let upper_idx = rank.ceil() as usize;

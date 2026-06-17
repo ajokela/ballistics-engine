@@ -113,7 +113,10 @@ impl WasmBallistics {
 
         // Route to appropriate command handler
         match args[0] {
-            "version" => Ok("Ballistics Engine v0.4.2\nWASM Build\n".to_string()),
+            "version" => Ok(format!(
+                "Ballistics Engine v{}\nWASM Build\n",
+                env!("CARGO_PKG_VERSION")
+            )),
             "trajectory" => self.handle_trajectory_command(&args[1..], units),
             "zero" => self.handle_zero_command(&args[1..], units),
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
@@ -152,7 +155,9 @@ impl WasmBallistics {
         };
         let mut time_step = 0.001;
         let mut wind_speed = 0.0;
-        let mut wind_direction = 90.0;
+        // f64 is required: `wind_direction.to_radians()` below needs a known receiver
+        // type (method resolution can't infer it from the field assignment alone).
+        let mut wind_direction: f64 = 90.0;
         let mut temperature = default_temp;
         let mut pressure = default_pressure;
         let mut humidity = 50.0;
@@ -451,6 +456,10 @@ impl WasmBallistics {
                 inputs.target_height = target_height * 0.001; // mm to meters
             }
         }
+        // Derive bullet_length from diameter (4.5-caliber heuristic), mirroring the CLI and FFI.
+        // WASM otherwise left it at the struct default (~0.0343 m) regardless of --diameter,
+        // skewing the Miller Sg / enhanced spin drift / Magnus for non-default calibers.
+        inputs.bullet_length = inputs.bullet_diameter * 4.5;
 
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
@@ -488,6 +497,10 @@ impl WasmBallistics {
 
         // Set additional parameters
         if let Some(rate) = twist_rate {
+            // twist_rate is inches/turn for both unit systems: the --twist-rate help
+            // documents "inches per turn" unconditionally (unlike --sight-height, which
+            // says "inches/mm"), and the engine field, the native CLI flag, and the FFI
+            // struct all use inches/turn. So forward the raw value with no unit scaling.
             inputs.twist_rate = rate;
         }
         inputs.is_twist_right = twist_right;
@@ -521,7 +534,9 @@ impl WasmBallistics {
                 wind.speed = wind_speed; // already m/s
             }
         }
-        wind.direction = wind_direction;
+        // WindConditions.direction is RADIANS (0=North, PI/2=East); --wind-direction is degrees.
+        // Convert (matches native CLI); previously a 90-degree crosswind was fed as 90 radians.
+        wind.direction = wind_direction.to_radians();
 
         // Set atmospheric conditions
         let mut atmosphere = AtmosphericConditions::default();
@@ -550,7 +565,7 @@ impl WasmBallistics {
             match calculate_zero_angle_with_conditions(
                 inputs.clone(),
                 zero_distance_m,
-                inputs.target_height, // Use target height from inputs
+                inputs.muzzle_height + inputs.sight_height, // Zero crosses the line of sight (matches CLI)
                 wind.clone(),
                 atmosphere.clone(),
             ) {
@@ -621,12 +636,9 @@ impl WasmBallistics {
         } else {
             50.0
         };
-        let mut muzzle_height = if units == UnitSystem::Imperial {
-            60.0
-        } else {
-            1500.0
-        }; // inches or mm
-        let mut target_height = 0.0; // inches or mm
+        // The zero solve is a sight-angle calculation; heights above ground
+        // (--muzzle-height / --target-height) don't affect it, so they are intentionally
+        // not parsed here (passing them is silently ignored by the catch-all arm below).
         let mut drag_model = "G1";
 
         // Parse arguments
@@ -681,22 +693,6 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
-                "--muzzle-height" => {
-                    if i + 1 < args.len() {
-                        muzzle_height = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid muzzle height"))?;
-                        i += 1;
-                    }
-                }
-                "--target-height" => {
-                    if i + 1 < args.len() {
-                        target_height = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid target height"))?;
-                        i += 1;
-                    }
-                }
                 "--drag-model" => {
                     if i + 1 < args.len() {
                         drag_model = args[i + 1];
@@ -726,6 +722,8 @@ impl WasmBallistics {
                 inputs.sight_height = sight_height * 0.001;
             }
         }
+        // Derive bullet_length from diameter (mirrors CLI/FFI); WASM left it at the default.
+        inputs.bullet_length = inputs.bullet_diameter * 4.5;
 
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
@@ -807,6 +805,7 @@ impl WasmBallistics {
             0.5
         };
         let mut wind_dir_std = 5.0;
+        let mut drag_model = "G1";
 
         // Parse arguments
         let mut i = 0;
@@ -900,6 +899,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--drag-model" => {
+                    if i + 1 < args.len() {
+                        drag_model = args[i + 1];
+                        i += 1;
+                    }
+                }
                 _ => {}
             }
             i += 1;
@@ -922,7 +927,14 @@ impl WasmBallistics {
             }
         }
 
+        // Derive bullet_length from diameter (mirrors CLI/FFI); WASM left it at the default.
+        inputs.bullet_length = inputs.bullet_diameter * 4.5;
+
         inputs.bc_value = bc;
+        // Honor --drag-model (mirrors the trajectory/zero handlers); previously the Monte
+        // Carlo path silently always used the G1 default even when G7 was intended.
+        inputs.bc_type = DragModel::from_str(drag_model)
+            .ok_or_else(|| JsValue::from_str("Invalid drag model (expected G1 or G7)"))?;
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
 
         // Create Monte Carlo parameters
@@ -1603,7 +1615,9 @@ Trajectory Command:
     --enable-precession          Enable angular motion physics
     --use-euler                  Use Euler integration (less accurate)
     --use-rk4-fixed              Use fixed-step RK4 (default: adaptive RK45)
+    --time-step <SECONDS>        Integration time step (seconds) [default: 0.001]
     --sample-trajectory          Enable trajectory sampling
+    --sample-interval <DIST>     Trajectory sampling interval (yards/meters) [default: 10]
     --use-bc-segments            Use velocity-based BC
     --use-powder-sensitivity     Enable powder temp sensitivity
     
@@ -1616,7 +1630,7 @@ Trajectory Command:
     --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm)
     --target-height <HEIGHT>     Target height above ground (inches/mm)
     --powder-temp <TEMP>         Powder temperature
-    --powder-temp-sensitivity    Velocity change per degree
+    --powder-temp-sensitivity <SENS>  Velocity change per degree
 
 Zero Command:
   ballistics zero [OPTIONS]
@@ -1626,6 +1640,7 @@ Zero Command:
     -b, --bc <BC>                Ballistic coefficient
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
+    --drag-model <MODEL>         Drag model (G1/G7)
     --target-distance <DIST>     Target distance for zero
     --sight-height <HEIGHT>      Sight height above bore
 
@@ -1637,18 +1652,29 @@ Monte Carlo Command:
     -b, --bc <BC>                Base BC
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
+    --drag-model <MODEL>         Drag model (G1/G7)
     -n, --num-sims <N>           Number of simulations
     --velocity-std <STD>         Velocity std deviation
     --angle-std <STD>            Angle std deviation
     --bc-std <STD>               BC std deviation
     --wind-speed-std <STD>       Wind speed std deviation
-    --wind-dir-std <STD>         Wind direction std deviation
+    --wind-dir-std <STD>         Wind direction std deviation (not yet implemented)
+
+Estimate BC Command:
+  ballistics estimate-bc [OPTIONS]
+
+  Options:
+    -v, --velocity <VEL>         Muzzle velocity (fps/m/s)
+    -m, --mass <MASS>            Mass (grains/grams)
+    -d, --diameter <DIA>         Diameter (inches/mm)
+    --data <PAIRS>               Trajectory data: "dist,drop;..." (yd,in / m,mm)
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
   ballistics trajectory --auto-zero 200 --enable-spin-drift
   ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9
   ballistics zero --target-distance 300
+  ballistics estimate-bc -v 2700 -m 168 -d 0.308 --data "100,2.1;200,9.4;300,22.8"
   ballistics monte-carlo -n 1000 --velocity-std 10"#
             .to_string()
     }
@@ -1700,7 +1726,7 @@ impl Calculator {
             velocity_fps: 2700.0,
             mass_grains: 168.0,
             diameter_inches: 0.308,
-            drag_model: "G7".to_string(),
+            drag_model: "G1".to_string(), // G1 matches the G1-scale default BC (0.475) and the CLI default
 
             wind_speed_mph: 0.0,
             wind_direction_deg: 90.0,
@@ -2054,7 +2080,10 @@ impl Calculator {
                     if let Some(drop) = point.get("drop_inches").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"drop_inches".into(), &drop.into())?;
                     }
-                    if let Some(windage) = point.get("windage_inches").and_then(|v| v.as_f64()) {
+                    // The JSON producer emits "drift_inches"/"time_seconds"; read those (the old
+                    // "windage_inches"/"time_sec" lookups always missed, dropping both fields).
+                    // Keep the public output keys (windage_inches/time_sec) unchanged.
+                    if let Some(windage) = point.get("drift_inches").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"windage_inches".into(), &windage.into())?;
                     }
                     if let Some(velocity) = point.get("velocity_fps").and_then(|v| v.as_f64()) {
@@ -2063,7 +2092,7 @@ impl Calculator {
                     if let Some(energy) = point.get("energy_ftlb").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"energy_ftlb".into(), &energy.into())?;
                     }
-                    if let Some(time) = point.get("time_sec").and_then(|v| v.as_f64()) {
+                    if let Some(time) = point.get("time_seconds").and_then(|v| v.as_f64()) {
                         js_sys::Reflect::set(&js_point, &"time_sec".into(), &time.into())?;
                     }
 

@@ -209,8 +209,16 @@ impl Bc5dDownloader {
 
     /// Check if a table is cached for the given caliber
     pub fn is_cached(&self, caliber: f64) -> bool {
-        let caliber_key = (caliber * 1000.0).round() as i32;
-        let filename = format!("bc5d_{}.bin", caliber_key);
+        let caliber_key = format!("{}", (caliber * 1000.0).round() as i32);
+        // Resolve the filename the same way ensure_table does — prefer the manifest
+        // entry's `file` when a manifest is loaded — so is_cached and the real cache
+        // path cannot disagree. Falls back to the default name when no manifest is present.
+        let filename = self
+            .manifest
+            .as_ref()
+            .and_then(|m| m.tables.get(&caliber_key))
+            .map(|entry| entry.file.clone())
+            .unwrap_or_else(|| format!("bc5d_{}.bin", caliber_key));
         self.cache_dir.join(&filename).exists()
     }
 

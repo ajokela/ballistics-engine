@@ -19,6 +19,7 @@ typedef struct {
     double latitude;
     double azimuth_angle;
     int use_rk4;
+    int use_adaptive_rk45;
     int enable_wind_shear;
     int enable_trajectory_sampling;
     double sample_interval;
@@ -103,6 +104,7 @@ int main() {
         .latitude = 45.0,               // 45 degrees north
         .azimuth_angle = 0.0,
         .use_rk4 = 1,                   // Use RK4 integration
+        .use_adaptive_rk45 = 0,         // (must match FFIBallisticInputs field order)
         .enable_wind_shear = 1,         // Enable wind shear
         .enable_trajectory_sampling = 1, // Enable sampling
         .sample_interval = 50.0,        // Sample every 50 meters
