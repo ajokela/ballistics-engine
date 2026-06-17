@@ -263,7 +263,7 @@ impl clap::builder::TypedValueParser for F64RangeParser {
             );
             err
         })?;
-        if inner < self.min || inner > self.max {
+        if !inner.is_finite() || inner < self.min || inner > self.max {
             let mut err = clap::Error::new(clap::error::ErrorKind::ValueValidation);
             if let Some(a) = arg {
                 err.insert(
