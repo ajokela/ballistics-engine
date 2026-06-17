@@ -164,8 +164,8 @@ pub fn compute_derivatives(
         let mut drag_factor = get_drag_coefficient_full(
             mach,
             &inputs.bc_type,
-            true, // apply transonic correction
-            true, // apply Reynolds correction
+            false, // transonic applied exactly once below (was double-applied here + in block)
+            true,  // apply Reynolds correction
             None, // let it determine shape
             if inputs.caliber_inches > 0.0 {
                 Some(inputs.caliber_inches)
@@ -223,28 +223,21 @@ pub fn compute_derivatives(
         // Calculate density scaling
         let density_scale = air_density / STANDARD_AIR_DENSITY;
 
-        // Apply transonic correction if in transonic regime
-        let drag_factor = if mach > 0.7 && mach < 1.3 {
-            // Estimate projectile shape from parameters
-            let shape = crate::transonic_drag::get_projectile_shape(
-                inputs.caliber_inches, // inches
-                inputs.weight_grains,  // grains
-                &inputs.bc_type.to_string(),
-            );
-
-            // Apply transonic correction
-            let corrected_cd = crate::transonic_drag::transonic_correction(
-                mach,
-                drag_factor,
-                shape,
-                true, // include_wave_drag
-            );
-
-            // The drag_factor is already a coefficient, so we need to calculate the correction ratio
-            corrected_cd / drag_factor
-        } else {
-            1.0
-        } * drag_factor;
+        // Apply the transonic drag-rise correction exactly ONCE. The base Cd above is taken
+        // WITHOUT transonic correction (apply_transonic_correction=false), so this is the only
+        // application. Previously the correction was applied here AND inside
+        // get_drag_coefficient_full, which squared the drag-rise factor and double-counted wave
+        // drag across the transonic band (Cd ~3x too high near Mach 1). transonic_correction
+        // self-gates via the projectile's critical Mach (returns the input unchanged outside the
+        // band), and include_wave_drag=false matches cli_api::calculate_drag_coefficient — the
+        // G1/G7 tables already embed the transonic rise, so additive wave drag would double-count.
+        let shape = crate::transonic_drag::get_projectile_shape(
+            inputs.caliber_inches, // inches
+            inputs.weight_grains,  // grains
+            &inputs.bc_type.to_string(),
+        );
+        let drag_factor =
+            crate::transonic_drag::transonic_correction(mach, drag_factor, shape, false);
 
         // Apply Reynolds correction for low velocities
         let drag_factor = if mach < 1.0 && speed_air < 200.0 {
