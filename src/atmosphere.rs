@@ -193,12 +193,11 @@ pub fn calculate_atmosphere(
     // Gas constant for moist air
     let r_moist = R_AIR * (1.0 + 0.6078 * mole_fraction_vapor);
 
-    // Speed of sound with enhanced humidity correction
-    let speed_of_sound_base = (gamma_moist * r_moist * temp_c_abs).sqrt();
-
-    // Additional humidity correction for molecular effects
-    let humidity_correction = 1.0 + 0.0001 * humidity_clamped * (temp_c / 20.0);
-    let speed_of_sound = speed_of_sound_base * humidity_correction;
+    // Speed of sound in moist air (Cramer, 1993) — physics-based correction only. The
+    // gamma_moist / r_moist terms above already yield the correct humid speed of sound; the
+    // previous extra empirical humidity_correction factor double-counted the humidity effect
+    // (roughly doubling it), over-predicting the public speed_of_sound and the reported MC Mach.
+    let speed_of_sound = (gamma_moist * r_moist * temp_c_abs).sqrt();
 
     (density, speed_of_sound)
 }
