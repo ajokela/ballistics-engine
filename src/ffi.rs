@@ -4,7 +4,6 @@ use crate::{
     calculate_zero_angle_with_conditions, run_monte_carlo, AtmosphericConditions, BallisticInputs,
     DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
-use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 
@@ -681,8 +680,8 @@ pub extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarl
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
-    let version = CString::new("0.3.0").unwrap();
-    let ptr = version.as_ptr();
-    std::mem::forget(version);
-    ptr
+    // Return a pointer to a static NUL-terminated string (the caller must NOT free it).
+    // Previously this leaked a freshly-allocated CString on every call and reported a
+    // stale hardcoded "0.3.0"; use the real crate version with no allocation.
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
 }
