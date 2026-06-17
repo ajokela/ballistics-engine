@@ -489,10 +489,13 @@ pub extern "C" fn ballistics_monte_carlo(
     let inputs = unsafe { &*inputs };
     let params = unsafe { &*params };
 
-    // Reject a non-positive simulation count: num_simulations is a c_int (i32) cast
-    // straight to usize, so a negative value would wrap to a near-max usize and drive an
-    // unbounded loop / OOM. (n == 0 also yields NaN stats and a zero-size allocation.)
-    if params.num_simulations <= 0 {
+    // Reject an out-of-range simulation count. num_simulations is a c_int (i32) cast straight to
+    // usize: a negative value would wrap to a near-max usize, and even a large positive value (up
+    // to i32::MAX ~ 2.1e9) would drive billions of iterations with the result arrays scaling to
+    // match — an unbounded-loop / OOM DoS from a single FFI call. Bound it to a sane maximum.
+    // (n == 0 also yields NaN stats and a zero-size allocation.)
+    const MAX_SIMULATIONS: c_int = 1_000_000;
+    if params.num_simulations <= 0 || params.num_simulations > MAX_SIMULATIONS {
         return ptr::null_mut();
     }
 
