@@ -636,12 +636,9 @@ impl WasmBallistics {
         } else {
             50.0
         };
-        let mut muzzle_height = if units == UnitSystem::Imperial {
-            60.0
-        } else {
-            1500.0
-        }; // inches or mm
-        let mut target_height = 0.0; // inches or mm
+        // The zero solve is a sight-angle calculation; heights above ground
+        // (--muzzle-height / --target-height) don't affect it, so they are intentionally
+        // not parsed here (passing them is silently ignored by the catch-all arm below).
         let mut drag_model = "G1";
 
         // Parse arguments
@@ -693,22 +690,6 @@ impl WasmBallistics {
                         sight_height = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid sight height"))?;
-                        i += 1;
-                    }
-                }
-                "--muzzle-height" => {
-                    if i + 1 < args.len() {
-                        muzzle_height = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid muzzle height"))?;
-                        i += 1;
-                    }
-                }
-                "--target-height" => {
-                    if i + 1 < args.len() {
-                        target_height = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid target height"))?;
                         i += 1;
                     }
                 }
@@ -1634,7 +1615,9 @@ Trajectory Command:
     --enable-precession          Enable angular motion physics
     --use-euler                  Use Euler integration (less accurate)
     --use-rk4-fixed              Use fixed-step RK4 (default: adaptive RK45)
+    --time-step <SECONDS>        Integration time step (seconds) [default: 0.001]
     --sample-trajectory          Enable trajectory sampling
+    --sample-interval <DIST>     Trajectory sampling interval (yards/meters) [default: 10]
     --use-bc-segments            Use velocity-based BC
     --use-powder-sensitivity     Enable powder temp sensitivity
     
@@ -1647,7 +1630,7 @@ Trajectory Command:
     --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm)
     --target-height <HEIGHT>     Target height above ground (inches/mm)
     --powder-temp <TEMP>         Powder temperature
-    --powder-temp-sensitivity    Velocity change per degree
+    --powder-temp-sensitivity <SENS>  Velocity change per degree
 
 Zero Command:
   ballistics zero [OPTIONS]
@@ -1657,6 +1640,7 @@ Zero Command:
     -b, --bc <BC>                Ballistic coefficient
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
+    --drag-model <MODEL>         Drag model (G1/G7)
     --target-distance <DIST>     Target distance for zero
     --sight-height <HEIGHT>      Sight height above bore
 
@@ -1668,18 +1652,29 @@ Monte Carlo Command:
     -b, --bc <BC>                Base BC
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
+    --drag-model <MODEL>         Drag model (G1/G7)
     -n, --num-sims <N>           Number of simulations
     --velocity-std <STD>         Velocity std deviation
     --angle-std <STD>            Angle std deviation
     --bc-std <STD>               BC std deviation
     --wind-speed-std <STD>       Wind speed std deviation
-    --wind-dir-std <STD>         Wind direction std deviation
+    --wind-dir-std <STD>         Wind direction std deviation (not yet implemented)
+
+Estimate BC Command:
+  ballistics estimate-bc [OPTIONS]
+
+  Options:
+    -v, --velocity <VEL>         Muzzle velocity (fps/m/s)
+    -m, --mass <MASS>            Mass (grains/grams)
+    -d, --diameter <DIA>         Diameter (inches/mm)
+    --data <PAIRS>               Trajectory data: "dist,drop;..." (yd,in / m,mm)
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
   ballistics trajectory --auto-zero 200 --enable-spin-drift
   ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9
   ballistics zero --target-distance 300
+  ballistics estimate-bc -v 2700 -m 168 -d 0.308 --data "100,2.1;200,9.4;300,22.8"
   ballistics monte-carlo -n 1000 --velocity-std 10"#
             .to_string()
     }
