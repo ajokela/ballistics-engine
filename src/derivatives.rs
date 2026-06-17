@@ -246,9 +246,23 @@ pub fn compute_derivatives(
         // self-gates via the projectile's critical Mach (returns the input unchanged outside the
         // band), and include_wave_drag=false matches cli_api::calculate_drag_coefficient — the
         // G1/G7 tables already embed the transonic rise, so additive wave drag would double-count.
+        // Use the same SI fallbacks as the get_drag_coefficient_full call above (and
+        // fast_trajectory): an SI-only caller may leave caliber_inches/weight_grains at 0, so
+        // derive them from the SI bullet_diameter/bullet_mass rather than feeding zeros into
+        // get_projectile_shape (which would mis-classify the shape via weight/caliber).
+        let caliber_in = if inputs.caliber_inches > 0.0 {
+            inputs.caliber_inches
+        } else {
+            inputs.bullet_diameter / 0.0254 // meters -> inches
+        };
+        let weight_gr = if inputs.weight_grains > 0.0 {
+            inputs.weight_grains
+        } else {
+            inputs.bullet_mass / 0.00006479891 // kg -> grains
+        };
         let shape = crate::transonic_drag::get_projectile_shape(
-            inputs.caliber_inches, // inches
-            inputs.weight_grains,  // grains
+            caliber_in,
+            weight_gr,
             &inputs.bc_type.to_string(),
         );
         let drag_factor =
