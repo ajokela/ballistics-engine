@@ -1861,21 +1861,19 @@ pub fn estimate_bc_from_trajectory(
 
 // Helper function to calculate air density
 fn calculate_air_density(atmosphere: &AtmosphericConditions) -> f64 {
-    // Simplified air density calculation
-    // P / (R * T) where R is specific gas constant for dry air
-    let r_specific = 287.058; // J/(kg·K)
-    let temperature_k = atmosphere.temperature + 273.15;
-
-    // Convert pressure from hPa to Pa
-    let pressure_pa = atmosphere.pressure * 100.0;
-
-    // Basic density calculation
-    let density = pressure_pa / (r_specific * temperature_k);
-
-    // Altitude correction (simplified)
-    let altitude_factor = (-atmosphere.altitude / 8000.0).exp();
-
-    density * altitude_factor
+    // Use the shared atmosphere model so ALL solvers agree on air density. The pressure field
+    // is the user's STATION pressure (already altitude-reduced), so the previous body's extra
+    // exp(-altitude/8000) factor double-counted altitude, and it ignored humidity entirely —
+    // disagreeing with calculate_atmosphere (used by the Monte Carlo / fast path). With both
+    // temperature and pressure provided, calculate_atmosphere applies no extra altitude factor
+    // (station pressure is authoritative) and DOES apply humidity (0-100, matching the field).
+    crate::atmosphere::calculate_atmosphere(
+        atmosphere.altitude,
+        Some(atmosphere.temperature),
+        Some(atmosphere.pressure),
+        atmosphere.humidity,
+    )
+    .0
 }
 
 // Add rand dependencies for Monte Carlo
