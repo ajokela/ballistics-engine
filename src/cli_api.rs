@@ -1862,15 +1862,15 @@ pub fn estimate_bc_from_trajectory(
 // Helper function to calculate air density
 fn calculate_air_density(atmosphere: &AtmosphericConditions) -> f64 {
     // Use the shared atmosphere model so ALL solvers agree on air density. An explicitly-set
-    // pressure is the user's STATION pressure (already altitude-reduced), so the previous body's
-    // extra exp(-altitude/8000) factor double-counted altitude, and it ignored humidity entirely.
-    // resolve_station_pressure passes a real station pressure through unchanged (no double-count),
-    // but when pressure is left at the sea-level default it returns None so altitude still drives
-    // density via the ICAO standard — otherwise `--altitude` alone (no `--pressure`) silently gave
-    // sea-level density. Humidity (0-100) is always applied.
+    // pressure/temperature is authoritative; the previous body's extra exp(-altitude/8000) factor
+    // double-counted altitude and ignored humidity. resolve_station_pressure / _temperature pass
+    // explicit values through unchanged, but when either is left at its sea-level default they
+    // return None so altitude drives BOTH the station pressure AND the lapse-rate temperature via
+    // the ICAO standard — otherwise `--altitude` alone gave sea-level density (and, with only the
+    // pressure derived, still 15 °C air, ~7% too thin at 3 km). Humidity (0-100) is always applied.
     crate::atmosphere::calculate_atmosphere(
         atmosphere.altitude,
-        Some(atmosphere.temperature),
+        crate::atmosphere::resolve_station_temperature(atmosphere.temperature, atmosphere.altitude),
         crate::atmosphere::resolve_station_pressure(atmosphere.pressure, atmosphere.altitude),
         atmosphere.humidity,
     )
