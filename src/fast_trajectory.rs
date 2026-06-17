@@ -154,7 +154,15 @@ pub fn fast_integrate(
     // calculate_atmosphere). Previously this called get_local_atmosphere with query alt 0.0
     // while base_alt = shooter altitude, which re-scaled that ratio DOWN to sea level —
     // discarding the correct altitude density and inflating drag for every elevated MC run.
-    let base_density = params.atmo_params.3 * 1.225;
+    // Guard a missing/absent ratio (base_ratio <= 0, e.g. legacy or uninitialized atmo_params):
+    // fall back to the standard sea-level density rather than 0, so a zero ratio cannot collapse
+    // density_scale to 0 and silently disable drag entirely. (atmo_params.0 is base_alt here, not
+    // a density, so it is not a usable fallback.)
+    let base_density = if params.atmo_params.3 > 0.0 {
+        params.atmo_params.3 * 1.225
+    } else {
+        1.225 // standard sea-level air density (kg/m^3)
+    };
 
     // Integration loop
     let mut hit_target = false;
