@@ -155,7 +155,9 @@ impl WasmBallistics {
         };
         let mut time_step = 0.001;
         let mut wind_speed = 0.0;
-        let mut wind_direction = 90.0;
+        // f64 is required: `wind_direction.to_radians()` below needs a known receiver
+        // type (method resolution can't infer it from the field assignment alone).
+        let mut wind_direction: f64 = 90.0;
         let mut temperature = default_temp;
         let mut pressure = default_pressure;
         let mut humidity = 50.0;
@@ -495,12 +497,11 @@ impl WasmBallistics {
 
         // Set additional parameters
         if let Some(rate) = twist_rate {
-            // inputs.twist_rate is inches/turn; convert metric mm/turn -> inches/turn
-            // (matches native CLI). Without this, a metric 254 mm/turn was read as 254 in/turn.
-            inputs.twist_rate = match units {
-                UnitSystem::Imperial => rate,
-                UnitSystem::Metric => rate / 25.4,
-            };
+            // twist_rate is inches/turn for both unit systems: the --twist-rate help
+            // documents "inches per turn" unconditionally (unlike --sight-height, which
+            // says "inches/mm"), and the engine field, the native CLI flag, and the FFI
+            // struct all use inches/turn. So forward the raw value with no unit scaling.
+            inputs.twist_rate = rate;
         }
         inputs.is_twist_right = twist_right;
         if let Some(lat) = latitude {
