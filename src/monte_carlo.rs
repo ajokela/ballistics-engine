@@ -36,6 +36,13 @@ pub fn solve_trajectory_for_monte_carlo(
     let muzzle_velocity_mps = inputs.muzzle_velocity; // m/s
     let mass_kg = inputs.bullet_mass; // kg
 
+    // Guard a non-positive target distance: los_y (and the wind segment / params.horiz)
+    // divide by target_distance_m, so 0/NaN/negative would yield a silently-NaN result that
+    // poisons mean/stddev/CEP aggregation. Engine default is 100 m.
+    if !(target_distance_m > 0.0) {
+        return Err("target_distance must be positive".to_string());
+    }
+
     // Calculate atmosphere at altitude
     let (air_density, speed_of_sound) = calculate_atmosphere(
         inputs.altitude, // meters
