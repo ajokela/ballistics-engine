@@ -127,16 +127,15 @@ pub fn fast_integrate(
         0.0001
     };
 
-    // Maximum time based on estimated flight time
-    let v0 = Vector3::new(
-        params.initial_state[3],
-        params.initial_state[4],
-        params.initial_state[5],
-    )
-    .norm();
-
-    let t_max = if v0 > 1e-6 && params.horiz > 0.0 {
-        (2.0 * params.horiz / v0).min(params.t_span.1)
+    // Maximum integration time. This only bounds the step-array pre-allocation; the
+    // hit_target / hit_ground early-breaks below terminate the loop for real shots. Estimate the
+    // flight time from the HORIZONTAL velocity with a 4x margin: the previous 2x estimate using
+    // the FULL muzzle speed truncated long-range trajectories once drag slowed the bullet (real
+    // time of flight to the target far exceeds horiz/v0), so Monte Carlo reported impact metrics
+    // at a too-short downrange.
+    let vx = params.initial_state[3]; // horizontal (downrange) velocity
+    let t_max = if vx > 1e-6 && params.horiz > 0.0 {
+        (4.0 * params.horiz / vx).min(params.t_span.1)
     } else {
         params.t_span.1
     };
