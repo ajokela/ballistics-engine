@@ -972,6 +972,15 @@ impl TrajectorySolver {
         let mut iteration_count = 0;
         const MAX_ITERATIONS: usize = 100000;
 
+        // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
+        // are immutable); compute once instead of every iteration (mirrors solve_rk4).
+        let air_density = calculate_air_density(&self.atmosphere);
+        let wind_vector = Vector3::new(
+            self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
+            0.0,
+            self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
+        );
+
         while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
             && time < 100.0
@@ -997,15 +1006,7 @@ impl TrajectorySolver {
                 max_height = position.y;
             }
 
-            // Wind (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
-            let air_density = calculate_air_density(&self.atmosphere);
-            let wind_vector = Vector3::new(
-                self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
-                0.0,
-                self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
-            );
-
-            // RK45 step with adaptive step size
+            // RK45 step with adaptive step size (air_density / wind_vector hoisted above)
             let (new_pos, new_vel, new_dt) = self.rk45_step(
                 &position,
                 &velocity,
@@ -1015,13 +1016,16 @@ impl TrajectorySolver {
                 tolerance,
             );
 
-            // Update step size with safety factor and bounds
-            dt = (safety_factor * new_dt).clamp(min_dt, max_dt);
-
-            // Update state
+            // Advance state and time by the dt actually used for THIS step. (Previously dt
+            // was overwritten with the adapted next-step size BEFORE `time += dt`, so every
+            // reported time advanced by the NEXT step's dt — desyncing time from state and
+            // corrupting time_of_flight and per-point / sampled times.)
             position = new_pos;
             velocity = new_vel;
             time += dt;
+
+            // Adapt the step size for the NEXT iteration.
+            dt = (safety_factor * new_dt).clamp(min_dt, max_dt);
         }
 
         // Ensure we have at least one point
@@ -1373,6 +1377,20 @@ impl TrajectorySolver {
         // Get drag coefficient from the drag tables (Mach-indexed)
         let base_cd = crate::drag::get_drag_coefficient(mach, &self.inputs.bc_type);
 
+        // Borrowed &'static str for the drag-model name. bc_type.to_string() goes through
+        // Debug and heap-allocates a String on every call; this match is bit-identical
+        // (Display == Debug == variant name) with no per-step allocation.
+        let bc_type_str: &str = match self.inputs.bc_type {
+            crate::DragModel::G1 => "G1",
+            crate::DragModel::G2 => "G2",
+            crate::DragModel::G5 => "G5",
+            crate::DragModel::G6 => "G6",
+            crate::DragModel::G7 => "G7",
+            crate::DragModel::G8 => "G8",
+            crate::DragModel::GI => "GI",
+            crate::DragModel::GS => "GS",
+        };
+
         // Determine projectile shape for transonic corrections
         let projectile_shape = if let Some(ref model) = self.inputs.bullet_model {
             // Try to determine shape from bullet model string
@@ -1388,7 +1406,7 @@ impl TrajectorySolver {
                 get_projectile_shape(
                     self.inputs.bullet_diameter,
                     self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
-                    &self.inputs.bc_type.to_string(),
+                    bc_type_str,
                 )
             }
         } else {
@@ -1396,7 +1414,7 @@ impl TrajectorySolver {
             get_projectile_shape(
                 self.inputs.bullet_diameter,
                 self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
-                &self.inputs.bc_type.to_string(),
+                bc_type_str,
             )
         };
 
