@@ -275,7 +275,9 @@ pub fn compute_derivatives(
             crate::reynolds::apply_reynolds_correction(
                 drag_factor,
                 speed_air,
-                inputs.caliber_inches, // inches (apply_reynolds_correction converts to meters internally)
+                caliber_in, // inches, with SI fallback (shared with the transonic block above);
+                // apply_reynolds_correction converts to meters internally. SI-only callers leave
+                // caliber_inches at 0, which would otherwise feed 0 into the Reynolds calc.
                 air_density,
                 temperature_c,
                 mach,
