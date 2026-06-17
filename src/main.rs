@@ -4912,7 +4912,11 @@ fn run_bc_estimation(
         ..Default::default()
     };
 
-    let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+    let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+    // Bound the verification range like the estimator does (estimate_bc_from_trajectory caps at
+    // last_point * 1.5); the solver default of 1000 m otherwise gives a bogus 100% error for
+    // long-range inputs (no point reaches distance2, so calc_drop2 falls back to 0.0). Metric.
+    solver.set_max_range(distance1.max(distance2) * 1.5);
     let trajectory = solver.solve()?;
 
     // Find drops at the specified distances (X is downrange)
@@ -6157,6 +6161,14 @@ fn handle_stability(
     let min_twist_1_5 = find_twist_for_sg(1.5);
     let min_twist_1_0 = find_twist_for_sg(1.0);
 
+    // min_twist_* are in INCHES (compute_stability_coefficient treats twist_rate as inches/turn);
+    // convert to mm for metric so the JSON/CSV values match their labeled unit (the Table path
+    // already converts). Imperial is unchanged.
+    let (min15_out, min10_out) = match units {
+        UnitSystem::Imperial => (min_twist_1_5, min_twist_1_0),
+        UnitSystem::Metric => (min_twist_1_5 * 25.4, min_twist_1_0 * 25.4),
+    };
+
     // Display units
     let (len_unit, vel_unit, twist_display, min15_display, min10_display) = match units {
         UnitSystem::Imperial => (
@@ -6182,8 +6194,8 @@ fn handle_stability(
                 "status": status,
                 "twist_rate": twist_rate,
                 "twist_rate_unit": if units == UnitSystem::Imperial { "in/turn" } else { "mm/turn" },
-                "min_twist_sg_1_5": (min_twist_1_5 * 100.0).round() / 100.0,
-                "min_twist_sg_1_0": (min_twist_1_0 * 100.0).round() / 100.0,
+                "min_twist_sg_1_5": (min15_out * 100.0).round() / 100.0,
+                "min_twist_sg_1_0": (min10_out * 100.0).round() / 100.0,
                 "bullet_length": length,
                 "bullet_diameter": diameter,
                 "bullet_mass": mass,
@@ -6195,7 +6207,7 @@ fn handle_stability(
         OutputFormat::Csv => {
             println!("sg,status,twist_rate,min_twist_sg1.5,min_twist_sg1.0,length,velocity");
             println!("{:.2},{},{:.1},{:.1},{:.1},{:.3},{:.0}",
-                     sg, status, twist_rate, min_twist_1_5, min_twist_1_0, length, velocity);
+                     sg, status, twist_rate, min15_out, min10_out, length, velocity);
         }
         OutputFormat::Table | OutputFormat::Pdf => {
             println!();
