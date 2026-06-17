@@ -8,7 +8,7 @@ use crate::trajectory_sampling::{
     sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample,
 };
 use crate::transonic_drag::{get_projectile_shape, transonic_correction, ProjectileShape};
-use crate::wind_shear::{WindLayer, WindShearModel, WindShearProfile};
+use crate::wind_shear::WindShearModel;
 use crate::DragModel;
 use nalgebra::Vector3;
 use std::error::Error;
@@ -362,28 +362,26 @@ impl TrajectorySolver {
     }
 
     fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {
-        // Create wind shear profile based on surface wind
-        let profile = WindShearProfile {
-            model: if self.inputs.wind_shear_model == "logarithmic" {
-                WindShearModel::Logarithmic
-            } else if self.inputs.wind_shear_model == "power" {
-                WindShearModel::PowerLaw
-            } else {
-                WindShearModel::PowerLaw // Default to power law
-            },
-            surface_wind: WindLayer {
-                altitude_m: 0.0,
-                speed_mps: self.wind.speed,
-                direction_deg: self.wind.direction.to_degrees(),
-            },
-            reference_height: 10.0, // Standard meteorological measurement height
-            roughness_length: 0.03, // Short grass
-            power_exponent: 1.0 / 7.0, // Neutral stability
-            geostrophic_wind: None,
-            custom_layers: Vec::new(),
+        // Scale the operative surface wind by the boundary-layer multiplier. `altitude_m` is the
+        // bullet's height relative to the muzzle (McCoy Y). The multiplier is floored at 1.0, so
+        // flat-fire trajectories keep ~full wind and only high-arcing shots see increased wind.
+        //
+        // We build the vector with THIS solver's non-shear sign convention (X=+cos, Z=+sin; see
+        // the `wind_vector` used in solve_rk4/solve_euler) and scale it, so that "shear on" equals
+        // "shear off" * ratio (ratio == 1.0 for flat fire). The previous code both attenuated the
+        // wind near the line of sight and flipped its sign relative to the non-shear path.
+        let model = if self.inputs.wind_shear_model == "logarithmic" {
+            WindShearModel::Logarithmic
+        } else {
+            WindShearModel::PowerLaw // default to power law
         };
+        let speed_ratio = crate::wind_shear::boundary_layer_speed_ratio(altitude_m, model);
 
-        profile.get_wind_at_altitude(altitude_m)
+        Vector3::new(
+            self.wind.speed * self.wind.direction.cos() * speed_ratio, // X: downrange head/tail
+            0.0,
+            self.wind.speed * self.wind.direction.sin() * speed_ratio, // Z: lateral crosswind
+        )
     }
 
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
