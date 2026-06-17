@@ -27,7 +27,11 @@ pub fn calculate_aerodynamic_jump(
     initial_yaw_rad: f64,
     air_density_kg_m3: f64,
 ) -> AerodynamicJumpComponents {
-    if muzzle_velocity_mps <= 0.0 || caliber_m <= 0.0 || twist_rate_calibers <= 0.0 {
+    if muzzle_velocity_mps <= 0.0
+        || caliber_m <= 0.0
+        || mass_kg <= 0.0
+        || twist_rate_calibers <= 0.0
+    {
         return AerodynamicJumpComponents {
             vertical_jump_moa: 0.0,
             horizontal_jump_moa: 0.0,
