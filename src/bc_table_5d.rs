@@ -175,8 +175,17 @@ impl Bc5dTable {
         let muzzle_vel_bins = read_f32_array(&mut reader, dim_muzzle_vel)?;
         let current_vel_bins = read_f32_array(&mut reader, dim_current_vel)?;
 
-        // Read data section
-        let total_cells = dim_drag_types * dim_weight * dim_bc * dim_muzzle_vel * dim_current_vel;
+        // Read data section. Bound the product with checked arithmetic so a corrupt or
+        // hostile file cannot overflow (debug panic / release wrap) or trigger a huge OOM
+        // allocation before the trailing CRC check can reject it.
+        const MAX_TOTAL_CELLS: usize = 64_000_000; // ~256 MB of f32; far above any real table
+        let total_cells = dim_drag_types
+            .checked_mul(dim_weight)
+            .and_then(|x| x.checked_mul(dim_bc))
+            .and_then(|x| x.checked_mul(dim_muzzle_vel))
+            .and_then(|x| x.checked_mul(dim_current_vel))
+            .filter(|&n| n <= MAX_TOTAL_CELLS)
+            .ok_or(Bc5dError::InvalidDimensions)?;
         let data = read_f32_array(&mut reader, total_cells)?;
 
         // Verify checksum (CRC32 of bins + data)
@@ -546,8 +555,20 @@ fn read_f32<R: Read>(reader: &mut R) -> Result<f32, std::io::Error> {
 }
 
 fn read_f32_array<R: Read>(reader: &mut R, count: usize) -> Result<Vec<f32>, std::io::Error> {
+    // Defensive bounds: reject absurd lengths from corrupt/hostile files before
+    // allocating, and guard the byte-count multiply against overflow.
+    const MAX_ELEMS: usize = 64_000_000; // 256 MB of f32
+    if count > MAX_ELEMS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "f32 array length too large",
+        ));
+    }
+    let byte_len = count.checked_mul(4).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "f32 array length overflow")
+    })?;
     let mut data = vec![0f32; count];
-    let mut buf = vec![0u8; count * 4];
+    let mut buf = vec![0u8; byte_len];
     reader.read_exact(&mut buf)?;
 
     for (i, chunk) in buf.chunks_exact(4).enumerate() {
