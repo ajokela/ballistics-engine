@@ -272,6 +272,9 @@ pub fn percentile(sorted_values: &[f64], p: f64) -> f64 {
         return sorted_values[0];
     }
 
+    // Clamp p to [0,1]: percentile is public (callable from ballistics_rust / FFI). p > 1 made
+    // upper_idx exceed the slice and panic; p < 0 silently returned a wrong value.
+    let p = p.clamp(0.0, 1.0);
     let rank = p * (sorted_values.len() - 1) as f64;
     let lower_idx = rank.floor() as usize;
     let upper_idx = rank.ceil() as usize;
