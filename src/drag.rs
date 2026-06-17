@@ -58,14 +58,14 @@ impl DragTable {
             return self.cd_values[n - 1];
         }
 
-        // Find the segment containing the mach value
-        let mut idx = 0;
-        for i in 0..n - 1 {
-            if mach >= self.mach_values[i] && mach <= self.mach_values[i + 1] {
-                idx = i;
-                break;
-            }
-        }
+        // Find the segment containing the mach value. Binary search over the
+        // strictly-ascending mach axis; bit-identical to the previous linear scan
+        // (first segment [i, i+1] with m[i] <= mach <= m[i+1]) but O(log n).
+        let idx = self
+            .mach_values
+            .partition_point(|&m| m < mach)
+            .saturating_sub(1)
+            .min(n - 2);
 
         // Use cubic interpolation if we have enough points, otherwise linear
         if idx > 0 && idx < n - 2 {
