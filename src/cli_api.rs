@@ -608,6 +608,16 @@ impl TrajectorySolver {
                 * velocity_rel_mag
                 * velocity_rel_mag;
 
+            // Guard ~zero relative velocity (e.g. muzzle velocity 0): dividing each component
+            // by velocity_rel_mag below would be 0/0 = NaN. Mirror calculate_acceleration (the
+            // RK4/RK45 path) and take a gravity-only step. Inert for real trajectories.
+            if velocity_rel_mag < 0.001 {
+                velocity += Vector3::new(0.0, -9.80665, 0.0) * self.time_step;
+                position += velocity * self.time_step;
+                time += self.time_step;
+                continue;
+            }
+
             // Calculate acceleration
             let drag_acceleration = -drag_force / self.inputs.bullet_mass;
             let acceleration = Vector3::new(
@@ -1742,9 +1752,11 @@ pub fn calculate_zero_angle_with_conditions(
                         // Height error within 10mm - acceptable for practical use
                         return Ok(mid_angle);
                     }
-                    // Angle converged but height error too large - this shouldn't happen
-                    // with proper tolerance values, but return best effort
-                    return Ok(mid_angle);
+                    // Angle bracket collapsed but the height error is still too large: the
+                    // target is not actually reachable / was never bracketed. Returning
+                    // Ok(mid_angle) here reported a NOT-zeroed angle as success (callers use
+                    // it directly as muzzle_angle); surface it as an error instead.
+                    return Err("Zero angle did not converge: residual height error too large (target not reachable / not bracketed)".into());
                 }
 
                 if error > 0.0 {
