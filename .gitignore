@@ -98,3 +98,16 @@ data/bc_corrections_transonic.bin
 # BC5D binary tables (large files, downloaded separately)
 data/bc_tables/*.bin
 glenn_update_bc5d.md
+
+# Mobile build artifacts — compiled outputs, not version-controlled.
+# (These ~169MB of committed .a/xcframework binaries bloated the GitHub source
+# archive to 61MB and broke the binary build farm's downloads; regenerate as needed.)
+/app/src/main/jniLibs/
+/BallisticsEngine.xcframework/
+/BallisticsEngine.xcframework.bak/
+
+# Stale prebuilt release binaries (served from ballistics.zip / GCS, not git)
+/releases/
+
+# Stray compiled test executable (source is tests/test_units.rs)
+/tests/test_units
