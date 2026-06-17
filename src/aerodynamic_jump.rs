@@ -81,12 +81,15 @@ pub fn calculate_aerodynamic_jump(
     // Total effective time
     let effective_time = exit_time + stabilization_time;
 
-    // Calculate jump displacement
-    let vertical_sign = if is_right_twist {
+    // Calculate jump displacement. Direction comes from the crosswind, falling back to the yaw
+    // direction when there is no crosswind — signum(0.0) == +1.0 would otherwise impose a phantom
+    // positive direction for pure-yaw (no-wind) inputs.
+    let dir_sign = if crosswind_mps != 0.0 {
         crosswind_mps.signum()
     } else {
-        -crosswind_mps.signum()
+        total_yaw_rad.signum()
     };
+    let vertical_sign = if is_right_twist { dir_sign } else { -dir_sign };
 
     // Magnus acceleration
     let magnus_accel = magnus_force / mass_kg;
