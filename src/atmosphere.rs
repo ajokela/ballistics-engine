@@ -118,6 +118,30 @@ fn calculate_icao_standard_atmosphere(altitude_m: f64) -> (f64, f64) {
     (temperature, pressure)
 }
 
+/// Resolve the station-pressure override for an air-density calculation.
+///
+/// Altitude and pressure are redundant inputs for density. The rule:
+/// * An explicitly-supplied pressure is the authoritative STATION pressure (already
+///   altitude-reduced); it is returned as `Some` and used directly, so altitude is NOT
+///   double-counted.
+/// * When pressure is left at the sea-level standard default (≈1013.25 hPa) while a real
+///   altitude is given, the caller meant "standard atmosphere at this altitude": return
+///   `None` so [`calculate_atmosphere`] derives the station pressure from altitude (ICAO
+///   standard) instead of silently using sea-level density.
+///
+/// Without this, `--altitude` with the default pressure produced sea-level density (altitude
+/// had no effect on drag). The ±0.5 hPa tolerance covers the `29.92 inHg ≈ 1013.21 hPa`
+/// conversion, and `>1 m` avoids triggering at sea level. (Mirrors the existing
+/// `pressure != 29.92` "user override" sentinel used elsewhere in the CLI.)
+pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f64> {
+    const SEA_LEVEL_HPA: f64 = 1013.25;
+    if (pressure_hpa - SEA_LEVEL_HPA).abs() < 0.5 && altitude_m.abs() > 1.0 {
+        None // pressure left at default + real altitude → derive station pressure from altitude
+    } else {
+        Some(pressure_hpa) // explicit station pressure is authoritative
+    }
+}
+
 /// Enhanced atmospheric calculation with ICAO Standard Atmosphere.
 ///
 /// # Arguments
@@ -425,6 +449,39 @@ mod tests {
         let (density, speed) = calculate_atmosphere(0.0, None, None, 0.0);
         assert!((density - 1.225).abs() < 0.01);
         assert!((speed - 340.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_resolve_station_pressure_contract() {
+        // Default sea-level pressure + real altitude => derive from altitude (None).
+        assert_eq!(resolve_station_pressure(1013.25, 2000.0), None);
+        // 29.92 inHg ≈ 1013.21 hPa is also treated as the default (within tolerance).
+        assert_eq!(resolve_station_pressure(1013.21, 2000.0), None);
+        // An explicit, non-default station pressure is authoritative (Some, used directly).
+        assert_eq!(resolve_station_pressure(850.0, 2000.0), Some(850.0));
+        // At/near sea level the default is used directly (no derivation needed).
+        assert_eq!(resolve_station_pressure(1013.25, 0.0), Some(1013.25));
+    }
+
+    #[test]
+    fn test_altitude_affects_density_with_default_pressure() {
+        // Regression: with the default pressure, altitude MUST lower density (previously the
+        // air-density path ignored altitude whenever pressure was the sea-level default).
+        let press = resolve_station_pressure(1013.25, 0.0);
+        let (rho_sea, _) = calculate_atmosphere(0.0, Some(15.0), press, 50.0);
+        let press_alt = resolve_station_pressure(1013.25, 2000.0);
+        let (rho_2km, _) = calculate_atmosphere(2000.0, Some(15.0), press_alt, 50.0);
+        assert!(
+            rho_2km < rho_sea * 0.9,
+            "density at 2000 m ({rho_2km}) should be well below sea level ({rho_sea})"
+        );
+
+        // But an explicit station pressure stays authoritative (no altitude double-count):
+        // density with an explicit pressure is independent of the altitude field.
+        let p = resolve_station_pressure(900.0, 2000.0);
+        let (rho_a, _) = calculate_atmosphere(2000.0, Some(15.0), p, 50.0);
+        let (rho_b, _) = calculate_atmosphere(0.0, Some(15.0), p, 50.0);
+        assert!((rho_a - rho_b).abs() < 1e-9, "explicit pressure must ignore altitude");
     }
 
     #[test]

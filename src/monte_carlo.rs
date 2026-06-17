@@ -45,11 +45,14 @@ pub fn solve_trajectory_for_monte_carlo(
         return Err("target_distance must be a positive, finite distance".to_string());
     }
 
-    // Calculate atmosphere at altitude
+    // Calculate atmosphere at altitude. resolve_station_pressure keeps an explicit station
+    // pressure authoritative (no altitude double-count) but returns None when pressure is left
+    // at the sea-level default, so altitude still drives the base density via the ICAO standard
+    // (this base_ratio feeds the fast/Monte-Carlo kernel's base_density). Matches calculate_air_density.
     let (air_density, speed_of_sound) = calculate_atmosphere(
         inputs.altitude, // meters
         Some(inputs.temperature),
-        Some(inputs.pressure),
+        crate::atmosphere::resolve_station_pressure(inputs.pressure, inputs.altitude),
         // BallisticInputs.humidity is a 0-1 fraction; calculate_atmosphere expects 0-100 percent
         // (matching AtmosphericConditions.humidity). Passing the raw fraction under-applied
         // humidity 100x.
