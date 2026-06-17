@@ -162,8 +162,11 @@ impl BcCorrectionTable {
     /// # Returns
     /// Correction factor (multiply published BC by this value)
     pub fn lookup(&self, bc: f64, bc_type: &str, mass: f64, length: f64, velocity: f64) -> f64 {
-        // Get type index (0 = G1, 1 = G7)
-        let type_idx = if bc_type.to_uppercase() == "G1" { 0 } else { 1 };
+        // Get type index (0 = G1, 1 = G7), clamped to the table's type axis so a
+        // G1-only table (num_types == 1) queried with "G7" stays in bounds instead of
+        // producing an out-of-range flat_index (mirrors Bc5dTable::lookup).
+        let type_idx =
+            (if bc_type.to_uppercase() == "G1" { 0 } else { 1 }).min(self.num_types.saturating_sub(1));
 
         // Find interpolation indices and weights for each dimension
         let (bc_idx, bc_weight) = self.interp_idx(bc as f32, &self.bc_bins);
@@ -192,7 +195,9 @@ impl BcCorrectionTable {
 
                         // Calculate flat index
                         let idx = self.flat_index(type_idx, i, j, k, l);
-                        // Bounds-safe access (defense-in-depth); in-bounds for valid tables.
+                        // Bounds-safe access (true defense-in-depth): the continuous axes are
+                        // clamped above and type_idx is clamped to num_types, so idx is always
+                        // in bounds for any valid table; the unwrap_or only guards corrupt data.
                         result += w * self.data.get(idx).copied().unwrap_or(0.0) as f64;
                     }
                 }
