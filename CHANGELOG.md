@@ -5,6 +5,47 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-06-17
+
+An autonomous adversarial hardening pass plus a follow-up altitude/temperature fix. 82 fixes across 78 commits since v0.16.0; build and full test suite green. Most changes are correctness/robustness fixes that preserve output, but several correct real bugs that **shift numerical results** — see Changed below and validate against a reference before deploying downstream.
+
+### Fixed
+- **RK45 time-of-flight desync** — the default solver advanced `time` by the *next* step's dt, corrupting time_of_flight and per-point/sample times.
+- **Arden-Buck vapor pressure** — the linear factor sat outside `exp()`, over-estimating saturation pressure (~7x) and corrupting humidity-dependent air density.
+- **Gyroscopic spin-drift twist sign** — applied twice (canceling), so left-twist barrels drifted the wrong way (right-twist/default unchanged).
+- **API twist-rate unit** — sent in meters where inches/turn was expected (~33x off); now sent verbatim as inches/turn across API/FFI/WASM.
+- **Wind-layer extrapolation** — above the top custom layer the profile extrapolated garbage instead of clamping; WindSock cursor no longer skips segments on large query jumps.
+- **Transonic drag** applied exactly once everywhere (was double-applied in `derivatives.rs`, missing in `fast_trajectory.rs`, shape-misclassified in `cli_api.rs`); **Reynolds drag** applied once and capped at 5x (was double-applied / uncapped ~16x spike).
+- **Euler solver** now uses the shared acceleration kernel — previously ignored the ballistic coefficient (diverging up to ~2.3x) and omitted Magnus/Coriolis.
+- **Projectile shape (default solver)** received caliber in meters instead of inches, under-applying transonic drag for G1/G2/G5/G6/G8/GI/GS.
+- **Monte Carlo** — fixed long-range truncation and a 100x humidity mis-scale (fraction vs percent); BC-correction table no longer silently zeros the BC when queried with the other drag model.
+- **Drag model selection** — G2/G5/GI/GS now explicitly alias to G1 (documented).
+- **Output** — corrected dope-card Drop MIL sign, `--full` table downrange/drift column swap, dope-card footer weekday (was off by 4 days), stability min-twist units label, and estimate-bc verification range.
+- **WASM** — auto-zero solves to line-of-sight (not bore); wind direction consumed as radians; Monte Carlo honors `--drag-model`; full-trajectory JSON keys fixed; wasm32 target now compiles; help text synced to the parser and dead zero flags dropped.
+- **Edge cases / divide-by-zero / NaN guards** — sectional-density and BC zero divisors, aero-jump zero/negative twist and `mass_kg<=0`, moist-air speed of sound at zero pressure, air density at non-positive pressure, zero-angle solver reporting non-convergence as success.
+- **Robustness** — BC5D/BCCR table loaders use checked-arithmetic dimension bounds and NaN-safe lookups; FFI stops leaking a `CString` per version call and caps oversized/negative Monte Carlo sim counts; fixed panics on PDF UTF-8 header truncation, `percentile(p>1)` OOB, and Euler zero-relative-velocity.
+- **Input validation** — CLI rejects non-finite numeric arguments; `target_distance` must be finite and positive (was `> 0`, letting `+inf` through); only `-inf` maps to the ignore-ground sentinel.
+
+### Changed
+> **FLAGGED for downstream:** these correct real bugs but **shift numerical output** — altitude, air-density, gravity, and transonic results all move. Re-validate dope and any cached/expected outputs.
+- **Air density unified** across all three integrators — `cli_api` no longer double-counts altitude (`exp(-alt/8000)` atop station pressure) and now applies humidity; Monte Carlo no longer reprojects shooter-altitude density to sea level. Shifts *every* trajectory (~0.32% at sea level, larger at altitude).
+- **Altitude now drives both station pressure and temperature** — with a default (15 °C / sea-level) input, `--altitude` derives ICAO station pressure *and* applies the −6.5 °C/km lapse rate; an explicit pressure or temperature stays authoritative. Previously altitude-only ran too warm/thin. Validated against py_ballisticcalc to ~0.04% (0–3000 m).
+- **Gravity** is the SI-canonical `9.80665` in the default RK4/RK45 kernel (was `9.81`).
+- **Transonic single-application** and **Reynolds once + capped** change near-Mach-1 and Monte Carlo drag.
+- **Spin twist sign** and **aero-jump Sg** (kg→grains, was ~1000x off) affect opt-in spin/jump diagnostics; left-twist spin-drift direction changes.
+- **Default `bullet_length` 4.0→4.5x caliber** (now unified across library/FFI/WASM) — shifts opt-in spin/Magnus/Miller diagnostics only, not the base trajectory.
+- **Zero solver returns `Err` on non-convergence** (was a best-effort `Ok(angle)`) — downstream callers must handle `Err`.
+- **WASM default drag model G7→G1** to match the G1-scale default BC.
+- **Monte Carlo range/velocity means exclude short-falling draws** when no explicit target is given (keeps CEP measurable and FFI arrays equal-length); pass an explicit target for unbiased per-target stats.
+
+### Added
+- `atmosphere::resolve_station_pressure(pressure_hpa, altitude_m) -> Option<f64>` — an explicit station pressure stays authoritative; a default pressure with real altitude derives the ICAO station pressure.
+- `atmosphere::resolve_station_temperature(temperature_c, altitude_m) -> Option<f64>` — mirrors the above for temperature (returns `None` at the 15 °C default so the ICAO lapse rate applies).
+
+### Performance (output-identical)
+- Build `BallisticInputs` once per integration instead of per derivative eval (eliminates per-step String alloc and Vec/DragTable clones on the Monte Carlo hot path).
+- Binary-search the drag Mach axis; precompute WindSock segment vectors; hoist RK45 air-density/wind and per-step pitch-damping/drag-coefficient allocations; skip BC-segment re-sort when already sorted; lowercase the bullet model once.
+
 ## [0.13.30] - 2026-01-26
 
 ### Added
