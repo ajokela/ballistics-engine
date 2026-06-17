@@ -166,11 +166,13 @@ pub fn calculate_atmosphere(
     // Calculate saturation vapor pressure (enhanced Magnus formula)
     let temp_c = temp_k - 273.15;
     let es_hpa = if temp_c >= 0.0 {
-        // Over water (Arden Buck equation)
-        6.1121 * (18.678 - temp_c / 234.5) * (temp_c / (257.14 + temp_c)).exp()
+        // Over water (Arden Buck): es = 6.1121 * exp[(18.678 - T/234.5) * (T/(257.14+T))].
+        // The ENTIRE product is the exponent; previously the linear factor sat OUTSIDE exp,
+        // over-estimating es by ~7x at 15C and corrupting humidity-dependent air density.
+        6.1121 * ((18.678 - temp_c / 234.5) * (temp_c / (257.14 + temp_c))).exp()
     } else {
-        // Over ice (Arden Buck equation)
-        6.1115 * (23.036 - temp_c / 333.7) * (temp_c / (279.82 + temp_c)).exp()
+        // Over ice (Arden Buck): es = 6.1115 * exp[(23.036 - T/333.7) * (T/(279.82+T))].
+        6.1115 * ((23.036 - temp_c / 333.7) * (temp_c / (279.82 + temp_c))).exp()
     };
 
     // Calculate actual vapor pressure
