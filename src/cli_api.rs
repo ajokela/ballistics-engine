@@ -1407,13 +1407,14 @@ impl TrajectorySolver {
 
         // Determine projectile shape for transonic corrections
         let projectile_shape = if let Some(ref model) = self.inputs.bullet_model {
-            // Try to determine shape from bullet model string
-            if model.to_lowercase().contains("boat") || model.to_lowercase().contains("bt") {
+            // Lowercase the model name once instead of allocating a new String per check
+            // (this runs 4-7x per integration step).
+            let m = model.to_lowercase();
+            if m.contains("boat") || m.contains("bt") {
                 ProjectileShape::BoatTail
-            } else if model.to_lowercase().contains("round") || model.to_lowercase().contains("rn")
-            {
+            } else if m.contains("round") || m.contains("rn") {
                 ProjectileShape::RoundNose
-            } else if model.to_lowercase().contains("flat") || model.to_lowercase().contains("fb") {
+            } else if m.contains("flat") || m.contains("fb") {
                 ProjectileShape::FlatBase
             } else {
                 // Use heuristic based on caliber, weight, and drag model
