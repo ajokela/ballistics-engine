@@ -1542,33 +1542,41 @@ pub fn run_monte_carlo_with_wind(
         let solver = TrajectorySolver::new(inputs, wind, Default::default());
         match solver.solve() {
             Ok(result) => {
+                // Skip samples that fell short of the target (e.g. a low muzzle-velocity draw):
+                // position_at_range would clamp to the ground-impact point (a large spurious
+                // deviation). Exclude such samples from ALL THREE result vectors so they stay
+                // equal-length and per-sample aligned — the FFI exposes them under ONE count
+                // (ranges.len()), so a shorter impact_positions would leave uninitialized tail
+                // slots read across the C ABI. The common case (all samples reach the target) is
+                // unaffected; range/velocity stats stay consistent with the dispersion stats.
+                if result.max_range < target_distance {
+                    continue;
+                }
+                // Position at target distance (not ground impact). Always Some here since
+                // max_range >= target_distance and an Ok result has a non-empty trajectory;
+                // skip defensively (keeping the vectors aligned) if it ever returns None.
+                let pos_at_target = match result.position_at_range(target_distance) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
                 ranges.push(result.max_range);
                 impact_velocities.push(result.impact_velocity);
 
-                // Interpolate position at target distance (not ground impact). Skip samples that
-                // fell short of the target (e.g. low muzzle-velocity draws): position_at_range
-                // clamps to the last (ground-impact) point for an out-of-reach target, which would
-                // otherwise be counted as a large spurious negative vertical deviation and pollute
-                // the dispersion stats. (Same short-fall class as the round-9 fast-path fix, here
-                // in the full-solver run_monte_carlo path.)
-                if result.max_range >= target_distance {
-                    if let Some(pos_at_target) = result.position_at_range(target_distance) {
-                        // Calculate deviation from baseline at the SAME target distance (McCoy)
-                        // X = downrange (0 here), Y = vertical (elevation), Z = lateral (windage)
-                        let mut deviation = Vector3::new(
-                            0.0, // X downrange deviation is 0 since we compare at same range
-                            pos_at_target.y - baseline_at_target.y, // Vertical deviation
-                            pos_at_target.z - baseline_at_target.z, // Lateral deviation (windage)
-                        );
+                // Calculate deviation from baseline at the SAME target distance (McCoy)
+                // X = downrange (0 here), Y = vertical (elevation), Z = lateral (windage)
+                let mut deviation = Vector3::new(
+                    0.0, // X downrange deviation is 0 since we compare at same range
+                    pos_at_target.y - baseline_at_target.y, // Vertical deviation
+                    pos_at_target.z - baseline_at_target.z, // Lateral deviation (windage)
+                );
 
-                        // Add additional pointing error to simulate realistic group sizes
-                        // This represents the shooter's ability to aim consistently
-                        let pointing_error_y = pointing_error_dist.sample(&mut rng);
-                        deviation.y += pointing_error_y;
+                // Add additional pointing error to simulate realistic group sizes
+                // This represents the shooter's ability to aim consistently
+                let pointing_error_y = pointing_error_dist.sample(&mut rng);
+                deviation.y += pointing_error_y;
 
-                        impact_positions.push(deviation);
-                    }
-                }
+                impact_positions.push(deviation);
             }
             Err(_) => {
                 // Skip failed simulations
