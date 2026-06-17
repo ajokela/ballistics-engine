@@ -184,7 +184,9 @@ pub fn calculate_atmosphere(
 
     // Enhanced speed of sound calculation with humidity effects
     // Speed of sound in moist air (Cramer, 1993)
-    let mole_fraction_vapor = vapor_pressure_pa / pressure_pa;
+    // Guard pressure_pa == 0 (a 0 hPa override would otherwise give +Inf -> -Inf gamma -> NaN
+    // speed of sound) and cap the mole fraction at the physical maximum of 1.
+    let mole_fraction_vapor = (vapor_pressure_pa / pressure_pa.max(f64::MIN_POSITIVE)).min(1.0);
     let temp_c_abs = temp_k;
 
     // Heat capacity ratio for moist air
