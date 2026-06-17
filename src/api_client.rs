@@ -317,9 +317,16 @@ impl ApiClient {
             req = req.query("bullet_diameter", &format!("{:.3}", diameter_in));
         }
         if let Some(threshold) = request.ground_threshold {
-            // Ground threshold is in meters - API expects meters (will be converted by parse_ballistic_inputs)
-            // Use a very large negative value when ignoring ground impact
-            req = req.query("ground_threshold", &format!("{:.1}", threshold));
+            // Ground threshold is in meters. format!("{:.1}") on f64::NEG_INFINITY (set by
+            // --ignore-ground-impact) produces the literal "-inf", which most server-side
+            // numeric validators reject — silently dropping the ignore-ground intent. Send a
+            // large finite negative sentinel for non-finite thresholds.
+            let v = if threshold.is_finite() {
+                format!("{:.1}", threshold)
+            } else {
+                "-1000000000.0".to_string()
+            };
+            req = req.query("ground_threshold", &v);
         }
         if let Some(enable) = request.enable_weather_zones {
             req = req.query("enable_weather_zones", if enable { "true" } else { "false" });
