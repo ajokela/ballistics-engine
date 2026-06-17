@@ -1234,7 +1234,7 @@ impl TrajectorySolver {
         let velocity_magnitude = relative_velocity.magnitude();
 
         if velocity_magnitude < 0.001 {
-            return Vector3::new(0.0, -9.81, 0.0);
+            return Vector3::new(0.0, -crate::constants::G_ACCEL_MPS2, 0.0);
         }
 
         // Get drag coefficient from drag model (Mach-indexed from drag tables)
@@ -1288,7 +1288,7 @@ impl TrajectorySolver {
         let drag_acceleration = -a_drag_m_s2 * (relative_velocity / velocity_magnitude);
 
         // Total acceleration = drag + gravity
-        let mut accel = drag_acceleration + Vector3::new(0.0, -9.81, 0.0);
+        let mut accel = drag_acceleration + Vector3::new(0.0, -crate::constants::G_ACCEL_MPS2, 0.0);
 
         // Coriolis (Earth rotation). McCoy frame: X=downrange, Y=vertical, Z=lateral,
         // azimuth 0 = North. McCoy frame: X=downrange, Y=vertical, Z=lateral.
