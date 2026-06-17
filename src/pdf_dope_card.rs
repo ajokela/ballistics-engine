@@ -222,12 +222,16 @@ fn find_in_directory(dir: &str, filename: &str) -> Option<std::path::PathBuf> {
 
 /// Truncate a string for header display, appending "..." if too long
 fn truncate_for_header(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
+    // Count/truncate by CHARACTERS, not bytes. The header concatenates user-controlled
+    // rifle/location names; byte-slicing a multi-byte UTF-8 string at an offset that isn't a
+    // char boundary panics. Identical output for ASCII (byte len == char count).
+    if s.chars().count() <= max_chars {
         s.to_string()
     } else if max_chars <= 3 {
-        s[..max_chars].to_string()
+        s.chars().take(max_chars).collect()
     } else {
-        format!("{}...", &s[..max_chars - 3])
+        let head: String = s.chars().take(max_chars - 3).collect();
+        format!("{head}...")
     }
 }
 
