@@ -502,8 +502,10 @@ impl TrajectorySolver {
                 kinetic_energy,
             });
 
-            // Debug: Log first and every 100th point
+            // Debug: log first and every 100th point. Debug builds only — this was ungated and
+            // polluted release/WASM stderr on the --use-euler path (the other solvers have none).
             // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral
+            #[cfg(debug_assertions)]
             if points.len() == 1 || points.len() % 100 == 0 {
                 eprintln!("Trajectory point {}: time={:.3}s, downrange={:.2}m, vertical={:.2}m, lateral={:.2}m, vel={:.1}m/s",
                     points.len(), time, position.x, position.y, position.z, velocity_magnitude);
@@ -1419,7 +1421,7 @@ impl TrajectorySolver {
             } else {
                 // Use heuristic based on caliber, weight, and drag model
                 get_projectile_shape(
-                    self.inputs.bullet_diameter,
+                    self.inputs.caliber_inches, // INCHES — get_projectile_shape expects inches, not meters
                     self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
                     bc_type_str,
                 )
@@ -1427,7 +1429,7 @@ impl TrajectorySolver {
         } else {
             // Use heuristic based on caliber, weight, and drag model
             get_projectile_shape(
-                self.inputs.bullet_diameter,
+                self.inputs.caliber_inches, // INCHES — get_projectile_shape expects inches, not meters
                 self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
                 bc_type_str,
             )
