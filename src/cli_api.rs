@@ -1282,17 +1282,21 @@ impl TrajectorySolver {
                 let omega_earth = 7.2921159e-5_f64; // rad/s
                 let lat = lat_deg.to_radians();
                 let az = self.inputs.azimuth_angle;
+                // Earth's angular velocity in the shot frame (X=downrange, Y=up,
+                // Z=lateral). Projecting Omega=(0, Ω cosφ, Ω sinφ) [local E,N,U] onto
+                // the azimuth-rotated shot axes gives a NEGATIVE lateral component:
+                // lateral = downrange × up points East for a North shot, and
+                // Omega·East = -Ω cosφ sin(az). The previous code dropped that sign.
                 let omega = Vector3::new(
-                    omega_earth * lat.cos() * az.cos(), // X: downrange component
-                    omega_earth * lat.sin(),            // Y: vertical component
-                    omega_earth * lat.cos() * az.sin(), // Z: lateral component
+                    omega_earth * lat.cos() * az.cos(),  // X: downrange
+                    omega_earth * lat.sin(),             // Y: vertical
+                    -omega_earth * lat.cos() * az.sin(), // Z: lateral (MBA-938: corrected sign)
                 );
-                // Coriolis is -2 Ω×v. Migrating from the engine's original
-                // left-handed (lateral, up, downrange) frame to McCoy right-handed
-                // (downrange, up, lateral) is a reflection, which negates the cross
-                // product; the +2 here reproduces the original deflection in the new
-                // frame (output-preserving relabel).
-                accel += 2.0 * omega.cross(velocity);
+                // Coriolis acceleration is the physical -2 Ω×v (MBA-938). The old +2 with
+                // an "output-preserving relabel" justification produced left-ward drift for
+                // a North shot in the Northern hemisphere; first principles (and the +Eötvös
+                // lift for East shots) require -2 with the corrected omega above.
+                accel += -2.0 * omega.cross(velocity);
             }
         }
 
