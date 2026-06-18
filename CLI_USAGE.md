@@ -417,7 +417,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --shooting-angle | Incline angle (up/down) | 0 | degrees | degrees |
 | --enable-wind-shear | Wind shear with altitude | false | - | - |
 | --sample-trajectory | Sample at regular intervals | false | - | - |
-| --sample-interval | Sampling interval | 10 | yards/meters | yards/meters |
+| --sample-interval | Sampling interval (always meters, not unit-system dependent) | 10 | meters | meters |
 | --enable-pitch-damping | Transonic stability analysis | false | - | - |
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |

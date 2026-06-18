@@ -450,6 +450,7 @@ enum Commands {
         sample_trajectory: bool,
 
         /// Sampling interval in meters (default: 10)
+        /// Trajectory sampling interval in meters (used with --sample-trajectory; always metric, not unit-system dependent)
         #[arg(long, default_value = "10.0")]
         sample_interval: f64,
 

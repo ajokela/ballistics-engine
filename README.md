@@ -362,7 +362,7 @@ Collect trajectory data at regular intervals for detailed analysis:
 ```bash
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
   --sample-trajectory \
-  --sample-interval 25  # Sample every 25 yards
+  --sample-interval 25  # Sample every 25 meters
   --max-range 1000 -o json
 ```
 
