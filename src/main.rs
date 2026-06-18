@@ -3915,14 +3915,23 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 // Check if we have sampled points (from --sample-trajectory)
                 if let Some(ref sampled) = result.sampled_points {
                     // Output sampled trajectory at regular distance intervals
+                    // Drop/drift use the same small-deflection units as the table/API
+                    // (inches for Imperial, meters for Metric), NOT the range unit (MBA-950).
+                    let defl_unit = match units {
+                        UnitSystem::Metric => "m",
+                        UnitSystem::Imperial => "in",
+                    };
                     println!(
                         "distance_{},drop_{},drift_{},velocity_{},energy_{},time_s",
-                        dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
+                        dist_unit, defl_unit, defl_unit, vel_unit, energy_unit
                     );
                     for s in sampled {
                         let distance = UnitConverter::distance_from_metric(s.distance_m, units);
-                        let drop = UnitConverter::distance_from_metric(s.drop_m, units);
-                        let drift = UnitConverter::distance_from_metric(s.wind_drift_m, units);
+                        // Imperial drop/drift in inches (meters * 39.3701); Metric in meters.
+                        let (drop, drift) = match units {
+                            UnitSystem::Imperial => (s.drop_m * 39.3701, s.wind_drift_m * 39.3701),
+                            UnitSystem::Metric => (s.drop_m, s.wind_drift_m),
+                        };
                         let vel = UnitConverter::velocity_from_metric(s.velocity_mps, units);
                         let energy = UnitConverter::energy_from_metric(s.energy_j, units);
                         println!(
