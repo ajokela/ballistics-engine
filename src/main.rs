@@ -4217,6 +4217,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             }
         }
 
+        #[cfg(feature = "pdf")]
         OutputFormat::Pdf => {
             // PDF output requires metadata and output file
             let pdf_meta = pdf_metadata.as_ref().ok_or("PDF output requires metadata (use --target-speed, --powder, --bullet-name, etc.)")?;
@@ -4296,6 +4297,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             std::fs::write(output_path, &pdf_bytes)?;
             eprintln!("PDF dope card written to: {}", output_path.display());
             eprintln!("  {} ranges from {} to {} yards", rows.len(), rows.first().map(|r| r.range_yd).unwrap_or(0), rows.last().map(|r| r.range_yd).unwrap_or(0));
+        }
+        #[cfg(not(feature = "pdf"))]
+        OutputFormat::Pdf => {
+            return Err("PDF output requires building with the 'pdf' feature (e.g. cargo build --features pdf)".into());
         }
     }
 
