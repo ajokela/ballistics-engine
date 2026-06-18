@@ -364,7 +364,7 @@ enum Commands {
         #[arg(long, default_value = "1000.0")]
         max_range: f64,
 
-        /// Time step (seconds)
+        /// Integration time step in seconds — RK4/Euler only (the adaptive RK45 default ignores it and steps adaptively)
         #[arg(long, default_value = "0.001", value_parser = f64_range(0.00001, 0.1))]
         time_step: f64,
 

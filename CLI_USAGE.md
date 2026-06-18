@@ -397,7 +397,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --bore-height | Bore height above ground | 5 | feet | meters |
 | --ignore-ground-impact | Disable ground impact detection | false | - | - |
 | --max-range | Maximum range | 1000 | yards | meters |
-| --time-step | Integration time step | 0.001 | seconds | seconds |
+| --time-step | Integration time step — RK4/Euler only (the adaptive RK45 default steps adaptively and ignores this) | 0.001 | seconds | seconds |
 | --wind-speed | Wind speed | 0 | mph | m/s |
 | --wind-direction | Wind direction | 0° | degrees | degrees |
 | --temperature | Temperature | 59 | °F | °C |
