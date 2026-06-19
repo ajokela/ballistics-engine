@@ -108,7 +108,7 @@ impl BcCorrectionTable {
         let num_velocity = read_u32(&mut reader)? as usize;
         let num_types = read_u32(&mut reader)? as usize;
         let _timestamp = read_u64(&mut reader)?;
-        let _checksum = read_u32(&mut reader)?;
+        let stored_checksum = read_u32(&mut reader)?;
 
         // Skip reserved bytes
         let mut reserved = [0u8; 16];
@@ -138,6 +138,22 @@ impl BcCorrectionTable {
             .filter(|&n| n <= MAX_TOTAL_CELLS)
             .ok_or(BcTableError::InvalidDimensions)?;
         let data = read_f32_array(&mut reader, total_cells)?;
+
+        // MBA-953: verify the stored CRC32 (previously read and discarded, so corrupt-but-in-range
+        // files loaded silently). BCCR CRCs the DATA section ONLY — the f32 cells — unlike
+        // bc_table_5d which CRCs bins+data. Gate on a non-zero stored value so older files written
+        // without a checksum (stored == 0) still load. The f32 round-trip is bit-exact, so this
+        // reproduces the on-disk data bytes.
+        if stored_checksum != 0 {
+            let mut data_bytes = Vec::with_capacity(data.len() * 4);
+            for &v in &data {
+                data_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let calculated = crate::bc_table_5d::crc32_ieee(&data_bytes);
+            if calculated != stored_checksum {
+                return Err(BcTableError::ChecksumMismatch);
+            }
+        }
 
         Ok(BcCorrectionTable {
             data,
