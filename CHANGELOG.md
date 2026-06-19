@@ -5,6 +5,14 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-06-18
+
+Two follow-up fixes after 0.18.0. Neither changes trajectory output.
+
+### Fixed
+- **BCCR drag-correction loader** now verifies the stored CRC32 (a standard IEEE/zlib CRC over the data section) instead of reading and discarding it — corrupt-but-in-range files are rejected with `ChecksumMismatch` instead of loading silently. Gated on a non-zero stored checksum so older checksum-less files still load (MBA-953).
+- **Precession/nutation angular diagnostics** — corrected four dimensional errors: the precession and nutation frequencies are now rad/s via the standard epicyclic form `φ = (Iₓp/2Iy)[1 ± √(1 − 1/Sg)]` (with the dimensionless Miller stability factor), and the yaw no longer random-walks. Diagnostic-only — these feed only the opt-in `max_yaw_angle` / `max_precession_angle` outputs (`--enable-precession-nutation`); no trajectory change (MBA-941).
+
 ## [0.18.0] - 2026-06-18
 
 A cross-solver consistency and physics-correction pass (JIRA MBA-938..958). 17 commits since v0.17.0; build and full test suite (210+) green. Several changes correct real bugs that **shift numerical results** on the Coriolis, transonic/subsonic drag, spin-drift-at-altitude, and WASM-zero paths — see Changed and validate against a reference before deploying downstream.
