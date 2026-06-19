@@ -191,6 +191,41 @@ fn zeroing_ignores_aerodynamic_jump() {
 }
 
 #[test]
+fn aj_affects_only_vertical_not_windage() {
+    // AJ is a vertical effect; it must NOT change the lateral wind drift. This proves it
+    // doesn't double-count with the integrator's crosswind response (which is purely
+    // lateral for a point-mass solve): AJ adds the missing vertical, leaving windage intact.
+    let solve_xyz = |aj: bool| {
+        let mut inputs = BallisticInputs::default();
+        inputs.muzzle_velocity = 790.0;
+        inputs.twist_rate = 11.0;
+        inputs.enable_aerodynamic_jump = aj;
+        inputs.muzzle_angle = 0.01;
+        let wind = WindConditions {
+            speed: 4.4704,
+            direction: PI / 2.0,
+        };
+        let mut s = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
+        s.set_max_range(600.0);
+        let p = s.solve().unwrap().position_at_range(500.0).unwrap();
+        (p.y, p.z)
+    };
+    let (y_off, z_off) = solve_xyz(false);
+    let (y_on, z_on) = solve_xyz(true);
+    let dz = (z_on - z_off).abs();
+    let dy = (y_on - y_off).abs();
+    // The vertical shift is the real AJ effect (~0.1 m at 500 m).
+    assert!(dy > 1e-2, "AJ should shift the vertical impact (dy={dy})");
+    // Windage is essentially untouched: the only lateral change is the negligible
+    // second-order coupling from cos(elevation) (~1e-6 m), NOT a duplicated wind drift.
+    // It must be orders of magnitude smaller than the vertical shift.
+    assert!(
+        dz < 1e-4 && dz < 1e-3 * dy,
+        "AJ must not double-count wind drift: lateral change {dz} not negligible vs vertical {dy}"
+    );
+}
+
+#[test]
 fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     // A NaN twist must not slip past the guard (NaN <= 0.0 is false) and NaN-out
     // the launch angle. AJ must be suppressed and the trajectory stay finite.
