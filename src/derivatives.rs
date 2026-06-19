@@ -286,6 +286,15 @@ pub fn compute_derivatives(
             drag_factor
         };
 
+        // MBA-940: a user-supplied custom drag table overrides the G-model Cd entirely and is used
+        // as-is — the transonic/Reynolds/form-factor corrections above are intentionally NOT
+        // applied to it (the curve already encodes the projectile's true drag, so applying them
+        // would distort/double-count it).
+        let drag_factor = match inputs.custom_drag_table {
+            Some(ref table) => table.interpolate(mach),
+            None => drag_factor,
+        };
+
         // Calculate drag acceleration
         let standard_factor = drag_factor * CD_TO_RETARD;
         let a_drag_ft_s2 =

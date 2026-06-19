@@ -1390,6 +1390,13 @@ impl TrajectorySolver {
         let speed_of_sound = (gamma * r_specific * temp_k).sqrt();
         let mach = velocity / speed_of_sound;
 
+        // MBA-940: a user-supplied custom drag table is the final Cd, used as-is — no G-model
+        // lookup, no transonic shape correction, no form factor. The supplied curve already
+        // encodes the projectile's true drag, so applying those would distort/double-count it.
+        if let Some(ref table) = self.inputs.custom_drag_table {
+            return table.interpolate(mach);
+        }
+
         // Get drag coefficient from the drag tables (Mach-indexed)
         let base_cd = crate::drag::get_drag_coefficient(mach, &self.inputs.bc_type);
 

@@ -428,18 +428,24 @@ fn compute_derivatives(
         // shape is invariant for the whole integration, so it is hoisted into fast_integrate and
         // passed in rather than recomputed per call. wave_drag=false: the G1/G7 tables already
         // embed the rise.
-        let base_cd = get_drag_coefficient(mach, drag_model);
-        let drag_factor =
-            crate::transonic_drag::transonic_correction(mach, base_cd, projectile_shape, false);
-        // MBA-948: honor use_form_factor in the fast path too (was derivatives.rs-only). No-op
-        // when the flag is false (apply_form_factor_to_drag short-circuits), as it is on every
-        // current consumer surface.
-        let drag_factor = crate::form_factor::apply_form_factor_to_drag(
-            drag_factor,
-            inputs.bullet_model.as_deref(),
-            &inputs.bc_type,
-            inputs.use_form_factor,
-        );
+        // MBA-940: a user-supplied custom drag table is the final Cd, used as-is (no G-model
+        // lookup, transonic, or form-factor correction — the curve already encodes the true drag).
+        let drag_factor = if let Some(ref table) = inputs.custom_drag_table {
+            table.interpolate(mach)
+        } else {
+            let base_cd = get_drag_coefficient(mach, drag_model);
+            let cd =
+                crate::transonic_drag::transonic_correction(mach, base_cd, projectile_shape, false);
+            // MBA-948: honor use_form_factor in the fast path too (was derivatives.rs-only). No-op
+            // when the flag is false (apply_form_factor_to_drag short-circuits), as it is on every
+            // current consumer surface.
+            crate::form_factor::apply_form_factor_to_drag(
+                cd,
+                inputs.bullet_model.as_deref(),
+                &inputs.bc_type,
+                inputs.use_form_factor,
+            )
+        };
 
         // Calculate drag acceleration using proper ballistics formula
         let cd_to_retard = 0.000683 * 0.30;
