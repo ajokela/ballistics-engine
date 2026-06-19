@@ -62,38 +62,49 @@ impl Default for PrecessionNutationParams {
     }
 }
 
-/// Calculate the natural precession frequency
-pub fn calculate_precession_frequency(
-    spin_rate_rad_s: f64,
-    velocity_mps: f64,
+/// The two epicyclic yaw-arm angular frequencies (rad/s) for a gyroscopically stable projectile:
+/// the FAST mode (nutation) and the SLOW mode (precession). Standard linearized aeroballistic
+/// result from the spinning-projectile yaw equation:
+///   phi_{fast,slow} = (Ix * p / 2 Iy) * [1 ± sqrt(1 - 1/Sg)]
+/// where Ix/Iy are the spin/transverse moments of inertia, p the spin rate, Sg the (dimensionless)
+/// gyroscopic stability factor. Returns (0, 0) when Sg <= 1 (no real epicyclic motion — the
+/// projectile is not gyroscopically stable) or the transverse inertia is zero. (MBA-941: the
+/// previous per-frequency formulas were dimensionally inconsistent — rad/m and length — and ad hoc.)
+pub fn epicyclic_frequencies(
     spin_inertia: f64,
     transverse_inertia: f64,
-    yaw_angle_rad: f64,
-) -> f64 {
-    if velocity_mps == 0.0 || transverse_inertia == 0.0 {
-        return 0.0;
+    spin_rate_rad_s: f64,
+    stability_factor: f64,
+) -> (f64, f64) {
+    if stability_factor <= 1.0 || transverse_inertia == 0.0 {
+        return (0.0, 0.0);
     }
-
-    // Basic gyroscopic precession
-    // ωp = (Is * ωs * sin(α)) / (It * V)
-    (spin_inertia * spin_rate_rad_s * yaw_angle_rad.sin()) / (transverse_inertia * velocity_mps)
+    // Ix * p / 2 Iy  [rad/s] — the mean of the two arm rates.
+    let arm = (spin_inertia * spin_rate_rad_s) / (2.0 * transverse_inertia);
+    let disc = (1.0 - 1.0 / stability_factor).sqrt();
+    (arm * (1.0 + disc), arm * (1.0 - disc)) // (fast = nutation, slow = precession)
 }
 
-/// Calculate the natural nutation frequency
+/// Slow-mode (precession) angular frequency in rad/s — the slow coning of the spin axis:
+/// phi_slow = (Ix p / 2 Iy)(1 - sqrt(1 - 1/Sg)).
+pub fn calculate_precession_frequency(
+    spin_rate_rad_s: f64,
+    spin_inertia: f64,
+    transverse_inertia: f64,
+    stability_factor: f64,
+) -> f64 {
+    epicyclic_frequencies(spin_inertia, transverse_inertia, spin_rate_rad_s, stability_factor).1
+}
+
+/// Fast-mode (nutation) angular frequency in rad/s:
+/// phi_fast = (Ix p / 2 Iy)(1 + sqrt(1 - 1/Sg)).
 pub fn calculate_nutation_frequency(
     spin_rate_rad_s: f64,
     spin_inertia: f64,
     transverse_inertia: f64,
     stability_factor: f64,
 ) -> f64 {
-    if stability_factor <= 1.0 || transverse_inertia == 0.0 {
-        return 0.0;
-    }
-
-    // Nutation frequency
-    // ωn = ωs * sqrt(Is / It) * sqrt(Sg - 1)
-    let inertia_ratio = spin_inertia / transverse_inertia;
-    spin_rate_rad_s * inertia_ratio.sqrt() * (stability_factor - 1.0).sqrt()
+    epicyclic_frequencies(spin_inertia, transverse_inertia, spin_rate_rad_s, stability_factor).0
 }
 
 /// Calculate nutation amplitude with exponential damping
@@ -132,20 +143,26 @@ pub fn calculate_combined_angular_motion(
         return *angular_state;
     }
 
-    // Calculate stability factor (simplified)
-    let stability = (params.spin_inertia * params.spin_rate_rad_s.powi(2))
-        / (4.0 * params.transverse_inertia * params.velocity_mps.powi(2) / params.length_m);
+    // Dimensionless gyroscopic stability factor via the Miller formula (consistent with the rest
+    // of the engine), derived from geometry. Twist (in/turn) follows from spin and velocity: one
+    // turn per 2*pi*V/p metres. (MBA-941: the previous inline Sg had units of 1/m.)
+    let caliber_in = params.caliber_m / 0.0254;
+    let length_in = params.length_m / 0.0254;
+    let mass_gr = params.mass_kg / 0.00006479891;
+    let twist_in = if params.spin_rate_rad_s.abs() > 1e-9 {
+        (2.0 * std::f64::consts::PI * params.velocity_mps / params.spin_rate_rad_s).abs() / 0.0254
+    } else {
+        0.0
+    };
+    let stability = crate::spin_drift::miller_stability(caliber_in, mass_gr, twist_in, length_in);
 
-    // Precession frequency
+    // Precession (slow) and nutation (fast) angular frequencies, both rad/s.
     let omega_p = calculate_precession_frequency(
         params.spin_rate_rad_s,
-        params.velocity_mps,
         params.spin_inertia,
         params.transverse_inertia,
-        angular_state.yaw_angle,
+        stability,
     );
-
-    // Nutation frequency
     let omega_n = calculate_nutation_frequency(
         params.spin_rate_rad_s,
         params.spin_inertia,
@@ -187,11 +204,17 @@ pub fn calculate_combined_angular_motion(
 
     // Update angular rates
     let new_pitch_rate = angular_state.pitch_rate + pitch_accel * dt;
-    let new_yaw_rate = omega_p; // Precession rate
 
-    // Combined angle with nutation
-    // The total yaw is precession + nutation oscillation
-    let total_yaw = angular_state.yaw_angle + nutation_amp * new_nutation_phase.sin();
+    // MBA-941: bounded epicyclic yaw. Previously `total_yaw = yaw_angle + nutation_amp*sin(phase)`
+    // re-added the nutation to the carried-forward yaw every step, so the yaw random-walked and the
+    // precession rate (yaw_rate) was never actually integrated. The yaw is now a bounded function
+    // of the cumulative precession/nutation PHASES — a slow precession arm plus the damped fast
+    // nutation arm — and yaw_rate is its true time derivative.
+    let coning_amp = initial_disturbance;
+    let total_yaw =
+        coning_amp * new_precession_angle.cos() + nutation_amp * new_nutation_phase.sin();
+    let new_yaw_rate = -coning_amp * omega_p * new_precession_angle.sin()
+        + nutation_amp * omega_n * new_nutation_phase.cos();
 
     // Pitch angle evolves more slowly
     let new_pitch = angular_state.pitch_angle + new_pitch_rate * dt;
@@ -208,8 +231,9 @@ pub fn calculate_combined_angular_motion(
 
 /// Calculate the epicyclic (combined precession + nutation) motion
 pub fn calculate_epicyclic_motion(
+    spin_inertia: f64,
+    transverse_inertia: f64,
     spin_rate_rad_s: f64,
-    velocity_mps: f64,
     stability_factor: f64,
     time_s: f64,
     initial_yaw_rad: f64,
@@ -220,14 +244,11 @@ pub fn calculate_epicyclic_motion(
         return (initial_yaw_rad, initial_yaw_rad);
     }
 
-    // Frequencies (simplified model)
-    // Slow mode (precession)
-    let omega_slow = 2.0 * velocity_mps / (stability_factor * spin_rate_rad_s);
+    // Fast (nutation) and slow (precession) angular frequencies, both rad/s (MBA-941).
+    let (omega_fast, omega_slow) =
+        epicyclic_frequencies(spin_inertia, transverse_inertia, spin_rate_rad_s, stability_factor);
 
-    // Fast mode (nutation)
-    let omega_fast = spin_rate_rad_s * ((stability_factor - 1.0).sqrt()) / stability_factor;
-
-    // Amplitude ratio (fast/slow)
+    // Amplitude ratio (fast/slow) — the nutation arm shrinks as stability grows.
     let amplitude_ratio = 1.0 / stability_factor;
 
     // Damping (exponential decay of fast mode)
@@ -276,31 +297,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_precession_frequency() {
-        let freq = calculate_precession_frequency(
-            17522.0, // spin rate
-            850.0,   // velocity
-            6.94e-8, // spin inertia
-            9.13e-7, // transverse inertia
-            0.002,   // yaw angle
-        );
+    fn test_mba941_epicyclic_relations_and_limits() {
+        // Validate the corrected frequencies against the EXACT algebraic relations of the standard
+        // epicyclic decomposition (no external reference needed): with arm = Ix p / 2 Iy,
+        //   fast + slow = Ix p / Iy = 2*arm     (sum of the arm rates)
+        //   fast * slow = arm^2 / Sg            (product)
+        let (ix, iy, p) = (6.94e-8_f64, 9.13e-7_f64, 17522.0_f64);
+        let arm = ix * p / (2.0 * iy);
+        for &sg in &[1.5_f64, 2.5, 5.0, 50.0] {
+            let (fast, slow) = epicyclic_frequencies(ix, iy, p, sg);
+            assert!(fast > slow && slow > 0.0, "expect fast>slow>0 at Sg={sg}");
+            assert!(
+                ((fast + slow) - 2.0 * arm).abs() < 1e-6 * arm,
+                "sum != Ix p / Iy at Sg={sg}"
+            );
+            assert!(
+                (fast * slow - arm * arm / sg).abs() < 1e-6 * arm * arm,
+                "product != arm^2 / Sg at Sg={sg}"
+            );
+        }
+        // Marginal stability (Sg -> 1+): the two modes coalesce at Ix p / 2 Iy.
+        let (f1, s1) = epicyclic_frequencies(ix, iy, p, 1.0 + 1e-9);
+        assert!((f1 - arm).abs() < 1e-3 * arm && (s1 - arm).abs() < 1e-3 * arm);
+        // High stability: slow precession -> 0, fast nutation -> Ix p / Iy = 2*arm.
+        let (f2, s2) = epicyclic_frequencies(ix, iy, p, 1.0e6);
+        assert!(s2 < 1e-3 * arm, "slow precession should vanish at high Sg");
+        assert!((f2 - 2.0 * arm).abs() < 1e-3 * arm, "fast -> Ix p / Iy at high Sg");
+        // Not gyroscopically stable -> no epicyclic motion.
+        assert_eq!(epicyclic_frequencies(ix, iy, p, 0.9), (0.0, 0.0));
+    }
 
-        // Should be small for small yaw angles
-        assert!(freq.abs() < 1.0);
+    #[test]
+    fn test_precession_frequency() {
+        // Slow (precession) mode, rad/s: (Ix p / 2 Iy)(1 - sqrt(1 - 1/Sg)).
+        let freq = calculate_precession_frequency(17522.0, 6.94e-8, 9.13e-7, 2.5);
+        let nut = calculate_nutation_frequency(17522.0, 6.94e-8, 9.13e-7, 2.5);
+        // Positive, and slower than the nutation (fast) mode.
+        assert!(
+            freq > 0.0 && freq < nut,
+            "precession {freq} should satisfy 0 < freq < nutation {nut}"
+        );
+        // Unstable -> no precession.
+        assert_eq!(
+            calculate_precession_frequency(17522.0, 6.94e-8, 9.13e-7, 0.9),
+            0.0
+        );
     }
 
     #[test]
     fn test_nutation_frequency() {
-        let freq = calculate_nutation_frequency(
-            17522.0, // spin rate
-            6.94e-8, // spin inertia
-            9.13e-7, // transverse inertia
-            1.5,     // stability
+        // Fast (nutation) mode, rad/s: (Ix p / 2 Iy)(1 + sqrt(1 - 1/Sg)).
+        // arm = Ix p / 2 Iy ~= 666 rad/s; fast = arm*(1 + sqrt(1/3)) ~= 1050 rad/s.
+        let freq = calculate_nutation_frequency(17522.0, 6.94e-8, 9.13e-7, 1.5);
+        assert!(
+            (900.0..1200.0).contains(&freq),
+            "nutation freq {freq} rad/s out of expected band"
         );
-
-        // Should be in the kHz range
-        assert!(freq > 1000.0);
-        assert!(freq < 10000.0);
     }
 
     #[test]
@@ -319,17 +371,20 @@ mod tests {
 
     #[test]
     fn test_precession_edge_cases() {
-        // Test zero velocity
-        let freq_zero_vel = calculate_precession_frequency(17522.0, 0.0, 6.94e-8, 9.13e-7, 0.002);
-        assert_eq!(freq_zero_vel, 0.0);
-
-        // Test zero transverse inertia
-        let freq_zero_inertia = calculate_precession_frequency(17522.0, 850.0, 6.94e-8, 0.0, 0.002);
-        assert_eq!(freq_zero_inertia, 0.0);
-
-        // Test zero yaw angle (sin(0) = 0)
-        let freq_zero_yaw = calculate_precession_frequency(17522.0, 850.0, 6.94e-8, 9.13e-7, 0.0);
-        assert_eq!(freq_zero_yaw, 0.0);
+        // Unstable / marginally stable -> no regular precession.
+        assert_eq!(
+            calculate_precession_frequency(17522.0, 6.94e-8, 9.13e-7, 0.9),
+            0.0
+        );
+        assert_eq!(
+            calculate_precession_frequency(17522.0, 6.94e-8, 9.13e-7, 1.0),
+            0.0
+        );
+        // Zero transverse inertia -> guarded to 0.
+        assert_eq!(
+            calculate_precession_frequency(17522.0, 6.94e-8, 0.0, 2.0),
+            0.0
+        );
     }
 
     #[test]
@@ -369,20 +424,22 @@ mod tests {
     #[test]
     fn test_epicyclic_motion() {
         let (pitch, yaw) = calculate_epicyclic_motion(
+            6.94e-8, // spin inertia
+            9.13e-7, // transverse inertia
             17522.0, // spin rate
-            850.0,   // velocity
             2.5,     // stability factor
             0.1,     // time
             0.01,    // initial yaw
         );
 
-        // Should produce reasonable angles
-        assert!(pitch.abs() <= 0.01);
-        assert!(yaw.abs() <= 0.01);
+        // Bounded by |initial_yaw| * (1 + 1/Sg) (slow arm amplitude 1 + fast arm amplitude 1/Sg).
+        let bound = 0.01 * (1.0 + 1.0 / 2.5) + 1e-9;
+        assert!(pitch.abs() <= bound, "pitch {pitch} exceeds bound {bound}");
+        assert!(yaw.abs() <= bound, "yaw {yaw} exceeds bound {bound}");
 
-        // Test unstable case
+        // Unstable case -> returns the initial yaw unchanged.
         let (pitch_unstable, yaw_unstable) =
-            calculate_epicyclic_motion(17522.0, 850.0, 0.9, 0.1, 0.01);
+            calculate_epicyclic_motion(6.94e-8, 9.13e-7, 17522.0, 0.9, 0.1, 0.01);
         assert_eq!(pitch_unstable, 0.01);
         assert_eq!(yaw_unstable, 0.01);
     }
@@ -463,12 +520,10 @@ mod tests {
 
     #[test]
     fn test_stability_effects() {
-        // High stability should give lower frequencies
+        // Higher stability gives a higher nutation (fast-mode) frequency:
+        // phi_fast = (Ix p / 2 Iy)(1 + sqrt(1 - 1/Sg)) increases monotonically with Sg.
         let freq_high_stability = calculate_nutation_frequency(17522.0, 6.94e-8, 9.13e-7, 5.0);
-
         let freq_low_stability = calculate_nutation_frequency(17522.0, 6.94e-8, 9.13e-7, 1.5);
-
-        // Higher stability gives higher nutation frequency
         assert!(freq_high_stability > freq_low_stability);
     }
 
@@ -499,7 +554,7 @@ mod tests {
             mass_kg: 0.01,
             caliber_m: 0.008,
             length_m: 0.03,
-            spin_rate_rad_s: 10000.0,
+            spin_rate_rad_s: 16000.0, // fast enough that the Miller Sg > 1 (gyroscopically stable)
             spin_inertia: 5e-8,
             transverse_inertia: 8e-7,
             velocity_mps: 800.0,
