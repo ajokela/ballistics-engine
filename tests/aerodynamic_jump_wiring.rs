@@ -226,6 +226,93 @@ fn aj_affects_only_vertical_not_windage() {
 }
 
 #[test]
+fn fast_path_launch_offset_sign_disabled_and_flips() {
+    // MBA-959: the engine fast-integrate path (used by the binding's fast_integrate + MC).
+    use ballistics_engine::fast_trajectory::aerodynamic_jump_launch_offset_rad;
+    let mut inputs = BallisticInputs::default();
+    inputs.muzzle_velocity = 800.0;
+    inputs.bullet_diameter = 0.00782;
+    inputs.bullet_length = 0.0312;
+    inputs.bullet_mass = 0.01134;
+    inputs.twist_rate = 11.0;
+    inputs.is_twist_right = true;
+    inputs.wind_speed = 4.4704; // m/s (~10 mph)
+    inputs.wind_angle = PI / 2.0; // BallisticInputs convention: 90deg = from the right
+    let atmo = (0.0, 15.0, 1013.25, 1.0);
+
+    inputs.enable_aerodynamic_jump = false;
+    assert_eq!(aerodynamic_jump_launch_offset_rad(&inputs, atmo), 0.0);
+
+    inputs.enable_aerodynamic_jump = true;
+    let from_right = aerodynamic_jump_launch_offset_rad(&inputs, atmo);
+    assert!(
+        from_right > 0.0,
+        "right twist + wind from the right -> up (positive), got {from_right}"
+    );
+    // Reverse the wind side -> opposite sign, same magnitude.
+    inputs.wind_angle = -PI / 2.0;
+    assert!((aerodynamic_jump_launch_offset_rad(&inputs, atmo) + from_right).abs() < 1e-12);
+    // Flip the twist hand -> opposite sign.
+    inputs.wind_angle = PI / 2.0;
+    inputs.is_twist_right = false;
+    assert!((aerodynamic_jump_launch_offset_rad(&inputs, atmo) + from_right).abs() < 1e-12);
+}
+
+#[test]
+fn fast_integrate_applies_aerodynamic_jump() {
+    use ballistics_engine::fast_trajectory::{fast_integrate, FastIntegrationParams};
+    use ballistics_engine::wind::WindSock;
+
+    let y_at_500 = |enable_aj: bool| -> f64 {
+        let mut inputs = BallisticInputs::default();
+        inputs.muzzle_velocity = 800.0;
+        inputs.bullet_diameter = 0.00782;
+        inputs.bullet_length = 0.0312;
+        inputs.bullet_mass = 0.01134;
+        inputs.twist_rate = 11.0;
+        inputs.is_twist_right = true;
+        inputs.wind_speed = 4.4704;
+        inputs.wind_angle = PI / 2.0; // from the right
+        inputs.enable_aerodynamic_jump = enable_aj;
+        let v = inputs.muzzle_velocity;
+        let elev = 0.02_f64;
+        let initial_state = [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0];
+        let params = FastIntegrationParams {
+            horiz: 600.0,
+            vert: 0.0,
+            initial_state,
+            t_span: (0.0, 3.0),
+            atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        };
+        let sol = fast_integrate(&inputs, &WindSock::new(vec![]), params);
+        // FastSolution.y is column-major [6][n_points]: y[0]=x series, y[1]=vertical series.
+        let xs = &sol.y[0];
+        let ys = &sol.y[1];
+        let target = 457.2; // ~500 yd downrange
+        let mut out = *ys.last().unwrap();
+        for i in 1..xs.len() {
+            if xs[i] >= target {
+                let f = (target - xs[i - 1]) / (xs[i] - xs[i - 1]);
+                out = ys[i - 1] + f * (ys[i] - ys[i - 1]);
+                break;
+            }
+        }
+        out
+    };
+
+    let off = y_at_500(false);
+    let on = y_at_500(true);
+    assert!(
+        (on - off).abs() > 1e-3,
+        "AJ should shift the fast-path vertical position (off={off}, on={on})"
+    );
+    assert!(
+        on > off,
+        "right twist + wind from the right should raise the impact (off={off}, on={on})"
+    );
+}
+
+#[test]
 fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     // A NaN twist must not slip past the guard (NaN <= 0.0 is false) and NaN-out
     // the launch angle. AJ must be suppressed and the trajectory stay finite.
