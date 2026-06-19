@@ -215,6 +215,8 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         bc_type_str: None,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
+        // AJ is not yet exposed through the TrajectoryParams binding path (MBA-959 follow-up).
+        enable_aerodynamic_jump: false,
         use_rk4: true,
         use_adaptive_rk45: false,
         enable_trajectory_sampling: false,

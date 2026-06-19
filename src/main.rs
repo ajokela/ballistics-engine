@@ -441,6 +441,10 @@ enum Commands {
         #[arg(long)]
         enable_spin_drift: bool,
 
+        /// Apply aerodynamic jump as a muzzle launch-angle perturbation (EXPERIMENTAL — heuristic model, MBA-959)
+        #[arg(long)]
+        enable_aerodynamic_jump: bool,
+
         /// Enable wind shear (altitude-dependent wind)
         #[arg(long)]
         enable_wind_shear: bool,
@@ -1482,6 +1486,7 @@ struct TrajectoryConfig {
     enable_magnus: bool,
     enable_coriolis: bool,
     enable_spin_drift: bool,
+    enable_aerodynamic_jump: bool,
     enable_wind_shear: bool,
     enable_pitch_damping: bool,
     enable_precession: bool,
@@ -1873,6 +1878,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             enable_magnus,
             enable_coriolis,
             enable_spin_drift,
+            enable_aerodynamic_jump,
             enable_wind_shear,
             sample_trajectory,
             sample_interval,
@@ -2374,6 +2380,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 enable_magnus,
                 enable_coriolis,
                 enable_spin_drift,
+                enable_aerodynamic_jump,
                 enable_wind_shear,
                 enable_pitch_damping,
                 enable_precession,
@@ -2539,6 +2546,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         } else { None }
                                     }),
                                     use_enhanced_spin_drift: enable_spin_drift,
+                                    enable_aerodynamic_jump,
                                     use_form_factor: false,
                                     enable_wind_shear,
                                     wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
@@ -3662,6 +3670,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_magnus,
         enable_coriolis,
         enable_spin_drift,
+        enable_aerodynamic_jump,
         enable_wind_shear,
         enable_pitch_damping,
         enable_precession,
@@ -3773,6 +3782,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             None
         },
         use_enhanced_spin_drift: enable_spin_drift,
+        enable_aerodynamic_jump,
         use_form_factor: false,
         enable_wind_shear,
         wind_shear_model: if enable_wind_shear {
