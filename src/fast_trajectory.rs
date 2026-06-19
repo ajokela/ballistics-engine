@@ -197,22 +197,14 @@ pub fn fast_integrate(
         inputs.bullet_mass / 0.00006479891
     };
 
-    // Projectile shape for transonic corrections. Consult inputs.bullet_model first (matching
-    // cli_api's canonical choice), then fall back to the caliber/weight/drag-model heuristic.
-    let projectile_shape = if let Some(ref model) = inputs.bullet_model {
-        let m = model.to_lowercase();
-        if m.contains("boat") || m.contains("bt") {
-            crate::transonic_drag::ProjectileShape::BoatTail
-        } else if m.contains("round") || m.contains("rn") {
-            crate::transonic_drag::ProjectileShape::RoundNose
-        } else if m.contains("flat") || m.contains("fb") {
-            crate::transonic_drag::ProjectileShape::FlatBase
-        } else {
-            crate::transonic_drag::get_projectile_shape(caliber_in, weight_gr, drag_model_str)
-        }
-    } else {
-        crate::transonic_drag::get_projectile_shape(caliber_in, weight_gr, drag_model_str)
-    };
+    // Projectile shape for transonic corrections (MBA-949: shared resolver — bullet_model name
+    // first, then the caliber/weight/drag-model heuristic).
+    let projectile_shape = crate::transonic_drag::resolve_projectile_shape(
+        inputs.bullet_model.as_deref(),
+        caliber_in,
+        weight_gr,
+        drag_model_str,
+    );
 
     // Coriolis omega (Earth rotation), hoisted (invariant over the flight). MBA-957:
     // fast_integrate — the Monte Carlo / Python-binding path — previously applied NO Coriolis.

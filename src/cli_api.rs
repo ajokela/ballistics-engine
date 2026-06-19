@@ -7,7 +7,7 @@ use crate::precession_nutation::{
 use crate::trajectory_sampling::{
     sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample,
 };
-use crate::transonic_drag::{get_projectile_shape, transonic_correction, ProjectileShape};
+use crate::transonic_drag::transonic_correction;
 use crate::wind_shear::WindShearModel;
 use crate::DragModel;
 use nalgebra::Vector3;
@@ -1414,33 +1414,14 @@ impl TrajectorySolver {
             crate::DragModel::GS => "GS",
         };
 
-        // Determine projectile shape for transonic corrections
-        let projectile_shape = if let Some(ref model) = self.inputs.bullet_model {
-            // Lowercase the model name once instead of allocating a new String per check
-            // (this runs 4-7x per integration step).
-            let m = model.to_lowercase();
-            if m.contains("boat") || m.contains("bt") {
-                ProjectileShape::BoatTail
-            } else if m.contains("round") || m.contains("rn") {
-                ProjectileShape::RoundNose
-            } else if m.contains("flat") || m.contains("fb") {
-                ProjectileShape::FlatBase
-            } else {
-                // Use heuristic based on caliber, weight, and drag model
-                get_projectile_shape(
-                    self.inputs.caliber_inches, // INCHES — get_projectile_shape expects inches, not meters
-                    self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
-                    bc_type_str,
-                )
-            }
-        } else {
-            // Use heuristic based on caliber, weight, and drag model
-            get_projectile_shape(
-                self.inputs.caliber_inches, // INCHES — get_projectile_shape expects inches, not meters
-                self.inputs.bullet_mass / 0.00006479891, // Convert kg to grains
-                bc_type_str,
-            )
-        };
+        // Determine projectile shape for transonic corrections (MBA-949: shared resolver so
+        // derivatives/fast_trajectory honor named shapes too; caliber in INCHES, weight in grains).
+        let projectile_shape = crate::transonic_drag::resolve_projectile_shape(
+            self.inputs.bullet_model.as_deref(),
+            self.inputs.caliber_inches,
+            self.inputs.bullet_mass / 0.00006479891, // kg -> grains
+            bc_type_str,
+        );
 
         // Apply transonic corrections
         // Note: Wave drag is disabled because G7/G1 drag functions already include
