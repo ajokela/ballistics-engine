@@ -385,12 +385,12 @@ pub fn compute_derivatives(
     // Total acceleration
     let mut accel = accel_gravity + accel_drag + accel_magnus;
 
-    // Add Coriolis acceleration if omega vector is provided.
-    // Coriolis is -2 Ω×v; migrating to the McCoy right-handed frame (X=downrange,
-    // Y=up, Z=lateral) reflects the original left-handed (lateral, up, downrange)
-    // frame, negating the cross product, so +2 reproduces the original deflection.
+    // Add Coriolis acceleration if omega vector is provided. The physical Coriolis term is
+    // -2 Ω×v (MBA-957: the old +2 "frame-relabel" justification was wrong — it flipped the
+    // lateral drift; the caller now builds omega with the corrected lateral sign, matching the
+    // validated cli_api solver, so the canonical -2 applies directly).
     if let Some(omega) = omega_vector {
-        let accel_coriolis = 2.0 * omega.cross(&vel);
+        let accel_coriolis = -2.0 * omega.cross(&vel);
         accel += accel_coriolis;
     }
 

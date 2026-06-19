@@ -214,6 +214,24 @@ pub fn fast_integrate(
         crate::transonic_drag::get_projectile_shape(caliber_in, weight_gr, drag_model_str)
     };
 
+    // Coriolis omega (Earth rotation), hoisted (invariant over the flight). MBA-957:
+    // fast_integrate — the Monte Carlo / Python-binding path — previously applied NO Coriolis.
+    // Mirror the validated cli_api solver exactly: McCoy frame X=downrange, Y=up, Z=lateral;
+    // azimuth 0 = North; omega.Z is NEGATIVE (Omega.East = -Omega cos(lat) sin(az)); applied as
+    // the physical -2 Omega x v inside compute_derivatives.
+    let omega_vector = if inputs.enable_coriolis && inputs.latitude.is_some() {
+        let omega_earth = 7.2921159e-5_f64; // rad/s
+        let lat = inputs.latitude.unwrap().to_radians();
+        let az = inputs.azimuth_angle; // radians, 0 = North
+        Some(Vector3::new(
+            omega_earth * lat.cos() * az.cos(),  // X: downrange
+            omega_earth * lat.sin(),             // Y: vertical
+            -omega_earth * lat.cos() * az.sin(), // Z: lateral (corrected sign)
+        ))
+    } else {
+        None
+    };
+
     // Integration loop
     let mut hit_target = false;
     let mut hit_ground = false;
@@ -261,6 +279,7 @@ pub fn fast_integrate(
             bc,
             has_bc_segments,
             has_bc_segments_data,
+            omega_vector,
         );
 
         let mut state2 = state;
@@ -277,6 +296,7 @@ pub fn fast_integrate(
             bc,
             has_bc_segments,
             has_bc_segments_data,
+            omega_vector,
         );
 
         let mut state3 = state;
@@ -293,6 +313,7 @@ pub fn fast_integrate(
             bc,
             has_bc_segments,
             has_bc_segments_data,
+            omega_vector,
         );
 
         let mut state4 = state;
@@ -309,6 +330,7 @@ pub fn fast_integrate(
             bc,
             has_bc_segments,
             has_bc_segments_data,
+            omega_vector,
         );
 
         // Update state
@@ -354,6 +376,7 @@ fn compute_derivatives(
     bc: f64,
     has_bc_segments: bool,
     has_bc_segments_data: bool,
+    omega: Option<Vector3<f64>>,
 ) -> [f64; 6] {
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
@@ -366,7 +389,7 @@ fn compute_derivatives(
     let v_mag = vel_adjusted.norm();
 
     // Calculate acceleration
-    let accel = if v_mag < 1e-6 {
+    let mut accel = if v_mag < 1e-6 {
         Vector3::new(0.0, -G_ACCEL_MPS2, 0.0)
     } else {
         // Calculate drag
@@ -425,6 +448,12 @@ fn compute_derivatives(
         accel_drag + Vector3::new(0.0, -G_ACCEL_MPS2, 0.0)
     };
 
+    // Coriolis (Earth rotation), MBA-957. omega already carries the corrected lateral sign; use
+    // the ground-frame velocity and the physical -2 Omega x v, exactly as the validated cli_api.
+    if let Some(omega) = omega {
+        accel += -2.0 * omega.cross(&vel);
+    }
+
     // Return derivatives [vx, vy, vz, ax, ay, az]
     [vel.x, vel.y, vel.z, accel.x, accel.y, accel.z]
 }
@@ -481,7 +510,7 @@ pub fn fast_integrate_with_segments(
         Some(Vector3::new(
             omega_earth * lat_rad.cos() * azimuth.cos(), // X: downrange component
             omega_earth * lat_rad.sin(),                 // Y: vertical component
-            omega_earth * lat_rad.cos() * azimuth.sin(), // Z: lateral component
+            -omega_earth * lat_rad.cos() * azimuth.sin(), // Z: lateral (MBA-957: corrected sign)
         ))
     } else {
         None
