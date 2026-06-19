@@ -1332,7 +1332,17 @@ impl TrajectorySolver {
             } else {
                 4.5 * d_in
             };
-            let sg = crate::spin_drift::miller_stability(d_in, m_gr, self.inputs.twist_rate, l_in);
+            // MBA-958: apply the canonical linear Miller density correction (T/T0)*(P0/P) to the
+            // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.
+            // No-op at sea-level standard (15 C, 1013.25 hPa -> factor 1.0).
+            let press_hpa = self.atmosphere.pressure;
+            let density_correction = if press_hpa > 0.0 && temp_k > 0.0 {
+                (temp_k / 288.15) * (1013.25 / press_hpa)
+            } else {
+                1.0
+            };
+            let sg = crate::spin_drift::miller_stability(d_in, m_gr, self.inputs.twist_rate, l_in)
+                * density_correction;
 
             // Yaw of repose (radians); zero for unstable bullets (Sg <= 1).
             let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(

@@ -339,7 +339,16 @@ pub fn compute_derivatives(
             } else {
                 4.5 * d_in.max(1e-9)
             };
-            let sg = crate::spin_drift::miller_stability(d_in, m_gr, inputs.twist_rate, l_in);
+            // MBA-958: apply the canonical linear Miller density correction (rho0/rho) to the
+            // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.
+            // No-op at sea-level standard (rho ~= 1.225 -> factor ~= 1.0).
+            let density_correction = if air_density > 0.0 {
+                STANDARD_AIR_DENSITY / air_density
+            } else {
+                1.0
+            };
+            let sg = crate::spin_drift::miller_stability(d_in, m_gr, inputs.twist_rate, l_in)
+                * density_correction;
             let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
                 sg,
                 speed_air,
