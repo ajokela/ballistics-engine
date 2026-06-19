@@ -243,6 +243,30 @@ pub fn transonic_correction(
     corrected_cd
 }
 
+/// Resolve the projectile shape for transonic corrections (MBA-949). A user-supplied bullet_model
+/// name (boat/bt, round/rn, flat/fb) takes precedence; otherwise fall back to the caliber/weight/
+/// drag-model heuristic below. This name-parsing previously lived in cli_api and fast_trajectory
+/// but NOT derivatives, so named shapes were silently ignored on the integrate_trajectory path.
+/// Sharing one helper makes all three solver families resolve the same shape for the same inputs.
+pub fn resolve_projectile_shape(
+    bullet_model: Option<&str>,
+    caliber: f64,
+    weight_grains: f64,
+    g_model: &str,
+) -> ProjectileShape {
+    if let Some(model) = bullet_model {
+        let m = model.to_lowercase();
+        if m.contains("boat") || m.contains("bt") {
+            return ProjectileShape::BoatTail;
+        } else if m.contains("round") || m.contains("rn") {
+            return ProjectileShape::RoundNose;
+        } else if m.contains("flat") || m.contains("fb") {
+            return ProjectileShape::FlatBase;
+        }
+    }
+    get_projectile_shape(caliber, weight_grains, g_model)
+}
+
 /// Estimate projectile shape from physical parameters
 ///
 /// This is a simple heuristic based on typical bullet designs.
@@ -272,6 +296,30 @@ pub fn get_projectile_shape(caliber: f64, weight_grains: f64, g_model: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_mba949_resolve_projectile_shape() {
+        // Named bullet_model takes precedence (case-insensitive, substring match).
+        let c = 0.308;
+        let w = 168.0;
+        assert!(matches!(
+            resolve_projectile_shape(Some("Sierra MatchKing Boat Tail"), c, w, "G1"),
+            ProjectileShape::BoatTail
+        ));
+        assert!(matches!(
+            resolve_projectile_shape(Some("300gr RN"), c, w, "G1"),
+            ProjectileShape::RoundNose
+        ));
+        assert!(matches!(
+            resolve_projectile_shape(Some("flat base"), c, w, "G1"),
+            ProjectileShape::FlatBase
+        ));
+        // No name -> heuristic. None and an unrecognized name both defer to get_projectile_shape,
+        // so they must agree with it for the same caliber/weight/drag model.
+        let heuristic = get_projectile_shape(c, w, "G7");
+        assert_eq!(resolve_projectile_shape(None, c, w, "G7"), heuristic);
+        assert_eq!(resolve_projectile_shape(Some("unknown"), c, w, "G7"), heuristic);
+    }
 
     #[test]
     fn test_prandtl_glauert() {

@@ -260,7 +260,10 @@ pub fn compute_derivatives(
         } else {
             inputs.bullet_mass / 0.00006479891 // kg -> grains
         };
-        let shape = crate::transonic_drag::get_projectile_shape(
+        // MBA-949: shared resolver so named bullet_model shapes are honored here too (this path
+        // previously used only the caliber/weight heuristic and ignored the name).
+        let shape = crate::transonic_drag::resolve_projectile_shape(
+            inputs.bullet_model.as_deref(),
             caliber_in,
             weight_gr,
             &inputs.bc_type.to_string(),
