@@ -612,26 +612,10 @@ fn get_bc_for_velocity(velocity_fps: f64, inputs: &BallisticInputs, bc_used: f64
         }
     }
 
-    // Try BC estimation if we have bullet details but no segments
-    if inputs.bullet_diameter > 0.0 && inputs.bullet_mass > 0.0 && bc_used > 0.0 {
-        // Create a model string from bullet_id or generate generic description
-        let model = if let Some(ref bullet_id) = inputs.bullet_id {
-            bullet_id.clone()
-        } else {
-            format!("{}gr bullet", inputs.weight_grains as i32)
-        };
-
-        // Estimate segments based on bullet characteristics
-        let bc_type_str = inputs.bc_type_str.as_deref().unwrap_or("G1");
-        let segments = BCSegmentEstimator::estimate_bc_segments(
-            bc_used,
-            inputs.caliber_inches,
-            inputs.weight_grains,
-            &model,
-            bc_type_str,
-        );
-
-        // Find appropriate segment for current velocity
+    // Try BC estimation if we have bullet details but no segments. MBA-955: the estimation is
+    // factored into estimate_bc_segments_for so the per-integration setup (build_inputs) can
+    // pre-populate bc_segments_data ONCE rather than rebuilding it here every step.
+    if let Some(segments) = estimate_bc_segments_for(inputs, bc_used) {
         for segment in &segments {
             if velocity_fps >= segment.velocity_min && velocity_fps <= segment.velocity_max {
                 return segment.bc_value;
@@ -641,6 +625,35 @@ fn get_bc_for_velocity(velocity_fps: f64, inputs: &BallisticInputs, bc_used: f64
 
     // Fallback to constant BC
     bc_used
+}
+
+/// Estimate velocity-BC segments from bullet characteristics (MBA-955). Extracted from
+/// get_bc_for_velocity's slow path so the per-integration setup can compute the segments ONCE
+/// (build_inputs pre-populates bc_segments_data) instead of rebuilding them — allocating a model
+/// String and a segment Vec — on every derivative evaluation. Returns None when the bullet
+/// details needed for estimation are absent (the caller then falls back to the constant BC). The
+/// logic is byte-identical to the previous inline slow path.
+pub(crate) fn estimate_bc_segments_for(
+    inputs: &BallisticInputs,
+    bc_used: f64,
+) -> Option<Vec<crate::BCSegmentData>> {
+    if !(inputs.bullet_diameter > 0.0 && inputs.bullet_mass > 0.0 && bc_used > 0.0) {
+        return None;
+    }
+    // Model string from bullet_id or a generic weight-based description (unchanged).
+    let model = if let Some(ref bullet_id) = inputs.bullet_id {
+        bullet_id.clone()
+    } else {
+        format!("{}gr bullet", inputs.weight_grains as i32)
+    };
+    let bc_type_str = inputs.bc_type_str.as_deref().unwrap_or("G1");
+    Some(BCSegmentEstimator::estimate_bc_segments(
+        bc_used,
+        inputs.caliber_inches,
+        inputs.weight_grains,
+        &model,
+        bc_type_str,
+    ))
 }
 
 #[cfg(test)]
@@ -661,6 +674,39 @@ mod tests {
             weight_grains: 168.0,
             altitude: 1000.0,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_mba955_bc_segments_prepopulate_byte_identical() {
+        // MBA-955: pre-populating bc_segments_data once (in build_inputs) must return
+        // BYTE-IDENTICAL BC to the old per-step estimation. Build the slow-path inputs
+        // (bc_segments_data = None -> get_bc_for_velocity estimates every call) and the
+        // pre-populated inputs (bc_segments_data = estimate_bc_segments_for, the same helper
+        // build_inputs now calls), and assert get_bc_for_velocity agrees bit-for-bit across the
+        // whole velocity range.
+        let mut slow = create_test_inputs();
+        slow.use_bc_segments = true;
+        slow.bc_segments_data = None;
+        slow.bc_segments = None;
+
+        let bc_used = slow.bc_value;
+        let mut fast = slow.clone();
+        fast.bc_segments_data = estimate_bc_segments_for(&fast, bc_used);
+        assert!(
+            fast.bc_segments_data.is_some(),
+            "estimation should yield segments for a valid bullet"
+        );
+
+        for v in (200..=3500).step_by(50) {
+            let vf = v as f64;
+            let a = get_bc_for_velocity(vf, &slow, bc_used);
+            let b = get_bc_for_velocity(vf, &fast, bc_used);
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "BC differs at {vf} fps: slow={a} fast={b}"
+            );
         }
     }
 

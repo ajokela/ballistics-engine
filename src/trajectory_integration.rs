@@ -155,7 +155,7 @@ pub struct TrajectoryParams {
 /// set to 0.0 because compute_derivatives never reads it on this path; every other field depends
 /// only on `params`, so the struct is constant for the whole integration.
 fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
-    BallisticInputs {
+    let mut inputs = BallisticInputs {
         bc_value: params.bc,
         bc_type: params.drag_model,
         bullet_mass: params.mass_kg, // kg
@@ -219,7 +219,19 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         sight_height: 0.0,
         muzzle_height: 0.0,
         target_height: 0.0,
+    };
+
+    // MBA-955: pre-populate velocity-BC segments ONCE here, instead of get_bc_for_velocity
+    // rebuilding them (a model String + a segment Vec) on every derivative evaluation (4-7x per
+    // step). Gated to EXACTLY the case where the per-step path would estimate: use_bc_segments on,
+    // no explicit velocity segments, and no Mach-based bc_segments (those take a different,
+    // unchanged path). bc_used there == params.bc == inputs.bc_value, so the estimated segments are
+    // identical and the per-step fast-path lookup returns the same BC -> byte-identical output.
+    if inputs.use_bc_segments && inputs.bc_segments_data.is_none() && inputs.bc_segments.is_none() {
+        inputs.bc_segments_data =
+            crate::derivatives::estimate_bc_segments_for(&inputs, inputs.bc_value);
     }
+    inputs
 }
 
 /// Convert state to Vector6 and call compute_derivatives
