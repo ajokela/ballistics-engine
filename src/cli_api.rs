@@ -376,10 +376,13 @@ impl TrajectorySolver {
     /// launch-angle offset is the physically correct integration point. Returns the bare
     /// `(muzzle_angle, azimuth_angle)` when the flag is off, so a default solve is
     /// numerically identical to pre-feature behavior. (MBA-959)
-    fn launch_angles(&self) -> (f64, f64) {
+    fn launch_angles_from(
+        &self,
+        aj: Option<&crate::aerodynamic_jump::AerodynamicJumpComponents>,
+    ) -> (f64, f64) {
         let elev = self.inputs.muzzle_angle;
         let azim = self.inputs.azimuth_angle;
-        match self.aerodynamic_jump_components() {
+        match aj {
             Some(c) => {
                 // vertical_/horizontal_jump_moa ARE the jump angles expressed in MOA.
                 const MOA_PER_RAD: f64 = 3437.7467707849;
@@ -571,8 +574,10 @@ impl TrajectorySolver {
         // Calculate initial velocity components with both elevation and azimuth
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
         // Launch direction includes the aerodynamic-jump muzzle perturbation when enabled
-        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959.
-        let (launch_elev, launch_azim) = self.launch_angles();
+        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959. Computed
+        // once here and reused for the result so it isn't evaluated twice per solve.
+        let aj_components = self.aerodynamic_jump_components();
+        let (launch_elev, launch_azim) = self.launch_angles_from(aj_components.as_ref());
         let horizontal_velocity = self.inputs.muzzle_velocity * launch_elev.cos();
         let mut velocity = Vector3::new(
             horizontal_velocity * launch_azim.cos(), // X: downrange (forward)
@@ -801,7 +806,7 @@ impl TrajectorySolver {
             } else {
                 None
             },
-            aerodynamic_jump: self.aerodynamic_jump_components(),
+            aerodynamic_jump: aj_components,
         })
     }
 
@@ -820,8 +825,10 @@ impl TrajectorySolver {
         // Calculate initial velocity components with both elevation and azimuth
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
         // Launch direction includes the aerodynamic-jump muzzle perturbation when enabled
-        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959.
-        let (launch_elev, launch_azim) = self.launch_angles();
+        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959. Computed
+        // once here and reused for the result so it isn't evaluated twice per solve.
+        let aj_components = self.aerodynamic_jump_components();
+        let (launch_elev, launch_azim) = self.launch_angles_from(aj_components.as_ref());
         let horizontal_velocity = self.inputs.muzzle_velocity * launch_elev.cos();
         let mut velocity = Vector3::new(
             horizontal_velocity * launch_azim.cos(), // X: downrange (forward)
@@ -1052,7 +1059,7 @@ impl TrajectorySolver {
             } else {
                 None
             },
-            aerodynamic_jump: self.aerodynamic_jump_components(),
+            aerodynamic_jump: aj_components,
         })
     }
 
@@ -1070,8 +1077,10 @@ impl TrajectorySolver {
         // Calculate initial velocity components
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
         // Launch direction includes the aerodynamic-jump muzzle perturbation when enabled
-        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959.
-        let (launch_elev, launch_azim) = self.launch_angles();
+        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959. Computed
+        // once here and reused for the result so it isn't evaluated twice per solve.
+        let aj_components = self.aerodynamic_jump_components();
+        let (launch_elev, launch_azim) = self.launch_angles_from(aj_components.as_ref());
         let horizontal_velocity = self.inputs.muzzle_velocity * launch_elev.cos();
         let mut velocity = Vector3::new(
             horizontal_velocity * launch_azim.cos(), // X: downrange (forward)
@@ -1207,7 +1216,7 @@ impl TrajectorySolver {
             angular_state: None,
             max_yaw_angle: None,
             max_precession_angle: None,
-            aerodynamic_jump: self.aerodynamic_jump_components(),
+            aerodynamic_jump: aj_components,
         })
     }
 

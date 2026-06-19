@@ -215,7 +215,12 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         bc_type_str: None,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
-        // AJ is not yet exposed through the TrajectoryParams binding path (MBA-959 follow-up).
+        // MBA-959: aerodynamic jump is intentionally OFF on this path. integrate_trajectory
+        // is a low-level state integrator: it advances a raw initial_state (no muzzle angle to
+        // perturb), carries placeholder bullet geometry (fixed twist/length/diameter) and an
+        // unread muzzle_velocity, so a meaningful Litz Sg can't be formed here (Sg would be ~0
+        // and the AJ guard would suppress it regardless). AJ belongs on the BallisticInputs +
+        // TrajectorySolver path, which bindings use and which already honors the flag.
         enable_aerodynamic_jump: false,
         use_rk4: true,
         use_adaptive_rk45: false,
