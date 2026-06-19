@@ -403,8 +403,15 @@ impl TrajectorySolver {
         if !self.inputs.enable_aerodynamic_jump {
             return None;
         }
+        // Reject degenerate/non-finite inputs before they can reach the launch angle.
+        // A bare `<= 0.0` test lets NaN through (NaN comparisons are always false), and a
+        // NaN/Inf here would poison the muzzle angle and collapse the whole trajectory.
         let twist_in = self.inputs.twist_rate;
-        if twist_in <= 0.0 || self.inputs.caliber_inches <= 0.0 {
+        if !(twist_in.is_finite() && twist_in > 0.0)
+            || !(self.inputs.caliber_inches.is_finite() && self.inputs.caliber_inches > 0.0)
+            || !self.inputs.muzzle_velocity.is_finite()
+            || !self.inputs.tipoff_yaw.is_finite()
+        {
             return None;
         }
         // Spin rate (rad/s): one turn per (twist_in * 0.0254) m of forward travel.
@@ -417,7 +424,7 @@ impl TrajectorySolver {
         let air_density = calculate_air_density(&self.atmosphere);
         // BallisticInputs has no barrel-length field yet (MBA-959 follow-up); assume 24".
         const ASSUMED_BARREL_M: f64 = 0.6096;
-        Some(crate::aerodynamic_jump::calculate_aerodynamic_jump(
+        let components = crate::aerodynamic_jump::calculate_aerodynamic_jump(
             self.inputs.muzzle_velocity,
             spin_rate_rad_s,
             crosswind_mps,
@@ -428,7 +435,13 @@ impl TrajectorySolver {
             self.inputs.is_twist_right,
             self.inputs.tipoff_yaw,
             air_density,
-        ))
+        );
+        // Belt-and-suspenders: never let a non-finite jump (e.g. an absurd twist that
+        // overflows spin_rate to Inf) perturb the launch angle.
+        if !components.vertical_jump_moa.is_finite() || !components.horizontal_jump_moa.is_finite() {
+            return None;
+        }
+        Some(components)
     }
 
     fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {

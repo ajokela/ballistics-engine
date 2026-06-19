@@ -67,6 +67,33 @@ fn jump_shifts_vertical_impact_with_crosswind() {
 }
 
 #[test]
+fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
+    // A NaN twist must not slip past the guard (NaN <= 0.0 is false) and NaN-out
+    // the launch angle. AJ must be suppressed and the trajectory stay finite.
+    let mut inputs = BallisticInputs::default();
+    inputs.muzzle_velocity = 800.0;
+    inputs.muzzle_angle = 0.01;
+    inputs.target_distance = 500.0;
+    inputs.enable_aerodynamic_jump = true;
+    inputs.twist_rate = f64::NAN;
+    let wind = WindConditions {
+        speed: 10.0,
+        direction: PI / 2.0,
+    };
+    let mut solver = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
+    solver.set_max_range(600.0);
+    let r = solver.solve().expect("solve should succeed even with NaN twist");
+    assert!(
+        r.aerodynamic_jump.is_none(),
+        "AJ must be suppressed for a non-finite twist"
+    );
+    assert!(
+        vertical_at_500(&r).is_finite(),
+        "trajectory must stay finite when twist is NaN"
+    );
+}
+
+#[test]
 fn no_wind_no_tipoff_jump_is_negligible() {
     // With zero crosswind and zero tip-off yaw, the jump should be ~0, so the
     // trajectory must stay numerically indistinguishable from the disabled case.
