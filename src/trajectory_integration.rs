@@ -147,6 +147,9 @@ pub struct TrajectoryParams {
     pub custom_drag_table: Option<crate::drag::DragTable>, // Custom Drag Model (CDM) data
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
     pub use_bc_segments: bool, // Whether to use BC segment interpolation
+    /// MBA-954: altitude (m, relative to launch) below which integration stops. -1000.0 is the
+    /// historical default — effectively "no early ground impact" for normal flat-fire shots.
+    pub ground_threshold: f64,
 }
 
 /// Build the loop-invariant BallisticInputs for the derivatives function ONCE per integration,
@@ -193,7 +196,7 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         powder_temp_sensitivity: 0.0,
         powder_temp: 59.0,
         tipoff_decay_distance: 0.0,
-        ground_threshold: -1000.0,
+        ground_threshold: params.ground_threshold, // MBA-954: honor the configured ground plane
         bc_segments: params.bc_segments.clone(),
         caliber_inches: 0.308,
         weight_grains: params.mass_kg / 0.00006479891,
@@ -367,8 +370,9 @@ pub fn integrate_trajectory(
                     break;
                 }
 
-                // Check if bullet hit ground
-                if state[1] < -1000.0 {
+                // Check if bullet hit ground (MBA-954: honor the configured ground plane,
+                // not a hardcoded -1000.0)
+                if state[1] < params.ground_threshold {
                     break;
                 }
             }
@@ -455,8 +459,9 @@ pub fn integrate_trajectory(
                     break;
                 }
 
-                // Check if bullet hit ground
-                if state[1] < -1000.0 {
+                // Check if bullet hit ground (MBA-954: honor the configured ground plane,
+                // not a hardcoded -1000.0)
+                if state[1] < params.ground_threshold {
                     break;
                 }
             }
@@ -517,6 +522,7 @@ pub fn solve_trajectory_rust(
         custom_drag_table: None, // No CDM for test function
         bc_segments: None,       // No BC segments for legacy function
         use_bc_segments: false,
+        ground_threshold: -1000.0, // MBA-954: preserve the historical default
     };
 
     let trajectory =
@@ -562,7 +568,33 @@ mod tests {
             custom_drag_table: None,
             bc_segments: None,
             use_bc_segments: false,
+            ground_threshold: -1000.0,
         }
+    }
+
+    #[test]
+    fn test_mba954_ground_threshold_honored() {
+        // MBA-954: integrate_trajectory must honor the configured ground plane, not a hardcoded
+        // -1000.0. A descending bullet with a shallow ground_threshold must terminate earlier
+        // (fewer points) than one with the historical deep default.
+        let initial_state = [0.0, 0.0, 0.0, 300.0, -30.0, 0.0]; // descending (vy = -30 m/s)
+
+        let mut shallow = create_test_params(1_000_000.0); // huge target so range never terminates
+        shallow.ground_threshold = -20.0; // stop ~20 m below launch
+        let mut deep = create_test_params(1_000_000.0);
+        deep.ground_threshold = -1000.0; // historical default
+
+        let t_shallow =
+            integrate_trajectory(initial_state, (0.0, 60.0), shallow, "RK4", 1e-6, 0.001);
+        let t_deep = integrate_trajectory(initial_state, (0.0, 60.0), deep, "RK4", 1e-6, 0.001);
+
+        assert!(
+            t_shallow.len() < t_deep.len(),
+            "shallow ground_threshold (-20) should terminate earlier than deep (-1000): \
+             shallow={}, deep={}",
+            t_shallow.len(),
+            t_deep.len()
+        );
     }
 
     #[test]
@@ -589,6 +621,7 @@ mod tests {
             custom_drag_table: None,
             bc_segments: None,
             use_bc_segments: false,
+            ground_threshold: -1000.0,
         };
 
         println!("Running integrate_trajectory test...");
