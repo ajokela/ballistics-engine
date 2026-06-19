@@ -550,6 +550,10 @@ pub fn fast_integrate_with_segments(
         custom_drag_table: inputs.custom_drag_table.clone(),
         bc_segments: inputs.bc_segments.clone(),
         use_bc_segments: inputs.use_bc_segments,
+        // MBA-954: keep the historical -1000.0 here (behavior-preserving for this binding path);
+        // threading inputs.ground_threshold would change the default ground plane for existing
+        // callers. Direct TrajectoryParams constructors can now configure it.
+        ground_threshold: -1000.0,
     };
 
     // Use RK45 adaptive integration
