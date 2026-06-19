@@ -1542,8 +1542,12 @@ pub fn run_monte_carlo_with_wind(
         .map_err(|e| format!("Invalid BC distribution: {}", e))?;
     let wind_speed_dist = Normal::new(base_wind.speed, params.wind_speed_std_dev)
         .map_err(|e| format!("Invalid wind speed distribution: {}", e))?;
+    // MBA-952: wind-direction spread is APPROXIMATED from the wind-SPEED std dev (×0.1), a unit
+    // conflation (m/s scaled as radians) — there is no dedicated wind_direction_std_dev field yet.
+    // The dead WASM `--wind-dir-std` setter was removed (it set nothing). A proper fix is an
+    // API-breaking wind_direction_std_dev on MonteCarloParams plumbed through WASM/FFI/main.
     let wind_dir_dist =
-        Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1) // Small variation in direction
+        Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1)
             .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
     let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
         .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;

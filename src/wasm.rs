@@ -804,7 +804,6 @@ impl WasmBallistics {
         } else {
             0.5
         };
-        let mut wind_dir_std = 5.0;
         let mut drag_model = "G1";
 
         // Parse arguments
@@ -888,14 +887,6 @@ impl WasmBallistics {
                         wind_speed_std = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid wind speed std"))?;
-                        i += 1;
-                    }
-                }
-                "--wind-dir-std" => {
-                    if i + 1 < args.len() {
-                        wind_dir_std = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid wind direction std"))?;
                         i += 1;
                     }
                 }
@@ -1658,7 +1649,6 @@ Monte Carlo Command:
     --angle-std <STD>            Angle std deviation
     --bc-std <STD>               BC std deviation
     --wind-speed-std <STD>       Wind speed std deviation
-    --wind-dir-std <STD>         Wind direction std deviation (not yet implemented)
 
 Estimate BC Command:
   ballistics estimate-bc [OPTIONS]
