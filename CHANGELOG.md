@@ -5,6 +5,35 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-06-18
+
+A cross-solver consistency and physics-correction pass (JIRA MBA-938..958). 17 commits since v0.17.0; build and full test suite (210+) green. Several changes correct real bugs that **shift numerical results** on the Coriolis, transonic/subsonic drag, spin-drift-at-altitude, and WASM-zero paths — see Changed and validate against a reference before deploying downstream.
+
+### Fixed
+- **Coriolis deflection direction** — corrected to the physical `-2 Ω×v` with the right lateral ω sign; a Northern-hemisphere shot now drifts right (was left), validated vs py_ballisticcalc. The fast/Monte-Carlo path (used by the Python/Ruby bindings) applied no Coriolis at all and now matches the default solver to ~1%.
+- **Transonic drag resolution** — the engine silently used a coarse 21-point G1/G7 fallback (a runtime loader looked for a directory that never exists at runtime); the high-resolution 79/84-point tables are now baked in via `include_str!`. Transonic drop error vs py_ballisticcalc fell from +43" to +3" at 1300 yd.
+- **Custom drag tables** (`custom_drag_table`) are now honored by all three solvers (were plumbed onto the inputs but never read — the G-model was always used).
+- **Named bullet shapes** (boat/round/flat in `bullet_model`) now drive the transonic shape on every solver (the integrate_trajectory path ignored the name and used a caliber/weight heuristic).
+- **`use_form_factor`** is honored consistently across all three solvers (was derivatives-only; no-op by default).
+- **WASM standalone zero** targets the line of sight (sight height), not the bore line — it was off by the sight-height angle (~2 MOA at 100 yd / 2" sight).
+- **PDF output** is gated behind the `pdf` feature so `--no-default-features` builds the binary.
+- **Sampled `--full` CSV** reports drop/drift in inches (Imperial) / meters (Metric), matching the table and API (was yards).
+- Removed a dead WASM `--wind-dir-std` setter; documented the wind-direction-spread approximation.
+
+### Changed
+> **FLAGGED for downstream:** these correct real bugs but **shift numerical output**. Re-validate dope and any cached/expected outputs.
+- **Coriolis** — direction fix plus the previously-absent Monte-Carlo/binding application; affects any Coriolis-enabled trajectory.
+- **Transonic/subsonic drag** — the high-resolution G1/G7 tables shift drag below ~Mach 1.3; the low-velocity **Reynolds correction was removed** (it ran on only one of three solvers, py_ballisticcalc does not model it, and the default solver already matches pbc subsonically), shifting subsonic (<200 m/s) shots on the binding path.
+- **Spin drift at altitude** — the Miller stability density correction is now the canonical linear `(T/T0)(P0/P)` (was `sqrt`), raising spin drift at altitude (sea level unchanged). The same correction now also feeds the Magnus / yaw-of-repose Sg (off by default).
+- **WASM zero** shifts by the sight-height angle (~2 MOA at 100 yd) — now a proper sight-line zero.
+
+### Added
+- `transonic_drag::resolve_projectile_shape(...)` — shared bullet-shape resolution (name first, then heuristic) used by all three solvers.
+- `TrajectoryParams.ground_threshold` — the integrate_trajectory ground plane is configurable (was hardcoded `-1000.0`; default preserved).
+
+### Performance (output-identical)
+- Velocity-BC segments are estimated **once** at solver setup on the integrate_trajectory path (the Python-binding hot path) instead of being rebuilt — allocating a string + a vector — on every derivative evaluation. Byte-identical output.
+
 ## [0.17.0] - 2026-06-17
 
 An autonomous adversarial hardening pass plus a follow-up altitude/temperature fix. 82 fixes across 78 commits since v0.16.0; build and full test suite green. Most changes are correctness/robustness fixes that preserve output, but several correct real bugs that **shift numerical results** — see Changed below and validate against a reference before deploying downstream.
