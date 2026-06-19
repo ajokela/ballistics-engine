@@ -1441,7 +1441,18 @@ impl TrajectorySolver {
         // Wave drag should only be enabled for custom drag functions that don't
         // include transonic behavior.
         let include_wave_drag = false;
-        transonic_correction(mach, base_cd, projectile_shape, include_wave_drag)
+        let cd = transonic_correction(mach, base_cd, projectile_shape, include_wave_drag);
+
+        // MBA-948: honor use_form_factor here too — previously only derivatives.rs applied it,
+        // so cli_api and fast_trajectory silently ignored the flag. apply_form_factor_to_drag
+        // short-circuits when the flag is false, so this is a no-op for every current consumer
+        // (the flag is false on all CLI/FFI/WASM/binding surfaces and defaults false).
+        crate::form_factor::apply_form_factor_to_drag(
+            cd,
+            self.inputs.bullet_model.as_deref(),
+            &self.inputs.bc_type,
+            self.inputs.use_form_factor,
+        )
     }
 }
 
