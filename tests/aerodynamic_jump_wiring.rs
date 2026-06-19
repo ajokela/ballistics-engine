@@ -163,6 +163,34 @@ fn aj_direction_flips_with_wind_side_and_twist() {
 }
 
 #[test]
+fn zeroing_ignores_aerodynamic_jump() {
+    // The zero must be found on the bare bore so AJ is an additive POI shift, never
+    // absorbed by the zero search — even when zeroing with a crosswind present.
+    use ballistics_engine::calculate_zero_angle_with_conditions;
+    let make = |aj: bool| {
+        let mut inputs = BallisticInputs::default();
+        inputs.muzzle_velocity = 790.0;
+        inputs.twist_rate = 11.0;
+        inputs.enable_aerodynamic_jump = aj;
+        inputs
+    };
+    let wind = WindConditions {
+        speed: 4.4704, // 10 mph crosswind present during zeroing
+        direction: PI / 2.0,
+    };
+    let atmo = AtmosphericConditions::default();
+    let z_off =
+        calculate_zero_angle_with_conditions(make(false), 200.0, 0.0, wind.clone(), atmo.clone())
+            .unwrap();
+    let z_on =
+        calculate_zero_angle_with_conditions(make(true), 200.0, 0.0, wind, atmo).unwrap();
+    assert!(
+        (z_on - z_off).abs() < 1e-12,
+        "zero angle must not depend on AJ (on={z_on}, off={z_off})"
+    );
+}
+
+#[test]
 fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     // A NaN twist must not slip past the guard (NaN <= 0.0 is false) and NaN-out
     // the launch angle. AJ must be suppressed and the trajectory stay finite.

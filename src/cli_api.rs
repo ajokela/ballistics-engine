@@ -1764,6 +1764,11 @@ pub fn calculate_zero_angle_with_conditions(
     let get_height_at_angle = |angle: f64| -> Result<Option<f64>, BallisticsError> {
         let mut test_inputs = inputs.clone();
         test_inputs.muzzle_angle = angle;
+        // MBA-959: zero on the bare bore. Aerodynamic jump is a constant elevation
+        // offset, so leaving it on here would let the zero search silently absorb the
+        // vertical jump. Disabling it makes AJ an additive POI shift relative to the
+        // no-jump zero, regardless of the conditions the caller zeroes in.
+        test_inputs.enable_aerodynamic_jump = false;
 
         let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
         solver.set_max_range(target_distance * 2.0);
@@ -1858,6 +1863,8 @@ pub fn calculate_zero_angle_with_conditions(
 
         let mut test_inputs = inputs.clone();
         test_inputs.muzzle_angle = mid_angle;
+        // MBA-959: zero on the bare bore so aerodynamic jump is not absorbed (see above).
+        test_inputs.enable_aerodynamic_jump = false;
 
         let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
         // Make sure we calculate far enough to reach the target
