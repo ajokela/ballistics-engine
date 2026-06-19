@@ -345,4 +345,52 @@ mod tests {
         assert!(sensitivity > 0.0);
         assert!(sensitivity < 0.5);
     }
+
+    // ---- Litz crosswind aerodynamic-jump estimator (the canonical solver model) ----
+
+    #[test]
+    fn litz_matches_the_published_formula() {
+        // Y = 0.01*Sg - 0.0024*L + 0.032 [MOA/mph], scaled by crosswind and twist hand.
+        // Sg = 1.75, L = 4.0 -> 0.0175 - 0.0096 + 0.032 = 0.0399 MOA/mph.
+        let per_mph = 0.01 * 1.75 - 0.0024 * 4.0 + 0.032;
+        let got = litz_crosswind_jump_moa(1.75, 4.0, 10.0, true);
+        assert!(
+            (got - per_mph * 10.0).abs() < 1e-12,
+            "got {got}, expected {}",
+            per_mph * 10.0
+        );
+        // Sanity: a few tenths of an MOA at 10 mph.
+        assert!((got - 0.399).abs() < 1e-3);
+    }
+
+    #[test]
+    fn litz_is_linear_in_crosswind() {
+        let one = litz_crosswind_jump_moa(1.8, 3.5, 1.0, true);
+        let ten = litz_crosswind_jump_moa(1.8, 3.5, 10.0, true);
+        assert!((ten - 10.0 * one).abs() < 1e-12);
+        assert_eq!(litz_crosswind_jump_moa(1.8, 3.5, 0.0, true), 0.0);
+    }
+
+    #[test]
+    fn litz_sign_flips_with_wind_side_and_twist() {
+        // Wind from the right + right twist -> up (positive).
+        let base = litz_crosswind_jump_moa(1.9, 4.0, 12.0, true);
+        assert!(base > 0.0);
+        // Reversing the wind side flips the sign, same magnitude.
+        assert!((litz_crosswind_jump_moa(1.9, 4.0, -12.0, true) + base).abs() < 1e-12);
+        // Flipping the twist hand flips the sign.
+        assert!((litz_crosswind_jump_moa(1.9, 4.0, 12.0, false) + base).abs() < 1e-12);
+    }
+
+    #[test]
+    fn litz_regression_can_go_negative_outside_its_fitted_range() {
+        // The estimator is a faithful linear fit (not clamped): a very long, marginally
+        // stable bullet drives 0.01*Sg - 0.0024*L + 0.032 below zero, reversing the jump.
+        // This is the extrapolation regime — see MBA-959.
+        let per_mph = 0.01 * 1.0 - 0.0024 * 20.0 + 0.032; // = -0.006
+        assert!(per_mph < 0.0);
+        let got = litz_crosswind_jump_moa(1.0, 20.0, 10.0, true);
+        assert!((got - per_mph * 10.0).abs() < 1e-12);
+        assert!(got < 0.0);
+    }
 }
