@@ -209,8 +209,39 @@ fn find_drag_tables_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-/// G1 drag table with lazy loading
+/// Parse an embedded CSV drag table (`mach,cd` per line, header tolerated). Used to bake the
+/// high-resolution G1/G7 tables (data/*.csv) into the binary so the engine never depends on a
+/// runtime `drag_tables/` directory existing. Falls back to the supplied coarse table only if
+/// parsing yields no points (the shipped data files always parse).
+fn parse_embedded_drag_table(csv: &str, fallback: &[(f64, f64)]) -> DragTable {
+    let mut mach_values = Vec::new();
+    let mut cd_values = Vec::new();
+    for line in csv.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut cols = line.split(',');
+        if let (Some(m), Some(cd)) = (cols.next(), cols.next()) {
+            if let (Ok(m), Ok(cd)) = (m.trim().parse::<f64>(), cd.trim().parse::<f64>()) {
+                mach_values.push(m);
+                cd_values.push(cd);
+            }
+        }
+    }
+    if mach_values.is_empty() {
+        mach_values = fallback.iter().map(|(m, _)| *m).collect();
+        cd_values = fallback.iter().map(|(_, cd)| *cd).collect();
+    }
+    DragTable::new(mach_values, cd_values)
+}
+
+/// G1 drag table — high-resolution data baked in from data/g1.csv at compile time (MBA-939).
+/// The previous runtime loader searched for a `drag_tables/` directory that does not exist when
+/// the binary runs (the tables ship under data/), so the engine silently used the coarse 21-point
+/// fallback below, flattening the transonic drag rise. include_str! guarantees the full table.
 static G1_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
+    // Coarse 21-point fallback, retained only for the impossible parse-failure path.
     let fallback_data = [
         (0.0, 0.2629),
         (0.5, 0.2695),
@@ -235,18 +266,15 @@ static G1_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
         (5.0, 0.4988),
     ];
 
-    if let Some(drag_dir) = find_drag_tables_dir() {
-        load_drag_table(&drag_dir, "g1", &fallback_data)
-    } else {
-        // Use fallback data if directory not found
-        let mach_values: Vec<f64> = fallback_data.iter().map(|(m, _)| *m).collect();
-        let cd_values: Vec<f64> = fallback_data.iter().map(|(_, cd)| *cd).collect();
-        DragTable::new(mach_values, cd_values)
-    }
+    parse_embedded_drag_table(include_str!("../data/g1.csv"), &fallback_data)
 });
 
-/// G7 drag table with lazy loading
+/// G7 drag table — high-resolution data baked in from data/g7.csv at compile time (MBA-939).
+/// Same root cause as G1: the runtime `drag_tables/` loader never resolved, so the coarse
+/// 21-point fallback was used, missing the Mach 0.9->1.0 transonic knee (the embedded 0.9 point
+/// was even wrong: 0.1294 vs the true 0.1464). include_str! bakes in the full 84-point table.
 static G7_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
+    // Coarse 21-point fallback, retained only for the impossible parse-failure path.
     let fallback_data = [
         (0.0, 0.1198),
         (0.5, 0.1197),
@@ -271,14 +299,7 @@ static G7_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
         (5.0, 0.1618),
     ];
 
-    if let Some(drag_dir) = find_drag_tables_dir() {
-        load_drag_table(&drag_dir, "g7", &fallback_data)
-    } else {
-        // Use fallback data if directory not found
-        let mach_values: Vec<f64> = fallback_data.iter().map(|(m, _)| *m).collect();
-        let cd_values: Vec<f64> = fallback_data.iter().map(|(_, cd)| *cd).collect();
-        DragTable::new(mach_values, cd_values)
-    }
+    parse_embedded_drag_table(include_str!("../data/g7.csv"), &fallback_data)
 });
 
 /// G6 drag table - flat-base with 6 caliber secant ogive (military FMJ bullets)

@@ -49,6 +49,13 @@ fn test_cli_trajectory_basic() {
 
 #[test]
 fn test_cli_monte_carlo_command() {
+    // An explicit --target-distance is REQUIRED for a stable low-sim test. Without it the
+    // Monte Carlo target defaults to the baseline's own max range (cli_api.rs), and the
+    // skip-filter then discards every perturbed draw that lands short of baseline — roughly
+    // half of all samples. With only 10 sims, an all-short batch ("No successful simulations")
+    // is hit ~10% of the time, and any legitimate change to the drag physics shifts that rate.
+    // Pinning a target well inside the trajectory keeps essentially every sample, so the test
+    // is deterministic. (The underlying self-referential-target attrition is tracked separately.)
     let output = Command::new(get_cli_binary())
         .args(&[
             "monte-carlo",
@@ -62,6 +69,8 @@ fn test_cli_monte_carlo_command() {
             "0.308",
             "--num-sims",
             "10",
+            "--target-distance",
+            "800",
         ])
         .output()
         .expect("Failed to execute command");
