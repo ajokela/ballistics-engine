@@ -101,6 +101,65 @@ pub struct FastIntegrationParams {
     pub atmo_params: (f64, f64, f64, f64),
 }
 
+/// Aerodynamic-jump vertical launch-angle offset (radians) for the fast-integrate path.
+///
+/// Bryan Litz's crosswind estimator (`Y = 0.01*Sg - 0.0024*L + 0.032` MOA/mph) fed by the
+/// engine's Miller Sg. The fast path receives a prebuilt initial velocity (no muzzle angle),
+/// so the caller rotates that velocity by this offset. Returns 0 when the feature is off or
+/// the inputs are degenerate. Crosswind is taken from `wind_speed`/`wind_angle`
+/// (BallisticInputs convention: 0 = headwind, +90deg = from the right). MBA-959, EXPERIMENTAL.
+pub fn aerodynamic_jump_launch_offset_rad(
+    inputs: &BallisticInputs,
+    atmo_params: (f64, f64, f64, f64),
+) -> f64 {
+    if !inputs.enable_aerodynamic_jump {
+        return 0.0;
+    }
+    let diameter = inputs.bullet_diameter;
+    if !(inputs.twist_rate.is_finite() && inputs.twist_rate != 0.0)
+        || !(diameter.is_finite() && diameter > 0.0)
+        || !(inputs.bullet_length.is_finite() && inputs.bullet_length > 0.0)
+        || !inputs.muzzle_velocity.is_finite()
+    {
+        return 0.0;
+    }
+    let sg = crate::stability::compute_stability_coefficient(inputs, atmo_params);
+    if !(sg.is_finite() && sg > 0.0) {
+        return 0.0;
+    }
+    let length_cal = inputs.bullet_length / diameter;
+    const MS_TO_MPH: f64 = 2.236_936_292_054_4;
+    let crosswind_from_right_mph = inputs.wind_speed * inputs.wind_angle.sin() * MS_TO_MPH;
+    let vertical_moa = crate::aerodynamic_jump::litz_crosswind_jump_moa(
+        sg,
+        length_cal,
+        crosswind_from_right_mph,
+        inputs.is_twist_right,
+    );
+    if !vertical_moa.is_finite() {
+        return 0.0;
+    }
+    const MOA_PER_RAD: f64 = 3437.7467707849;
+    vertical_moa / MOA_PER_RAD
+}
+
+/// Rotate a McCoy-frame state's velocity (indices 3..6) by `theta_rad` in the vertical
+/// (downrange–vertical) plane, preserving speed and horizontal heading. Positive = up.
+fn rotate_launch_velocity(state: &mut [f64; 6], theta_rad: f64) {
+    let (vx, vy, vz) = (state[3], state[4], state[5]);
+    let speed = (vx * vx + vy * vy + vz * vz).sqrt();
+    if speed <= 0.0 {
+        return;
+    }
+    let h = (vx * vx + vz * vz).sqrt(); // horizontal (downrange+lateral) speed
+    let new_elev = vy.atan2(h) + theta_rad;
+    state[4] = speed * new_elev.sin();
+    let new_h = speed * new_elev.cos();
+    let scale = if h > 1e-12 { new_h / h } else { 0.0 };
+    state[3] = vx * scale;
+    state[5] = vz * scale;
+}
+
 /// Fast fixed-step integration for longer trajectories
 pub fn fast_integrate(
     inputs: &BallisticInputs,
@@ -136,7 +195,14 @@ pub fn fast_integrate(
     // at a too-short downrange. NOTE: the 4x factor is a heuristic, NOT a proven upper bound — it
     // can still be exceeded by extreme high-drag / high-launch-angle shots, which would truncate
     // the loop before impact.
-    let vx = params.initial_state[3]; // horizontal (downrange) velocity
+    // MBA-959: aerodynamic jump perturbs the prebuilt launch velocity vertically (this path is
+    // handed an initial_state, not a muzzle angle). A no-op returning the original when disabled.
+    let mut initial_state = params.initial_state;
+    let aj_offset = aerodynamic_jump_launch_offset_rad(inputs, params.atmo_params);
+    if aj_offset != 0.0 {
+        rotate_launch_velocity(&mut initial_state, aj_offset);
+    }
+    let vx = initial_state[3]; // horizontal (downrange) velocity
     let t_max = if vx > 1e-6 && params.horiz > 0.0 {
         (4.0 * params.horiz / vx).min(params.t_span.1)
     } else {
@@ -148,9 +214,9 @@ pub fn fast_integrate(
     let mut times = Vec::with_capacity(n_steps);
     let mut states = Vec::with_capacity(n_steps);
 
-    // Initial state
+    // Initial state (with the aerodynamic-jump launch perturbation applied above)
     times.push(0.0);
-    states.push(params.initial_state);
+    states.push(initial_state);
 
     // Base drag density = the muzzle (shooter-altitude) density. atmo_params.3 is base_ratio
     // = air_density/1.225 at the shooter altitude (the MC caller computes it via
