@@ -5,6 +5,13 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.3] - 2026-06-19
+
+Extends aerodynamic jump (MBA-959) to the fast-integrate path. Default-off; no change to existing trajectories.
+
+### Added
+- **Aerodynamic jump in `fast_trajectory::fast_integrate`** — the fast fixed-step kernel (used by the `ballistics-engine-py` `fast_integrate` binding and the Monte-Carlo path) now applies aerodynamic jump when `enable_aerodynamic_jump` is set, by perturbing the prebuilt launch velocity vertically. New public `fast_trajectory::aerodynamic_jump_launch_offset_rad(inputs, atmo_params)` returns the Litz vertical offset (radians) from the engine's Miller Sg; crosswind is taken from `wind_speed`/`wind_angle` (BallisticInputs convention: 0 = headwind, +90° = from the right). Previously only the `cli_api::TrajectorySolver` (Euler/RK4/RK45) path applied AJ; the fast path ignored the flag.
+
 ## [0.18.2] - 2026-06-19
 
 Adds an opt-in aerodynamic-jump effect (MBA-959). Default-off and additive — no change to existing trajectories.
