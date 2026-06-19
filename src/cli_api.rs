@@ -395,8 +395,10 @@ impl TrajectorySolver {
     /// Compute the aerodynamic-jump components for the current inputs, or `None` when the
     /// feature is disabled / inputs are degenerate.
     ///
-    /// EXPERIMENTAL: the underlying model (`aerodynamic_jump::calculate_aerodynamic_jump`)
-    /// is heuristic and not yet validated against reference solvers — see MBA-959.
+    /// Uses Bryan Litz's crosswind aerodynamic-jump estimator
+    /// (`Y = 0.01*Sg - 0.0024*L + 0.032` MOA/mph) fed by the engine's own Miller Sg.
+    /// Aerodynamic jump is a vertical effect, so only the elevation is perturbed.
+    /// The estimator is a regression best near Sg ~ 1.75 — see MBA-959.
     fn aerodynamic_jump_components(
         &self,
     ) -> Option<crate::aerodynamic_jump::AerodynamicJumpComponents> {
@@ -406,42 +408,57 @@ impl TrajectorySolver {
         // Reject degenerate/non-finite inputs before they can reach the launch angle.
         // A bare `<= 0.0` test lets NaN through (NaN comparisons are always false), and a
         // NaN/Inf here would poison the muzzle angle and collapse the whole trajectory.
-        let twist_in = self.inputs.twist_rate;
-        if !(twist_in.is_finite() && twist_in > 0.0)
-            || !(self.inputs.caliber_inches.is_finite() && self.inputs.caliber_inches > 0.0)
+        let diameter_m = self.inputs.bullet_diameter;
+        if !(self.inputs.twist_rate.is_finite() && self.inputs.twist_rate != 0.0)
+            || !(diameter_m.is_finite() && diameter_m > 0.0)
+            || !(self.inputs.bullet_length.is_finite() && self.inputs.bullet_length > 0.0)
             || !self.inputs.muzzle_velocity.is_finite()
-            || !self.inputs.tipoff_yaw.is_finite()
         {
             return None;
         }
-        // Spin rate (rad/s): one turn per (twist_in * 0.0254) m of forward travel.
-        let spin_rate_rad_s =
-            2.0 * std::f64::consts::PI * self.inputs.muzzle_velocity / (twist_in * 0.0254);
-        // Crosswind = the solver's lateral (McCoy Z) wind component, so AJ uses exactly the
-        // wind the integrator applies (see the `wind_vector` in solve_rk4/solve_euler).
-        let crosswind_mps = self.wind.speed * self.wind.direction.sin();
-        let twist_calibers = twist_in / self.inputs.caliber_inches;
-        let air_density = calculate_air_density(&self.atmosphere);
-        // BallisticInputs has no barrel-length field yet (MBA-959 follow-up); assume 24".
-        const ASSUMED_BARREL_M: f64 = 0.6096;
-        let components = crate::aerodynamic_jump::calculate_aerodynamic_jump(
-            self.inputs.muzzle_velocity,
-            spin_rate_rad_s,
-            crosswind_mps,
-            self.inputs.bullet_diameter,
-            self.inputs.bullet_mass,
-            ASSUMED_BARREL_M,
-            twist_calibers,
-            self.inputs.is_twist_right,
-            self.inputs.tipoff_yaw,
-            air_density,
+
+        // Engine's own gyroscopic (Miller) stability factor — same Sg shown elsewhere.
+        let sg = crate::stability::compute_stability_coefficient(
+            &self.inputs,
+            (
+                self.atmosphere.altitude,
+                self.atmosphere.temperature,
+                self.atmosphere.pressure,
+                0.0,
+            ),
         );
-        // Belt-and-suspenders: never let a non-finite jump (e.g. an absurd twist that
-        // overflows spin_rate to Inf) perturb the launch angle.
-        if !components.vertical_jump_moa.is_finite() || !components.horizontal_jump_moa.is_finite() {
+        if !(sg.is_finite() && sg > 0.0) {
             return None;
         }
-        Some(components)
+        let length_calibers = self.inputs.bullet_length / diameter_m;
+
+        // Crosswind: the solver's lateral (McCoy +Z = right) wind component is the velocity
+        // the integrator applies; a wind FROM the right is the negative of that (it pushes
+        // the bullet to the left). Litz's estimator wants the from-the-right component.
+        const MS_TO_MPH: f64 = 2.236_936_292_054_4;
+        let crosswind_z_mps = self.wind.speed * self.wind.direction.sin();
+        let crosswind_from_right_mph = -crosswind_z_mps * MS_TO_MPH;
+
+        let vertical_jump_moa = crate::aerodynamic_jump::litz_crosswind_jump_moa(
+            sg,
+            length_calibers,
+            crosswind_from_right_mph,
+            self.inputs.is_twist_right,
+        );
+        if !vertical_jump_moa.is_finite() {
+            return None;
+        }
+
+        const MOA_PER_RAD: f64 = 3437.7467707849;
+        Some(crate::aerodynamic_jump::AerodynamicJumpComponents {
+            vertical_jump_moa,
+            // Aerodynamic jump is a vertical effect; the Litz estimator has no horizontal term.
+            horizontal_jump_moa: 0.0,
+            jump_angle_rad: vertical_jump_moa.abs() / MOA_PER_RAD,
+            magnus_component_moa: 0.0,
+            yaw_component_moa: 0.0,
+            stabilization_factor: (sg / 1.5).clamp(0.0, 1.0),
+        })
     }
 
     fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {

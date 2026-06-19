@@ -11,6 +11,39 @@ pub struct AerodynamicJumpComponents {
     pub stabilization_factor: f64, // How quickly projectile stabilizes (0-1)
 }
 
+/// Bryan Litz's crosswind aerodynamic-jump estimator ("Applied Ballistics").
+///
+/// Linear regression for the VERTICAL jump a crosswind imparts to a
+/// spin-stabilized bullet, in MOA per mph of crosswind:
+///
+/// ```text
+///   Y = 0.01*Sg - 0.0024*L + 0.032        [MOA per mph]
+/// ```
+///
+/// where `sg` is the gyroscopic (Miller) stability factor and `length_calibers`
+/// is the bullet length in calibers. The returned value is the SIGNED vertical
+/// jump in MOA for the supplied crosswind and twist hand: per Litz a right-twist
+/// bullet jumps UP for a crosswind from the right and DOWN for one from the left,
+/// so `crosswind_from_right_mph` is positive for a wind coming from the right.
+///
+/// This is a regression valid mainly near `Sg ~ 1.75`; accuracy degrades for
+/// bullets well outside the fitted data set. See MBA-959.
+pub fn litz_crosswind_jump_moa(
+    sg: f64,
+    length_calibers: f64,
+    crosswind_from_right_mph: f64,
+    is_right_twist: bool,
+) -> f64 {
+    let y_per_mph = 0.01 * sg - 0.0024 * length_calibers + 0.032;
+    let hand = if is_right_twist { 1.0 } else { -1.0 };
+    hand * y_per_mph * crosswind_from_right_mph
+}
+
+/// Legacy heuristic aerodynamic-jump model. NOTE: the trajectory solver uses the
+/// validated [`litz_crosswind_jump_moa`] estimator instead; this self-calibrated
+/// model (with a hand-tuned `magnus_enhancement` factor and a known horizontal-sign
+/// quirk) is retained only for backward compatibility with external callers.
+///
 /// Calculate aerodynamic jump for a spinning projectile.
 ///
 /// Aerodynamic jump is the displacement of the projectile's trajectory

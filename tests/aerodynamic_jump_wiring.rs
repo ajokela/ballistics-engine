@@ -66,6 +66,102 @@ fn jump_shifts_vertical_impact_with_crosswind() {
     );
 }
 
+const MS_TO_MPH: f64 = 2.236_936_292_054_4;
+
+#[test]
+fn litz_magnitude_matches_engine_sg_exactly() {
+    // The engine's vertical jump must equal Litz's Y = (0.01*Sg - 0.0024*L + 0.032)
+    // * crosswind_mph, computed from the engine's OWN Miller Sg.
+    use ballistics_engine::aerodynamic_jump::litz_crosswind_jump_moa;
+    use ballistics_engine::stability::compute_stability_coefficient;
+
+    let mut inputs = BallisticInputs::default();
+    inputs.muzzle_velocity = 790.0;
+    inputs.bullet_diameter = 0.00782; // ~.308"
+    inputs.bullet_length = 0.0312; // ~4.0 cal
+    inputs.bullet_mass = 0.01134; // ~175 gr
+    inputs.twist_rate = 11.0;
+    inputs.is_twist_right = true;
+    inputs.enable_aerodynamic_jump = true;
+    inputs.muzzle_angle = 0.01;
+
+    let atmo = AtmosphericConditions::default();
+    let cw_mps = 4.4704_f64; // 10 mph
+    let wind = WindConditions {
+        speed: cw_mps,
+        direction: -PI / 2.0, // from the right
+    };
+
+    let sg = compute_stability_coefficient(
+        &inputs,
+        (atmo.altitude, atmo.temperature, atmo.pressure, 0.0),
+    );
+    let length_cal = inputs.bullet_length / inputs.bullet_diameter;
+    let cw_from_right_mph = -(cw_mps * (-PI / 2.0_f64).sin()) * MS_TO_MPH; // = +10 mph
+    let expected = litz_crosswind_jump_moa(sg, length_cal, cw_from_right_mph, true);
+
+    let mut solver = TrajectorySolver::new(inputs, wind, atmo);
+    solver.set_max_range(600.0);
+    let r = solver.solve().unwrap();
+    let aj = r.aerodynamic_jump.expect("AJ present when enabled");
+
+    assert!(
+        (aj.vertical_jump_moa - expected).abs() < 1e-9,
+        "engine vertical jump {} != Litz {}",
+        aj.vertical_jump_moa,
+        expected
+    );
+    // Plausible Litz magnitude for a .308 at 10 mph crosswind (a few tenths MOA).
+    assert!(
+        (0.2..0.8).contains(&aj.vertical_jump_moa.abs()),
+        "magnitude {} outside plausible Litz range",
+        aj.vertical_jump_moa
+    );
+    // Physical anchor: a wind from the right pushes the bullet LEFT (z < 0)...
+    let z = r.position_at_range(500.0).unwrap().z;
+    assert!(z < 0.0, "wind from the right should drift the bullet left, z={z}");
+    // ...and for a right twist that crosswind jumps the impact UP.
+    assert!(aj.vertical_jump_moa > 0.0, "right twist + wind from right -> up");
+}
+
+#[test]
+fn aj_direction_flips_with_wind_side_and_twist() {
+    let v = |dir: f64, right_twist: bool| -> f64 {
+        let mut inputs = BallisticInputs::default();
+        inputs.muzzle_velocity = 790.0;
+        inputs.twist_rate = 11.0;
+        inputs.is_twist_right = right_twist;
+        inputs.enable_aerodynamic_jump = true;
+        inputs.muzzle_angle = 0.01;
+        let wind = WindConditions {
+            speed: 4.4704,
+            direction: dir,
+        };
+        let mut s = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
+        s.set_max_range(600.0);
+        s.solve()
+            .unwrap()
+            .aerodynamic_jump
+            .unwrap()
+            .vertical_jump_moa
+    };
+    let from_right = v(-PI / 2.0, true);
+    let from_left = v(PI / 2.0, true);
+    assert!(
+        from_right > 0.0 && from_left < 0.0,
+        "right twist: wind from right -> up, from left -> down (R={from_right}, L={from_left})"
+    );
+    assert!(
+        (from_right + from_left).abs() < 1e-9,
+        "left/right crosswind jumps should be symmetric"
+    );
+    // Left-hand twist reverses the jump direction.
+    assert!(
+        v(-PI / 2.0, false) < 0.0,
+        "left twist reverses the jump direction"
+    );
+}
+
 #[test]
 fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     // A NaN twist must not slip past the guard (NaN <= 0.0 is false) and NaN-out
