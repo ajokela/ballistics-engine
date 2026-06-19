@@ -135,7 +135,7 @@ pub fn compute_derivatives(
         // params[0] = air density, params[1] = speed of sound
         // params[2] and params[3] would be 0.0
         // BUT: we need to check if params[0] is a reasonable density value (< 2.0 kg/m³)
-        let (air_density, speed_of_sound, temperature_c) = if atmos_params.0 < MAX_REALISTIC_DENSITY
+        let (air_density, speed_of_sound, _temperature_c) = if atmos_params.0 < MAX_REALISTIC_DENSITY
             && atmos_params.1 > MIN_REALISTIC_SPEED_OF_SOUND
             && atmos_params.2 == 0.0
             && atmos_params.3 == 0.0
@@ -271,23 +271,12 @@ pub fn compute_derivatives(
         let drag_factor =
             crate::transonic_drag::transonic_correction(mach, drag_factor, shape, false);
 
-        // Apply Reynolds correction for low velocities
-        let drag_factor = if mach < 1.0 && speed_air < 200.0 {
-            // temperature_c is derived per atmosphere mode above (base_temp_c, or back-computed
-            // from the speed of sound in direct-atmosphere mode where atmos_params.1 is NOT Celsius).
-            crate::reynolds::apply_reynolds_correction(
-                drag_factor,
-                speed_air,
-                caliber_in, // inches, with SI fallback (shared with the transonic block above);
-                // apply_reynolds_correction converts to meters internally. SI-only callers leave
-                // caliber_inches at 0, which would otherwise feed 0 into the Reynolds calc.
-                air_density,
-                temperature_c,
-                mach,
-            )
-        } else {
-            drag_factor
-        };
+        // MBA-945: the low-velocity Reynolds drag correction was applied ONLY here (not in cli_api
+        // or fast_trajectory), so subsonic shots diverged across the three solver families. Removed
+        // for consistency — py_ballisticcalc (the validation reference) does not model it, and
+        // cli_api already matches pbc subsonically without it (validated to 1300yd in MBA-939). The
+        // reynolds module and get_drag_coefficient_full's apply_reynolds flag remain available for a
+        // future opt-in wired across all three solvers.
 
         // MBA-940: a user-supplied custom drag table overrides the G-model Cd entirely and is used
         // as-is — the transonic/Reynolds/form-factor corrections above are intentionally NOT
