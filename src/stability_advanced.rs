@@ -173,9 +173,11 @@ fn apply_atmospheric_correction(sg: f64, air_density_kg_m3: f64, temperature_k: 
     const STD_DENSITY: f64 = 1.225; // kg/m³
     const STD_TEMP: f64 = 288.15; // K (15°C)
 
-    // Density altitude correction
+    // Density altitude correction (MBA-942): canonical Miller is LINEAR in density ratio
+    // (rho0/rho), matching stability.rs and py_ballisticcalc — not sqrt. (This module is
+    // currently dead code, but kept consistent with the canonical correction.)
     let density_ratio = STD_DENSITY / air_density_kg_m3;
-    let density_correction = density_ratio.sqrt();
+    let density_correction = density_ratio;
 
     // Temperature correction (affects speed of sound and viscosity)
     let temp_ratio = temperature_k / STD_TEMP;

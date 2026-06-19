@@ -420,7 +420,20 @@ impl TrajectorySolver {
         } else {
             4.5 * d_in
         };
-        let sg = crate::spin_drift::miller_stability(d_in, m_gr, twist_in, length_in);
+        // MBA-942: apply the canonical Miller atmospheric correction (LINEAR in density ratio,
+        // = rho0/rho via ideal gas: (T/T0)*(P0/P)), matching stability.rs and py_ballisticcalc.
+        // miller_stability returns the bare geometric Sg with no density dependence, so without
+        // this the spin drift under-predicts at altitude (Sg should rise as the air thins). At
+        // standard sea level (15 C, 1013.25 hPa) the factor is exactly 1.0 — a no-op there.
+        let temp_k = self.atmosphere.temperature + 273.15; // Celsius -> Kelvin
+        let press_hpa = self.atmosphere.pressure; // hPa
+        let density_correction = if press_hpa > 0.0 && temp_k > 0.0 {
+            (temp_k / 288.15) * (1013.25 / press_hpa)
+        } else {
+            1.0
+        };
+        let sg =
+            crate::spin_drift::miller_stability(d_in, m_gr, twist_in, length_in) * density_correction;
         let sign = if self.inputs.is_twist_right { 1.0 } else { -1.0 };
 
         for p in result.points.iter_mut() {
