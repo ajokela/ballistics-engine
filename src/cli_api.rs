@@ -125,6 +125,9 @@ pub struct BallisticInputs {
     pub sample_interval: f64, // meters
     pub enable_pitch_damping: bool,
     pub enable_precession_nutation: bool,
+    // MBA-959: apply aerodynamic jump as a muzzle launch-angle perturbation.
+    // EXPERIMENTAL — the underlying model is heuristic and not yet validated; default OFF.
+    pub enable_aerodynamic_jump: bool,
     pub use_cluster_bc: bool, // Use cluster-based BC degradation
 
     // Custom drag model support
@@ -206,6 +209,7 @@ impl Default for BallisticInputs {
             sample_interval: 10.0, // Default 10 meter intervals
             enable_pitch_damping: false,
             enable_precession_nutation: false,
+            enable_aerodynamic_jump: false,
             use_cluster_bc: false, // Disabled by default for backward compatibility
 
             // Custom drag model support
@@ -277,6 +281,9 @@ pub struct TrajectoryResult {
     pub angular_state: Option<AngularState>, // Final angular state if precession/nutation enabled
     pub max_yaw_angle: Option<f64>,     // Maximum yaw angle during flight (radians)
     pub max_precession_angle: Option<f64>, // Maximum precession angle (radians)
+    // MBA-959: aerodynamic-jump components applied at the muzzle (None unless
+    // enable_aerodynamic_jump). EXPERIMENTAL.
+    pub aerodynamic_jump: Option<crate::aerodynamic_jump::AerodynamicJumpComponents>,
 }
 
 impl TrajectoryResult {
@@ -359,6 +366,69 @@ impl TrajectorySolver {
 
     pub fn set_time_step(&mut self, step: f64) {
         self.time_step = step;
+    }
+
+    /// Effective initial launch direction `(elevation, azimuth)` in radians, including
+    /// the aerodynamic-jump muzzle perturbation when `enable_aerodynamic_jump` is set.
+    ///
+    /// Aerodynamic jump is the fixed angular departure imparted as the projectile
+    /// transitions from the constrained bore to free flight; applying it as an initial
+    /// launch-angle offset is the physically correct integration point. Returns the bare
+    /// `(muzzle_angle, azimuth_angle)` when the flag is off, so a default solve is
+    /// numerically identical to pre-feature behavior. (MBA-959)
+    fn launch_angles(&self) -> (f64, f64) {
+        let elev = self.inputs.muzzle_angle;
+        let azim = self.inputs.azimuth_angle;
+        match self.aerodynamic_jump_components() {
+            Some(c) => {
+                // vertical_/horizontal_jump_moa ARE the jump angles expressed in MOA.
+                const MOA_PER_RAD: f64 = 3437.7467707849;
+                (
+                    elev + c.vertical_jump_moa / MOA_PER_RAD,
+                    azim + c.horizontal_jump_moa / MOA_PER_RAD,
+                )
+            }
+            None => (elev, azim),
+        }
+    }
+
+    /// Compute the aerodynamic-jump components for the current inputs, or `None` when the
+    /// feature is disabled / inputs are degenerate.
+    ///
+    /// EXPERIMENTAL: the underlying model (`aerodynamic_jump::calculate_aerodynamic_jump`)
+    /// is heuristic and not yet validated against reference solvers — see MBA-959.
+    fn aerodynamic_jump_components(
+        &self,
+    ) -> Option<crate::aerodynamic_jump::AerodynamicJumpComponents> {
+        if !self.inputs.enable_aerodynamic_jump {
+            return None;
+        }
+        let twist_in = self.inputs.twist_rate;
+        if twist_in <= 0.0 || self.inputs.caliber_inches <= 0.0 {
+            return None;
+        }
+        // Spin rate (rad/s): one turn per (twist_in * 0.0254) m of forward travel.
+        let spin_rate_rad_s =
+            2.0 * std::f64::consts::PI * self.inputs.muzzle_velocity / (twist_in * 0.0254);
+        // Crosswind = the solver's lateral (McCoy Z) wind component, so AJ uses exactly the
+        // wind the integrator applies (see the `wind_vector` in solve_rk4/solve_euler).
+        let crosswind_mps = self.wind.speed * self.wind.direction.sin();
+        let twist_calibers = twist_in / self.inputs.caliber_inches;
+        let air_density = calculate_air_density(&self.atmosphere);
+        // BallisticInputs has no barrel-length field yet (MBA-959 follow-up); assume 24".
+        const ASSUMED_BARREL_M: f64 = 0.6096;
+        Some(crate::aerodynamic_jump::calculate_aerodynamic_jump(
+            self.inputs.muzzle_velocity,
+            spin_rate_rad_s,
+            crosswind_mps,
+            self.inputs.bullet_diameter,
+            self.inputs.bullet_mass,
+            ASSUMED_BARREL_M,
+            twist_calibers,
+            self.inputs.is_twist_right,
+            self.inputs.tipoff_yaw,
+            air_density,
+        ))
     }
 
     fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {
@@ -470,11 +540,14 @@ impl TrajectorySolver {
         );
         // Calculate initial velocity components with both elevation and azimuth
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
-        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
+        // Launch direction includes the aerodynamic-jump muzzle perturbation when enabled
+        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959.
+        let (launch_elev, launch_azim) = self.launch_angles();
+        let horizontal_velocity = self.inputs.muzzle_velocity * launch_elev.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.cos(), // X: downrange (forward)
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.sin(), // Z: lateral (side deviation)
+            horizontal_velocity * launch_azim.cos(), // X: downrange (forward)
+            self.inputs.muzzle_velocity * launch_elev.sin(), // Y: vertical component
+            horizontal_velocity * launch_azim.sin(), // Z: lateral (side deviation)
         );
 
         let mut points = Vec::new();
@@ -698,6 +771,7 @@ impl TrajectorySolver {
             } else {
                 None
             },
+            aerodynamic_jump: self.aerodynamic_jump_components(),
         })
     }
 
@@ -715,11 +789,14 @@ impl TrajectorySolver {
 
         // Calculate initial velocity components with both elevation and azimuth
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
-        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
+        // Launch direction includes the aerodynamic-jump muzzle perturbation when enabled
+        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959.
+        let (launch_elev, launch_azim) = self.launch_angles();
+        let horizontal_velocity = self.inputs.muzzle_velocity * launch_elev.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.cos(), // X: downrange (forward)
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.sin(), // Z: lateral (side deviation)
+            horizontal_velocity * launch_azim.cos(), // X: downrange (forward)
+            self.inputs.muzzle_velocity * launch_elev.sin(), // Y: vertical component
+            horizontal_velocity * launch_azim.sin(), // Z: lateral (side deviation)
         );
 
         let mut points = Vec::new();
@@ -945,6 +1022,7 @@ impl TrajectorySolver {
             } else {
                 None
             },
+            aerodynamic_jump: self.aerodynamic_jump_components(),
         })
     }
 
@@ -961,11 +1039,14 @@ impl TrajectorySolver {
 
         // Calculate initial velocity components
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
-        let horizontal_velocity = self.inputs.muzzle_velocity * self.inputs.muzzle_angle.cos();
+        // Launch direction includes the aerodynamic-jump muzzle perturbation when enabled
+        // (a no-op returning the bare muzzle/azimuth angles otherwise). MBA-959.
+        let (launch_elev, launch_azim) = self.launch_angles();
+        let horizontal_velocity = self.inputs.muzzle_velocity * launch_elev.cos();
         let mut velocity = Vector3::new(
-            horizontal_velocity * self.inputs.azimuth_angle.cos(), // X: downrange (forward)
-            self.inputs.muzzle_velocity * self.inputs.muzzle_angle.sin(), // Y: vertical component
-            horizontal_velocity * self.inputs.azimuth_angle.sin(), // Z: lateral (side deviation)
+            horizontal_velocity * launch_azim.cos(), // X: downrange (forward)
+            self.inputs.muzzle_velocity * launch_elev.sin(), // Y: vertical component
+            horizontal_velocity * launch_azim.sin(), // Z: lateral (side deviation)
         );
 
         let mut points = Vec::new();
@@ -1096,6 +1177,7 @@ impl TrajectorySolver {
             angular_state: None,
             max_yaw_angle: None,
             max_precession_angle: None,
+            aerodynamic_jump: self.aerodynamic_jump_components(),
         })
     }
 
