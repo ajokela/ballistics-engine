@@ -579,7 +579,7 @@ fn read_f32_array<R: Read>(reader: &mut R, count: usize) -> Result<Vec<f32>, std
 }
 
 /// Simple CRC32 (IEEE polynomial) implementation
-fn crc32_ieee(data: &[u8]) -> u32 {
+pub(crate) fn crc32_ieee(data: &[u8]) -> u32 {
     const TABLE: [u32; 256] = make_crc32_table();
     let mut crc = 0xFFFFFFFFu32;
     for &byte in data {
