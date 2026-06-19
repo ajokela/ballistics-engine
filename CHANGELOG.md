@@ -5,6 +5,16 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.2] - 2026-06-19
+
+Adds an opt-in aerodynamic-jump effect (MBA-959). Default-off and additive — no change to existing trajectories.
+
+### Added
+- **Aerodynamic jump** (`enable_aerodynamic_jump`, default off): the vertical point-of-impact shift a crosswind imparts to a spin-stabilized bullet, applied as a muzzle launch-angle perturbation in the solver. Uses Bryan Litz's estimator `Y = 0.01·Sg − 0.0024·L + 0.032` (MOA per mph of crosswind), fed by the engine's own Miller stability factor (Sg) and bullet length in calibers. Exposed on `TrajectoryResult.aerodynamic_jump`, via the CLI `--enable-aerodynamic-jump` flag, and as the public `aerodynamic_jump::litz_crosswind_jump_moa()`. The jump is purely vertical; direction follows Litz (right twist: crosswind from the right → impact up). The zero is found on the bare bore, so the jump appears as an additive POI shift rather than being absorbed by the zero. Most accurate near Sg ≈ 1.75 (Litz regression validity).
+
+### Notes
+- The legacy heuristic `aerodynamic_jump::calculate_aerodynamic_jump` is retained for backward compatibility but is superseded by the Litz estimator and is no longer used by the solver.
+
 ## [0.18.1] - 2026-06-18
 
 Two follow-up fixes after 0.18.0. Neither changes trajectory output.
