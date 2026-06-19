@@ -636,9 +636,10 @@ impl WasmBallistics {
         } else {
             50.0
         };
-        // The zero solve is a sight-angle calculation; heights above ground
-        // (--muzzle-height / --target-height) don't affect it, so they are intentionally
-        // not parsed here (passing them is silently ignored by the catch-all arm below).
+        // Heights above GROUND (--muzzle-height / --target-height) do NOT change the zero ANGLE —
+        // for a same-elevation target they cancel — so they are intentionally not parsed here
+        // (silently ignored by the catch-all arm below). The SIGHT height IS honored: the zero
+        // targets the line-of-sight height at the zero distance (see the calculate_zero call).
         let mut drag_model = "G1";
 
         // Parse arguments
@@ -734,10 +735,14 @@ impl WasmBallistics {
             UnitSystem::Metric => target_distance,
         };
 
+        // MBA-951: target the line-of-sight height at the zero distance (= sight_height), matching
+        // the CLI convention in every zero call. Previously 0.0, which solved a BORE-line zero and
+        // ignored sight height entirely (off by the sight-height angle — ~2 MOA at 100 yd).
+        let los_height = inputs.sight_height;
         match calculate_zero_angle_with_conditions(
             inputs,
             target_distance_m,
-            0.0,
+            los_height,
             WindConditions::default(),
             AtmosphericConditions::default(),
         ) {
