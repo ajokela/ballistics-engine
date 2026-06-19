@@ -124,9 +124,11 @@ pub fn calculate_dynamic_stability(
         // Velocity correction (compared to standard 2800 fps)
         let velocity_factor = (velocity_fps / 2800.0).powf(1.0 / 3.0);
 
-        // Atmospheric correction
-        // Standard conditions: 59°F, 29.92 inHg = 1.225 kg/m³
-        let density_factor = (1.225 / air_density_kg_m3).sqrt();
+        // Atmospheric correction (MBA-942): canonical Miller is LINEAR in density ratio
+        // (FTP = (T/T0)*(P0/P) = rho0/rho), matching stability.rs and py_ballisticcalc. The
+        // previous sqrt(1.225/rho) under-corrected Sg by ~14% at altitude. Standard
+        // conditions: 59°F, 29.92 inHg = 1.225 kg/m³ (sqrt(1)=1, so sea level is unchanged).
+        let density_factor = 1.225 / air_density_kg_m3;
 
         // Final stability
         sg_base * velocity_factor * density_factor
