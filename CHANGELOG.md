@@ -5,6 +5,59 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-06-20
+
+Adds downrange-segmented wind to the CLI and WASM, and **corrects the wind-direction
+sign on the `cli_api`/`TrajectorySolver` path** (a breaking output change — see below).
+
+### Added
+- **Downrange-segmented wind** — wind can now vary along the trajectory (e.g. a muzzle
+  reading plus downrange sensor stations).
+  - CLI: repeatable `--wind-segment SPEED:ANGLE:UNTIL_DISTANCE` on the `trajectory`
+    command. SPEED and UNTIL_DISTANCE follow `--units` (mph & yards imperial, m/s &
+    meters metric); ANGLE is degrees in the wind-FROM convention (same as
+    `--wind-direction`). Each segment applies from the previous boundary out to its
+    UNTIL_DISTANCE; wind is a step function with **zero wind beyond the last segment**
+    (a coverage warning is printed when the segments don't reach `--max-range`).
+    Segments **override** scalar `--wind-speed`/`--wind-direction`, and are **not
+    compatible with `--enable-wind-shear`** (rejected with an error).
+  - WASM: `runCommand` accepts the same repeatable `--wind-segment` flag, and the
+    `Calculator` gains `addWindSegment(speedMph, directionDeg, untilYards)` and
+    `clearWindSegments()`.
+  - API: `TrajectorySolver::set_wind_segments(Vec<WindSegment>)` performs a per-step
+    downrange lookup via `WindSock`, preserving all solver physics (Coriolis, spin
+    drift, aerodynamic jump, zero-finding, full `TrajectoryResult` output). A solve
+    with no segments is numerically identical to before. New public
+    `wind::parse_wind_segment_str(&str, imperial)`.
+
+### Fixed
+- **CLI `--twist-right` can now select left-hand twist.** It was a presence-only flag
+  (always true; `--twist-right false` errored), so left-hand twist — and the
+  aerodynamic-jump direction reversal it produces — was unreachable from the CLI. It now
+  takes an optional value: `--twist-right` / `--twist-right true` = right-hand (default),
+  `--twist-right false` = left-hand (the bare flag still works, so existing usage is
+  unaffected).
+
+### Changed (BREAKING)
+- **Wind direction sign corrected on the `cli_api`/`TrajectorySolver` path.** The scalar
+  wind vector was built with the opposite sign to the standard wind-clock convention
+  (and to the engine's own `WindSock`, the Monte-Carlo path, and the Python/Ruby
+  bindings): `--wind-direction 0` produced a *tailwind* and `90°` drifted the bullet the
+  wrong way. It is now correct: **0° = headwind, 90° = from the right (drifts left),
+  180° = tailwind, 270° = from the left** — matching `WindSock`/the bindings.
+  **Trajectories computed with a non-zero wind direction will change** (head/tail effect
+  and crosswind drift direction flip); no change when wind speed is 0. This affects
+  **every consumer of the `TrajectorySolver`/cli_api path**: the CLI `trajectory`,
+  `wind-card`, `range-table`, and `come-ups` subcommands; the WASM `runCommand` and
+  `Calculator`; the C FFI (`FFIWindConditions.direction`, for iOS/Android callers); and
+  any direct `TrajectorySolver` user. The Monte-Carlo path and the Python/Ruby bindings
+  already used the correct convention and are unchanged. The aerodynamic-jump crosswind sign
+  on this path was aligned to match (right twist + wind-from-right → impact up, drift
+  left), bringing `cli_api` into agreement with the fast-integrate path. The wind-shear
+  path was already sign-aligned with the scalar path and flips with it.
+- The `--wind-direction` help text was corrected (previously the inaccurate
+  "0=North, 90=East").
+
 ## [0.18.3] - 2026-06-19
 
 Extends aerodynamic jump (MBA-959) to the fast-integrate path. Default-off; no change to existing trajectories.

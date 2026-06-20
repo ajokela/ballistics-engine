@@ -12,7 +12,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation
 - **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere
-- **Wind Effects** - 3D wind calculations with altitude-dependent wind shear modeling
+- **Wind Effects** - 3D wind calculations with altitude-dependent wind shear modeling and **downrange-segmented wind** (`--wind-segment SPEED:ANGLE:DIST`, repeatable — model wind that varies along the path, e.g. muzzle plus downrange sensor readings)
 - **Monte Carlo Simulations** - Statistical analysis with parameter uncertainties
 - **BC Estimation** - Estimate ballistic coefficients from trajectory data
 - **Advanced Physics**:

@@ -399,7 +399,8 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --max-range | Maximum range | 1000 | yards | meters |
 | --time-step | Integration time step — RK4/Euler only (the adaptive RK45 default steps adaptively and ignores this) | 0.001 | seconds | seconds |
 | --wind-speed | Wind speed | 0 | mph | m/s |
-| --wind-direction | Wind direction | 0° | degrees | degrees |
+| --wind-direction | Wind direction (0=headwind, 90=from right, 180=tailwind, 270=from left) | 0° | degrees | degrees |
+| --wind-segment | Downrange wind segment `SPEED:ANGLE:UNTIL_DISTANCE` (repeatable) | — | mph & yd | m/s & m |
 | --temperature | Temperature | 59 | °F | °C |
 | --pressure | Barometric pressure | 29.92 | inHg | hPa |
 | --humidity | Relative humidity | 50 | % | % |
@@ -421,6 +422,30 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --enable-pitch-damping | Transonic stability analysis | false | - | - |
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
+
+### Downrange Wind Segments (`--wind-segment`)
+
+Real wind varies along the bullet's path. `--wind-segment SPEED:ANGLE:UNTIL_DISTANCE`
+(repeatable) lets you describe wind that changes with downrange distance — for example a
+muzzle reading plus downrange sensor stations:
+
+```bash
+# 8 mph at the muzzle, 12 mph past 300 yd, 18 mph past 600 yd (all from the right)
+ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --max-range 1000 \
+  --wind-segment 8:90:300 \
+  --wind-segment 12:90:600 \
+  --wind-segment 18:90:1000
+```
+
+- **SPEED** and **UNTIL_DISTANCE** follow `--units` (mph & yards imperial, m/s & meters
+  metric). **ANGLE** is degrees in the wind-FROM convention, same as `--wind-direction`
+  (0 = headwind, 90 = from the right, 180 = tailwind, 270 = from the left).
+- Each segment applies from the previous boundary out to its `UNTIL_DISTANCE`. The wind
+  is a **step function** — there is no interpolation between segments.
+- **Wind is zero beyond the last segment.** If your segments don't reach `--max-range`,
+  a coverage warning is printed; extend the last segment past the target to avoid it.
+- `--wind-segment` **overrides** `--wind-speed`/`--wind-direction` (a note is printed if
+  both are given), and is **not compatible with `--enable-wind-shear`**.
 
 ### Online Mode Parameters (--online)
 

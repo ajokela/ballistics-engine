@@ -40,8 +40,10 @@ pub struct FFIBallisticInputs {
 
 #[repr(C)]
 pub struct FFIWindConditions {
-    pub speed: c_double,     // m/s
-    pub direction: c_double, // radians (0 = North, PI/2 = East)
+    pub speed: c_double, // m/s
+    // radians, wind-FROM convention: 0 = headwind, PI/2 = from the right,
+    // PI = tailwind, 3*PI/2 = from the left (matches WindConditions / WindSock).
+    pub direction: c_double,
 }
 
 #[repr(C)]

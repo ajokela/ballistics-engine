@@ -224,8 +224,10 @@ impl Default for BallisticInputs {
 // Wind conditions
 #[derive(Debug, Clone)]
 pub struct WindConditions {
-    pub speed: f64,     // m/s
-    pub direction: f64, // radians (0 = North, PI/2 = East)
+    pub speed: f64, // m/s
+    // radians, wind-FROM convention: 0 = headwind, PI/2 = from the right,
+    // PI = tailwind, 3*PI/2 = from the left (matches WindSock / the bindings).
+    pub direction: f64,
 }
 
 impl Default for WindConditions {
@@ -331,6 +333,11 @@ pub struct TrajectorySolver {
     max_range: f64,
     time_step: f64,
     cluster_bc: Option<ClusterBCDegradation>,
+    /// Optional downrange-segmented wind. When `Some`, the per-step wind vector is
+    /// looked up by downrange distance from this `WindSock` and the scalar `wind`
+    /// field is ignored. When `None`, the constant `wind` vector is used (default),
+    /// so a non-segmented solve is numerically identical to pre-feature behavior.
+    wind_sock: Option<crate::wind::WindSock>,
 }
 
 impl TrajectorySolver {
@@ -357,6 +364,7 @@ impl TrajectorySolver {
             max_range: 1000.0,
             time_step: 0.001,
             cluster_bc,
+            wind_sock: None,
         }
     }
 
@@ -366,6 +374,20 @@ impl TrajectorySolver {
 
     pub fn set_time_step(&mut self, step: f64) {
         self.time_step = step;
+    }
+
+    /// Supply downrange-segmented wind. Each segment is `(speed_kmh, angle_deg,
+    /// until_distance_m)`; the wind for a given downrange distance is the first
+    /// segment whose `until_distance_m` exceeds it (a step function), and wind is
+    /// zero beyond the last segment. An empty list clears segmented wind (reverts
+    /// to the scalar `wind`). The angle convention matches `WindConditions`
+    /// (0 = headwind, 90 = from the right).
+    pub fn set_wind_segments(&mut self, segments: Vec<crate::wind::WindSegment>) {
+        self.wind_sock = if segments.is_empty() {
+            None
+        } else {
+            Some(crate::wind::WindSock::new(segments))
+        };
     }
 
     /// Effective initial launch direction `(elevation, azimuth)` in radians, including
@@ -435,12 +457,13 @@ impl TrajectorySolver {
         }
         let length_calibers = self.inputs.bullet_length / diameter_m;
 
-        // Crosswind: the solver's lateral (McCoy +Z = right) wind component is the velocity
-        // the integrator applies; a wind FROM the right is the negative of that (it pushes
-        // the bullet to the left). Litz's estimator wants the from-the-right component.
+        // Crosswind-from-the-right (mph) for Litz's estimator. Wind direction uses the
+        // wind-FROM convention (0 = headwind, +90deg = from the right), matching the
+        // fast-integrate path (fast_trajectory::aerodynamic_jump_launch_offset_rad) and
+        // the lateral windage sign, so a from-the-right wind on a right-twist barrel
+        // jumps the impact UP and drifts it left.
         const MS_TO_MPH: f64 = 2.236_936_292_054_4;
-        let crosswind_z_mps = self.wind.speed * self.wind.direction.sin();
-        let crosswind_from_right_mph = -crosswind_z_mps * MS_TO_MPH;
+        let crosswind_from_right_mph = self.wind.speed * self.wind.direction.sin() * MS_TO_MPH;
 
         let vertical_jump_moa = crate::aerodynamic_jump::litz_crosswind_jump_moa(
             sg,
@@ -469,10 +492,11 @@ impl TrajectorySolver {
         // bullet's height relative to the muzzle (McCoy Y). The multiplier is floored at 1.0, so
         // flat-fire trajectories keep ~full wind and only high-arcing shots see increased wind.
         //
-        // We build the vector with THIS solver's non-shear sign convention (X=+cos, Z=+sin; see
-        // the `wind_vector` used in solve_rk4/solve_euler) and scale it, so that "shear on" equals
-        // "shear off" * ratio (ratio == 1.0 for flat fire). The previous code both attenuated the
-        // wind near the line of sight and flipped its sign relative to the non-shear path.
+        // We build the vector with THIS solver's non-shear sign convention (X=-cos, Z=-sin; see
+        // the `wind_vector` used in solve_rk4/solve_euler, matching WindSock) and scale it, so that
+        // "shear on" equals "shear off" * ratio (ratio == 1.0 for flat fire). An earlier revision
+        // attenuated the wind near the line of sight and flipped its sign relative to the non-shear
+        // path; this keeps them sign-consistent.
         let model = if self.inputs.wind_shear_model == "logarithmic" {
             WindShearModel::Logarithmic
         } else {
@@ -480,10 +504,12 @@ impl TrajectorySolver {
         };
         let speed_ratio = crate::wind_shear::boundary_layer_speed_ratio(altitude_m, model);
 
+        // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
+        // WindConditions / WindSock); wind enters drag via velocity - wind.
         Vector3::new(
-            self.wind.speed * self.wind.direction.cos() * speed_ratio, // X: downrange head/tail
+            -self.wind.speed * self.wind.direction.cos() * speed_ratio, // X: downrange head/tail
             0.0,
-            self.wind.speed * self.wind.direction.sin() * speed_ratio, // Z: lateral crosswind
+            -self.wind.speed * self.wind.direction.sin() * speed_ratio, // Z: lateral crosswind
         )
     }
 
@@ -610,10 +636,12 @@ impl TrajectorySolver {
         let air_density = calculate_air_density(&self.atmosphere);
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
+        // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
+        // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
+            -self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
             0.0,
-            self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
+            -self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
@@ -861,10 +889,12 @@ impl TrajectorySolver {
         let air_density = calculate_air_density(&self.atmosphere);
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
+        // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
+        // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
+            -self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
             0.0,
-            self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
+            -self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
@@ -1103,10 +1133,12 @@ impl TrajectorySolver {
         // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
         // are immutable); compute once instead of every iteration (mirrors solve_rk4).
         let air_density = calculate_air_density(&self.atmosphere);
+        // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
+        // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         let wind_vector = Vector3::new(
-            self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
+            -self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
             0.0,
-            self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
+            -self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
         while position.x < self.max_range
@@ -1342,8 +1374,14 @@ impl TrajectorySolver {
         air_density: f64,
         wind_vector: &Vector3<f64>,
     ) -> Vector3<f64> {
-        // Calculate altitude-dependent wind if wind shear is enabled
-        let actual_wind = if self.inputs.enable_wind_shear {
+        // Resolve the wind at this point. Downrange-segmented wind (when supplied)
+        // takes precedence and is sampled by downrange distance (position.x) per
+        // step; otherwise altitude-dependent shear (if enabled); otherwise the
+        // constant `wind_vector`. Segmented wind is not combined with shear (the
+        // CLI/WASM front-ends reject that combination), so the order is safe.
+        let actual_wind = if let Some(ref sock) = self.wind_sock {
+            sock.vector_for_range_stateless(position.x)
+        } else if self.inputs.enable_wind_shear {
             self.get_wind_at_altitude(position.y)
         } else {
             *wind_vector
