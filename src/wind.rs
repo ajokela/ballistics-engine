@@ -121,6 +121,47 @@ impl WindSock {
     }
 }
 
+/// Parse a `"SPEED:ANGLE:UNTIL_DISTANCE"` string into a [`WindSegment`]
+/// `(speed_kmh, angle_deg, until_distance_m)`.
+///
+/// `imperial`: when true, SPEED is mph and UNTIL_DISTANCE is yards; otherwise
+/// SPEED is m/s and UNTIL_DISTANCE is meters. ANGLE is always degrees in the
+/// wind-FROM convention (0 = headwind, 90 = from the right). Shared by the CLI
+/// (`--wind-segment`) and the WASM front-ends so they parse identically.
+pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!(
+            "invalid wind segment '{s}': expected SPEED:ANGLE:UNTIL_DISTANCE (three colon-separated numbers)"
+        ));
+    }
+    let num = |i: usize, name: &str| -> Result<f64, String> {
+        parts[i].trim().parse::<f64>().map_err(|_| {
+            format!("invalid wind segment '{s}': {name} '{}' is not a number", parts[i])
+        })
+    };
+    let speed = num(0, "speed")?;
+    let angle = num(1, "angle")?;
+    let until = num(2, "until-distance")?;
+    if !speed.is_finite() || !angle.is_finite() || !until.is_finite() {
+        return Err(format!(
+            "invalid wind segment '{s}': speed, angle, and until-distance must be finite numbers"
+        ));
+    }
+    if speed < 0.0 {
+        return Err(format!("invalid wind segment '{s}': speed must be >= 0"));
+    }
+    if until <= 0.0 {
+        return Err(format!("invalid wind segment '{s}': until-distance must be > 0"));
+    }
+    let (speed_kmh, until_m) = if imperial {
+        (speed * 1.609344, until * 0.9144) // mph -> km/h, yards -> meters
+    } else {
+        (speed * 3.6, until) // m/s -> km/h, meters -> meters
+    };
+    Ok((speed_kmh, angle, until_m))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +246,43 @@ mod tests {
 
         let expected_speed = 16.0934 * KMH_TO_MPS;
         assert!((vec.norm() - expected_speed).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_wind_sock_boundary_is_upper_exclusive() {
+        // A segment's `until_distance_m` is exclusive: a query exactly at the
+        // boundary rolls to the next segment.
+        let sock = WindSock::new(vec![(16.0934, 90.0, 100.0), (32.1868, 270.0, 200.0)]);
+        // Just below 100 m -> first segment (90deg, negative Z).
+        assert!(sock.vector_for_range_stateless(99.999)[2] < 0.0);
+        // Exactly 100 m -> second segment (270deg, positive Z).
+        assert!(sock.vector_for_range_stateless(100.0)[2] > 0.0);
+        // Beyond the last boundary -> zero.
+        assert_eq!(sock.vector_for_range_stateless(200.0), Vector3::zeros());
+    }
+
+    #[test]
+    fn test_parse_wind_segment_str_units() {
+        // Imperial: 10 mph -> 16.0934 km/h, 100 yd -> 91.44 m.
+        let (kmh, ang, until) = parse_wind_segment_str("10:90:100", true).unwrap();
+        assert!((kmh - 16.09344).abs() < 1e-4);
+        assert_eq!(ang, 90.0);
+        assert!((until - 91.44).abs() < 1e-4);
+
+        // Metric: 5 m/s -> 18 km/h, 200 m stays 200 m.
+        let (kmh, ang, until) = parse_wind_segment_str("5:270:200", false).unwrap();
+        assert!((kmh - 18.0).abs() < 1e-9);
+        assert_eq!(ang, 270.0);
+        assert!((until - 200.0).abs() < 1e-9);
+
+        // Malformed inputs are rejected.
+        assert!(parse_wind_segment_str("10:90", true).is_err()); // too few fields
+        assert!(parse_wind_segment_str("10:bad:100", true).is_err()); // non-numeric
+        assert!(parse_wind_segment_str("10:90:0", true).is_err()); // zero until-distance
+        assert!(parse_wind_segment_str("-3:90:100", true).is_err()); // negative speed
+        // Non-finite values must be rejected (NaN comparisons would slip past < / <=).
+        assert!(parse_wind_segment_str("10:nan:5000", true).is_err());
+        assert!(parse_wind_segment_str("10:90:nan", true).is_err());
+        assert!(parse_wind_segment_str("inf:90:100", true).is_err());
     }
 }

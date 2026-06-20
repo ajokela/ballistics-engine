@@ -158,6 +158,9 @@ impl WasmBallistics {
         // f64 is required: `wind_direction.to_radians()` below needs a known receiver
         // type (method resolution can't infer it from the field assignment alone).
         let mut wind_direction: f64 = 90.0;
+        // Raw "SPEED:ANGLE:UNTIL" strings; every --wind-segment occurrence is collected
+        // (the parse loop visits all args, so repeats accumulate here).
+        let mut wind_segment_strs: Vec<String> = Vec::new();
         let mut temperature = default_temp;
         let mut pressure = default_pressure;
         let mut humidity = 50.0;
@@ -282,6 +285,12 @@ impl WasmBallistics {
                         wind_direction = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid wind direction"))?;
+                        i += 1;
+                    }
+                }
+                "--wind-segment" => {
+                    if i + 1 < args.len() {
+                        wind_segment_strs.push(args[i + 1].to_string());
                         i += 1;
                     }
                 }
@@ -599,6 +608,24 @@ impl WasmBallistics {
         };
         solver.set_max_range(max_range_m);
         solver.set_time_step(time_step);
+
+        // Downrange-segmented wind overrides the scalar wind when present.
+        if !wind_segment_strs.is_empty() {
+            if enable_wind_shear {
+                return Err(JsValue::from_str(
+                    "--wind-segment cannot be combined with --enable-wind-shear \
+                     (downrange segments + altitude shear is not yet a defined model)",
+                ));
+            }
+            let imperial = matches!(units, UnitSystem::Imperial);
+            let mut segments = Vec::with_capacity(wind_segment_strs.len());
+            for s in &wind_segment_strs {
+                let seg = crate::wind::parse_wind_segment_str(s, imperial)
+                    .map_err(|err| JsValue::from_str(&err))?;
+                segments.push(seg);
+            }
+            solver.set_wind_segments(segments);
+        }
 
         match solver.solve() {
             Ok(result) => {
@@ -1596,7 +1623,8 @@ Trajectory Command:
     
   Environmental:
     --wind-speed <SPEED>         Wind speed (mph/m/s)
-    --wind-direction <DIR>       Wind direction (degrees)
+    --wind-direction <DIR>       Wind direction (deg; 0=headwind, 90=from right)
+    --wind-segment <S:A:D>       Downrange wind seg speed:angle:until-dist (repeatable)
     --temperature <TEMP>         Temperature (F/C)
     --pressure <PRESSURE>        Pressure (inHg/hPa)
     --humidity <HUMIDITY>        Humidity (0-100%)
@@ -1693,6 +1721,9 @@ pub struct Calculator {
     // Environmental conditions
     wind_speed_mph: f64,
     wind_direction_deg: f64,
+    // Downrange wind segments as (speed_mph, angle_deg, until_yards); when non-empty
+    // these are emitted as --wind-segment flags and override the scalar wind above.
+    wind_segments: Vec<(f64, f64, f64)>,
     temperature_f: f64,
     pressure_inhg: f64,
     humidity_percent: f64,
@@ -1725,6 +1756,7 @@ impl Calculator {
 
             wind_speed_mph: 0.0,
             wind_direction_deg: 90.0,
+            wind_segments: Vec::new(),
             temperature_f: 59.0,
             pressure_inhg: 29.92,
             humidity_percent: 50.0,
@@ -1779,6 +1811,25 @@ impl Calculator {
     pub fn set_wind(mut self, speed_mph: f64, direction_deg: f64) -> Self {
         self.wind_speed_mph = speed_mph;
         self.wind_direction_deg = direction_deg;
+        self
+    }
+
+    /// Add a downrange wind segment: `speed_mph` from `direction_deg`
+    /// (wind-FROM: 0 = headwind, 90 = from the right) out to `until_yards`.
+    /// Each segment applies from the previous boundary to `until_yards`; wind is
+    /// zero beyond the last segment. When any segment is added it overrides the
+    /// scalar `setWind` value. Repeatable.
+    #[wasm_bindgen(js_name = addWindSegment)]
+    pub fn add_wind_segment(mut self, speed_mph: f64, direction_deg: f64, until_yards: f64) -> Self {
+        self.wind_segments
+            .push((speed_mph, direction_deg, until_yards));
+        self
+    }
+
+    /// Remove all downrange wind segments (reverts to the scalar `setWind`).
+    #[wasm_bindgen(js_name = clearWindSegments)]
+    pub fn clear_wind_segments(mut self) -> Self {
+        self.wind_segments.clear();
         self
     }
 
@@ -1864,6 +1915,12 @@ impl Calculator {
             cmd.push_str(&format!(
                 " --wind-speed {} --wind-direction {}",
                 self.wind_speed_mph, self.wind_direction_deg
+            ));
+        }
+        for (speed_mph, direction_deg, until_yards) in &self.wind_segments {
+            cmd.push_str(&format!(
+                " --wind-segment {}:{}:{}",
+                speed_mph, direction_deg, until_yards
             ));
         }
 
@@ -2010,6 +2067,12 @@ impl Calculator {
             cmd.push_str(&format!(
                 " --wind-speed {} --wind-direction {}",
                 self.wind_speed_mph, self.wind_direction_deg
+            ));
+        }
+        for (speed_mph, direction_deg, until_yards) in &self.wind_segments {
+            cmd.push_str(&format!(
+                " --wind-segment {}:{}:{}",
+                speed_mph, direction_deg, until_yards
             ));
         }
 

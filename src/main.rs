@@ -372,9 +372,17 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
 
-        /// Wind direction (degrees, 0=North, 90=East)
+        /// Wind direction (degrees; wind-FROM: 0=headwind, 90=from right, 180=tailwind, 270=from left)
         #[arg(long, default_value = "0.0")]
         wind_direction: f64,
+
+        /// Downrange wind segment "SPEED:ANGLE:UNTIL_DISTANCE" (repeatable). SPEED/UNTIL_DISTANCE
+        /// follow --units (mph & yd imperial, m/s & m metric); ANGLE is degrees, same convention
+        /// as --wind-direction. Each segment applies from the previous boundary out to
+        /// UNTIL_DISTANCE; wind is zero beyond the last segment. Overrides --wind-speed/-direction.
+        /// Not compatible with --enable-wind-shear.
+        #[arg(long = "wind-segment", value_name = "SPEED:ANGLE:DIST", action = clap::ArgAction::Append)]
+        wind_segment: Vec<String>,
 
         /// Temperature (Fahrenheit or Celsius based on --units)
         #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
@@ -501,8 +509,15 @@ enum Commands {
         #[arg(long)]
         twist_rate: Option<f64>,
 
-        /// Right-hand twist (true) or left-hand (false)
-        #[arg(long, default_value = "true")]
+        /// Twist hand: `--twist-right` or `--twist-right true` = right-hand (default);
+        /// `--twist-right false` = left-hand
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set
+        )]
         twist_right: bool,
 
         /// Latitude for Coriolis effect and weather zones (degrees, -90 to 90)
@@ -1466,6 +1481,9 @@ struct TrajectoryConfig {
     // Wind (metric)
     wind_speed: f64,
     wind_direction: f64,
+    // Downrange-segmented wind (engine units: speed km/h, angle deg, distance m).
+    // When non-empty, overrides the scalar wind above.
+    wind_segments: Vec<ballistics_engine::wind::WindSegment>,
 
     // Output
     output: OutputFormat,
@@ -1842,6 +1860,17 @@ fn parse_drag_model_arg(s: &str) -> DragModelArg {
     }
 }
 
+/// Parse a `--wind-segment` value `"SPEED:ANGLE:UNTIL_DISTANCE"` into an engine
+/// `WindSegment` `(speed_kmh, angle_deg, until_distance_m)`. SPEED and UNTIL_DISTANCE
+/// are interpreted in the CLI display units (mph & yards imperial, m/s & meters
+/// metric); ANGLE is degrees in the wind-FROM convention (same as `--wind-direction`).
+fn parse_wind_segment(
+    s: &str,
+    units: UnitSystem,
+) -> Result<ballistics_engine::wind::WindSegment, String> {
+    ballistics_engine::wind::parse_wind_segment_str(s, matches!(units, UnitSystem::Imperial))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
@@ -1864,6 +1893,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             time_step,
             wind_speed,
             wind_direction,
+            wind_segment,
             temperature,
             pressure,
             humidity,
@@ -2352,6 +2382,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
 
 
+            // Parse downrange wind segments (display units -> engine units).
+            let wind_segments: Vec<ballistics_engine::wind::WindSegment> = wind_segment
+                .iter()
+                .map(|s| parse_wind_segment(s, cli.units))
+                .collect::<Result<Vec<_>, String>>()?;
+
             // Construct TrajectoryConfig once, used by all code paths
             let traj_config = TrajectoryConfig {
                 velocity: velocity_metric,
@@ -2368,6 +2404,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 altitude: altitude_metric,
                 wind_speed: wind_speed_metric,
                 wind_direction: final_wind_direction,
+                wind_segments,
                 output,
                 full,
                 units: cli.units,
@@ -3658,6 +3695,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         altitude,
         wind_speed,
         wind_direction,
+        ref wind_segments,
         output,
         full,
         units,
@@ -3821,6 +3859,39 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     let mut solver = TrajectorySolver::new(inputs.clone(), wind, atmosphere.clone());
     solver.set_max_range(max_range);
     solver.set_time_step(time_step);
+
+    // Downrange-segmented wind (overrides the scalar wind when present).
+    if !wind_segments.is_empty() {
+        if enable_wind_shear {
+            return Err("--wind-segment cannot be combined with --enable-wind-shear \
+                (downrange segments + altitude shear is not yet a defined model)"
+                .into());
+        }
+        // Note when a non-zero scalar wind is also set, since segments take precedence.
+        if wind_speed != 0.0 {
+            eprintln!(
+                "note: --wind-segment overrides --wind-speed/--wind-direction (scalar wind ignored)"
+            );
+        }
+        // Warn if the segments don't cover the whole trajectory (wind is zero beyond
+        // the last segment's until-distance). A 1 m epsilon avoids float-noise warnings
+        // when a segment is set right at max_range.
+        let coverage_m = wind_segments
+            .iter()
+            .map(|(_, _, until)| *until)
+            .fold(0.0_f64, f64::max);
+        if coverage_m < max_range - 1.0 {
+            let (cov_disp, max_disp, unit) = match units {
+                UnitSystem::Imperial => (coverage_m / 0.9144, max_range / 0.9144, "yd"),
+                UnitSystem::Metric => (coverage_m, max_range, "m"),
+            };
+            eprintln!(
+                "warning: wind segments cover only {cov_disp:.0} {unit} of the {max_disp:.0} {unit} \
+                trajectory; wind is treated as zero beyond {cov_disp:.0} {unit}"
+            );
+        }
+        solver.set_wind_segments(wind_segments.clone());
+    }
 
     // Solve trajectory
     let result = solver.solve()?;

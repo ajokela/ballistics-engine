@@ -89,7 +89,7 @@ fn litz_magnitude_matches_engine_sg_exactly() {
     let cw_mps = 4.4704_f64; // 10 mph
     let wind = WindConditions {
         speed: cw_mps,
-        direction: -PI / 2.0, // from the right
+        direction: PI / 2.0, // from the right (0=headwind, +90deg=from right)
     };
 
     let sg = compute_stability_coefficient(
@@ -97,7 +97,7 @@ fn litz_magnitude_matches_engine_sg_exactly() {
         (atmo.altitude, atmo.temperature, atmo.pressure, 0.0),
     );
     let length_cal = inputs.bullet_length / inputs.bullet_diameter;
-    let cw_from_right_mph = -(cw_mps * (-PI / 2.0_f64).sin()) * MS_TO_MPH; // = +10 mph
+    let cw_from_right_mph = cw_mps * (PI / 2.0_f64).sin() * MS_TO_MPH; // = +10 mph
     let expected = litz_crosswind_jump_moa(sg, length_cal, cw_from_right_mph, true);
 
     let mut solver = TrajectorySolver::new(inputs, wind, atmo);
@@ -145,8 +145,9 @@ fn aj_direction_flips_with_wind_side_and_twist() {
             .unwrap()
             .vertical_jump_moa
     };
-    let from_right = v(-PI / 2.0, true);
-    let from_left = v(PI / 2.0, true);
+    // Corrected wind-FROM convention: +90deg (+PI/2) = from the right, -90deg = from the left.
+    let from_right = v(PI / 2.0, true);
+    let from_left = v(-PI / 2.0, true);
     assert!(
         from_right > 0.0 && from_left < 0.0,
         "right twist: wind from right -> up, from left -> down (R={from_right}, L={from_left})"
@@ -157,7 +158,7 @@ fn aj_direction_flips_with_wind_side_and_twist() {
     );
     // Left-hand twist reverses the jump direction.
     assert!(
-        v(-PI / 2.0, false) < 0.0,
+        v(PI / 2.0, false) < 0.0,
         "left twist reverses the jump direction"
     );
 }
