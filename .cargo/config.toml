@@ -13,9 +13,3 @@ linker = "/Users/alexjokela/Library/Android/sdk/ndk/25.2.9519653/toolchains/llvm
 [target.i686-linux-android]
 ar = "/Users/alexjokela/Library/Android/sdk/ndk/25.2.9519653/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
 linker = "/Users/alexjokela/Library/Android/sdk/ndk/25.2.9519653/toolchains/llvm/prebuilt/darwin-x86_64/bin/i686-linux-android26-clang"
-
-# getrandom 0.3+ requires an explicit backend on wasm32-unknown-unknown (the WASM
-# build for ballistics.sh). Both the `wasm_js` getrandom feature (set in Cargo.toml)
-# AND this cfg are required; the feature alone is insufficient.
-[target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
