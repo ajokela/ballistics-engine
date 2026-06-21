@@ -239,17 +239,22 @@ impl Bc5dDownloader {
     fn fetch_manifest(&self) -> Result<Bc5dManifest, Bc5dDownloadError> {
         let url = format!("{}/{}", self.base_url, MANIFEST_FILE);
 
-        let response = ureq::get(&url)
-            .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
+        let mut response = ureq::get(&url)
+            .config()
+            .timeout_global(Some(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS)))
+            .build()
             .call()
             .map_err(|e| match e {
-                ureq::Error::Transport(t) if t.kind() == ureq::ErrorKind::Io => {
-                    Bc5dDownloadError::NetworkError(format!("Connection failed: {}", t))
+                ureq::Error::Io(io_err) => {
+                    Bc5dDownloadError::NetworkError(format!("Connection failed: {}", io_err))
+                }
+                ureq::Error::Timeout(_) => {
+                    Bc5dDownloadError::NetworkError("Connection failed: timed out".to_string())
                 }
                 _ => Bc5dDownloadError::NetworkError(format!("{}", e)),
             })?;
 
-        let json: serde_json::Value = response.into_json().map_err(|e| {
+        let json: serde_json::Value = response.body_mut().read_json().map_err(|e| {
             Bc5dDownloadError::ManifestParseError(format!("Failed to parse JSON: {}", e))
         })?;
 
@@ -307,20 +312,30 @@ impl Bc5dDownloader {
         eprintln!("Downloading BC5D table: {}...", filename);
 
         let response = ureq::get(&url)
-            .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
+            .config()
+            .timeout_global(Some(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS)))
+            .build()
             .call()
             .map_err(|e| match e {
-                ureq::Error::Transport(t) if t.kind() == ureq::ErrorKind::Io => {
-                    Bc5dDownloadError::NetworkError(format!("Connection failed: {}", t))
+                ureq::Error::Io(io_err) => {
+                    Bc5dDownloadError::NetworkError(format!("Connection failed: {}", io_err))
+                }
+                ureq::Error::Timeout(_) => {
+                    Bc5dDownloadError::NetworkError("Connection failed: timed out".to_string())
                 }
                 _ => Bc5dDownloadError::NetworkError(format!("{}", e)),
             })?;
 
-        // Read response body
+        // Read response body. `into_body().into_reader()` reads without the 10MB limit
+        // imposed by the convenience `read_to_*` helpers, matching the prior behavior.
         let mut data = Vec::new();
-        response.into_reader().read_to_end(&mut data).map_err(|e| {
-            Bc5dDownloadError::NetworkError(format!("Failed to read response: {}", e))
-        })?;
+        response
+            .into_body()
+            .into_reader()
+            .read_to_end(&mut data)
+            .map_err(|e| {
+                Bc5dDownloadError::NetworkError(format!("Failed to read response: {}", e))
+            })?;
 
         // Verify checksum
         let actual_crc = calculate_crc32(&data);
