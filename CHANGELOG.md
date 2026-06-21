@@ -5,6 +5,26 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-06-21
+
+Dependency modernization — a coordinated upgrade of the major dependencies. No new
+features, CLI flags, or physics; numerical trajectory output is unchanged. The one
+observable difference is in Monte Carlo: under the new RNG the per-run sample
+*sequence* differs, but the statistical results (mean, std-dev, CEP, confidence
+ellipse) are unchanged.
+
+### Changed
+- **`ndarray` 0.15 → 0.17** and **`ndarray-npy` 0.8 → 0.10** (upgraded together; the
+  drag-table `.npy` loader is unaffected).
+- **`rand` 0.8 → 0.9** and **`rand_distr` 0.4 → 0.5**. Monte Carlo uses an unseeded
+  RNG, so this only changes the sample sequence, not the statistical behavior.
+- **`ureq` 2.12 → 3.1** (online feature). Migrated to the 3.x API; the public error
+  mapping (`ServerError(code, body)`, timeout vs. network) and the unbounded
+  BC-table read are preserved.
+- **`getrandom` 0.2 → 0.3** with the `wasm_js` backend feature (WASM builds).
+- CI: `actions/upload-artifact` 6 → 7, `actions/download-artifact` 7 → 8,
+  `cross-platform-actions/action` 0.30 → 0.32.
+
 ## [0.19.0] - 2026-06-20
 
 Adds downrange-segmented wind to the CLI and WASM, and **corrects the wind-direction
