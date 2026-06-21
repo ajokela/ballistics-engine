@@ -261,60 +261,62 @@ impl ApiClient {
         let distance_yards = request.target_distance / 0.9144; // meters to yards
 
         let mut req = ureq::get(&url)
-            .set("Accept", "application/json")
-            .set("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(self.timeout)
-            .query("bc_value", &request.bc_value.to_string())
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .header("Accept", "application/json")
+            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
+            .query("bc_value", request.bc_value.to_string())
             .query("bc_type", &request.bc_type)
-            .query("bullet_mass", &format!("{:.1}", mass_grains))
-            .query("muzzle_velocity", &format!("{:.1}", velocity_fps))
-            .query("target_distance", &format!("{:.1}", distance_yards));
+            .query("bullet_mass", format!("{:.1}", mass_grains))
+            .query("muzzle_velocity", format!("{:.1}", velocity_fps))
+            .query("target_distance", format!("{:.1}", distance_yards));
 
         // Add optional parameters
         if let Some(zero_range) = request.zero_range {
             let zero_yards = zero_range / 0.9144;
-            req = req.query("zero_distance", &format!("{:.1}", zero_yards));
+            req = req.query("zero_distance", format!("{:.1}", zero_yards));
         }
         if let Some(wind_speed) = request.wind_speed {
             let wind_mph = wind_speed * 2.23694; // m/s to mph
-            req = req.query("wind_speed", &format!("{:.1}", wind_mph));
+            req = req.query("wind_speed", format!("{:.1}", wind_mph));
         }
         if let Some(wind_angle) = request.wind_angle {
-            req = req.query("wind_angle", &format!("{:.1}", wind_angle));
+            req = req.query("wind_angle", format!("{:.1}", wind_angle));
         }
         if let Some(temp) = request.temperature {
             let temp_f = temp * 9.0 / 5.0 + 32.0; // Celsius to Fahrenheit
-            req = req.query("temperature", &format!("{:.1}", temp_f));
+            req = req.query("temperature", format!("{:.1}", temp_f));
         }
         if let Some(pressure) = request.pressure {
             let pressure_inhg = pressure / 33.8639; // hPa to inHg
-            req = req.query("pressure", &format!("{:.2}", pressure_inhg));
+            req = req.query("pressure", format!("{:.2}", pressure_inhg));
         }
         if let Some(humidity) = request.humidity {
-            req = req.query("humidity", &format!("{:.1}", humidity));
+            req = req.query("humidity", format!("{:.1}", humidity));
         }
         if let Some(altitude) = request.altitude {
             let altitude_ft = altitude / 0.3048; // meters to feet
-            req = req.query("altitude", &format!("{:.1}", altitude_ft));
+            req = req.query("altitude", format!("{:.1}", altitude_ft));
         }
         if let Some(shooting_angle) = request.shooting_angle {
-            req = req.query("shooting_angle", &format!("{:.1}", shooting_angle));
+            req = req.query("shooting_angle", format!("{:.1}", shooting_angle));
         }
         if let Some(latitude) = request.latitude {
-            req = req.query("latitude", &format!("{:.2}", latitude));
+            req = req.query("latitude", format!("{:.2}", latitude));
         }
         if let Some(longitude) = request.longitude {
-            req = req.query("longitude", &format!("{:.2}", longitude));
+            req = req.query("longitude", format!("{:.2}", longitude));
         }
         if let Some(shot_direction) = request.shot_direction {
-            req = req.query("shot_direction", &format!("{:.1}", shot_direction));
+            req = req.query("shot_direction", format!("{:.1}", shot_direction));
         }
         if let Some(twist_rate) = request.twist_rate {
-            req = req.query("twist_rate", &format!("{:.1}", twist_rate));
+            req = req.query("twist_rate", format!("{:.1}", twist_rate));
         }
         if let Some(diameter) = request.bullet_diameter {
             let diameter_in = diameter / 0.0254; // meters to inches
-            req = req.query("bullet_diameter", &format!("{:.3}", diameter_in));
+            req = req.query("bullet_diameter", format!("{:.3}", diameter_in));
         }
         if let Some(threshold) = request.ground_threshold {
             // Ground threshold is in meters. --ignore-ground-impact sets f64::NEG_INFINITY, which
@@ -324,7 +326,7 @@ impl ApiClient {
             // non-finite value (NaN or +Inf) is invalid input, not an ignore-ground request, so
             // omit the parameter rather than silently mapping it to the sentinel.
             if threshold.is_finite() {
-                req = req.query("ground_threshold", &format!("{:.1}", threshold));
+                req = req.query("ground_threshold", format!("{:.1}", threshold));
             } else if threshold == f64::NEG_INFINITY {
                 req = req.query("ground_threshold", "-1000000000.0");
             }
@@ -344,27 +346,23 @@ impl ApiClient {
         if let Some(sample_interval) = request.sample_interval {
             // Convert from meters to yards for the Flask API (trajectory_step is in yards)
             let step_yards = sample_interval / 0.9144;
-            req = req.query("trajectory_step", &format!("{:.4}", step_yards));
+            req = req.query("trajectory_step", format!("{:.4}", step_yards));
         }
 
-        let response = req.call().map_err(|e| match e {
-            ureq::Error::Status(code, response) => {
-                let body = response.into_string().unwrap_or_default();
-                ApiError::ServerError(code, body)
-            }
-            ureq::Error::Transport(transport) => {
-                // Check for timeout by looking at the error message
-                let msg = transport.to_string();
-                if msg.contains("timed out") || msg.contains("timeout") {
-                    ApiError::Timeout
-                } else {
-                    ApiError::NetworkError(msg)
-                }
-            }
-        })?;
+        let mut response = req.call().map_err(map_ureq_error)?;
+
+        // In ureq 3.x, 4xx/5xx responses are no longer returned as Err by default;
+        // .call() yields Ok(response) for any status. Inspect the status ourselves and
+        // map non-2xx to ServerError(code, body) to preserve the previous behavior.
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(ApiError::ServerError(status.as_u16(), body));
+        }
 
         let body = response
-            .into_string()
+            .body_mut()
+            .read_to_string()
             .map_err(|e| ApiError::InvalidResponse(e.to_string()))?;
 
         // Parse the Flask API response and convert to our format
@@ -485,24 +483,13 @@ impl ApiClient {
         let url = format!("{}/health", self.base_url);
 
         let response = ureq::get(&url)
-            .timeout(Duration::from_secs(5))
+            .config()
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build()
             .call()
-            .map_err(|e| match e {
-                ureq::Error::Status(code, response) => {
-                    let body = response.into_string().unwrap_or_default();
-                    ApiError::ServerError(code, body)
-                }
-                ureq::Error::Transport(transport) => {
-                    let msg = transport.to_string();
-                    if msg.contains("timed out") || msg.contains("timeout") {
-                        ApiError::Timeout
-                    } else {
-                        ApiError::NetworkError(msg)
-                    }
-                }
-            })?;
+            .map_err(map_ureq_error)?;
 
-        Ok(response.status() == 200)
+        Ok(response.status().as_u16() == 200)
     }
 
     /// Calculate true/effective muzzle velocity via Flask API
@@ -523,33 +510,54 @@ impl ApiClient {
         let body = serde_json::to_string(request)
             .map_err(|e| ApiError::RequestError(format!("Failed to serialize request: {}", e)))?;
 
-        let response = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .set("Accept", "application/json")
-            .set("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(self.timeout)
-            .send_string(&body)
-            .map_err(|e| match e {
-                ureq::Error::Status(code, response) => {
-                    let body = response.into_string().unwrap_or_default();
-                    ApiError::ServerError(code, body)
-                }
-                ureq::Error::Transport(transport) => {
-                    let msg = transport.to_string();
-                    if msg.contains("timed out") || msg.contains("timeout") {
-                        ApiError::Timeout
-                    } else {
-                        ApiError::NetworkError(msg)
-                    }
-                }
-            })?;
+        let mut response = ureq::post(&url)
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
+            .send(&body)
+            .map_err(map_ureq_error)?;
+
+        // In ureq 3.x, 4xx/5xx responses are returned as Ok; check status explicitly.
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(ApiError::ServerError(status.as_u16(), body));
+        }
 
         let response_body = response
-            .into_string()
+            .body_mut()
+            .read_to_string()
             .map_err(|e| ApiError::InvalidResponse(format!("Failed to read response: {}", e)))?;
 
         serde_json::from_str(&response_body)
             .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))
+    }
+}
+
+/// Map a ureq 3.x transport/protocol error to an `ApiError`.
+///
+/// Note: in ureq 3.x, HTTP 4xx/5xx responses are NOT returned as errors by default
+/// (`.call()`/`.send()` yield `Ok(response)` for any status), so the status is checked
+/// on the returned response rather than here. This helper only sees genuine
+/// transport-level failures.
+#[cfg(feature = "online")]
+fn map_ureq_error(e: ureq::Error) -> ApiError {
+    match e {
+        // Any configured timeout (global/connect/etc.) maps to Timeout.
+        ureq::Error::Timeout(_) => ApiError::Timeout,
+        // Socket/IO errors: distinguish timeouts surfaced as IO errors, otherwise network.
+        ureq::Error::Io(io_err) => {
+            if io_err.kind() == std::io::ErrorKind::TimedOut {
+                ApiError::Timeout
+            } else {
+                ApiError::NetworkError(io_err.to_string())
+            }
+        }
+        // Other transport-level failures (DNS, connect, proxy, redirects, TLS, etc.).
+        other => ApiError::NetworkError(other.to_string()),
     }
 }
 

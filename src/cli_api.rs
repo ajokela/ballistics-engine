@@ -1669,10 +1669,9 @@ pub fn run_monte_carlo_with_wind(
     base_wind: WindConditions,
     params: MonteCarloParams,
 ) -> Result<MonteCarloResults, BallisticsError> {
-    use rand::thread_rng;
     use rand_distr::{Distribution, Normal};
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let mut ranges = Vec::new();
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
