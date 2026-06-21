@@ -111,3 +111,6 @@ glenn_update_bc5d.md
 
 # Stray compiled test executable (source is tests/test_units.rs)
 /tests/test_units
+
+# Superpowers planning/spec artifacts (not part of the crate or repo)
+docs/superpowers/
