@@ -261,9 +261,11 @@ impl ApiClient {
         let distance_yards = request.target_distance / 0.9144; // meters to yards
 
         let mut req = ureq::get(&url)
-            .set("Accept", "application/json")
-            .set("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(self.timeout)
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .header("Accept", "application/json")
+            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
             .query("bc_value", &request.bc_value.to_string())
             .query("bc_type", &request.bc_type)
             .query("bullet_mass", &format!("{:.1}", mass_grains))
@@ -347,24 +349,20 @@ impl ApiClient {
             req = req.query("trajectory_step", &format!("{:.4}", step_yards));
         }
 
-        let response = req.call().map_err(|e| match e {
-            ureq::Error::Status(code, response) => {
-                let body = response.into_string().unwrap_or_default();
-                ApiError::ServerError(code, body)
-            }
-            ureq::Error::Transport(transport) => {
-                // Check for timeout by looking at the error message
-                let msg = transport.to_string();
-                if msg.contains("timed out") || msg.contains("timeout") {
-                    ApiError::Timeout
-                } else {
-                    ApiError::NetworkError(msg)
-                }
-            }
-        })?;
+        let mut response = req.call().map_err(map_ureq_error)?;
+
+        // In ureq 3.x, 4xx/5xx responses are no longer returned as Err by default;
+        // .call() yields Ok(response) for any status. Inspect the status ourselves and
+        // map non-2xx to ServerError(code, body) to preserve the previous behavior.
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(ApiError::ServerError(status.as_u16(), body));
+        }
 
         let body = response
-            .into_string()
+            .body_mut()
+            .read_to_string()
             .map_err(|e| ApiError::InvalidResponse(e.to_string()))?;
 
         // Parse the Flask API response and convert to our format
@@ -485,24 +483,13 @@ impl ApiClient {
         let url = format!("{}/health", self.base_url);
 
         let response = ureq::get(&url)
-            .timeout(Duration::from_secs(5))
+            .config()
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build()
             .call()
-            .map_err(|e| match e {
-                ureq::Error::Status(code, response) => {
-                    let body = response.into_string().unwrap_or_default();
-                    ApiError::ServerError(code, body)
-                }
-                ureq::Error::Transport(transport) => {
-                    let msg = transport.to_string();
-                    if msg.contains("timed out") || msg.contains("timeout") {
-                        ApiError::Timeout
-                    } else {
-                        ApiError::NetworkError(msg)
-                    }
-                }
-            })?;
+            .map_err(map_ureq_error)?;
 
-        Ok(response.status() == 200)
+        Ok(response.status().as_u16() == 200)
     }
 
     /// Calculate true/effective muzzle velocity via Flask API
@@ -523,33 +510,54 @@ impl ApiClient {
         let body = serde_json::to_string(request)
             .map_err(|e| ApiError::RequestError(format!("Failed to serialize request: {}", e)))?;
 
-        let response = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .set("Accept", "application/json")
-            .set("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(self.timeout)
-            .send_string(&body)
-            .map_err(|e| match e {
-                ureq::Error::Status(code, response) => {
-                    let body = response.into_string().unwrap_or_default();
-                    ApiError::ServerError(code, body)
-                }
-                ureq::Error::Transport(transport) => {
-                    let msg = transport.to_string();
-                    if msg.contains("timed out") || msg.contains("timeout") {
-                        ApiError::Timeout
-                    } else {
-                        ApiError::NetworkError(msg)
-                    }
-                }
-            })?;
+        let mut response = ureq::post(&url)
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
+            .send(&body)
+            .map_err(map_ureq_error)?;
+
+        // In ureq 3.x, 4xx/5xx responses are returned as Ok; check status explicitly.
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(ApiError::ServerError(status.as_u16(), body));
+        }
 
         let response_body = response
-            .into_string()
+            .body_mut()
+            .read_to_string()
             .map_err(|e| ApiError::InvalidResponse(format!("Failed to read response: {}", e)))?;
 
         serde_json::from_str(&response_body)
             .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))
+    }
+}
+
+/// Map a ureq 3.x transport/protocol error to an `ApiError`.
+///
+/// Note: in ureq 3.x, HTTP 4xx/5xx responses are NOT returned as errors by default
+/// (`.call()`/`.send()` yield `Ok(response)` for any status), so the status is checked
+/// on the returned response rather than here. This helper only sees genuine
+/// transport-level failures.
+#[cfg(feature = "online")]
+fn map_ureq_error(e: ureq::Error) -> ApiError {
+    match e {
+        // Any configured timeout (global/connect/etc.) maps to Timeout.
+        ureq::Error::Timeout(_) => ApiError::Timeout,
+        // Socket/IO errors: distinguish timeouts surfaced as IO errors, otherwise network.
+        ureq::Error::Io(io_err) => {
+            if io_err.kind() == std::io::ErrorKind::TimedOut {
+                ApiError::Timeout
+            } else {
+                ApiError::NetworkError(io_err.to_string())
+            }
+        }
+        // Other transport-level failures (DNS, connect, proxy, redirects, TLS, etc.).
+        other => ApiError::NetworkError(other.to_string()),
     }
 }
 

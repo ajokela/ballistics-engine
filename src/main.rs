@@ -91,13 +91,16 @@ fn check_tos_accepted() -> bool {
 /// Fetch the TOS text from the server
 #[cfg(feature = "online")]
 fn fetch_tos_text() -> Result<String, String> {
-    let response = ureq::get(TOS_URL)
-        .timeout(std::time::Duration::from_secs(10))
+    let mut response = ureq::get(TOS_URL)
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .build()
         .call()
         .map_err(|e| format!("Failed to fetch Terms of Service: {}", e))?;
 
     response
-        .into_string()
+        .body_mut()
+        .read_to_string()
         .map_err(|e| format!("Failed to read Terms of Service: {}", e))
 }
 
