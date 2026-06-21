@@ -266,57 +266,57 @@ impl ApiClient {
             .build()
             .header("Accept", "application/json")
             .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
-            .query("bc_value", &request.bc_value.to_string())
+            .query("bc_value", request.bc_value.to_string())
             .query("bc_type", &request.bc_type)
-            .query("bullet_mass", &format!("{:.1}", mass_grains))
-            .query("muzzle_velocity", &format!("{:.1}", velocity_fps))
-            .query("target_distance", &format!("{:.1}", distance_yards));
+            .query("bullet_mass", format!("{:.1}", mass_grains))
+            .query("muzzle_velocity", format!("{:.1}", velocity_fps))
+            .query("target_distance", format!("{:.1}", distance_yards));
 
         // Add optional parameters
         if let Some(zero_range) = request.zero_range {
             let zero_yards = zero_range / 0.9144;
-            req = req.query("zero_distance", &format!("{:.1}", zero_yards));
+            req = req.query("zero_distance", format!("{:.1}", zero_yards));
         }
         if let Some(wind_speed) = request.wind_speed {
             let wind_mph = wind_speed * 2.23694; // m/s to mph
-            req = req.query("wind_speed", &format!("{:.1}", wind_mph));
+            req = req.query("wind_speed", format!("{:.1}", wind_mph));
         }
         if let Some(wind_angle) = request.wind_angle {
-            req = req.query("wind_angle", &format!("{:.1}", wind_angle));
+            req = req.query("wind_angle", format!("{:.1}", wind_angle));
         }
         if let Some(temp) = request.temperature {
             let temp_f = temp * 9.0 / 5.0 + 32.0; // Celsius to Fahrenheit
-            req = req.query("temperature", &format!("{:.1}", temp_f));
+            req = req.query("temperature", format!("{:.1}", temp_f));
         }
         if let Some(pressure) = request.pressure {
             let pressure_inhg = pressure / 33.8639; // hPa to inHg
-            req = req.query("pressure", &format!("{:.2}", pressure_inhg));
+            req = req.query("pressure", format!("{:.2}", pressure_inhg));
         }
         if let Some(humidity) = request.humidity {
-            req = req.query("humidity", &format!("{:.1}", humidity));
+            req = req.query("humidity", format!("{:.1}", humidity));
         }
         if let Some(altitude) = request.altitude {
             let altitude_ft = altitude / 0.3048; // meters to feet
-            req = req.query("altitude", &format!("{:.1}", altitude_ft));
+            req = req.query("altitude", format!("{:.1}", altitude_ft));
         }
         if let Some(shooting_angle) = request.shooting_angle {
-            req = req.query("shooting_angle", &format!("{:.1}", shooting_angle));
+            req = req.query("shooting_angle", format!("{:.1}", shooting_angle));
         }
         if let Some(latitude) = request.latitude {
-            req = req.query("latitude", &format!("{:.2}", latitude));
+            req = req.query("latitude", format!("{:.2}", latitude));
         }
         if let Some(longitude) = request.longitude {
-            req = req.query("longitude", &format!("{:.2}", longitude));
+            req = req.query("longitude", format!("{:.2}", longitude));
         }
         if let Some(shot_direction) = request.shot_direction {
-            req = req.query("shot_direction", &format!("{:.1}", shot_direction));
+            req = req.query("shot_direction", format!("{:.1}", shot_direction));
         }
         if let Some(twist_rate) = request.twist_rate {
-            req = req.query("twist_rate", &format!("{:.1}", twist_rate));
+            req = req.query("twist_rate", format!("{:.1}", twist_rate));
         }
         if let Some(diameter) = request.bullet_diameter {
             let diameter_in = diameter / 0.0254; // meters to inches
-            req = req.query("bullet_diameter", &format!("{:.3}", diameter_in));
+            req = req.query("bullet_diameter", format!("{:.3}", diameter_in));
         }
         if let Some(threshold) = request.ground_threshold {
             // Ground threshold is in meters. --ignore-ground-impact sets f64::NEG_INFINITY, which
@@ -326,7 +326,7 @@ impl ApiClient {
             // non-finite value (NaN or +Inf) is invalid input, not an ignore-ground request, so
             // omit the parameter rather than silently mapping it to the sentinel.
             if threshold.is_finite() {
-                req = req.query("ground_threshold", &format!("{:.1}", threshold));
+                req = req.query("ground_threshold", format!("{:.1}", threshold));
             } else if threshold == f64::NEG_INFINITY {
                 req = req.query("ground_threshold", "-1000000000.0");
             }
@@ -346,7 +346,7 @@ impl ApiClient {
         if let Some(sample_interval) = request.sample_interval {
             // Convert from meters to yards for the Flask API (trajectory_step is in yards)
             let step_yards = sample_interval / 0.9144;
-            req = req.query("trajectory_step", &format!("{:.4}", step_yards));
+            req = req.query("trajectory_step", format!("{:.4}", step_yards));
         }
 
         let mut response = req.call().map_err(map_ureq_error)?;
