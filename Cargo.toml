@@ -57,7 +57,7 @@ jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-nalgebra = "0.34"
+nalgebra = "0.35"
 ndarray = "0.17"
 ndarray-npy = "0.10"
 rayon = "1.10"
