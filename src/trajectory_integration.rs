@@ -192,6 +192,7 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         latitude: None,
         shooting_angle: 0.0,
         azimuth_angle: 0.0,
+        shot_azimuth: 0.0, // this fast path doesn't plumb latitude/bearing (no directional Coriolis here)
         use_powder_sensitivity: false,
         powder_temp_sensitivity: 0.0,
         powder_temp: 59.0,

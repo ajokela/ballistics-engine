@@ -1524,6 +1524,7 @@ struct TrajectoryConfig {
     twist_rate: Option<f64>,
     twist_right: bool,
     latitude: Option<f64>,
+    shot_direction: Option<f64>, // compass bearing of the shot, degrees, 0=N (for Coriolis)
     shooting_angle: f64,
 
     // Powder sensitivity
@@ -2431,6 +2432,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 twist_rate,
                 twist_right,
                 latitude,
+                shot_direction,
                 shooting_angle,
                 use_powder_sensitivity,
                 powder_temp_sensitivity,
@@ -2538,6 +2540,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     muzzle_angle: muzzle_angle.to_radians(),
                                     target_distance: max_range_metric,
                                     azimuth_angle: 0.0,
+                                    shot_azimuth: shot_direction.map(|d| d.to_radians()).unwrap_or(0.0),
                                     shooting_angle: shooting_angle.to_radians(),
                                     sight_height: sight_height_metric,
                                     muzzle_height: bore_height_metric,
@@ -3722,6 +3725,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         twist_rate,
         twist_right,
         latitude,
+        shot_direction,
         shooting_angle,
         use_powder_sensitivity,
         powder_temp_sensitivity,
@@ -3748,6 +3752,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         muzzle_angle: angle.to_radians(),
         target_distance: max_range,
         azimuth_angle: 0.0,
+        shot_azimuth: shot_direction.map(|d| d.to_radians()).unwrap_or(0.0),
         shooting_angle: shooting_angle.to_radians(),
         sight_height,
         muzzle_height: bore_height, // Bore height above ground from --bore-height CLI option

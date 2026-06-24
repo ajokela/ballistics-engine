@@ -619,7 +619,7 @@ BC5D (5-Dimensional BC Correction) tables provide ML-derived corrections for imp
   -v 2850 -b 0.690 -m 230 -d 0.338 \
   --enable-coriolis \
   --latitude 45 \
-  --shooting-angle 90 \
+  --shot-direction 90 \
   --max-range 2000
 
 # Complete advanced physics
@@ -641,6 +641,14 @@ BC5D (5-Dimensional BC Correction) tables provide ML-derived corrections for imp
   --humidity 30 \
   --max-range 3000
 ```
+
+**Shot direction matters (Eötvös effect, fixed in 0.21.0):** with `--enable-coriolis`
+and `--latitude`, the `--shot-direction` bearing (0=N, 90=E, 180=S, 270=W) changes the
+vertical correction. An **east** shot is lifted (`+2Ω·cos(latitude)·v_east`) and prints
+slightly higher; a **west** shot is depressed and prints lower; north/south sit in
+between. The horizontal (left/right) Coriolis drift is essentially direction-independent
+in the northern hemisphere (always to the right). Prior to 0.21.0 `--shot-direction` was
+ignored by the local solver, so east and west gave identical output.
 
 ### Online Mode with ML Enhancements
 ```bash

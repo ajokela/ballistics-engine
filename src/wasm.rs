@@ -198,6 +198,7 @@ impl WasmBallistics {
         let mut twist_rate: Option<f64> = None;
         let mut twist_right = true;
         let mut latitude: Option<f64> = None;
+        let mut shot_direction: Option<f64> = None; // compass bearing, degrees, 0=N (Coriolis)
         let mut shooting_angle = 0.0;
         let mut powder_temp_sensitivity = 1.0;
         let mut powder_temp = if units == UnitSystem::Imperial {
@@ -414,6 +415,16 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--shot-direction" => {
+                    if i + 1 < args.len() {
+                        shot_direction = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid shot-direction"))?,
+                        );
+                        i += 1;
+                    }
+                }
                 "--shooting-angle" => {
                     if i + 1 < args.len() {
                         shooting_angle = args[i + 1]
@@ -516,6 +527,7 @@ impl WasmBallistics {
         if let Some(lat) = latitude {
             inputs.latitude = Some(lat);
         }
+        inputs.shot_azimuth = shot_direction.map(|d| d.to_radians()).unwrap_or(0.0);
         inputs.powder_temp_sensitivity = powder_temp_sensitivity;
 
         // Adjust velocity for powder temperature if enabled
@@ -1649,6 +1661,7 @@ Trajectory Command:
     --twist-rate <RATE>          Barrel twist (inches per turn)
     --twist-right <BOOL>         Right-hand twist (true/false)
     --latitude <LAT>             Latitude for Coriolis (degrees)
+    --shot-direction <DEG>       Compass bearing of the shot for Coriolis (0=N, 90=E)
     --shooting-angle <ANGLE>     Uphill/downhill angle (degrees)
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
     --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm)

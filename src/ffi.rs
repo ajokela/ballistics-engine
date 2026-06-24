@@ -36,6 +36,10 @@ pub struct FFIBallisticInputs {
     pub enable_spin_drift: c_int,          // 0=false, 1=true
     pub enable_magnus: c_int,              // 0=false, 1=true
     pub enable_coriolis: c_int,            // 0=false, 1=true
+    // Appended (keeps existing field offsets): compass bearing the shot is fired
+    // along, radians, 0=North, PI/2=East. Drives the Coriolis Eötvös/drift azimuth.
+    // Distinct from azimuth_angle (the small aiming offset). 0.0 if unset.
+    pub shot_azimuth: c_double,
 }
 
 #[repr(C)]
@@ -132,6 +136,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.muzzle_velocity = inputs.muzzle_velocity;
     ballistic_inputs.muzzle_angle = inputs.muzzle_angle;
     ballistic_inputs.azimuth_angle = inputs.azimuth_angle;
+    ballistic_inputs.shot_azimuth = inputs.shot_azimuth;
     ballistic_inputs.use_rk4 = inputs.use_rk4 != 0;
     ballistic_inputs.use_adaptive_rk45 = inputs.use_adaptive_rk45 != 0;
     ballistic_inputs.bc_value = inputs.bc_value;

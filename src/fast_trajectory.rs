@@ -280,7 +280,7 @@ pub fn fast_integrate(
     let omega_vector = if inputs.enable_coriolis && inputs.latitude.is_some() {
         let omega_earth = 7.2921159e-5_f64; // rad/s
         let lat = inputs.latitude.unwrap().to_radians();
-        let az = inputs.azimuth_angle; // radians, 0 = North
+        let az = inputs.shot_azimuth; // compass bearing (0=N), NOT the aiming offset
         Some(Vector3::new(
             omega_earth * lat.cos() * az.cos(),  // X: downrange
             omega_earth * lat.sin(),             // Y: vertical
