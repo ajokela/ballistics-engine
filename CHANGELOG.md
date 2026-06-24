@@ -5,6 +5,28 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-06-24
+
+### Fixed
+- **Coriolis now responds to shot direction (Eötvös effect).** `--shot-direction` was
+  stored but never reached the trajectory solver, so the Coriolis correction was always
+  computed as a due-North shot — east- and west-fired shots produced identical results.
+  The solver now carries the firing compass bearing in a dedicated `shot_azimuth` input
+  (distinct from `azimuth_angle`, the small aiming offset that rotates the launch
+  velocity), and both the RK4 solver and the fast/Monte-Carlo path use it for the
+  Earth-rotation vector. An east shot now gets the upward Eötvös term (`+2Ω·cosφ·v_east`,
+  shoots higher) and a west shot the downward one (shoots lower); lateral drift is
+  unchanged. Regression test `coriolis_direction_tests::eotvos_east_higher_than_west`.
+
+### Changed
+- **DOWNSTREAM:** numerical output changes for Coriolis shots with a non-North
+  `--shot-direction` (previously those were silently treated as North; North / unset is
+  unchanged). FFI `FFIBallisticInputs` gains an appended `shot_azimuth` field (radians,
+  0=N) — existing field offsets are preserved, but FFI consumers that construct the full
+  struct must add it. WASM `runCommand` now accepts `--shot-direction`. The fast/MC path
+  still does not plumb latitude/bearing on its own (`build_inputs` hardwires
+  `latitude: None`), so directional Coriolis there remains out of scope for this release.
+
 ## [0.20.0] - 2026-06-21
 
 Dependency modernization — a coordinated upgrade of the major dependencies. No new

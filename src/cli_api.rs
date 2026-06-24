@@ -73,7 +73,12 @@ pub struct BallisticInputs {
     // Targeting and positioning
     pub muzzle_angle: f64,     // radians (launch angle)
     pub target_distance: f64,  // meters
-    pub azimuth_angle: f64,    // horizontal aiming angle in radians
+    pub azimuth_angle: f64,    // horizontal aiming angle in radians (small aim offset within the shot frame)
+    /// Compass bearing the shot is fired ALONG, radians, 0 = North, π/2 = East.
+    /// Used only by the Coriolis model (Earth-rotation depends on which way downrange
+    /// points relative to true North). Distinct from `azimuth_angle`, which is the
+    /// small horizontal *aiming* offset and rotates the launch velocity.
+    pub shot_azimuth: f64,
     pub shooting_angle: f64,   // uphill/downhill angle in radians
     pub sight_height: f64,     // meters above bore
     pub muzzle_height: f64,    // meters above ground
@@ -158,6 +163,7 @@ impl Default for BallisticInputs {
             muzzle_angle: muzzle_angle_rad,
             target_distance: 100.0,
             azimuth_angle: 0.0,
+            shot_azimuth: 0.0,
             shooting_angle: 0.0,
             sight_height: 0.05,
             muzzle_height: 0.0,       // Default 0 - height is in sight_height
@@ -1453,7 +1459,7 @@ impl TrajectorySolver {
             if let Some(lat_deg) = self.inputs.latitude {
                 let omega_earth = 7.2921159e-5_f64; // rad/s
                 let lat = lat_deg.to_radians();
-                let az = self.inputs.azimuth_angle;
+                let az = self.inputs.shot_azimuth; // compass bearing (0=N), NOT the aiming offset
                 // Earth's angular velocity in the shot frame (X=downrange, Y=up,
                 // Z=lateral). Projecting Omega=(0, Ω cosφ, Ω sinφ) [local E,N,U] onto
                 // the azimuth-rotated shot axes gives a NEGATIVE lateral component:
@@ -2114,5 +2120,67 @@ mod ground_termination_tests {
                  past launch level toward the ground_threshold floor, not stop at y = 0"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod coriolis_direction_tests {
+    use super::*;
+    use std::f64::consts::FRAC_PI_2;
+
+    /// Vertical position (m) at a given downrange `range_m`, for a shot fired along
+    /// compass bearing `shot_azimuth` (radians, 0=N) with Coriolis enabled.
+    fn vertical_at(shot_azimuth: f64, range_m: f64) -> f64 {
+        let mut inputs = BallisticInputs::default();
+        inputs.muzzle_velocity = 800.0;
+        inputs.bc_value = 0.5;
+        inputs.bc_type = DragModel::G7;
+        inputs.muzzle_angle = 0.02; // ~20 mrad so it carries well past range_m
+        inputs.enable_coriolis = true;
+        inputs.latitude = Some(45.0);
+        inputs.shot_azimuth = shot_azimuth;
+        inputs.ground_threshold = f64::NEG_INFINITY; // never terminate early
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(range_m + 50.0);
+        let r = solver.solve().expect("solve");
+        let pts = &r.points;
+        for i in 1..pts.len() {
+            if pts[i].position.x >= range_m {
+                let p1 = &pts[i - 1];
+                let p2 = &pts[i];
+                let t = (range_m - p1.position.x) / (p2.position.x - p1.position.x);
+                return p1.position.y + t * (p2.position.y - p1.position.y);
+            }
+        }
+        panic!("range {range_m} not reached");
+    }
+
+    /// Regression for the shot-direction Coriolis bug: the Eötvös vertical term
+    /// `a_up = +2Ω cosφ v_east` lifts an EAST shot and depresses a WEST shot, so at a
+    /// common range east must sit HIGHER than west, with north in between. Before the
+    /// fix, `--shot-direction` never reached the solver and E/W/N were identical.
+    #[test]
+    fn eotvos_east_higher_than_west() {
+        let range = 600.0;
+        let east = vertical_at(FRAC_PI_2, range); // 90° E
+        let west = vertical_at(3.0 * FRAC_PI_2, range); // 270° W
+        let north = vertical_at(0.0, range); // 0° N
+        assert!(
+            east > west,
+            "east ({east:.5}) must be higher than west ({west:.5}) at {range} m (Eötvös)"
+        );
+        assert!(
+            east > north && north > west,
+            "north ({north:.5}) must lie between east ({east:.5}) and west ({west:.5})"
+        );
+        assert!(
+            (east - west) > 1e-3,
+            "E-W vertical separation ({:.6} m) should be physically meaningful, not FP noise",
+            east - west
+        );
     }
 }
