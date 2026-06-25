@@ -5,6 +5,23 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-06-24
+
+### Fixed
+- **Coriolis shot direction on the fast / Monte-Carlo path.** 0.21.0 fixed the RK4
+  solver but missed a third Earth-rotation construction site: `fast_integrate_with_segments`
+  (the path the Python binding uses) still built ω from `azimuth_angle` instead of
+  `shot_azimuth`, so east and west shots were identical there. Now uses `shot_azimuth`,
+  matching the RK4 and `fast_integrate` paths — directional Coriolis (Eötvös) is applied
+  consistently across all solver paths. Regression test
+  `fast_trajectory::tests::fast_path_coriolis_uses_shot_direction`. (This corrects the
+  "fast/MC path is still a no-op" caveat noted in 0.21.0.)
+
+### Changed
+- **DOWNSTREAM:** the fast/MC path now changes output for Coriolis shots with a non-North
+  bearing (north / unset unchanged). The Python binding accepts a `shot_direction` key
+  (degrees, 0=N) to drive it; pass it alongside `latitude` + advanced effects.
+
 ## [0.21.0] - 2026-06-24
 
 ### Fixed
