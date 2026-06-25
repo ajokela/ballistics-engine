@@ -5,6 +5,24 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.2] - 2026-06-25
+
+### Changed
+- **Coriolis is now independent of the advanced-effects umbrella on the fast/MC path.**
+  `fast_integrate_with_segments` previously gated its Earth-rotation ω — and spin-drift /
+  Magnus — together on `enable_advanced_effects`, so a caller could not request
+  Coriolis-only. The ω is now gated on `enable_coriolis` (+ a latitude), and Magnus on
+  `enable_magnus`, matching the RK4 solver. A caller can enable Coriolis with
+  `enable_advanced_effects = false`. Tests: `fast_path_coriolis_independent_of_advanced_effects`.
+
+### Fixed
+- **Degenerate atmosphere no longer reports success.** A non-physical `atmo_params`
+  (pressure ≤ 0 or non-finite — typically a unit mix-up, e.g. inHg passed where hPa is
+  expected) yielded zero/NaN air density and silently truncated the fast path to a
+  single-point stub trajectory marked `success = true`. The fast entrypoints now validate
+  the atmosphere up front and return `success = false` for degenerate input. Test:
+  `fast_path_rejects_degenerate_atmosphere`.
+
 ## [0.21.1] - 2026-06-24
 
 ### Fixed
