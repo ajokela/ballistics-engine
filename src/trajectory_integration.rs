@@ -144,6 +144,11 @@ pub struct TrajectoryParams {
     pub wind_shear_model: String,
     pub shooter_altitude_m: f64,
     pub is_twist_right: bool, // True for right-hand twist, false for left-hand
+    // MBA-717: real bullet geometry so spin-drift / Magnus / stability on this fast/MC
+    // path use the actual bullet instead of hardcoded .308 / 1.24in / 10-twist placeholders.
+    pub bullet_diameter: f64, // meters
+    pub bullet_length: f64,   // meters (0.0 -> derivatives falls back to the 4.5-caliber heuristic)
+    pub twist_rate: f64,      // inches per turn
     pub custom_drag_table: Option<crate::drag::DragTable>, // Custom Drag Model (CDM) data
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
     pub use_bc_segments: bool, // Whether to use BC segment interpolation
@@ -163,9 +168,9 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         bc_type: params.drag_model,
         bullet_mass: params.mass_kg, // kg
         muzzle_velocity: 0.0,        // unread by compute_derivatives on this path
-        bullet_diameter: 0.0078232,  // 0.308 in -> meters
-        bullet_length: 0.031496,     // 1.24 in -> meters
-        twist_rate: 10.0,            // inches/turn (twist stays imperial)
+        bullet_diameter: params.bullet_diameter, // MBA-717: real geometry, not placeholders
+        bullet_length: params.bullet_length,
+        twist_rate: params.twist_rate,
         is_twist_right: params.is_twist_right,
         enable_advanced_effects: params.enable_spin_drift
             || params.enable_magnus
@@ -199,7 +204,7 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         tipoff_decay_distance: 0.0,
         ground_threshold: params.ground_threshold, // MBA-954: honor the configured ground plane
         bc_segments: params.bc_segments.clone(),
-        caliber_inches: 0.308,
+        caliber_inches: params.bullet_diameter / 0.0254, // MBA-717: from real diameter
         weight_grains: params.mass_kg / 0.00006479891,
         use_bc_segments: params.use_bc_segments,
         bullet_id: None,
@@ -218,10 +223,11 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         enable_precession_nutation: false,
         // MBA-959: aerodynamic jump is intentionally OFF on this path. integrate_trajectory
         // is a low-level state integrator: it advances a raw initial_state (no muzzle angle to
-        // perturb), carries placeholder bullet geometry (fixed twist/length/diameter) and an
-        // unread muzzle_velocity, so a meaningful Litz Sg can't be formed here (Sg would be ~0
-        // and the AJ guard would suppress it regardless). AJ belongs on the BallisticInputs +
-        // TrajectorySolver path, which bindings use and which already honors the flag.
+        // perturb) and an unread muzzle_velocity, so a meaningful Litz Sg can't be formed here
+        // (Sg would be ~0 and the AJ guard would suppress it regardless). AJ belongs on the
+        // BallisticInputs + TrajectorySolver path, which bindings use and already honors the flag.
+        // (Bullet geometry IS now carried through TrajectoryParams — MBA-717 — so spin-drift /
+        // Magnus on this path use the real diameter/length/twist.)
         enable_aerodynamic_jump: false,
         use_rk4: true,
         use_adaptive_rk45: false,
@@ -527,6 +533,11 @@ pub fn solve_trajectory_rust(
         wind_shear_model: "none".to_string(),
         shooter_altitude_m: 0.0,
         is_twist_right: true,    // Default for test function
+        // This legacy entry takes no geometry args; keep the historical placeholders so its
+        // behavior is unchanged (callers needing real geometry use fast_integrate_with_segments).
+        bullet_diameter: 0.0078232,
+        bullet_length: 0.031496,
+        twist_rate: 10.0,
         custom_drag_table: None, // No CDM for test function
         bc_segments: None,       // No BC segments for legacy function
         use_bc_segments: false,
@@ -561,6 +572,9 @@ mod tests {
         TrajectoryParams {
             mass_kg: 0.01134, // 175 grains in kg
             bc: 0.442,
+            bullet_diameter: 0.0078232, // .308 in
+            bullet_length: 0.031496,    // 1.24 in
+            twist_rate: 10.0,
             drag_model: DragModel::G7,
             wind_segments: vec![],
             atmos_params: (0.0, 59.0, 29.92, 0.0),
@@ -614,6 +628,9 @@ mod tests {
         let params = TrajectoryParams {
             mass_kg: 0.01134, // 175 grains in kg
             bc: 0.442,
+            bullet_diameter: 0.0078232, // .308 in
+            bullet_length: 0.031496,    // 1.24 in
+            twist_rate: 10.0,
             drag_model: DragModel::G7,
             wind_segments: vec![(0.0, 90.0, 914.4)],
             atmos_params: (0.0, 59.0, 29.92, 0.0),

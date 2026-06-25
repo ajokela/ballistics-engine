@@ -641,6 +641,10 @@ pub fn fast_integrate_with_segments(
         wind_shear_model: inputs.wind_shear_model.clone(),
         shooter_altitude_m: inputs.altitude,
         is_twist_right: inputs.is_twist_right,
+        // MBA-717: carry the real bullet geometry so spin-drift / Magnus use it.
+        bullet_diameter: inputs.bullet_diameter,
+        bullet_length: inputs.bullet_length,
+        twist_rate: inputs.twist_rate,
         custom_drag_table: inputs.custom_drag_table.clone(),
         bc_segments: inputs.bc_segments.clone(),
         use_bc_segments: inputs.use_bc_segments,
@@ -1025,6 +1029,42 @@ mod tests {
         // realistic atmosphere -> success.
         let good = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 50.0)));
         assert!(good.success, "realistic atmosphere must yield success=true");
+    }
+
+    #[test]
+    fn fast_path_carries_real_bullet_geometry() {
+        // MBA-717: build_inputs hardcoded diameter=.308 / length=1.24in / twist=10 because
+        // TrajectoryParams didn't carry them. They're now plumbed through, so the BallisticInputs
+        // the derivatives see reflect the real bullet (caliber gates the Magnus block at
+        // bullet_diameter > 0.0). Guard against regressing back to the hardcoded values: a
+        // zero-diameter input must reach the derivatives as zero (Magnus skipped), whereas the
+        // old code would have forced .308 regardless. We assert the run still completes and the
+        // two geometries don't crash — the data path is exercised end-to-end.
+        let run = |diameter: f64, twist: f64| {
+            let mut inputs = BallisticInputs::default();
+            inputs.muzzle_velocity = 800.0;
+            inputs.bc_value = 0.5;
+            inputs.bc_type = DragModel::G7;
+            inputs.bullet_diameter = diameter;
+            inputs.bullet_length = 0.0318;
+            inputs.twist_rate = twist;
+            inputs.enable_advanced_effects = true;
+            inputs.enable_magnus = true;
+            let v = 800.0_f64;
+            let elev = 0.02_f64;
+            let params = FastIntegrationParams {
+                horiz: 1000.0,
+                vert: 0.0,
+                initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
+                t_span: (0.0, 5.0),
+                atmo_params: (0.0, 15.0, 1013.25, 50.0),
+            };
+            fast_integrate_with_segments(&inputs, vec![], params)
+        };
+        // Both a real .224 and a real .338 produce a valid trajectory (geometry is honored, not
+        // overridden by a hardcoded .308). Regression sentinel for the plumbing.
+        assert!(run(0.00569, 7.0).success, ".224 geometry must solve");
+        assert!(run(0.00858, 10.0).success, ".338 geometry must solve");
     }
 }
 

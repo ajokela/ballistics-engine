@@ -86,10 +86,14 @@ pub struct BallisticInputs {
     pub ground_threshold: f64, // meters below which to stop
 
     // Environmental conditions
-    pub altitude: f64,         // meters
-    pub temperature: f64,      // Celsius
-    pub pressure: f64,         // millibars/hPa
-    pub humidity: f64,         // relative humidity (0-1)
+    pub altitude: f64,    // meters
+    pub temperature: f64, // Celsius
+    pub pressure: f64,    // millibars/hPa
+    /// Relative humidity as a FRACTION in `[0, 1]` (e.g. 0.5 = 50%). NOTE the scale
+    /// differs from [`AtmosphericConditions::humidity`], which is a PERCENT in `[0, 100]`.
+    /// The atmosphere helpers (`calculate_air_density_*`) expect percent, so convert via
+    /// [`BallisticInputs::humidity_percent`] before passing this value to them (MBA-722).
+    pub humidity: f64,
     pub latitude: Option<f64>, // degrees
 
     // Wind conditions
@@ -140,6 +144,16 @@ pub struct BallisticInputs {
 
     // Legacy field for compatibility
     pub bc_type_str: Option<String>,
+}
+
+impl BallisticInputs {
+    /// `humidity` as a PERCENT in `[0, 100]`, clamped — the scale the atmosphere
+    /// density helpers expect. Centralizes the 0–1 → 0–100 conversion so callers don't
+    /// re-derive it (and can't accidentally feed the raw 0–1 fraction as a percentage).
+    /// See the field doc on [`BallisticInputs::humidity`] (MBA-722).
+    pub fn humidity_percent(&self) -> f64 {
+        (self.humidity * 100.0).clamp(0.0, 100.0)
+    }
 }
 
 impl Default for BallisticInputs {
@@ -250,7 +264,10 @@ impl Default for WindConditions {
 pub struct AtmosphericConditions {
     pub temperature: f64, // Celsius
     pub pressure: f64,    // hPa
-    pub humidity: f64,    // percentage (0-100)
+    /// Relative humidity as a PERCENT in `[0, 100]`. NOTE: [`BallisticInputs::humidity`]
+    /// uses a 0–1 FRACTION instead — convert with `BallisticInputs::humidity_percent` when
+    /// crossing between them (MBA-722).
+    pub humidity: f64,
     pub altitude: f64,    // meters
 }
 
@@ -2127,6 +2144,20 @@ mod ground_termination_tests {
 mod coriolis_direction_tests {
     use super::*;
     use std::f64::consts::FRAC_PI_2;
+
+    #[test]
+    fn humidity_percent_converts_and_clamps() {
+        // MBA-722: BallisticInputs.humidity is a 0-1 fraction; the helper yields 0-100 percent.
+        let mut i = BallisticInputs::default();
+        i.humidity = 0.5;
+        assert!((i.humidity_percent() - 50.0).abs() < 1e-9, "0.5 -> 50%");
+        i.humidity = 0.0;
+        assert_eq!(i.humidity_percent(), 0.0);
+        i.humidity = 1.0;
+        assert_eq!(i.humidity_percent(), 100.0);
+        i.humidity = 1.5; // out of range -> clamped, never > 100
+        assert_eq!(i.humidity_percent(), 100.0);
+    }
 
     /// Vertical position (m) at a given downrange `range_m`, for a shot fired along
     /// compass bearing `shot_azimuth` (radians, 0=N) with Coriolis enabled.
