@@ -5,6 +5,24 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.3] - 2026-06-25
+
+### Fixed
+- **MBA-717: fast/MC path no longer hardcodes bullet geometry.** `build_inputs` used fixed
+  placeholders (0.308" diameter / 1.24" length / 10" twist) because `TrajectoryParams`
+  didn't carry the geometry, so spin-drift / Magnus / stability on that path ignored the
+  real bullet. `TrajectoryParams` now carries `bullet_diameter` / `bullet_length` /
+  `twist_rate`, plumbed from the inputs. (Behavioral impact is small today — the fast-path
+  yaw-of-repose has no angular state, so its Magnus/spin-drift is ~0 — but the data is now
+  correct for callers that do use it and for future work on that path.)
+
+### Changed
+- **MBA-722: humidity-scale convention documented + centralized.** `BallisticInputs.humidity`
+  is a 0–1 fraction while `AtmosphericConditions.humidity` is a 0–100 percent (the scale the
+  atmosphere density helpers expect) — an easy 100× footgun. Added a `humidity_percent()`
+  helper that does the clamped 0–1 → 0–100 conversion, used it at the Monte-Carlo boundary,
+  and cross-documented both fields. No numerical change (existing paths already converted).
+
 ## [0.21.2] - 2026-06-25
 
 ### Changed

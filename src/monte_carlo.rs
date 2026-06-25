@@ -56,8 +56,8 @@ pub fn solve_trajectory_for_monte_carlo(
         crate::atmosphere::resolve_station_pressure(inputs.pressure, inputs.altitude),
         // BallisticInputs.humidity is a 0-1 fraction; calculate_atmosphere expects 0-100 percent
         // (matching AtmosphericConditions.humidity). Passing the raw fraction under-applied
-        // humidity 100x.
-        (inputs.humidity * 100.0).clamp(0.0, 100.0),
+        // humidity 100x. Centralized in humidity_percent() (MBA-722).
+        inputs.humidity_percent(),
     );
 
     // Create wind segments. WindSock expects (speed_kmh, angle_deg, until_distance_m);
