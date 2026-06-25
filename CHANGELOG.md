@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.21.3] - 2026-06-25
 
 ### Fixed
+- **Direct-atmosphere mode no longer rejected as degenerate (0.21.2 regression).** The
+  0.21.2 degenerate-atmosphere guard rejected the legitimate direct-atmosphere tuple
+  `(air_density, speed_of_sound, 0.0, 0.0)` because slots 2 and 3 are `0.0` sentinels and
+  the guard treated "pressure ≤ 0" as non-physical. The guard now recognizes direct mode
+  (real density < 2.0 kg/m³ and speed of sound > 200 m/s with zero pressure/ratio slots)
+  and only rejects genuinely non-physical input. Test: `fast_path_rejects_degenerate_atmosphere`
+  now also asserts direct mode succeeds.
+- **Transonic Mach transitions are now flagged in sampled output.** The trajectory sampler's
+  `transonic_distances` was a `Vec::new()` placeholder (a TODO), so no sampled point ever
+  received a `MachTransition` flag regardless of trajectory. The Euler / RK4 / RK45 solvers
+  now record the downrange distances where the projectile crosses Mach 1.2 (transonic) and
+  Mach 1.0 (subsonic), and `add_trajectory_flags` marks the nearest sample at each crossing.
+  Test: `transonic_crossing_flags_a_sampled_point`.
 - **MBA-717: fast/MC path no longer hardcodes bullet geometry.** `build_inputs` used fixed
   placeholders (0.308" diameter / 1.24" length / 10" twist) because `TrajectoryParams`
   didn't carry the geometry, so spin-drift / Magnus / stability on that path ignored the
@@ -22,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   atmosphere density helpers expect) — an easy 100× footgun. Added a `humidity_percent()`
   helper that does the clamped 0–1 → 0–100 conversion, used it at the Monte-Carlo boundary,
   and cross-documented both fields. No numerical change (existing paths already converted).
+- **Documented the dual-mode `atmo_params` tuple.** The atmosphere 4-tuple has two modes
+  (standard `(alt, temp_c, pressure_hPa, density_ratio)` vs direct `(density, sound, 0, 0)`)
+  and slot 3 is a density RATIO that rides in the `humidity` field — an easy footgun. Added
+  doc comments at `TrajectoryParams.atmos_params`, `FastIntegrationParams.atmo_params`, and
+  the `atmo_is_physical` guard spelling out both modes. Documentation only.
 
 ## [0.21.2] - 2026-06-25
 

@@ -638,6 +638,12 @@ impl TrajectorySolver {
         let mut max_height = position.y;
         let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
+        // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
+        // (subsonic), so the sampled trajectory output can flag those transitions
+        // (trajectory_sampling::add_trajectory_flags consumes this).
+        let mut transonic_distances: Vec<f64> = Vec::new();
+        let mut crossed_transonic = false;
+        let mut crossed_subsonic = false;
 
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
@@ -686,6 +692,21 @@ impl TrajectorySolver {
                 velocity_magnitude,
                 kinetic_energy,
             });
+
+            // Record Mach-transition distances (constant sea-level speed of sound, matching the
+            // transonic_mach tracking). Each threshold is recorded once, in descending order.
+            {
+                let sos = (1.4 * 287.05 * (self.atmosphere.temperature + 273.15)).sqrt();
+                let mach_here = if sos > 0.0 { velocity_magnitude / sos } else { 0.0 };
+                if !crossed_transonic && mach_here < 1.2 {
+                    crossed_transonic = true;
+                    transonic_distances.push(position.x);
+                }
+                if !crossed_subsonic && mach_here < 1.0 {
+                    crossed_subsonic = true;
+                    transonic_distances.push(position.x);
+                }
+            }
 
             // Debug: log first and every 100th point. Debug builds only — this was ungated and
             // polluted release/WASM stderr on the --use-euler path (the other solvers have none).
@@ -804,7 +825,7 @@ impl TrajectorySolver {
                         Vector3::new(0.0, 0.0, p.velocity_magnitude)
                     })
                     .collect(),
-                transonic_distances: Vec::new(), // TODO: Track Mach transitions
+                transonic_distances, // populated above at each Mach-threshold crossing
             };
 
             // For LOS calculation in ground-referenced coordinates:
@@ -891,6 +912,12 @@ impl TrajectorySolver {
         let mut max_height = position.y;
         let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
+        // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
+        // (subsonic), so the sampled trajectory output can flag those transitions
+        // (trajectory_sampling::add_trajectory_flags consumes this).
+        let mut transonic_distances: Vec<f64> = Vec::new();
+        let mut crossed_transonic = false;
+        let mut crossed_subsonic = false;
 
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
@@ -939,6 +966,21 @@ impl TrajectorySolver {
                 velocity_magnitude,
                 kinetic_energy,
             });
+
+            // Record Mach-transition distances (constant sea-level speed of sound, matching the
+            // transonic_mach tracking). Each threshold is recorded once, in descending order.
+            {
+                let sos = (1.4 * 287.05 * (self.atmosphere.temperature + 273.15)).sqrt();
+                let mach_here = if sos > 0.0 { velocity_magnitude / sos } else { 0.0 };
+                if !crossed_transonic && mach_here < 1.2 {
+                    crossed_transonic = true;
+                    transonic_distances.push(position.x);
+                }
+                if !crossed_subsonic && mach_here < 1.0 {
+                    crossed_subsonic = true;
+                    transonic_distances.push(position.x);
+                }
+            }
 
             if position.y > max_height {
                 max_height = position.y;
@@ -1059,7 +1101,7 @@ impl TrajectorySolver {
                         Vector3::new(0.0, 0.0, p.velocity_magnitude)
                     })
                     .collect(),
-                transonic_distances: Vec::new(), // TODO: Track Mach transitions
+                transonic_distances, // populated above at each Mach-threshold crossing
             };
 
             // For LOS calculation in ground-referenced coordinates:
@@ -1164,6 +1206,11 @@ impl TrajectorySolver {
             -self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
         );
 
+        // Mach-transition distances for the sampled-output flags (see solve_euler/solve_rk4).
+        let mut transonic_distances: Vec<f64> = Vec::new();
+        let mut crossed_transonic = false;
+        let mut crossed_subsonic = false;
+
         while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
             && time < 100.0
@@ -1184,6 +1231,21 @@ impl TrajectorySolver {
                 velocity_magnitude,
                 kinetic_energy,
             });
+
+            // Record Mach-transition distances (constant sea-level speed of sound, matching the
+            // transonic_mach tracking). Each threshold is recorded once, in descending order.
+            {
+                let sos = (1.4 * 287.05 * (self.atmosphere.temperature + 273.15)).sqrt();
+                let mach_here = if sos > 0.0 { velocity_magnitude / sos } else { 0.0 };
+                if !crossed_transonic && mach_here < 1.2 {
+                    crossed_transonic = true;
+                    transonic_distances.push(position.x);
+                }
+                if !crossed_subsonic && mach_here < 1.0 {
+                    crossed_subsonic = true;
+                    transonic_distances.push(position.x);
+                }
+            }
 
             if position.y > max_height {
                 max_height = position.y;
@@ -1231,7 +1293,7 @@ impl TrajectorySolver {
                         Vector3::new(0.0, 0.0, p.velocity_magnitude)
                     })
                     .collect(),
-                transonic_distances: Vec::new(),
+                transonic_distances, // populated at each Mach-threshold crossing
             };
 
             // For LOS calculation in ground-referenced coordinates:
@@ -2144,6 +2206,37 @@ mod ground_termination_tests {
 mod coriolis_direction_tests {
     use super::*;
     use std::f64::consts::FRAC_PI_2;
+
+    #[test]
+    fn transonic_crossing_flags_a_sampled_point() {
+        // A supersonic shot that slows past Mach 1 must flag a sampled point as a Mach
+        // transition. The underlying transonic_distances were a Vec::new() TODO, so this
+        // flag was NEVER set regardless of trajectory — this is the regression guard.
+        use crate::trajectory_sampling::TrajectoryFlag;
+        let mut inputs = BallisticInputs::default();
+        inputs.muzzle_velocity = 850.0; // ~2790 fps, well supersonic
+        inputs.bc_value = 0.2; // low BC -> slows past Mach 1 within range
+        inputs.bc_type = DragModel::G7;
+        inputs.muzzle_angle = 0.03;
+        inputs.enable_trajectory_sampling = true;
+        inputs.sample_interval = 50.0;
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(2000.0);
+        let r = solver.solve().expect("solve");
+        let samples = r
+            .sampled_points
+            .expect("sampling enabled -> sampled_points present");
+        assert!(
+            samples
+                .iter()
+                .any(|s| s.flags.contains(&TrajectoryFlag::MachTransition)),
+            "a shot that crosses Mach 1 must flag at least one Mach-transition sample"
+        );
+    }
 
     #[test]
     fn humidity_percent_converts_and_clamps() {

@@ -134,6 +134,11 @@ pub struct TrajectoryParams {
     pub bc: f64,
     pub drag_model: DragModel,
     pub wind_segments: Vec<WindSegment>,
+    /// Dual-mode atmosphere tuple consumed by `compute_derivatives`:
+    /// **Standard** `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` — note
+    /// slot 3 is a density RATIO, NOT humidity, even though it rides in the `humidity` field;
+    /// or **Direct** `(air_density, speed_of_sound, 0.0, 0.0)` — slots 2 and 3 are zero
+    /// sentinels. A pressure of 0 that is not the direct-mode sentinel disables drag.
     pub atmos_params: (f64, f64, f64, f64),
     pub omega_vector: Option<Vector3<f64>>,
     pub enable_spin_drift: bool,
