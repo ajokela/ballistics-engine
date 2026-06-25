@@ -90,6 +90,31 @@ impl FastSolution {
             success: true,
         }
     }
+
+    /// A clearly-failed solution carrying only the launch state, with `success = false`.
+    /// Used when inputs are too degenerate to integrate (e.g. non-physical atmosphere),
+    /// so callers see `success = false` instead of a stub trajectory reported as success.
+    fn degenerate(initial_state: &[f64; 6]) -> Self {
+        let mut y = vec![Vec::new(); 6];
+        for (j, slot) in y.iter_mut().enumerate() {
+            slot.push(initial_state[j]);
+        }
+        FastSolution {
+            t: vec![0.0],
+            y,
+            t_events: [Vec::new(), Vec::new(), Vec::new()],
+            success: false,
+        }
+    }
+}
+
+/// True if `atmo_params` (alt_m, temp_c, pressure_hPa, humidity) can yield a finite,
+/// positive air density. A pressure <= 0 (or non-finite temp/pressure — often a unit
+/// mistake, e.g. inHg passed where hPa is expected) gives zero/NaN density and would
+/// otherwise silently truncate the integration to a single point.
+fn atmo_is_physical(atmo_params: (f64, f64, f64, f64)) -> bool {
+    let (_alt, temp_c, pressure_hpa, _humidity) = atmo_params;
+    temp_c.is_finite() && pressure_hpa.is_finite() && pressure_hpa > 0.0
 }
 
 /// Fast trajectory integration parameters
@@ -166,6 +191,10 @@ pub fn fast_integrate(
     wind_sock: &WindSock,
     params: FastIntegrationParams,
 ) -> FastSolution {
+    // Degenerate atmosphere -> non-physical air density would silently stub the run.
+    if !atmo_is_physical(params.atmo_params) {
+        return FastSolution::degenerate(&params.initial_state);
+    }
     // Extract parameters
     let _mass_kg = inputs.bullet_mass; // SI (kg)
     let bc = inputs.bc_value;
@@ -566,13 +595,20 @@ pub fn fast_integrate_with_segments(
     // Use the RK45 implementation from trajectory_integration module
     use crate::trajectory_integration::{integrate_trajectory, TrajectoryParams};
 
+    // Degenerate atmosphere -> non-physical air density would silently stub the run.
+    if !atmo_is_physical(params.atmo_params) {
+        return FastSolution::degenerate(&params.initial_state);
+    }
+
     // Extract parameters
     let mass_kg = inputs.bullet_mass; // SI (kg)
     let bc = inputs.bc_value;
     let drag_model = inputs.bc_type;
 
-    // Get omega vector if advanced effects enabled
-    let omega_vector = if inputs.enable_advanced_effects {
+    // Coriolis omega — gated on enable_coriolis (+ a latitude), INDEPENDENT of
+    // spin-drift/Magnus. A caller can now request Coriolis-only (enable_coriolis=true
+    // with enable_advanced_effects=false) instead of being forced to enable all three.
+    let omega_vector = if inputs.enable_coriolis && inputs.latitude.is_some() {
         // Calculate omega based on latitude and shot azimuth
         // The Earth's rotation vector must be projected into the shooter's
         // local frame which depends on azimuth (shooting direction).
@@ -598,8 +634,8 @@ pub fn fast_integrate_with_segments(
         atmos_params: params.atmo_params,
         omega_vector,
         enable_spin_drift: inputs.enable_advanced_effects,
-        enable_magnus: inputs.enable_advanced_effects,
-        enable_coriolis: inputs.enable_advanced_effects,
+        enable_magnus: inputs.enable_magnus,
+        enable_coriolis: inputs.enable_coriolis,
         target_distance_m: params.horiz,
         enable_wind_shear: inputs.enable_wind_shear,
         wind_shear_model: inputs.wind_shear_model.clone(),
@@ -927,4 +963,68 @@ mod tests {
             ey - wy
         );
     }
+
+    #[test]
+    fn fast_path_coriolis_independent_of_advanced_effects() {
+        // Coriolis is now gated on enable_coriolis (+ latitude), NOT enable_advanced_effects.
+        // So a caller can request Coriolis-only without being forced to enable spin/Magnus.
+        use std::f64::consts::FRAC_PI_2;
+        fn final_y(coriolis: bool, shot_az: f64) -> f64 {
+            let mut inputs = BallisticInputs::default();
+            inputs.muzzle_velocity = 800.0;
+            inputs.bc_value = 0.5;
+            inputs.bc_type = DragModel::G7;
+            inputs.enable_coriolis = coriolis;
+            inputs.enable_advanced_effects = false; // explicitly OFF — Coriolis must still work
+            inputs.latitude = Some(45.0);
+            inputs.shot_azimuth = shot_az;
+            let v = 800.0_f64;
+            let elev = 0.02_f64;
+            let params = FastIntegrationParams {
+                horiz: 1000.0,
+                vert: 0.0,
+                initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
+                t_span: (0.0, 5.0),
+                atmo_params: (0.0, 59.0, 29.92, 0.0),
+            };
+            let sol = fast_integrate_with_segments(&inputs, vec![], params);
+            let n = sol.y[0].len();
+            sol.y[1][n - 1]
+        }
+        // enable_coriolis=true with advanced effects OFF: directional Coriolis still applies.
+        let e = final_y(true, FRAC_PI_2);
+        let w = final_y(true, 3.0 * FRAC_PI_2);
+        assert!(e > w && (e - w) > 1e-5, "Coriolis-only (no advanced effects) must still be directional: E={e} W={w}");
+        // enable_coriolis=false: no Coriolis at all, east == west.
+        let e2 = final_y(false, FRAC_PI_2);
+        let w2 = final_y(false, 3.0 * FRAC_PI_2);
+        assert!((e2 - w2).abs() < 1e-9, "with enable_coriolis=false, east/west must be identical: E={e2} W={w2}");
+    }
+
+    #[test]
+    fn fast_path_rejects_degenerate_atmosphere() {
+        let mut inputs = BallisticInputs::default();
+        inputs.muzzle_velocity = 800.0;
+        inputs.bc_value = 0.5;
+        inputs.bc_type = DragModel::G7;
+        let v = 800.0_f64;
+        let e = 0.02_f64;
+        let mk = |atmo: (f64, f64, f64, f64)| FastIntegrationParams {
+            horiz: 500.0,
+            vert: 0.0,
+            initial_state: [0.0, 0.0, 0.0, v * e.cos(), v * e.sin(), 0.0],
+            t_span: (0.0, 5.0),
+            atmo_params: atmo,
+        };
+        // pressure <= 0 -> fail loudly (success=false) instead of a 1-point stub as success.
+        let zero_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 0.0, 50.0)));
+        assert!(!zero_p.success, "pressure=0 atmosphere must yield success=false");
+        // non-finite pressure -> also rejected.
+        let nan_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, f64::NAN, 50.0)));
+        assert!(!nan_p.success, "NaN pressure must yield success=false");
+        // realistic atmosphere -> success.
+        let good = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 50.0)));
+        assert!(good.success, "realistic atmosphere must yield success=true");
+    }
 }
+
