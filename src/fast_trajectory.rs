@@ -108,13 +108,28 @@ impl FastSolution {
     }
 }
 
-/// True if `atmo_params` (alt_m, temp_c, pressure_hPa, humidity) can yield a finite,
-/// positive air density. A pressure <= 0 (or non-finite temp/pressure — often a unit
-/// mistake, e.g. inHg passed where hPa is expected) gives zero/NaN density and would
-/// otherwise silently truncate the integration to a single point.
+/// True if `atmo_params` can yield a finite, positive air density. `atmo_params` has TWO
+/// modes that `compute_derivatives` distinguishes:
+///   * **Standard**: `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` —
+///     positive station pressure. (Slot 3 is a density RATIO, not humidity, despite the
+///     `humidity` field it lands in via `build_inputs`.)
+///   * **Direct**: `(air_density, speed_of_sound, 0.0, 0.0)` — slots 2 and 3 are `0.0`
+///     sentinels, with a real density (< 2.0 kg/m³) and speed of sound (> 200 m/s).
+///
+/// A pressure <= 0 that ISN'T the direct-mode sentinel (or any non-finite value) — often a
+/// unit mistake like inHg where hPa is expected — gives zero/NaN density and would silently
+/// truncate the integration to a single point, so it's rejected. (Earlier this guard also
+/// rejected legitimate direct-mode input; the direct-mode allowance below fixes that.)
 fn atmo_is_physical(atmo_params: (f64, f64, f64, f64)) -> bool {
-    let (_alt, temp_c, pressure_hpa, _humidity) = atmo_params;
-    temp_c.is_finite() && pressure_hpa.is_finite() && pressure_hpa > 0.0
+    let (a, b, c, d) = atmo_params;
+    if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
+        return false;
+    }
+    // Direct-atmosphere mode: (density, speed_of_sound, 0, 0). Constants mirror
+    // derivatives.rs (MAX_REALISTIC_DENSITY = 2.0 kg/m³, MIN_REALISTIC_SPEED_OF_SOUND = 200 m/s).
+    let direct_mode = c == 0.0 && d == 0.0 && a > 0.0 && a < 2.0 && b > 200.0;
+    // Standard mode: positive station pressure (hPa).
+    direct_mode || c > 0.0
 }
 
 /// Fast trajectory integration parameters
@@ -123,6 +138,9 @@ pub struct FastIntegrationParams {
     pub vert: f64,
     pub initial_state: [f64; 6],
     pub t_span: (f64, f64),
+    /// Dual-mode atmosphere tuple — see [`atmo_is_physical`]. Standard mode is
+    /// `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` (slot 3 is a density
+    /// RATIO, not humidity); direct mode is `(air_density, speed_of_sound, 0.0, 0.0)`.
     pub atmo_params: (f64, f64, f64, f64),
 }
 
@@ -1029,6 +1047,10 @@ mod tests {
         // realistic atmosphere -> success.
         let good = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 50.0)));
         assert!(good.success, "realistic atmosphere must yield success=true");
+        // Direct-atmosphere mode (density, speed_of_sound, 0, 0) is legitimate and must NOT
+        // be rejected by the guard (regression: 0.21.2 rejected it via the pressure<=0 check).
+        let direct = fast_integrate_with_segments(&inputs, vec![], mk((1.225, 340.0, 0.0, 0.0)));
+        assert!(direct.success, "direct-atmosphere mode (pressure=0 sentinel) must yield success=true");
     }
 
     #[test]
