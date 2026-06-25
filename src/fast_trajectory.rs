@@ -579,7 +579,7 @@ pub fn fast_integrate_with_segments(
         // azimuth_angle: 0 = North, pi/2 = East
         let omega_earth = 7.2921159e-5; // rad/s
         let lat_rad = inputs.latitude.unwrap_or(0.0).to_radians();
-        let azimuth = inputs.azimuth_angle; // already in radians
+        let azimuth = inputs.shot_azimuth; // compass bearing (0=N), NOT the aiming offset
         Some(Vector3::new(
             omega_earth * lat_rad.cos() * azimuth.cos(), // X: downrange component
             omega_earth * lat_rad.sin(),                 // Y: vertical component
@@ -875,5 +875,56 @@ mod tests {
         assert_eq!(solution.t_events[0], vec![2.0]); // Target hit
         assert_eq!(solution.t_events[1], vec![0.5]); // Max ordinate
         assert!(solution.t_events[2].is_empty()); // No ground hit
+    }
+
+    #[test]
+    fn fast_path_coriolis_uses_shot_direction() {
+        // Regression: fast_integrate_with_segments (the path the Python binding uses)
+        // built its Coriolis omega from azimuth_angle (the aiming offset, always ~0)
+        // instead of shot_azimuth, so east and west shots came out identical. After the
+        // fix they must differ with the correct Eotvos sign (east lifted, higher).
+        use std::f64::consts::FRAC_PI_2;
+        // Returns (final_downrange, final_vertical) for a shot fired along `shot_az`.
+        fn final_xy(shot_az: f64) -> (f64, f64) {
+            let mut inputs = BallisticInputs::default();
+            inputs.muzzle_velocity = 800.0;
+            inputs.bc_value = 0.5;
+            inputs.bc_type = DragModel::G7;
+            inputs.enable_advanced_effects = true; // gates the omega vector
+            inputs.enable_coriolis = true;
+            inputs.latitude = Some(45.0);
+            inputs.shot_azimuth = shot_az;
+            let v = 800.0_f64;
+            let elev = 0.02_f64;
+            let params = FastIntegrationParams {
+                horiz: 1000.0,
+                vert: 0.0,
+                initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
+                t_span: (0.0, 5.0),
+                atmo_params: (0.0, 59.0, 29.92, 0.0),
+            };
+            let sol = fast_integrate_with_segments(&inputs, vec![], params);
+            let n = sol.y[0].len();
+            (sol.y[0][n - 1], sol.y[1][n - 1])
+        }
+        let (ex, ey) = final_xy(FRAC_PI_2); // east
+        let (wx, wy) = final_xy(3.0 * FRAC_PI_2); // west
+        // Both shots cover essentially the same downrange (Coriolis barely affects x),
+        // so comparing the final vertical is apples-to-apples.
+        assert!(
+            (ex - wx).abs() < 0.5,
+            "east/west downrange should be ~equal (ex={ex:.4}, wx={wx:.4})"
+        );
+        // Pre-fix the fast path was North-locked, making these byte-identical. The Eotvos
+        // term now lifts the east shot above the west shot.
+        assert!(
+            ey > wy,
+            "fast-path east ({ey:.6}) must be higher than west ({wy:.6}) (Eotvos)"
+        );
+        assert!(
+            (ey - wy) > 1e-5,
+            "fast-path E-W vertical separation ({:.8} m) should be non-zero (the pre-fix bug was exact equality)",
+            ey - wy
+        );
     }
 }
