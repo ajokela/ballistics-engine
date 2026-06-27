@@ -587,10 +587,9 @@ enum Commands {
         #[arg(long, help = "Enable 3D weather with altitude corrections")]
         enable_3d_weather: bool,
 
-        /// Wind shear model to use
-        #[cfg(feature = "online")]
-        #[arg(long, default_value = "logarithmic", help = "Wind shear model: none, logarithmic, power_law, ekman_spiral")]
-        wind_shear_model: String,
+        /// Wind shear boundary-layer model (only used with --enable-wind-shear)
+        #[arg(long, value_enum, default_value = "power_law", help = "Wind shear model: none, logarithmic, power_law, ekman_spiral, custom_layers")]
+        wind_shear_model: WindShearModelArg,
 
         /// Weather zone interpolation method
         #[cfg(feature = "online")]
@@ -1381,6 +1380,36 @@ enum MonteCarloOutput {
     Statistics,
 }
 
+/// Wind-shear boundary-layer profile model. Parsed as a clap enum so invalid
+/// values are rejected at the command line (MBA-965). Both snake_case (the
+/// historical/engine spelling) and kebab-case are accepted for each model.
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+enum WindShearModelArg {
+    None,
+    #[value(name = "logarithmic")]
+    Logarithmic,
+    #[value(name = "power_law", alias = "power-law", alias = "powerlaw", alias = "exponential")]
+    PowerLaw,
+    #[value(name = "ekman_spiral", alias = "ekman-spiral", alias = "ekman")]
+    EkmanSpiral,
+    #[value(name = "custom_layers", alias = "custom-layers", alias = "custom")]
+    CustomLayers,
+}
+
+impl WindShearModelArg {
+    /// Canonical lower-snake string understood by the engine
+    /// (`cli_api`/`wind_shear`).
+    fn as_engine_str(self) -> &'static str {
+        match self {
+            WindShearModelArg::None => "none",
+            WindShearModelArg::Logarithmic => "logarithmic",
+            WindShearModelArg::PowerLaw => "power_law",
+            WindShearModelArg::EkmanSpiral => "ekman_spiral",
+            WindShearModelArg::CustomLayers => "custom_layers",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AdjustmentUnit {
     /// Milliradians (1 MIL = 3.6 inches at 100 yards)
@@ -1529,6 +1558,7 @@ struct TrajectoryConfig {
     enable_spin_drift: bool,
     enable_aerodynamic_jump: bool,
     enable_wind_shear: bool,
+    wind_shear_model: WindShearModelArg,
     enable_pitch_damping: bool,
     enable_precession: bool,
 
@@ -2043,7 +2073,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             enable_weather_zones,
             #[cfg(feature = "online")]
             enable_3d_weather,
-            #[cfg(feature = "online")]
             wind_shear_model,
             #[cfg(feature = "online")]
             weather_zone_interpolation,
@@ -2523,6 +2552,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 enable_spin_drift,
                 enable_aerodynamic_jump,
                 enable_wind_shear,
+                wind_shear_model,
                 enable_pitch_damping,
                 enable_precession,
                 sample_trajectory,
@@ -2587,7 +2617,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         })
                         .enable_weather_zones(enable_weather_zones)
                         .enable_3d_weather(enable_3d_weather)
-                        .wind_shear_model(&wind_shear_model)
+                        .wind_shear_model(wind_shear_model.as_engine_str())
                         .weather_zone_interpolation(&weather_zone_interpolation)
                         .sample_interval(sample_interval)
                         .build()
@@ -2693,7 +2723,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     enable_aerodynamic_jump,
                                     use_form_factor: false,
                                     enable_wind_shear,
-                                    wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
+                                    wind_shear_model: if enable_wind_shear { wind_shear_model.as_engine_str().to_string() } else { "none".to_string() },
                                     enable_trajectory_sampling: sample_trajectory,
                                     sample_interval,
                                     enable_pitch_damping,
@@ -3833,6 +3863,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_spin_drift,
         enable_aerodynamic_jump,
         enable_wind_shear,
+        wind_shear_model,
         enable_pitch_damping,
         enable_precession,
         sample_trajectory,
@@ -3951,8 +3982,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_aerodynamic_jump,
         use_form_factor: false,
         enable_wind_shear,
+        // Forward the user's --wind-shear-model (MBA-965) instead of hardcoding
+        // a single profile. "none" when shear is disabled so the engine skips it.
         wind_shear_model: if enable_wind_shear {
-            "exponential".to_string()
+            wind_shear_model.as_engine_str().to_string()
         } else {
             "none".to_string()
         },
