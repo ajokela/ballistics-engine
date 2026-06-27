@@ -387,13 +387,13 @@ enum Commands {
         #[arg(long = "wind-segment", value_name = "SPEED:ANGLE:DIST", action = clap::ArgAction::Append)]
         wind_segment: Vec<String>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -508,7 +508,7 @@ enum Commands {
         #[arg(long)]
         bullet_length: Option<f64>,
 
-        /// Barrel twist rate (inches per turn, e.g., 10 for 1:10)
+        /// Barrel twist rate (inches/turn for imperial, mm/turn for metric; e.g. imperial 10 = 1:10")
         #[arg(long)]
         twist_rate: Option<f64>,
 
@@ -587,10 +587,9 @@ enum Commands {
         #[arg(long, help = "Enable 3D weather with altitude corrections")]
         enable_3d_weather: bool,
 
-        /// Wind shear model to use
-        #[cfg(feature = "online")]
-        #[arg(long, default_value = "logarithmic", help = "Wind shear model: none, logarithmic, power_law, ekman_spiral")]
-        wind_shear_model: String,
+        /// Wind shear boundary-layer model (only used with --enable-wind-shear)
+        #[arg(long, value_enum, default_value = "power_law", help = "Wind shear model: none, logarithmic, power_law, ekman_spiral, custom_layers")]
+        wind_shear_model: WindShearModelArg,
 
         /// Weather zone interpolation method
         #[cfg(feature = "online")]
@@ -720,13 +719,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -841,13 +840,13 @@ enum Commands {
         #[arg(long, default_value = "2.0")]
         sight_height: f64,
 
-        /// Temperature (Fahrenheit for imperial, Celsius for metric)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit for imperial, Celsius for metric; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg for imperial, hPa for metric)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg for imperial, hPa for metric; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -937,13 +936,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1008,13 +1007,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1091,13 +1090,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0")]
@@ -1138,13 +1137,13 @@ enum Commands {
         #[arg(short = 'v', long)]
         velocity: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Altitude (feet or meters based on --units)
         #[arg(long, default_value = "0.0")]
@@ -1213,13 +1212,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1287,13 +1286,13 @@ enum ProfileAction {
         #[arg(long)]
         zero_distance: Option<f64>,
 
-        /// Default temperature
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Default temperature (Fahrenheit for imperial, Celsius for metric; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Default pressure
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Default pressure (inHg for imperial, hPa for metric; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Default humidity
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1381,6 +1380,36 @@ enum MonteCarloOutput {
     Statistics,
 }
 
+/// Wind-shear boundary-layer profile model. Parsed as a clap enum so invalid
+/// values are rejected at the command line (MBA-965). Both snake_case (the
+/// historical/engine spelling) and kebab-case are accepted for each model.
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+enum WindShearModelArg {
+    None,
+    #[value(name = "logarithmic")]
+    Logarithmic,
+    #[value(name = "power_law", alias = "power-law", alias = "powerlaw", alias = "exponential")]
+    PowerLaw,
+    #[value(name = "ekman_spiral", alias = "ekman-spiral", alias = "ekman")]
+    EkmanSpiral,
+    #[value(name = "custom_layers", alias = "custom-layers", alias = "custom")]
+    CustomLayers,
+}
+
+impl WindShearModelArg {
+    /// Canonical lower-snake string understood by the engine
+    /// (`cli_api`/`wind_shear`).
+    fn as_engine_str(self) -> &'static str {
+        match self {
+            WindShearModelArg::None => "none",
+            WindShearModelArg::Logarithmic => "logarithmic",
+            WindShearModelArg::PowerLaw => "power_law",
+            WindShearModelArg::EkmanSpiral => "ekman_spiral",
+            WindShearModelArg::CustomLayers => "custom_layers",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AdjustmentUnit {
     /// Milliradians (1 MIL = 3.6 inches at 100 yards)
@@ -1451,6 +1480,8 @@ struct TrajectoryPoint {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TrajectoryResult {
+    /// Unit system the numeric fields are expressed in ("imperial" or "metric").
+    units: String,
     max_range: f64,
     max_height: f64,
     time_of_flight: f64,
@@ -1458,6 +1489,24 @@ struct TrajectoryResult {
     impact_energy: f64,
     stability_coefficient: Option<f64>,
     spin_drift: Option<f64>,
+    /// Minimum pitch-damping coefficient (only when --enable-pitch-damping).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_pitch_damping: Option<f64>,
+    /// Mach number when entering the transonic regime (pitch-damping diagnostic).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transonic_mach: Option<f64>,
+    /// Maximum yaw angle during flight, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_yaw_angle: Option<f64>,
+    /// Maximum precession angle during flight, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_precession_angle: Option<f64>,
+    /// Final pitch angle, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_pitch_angle: Option<f64>,
+    /// Final yaw angle, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_yaw_angle: Option<f64>,
     trajectory: Vec<TrajectoryPoint>,
 }
 
@@ -1509,6 +1558,7 @@ struct TrajectoryConfig {
     enable_spin_drift: bool,
     enable_aerodynamic_jump: bool,
     enable_wind_shear: bool,
+    wind_shear_model: WindShearModelArg,
     enable_pitch_damping: bool,
     enable_precession: bool,
 
@@ -1600,10 +1650,80 @@ impl UnitConverter {
         }
     }
 
+    /// Convert a temperature *difference* (delta), not an absolute point.
+    /// A 1 F delta equals a 5/9 C delta (no -32 offset). Used to convert
+    /// per-degree quantities such as powder temperature sensitivity (MBA-963).
+    fn temperature_delta_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 5.0 / 9.0, // Fahrenheit delta to Celsius delta
+        }
+    }
+
     fn pressure_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val * 33.8639, // inHg to hPa
+        }
+    }
+
+    /// Resolve the pressure CLI argument AFTER --units is known.
+    ///
+    /// `None` -> the per-unit standard atmosphere (29.92 inHg / 1013.25 hPa).
+    /// `Some(v)` -> validated against a plausible range in the user's own unit
+    /// and returned IN USER UNITS (the caller still applies `pressure_to_metric`).
+    fn resolve_pressure(val: Option<f64>, units: UnitSystem) -> Result<f64, String> {
+        match (val, units) {
+            (None, UnitSystem::Imperial) => Ok(29.92),
+            (None, UnitSystem::Metric) => Ok(1013.25),
+            (Some(v), UnitSystem::Imperial) => {
+                if !(8.0..=33.0).contains(&v) {
+                    Err(format!(
+                        "--pressure {v} inHg is out of range (expected ~8..33 inHg for imperial units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(250.0..=1100.0).contains(&v) {
+                    Err(format!(
+                        "--pressure {v} hPa is out of range (expected ~250..1100 hPa for metric units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
+        }
+    }
+
+    /// Resolve the temperature CLI argument AFTER --units is known.
+    ///
+    /// `None` -> the per-unit standard temperature (59 F / 15 C).
+    /// `Some(v)` -> validated against a plausible range in the user's own unit
+    /// and returned IN USER UNITS (the caller still applies `temperature_to_metric`).
+    fn resolve_temperature(val: Option<f64>, units: UnitSystem) -> Result<f64, String> {
+        match (val, units) {
+            (None, UnitSystem::Imperial) => Ok(59.0),
+            (None, UnitSystem::Metric) => Ok(15.0),
+            (Some(v), UnitSystem::Imperial) => {
+                if !(-148.0..=392.0).contains(&v) {
+                    Err(format!(
+                        "--temperature {v} F is out of range (expected ~-148..392 F for imperial units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(-100.0..=200.0).contains(&v) {
+                    Err(format!(
+                        "--temperature {v} C is out of range (expected ~-100..200 C for metric units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
         }
     }
 
@@ -1953,7 +2073,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             enable_weather_zones,
             #[cfg(feature = "online")]
             enable_3d_weather,
-            #[cfg(feature = "online")]
             wind_shear_model,
             #[cfg(feature = "online")]
             weather_zone_interpolation,
@@ -2026,9 +2145,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             let final_wind_speed = if wind_speed != 0.0 { wind_speed } else { saved_profile_data.as_ref().and_then(|p| p.wind_speed).unwrap_or(0.0) };
             let final_wind_direction = if wind_direction != 0.0 { wind_direction } else { csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0) };
 
-            // Location overrides (environmental conditions)
-            let final_temperature = if temperature != 59.0 { temperature } else { csv_get_f64(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"], csv_get_f64(&profile_data, &["ZERO_TEMP"], 59.0)) };
-            let final_pressure = if pressure != 29.92 { pressure } else { csv_get_f64(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"], 29.92) };
+            // Location overrides (environmental conditions).
+            // Resolve the per-unit standard once so CSV-less runs use the right
+            // standard atmosphere for --units (MBA-960/961).
+            let std_temperature = UnitConverter::resolve_temperature(None, cli.units)?;
+            let std_pressure = UnitConverter::resolve_pressure(None, cli.units)?;
+            let final_temperature = match temperature {
+                Some(t) => UnitConverter::resolve_temperature(Some(t), cli.units)?,
+                None => csv_get_f64(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"], csv_get_f64(&profile_data, &["ZERO_TEMP"], std_temperature)),
+            };
+            let final_pressure = match pressure {
+                Some(p) => UnitConverter::resolve_pressure(Some(p), cli.units)?,
+                None => csv_get_f64(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"], std_pressure),
+            };
             let final_humidity = if humidity != 50.0 { humidity } else { csv_get_f64(&location_data, &["HUMIDITY"], 50.0) };
             let final_altitude = if altitude != 0.0 { altitude } else { csv_get_f64(&location_data, &["ALTITUDE", "ALT"], csv_get_f64(&profile_data, &["ZERO_ALT"], 0.0)) };
 
@@ -2048,6 +2177,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let bullet_length = bullet_length.or_else(|| saved_profile_data.as_ref().and_then(|p| p.bullet_length));
             let sight_height = sight_height.or_else(|| saved_profile_data.as_ref().and_then(|p| p.sight_height));
             let twist_rate = twist_rate.or_else(|| saved_profile_data.as_ref().and_then(|p| p.twist_rate));
+            // --twist-rate is mm/turn in metric and inches/turn in imperial, matching the
+            // `stability` subcommand (MBA-970). The engine and all downstream paths
+            // (local solver, TrajectoryConfig, the --compare API request) treat twist as
+            // inches/turn, so convert once here. Previously metric twist was used raw as
+            // inches (~25x off), so e.g. a 254 mm (1:10") twist read as 254"/turn and
+            // collapsed stability/spin-drift to ~0.
+            let twist_rate = twist_rate.map(|t| match cli.units {
+                UnitSystem::Imperial => t,
+                UnitSystem::Metric => t / 25.4, // mm/turn -> inches/turn
+            });
 
             // Apply truing adjustments
             let trued_velocity = final_velocity + final_velocity_adj;
@@ -2423,6 +2562,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 enable_spin_drift,
                 enable_aerodynamic_jump,
                 enable_wind_shear,
+                wind_shear_model,
                 enable_pitch_damping,
                 enable_precession,
                 sample_trajectory,
@@ -2487,7 +2627,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         })
                         .enable_weather_zones(enable_weather_zones)
                         .enable_3d_weather(enable_3d_weather)
-                        .wind_shear_model(&wind_shear_model)
+                        .wind_shear_model(wind_shear_model.as_engine_str())
                         .weather_zone_interpolation(&weather_zone_interpolation)
                         .sample_interval(sample_interval)
                         .build()
@@ -2504,12 +2644,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(dir) = shot_direction {
                         request.shot_direction = Some(dir);
                     }
-                    // twist_rate is inches-per-turn for ALL unit systems (documented at the
-                    // --twist-rate flag, and used as-is by the local solver / TrajectoryConfig and
-                    // the compare-mode local inputs), and api_client sends it verbatim — so forward
-                    // the RAW value. The original code sent meters (~33x too small); converting
-                    // metric by /25.4 here would instead make the API disagree with local under
-                    // --compare. No conversion: all paths use the documented inches/turn.
+                    // `twist_rate` was already normalized to inches/turn above (metric mm
+                    // converted by /25.4, MBA-970), and api_client / the local solver both
+                    // consume inches/turn — so forward it verbatim. Both the local and API
+                    // legs of --compare see the same converted value, so they stay in
+                    // agreement.
                     if let Some(twist) = twist_rate {
                         request.twist_rate = Some(twist);
                     }
@@ -2568,8 +2707,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     enable_coriolis,
                                     use_powder_sensitivity,
                                     powder_temp_sensitivity: if use_powder_sensitivity {
+                                        // Per-degree DELTA conversion, not absolute point (MBA-963).
                                         UnitConverter::velocity_to_metric(powder_temp_sensitivity, cli.units)
-                                            / UnitConverter::temperature_to_metric(1.0, cli.units)
+                                            / UnitConverter::temperature_delta_to_metric(1.0, cli.units)
                                     } else { 0.0 },
                                     powder_temp: UnitConverter::temperature_to_metric(powder_temp, cli.units),
                                     tipoff_yaw: 0.0,
@@ -2592,7 +2732,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     enable_aerodynamic_jump,
                                     use_form_factor: false,
                                     enable_wind_shear,
-                                    wind_shear_model: if enable_wind_shear { "exponential".to_string() } else { "none".to_string() },
+                                    wind_shear_model: if enable_wind_shear { wind_shear_model.as_engine_str().to_string() } else { "none".to_string() },
                                     enable_trajectory_sampling: sample_trajectory,
                                     sample_interval,
                                     enable_pitch_damping,
@@ -2773,6 +2913,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let bullet_mass = mass;
             let bullet_diameter = diameter;
             // Convert inputs to metric
@@ -2899,6 +3041,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             bullet_length,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, units)?;
             // Convert to imperial for calculations (internal calculations use imperial)
             let range_yd = match units {
                 UnitSystem::Imperial => range,
@@ -3200,6 +3344,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             // Load profile if specified
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
@@ -3254,6 +3400,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_direction,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3308,6 +3456,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3364,6 +3514,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3408,6 +3560,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3452,6 +3606,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     wind_speed, wind_direction, shooting_angle,
                     auto_zero, twist_right, use_bc_segments, bullet_length,
                 } => {
+                    let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+                    let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
                     let drag_str = match drag_model {
                         DragModelArg::G1 => "G1",
                         DragModelArg::G7 => "G7",
@@ -3716,6 +3872,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_spin_drift,
         enable_aerodynamic_jump,
         enable_wind_shear,
+        wind_shear_model,
         enable_pitch_damping,
         enable_precession,
         sample_trajectory,
@@ -3794,8 +3951,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_coriolis,
         use_powder_sensitivity,
         powder_temp_sensitivity: if use_powder_sensitivity {
+            // Convert (velocity / degree) to SI: velocity per a 1-degree DELTA.
+            // The denominator must be a temperature delta, not the absolute-point
+            // conversion of 1 F (which is -17.2 C) — that was MBA-963.
             UnitConverter::velocity_to_metric(powder_temp_sensitivity, units)
-                / UnitConverter::temperature_to_metric(1.0, units)
+                / UnitConverter::temperature_delta_to_metric(1.0, units)
         } else {
             0.0
         },
@@ -3831,8 +3991,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_aerodynamic_jump,
         use_form_factor: false,
         enable_wind_shear,
+        // Forward the user's --wind-shear-model (MBA-965) instead of hardcoding
+        // a single profile. "none" when shear is disabled so the engine skips it.
         wind_shear_model: if enable_wind_shear {
-            "exponential".to_string()
+            wind_shear_model.as_engine_str().to_string()
         } else {
             "none".to_string()
         },
@@ -3904,8 +4066,16 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // Solve trajectory
     let result = solver.solve()?;
 
+    // Report the summary using the SAME twist the integration path actually
+    // used (MBA-964). The path builds BallisticInputs with
+    // `twist_rate.unwrap_or(12.0)`, so it always flies with a real twist; the
+    // summary must therefore compute stability/spin-drift from that effective
+    // twist rather than only when `--twist-rate` was explicitly supplied,
+    // otherwise the JSON/table reports null while drift is silently applied.
+    let effective_twist_rate = inputs.twist_rate;
+
     // Calculate stability coefficient if twist rate is provided
-    let stability = if twist_rate.is_some() && twist_rate.unwrap() > 0.0 {
+    let stability = if effective_twist_rate > 0.0 {
         ballistics_engine::stability::compute_stability_coefficient(
             &inputs,
             (altitude, temperature, pressure, 1.0),
@@ -3915,7 +4085,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     };
 
     // Calculate spin drift if enabled and twist rate is provided
-    let spin_drift = if enable_spin_drift && twist_rate.is_some() && stability > 0.0 {
+    let spin_drift = if enable_spin_drift && effective_twist_rate > 0.0 && stability > 0.0 {
         // Calculate spin decay factor based on time of flight
         use ballistics_engine::spin_decay::{
             calculate_spin_decay_correction_factor, SpinDecayParameters,
@@ -3943,7 +4113,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         ballistics_engine::stability::compute_spin_drift_with_decay(
             result.time_of_flight,
             stability,
-            twist_rate.unwrap(),
+            effective_twist_rate,
             twist_right,
             Some(decay_factor),
         )
@@ -3951,25 +4121,60 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         0.0
     };
 
+    // Detect runs that ended because the integrator hit its 100 s time cap
+    // rather than at a real impact or the requested range (MBA-969). This
+    // happens for steep --ignore-ground-impact shots: ground termination is
+    // disabled, so the bullet keeps "falling" past the ground and the only
+    // terminator left is the time cap. Without this the summary prints the
+    // capped state as a bogus ground impact (e.g. y = -12390 yd at t = 99.99 s).
+    const INTEGRATION_TIME_CAP_S: f64 = 100.0;
+    let reached_max_range =
+        result.max_range >= max_range - (max_range.abs() * 1e-3).max(1e-6);
+    let reached_time_cap = result
+        .points
+        .last()
+        .map(|p| p.time >= INTEGRATION_TIME_CAP_S - 0.05)
+        .unwrap_or(false)
+        && !reached_max_range;
+
     // Format output
     match output {
         OutputFormat::Json => {
+            // Honor --units like the table/csv branches do (MBA-962): convert
+            // all distance/velocity/energy fields to the user's unit system and
+            // record which system the numbers are in.
+            let units_label = match units {
+                UnitSystem::Metric => "metric",
+                UnitSystem::Imperial => "imperial",
+            };
             let trajectory_result = TrajectoryResult {
-                max_range: result.max_range,
-                max_height: result.max_height,
+                units: units_label.to_string(),
+                max_range: UnitConverter::distance_from_metric(result.max_range, units),
+                max_height: UnitConverter::distance_from_metric(result.max_height, units),
                 time_of_flight: result.time_of_flight,
-                impact_velocity: result.impact_velocity,
-                impact_energy: result.impact_energy,
+                impact_velocity: UnitConverter::velocity_from_metric(result.impact_velocity, units),
+                impact_energy: UnitConverter::energy_from_metric(result.impact_energy, units),
                 stability_coefficient: if stability > 0.0 {
                     Some(stability)
                 } else {
                     None
                 },
                 spin_drift: if spin_drift.abs() > 0.0001 {
-                    Some(spin_drift)
+                    Some(UnitConverter::distance_from_metric(spin_drift, units))
                 } else {
                     None
                 },
+                // Pitch-damping diagnostics (MBA-966), only present when
+                // --enable-pitch-damping populated them on the engine result.
+                min_pitch_damping: result.min_pitch_damping,
+                transonic_mach: result.transonic_mach,
+                // Precession/nutation diagnostics (MBA-966), only present when
+                // --enable-precession populated them. Angles stay in radians,
+                // matching the table output.
+                max_yaw_angle: result.max_yaw_angle,
+                max_precession_angle: result.max_precession_angle,
+                final_pitch_angle: result.angular_state.as_ref().map(|s| s.pitch_angle),
+                final_yaw_angle: result.angular_state.as_ref().map(|s| s.yaw_angle),
                 trajectory: if full {
                     result
                         .points
@@ -3979,11 +4184,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             // Output contract is unchanged: the `x` field is lateral
                             // (drift), `z` is downrange. With McCoy internals these map
                             // to position.z (lateral) and position.x (downrange).
-                            x: p.position.z,
-                            y: p.position.y,
-                            z: p.position.x,
-                            velocity: p.velocity_magnitude,
-                            energy: p.kinetic_energy,
+                            x: UnitConverter::distance_from_metric(p.position.z, units),
+                            y: UnitConverter::distance_from_metric(p.position.y, units),
+                            z: UnitConverter::distance_from_metric(p.position.x, units),
+                            velocity: UnitConverter::velocity_from_metric(p.velocity_magnitude, units),
+                            energy: UnitConverter::energy_from_metric(p.kinetic_energy, units),
                         })
                         .collect()
                 } else {
@@ -4108,18 +4313,33 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 "║ Max Height:        {:>8.2} {:3}       ║",
                 height_display, range_unit
             );
-            println!(
-                "║ Time of Flight:    {:>8.3} s          ║",
-                result.time_of_flight
-            );
-            println!(
-                "║ Impact Velocity:   {:>8.2} {:3}       ║",
-                velocity_display, velocity_unit
-            );
-            println!(
-                "║ Impact Energy:     {:>8.2} {:5}     ║",
-                energy_display, energy_unit
-            );
+            if reached_time_cap {
+                // Integration stopped at the time cap, not at an impact: the
+                // "impact" velocity/energy/ToF are the capped state, not a real
+                // terminal-ballistics result, so don't label them as impact.
+                println!(
+                    "║ Final Velocity:    {:>8.2} {:3}       ║",
+                    velocity_display, velocity_unit
+                );
+                println!(
+                    "║ Time at Cap:       {:>8.3} s          ║",
+                    result.time_of_flight
+                );
+                println!("║ Impact:            No impact (cap)     ║");
+            } else {
+                println!(
+                    "║ Time of Flight:    {:>8.3} s          ║",
+                    result.time_of_flight
+                );
+                println!(
+                    "║ Impact Velocity:   {:>8.2} {:3}       ║",
+                    velocity_display, velocity_unit
+                );
+                println!(
+                    "║ Impact Energy:     {:>8.2} {:5}     ║",
+                    energy_display, energy_unit
+                );
+            }
             if stability > 0.0 {
                 println!("╠════════════════════════════════════════╣");
                 println!("║ Stability (SG):    {:>8.2}            ║", stability);
@@ -4191,8 +4411,17 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
             println!("╚════════════════════════════════════════╝");
 
-            // Check if trajectory hit ground
-            if let Some(last_point) = result.points.last() {
+            // Report termination. A run that ran out the integration time cap
+            // (MBA-969) is NOT a ground impact even though its capped y is far
+            // below zero, so flag it explicitly instead of claiming an impact.
+            if reached_time_cap {
+                println!();
+                println!(
+                    "No impact: integration reached the {:.0} s time cap (use a shorter --max-range \
+                     or remove --ignore-ground-impact).",
+                    INTEGRATION_TIME_CAP_S
+                );
+            } else if let Some(last_point) = result.points.last() {
                 let last_height = last_point.position.y;
                 let last_range = last_point.position.x;
 

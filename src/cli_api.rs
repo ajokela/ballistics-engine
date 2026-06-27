@@ -373,6 +373,17 @@ impl TrajectorySolver {
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
         inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
 
+        // Apply powder-temperature sensitivity to the muzzle velocity before
+        // integration (MBA-963). Previously this only happened on the WASM path,
+        // so the native CLI solve ignored --use-powder-sensitivity entirely.
+        // All quantities are canonical SI here: powder_temp_sensitivity is in
+        // (m/s) per degree Celsius and the temperatures are in Celsius, so the
+        // adjustment is a simple additive shift matching wasm.rs.
+        if inputs.use_powder_sensitivity {
+            let temp_delta_c = inputs.temperature - inputs.powder_temp;
+            inputs.muzzle_velocity += inputs.powder_temp_sensitivity * temp_delta_c;
+        }
+
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
             Some(ClusterBCDegradation::new())
@@ -520,10 +531,17 @@ impl TrajectorySolver {
         // "shear on" equals "shear off" * ratio (ratio == 1.0 for flat fire). An earlier revision
         // attenuated the wind near the line of sight and flipped its sign relative to the non-shear
         // path; this keeps them sign-consistent.
-        let model = if self.inputs.wind_shear_model == "logarithmic" {
-            WindShearModel::Logarithmic
-        } else {
-            WindShearModel::PowerLaw // default to power law
+        // Map the requested model name to the boundary-layer model (MBA-965).
+        // Names match wind_shear::get_wind_at_position. Unknown strings should
+        // never reach here (the CLI parses an enum), but default to PowerLaw to
+        // preserve the historical "exponential" behaviour for any caller that
+        // forwards an unexpected value.
+        let model = match self.inputs.wind_shear_model.as_str() {
+            "logarithmic" => WindShearModel::Logarithmic,
+            "power_law" | "powerlaw" | "exponential" => WindShearModel::PowerLaw,
+            "ekman_spiral" | "ekman" => WindShearModel::EkmanSpiral,
+            "custom_layers" | "custom" => WindShearModel::CustomLayers,
+            _ => WindShearModel::PowerLaw,
         };
         let speed_ratio = crate::wind_shear::boundary_layer_speed_ratio(altitude_m, model);
 
@@ -1211,6 +1229,30 @@ impl TrajectorySolver {
         let mut crossed_transonic = false;
         let mut crossed_subsonic = false;
 
+        // Pitch-damping / precession diagnostics (MBA-966). Previously only the
+        // Euler and fixed-RK4 solvers tracked these, so the default adaptive
+        // RK45 path always reported null even with --enable-pitch-damping /
+        // --enable-precession set. Mirror the RK4 tracking here.
+        let mut min_pitch_damping = 1.0;
+        let mut transonic_mach: Option<f64> = None;
+        let pitch_coeffs = PitchDampingCoefficients::from_bullet_type(
+            self.inputs.bullet_model.as_deref().unwrap_or("default"),
+        );
+        let mut angular_state = if self.inputs.enable_precession_nutation {
+            Some(AngularState {
+                pitch_angle: 0.001,
+                yaw_angle: 0.001,
+                pitch_rate: 0.0,
+                yaw_rate: 0.0,
+                precession_angle: 0.0,
+                nutation_phase: 0.0,
+            })
+        } else {
+            None
+        };
+        let mut max_yaw_angle = 0.0;
+        let mut max_precession_angle = 0.0;
+
         while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
             && time < 100.0
@@ -1251,6 +1293,65 @@ impl TrajectorySolver {
                 max_height = position.y;
             }
 
+            // Pitch damping (RK45 solver) — track the minimum coefficient and the
+            // Mach at which the projectile enters the transonic band (MBA-966).
+            if self.inputs.enable_pitch_damping {
+                let temp_k = self.atmosphere.temperature + 273.15;
+                let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+                let mach = velocity_magnitude / speed_of_sound;
+                if transonic_mach.is_none() && mach < 1.2 && mach > 0.8 {
+                    transonic_mach = Some(mach);
+                }
+                let pitch_damping = calculate_pitch_damping_coefficient(mach, &pitch_coeffs);
+                if pitch_damping < min_pitch_damping {
+                    min_pitch_damping = pitch_damping;
+                }
+            }
+
+            // Precession / nutation (RK45 solver). Uses the step `dt` actually
+            // taken for this iteration so the angular integration stays in sync
+            // with the variable-step trajectory.
+            if self.inputs.enable_precession_nutation {
+                if let Some(ref mut state) = angular_state {
+                    let temp_k = self.atmosphere.temperature + 273.15;
+                    let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+                    let mach = velocity_magnitude / speed_of_sound;
+
+                    let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
+                        let velocity_fps = velocity_magnitude * 3.28084;
+                        let twist_rate_ft = self.inputs.twist_rate / 12.0;
+                        (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI
+                    } else {
+                        0.0
+                    };
+
+                    let params = PrecessionNutationParams {
+                        mass_kg: self.inputs.bullet_mass,
+                        caliber_m: self.inputs.bullet_diameter,
+                        length_m: self.inputs.bullet_length,
+                        spin_rate_rad_s,
+                        spin_inertia: 6.94e-8,
+                        transverse_inertia: 9.13e-7,
+                        velocity_mps: velocity_magnitude,
+                        air_density_kg_m3: air_density,
+                        mach,
+                        pitch_damping_coeff: -0.8,
+                        nutation_damping_factor: 0.05,
+                    };
+
+                    *state = calculate_combined_angular_motion(
+                        &params, state, time, dt, 0.001,
+                    );
+
+                    if state.yaw_angle.abs() > max_yaw_angle {
+                        max_yaw_angle = state.yaw_angle.abs();
+                    }
+                    if state.precession_angle.abs() > max_precession_angle {
+                        max_precession_angle = state.precession_angle.abs();
+                    }
+                }
+            }
+
             // RK45 step with adaptive step size (air_density / wind_vector hoisted above)
             let (new_pos, new_vel, new_dt) = self.rk45_step(
                 &position,
@@ -1276,6 +1377,41 @@ impl TrajectorySolver {
         // Ensure we have at least one point
         if points.is_empty() {
             return Err(BallisticsError::from("No trajectory points calculated"));
+        }
+
+        // Boundary interpolation to exactly max_range (MBA-968). The adaptive
+        // loop stores the point at the TOP of each iteration, so the last stored
+        // point sits one (possibly large) step SHORT of max_range while the
+        // post-loop `position` has just overshot it. Without this, the default
+        // RK45 solver reports ~2% short of --max-range, unlike the fixed-step
+        // solvers. When the loop exited by crossing the range (not by hitting the
+        // ground / time cap / iteration cap), append a linearly-interpolated
+        // point at exactly max_range so the reported range matches the request.
+        {
+            let prev = points.last().unwrap().clone();
+            let overshoot_x = position.x;
+            let crossed_range = overshoot_x >= self.max_range && prev.position.x < self.max_range;
+            if crossed_range {
+                let span = overshoot_x - prev.position.x;
+                if span > 1e-9 {
+                    let frac = (self.max_range - prev.position.x) / span;
+                    let interp_pos = prev.position + (position - prev.position) * frac;
+                    let interp_vel_mag = prev.velocity_magnitude
+                        + (velocity.magnitude() - prev.velocity_magnitude) * frac;
+                    let interp_time = prev.time + (time - prev.time) * frac;
+                    let interp_ke =
+                        0.5 * self.inputs.bullet_mass * interp_vel_mag * interp_vel_mag;
+                    points.push(TrajectoryPoint {
+                        time: interp_time,
+                        position: interp_pos,
+                        velocity_magnitude: interp_vel_mag,
+                        kinetic_energy: interp_ke,
+                    });
+                    if interp_pos.y > max_height {
+                        max_height = interp_pos.y;
+                    }
+                }
+            }
         }
 
         let last_point = points.last().unwrap();
@@ -1328,11 +1464,23 @@ impl TrajectorySolver {
             impact_energy: last_point.kinetic_energy,
             points,
             sampled_points,
-            min_pitch_damping: None,
-            transonic_mach: None,
-            angular_state: None,
-            max_yaw_angle: None,
-            max_precession_angle: None,
+            min_pitch_damping: if self.inputs.enable_pitch_damping {
+                Some(min_pitch_damping)
+            } else {
+                None
+            },
+            transonic_mach,
+            angular_state,
+            max_yaw_angle: if self.inputs.enable_precession_nutation {
+                Some(max_yaw_angle)
+            } else {
+                None
+            },
+            max_precession_angle: if self.inputs.enable_precession_nutation {
+                Some(max_precession_angle)
+            } else {
+                None
+            },
             aerodynamic_jump: aj_components,
         })
     }
