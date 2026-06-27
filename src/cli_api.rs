@@ -373,6 +373,17 @@ impl TrajectorySolver {
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
         inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
 
+        // Apply powder-temperature sensitivity to the muzzle velocity before
+        // integration (MBA-963). Previously this only happened on the WASM path,
+        // so the native CLI solve ignored --use-powder-sensitivity entirely.
+        // All quantities are canonical SI here: powder_temp_sensitivity is in
+        // (m/s) per degree Celsius and the temperatures are in Celsius, so the
+        // adjustment is a simple additive shift matching wasm.rs.
+        if inputs.use_powder_sensitivity {
+            let temp_delta_c = inputs.temperature - inputs.powder_temp;
+            inputs.muzzle_velocity += inputs.powder_temp_sensitivity * temp_delta_c;
+        }
+
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
             Some(ClusterBCDegradation::new())
