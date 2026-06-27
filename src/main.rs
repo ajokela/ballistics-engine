@@ -508,7 +508,7 @@ enum Commands {
         #[arg(long)]
         bullet_length: Option<f64>,
 
-        /// Barrel twist rate (inches per turn, e.g., 10 for 1:10)
+        /// Barrel twist rate (inches/turn for imperial, mm/turn for metric; e.g. imperial 10 = 1:10")
         #[arg(long)]
         twist_rate: Option<f64>,
 
@@ -2177,6 +2177,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let bullet_length = bullet_length.or_else(|| saved_profile_data.as_ref().and_then(|p| p.bullet_length));
             let sight_height = sight_height.or_else(|| saved_profile_data.as_ref().and_then(|p| p.sight_height));
             let twist_rate = twist_rate.or_else(|| saved_profile_data.as_ref().and_then(|p| p.twist_rate));
+            // --twist-rate is mm/turn in metric and inches/turn in imperial, matching the
+            // `stability` subcommand (MBA-970). The engine and all downstream paths
+            // (local solver, TrajectoryConfig, the --compare API request) treat twist as
+            // inches/turn, so convert once here. Previously metric twist was used raw as
+            // inches (~25x off), so e.g. a 254 mm (1:10") twist read as 254"/turn and
+            // collapsed stability/spin-drift to ~0.
+            let twist_rate = twist_rate.map(|t| match cli.units {
+                UnitSystem::Imperial => t,
+                UnitSystem::Metric => t / 25.4, // mm/turn -> inches/turn
+            });
 
             // Apply truing adjustments
             let trued_velocity = final_velocity + final_velocity_adj;
@@ -2634,12 +2644,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(dir) = shot_direction {
                         request.shot_direction = Some(dir);
                     }
-                    // twist_rate is inches-per-turn for ALL unit systems (documented at the
-                    // --twist-rate flag, and used as-is by the local solver / TrajectoryConfig and
-                    // the compare-mode local inputs), and api_client sends it verbatim — so forward
-                    // the RAW value. The original code sent meters (~33x too small); converting
-                    // metric by /25.4 here would instead make the API disagree with local under
-                    // --compare. No conversion: all paths use the documented inches/turn.
+                    // `twist_rate` was already normalized to inches/turn above (metric mm
+                    // converted by /25.4, MBA-970), and api_client / the local solver both
+                    // consume inches/turn — so forward it verbatim. Both the local and API
+                    // legs of --compare see the same converted value, so they stay in
+                    // agreement.
                     if let Some(twist) = twist_rate {
                         request.twist_rate = Some(twist);
                     }
