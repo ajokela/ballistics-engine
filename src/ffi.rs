@@ -554,21 +554,15 @@ pub extern "C" fn ballistics_monte_carlo(
                 / num_results as f64;
             let std_dev_velocity = variance_velocity.sqrt();
 
-            // Calculate hit probability if target distance was specified
+            // Calculate hit probability if target distance was specified. MBA-971: use the shared
+            // position-based criterion (fraction within DEFAULT_HIT_RADIUS_M of the point of aim
+            // at the target plane). The old inline version had a redundant `distance < target`
+            // clause comparing a ~meter deviation to the ~hundreds-of-meters target distance
+            // (effectively always true), and the CLI used a different range-based notion entirely.
             let hit_probability = if params.target_distance.is_nan() {
                 0.0
             } else {
-                let target = params.target_distance;
-                let hit_radius = 0.3; // 30cm radius for hit zone
-                let hits = results
-                    .impact_positions
-                    .iter()
-                    .filter(|pos| {
-                        let distance = (pos.x.powi(2) + pos.y.powi(2)).sqrt();
-                        distance < target && pos.norm() < hit_radius
-                    })
-                    .count();
-                hits as f64 / num_results as f64
+                results.hit_probability(crate::DEFAULT_HIT_RADIUS_M)
             };
 
             // Allocate memory for arrays
