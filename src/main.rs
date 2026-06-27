@@ -1620,6 +1620,16 @@ impl UnitConverter {
         }
     }
 
+    /// Convert a temperature *difference* (delta), not an absolute point.
+    /// A 1 F delta equals a 5/9 C delta (no -32 offset). Used to convert
+    /// per-degree quantities such as powder temperature sensitivity (MBA-963).
+    fn temperature_delta_to_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 5.0 / 9.0, // Fahrenheit delta to Celsius delta
+        }
+    }
+
     fn pressure_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
@@ -2658,8 +2668,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     enable_coriolis,
                                     use_powder_sensitivity,
                                     powder_temp_sensitivity: if use_powder_sensitivity {
+                                        // Per-degree DELTA conversion, not absolute point (MBA-963).
                                         UnitConverter::velocity_to_metric(powder_temp_sensitivity, cli.units)
-                                            / UnitConverter::temperature_to_metric(1.0, cli.units)
+                                            / UnitConverter::temperature_delta_to_metric(1.0, cli.units)
                                     } else { 0.0 },
                                     powder_temp: UnitConverter::temperature_to_metric(powder_temp, cli.units),
                                     tipoff_yaw: 0.0,
@@ -3900,8 +3911,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_coriolis,
         use_powder_sensitivity,
         powder_temp_sensitivity: if use_powder_sensitivity {
+            // Convert (velocity / degree) to SI: velocity per a 1-degree DELTA.
+            // The denominator must be a temperature delta, not the absolute-point
+            // conversion of 1 F (which is -17.2 C) — that was MBA-963.
             UnitConverter::velocity_to_metric(powder_temp_sensitivity, units)
-                / UnitConverter::temperature_to_metric(1.0, units)
+                / UnitConverter::temperature_delta_to_metric(1.0, units)
         } else {
             0.0
         },
