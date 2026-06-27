@@ -4121,6 +4121,22 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         0.0
     };
 
+    // Detect runs that ended because the integrator hit its 100 s time cap
+    // rather than at a real impact or the requested range (MBA-969). This
+    // happens for steep --ignore-ground-impact shots: ground termination is
+    // disabled, so the bullet keeps "falling" past the ground and the only
+    // terminator left is the time cap. Without this the summary prints the
+    // capped state as a bogus ground impact (e.g. y = -12390 yd at t = 99.99 s).
+    const INTEGRATION_TIME_CAP_S: f64 = 100.0;
+    let reached_max_range =
+        result.max_range >= max_range - (max_range.abs() * 1e-3).max(1e-6);
+    let reached_time_cap = result
+        .points
+        .last()
+        .map(|p| p.time >= INTEGRATION_TIME_CAP_S - 0.05)
+        .unwrap_or(false)
+        && !reached_max_range;
+
     // Format output
     match output {
         OutputFormat::Json => {
@@ -4297,18 +4313,33 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 "║ Max Height:        {:>8.2} {:3}       ║",
                 height_display, range_unit
             );
-            println!(
-                "║ Time of Flight:    {:>8.3} s          ║",
-                result.time_of_flight
-            );
-            println!(
-                "║ Impact Velocity:   {:>8.2} {:3}       ║",
-                velocity_display, velocity_unit
-            );
-            println!(
-                "║ Impact Energy:     {:>8.2} {:5}     ║",
-                energy_display, energy_unit
-            );
+            if reached_time_cap {
+                // Integration stopped at the time cap, not at an impact: the
+                // "impact" velocity/energy/ToF are the capped state, not a real
+                // terminal-ballistics result, so don't label them as impact.
+                println!(
+                    "║ Final Velocity:    {:>8.2} {:3}       ║",
+                    velocity_display, velocity_unit
+                );
+                println!(
+                    "║ Time at Cap:       {:>8.3} s          ║",
+                    result.time_of_flight
+                );
+                println!("║ Impact:            No impact (cap)     ║");
+            } else {
+                println!(
+                    "║ Time of Flight:    {:>8.3} s          ║",
+                    result.time_of_flight
+                );
+                println!(
+                    "║ Impact Velocity:   {:>8.2} {:3}       ║",
+                    velocity_display, velocity_unit
+                );
+                println!(
+                    "║ Impact Energy:     {:>8.2} {:5}     ║",
+                    energy_display, energy_unit
+                );
+            }
             if stability > 0.0 {
                 println!("╠════════════════════════════════════════╣");
                 println!("║ Stability (SG):    {:>8.2}            ║", stability);
@@ -4380,8 +4411,17 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
             println!("╚════════════════════════════════════════╝");
 
-            // Check if trajectory hit ground
-            if let Some(last_point) = result.points.last() {
+            // Report termination. A run that ran out the integration time cap
+            // (MBA-969) is NOT a ground impact even though its capped y is far
+            // below zero, so flag it explicitly instead of claiming an impact.
+            if reached_time_cap {
+                println!();
+                println!(
+                    "No impact: integration reached the {:.0} s time cap (use a shorter --max-range \
+                     or remove --ignore-ground-impact).",
+                    INTEGRATION_TIME_CAP_S
+                );
+            } else if let Some(last_point) = result.points.last() {
                 let last_height = last_point.position.y;
                 let last_range = last_point.position.x;
 
