@@ -1451,6 +1451,8 @@ struct TrajectoryPoint {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TrajectoryResult {
+    /// Unit system the numeric fields are expressed in ("imperial" or "metric").
+    units: String,
     max_range: f64,
     max_height: f64,
     time_of_flight: f64,
@@ -1458,6 +1460,24 @@ struct TrajectoryResult {
     impact_energy: f64,
     stability_coefficient: Option<f64>,
     spin_drift: Option<f64>,
+    /// Minimum pitch-damping coefficient (only when --enable-pitch-damping).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_pitch_damping: Option<f64>,
+    /// Mach number when entering the transonic regime (pitch-damping diagnostic).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transonic_mach: Option<f64>,
+    /// Maximum yaw angle during flight, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_yaw_angle: Option<f64>,
+    /// Maximum precession angle during flight, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_precession_angle: Option<f64>,
+    /// Final pitch angle, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_pitch_angle: Option<f64>,
+    /// Final yaw angle, radians (only when --enable-precession).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_yaw_angle: Option<f64>,
     trajectory: Vec<TrajectoryPoint>,
 }
 
@@ -4040,22 +4060,41 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // Format output
     match output {
         OutputFormat::Json => {
+            // Honor --units like the table/csv branches do (MBA-962): convert
+            // all distance/velocity/energy fields to the user's unit system and
+            // record which system the numbers are in.
+            let units_label = match units {
+                UnitSystem::Metric => "metric",
+                UnitSystem::Imperial => "imperial",
+            };
             let trajectory_result = TrajectoryResult {
-                max_range: result.max_range,
-                max_height: result.max_height,
+                units: units_label.to_string(),
+                max_range: UnitConverter::distance_from_metric(result.max_range, units),
+                max_height: UnitConverter::distance_from_metric(result.max_height, units),
                 time_of_flight: result.time_of_flight,
-                impact_velocity: result.impact_velocity,
-                impact_energy: result.impact_energy,
+                impact_velocity: UnitConverter::velocity_from_metric(result.impact_velocity, units),
+                impact_energy: UnitConverter::energy_from_metric(result.impact_energy, units),
                 stability_coefficient: if stability > 0.0 {
                     Some(stability)
                 } else {
                     None
                 },
                 spin_drift: if spin_drift.abs() > 0.0001 {
-                    Some(spin_drift)
+                    Some(UnitConverter::distance_from_metric(spin_drift, units))
                 } else {
                     None
                 },
+                // Pitch-damping diagnostics (MBA-966), only present when
+                // --enable-pitch-damping populated them on the engine result.
+                min_pitch_damping: result.min_pitch_damping,
+                transonic_mach: result.transonic_mach,
+                // Precession/nutation diagnostics (MBA-966), only present when
+                // --enable-precession populated them. Angles stay in radians,
+                // matching the table output.
+                max_yaw_angle: result.max_yaw_angle,
+                max_precession_angle: result.max_precession_angle,
+                final_pitch_angle: result.angular_state.as_ref().map(|s| s.pitch_angle),
+                final_yaw_angle: result.angular_state.as_ref().map(|s| s.yaw_angle),
                 trajectory: if full {
                     result
                         .points
@@ -4065,11 +4104,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             // Output contract is unchanged: the `x` field is lateral
                             // (drift), `z` is downrange. With McCoy internals these map
                             // to position.z (lateral) and position.x (downrange).
-                            x: p.position.z,
-                            y: p.position.y,
-                            z: p.position.x,
-                            velocity: p.velocity_magnitude,
-                            energy: p.kinetic_energy,
+                            x: UnitConverter::distance_from_metric(p.position.z, units),
+                            y: UnitConverter::distance_from_metric(p.position.y, units),
+                            z: UnitConverter::distance_from_metric(p.position.x, units),
+                            velocity: UnitConverter::velocity_from_metric(p.velocity_magnitude, units),
+                            energy: UnitConverter::energy_from_metric(p.kinetic_energy, units),
                         })
                         .collect()
                 } else {
