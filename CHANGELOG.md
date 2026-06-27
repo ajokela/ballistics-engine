@@ -5,6 +5,31 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.5] - 2026-06-27
+
+Two monte-carlo correctness fixes (MBA-967, MBA-971).
+
+### Fixed
+- **monte-carlo "Mean Range" is now meaningful and target-independent (MBA-967).**
+  Simulations used `BallisticInputs::default()` (muzzle_height 0, ground_threshold -100 m)
+  so each sim flew to the integrator's range cap instead of a real ground impact — "Mean
+  Range" reported the cap (~1000 m), not the trajectory's ground-impact range. And a
+  per-sample `max_range < target_distance` skip tied the range statistic to
+  `--target-distance`. MC now uses the same bore-height/ground convention as `trajectory`
+  (1.5 m) and computes range/velocity over all samples, so Mean Range matches `trajectory`
+  for the same physics and no longer changes with the target distance.
+- **monte-carlo `hit_probability` unified across the CLI and FFI (MBA-971).** The CLI
+  counted ground-impact ranges within 1 m of the target (a range-precision notion that read
+  0% for any target short of the impact range) while the FFI used a position notion with a
+  redundant clause. Both now use a single `MonteCarloResults::hit_probability(radius)`
+  method — the fraction of samples landing within the hit radius of the point of aim at the
+  target plane. Samples that fall short are recorded as definite misses, so an unreachable
+  target correctly yields ~0% (was a spurious ~100%).
+
+### Added
+- **`monte-carlo --target-radius` flag** (default 0.3 m, unit-aware) to define the hit zone
+  used by hit probability, instead of a hardcoded radius.
+
 ## [0.21.4] - 2026-06-26
 
 Ten CLI/correctness fixes surfaced by an adversarial edge-case sweep (MBA-960..966,
