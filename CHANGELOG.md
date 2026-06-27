@@ -5,6 +5,42 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.4] - 2026-06-26
+
+Ten CLI/correctness fixes surfaced by an adversarial edge-case sweep (MBA-960..966,
+968, 969, 970). Two are behavioral changes existing consumers should note:
+
+### Fixed
+- **⚠️ Metric mode no longer runs in a near-vacuum (MBA-960/961).** The CLI atmosphere
+  defaults (`29.92` / `59.0`) were imperial literals applied before `--units` was parsed,
+  so in metric mode they were read as 29.92 hPa (~24 km) and 59 °C — drag ~30× too low,
+  impact velocity ~42% high. `--pressure`/`--temperature` are now resolved and validated
+  *after* `--units` (per-unit defaults + ranges). **Metric trajectories without explicit
+  atmosphere flags now produce different (correct) output than before.** Also fixes the
+  `--pressure` validator (was an hPa range applied to imperial inHg: rejected valid `14`,
+  accepted an hPa typo like `1013`).
+- **⚠️ JSON output now honors `--units` (MBA-962).** The JSON formatter always emitted raw
+  SI regardless of `--units` (table/csv were already correct). It now converts to the
+  requested units and adds an explicit `"units"` field. **JSON consumers using `--units
+  imperial` previously received metric numbers; they now receive imperial.**
+- **`--use-powder-sensitivity` now affects the trajectory (MBA-963).** It was a no-op on
+  the CLI solve path (the muzzle-velocity adjustment was computed but never applied); the
+  per-degree sensitivity delta was also mis-converted. Now wired into `TrajectorySolver`.
+- **`spin_drift` summary is consistent with the applied path (MBA-964).** It reported
+  `null` while the path silently applied drift from a default 1:12 twist.
+- **`--wind-shear-model` is now honored (MBA-965).** The selector was discarded (everything
+  ran as PowerLaw) and invalid values were accepted; models are now distinct and validated.
+- **Pitch-damping / precession diagnostics are serialized (MBA-966).** `--enable-pitch-damping`
+  / `--enable-precession` computed diagnostics that the CLI never emitted; now in JSON.
+- **Default RK45 reaches `--max-range` exactly (MBA-968).** It stopped ~2% short (no
+  boundary interpolation), disagreeing with Euler/RK4-fixed; the final state is now
+  interpolated to the boundary.
+- **Time-cap runs are labeled "no impact" (MBA-969).** An upward shot with
+  `--ignore-ground-impact` reported a bogus impact at the hidden 100 s integration cap.
+- **`--twist-rate` is mm/turn in metric for `trajectory` (MBA-970).** It was read as inches
+  regardless of `--units`, so a metric 1:10 twist gave zero stability; now matches the
+  `stability` subcommand.
+
 ## [0.21.3] - 2026-06-25
 
 ### Fixed
