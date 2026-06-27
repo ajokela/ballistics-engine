@@ -684,6 +684,11 @@ enum Commands {
         #[arg(long)]
         target_distance: Option<f64>,
 
+        /// Hit-zone radius around the point of aim at the target plane (yards for imperial,
+        /// meters for metric). A "hit" is a simulation landing within this radius. Default 0.3 m.
+        #[arg(long)]
+        target_radius: Option<f64>,
+
         /// Output format
         #[arg(short = 'o', long, default_value = "summary")]
         output: MonteCarloOutput,
@@ -2869,6 +2874,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_speed,
             wind_direction,
             target_distance,
+            target_radius,
             output,
         } => {
             let bullet_mass = mass;
@@ -2881,6 +2887,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let wind_std_metric = UnitConverter::wind_to_metric(wind_std, cli.units);
             let wind_speed_metric = UnitConverter::wind_to_metric(wind_speed, cli.units);
             let target_distance_metric = target_distance.map(|d| UnitConverter::distance_to_metric(d, cli.units));
+            // Hit-zone radius in meters: default 0.3 m, or the user's --target-radius (in the
+            // selected unit). MBA-971.
+            let target_radius_metric = target_radius
+                .map(|r| UnitConverter::distance_to_metric(r, cli.units))
+                .unwrap_or(ballistics_engine::DEFAULT_HIT_RADIUS_M);
             run_monte_carlo(
                 velocity_metric,
                 angle,
@@ -2895,6 +2906,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_speed_metric,
                 wind_direction,
                 target_distance_metric,
+                target_radius_metric,
                 output,
             )?;
         }
@@ -4854,6 +4866,7 @@ fn run_monte_carlo(
     wind_speed: f64,
     wind_direction: f64,
     target_distance: Option<f64>,
+    target_radius: f64,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
     // Create base inputs. MBA-967: use the same bore-height/ground convention as the
@@ -4918,14 +4931,11 @@ fn run_monte_carlo(
     let cep = std_range * 1.1774; // Approximation for circular normal distribution
 
     // Calculate hit probability if target distance specified
-    let hit_probability = target_distance.map(|target| {
-        let hits = results
-            .ranges
-            .iter()
-            .filter(|r| (*r - target).abs() < 1.0) // Within 1m of target
-            .count();
-        hits as f64 / results.ranges.len() as f64
-    });
+    // MBA-971: hit probability is the fraction of samples landing within the hit radius of the
+    // point of aim at the target plane (shared MonteCarloResults::hit_probability), matching the
+    // FFI. The old range-precision notion (ground-impact range within 1 m of the target) reported
+    // 0% for any target short of the impact range.
+    let hit_probability = target_distance.map(|_target| results.hit_probability(target_radius));
 
     match output {
         MonteCarloOutput::Summary => {

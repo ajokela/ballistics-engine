@@ -1884,6 +1884,32 @@ pub struct MonteCarloResults {
     pub impact_positions: Vec<Vector3<f64>>,
 }
 
+/// Default hit-zone radius (meters) around the point of aim at the target plane — a 30 cm
+/// circle. Shared by the CLI, FFI, and WASM so "hit probability" means the same thing everywhere.
+pub const DEFAULT_HIT_RADIUS_M: f64 = 0.3;
+
+impl MonteCarloResults {
+    /// Fraction of simulations whose impact at the target plane lands within `hit_radius_m`
+    /// of the point of aim. `impact_positions` are deviations from the baseline at the target
+    /// plane (the downrange component is 0), so the vector norm is the radial miss distance.
+    /// Samples that fall short of the target are clamped to their ground impact (a large
+    /// deviation) and so correctly count as misses. Returns 0.0 when there are no samples.
+    ///
+    /// Single source of truth for hit probability — previously the CLI used a range-precision
+    /// notion and the FFI a position notion with a redundant clause, so they disagreed.
+    pub fn hit_probability(&self, hit_radius_m: f64) -> f64 {
+        if self.impact_positions.is_empty() {
+            return 0.0;
+        }
+        let hits = self
+            .impact_positions
+            .iter()
+            .filter(|p| p.norm() < hit_radius_m)
+            .count();
+        hits as f64 / self.impact_positions.len() as f64
+    }
+}
+
 // Run Monte Carlo simulation (backwards compatibility)
 pub fn run_monte_carlo(
     base_inputs: BallisticInputs,
@@ -1966,31 +1992,35 @@ pub fn run_monte_carlo_with_wind(
                 // MBA-967: do NOT skip samples that fall short of the target. range/velocity are
                 // recorded at GROUND IMPACT for EVERY sample, so "Mean Range" is the ground-impact
                 // distribution — independent of target_distance and consistent with `trajectory`.
-                // For the target-plane deviation, position_at_range clamps a short sample to its
-                // ground-impact point: a large deviation that correctly counts as a MISS in
-                // hit_probability. All three result vectors still grow together per sample, so the
-                // equal-length FFI ABI (exposed under one count) is preserved.
-                let pos_at_target = match result.position_at_range(target_distance) {
-                    Some(p) => p,
-                    None => continue, // defensive: keep the three vectors aligned
+                // All three result vectors still grow together per sample, so the equal-length FFI
+                // ABI (exposed under one count) is preserved.
+                let deviation = if result.max_range < target_distance {
+                    // MBA-971: this sample never reached the target plane -> a definite MISS.
+                    // Record the downrange shortfall as the (vertical) deviation magnitude: it is
+                    // large (never within a hit radius), finite, and roughly indicates how far
+                    // short the sample fell. Do NOT use position_at_range's clamped ground-impact
+                    // point — when the baseline also falls short it clamps too, so the deviation
+                    // would be spuriously near zero and count as a false hit.
+                    Vector3::new(0.0, -(target_distance - result.max_range), 0.0)
+                } else {
+                    let pos_at_target = match result.position_at_range(target_distance) {
+                        Some(p) => p,
+                        None => continue, // defensive: skip the whole sample (keeps vectors aligned)
+                    };
+                    // Deviation from baseline at the SAME target distance (McCoy): X = downrange
+                    // (0 here), Y = vertical (elevation), Z = lateral (windage), plus a pointing
+                    // error to simulate realistic group sizes.
+                    let mut d = Vector3::new(
+                        0.0,
+                        pos_at_target.y - baseline_at_target.y,
+                        pos_at_target.z - baseline_at_target.z,
+                    );
+                    d.y += pointing_error_dist.sample(&mut rng);
+                    d
                 };
 
                 ranges.push(result.max_range);
                 impact_velocities.push(result.impact_velocity);
-
-                // Calculate deviation from baseline at the SAME target distance (McCoy)
-                // X = downrange (0 here), Y = vertical (elevation), Z = lateral (windage)
-                let mut deviation = Vector3::new(
-                    0.0, // X downrange deviation is 0 since we compare at same range
-                    pos_at_target.y - baseline_at_target.y, // Vertical deviation
-                    pos_at_target.z - baseline_at_target.z, // Lateral deviation (windage)
-                );
-
-                // Add additional pointing error to simulate realistic group sizes
-                // This represents the shooter's ability to aim consistently
-                let pointing_error_y = pointing_error_dist.sample(&mut rng);
-                deviation.y += pointing_error_y;
-
                 impact_positions.push(deviation);
             }
             Err(_) => {
