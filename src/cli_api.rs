@@ -1963,22 +1963,16 @@ pub fn run_monte_carlo_with_wind(
         let solver = TrajectorySolver::new(inputs, wind, Default::default());
         match solver.solve() {
             Ok(result) => {
-                // Skip samples that fell short of the target (e.g. a low muzzle-velocity draw):
-                // position_at_range would clamp to the ground-impact point (a large spurious
-                // deviation). Exclude such samples from ALL THREE result vectors so they stay
-                // equal-length and per-sample aligned — the FFI exposes them under ONE count
-                // (ranges.len()), so a shorter impact_positions would leave uninitialized tail
-                // slots read across the C ABI. The common case (all samples reach the target) is
-                // unaffected; range/velocity stats stay consistent with the dispersion stats.
-                if result.max_range < target_distance {
-                    continue;
-                }
-                // Position at target distance (not ground impact). Always Some here since
-                // max_range >= target_distance and an Ok result has a non-empty trajectory;
-                // skip defensively (keeping the vectors aligned) if it ever returns None.
+                // MBA-967: do NOT skip samples that fall short of the target. range/velocity are
+                // recorded at GROUND IMPACT for EVERY sample, so "Mean Range" is the ground-impact
+                // distribution — independent of target_distance and consistent with `trajectory`.
+                // For the target-plane deviation, position_at_range clamps a short sample to its
+                // ground-impact point: a large deviation that correctly counts as a MISS in
+                // hit_probability. All three result vectors still grow together per sample, so the
+                // equal-length FFI ABI (exposed under one count) is preserved.
                 let pos_at_target = match result.position_at_range(target_distance) {
                     Some(p) => p,
-                    None => continue,
+                    None => continue, // defensive: keep the three vectors aligned
                 };
 
                 ranges.push(result.max_range);
