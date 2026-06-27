@@ -531,10 +531,17 @@ impl TrajectorySolver {
         // "shear on" equals "shear off" * ratio (ratio == 1.0 for flat fire). An earlier revision
         // attenuated the wind near the line of sight and flipped its sign relative to the non-shear
         // path; this keeps them sign-consistent.
-        let model = if self.inputs.wind_shear_model == "logarithmic" {
-            WindShearModel::Logarithmic
-        } else {
-            WindShearModel::PowerLaw // default to power law
+        // Map the requested model name to the boundary-layer model (MBA-965).
+        // Names match wind_shear::get_wind_at_position. Unknown strings should
+        // never reach here (the CLI parses an enum), but default to PowerLaw to
+        // preserve the historical "exponential" behaviour for any caller that
+        // forwards an unexpected value.
+        let model = match self.inputs.wind_shear_model.as_str() {
+            "logarithmic" => WindShearModel::Logarithmic,
+            "power_law" | "powerlaw" | "exponential" => WindShearModel::PowerLaw,
+            "ekman_spiral" | "ekman" => WindShearModel::EkmanSpiral,
+            "custom_layers" | "custom" => WindShearModel::CustomLayers,
+            _ => WindShearModel::PowerLaw,
         };
         let speed_ratio = crate::wind_shear::boundary_layer_speed_ratio(altitude_m, model);
 
