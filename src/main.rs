@@ -4010,8 +4010,16 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // Solve trajectory
     let result = solver.solve()?;
 
+    // Report the summary using the SAME twist the integration path actually
+    // used (MBA-964). The path builds BallisticInputs with
+    // `twist_rate.unwrap_or(12.0)`, so it always flies with a real twist; the
+    // summary must therefore compute stability/spin-drift from that effective
+    // twist rather than only when `--twist-rate` was explicitly supplied,
+    // otherwise the JSON/table reports null while drift is silently applied.
+    let effective_twist_rate = inputs.twist_rate;
+
     // Calculate stability coefficient if twist rate is provided
-    let stability = if twist_rate.is_some() && twist_rate.unwrap() > 0.0 {
+    let stability = if effective_twist_rate > 0.0 {
         ballistics_engine::stability::compute_stability_coefficient(
             &inputs,
             (altitude, temperature, pressure, 1.0),
@@ -4021,7 +4029,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     };
 
     // Calculate spin drift if enabled and twist rate is provided
-    let spin_drift = if enable_spin_drift && twist_rate.is_some() && stability > 0.0 {
+    let spin_drift = if enable_spin_drift && effective_twist_rate > 0.0 && stability > 0.0 {
         // Calculate spin decay factor based on time of flight
         use ballistics_engine::spin_decay::{
             calculate_spin_decay_correction_factor, SpinDecayParameters,
@@ -4049,7 +4057,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         ballistics_engine::stability::compute_spin_drift_with_decay(
             result.time_of_flight,
             stability,
-            twist_rate.unwrap(),
+            effective_twist_rate,
             twist_right,
             Some(decay_factor),
         )
