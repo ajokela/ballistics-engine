@@ -1379,6 +1379,41 @@ impl TrajectorySolver {
             return Err(BallisticsError::from("No trajectory points calculated"));
         }
 
+        // Boundary interpolation to exactly max_range (MBA-968). The adaptive
+        // loop stores the point at the TOP of each iteration, so the last stored
+        // point sits one (possibly large) step SHORT of max_range while the
+        // post-loop `position` has just overshot it. Without this, the default
+        // RK45 solver reports ~2% short of --max-range, unlike the fixed-step
+        // solvers. When the loop exited by crossing the range (not by hitting the
+        // ground / time cap / iteration cap), append a linearly-interpolated
+        // point at exactly max_range so the reported range matches the request.
+        {
+            let prev = points.last().unwrap().clone();
+            let overshoot_x = position.x;
+            let crossed_range = overshoot_x >= self.max_range && prev.position.x < self.max_range;
+            if crossed_range {
+                let span = overshoot_x - prev.position.x;
+                if span > 1e-9 {
+                    let frac = (self.max_range - prev.position.x) / span;
+                    let interp_pos = prev.position + (position - prev.position) * frac;
+                    let interp_vel_mag = prev.velocity_magnitude
+                        + (velocity.magnitude() - prev.velocity_magnitude) * frac;
+                    let interp_time = prev.time + (time - prev.time) * frac;
+                    let interp_ke =
+                        0.5 * self.inputs.bullet_mass * interp_vel_mag * interp_vel_mag;
+                    points.push(TrajectoryPoint {
+                        time: interp_time,
+                        position: interp_pos,
+                        velocity_magnitude: interp_vel_mag,
+                        kinetic_energy: interp_ke,
+                    });
+                    if interp_pos.y > max_height {
+                        max_height = interp_pos.y;
+                    }
+                }
+            }
+        }
+
         let last_point = points.last().unwrap();
 
         // Generate sampled trajectory points if enabled
