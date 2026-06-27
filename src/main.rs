@@ -4856,13 +4856,19 @@ fn run_monte_carlo(
     target_distance: Option<f64>,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
-    // Create base inputs
+    // Create base inputs. MBA-967: use the same bore-height/ground convention as the
+    // `trajectory` subcommand (standard 1.5 m bore height; this helper works in metric) so each
+    // simulation stops at a realistic ground impact instead of flying to the integrator's range
+    // cap. Without this, "Mean Range" reports the ~1000 m cap rather than the ground-impact range.
+    let bore_height_metric = 1.5_f64;
     let base_inputs = BallisticInputs {
         muzzle_velocity: velocity,
         muzzle_angle: angle.to_radians(),
         bc_value: bc,
         bullet_mass: mass,
         bullet_diameter: diameter,
+        muzzle_height: bore_height_metric,
+        ground_threshold: -bore_height_metric,
         ..Default::default()
     };
 
