@@ -387,13 +387,13 @@ enum Commands {
         #[arg(long = "wind-segment", value_name = "SPEED:ANGLE:DIST", action = clap::ArgAction::Append)]
         wind_segment: Vec<String>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -720,13 +720,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -841,13 +841,13 @@ enum Commands {
         #[arg(long, default_value = "2.0")]
         sight_height: f64,
 
-        /// Temperature (Fahrenheit for imperial, Celsius for metric)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit for imperial, Celsius for metric; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg for imperial, hPa for metric)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg for imperial, hPa for metric; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -937,13 +937,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1008,13 +1008,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1091,13 +1091,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0")]
@@ -1138,13 +1138,13 @@ enum Commands {
         #[arg(short = 'v', long)]
         velocity: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0")]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92")]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Altitude (feet or meters based on --units)
         #[arg(long, default_value = "0.0")]
@@ -1213,13 +1213,13 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units)
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1287,13 +1287,13 @@ enum ProfileAction {
         #[arg(long)]
         zero_distance: Option<f64>,
 
-        /// Default temperature
-        #[arg(long, default_value = "59.0", value_parser = f64_range(-100.0, 200.0))]
-        temperature: f64,
+        /// Default temperature (Fahrenheit for imperial, Celsius for metric; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
 
-        /// Default pressure
-        #[arg(long, default_value = "29.92", value_parser = f64_range(15.0, 1200.0))]
-        pressure: f64,
+        /// Default pressure (inHg for imperial, hPa for metric; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
 
         /// Default humidity
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1604,6 +1604,66 @@ impl UnitConverter {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val * 33.8639, // inHg to hPa
+        }
+    }
+
+    /// Resolve the pressure CLI argument AFTER --units is known.
+    ///
+    /// `None` -> the per-unit standard atmosphere (29.92 inHg / 1013.25 hPa).
+    /// `Some(v)` -> validated against a plausible range in the user's own unit
+    /// and returned IN USER UNITS (the caller still applies `pressure_to_metric`).
+    fn resolve_pressure(val: Option<f64>, units: UnitSystem) -> Result<f64, String> {
+        match (val, units) {
+            (None, UnitSystem::Imperial) => Ok(29.92),
+            (None, UnitSystem::Metric) => Ok(1013.25),
+            (Some(v), UnitSystem::Imperial) => {
+                if !(8.0..=33.0).contains(&v) {
+                    Err(format!(
+                        "--pressure {v} inHg is out of range (expected ~8..33 inHg for imperial units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(250.0..=1100.0).contains(&v) {
+                    Err(format!(
+                        "--pressure {v} hPa is out of range (expected ~250..1100 hPa for metric units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
+        }
+    }
+
+    /// Resolve the temperature CLI argument AFTER --units is known.
+    ///
+    /// `None` -> the per-unit standard temperature (59 F / 15 C).
+    /// `Some(v)` -> validated against a plausible range in the user's own unit
+    /// and returned IN USER UNITS (the caller still applies `temperature_to_metric`).
+    fn resolve_temperature(val: Option<f64>, units: UnitSystem) -> Result<f64, String> {
+        match (val, units) {
+            (None, UnitSystem::Imperial) => Ok(59.0),
+            (None, UnitSystem::Metric) => Ok(15.0),
+            (Some(v), UnitSystem::Imperial) => {
+                if !(-148.0..=392.0).contains(&v) {
+                    Err(format!(
+                        "--temperature {v} F is out of range (expected ~-148..392 F for imperial units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(-100.0..=200.0).contains(&v) {
+                    Err(format!(
+                        "--temperature {v} C is out of range (expected ~-100..200 C for metric units)"
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
         }
     }
 
@@ -2026,9 +2086,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             let final_wind_speed = if wind_speed != 0.0 { wind_speed } else { saved_profile_data.as_ref().and_then(|p| p.wind_speed).unwrap_or(0.0) };
             let final_wind_direction = if wind_direction != 0.0 { wind_direction } else { csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0) };
 
-            // Location overrides (environmental conditions)
-            let final_temperature = if temperature != 59.0 { temperature } else { csv_get_f64(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"], csv_get_f64(&profile_data, &["ZERO_TEMP"], 59.0)) };
-            let final_pressure = if pressure != 29.92 { pressure } else { csv_get_f64(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"], 29.92) };
+            // Location overrides (environmental conditions).
+            // Resolve the per-unit standard once so CSV-less runs use the right
+            // standard atmosphere for --units (MBA-960/961).
+            let std_temperature = UnitConverter::resolve_temperature(None, cli.units)?;
+            let std_pressure = UnitConverter::resolve_pressure(None, cli.units)?;
+            let final_temperature = match temperature {
+                Some(t) => UnitConverter::resolve_temperature(Some(t), cli.units)?,
+                None => csv_get_f64(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"], csv_get_f64(&profile_data, &["ZERO_TEMP"], std_temperature)),
+            };
+            let final_pressure = match pressure {
+                Some(p) => UnitConverter::resolve_pressure(Some(p), cli.units)?,
+                None => csv_get_f64(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"], std_pressure),
+            };
             let final_humidity = if humidity != 50.0 { humidity } else { csv_get_f64(&location_data, &["HUMIDITY"], 50.0) };
             let final_altitude = if altitude != 0.0 { altitude } else { csv_get_f64(&location_data, &["ALTITUDE", "ALT"], csv_get_f64(&profile_data, &["ZERO_ALT"], 0.0)) };
 
@@ -2773,6 +2843,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let bullet_mass = mass;
             let bullet_diameter = diameter;
             // Convert inputs to metric
@@ -2899,6 +2971,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             bullet_length,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, units)?;
             // Convert to imperial for calculations (internal calculations use imperial)
             let range_yd = match units {
                 UnitSystem::Imperial => range,
@@ -3200,6 +3274,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             // Load profile if specified
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
@@ -3254,6 +3330,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_direction,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3308,6 +3386,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3364,6 +3444,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3408,6 +3490,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
         } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile(name).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -3452,6 +3536,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     wind_speed, wind_direction, shooting_angle,
                     auto_zero, twist_right, use_bc_segments, bullet_length,
                 } => {
+                    let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+                    let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
                     let drag_str = match drag_model {
                         DragModelArg::G1 => "G1",
                         DragModelArg::G7 => "G7",
