@@ -44,6 +44,8 @@ exclude = [
     "scripts/",
     "analyze_drift.md",
     "MCCOY_MIGRATION.md",
+    "ADV_ISSUES-JUL1-2026.md",
+    "MIPS_BUILD_NOTES.md",
     "test_drift.rs",
     "test_user_drift.html",
     "*.html"
