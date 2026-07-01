@@ -14,6 +14,24 @@ use crate::wind::WindSegment;
 use crate::BallisticInputs;
 use crate::DragModel;
 
+fn wind_vector_for_range(range_m: f64, wind_segments: &[WindSegment]) -> Vector3<f64> {
+    if range_m.is_nan() {
+        return Vector3::zeros();
+    }
+    for seg in wind_segments {
+        if range_m < seg.2 {
+            let wind_speed_mps = seg.0 * 0.2777778; // km/h to m/s
+            let wind_angle_rad = seg.1.to_radians();
+            return Vector3::new(
+                -wind_speed_mps * wind_angle_rad.cos(),
+                0.0,
+                -wind_speed_mps * wind_angle_rad.sin(),
+            );
+        }
+    }
+    Vector3::zeros()
+}
+
 /// RK4 integration step
 fn rk4_step(
     state: &Vector6<f64>,
@@ -80,8 +98,12 @@ fn rk45_step(
     // Compute stages
     let k1 = compute_derivatives_vec(state, t, params, inputs);
     let k2 = compute_derivatives_vec(&(state + dt * A21 * k1), t + dt * 0.2, params, inputs);
-    let k3 =
-        compute_derivatives_vec(&(state + dt * (A31 * k1 + A32 * k2)), t + dt * 0.3, params, inputs);
+    let k3 = compute_derivatives_vec(
+        &(state + dt * (A31 * k1 + A32 * k2)),
+        t + dt * 0.3,
+        params,
+        inputs,
+    );
     let k4 = compute_derivatives_vec(
         &(state + dt * (A41 * k1 + A42 * k2 + A43 * k3)),
         t + dt * 0.8,
@@ -149,11 +171,12 @@ pub struct TrajectoryParams {
     pub wind_shear_model: String,
     pub shooter_altitude_m: f64,
     pub is_twist_right: bool, // True for right-hand twist, false for left-hand
+    pub shooting_angle: f64,  // uphill/downhill angle in radians
     // MBA-717: real bullet geometry so spin-drift / Magnus / stability on this fast/MC
     // path use the actual bullet instead of hardcoded .308 / 1.24in / 10-twist placeholders.
-    pub bullet_diameter: f64, // meters
-    pub bullet_length: f64,   // meters (0.0 -> derivatives falls back to the 4.5-caliber heuristic)
-    pub twist_rate: f64,      // inches per turn
+    pub bullet_diameter: f64,                              // meters
+    pub bullet_length: f64, // meters (0.0 -> derivatives falls back to the 4.5-caliber heuristic)
+    pub twist_rate: f64,    // inches per turn
     pub custom_drag_table: Option<crate::drag::DragTable>, // Custom Drag Model (CDM) data
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
     pub use_bc_segments: bool, // Whether to use BC segment interpolation
@@ -171,8 +194,8 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
     let mut inputs = BallisticInputs {
         bc_value: params.bc,
         bc_type: params.drag_model,
-        bullet_mass: params.mass_kg, // kg
-        muzzle_velocity: 0.0,        // unread by compute_derivatives on this path
+        bullet_mass: params.mass_kg,             // kg
+        muzzle_velocity: 0.0,                    // unread by compute_derivatives on this path
         bullet_diameter: params.bullet_diameter, // MBA-717: real geometry, not placeholders
         bullet_length: params.bullet_length,
         twist_rate: params.twist_rate,
@@ -200,7 +223,7 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
             0.0
         },
         latitude: None,
-        shooting_angle: 0.0,
+        shooting_angle: params.shooting_angle,
         azimuth_angle: 0.0,
         shot_azimuth: 0.0, // this fast path doesn't plumb latitude/bearing (no directional Coriolis here)
         use_powder_sensitivity: false,
@@ -277,16 +300,7 @@ fn compute_derivatives_vec(
                 params.shooter_altitude_m,
             )
         } else {
-            // Simple constant wind (original implementation)
-            let seg = &params.wind_segments[0];
-            let wind_speed_mps = seg.0 * 0.2777778; // km/h to m/s
-            let wind_angle_rad = seg.1.to_radians();
-            // McCoy: x=downrange, y=vertical, z=lateral
-            Vector3::new(
-                -wind_speed_mps * wind_angle_rad.cos(), // x (downrange - head/tail component)
-                0.0,                                    // y (vertical)
-                -wind_speed_mps * wind_angle_rad.sin(), // z (lateral - crosswind component)
-            )
+            wind_vector_for_range(pos.x, &params.wind_segments)
         }
     } else {
         Vector3::zeros()
@@ -537,7 +551,8 @@ pub fn solve_trajectory_rust(
         enable_wind_shear: false, // Default for test function
         wind_shear_model: "none".to_string(),
         shooter_altitude_m: 0.0,
-        is_twist_right: true,    // Default for test function
+        is_twist_right: true, // Default for test function
+        shooting_angle: 0.0,  // This legacy entry takes no inclined-fire arg; flat fire only
         // This legacy entry takes no geometry args; keep the historical placeholders so its
         // behavior is unchanged (callers needing real geometry use fast_integrate_with_segments).
         bullet_diameter: 0.0078232,
@@ -592,6 +607,7 @@ mod tests {
             wind_shear_model: "none".to_string(),
             shooter_altitude_m: 0.0,
             is_twist_right: true,
+            shooting_angle: 0.0,
             custom_drag_table: None,
             bc_segments: None,
             use_bc_segments: false,
@@ -648,6 +664,7 @@ mod tests {
             wind_shear_model: "none".to_string(),
             shooter_altitude_m: 0.0,
             is_twist_right: true,
+            shooting_angle: 0.0,
             custom_drag_table: None,
             bc_segments: None,
             use_bc_segments: false,
@@ -782,14 +799,32 @@ mod tests {
         let mut params_headwind = create_test_params(target_distance);
         params_headwind.wind_segments = vec![(72.0, 0.0, 500.0)]; // 72 km/h = 20 m/s headwind
 
-        let trajectory_no_wind =
-            integrate_trajectory(initial_state, (0.0, 5.0), params_no_wind, "RK45", 1e-6, 0.01);
-        let trajectory_headwind =
-            integrate_trajectory(initial_state, (0.0, 5.0), params_headwind, "RK45", 1e-6, 0.01);
+        let trajectory_no_wind = integrate_trajectory(
+            initial_state,
+            (0.0, 5.0),
+            params_no_wind,
+            "RK45",
+            1e-6,
+            0.01,
+        );
+        let trajectory_headwind = integrate_trajectory(
+            initial_state,
+            (0.0, 5.0),
+            params_headwind,
+            "RK45",
+            1e-6,
+            0.01,
+        );
 
         // Both trajectories should complete
-        assert!(!trajectory_no_wind.is_empty(), "No-wind trajectory should complete");
-        assert!(!trajectory_headwind.is_empty(), "Headwind trajectory should complete");
+        assert!(
+            !trajectory_no_wind.is_empty(),
+            "No-wind trajectory should complete"
+        );
+        assert!(
+            !trajectory_headwind.is_empty(),
+            "Headwind trajectory should complete"
+        );
 
         let (time_no_wind, final_no_wind) = trajectory_no_wind.last().unwrap();
         let (time_headwind, final_headwind) = trajectory_headwind.last().unwrap();
@@ -822,19 +857,19 @@ mod tests {
         let result = solve_trajectory_rust(
             initial_state,
             (0.0, 2.0),
-            0.01134,        // mass_kg
-            0.442,          // bc
-            DragModel::G7,  // drag_model
-            vec![],         // wind_segments
+            0.01134,                 // mass_kg
+            0.442,                   // bc
+            DragModel::G7,           // drag_model
+            vec![],                  // wind_segments
             (0.0, 59.0, 29.92, 0.0), // atmos_params
-            None,           // omega_vector
-            false,          // enable_spin_drift
-            false,          // enable_magnus
-            false,          // enable_coriolis
-            "RK45".to_string(), // method
-            1e-6,           // tolerance
-            0.01,           // max_step
-            500.0,          // target_distance_m
+            None,                    // omega_vector
+            false,                   // enable_spin_drift
+            false,                   // enable_magnus
+            false,                   // enable_coriolis
+            "RK45".to_string(),      // method
+            1e-6,                    // tolerance
+            0.01,                    // max_step
+            500.0,                   // target_distance_m
         );
 
         // Should return Vec of HashMaps with expected keys

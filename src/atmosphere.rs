@@ -166,6 +166,21 @@ pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Optio
     }
 }
 
+/// Return the station temperature and pressure that [`calculate_atmosphere`] will use after
+/// applying the default-at-altitude resolution rules.
+pub fn resolve_station_conditions(
+    temperature_c: f64,
+    pressure_hpa: f64,
+    altitude_m: f64,
+) -> (f64, f64) {
+    let temp_override = resolve_station_temperature(temperature_c, altitude_m);
+    let press_override = resolve_station_pressure(pressure_hpa, altitude_m);
+    let (std_temp_k, std_pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
+    let temp_c = temp_override.unwrap_or(std_temp_k - 273.15);
+    let pressure_hpa = press_override.unwrap_or(std_pressure_pa / 100.0);
+    (temp_c, pressure_hpa)
+}
+
 /// Enhanced atmospheric calculation with ICAO Standard Atmosphere.
 ///
 /// # Arguments
@@ -237,11 +252,12 @@ pub fn calculate_atmosphere(
     let mole_fraction_vapor = (vapor_pressure_pa / pressure_pa.max(f64::MIN_POSITIVE)).min(1.0);
     let temp_c_abs = temp_k;
 
-    // Heat capacity ratio for moist air
-    let gamma_moist = GAMMA * (1.0 - mole_fraction_vapor * 0.11);
+    // Heat capacity ratio for moist air. The coefficient is for vapor mole fraction.
+    let gamma_moist = GAMMA * (1.0 - mole_fraction_vapor * 0.062);
 
-    // Gas constant for moist air
-    let r_moist = R_AIR * (1.0 + 0.6078 * mole_fraction_vapor);
+    // Gas constant for moist air. 0.6078 belongs to specific humidity; for mole fraction the
+    // dry-air molecular-weight ratio gives approximately 0.378.
+    let r_moist = R_AIR * (1.0 + 0.378 * mole_fraction_vapor);
 
     // Speed of sound in moist air (Cramer, 1993) — physics-based correction only. The
     // gamma_moist / r_moist terms above already yield the correct humid speed of sound; the
@@ -267,29 +283,27 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // Enhanced saturation vapor pressure calculation
     let p_sv = enhanced_saturation_vapor_pressure(t_k);
 
-    // Enhanced enhancement factor with temperature dependence
-    let f = enhanced_enhancement_factor(pressure_hpa, temp_c);
+    let pressure_pa = pressure_hpa * 100.0;
+
+    // Enhanced enhancement factor with temperature dependence. CIPM constants use Pa.
+    let f = enhanced_enhancement_factor(pressure_pa, temp_c);
 
     // Vapor pressure with clamping
     let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv;
 
     // Floor the pressure divisor (mirrors calculate_atmosphere): a 0 hPa pressure would
     // otherwise make x_v = +Inf -> NaN density. No-op for all valid (>0) pressures.
-    let p_hpa = pressure_hpa.max(f64::MIN_POSITIVE);
+    let p_pa = pressure_pa.max(f64::MIN_POSITIVE);
 
     // Mole fraction of water vapor (capped at the physical maximum of 1)
-    let x_v = (p_v / p_hpa).min(1.0);
+    let x_v = (p_v / p_pa).min(1.0);
 
-    // Enhanced compressibility factor
-    let z = enhanced_compressibility_factor(p_hpa, t_k, x_v);
+    // Enhanced compressibility factor. CIPM virial constants use Pa.
+    let z = enhanced_compressibility_factor(p_pa, t_k, x_v);
 
     // Calculate density with enhanced precision
     // Note: parentheses are important here for correct operator precedence
-    let density = ((p_hpa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A));
-
-    // Convert from SI units (pressure in Pa) to final density in kg/m³
-    // pressure_hpa is in hPa, so multiply by 100 to get Pa
-    density * 100.0
+    ((p_pa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A))
 }
 
 /// Enhanced saturation vapor pressure calculation.
@@ -505,7 +519,10 @@ mod tests {
         let p = resolve_station_pressure(900.0, 2000.0);
         let (rho_a, _) = calculate_atmosphere(2000.0, Some(15.0), p, 50.0);
         let (rho_b, _) = calculate_atmosphere(0.0, Some(15.0), p, 50.0);
-        assert!((rho_a - rho_b).abs() < 1e-9, "explicit pressure must ignore altitude");
+        assert!(
+            (rho_a - rho_b).abs() < 1e-9,
+            "explicit pressure must ignore altitude"
+        );
     }
 
     #[test]

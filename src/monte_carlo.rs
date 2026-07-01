@@ -50,10 +50,15 @@ pub fn solve_trajectory_for_monte_carlo(
     // default, so altitude drives BOTH the base station pressure AND the lapse-rate temperature
     // via the ICAO standard (this base_ratio feeds the fast/Monte-Carlo kernel's base_density).
     // Matches calculate_air_density.
+    let (resolved_temp_c, resolved_pressure_hpa) = crate::atmosphere::resolve_station_conditions(
+        inputs.temperature,
+        inputs.pressure,
+        inputs.altitude,
+    );
     let (air_density, speed_of_sound) = calculate_atmosphere(
         inputs.altitude, // meters
-        crate::atmosphere::resolve_station_temperature(inputs.temperature, inputs.altitude),
-        crate::atmosphere::resolve_station_pressure(inputs.pressure, inputs.altitude),
+        Some(resolved_temp_c),
+        Some(resolved_pressure_hpa),
         // BallisticInputs.humidity is a 0-1 fraction; calculate_atmosphere expects 0-100 percent
         // (matching AtmosphericConditions.humidity). Passing the raw fraction under-applied
         // humidity 100x. Centralized in humidity_percent() (MBA-722).
@@ -63,9 +68,9 @@ pub fn solve_trajectory_for_monte_carlo(
     // Create wind segments. WindSock expects (speed_kmh, angle_deg, until_distance_m);
     // convert from the SI fields (m/s, radians) at this boundary.
     let wind_segments = vec![(
-        inputs.wind_speed * 3.6,          // m/s -> km/h
-        inputs.wind_angle.to_degrees(),   // radians -> degrees
-        target_distance_m * 2.0,          // wind extends beyond target
+        inputs.wind_speed * 3.6,        // m/s -> km/h
+        inputs.wind_angle.to_degrees(), // radians -> degrees
+        target_distance_m * 2.0,        // wind extends beyond target
     )];
     let wind_sock = WindSock::new(wind_segments);
 
@@ -103,7 +108,12 @@ pub fn solve_trajectory_for_monte_carlo(
         t_span: (0.0, 30.0),
         horiz: target_distance_m,
         vert: 0.0, // Target at ground level
-        atmo_params: (inputs.altitude, inputs.temperature, inputs.pressure, base_ratio),
+        atmo_params: (
+            inputs.altitude,
+            resolved_temp_c,
+            resolved_pressure_hpa,
+            base_ratio,
+        ),
     };
 
     // Solve trajectory

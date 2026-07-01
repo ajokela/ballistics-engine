@@ -157,7 +157,7 @@ impl WasmBallistics {
         let mut wind_speed = 0.0;
         // f64 is required: `wind_direction.to_radians()` below needs a known receiver
         // type (method resolution can't infer it from the field assignment alone).
-        let mut wind_direction: f64 = 90.0;
+        let mut wind_direction: f64 = 0.0;
         // Raw "SPEED:ANGLE:UNTIL" strings; every --wind-segment occurrence is collected
         // (the parse loop visits all args, so repeats accumulate here).
         let mut wind_segment_strs: Vec<String> = Vec::new();
@@ -200,7 +200,11 @@ impl WasmBallistics {
         let mut latitude: Option<f64> = None;
         let mut shot_direction: Option<f64> = None; // compass bearing, degrees, 0=N (Coriolis)
         let mut shooting_angle = 0.0;
-        let mut powder_temp_sensitivity = 1.0;
+        let mut powder_temp_sensitivity = if units == UnitSystem::Imperial {
+            1.0
+        } else {
+            0.3048 / (5.0 / 9.0)
+        };
         let mut powder_temp = if units == UnitSystem::Imperial {
             70.0
         } else {
@@ -486,6 +490,7 @@ impl WasmBallistics {
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
+        inputs.ground_threshold = 0.0;
 
         // Set advanced physics flags. enable_advanced_effects remains the umbrella
         // flag, but Magnus and Coriolis are now gated independently so enabling one
@@ -517,33 +522,24 @@ impl WasmBallistics {
 
         // Set additional parameters
         if let Some(rate) = twist_rate {
-            // twist_rate is inches/turn for both unit systems: the --twist-rate help
-            // documents "inches per turn" unconditionally (unlike --sight-height, which
-            // says "inches/mm"), and the engine field, the native CLI flag, and the FFI
-            // struct all use inches/turn. So forward the raw value with no unit scaling.
-            inputs.twist_rate = rate;
+            inputs.twist_rate = match units {
+                UnitSystem::Imperial => rate,
+                UnitSystem::Metric => rate / 25.4,
+            };
         }
         inputs.is_twist_right = twist_right;
         if let Some(lat) = latitude {
             inputs.latitude = Some(lat);
         }
         inputs.shot_azimuth = shot_direction.map(|d| d.to_radians()).unwrap_or(0.0);
-        inputs.powder_temp_sensitivity = powder_temp_sensitivity;
-
-        // Adjust velocity for powder temperature if enabled
-        if use_powder_sensitivity {
-            let temp_diff = match units {
-                UnitSystem::Imperial => powder_temp - 70.0,
-                UnitSystem::Metric => powder_temp - 21.0,
-            };
-            let velocity_adjustment = temp_diff * powder_temp_sensitivity;
-            inputs.muzzle_velocity += velocity_adjustment
-                * (if units == UnitSystem::Imperial {
-                    0.3048
-                } else {
-                    1.0
-                });
-        }
+        inputs.powder_temp_sensitivity = match units {
+            UnitSystem::Imperial => powder_temp_sensitivity * 0.3048 / (5.0 / 9.0),
+            UnitSystem::Metric => powder_temp_sensitivity,
+        };
+        inputs.powder_temp = match units {
+            UnitSystem::Imperial => (powder_temp - 32.0) * 5.0 / 9.0,
+            UnitSystem::Metric => powder_temp,
+        };
 
         // Set wind conditions
         let mut wind = WindConditions::default();
@@ -574,6 +570,10 @@ impl WasmBallistics {
             }
         }
         atmosphere.humidity = humidity;
+        inputs.temperature = atmosphere.temperature;
+        inputs.pressure = atmosphere.pressure;
+        inputs.humidity = (humidity / 100.0).clamp(0.0, 1.0);
+        inputs.altitude = atmosphere.altitude;
 
         // Handle auto-zero if specified
         let mut zero_info = String::new();
@@ -642,11 +642,19 @@ impl WasmBallistics {
         match solver.solve() {
             Ok(result) => {
                 let output = match output_format {
-                    OutputFormat::Table => {
-                        self.format_trajectory_table(&result, auto_zero, units, full)
+                    OutputFormat::Table => self.format_trajectory_table(
+                        &result,
+                        auto_zero,
+                        units,
+                        full,
+                        inputs.sight_height,
+                    ),
+                    OutputFormat::Json => {
+                        self.format_trajectory_json(&result, units, inputs.sight_height)
                     }
-                    OutputFormat::Json => self.format_trajectory_json(&result, units),
-                    OutputFormat::Csv => self.format_trajectory_csv(&result, units, full),
+                    OutputFormat::Csv => {
+                        self.format_trajectory_csv(&result, units, full, inputs.sight_height)
+                    }
                 };
                 Ok(format!("{}{}", zero_info, output))
             }
@@ -971,6 +979,8 @@ impl WasmBallistics {
         inputs.bc_type = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model (expected G1 or G7)"))?;
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
+        inputs.muzzle_height = 1.5;
+        inputs.ground_threshold = 0.0;
 
         // Create Monte Carlo parameters
         let params = MonteCarloParams {
@@ -1266,6 +1276,7 @@ impl WasmBallistics {
         zero_distance: Option<f64>,
         units: UnitSystem,
         full: bool,
+        sight_height_above_bore_m: f64,
     ) -> String {
         let mut output = String::new();
         output.push_str("Trajectory Calculation Results\n");
@@ -1296,8 +1307,8 @@ impl WasmBallistics {
         let mut current_range = 0.0;
 
         // Get initial height for reference (sight height)
-        let sight_height = if !result.points.is_empty() {
-            result.points[0].position.y
+        let los_height = if !result.points.is_empty() {
+            result.points[0].position.y + sight_height_above_bore_m
         } else {
             0.05 // Default 2 inches
         };
@@ -1318,7 +1329,7 @@ impl WasmBallistics {
                     && (range_display - zero_distance.unwrap()).abs() < 1.0);
 
             if should_show {
-                let drop = sight_height - point.position.y;
+                let drop = los_height - point.position.y;
                 let drift = point.position.z; // Z is lateral (windage, McCoy)
                 let velocity = point.velocity_magnitude;
 
@@ -1450,7 +1461,13 @@ impl WasmBallistics {
         &self,
         result: &crate::cli_api::TrajectoryResult,
         units: UnitSystem,
+        sight_height_above_bore_m: f64,
     ) -> String {
+        let los_height = result
+            .points
+            .first()
+            .map(|p| p.position.y + sight_height_above_bore_m)
+            .unwrap_or(0.05);
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral
         let points: Vec<serde_json::Value> = result
             .points
@@ -1460,7 +1477,7 @@ impl WasmBallistics {
                     UnitSystem::Imperial => {
                         serde_json::json!({
                             "range_yards": p.position.x * 1.09361,  // X is downrange (McCoy)
-                            "drop_inches": (result.points[0].position.y - p.position.y) * 39.3701,
+                            "drop_inches": (los_height - p.position.y) * 39.3701,
                             "drift_inches": p.position.z * 39.3701,  // Z is lateral (windage, McCoy)
                             "velocity_fps": p.velocity_magnitude * 3.28084,
                             "energy_ftlb": p.kinetic_energy * 0.737562149,
@@ -1470,7 +1487,7 @@ impl WasmBallistics {
                     UnitSystem::Metric => {
                         serde_json::json!({
                             "range_meters": p.position.x,  // X is downrange (McCoy)
-                            "drop_cm": (result.points[0].position.y - p.position.y) * 100.0,
+                            "drop_cm": (los_height - p.position.y) * 100.0,
                             "drift_cm": p.position.z * 100.0,  // Z is lateral (windage, McCoy)
                             "velocity_mps": p.velocity_magnitude,
                             "energy_joules": p.kinetic_energy,
@@ -1514,6 +1531,7 @@ impl WasmBallistics {
         result: &crate::cli_api::TrajectoryResult,
         units: UnitSystem,
         full: bool,
+        sight_height_above_bore_m: f64,
     ) -> String {
         let mut output = String::new();
 
@@ -1550,8 +1568,8 @@ impl WasmBallistics {
         };
 
         let mut current_range = 0.0;
-        let sight_height = if !result.points.is_empty() {
-            result.points[0].position.y
+        let los_height = if !result.points.is_empty() {
+            result.points[0].position.y + sight_height_above_bore_m
         } else {
             0.05
         };
@@ -1566,7 +1584,7 @@ impl WasmBallistics {
             let is_last_point = idx == result.points.len() - 1;
 
             if range_display >= current_range || is_last_point {
-                let drop = sight_height - point.position.y;
+                let drop = los_height - point.position.y;
 
                 match units {
                     UnitSystem::Imperial => {
@@ -1658,7 +1676,7 @@ Trajectory Command:
     --use-powder-sensitivity     Enable powder temp sensitivity
     
   Additional Parameters:
-    --twist-rate <RATE>          Barrel twist (inches per turn)
+    --twist-rate <RATE>          Barrel twist (inches/turn imperial, mm/turn metric)
     --twist-right <BOOL>         Right-hand twist (true/false)
     --latitude <LAT>             Latitude for Coriolis (degrees)
     --shot-direction <DEG>       Compass bearing of the shot for Coriolis (0=N, 90=E)
@@ -1768,7 +1786,7 @@ impl Calculator {
             drag_model: "G1".to_string(), // G1 matches the G1-scale default BC (0.475) and the CLI default
 
             wind_speed_mph: 0.0,
-            wind_direction_deg: 90.0,
+            wind_direction_deg: 0.0, // wind-FROM convention: 0 = headwind, matching the CLI/trajectory defaults
             wind_segments: Vec::new(),
             temperature_f: 59.0,
             pressure_inhg: 29.92,
@@ -1833,7 +1851,12 @@ impl Calculator {
     /// zero beyond the last segment. When any segment is added it overrides the
     /// scalar `setWind` value. Repeatable.
     #[wasm_bindgen(js_name = addWindSegment)]
-    pub fn add_wind_segment(mut self, speed_mph: f64, direction_deg: f64, until_yards: f64) -> Self {
+    pub fn add_wind_segment(
+        mut self,
+        speed_mph: f64,
+        direction_deg: f64,
+        until_yards: f64,
+    ) -> Self {
         self.wind_segments
             .push((speed_mph, direction_deg, until_yards));
         self

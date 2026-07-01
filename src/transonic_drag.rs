@@ -228,11 +228,14 @@ pub fn transonic_correction(
     shape: ProjectileShape,
     include_wave_drag: bool,
 ) -> f64 {
-    // Get the drag rise factor
-    let rise_factor = transonic_drag_rise(mach, shape);
-
-    // Apply to base drag
-    let mut corrected_cd = base_cd * rise_factor;
+    // Standard G1/G7/Gx tables already include their transonic drag rise. Only apply this
+    // empirical rise when the caller is explicitly adding wave/transonic effects to a table that
+    // does not already contain them.
+    let mut corrected_cd = if include_wave_drag {
+        base_cd * transonic_drag_rise(mach, shape)
+    } else {
+        base_cd
+    };
 
     // Add wave drag if requested
     if include_wave_drag && mach > 0.8 {
@@ -318,7 +321,10 @@ mod tests {
         // so they must agree with it for the same caliber/weight/drag model.
         let heuristic = get_projectile_shape(c, w, "G7");
         assert_eq!(resolve_projectile_shape(None, c, w, "G7"), heuristic);
-        assert_eq!(resolve_projectile_shape(Some("unknown"), c, w, "G7"), heuristic);
+        assert_eq!(
+            resolve_projectile_shape(Some("unknown"), c, w, "G7"),
+            heuristic
+        );
     }
 
     #[test]

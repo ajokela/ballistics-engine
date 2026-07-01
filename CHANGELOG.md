@@ -5,6 +5,123 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-07-01
+
+A large correctness pass from an adversarial logic/math audit of the whole crate (44
+confirmed findings across drag, atmosphere, ground/zero geometry, wind, spin/rotational
+physics, Monte Carlo, and cross-surface consistency). This release changes numeric output
+for most trajectories — re-validate any downstream reference tables. Highest-impact items
+marked ⚠️.
+
+### Fixed
+
+**Drag & atmosphere**
+- **⚠️ Ground plane no longer double-counts bore height.** `ground_threshold` was set to
+  `-bore_height` while the solver already starts the bullet at a ground-referenced
+  `muzzle_height`, so flat-fire shots flew until `2×bore_height` below the muzzle instead
+  of 1 — ground-impact range and time-of-flight were overstated (~37%/~45% in a typical
+  flat-fire case). Ground is now `y = 0` in all CLI/FFI/WASM/Monte-Carlo call sites.
+- **⚠️ Removed a transonic drag-rise double-count.** The G1/G7 table Cd already embeds the
+  full McCoy transonic rise; an additional multiplier (up to 2.5×, applied unconditionally
+  near Mach 1) was stacking a second rise on top of it, inflating drop and reducing retained
+  velocity for any shot touching Mach 0.85–1.2 — and for the entire flight of subsonic loads
+  (.22LR, subsonic .300BLK, etc).
+- **⚠️ Corrected `CD_TO_RETARD` to the ICAO-referenced value** (`2.08551e-4`, was the Army
+  Standard Metro constant `2.049e-4`), matching density normalized to ICAO sea level
+  (1.225 kg/m³). Drag was uniformly ~1.75% low for any ICAO-referenced BC.
+- **Mach number and air density now use the same resolved atmosphere.** Speed-of-sound was
+  computed from the raw input temperature while density used the ICAO-lapse-resolved
+  station temperature at `--altitude`, so drag was evaluated at the wrong Mach for
+  altitude shots with default atmosphere (a few percent error near transonic).
+- **Miller Sg density correction, and the fast/Monte-Carlo Mach lookup, now use the same
+  resolved station atmosphere** instead of the raw (often default sea-level) input —
+  affects stability classification, spin drift, and Magnus at altitude.
+- Moist-air speed-of-sound and CIPM-2007 enhancement/compressibility coefficients corrected
+  (were using a specific-humidity coefficient with a mole fraction, and hPa where the CIPM
+  constants expect Pa); both errors were small (<1.5%) but real.
+- Magnus moment coefficient is now continuous at Mach 1.2 (was a 33% discontinuous jump
+  between the transonic and supersonic branches).
+
+**Zeroing & geometry**
+- **`zero` subcommand now zeroes to the line of sight**, not the bore line — was ignoring
+  `--sight-height` entirely (~1.9 MOA error at typical sight heights).
+- **`--auto-zero` now solves with the user's actual drag model and atmosphere**, not a
+  hardcoded G1/ISA-sea-level zero — a G7 auto-zero previously struck several inches off
+  the intended zero distance.
+- **`sight_adjustment_moa` sign fixed** (was subtracting the sight-height correction instead
+  of adding it — told users to dial the wrong direction).
+- **`point_blank_range` fixed** — was reading the lateral (always-zero) axis with a
+  bore-referenced threshold; now downrange, referenced to the line of sight.
+- **`true-velocity` drop formula no longer double-counts barrel elevation** and no longer
+  flips the sight-height sign (was up to +11% effective-velocity error).
+- **`--shooting-angle` (inclined fire) is now applied** — previously accepted by every
+  surface (CLI/FFI/WASM) and by the low-level fast/library-binding integration path, but
+  read by no solver; gravity is now rotated into the shot-aligned frame everywhere,
+  including `fast_integrate_with_segments`.
+- Trajectory `bullet_length` now honors `--bullet-length` instead of a hardcoded 4.5-caliber
+  estimate, so stability/spin-drift/aerodynamic-jump match the `stability` subcommand for
+  the same bullet.
+
+**Monte Carlo**
+- **CEP is now the median target-plane radial miss** (was `range_std_dev × 1.1774`, off by
+  up to ~100×).
+- **Fell-short samples are no longer misclassified as hits** — a downrange shortfall was
+  being compared against the target-plane hit radius.
+- **Vertical angular dispersion is no longer sampled twice** — muzzle-angle jitter and an
+  independent "pointing error" of the same magnitude were both applied, inflating vertical
+  spread ~41%.
+- **`max_range` is now sized to the target**, so simulations no longer silently truncate at
+  the 1000 m integrator default on longer shots.
+- **FFI and WASM Monte Carlo now use the same ground/bore convention as the CLI** (previously
+  only the CLI had a real ground-impact range; FFI/WASM reported the integrator cap with
+  zero standard deviation).
+- **FFI Monte Carlo now honors its `atmosphere` argument** instead of discarding it and
+  running every sample at ICAO sea level.
+
+**Wind**
+- Wind beyond the last `--wind-segment` now correctly goes to zero on the shear-enabled fast
+  path (was falling back to the first segment's wind).
+- `fast_integrate_with_segments` (the library/binding entry point) now actually steps
+  through wind segments by downrange distance instead of applying only the first segment
+  for the whole flight.
+
+**Cross-surface consistency (CLI vs FFI vs WASM)**
+- `estimate-bc` drop values are now inches on both CLI and WASM (CLI was parsing them as
+  yards — a 36× unit mismatch).
+- `--twist-rate` is mm/turn in metric mode on WASM, matching the CLI (MBA-970).
+- Powder-temperature modeling now matches between the native solver and WASM (WASM
+  previously used a hardcoded 70°F/21°C reference and ignored `--temperature` entirely).
+- `--powder-temp`'s default no longer gets reinterpreted as 70°C in metric mode.
+- WASM now sets `ground_threshold` on `trajectory` (was the -100 m library default, a ~3.5×
+  disagreement with the CLI on the same command).
+- WASM's Drop column (table/JSON/CSV) is now relative to the line of sight instead of the
+  bore line.
+- WASM's default wind direction is now 0° (headwind), matching the CLI, instead of 90°
+  (full crosswind).
+- FFI trajectory samples now report real `mach` and `spin_rate_rps` instead of hardcoded 0.0.
+- FFI `ballistics_quick_trajectory` drop is now referenced to the sight line, not the bore.
+- Metric-mode `--bc-table`/`--bc-table-dir` lookups now convert to the tables' native
+  inches/fps units instead of feeding them mm/m-s.
+- `--bc-adjustment` now actually affects the trajectory when a `--bc-table` is also
+  supplied (previously affected only the displayed BC).
+- Metric-mode PDF dope cards now convert to the card's imperial fields instead of writing
+  raw metric values under imperial labels.
+- Density-altitude on the PDF dope card no longer applies the 120 ft/°C rule to a Fahrenheit
+  delta (was overstating the temperature correction ~1.8×).
+- `monte-carlo` help text now documents per-`--units` values instead of claiming SI
+  regardless of the active unit system.
+
+**Numerical**
+- `fast_integrate`'s `FastSolution::sol()` no longer returns NaN when queried at its own
+  reported event time (was pushing a duplicate final (time, state) sample).
+- The sampled-trajectory `Apex` flag is no longer placed on the first sample for flat or
+  descending shots that never rise above the muzzle.
+
+### Performance
+- Speed-of-sound/temperature/pressure are now resolved once per trajectory solve and
+  threaded through drag and Magnus calculations, instead of being re-resolved (including a
+  vapor-pressure polynomial) on every RK4/RK45 stage.
+
 ## [0.21.5] - 2026-06-27
 
 Two monte-carlo correctness fixes (MBA-967, MBA-971).

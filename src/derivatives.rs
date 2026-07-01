@@ -27,11 +27,11 @@ const MAGNUS_COEFF_SUBSONIC: f64 = 0.030;
 
 /// Magnus coefficient reduction factor for transonic regime (0.8 < M < 1.2)
 ///
-/// Value: 0.0075 (25% of subsonic value at M=1.2)
+/// Value: 0.015 (continuous with the supersonic base at M=1.2)
 /// Physical basis: Shock waves disrupt circulation patterns, reducing Magnus effect
 /// Effect: Spin drift significantly reduced in transonic flight
 /// Source: Experimental spinning projectile studies
-const MAGNUS_COEFF_TRANSONIC_REDUCTION: f64 = 0.0075;
+const MAGNUS_COEFF_TRANSONIC_REDUCTION: f64 = 0.015;
 
 /// Base Magnus coefficient for supersonic flow (M > 1.2)
 ///
@@ -112,8 +112,14 @@ pub fn compute_derivatives(
     omega_vector: Option<Vector3<f64>>,
     time: f64,
 ) -> [f64; 6] {
-    // Gravity acceleration vector
-    let accel_gravity = Vector3::new(0.0, -G_ACCEL_MPS2, 0.0);
+    // Gravity acceleration vector, rotated into the shot-aligned frame by shooting_angle
+    // (uphill/downhill inclined fire), matching cli_api::TrajectorySolver::gravity_acceleration.
+    let theta = inputs.shooting_angle;
+    let accel_gravity = Vector3::new(
+        -G_ACCEL_MPS2 * theta.sin(),
+        -G_ACCEL_MPS2 * theta.cos(),
+        0.0,
+    );
 
     // Wind-adjusted velocity
     let velocity_adjusted = vel - wind_vector;
@@ -135,7 +141,8 @@ pub fn compute_derivatives(
         // params[0] = air density, params[1] = speed of sound
         // params[2] and params[3] would be 0.0
         // BUT: we need to check if params[0] is a reasonable density value (< 2.0 kg/m³)
-        let (air_density, speed_of_sound, _temperature_c) = if atmos_params.0 < MAX_REALISTIC_DENSITY
+        let (air_density, speed_of_sound, _temperature_c) = if atmos_params.0
+            < MAX_REALISTIC_DENSITY
             && atmos_params.1 > MIN_REALISTIC_SPEED_OF_SOUND
             && atmos_params.2 == 0.0
             && atmos_params.3 == 0.0
@@ -174,7 +181,7 @@ pub fn compute_derivatives(
             &inputs.bc_type,
             false, // transonic applied exactly once below (was double-applied here + in block)
             false, // Reynolds applied once below (manual block ~243); was double-applied here + there
-            None, // let it determine shape
+            None,  // let it determine shape
             if inputs.caliber_inches > 0.0 {
                 Some(inputs.caliber_inches)
             } else {
@@ -298,8 +305,7 @@ pub fn compute_derivatives(
 
         // Magnus Effect calculation. Gated on enable_magnus specifically so it is
         // independent of Coriolis (matches the cli_api solver's decoupled flags).
-        if inputs.enable_magnus && inputs.bullet_diameter > 0.0 && inputs.twist_rate > 0.0
-        {
+        if inputs.enable_magnus && inputs.bullet_diameter > 0.0 && inputs.twist_rate > 0.0 {
             // Calculate spin rate from twist rate and velocity
             let spin_rate_rad_s = calculate_spin_rate(inputs.twist_rate, speed_air);
 
@@ -675,7 +681,7 @@ mod tests {
         // docs and cli_api — plus the explicit imperial mirror fields
         // (caliber_inches/weight_grains) the stability/Magnus helpers read.
         BallisticInputs {
-            muzzle_velocity: 800.0,         // m/s
+            muzzle_velocity: 800.0, // m/s
             bc_value: 0.5,
             bullet_mass: 168.0 * 0.00006479891, // kg (168 gr)
             bullet_diameter: 0.308 * 0.0254,    // meters (.308 in)
@@ -880,7 +886,7 @@ mod tests {
         // Test at various Mach numbers with corrected coefficients
         assert!((calculate_magnus_moment_coefficient(0.5) - 0.030).abs() < 0.001); // Subsonic
         assert!((calculate_magnus_moment_coefficient(0.8) - 0.030).abs() < 0.001); // Start of transonic
-        assert!((calculate_magnus_moment_coefficient(1.0) - 0.02625).abs() < 0.001); // Mid transonic
+        assert!((calculate_magnus_moment_coefficient(1.0) - 0.0225).abs() < 0.001); // Mid transonic
         assert!((calculate_magnus_moment_coefficient(1.2) - 0.015).abs() < 0.001); // End of transonic
         assert!((calculate_magnus_moment_coefficient(2.0) - 0.01653).abs() < 0.001);
         // Supersonic

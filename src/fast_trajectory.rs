@@ -55,12 +55,17 @@ impl FastSolution {
                 // Linear interpolation
                 let t0 = self.t[idx - 1];
                 let t1 = self.t[idx];
-                let frac = (tq - t0) / (t1 - t0);
+                let span = t1 - t0;
 
                 for j in 0..6 {
                     let y0 = self.y[j][idx - 1];
                     let y1 = self.y[j][idx];
-                    result[j][i] = y0 + frac * (y1 - y0);
+                    result[j][i] = if span.abs() < f64::EPSILON {
+                        y1
+                    } else {
+                        let frac = (tq - t0) / span;
+                        y0 + frac * (y1 - y0)
+                    };
                 }
             }
         }
@@ -213,6 +218,14 @@ pub fn fast_integrate(
     if !atmo_is_physical(params.atmo_params) {
         return FastSolution::degenerate(&params.initial_state);
     }
+    let mut effective_inputs = inputs.clone();
+    if params.atmo_params.2 > 0.0 {
+        effective_inputs.altitude = params.atmo_params.0;
+        effective_inputs.temperature = params.atmo_params.1;
+        effective_inputs.pressure = params.atmo_params.2;
+        effective_inputs.humidity = params.atmo_params.3;
+    }
+    let inputs = &effective_inputs;
     // Extract parameters
     let _mass_kg = inputs.bullet_mass; // SI (kg)
     let bc = inputs.bc_value;
@@ -355,15 +368,11 @@ pub fn fast_integrate(
         // Check termination conditions (X is downrange, McCoy)
         if pos.x >= params.horiz {
             hit_target = true;
-            times.push(t);
-            states.push(state);
             break;
         }
 
         if pos.y <= ground_threshold {
             hit_ground = true;
-            times.push(t);
-            states.push(state);
             break;
         }
 
@@ -493,9 +502,18 @@ fn compute_derivatives(
     let vel_adjusted = vel - wind_vector;
     let v_mag = vel_adjusted.norm();
 
+    // Gravity acceleration vector, rotated into the shot-aligned frame by shooting_angle
+    // (uphill/downhill inclined fire), matching cli_api::TrajectorySolver::gravity_acceleration.
+    let theta = inputs.shooting_angle;
+    let accel_gravity = Vector3::new(
+        -G_ACCEL_MPS2 * theta.sin(),
+        -G_ACCEL_MPS2 * theta.cos(),
+        0.0,
+    );
+
     // Calculate acceleration
     let mut accel = if v_mag < 1e-6 {
-        Vector3::new(0.0, -G_ACCEL_MPS2, 0.0)
+        accel_gravity
     } else {
         // Calculate drag
         let v_fps = v_mag * MPS_TO_FPS;
@@ -508,7 +526,11 @@ fn compute_derivatives(
             inputs.altitude, // base_alt approximation
             inputs.temperature,
             inputs.pressure,
-            if inputs.humidity > 0.0 { inputs.humidity } else { 1.0 },
+            if inputs.humidity > 0.0 {
+                inputs.humidity
+            } else {
+                1.0
+            },
         );
         let mach = v_mag / speed_of_sound;
 
@@ -553,7 +575,7 @@ fn compute_derivatives(
         };
 
         // Calculate drag acceleration using proper ballistics formula
-        let cd_to_retard = 0.000683 * 0.30;
+        let cd_to_retard = crate::constants::CD_TO_RETARD;
         let standard_factor = drag_factor * cd_to_retard;
         let density_scale = base_density / 1.225;
 
@@ -565,7 +587,7 @@ fn compute_derivatives(
         let accel_drag = -a_drag_m_s2 * (vel_adjusted / v_mag);
 
         // Total acceleration
-        accel_drag + Vector3::new(0.0, -G_ACCEL_MPS2, 0.0)
+        accel_drag + accel_gravity
     };
 
     // Coriolis (Earth rotation), MBA-957. omega already carries the corrected lateral sign; use
@@ -659,6 +681,7 @@ pub fn fast_integrate_with_segments(
         wind_shear_model: inputs.wind_shear_model.clone(),
         shooter_altitude_m: inputs.altitude,
         is_twist_right: inputs.is_twist_right,
+        shooting_angle: inputs.shooting_angle,
         // MBA-717: carry the real bullet geometry so spin-drift / Magnus use it.
         bullet_diameter: inputs.bullet_diameter,
         bullet_length: inputs.bullet_length,
@@ -871,7 +894,7 @@ mod tests {
         let segments = vec![
             BCSegmentData {
                 velocity_min: 0.0,
-                velocity_max: 999.0,  // Exclusive upper bound to avoid overlap
+                velocity_max: 999.0, // Exclusive upper bound to avoid overlap
                 bc_value: 0.45,
             },
             BCSegmentData {
@@ -923,9 +946,9 @@ mod tests {
 
         // Create solution with events
         let t_events = [
-            vec![2.0],  // target_hit at t=2
-            vec![0.5],  // max_ord at t=0.5
-            vec![],     // no ground_hit
+            vec![2.0], // target_hit at t=2
+            vec![0.5], // max_ord at t=0.5
+            vec![],    // no ground_hit
         ];
 
         let solution = FastSolution::from_trajectory_data(times, states, t_events);
@@ -967,8 +990,8 @@ mod tests {
         }
         let (ex, ey) = final_xy(FRAC_PI_2); // east
         let (wx, wy) = final_xy(3.0 * FRAC_PI_2); // west
-        // Both shots cover essentially the same downrange (Coriolis barely affects x),
-        // so comparing the final vertical is apples-to-apples.
+                                                  // Both shots cover essentially the same downrange (Coriolis barely affects x),
+                                                  // so comparing the final vertical is apples-to-apples.
         assert!(
             (ex - wx).abs() < 0.5,
             "east/west downrange should be ~equal (ex={ex:.4}, wx={wx:.4})"
@@ -1016,11 +1039,17 @@ mod tests {
         // enable_coriolis=true with advanced effects OFF: directional Coriolis still applies.
         let e = final_y(true, FRAC_PI_2);
         let w = final_y(true, 3.0 * FRAC_PI_2);
-        assert!(e > w && (e - w) > 1e-5, "Coriolis-only (no advanced effects) must still be directional: E={e} W={w}");
+        assert!(
+            e > w && (e - w) > 1e-5,
+            "Coriolis-only (no advanced effects) must still be directional: E={e} W={w}"
+        );
         // enable_coriolis=false: no Coriolis at all, east == west.
         let e2 = final_y(false, FRAC_PI_2);
         let w2 = final_y(false, 3.0 * FRAC_PI_2);
-        assert!((e2 - w2).abs() < 1e-9, "with enable_coriolis=false, east/west must be identical: E={e2} W={w2}");
+        assert!(
+            (e2 - w2).abs() < 1e-9,
+            "with enable_coriolis=false, east/west must be identical: E={e2} W={w2}"
+        );
     }
 
     #[test]
@@ -1040,7 +1069,10 @@ mod tests {
         };
         // pressure <= 0 -> fail loudly (success=false) instead of a 1-point stub as success.
         let zero_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 0.0, 50.0)));
-        assert!(!zero_p.success, "pressure=0 atmosphere must yield success=false");
+        assert!(
+            !zero_p.success,
+            "pressure=0 atmosphere must yield success=false"
+        );
         // non-finite pressure -> also rejected.
         let nan_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, f64::NAN, 50.0)));
         assert!(!nan_p.success, "NaN pressure must yield success=false");
@@ -1050,7 +1082,10 @@ mod tests {
         // Direct-atmosphere mode (density, speed_of_sound, 0, 0) is legitimate and must NOT
         // be rejected by the guard (regression: 0.21.2 rejected it via the pressure<=0 check).
         let direct = fast_integrate_with_segments(&inputs, vec![], mk((1.225, 340.0, 0.0, 0.0)));
-        assert!(direct.success, "direct-atmosphere mode (pressure=0 sentinel) must yield success=true");
+        assert!(
+            direct.success,
+            "direct-atmosphere mode (pressure=0 sentinel) must yield success=true"
+        );
     }
 
     #[test]
@@ -1089,4 +1124,3 @@ mod tests {
         assert!(run(0.00858, 10.0).success, ".338 geometry must solve");
     }
 }
-

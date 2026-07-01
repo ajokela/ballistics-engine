@@ -374,15 +374,11 @@ pub fn get_wind_at_position(
     let base_wind = if wind_segments.is_empty() {
         (0.0, 0.0)
     } else {
-        // Find the segment that covers this range
-        let mut found_wind = (wind_segments[0].0, wind_segments[0].1);
-        for seg in wind_segments {
-            if range_m <= seg.2 {
-                found_wind = (seg.0, seg.1);
-                break;
-            }
-        }
-        found_wind
+        wind_segments
+            .iter()
+            .find(|seg| range_m < seg.2)
+            .map(|seg| (seg.0, seg.1))
+            .unwrap_or((0.0, 0.0))
     };
 
     // Convert base wind from km/h to m/s
@@ -517,7 +513,10 @@ mod tests {
         let r100 = boundary_layer_speed_ratio(100.0, WindShearModel::Logarithmic);
         let r300 = boundary_layer_speed_ratio(300.0, WindShearModel::Logarithmic);
         assert!(r100 > 1.0, "ratio at 100 m should exceed 1.0, got {r100}");
-        assert!(r300 > r100, "ratio should increase with altitude: {r300} !> {r100}");
+        assert!(
+            r300 > r100,
+            "ratio should increase with altitude: {r300} !> {r100}"
+        );
         // Magnitude sanity: ~1.4x at ~100 m above ground for the logarithmic profile.
         assert!(
             (r100 - 1.40).abs() < 0.10,
