@@ -48,9 +48,6 @@ const MAGIC: &[u8; 4] = b"BC5D";
 /// Supported format version
 const SUPPORTED_VERSION: u32 = 2;
 
-/// Header size in bytes
-const HEADER_SIZE: usize = 80;
-
 /// BC5D table with 4D interpolation (drag type is discrete)
 #[derive(Debug)]
 pub struct Bc5dTable {

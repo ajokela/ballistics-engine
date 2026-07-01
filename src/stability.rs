@@ -97,11 +97,9 @@ pub fn compute_spin_drift_with_decay(
 
     let sign = if is_twist_right { 1.0 } else { -1.0 };
 
-    // Modified formula with more realistic scaling
-    // Original Litz: SD = 1.25 * (SG + 1.2) * TOF^1.83
-    // This overestimates significantly for short TOF
-    // Using a modified version with better scaling factor
-    let scaling_factor = 0.075; // Reduced from 1.25 to give realistic values
+    // Litz empirical spin drift: inches = 1.25 * (SG + 1.2) * TOF^1.83.
+    // Keep this summary/API path consistent with cli_api::apply_spin_drift.
+    let scaling_factor = 1.25;
     let base_drift = sign * scaling_factor * (stability + 1.2) * time_s.powf(1.83);
 
     // Apply spin decay if provided
@@ -208,8 +206,8 @@ mod tests {
         assert!(drift_left < 0.0); // Should drift to the left (negative)
         assert!((drift_left + drift_right).abs() < 1e-10); // Should be equal magnitude
 
-        // Test reasonable magnitude (should be small)
-        assert!(drift_right.abs() < 0.1); // Less than 10cm for 1.5s flight
+        // Litz spin drift remains a small correction for this flight time.
+        assert!(drift_right.abs() < 0.25); // Less than 25cm for 1.5s flight
     }
 
     #[test]

@@ -213,10 +213,11 @@ fn add_trajectory_flags(
         // Use the target distance passed as parameter
         let target_distance_m = target_distance_input_m;
 
-        // Find the index of maximum height (minimum drop, most negative) within target distance
-        // Exclude first point (always 0 for auto-zeroing)
-        let mut min_drop = f64::INFINITY;
-        let mut apex_idx = 1;
+        // Find the index of maximum height (minimum drop, most negative) within target distance.
+        // Only mark an interior apex if it is actually above the muzzle/first sample.
+        let first_drop = samples[0].drop_m;
+        let mut min_drop = first_drop;
+        let mut apex_idx: Option<usize> = None;
 
         // Search from index 1, but stop at target distance
         for i in 1..samples.len() {
@@ -227,12 +228,13 @@ fn add_trajectory_flags(
 
             if samples[i].drop_m < min_drop {
                 min_drop = samples[i].drop_m;
-                apex_idx = i;
+                apex_idx = Some(i);
             }
         }
 
-        // Mark the apex
-        samples[apex_idx].flags.push(TrajectoryFlag::Apex);
+        if let Some(idx) = apex_idx {
+            samples[idx].flags.push(TrajectoryFlag::Apex);
+        }
     }
 }
 
@@ -446,9 +448,9 @@ mod tests {
         let trajectory_data = TrajectoryData {
             times: vec![0.0, 1.0, 2.0],
             positions: vec![
-                Vector3::new(0.0, 0.0, 0.0),     // x=0 (start), y=0 (vertical), z=0 (no drift)
-                Vector3::new(100.0, 10.0, 1.0),  // x=100 (mid downrange), y=10 (apex height), z=1 (drift)
-                Vector3::new(200.0, 5.0, 2.0),   // x=200 (end downrange), y=5 (below apex), z=2 (drift)
+                Vector3::new(0.0, 0.0, 0.0), // x=0 (start), y=0 (vertical), z=0 (no drift)
+                Vector3::new(100.0, 10.0, 1.0), // x=100 (mid downrange), y=10 (apex height), z=1 (drift)
+                Vector3::new(200.0, 5.0, 2.0), // x=200 (end downrange), y=5 (below apex), z=2 (drift)
             ],
             velocities: vec![
                 Vector3::new(1.0, 10.0, 100.0),

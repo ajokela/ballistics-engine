@@ -12,22 +12,16 @@ pub const FPS_TO_MPS: f64 = 0.3048;
 /// Standard air density at sea level (kg/m³)
 pub const STANDARD_AIR_DENSITY: f64 = 1.225;
 
-/// Critical drag coefficient to retardation conversion constant
+/// Cd-to-retardation conversion for ICAO-referenced BCs.
 ///
-/// This fundamental constant converts drag coefficient (Cd) to ballistic retardation force.
-/// Value: 0.000683 * 0.30 = 0.0002049
+/// Exact imperial retardation form for density normalized to ICAO sea-level air
+/// (1.225 kg/m^3 / 0.076474 lb/ft^3):
 ///
-/// Derivation:
-/// - 0.000683: Dimensional conversion factor from imperial ballistics units
-/// - 0.30: Empirical correction factor from extensive ballistics testing
+/// `a_ft/s^2 = Cd * v_fps^2 * (rho / 1.225) * CD_TO_RETARD / BC`
 ///
-/// Physical meaning: Proportionality constant in the ballistic coefficient equation:
-/// BC = (bullet_mass / bullet_diameter²) / (Cd / Cd_standard)
-/// Retardation = CD_TO_RETARD * Cd * air_density * velocity²
-///
-/// Sources: Classical ballistics theory (Pejsa, McCoy), validated against
-/// Aberdeen Proving Ground data and modern Doppler radar measurements.
-pub const CD_TO_RETARD: f64 = 0.000683 * 0.30;
+/// The older `0.000683 * 0.30` value is the Army Standard Metro constant and is
+/// only consistent with a 0.075126 lb/ft^3 density reference.
+pub const CD_TO_RETARD: f64 = 2.08551e-4;
 
 /// Conversion factor: grains to kilograms
 pub const GRAINS_TO_KG: f64 = 0.00006479891;

@@ -7,7 +7,6 @@ use crate::precession_nutation::{
 use crate::trajectory_sampling::{
     sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample,
 };
-use crate::transonic_drag::transonic_correction;
 use crate::wind_shear::WindShearModel;
 use crate::DragModel;
 use nalgebra::Vector3;
@@ -71,9 +70,9 @@ pub struct BallisticInputs {
     pub bullet_length: f64,   // meters
 
     // Targeting and positioning
-    pub muzzle_angle: f64,     // radians (launch angle)
-    pub target_distance: f64,  // meters
-    pub azimuth_angle: f64,    // horizontal aiming angle in radians (small aim offset within the shot frame)
+    pub muzzle_angle: f64,    // radians (launch angle)
+    pub target_distance: f64, // meters
+    pub azimuth_angle: f64, // horizontal aiming angle in radians (small aim offset within the shot frame)
     /// Compass bearing the shot is fired ALONG, radians, 0 = North, π/2 = East.
     /// Used only by the Coriolis model (Earth-rotation depends on which way downrange
     /// points relative to true North). Distinct from `azimuth_angle`, which is the
@@ -268,7 +267,7 @@ pub struct AtmosphericConditions {
     /// uses a 0–1 FRACTION instead — convert with `BallisticInputs::humidity_percent` when
     /// crossing between them (MBA-722).
     pub humidity: f64,
-    pub altitude: f64,    // meters
+    pub altitude: f64, // meters
 }
 
 impl Default for AtmosphericConditions {
@@ -477,14 +476,10 @@ impl TrajectorySolver {
         }
 
         // Engine's own gyroscopic (Miller) stability factor — same Sg shown elsewhere.
+        let (_, _, temp_c, pressure_hpa) = self.resolved_atmosphere();
         let sg = crate::stability::compute_stability_coefficient(
             &self.inputs,
-            (
-                self.atmosphere.altitude,
-                self.atmosphere.temperature,
-                self.atmosphere.pressure,
-                0.0,
-            ),
+            (self.atmosphere.altitude, temp_c, pressure_hpa, 0.0),
         );
         if !(sg.is_finite() && sg > 0.0) {
             return None;
@@ -519,6 +514,30 @@ impl TrajectorySolver {
             yaw_component_moa: 0.0,
             stabilization_factor: (sg / 1.5).clamp(0.0, 1.0),
         })
+    }
+
+    fn resolved_atmosphere(&self) -> (f64, f64, f64, f64) {
+        let (temp_c, pressure_hpa) = crate::atmosphere::resolve_station_conditions(
+            self.atmosphere.temperature,
+            self.atmosphere.pressure,
+            self.atmosphere.altitude,
+        );
+        let (density, speed_of_sound) = crate::atmosphere::calculate_atmosphere(
+            self.atmosphere.altitude,
+            Some(temp_c),
+            Some(pressure_hpa),
+            self.atmosphere.humidity,
+        );
+        (density, speed_of_sound, temp_c, pressure_hpa)
+    }
+
+    fn gravity_acceleration(&self) -> Vector3<f64> {
+        let theta = self.inputs.shooting_angle;
+        Vector3::new(
+            -crate::constants::G_ACCEL_MPS2 * theta.sin(),
+            -crate::constants::G_ACCEL_MPS2 * theta.cos(),
+            0.0,
+        )
     }
 
     fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {
@@ -595,16 +614,20 @@ impl TrajectorySolver {
         // miller_stability returns the bare geometric Sg with no density dependence, so without
         // this the spin drift under-predicts at altitude (Sg should rise as the air thins). At
         // standard sea level (15 C, 1013.25 hPa) the factor is exactly 1.0 — a no-op there.
-        let temp_k = self.atmosphere.temperature + 273.15; // Celsius -> Kelvin
-        let press_hpa = self.atmosphere.pressure; // hPa
+        let (_, _, temp_c, press_hpa) = self.resolved_atmosphere();
+        let temp_k = temp_c + 273.15; // Celsius -> Kelvin
         let density_correction = if press_hpa > 0.0 && temp_k > 0.0 {
             (temp_k / 288.15) * (1013.25 / press_hpa)
         } else {
             1.0
         };
-        let sg =
-            crate::spin_drift::miller_stability(d_in, m_gr, twist_in, length_in) * density_correction;
-        let sign = if self.inputs.is_twist_right { 1.0 } else { -1.0 };
+        let sg = crate::spin_drift::miller_stability(d_in, m_gr, twist_in, length_in)
+            * density_correction;
+        let sign = if self.inputs.is_twist_right {
+            1.0
+        } else {
+            -1.0
+        };
 
         for p in result.points.iter_mut() {
             if p.time <= 0.0 {
@@ -656,9 +679,9 @@ impl TrajectorySolver {
         let mut max_height = position.y;
         let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
-        // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
-        // (subsonic), so the sampled trajectory output can flag those transitions
-        // (trajectory_sampling::add_trajectory_flags consumes this).
+                                       // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
+                                       // (subsonic), so the sampled trajectory output can flag those transitions
+                                       // (trajectory_sampling::add_trajectory_flags consumes this).
         let mut transonic_distances: Vec<f64> = Vec::new();
         let mut crossed_transonic = false;
         let mut crossed_subsonic = false;
@@ -680,7 +703,7 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let air_density = calculate_air_density(&self.atmosphere);
+        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -698,7 +721,10 @@ impl TrajectorySolver {
         );
 
         // Main integration loop (X is downrange)
-        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
+        while position.x < self.max_range
+            && position.y > self.inputs.ground_threshold
+            && time < 100.0
+        {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
@@ -714,8 +740,11 @@ impl TrajectorySolver {
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
             // transonic_mach tracking). Each threshold is recorded once, in descending order.
             {
-                let sos = (1.4 * 287.05 * (self.atmosphere.temperature + 273.15)).sqrt();
-                let mach_here = if sos > 0.0 { velocity_magnitude / sos } else { 0.0 };
+                let mach_here = if speed_of_sound > 0.0 {
+                    velocity_magnitude / speed_of_sound
+                } else {
+                    0.0
+                };
                 if !crossed_transonic && mach_here < 1.2 {
                     crossed_transonic = true;
                     transonic_distances.push(position.x);
@@ -742,9 +771,6 @@ impl TrajectorySolver {
 
             // Calculate pitch damping if enabled
             if self.inputs.enable_pitch_damping {
-                let temp_c = self.atmosphere.temperature;
-                let temp_k = temp_c + 273.15;
-                let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                 let mach = velocity_magnitude / speed_of_sound;
 
                 // Track when we enter transonic
@@ -765,9 +791,6 @@ impl TrajectorySolver {
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
                     let velocity_magnitude = velocity.magnitude();
-                    let temp_c = self.atmosphere.temperature;
-                    let temp_k = temp_c + 273.15;
-                    let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                     let mach = velocity_magnitude / speed_of_sound;
 
                     // Calculate spin rate from twist rate and velocity
@@ -820,7 +843,10 @@ impl TrajectorySolver {
             // calculate_acceleration applies BC-retardation drag, gravity, Coriolis, Magnus, wind
             // shear, and the zero-relative-velocity gravity-only guard.
             let acceleration =
-                self.calculate_acceleration(&position, &velocity, air_density, &wind_vector);
+                self.calculate_acceleration(&position, &velocity, air_density,
+                    &wind_vector,
+                    (speed_of_sound, resolved_temp_c, resolved_press_hpa),
+                );
 
             // Update state
             velocity += acceleration * self.time_step;
@@ -930,9 +956,9 @@ impl TrajectorySolver {
         let mut max_height = position.y;
         let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
-        // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
-        // (subsonic), so the sampled trajectory output can flag those transitions
-        // (trajectory_sampling::add_trajectory_flags consumes this).
+                                       // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
+                                       // (subsonic), so the sampled trajectory output can flag those transitions
+                                       // (trajectory_sampling::add_trajectory_flags consumes this).
         let mut transonic_distances: Vec<f64> = Vec::new();
         let mut crossed_transonic = false;
         let mut crossed_subsonic = false;
@@ -954,7 +980,7 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let air_density = calculate_air_density(&self.atmosphere);
+        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -972,7 +998,10 @@ impl TrajectorySolver {
         );
 
         // Main RK4 integration loop (X is downrange)
-        while position.x < self.max_range && position.y > self.inputs.ground_threshold && time < 100.0 {
+        while position.x < self.max_range
+            && position.y > self.inputs.ground_threshold
+            && time < 100.0
+        {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy =
@@ -988,8 +1017,11 @@ impl TrajectorySolver {
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
             // transonic_mach tracking). Each threshold is recorded once, in descending order.
             {
-                let sos = (1.4 * 287.05 * (self.atmosphere.temperature + 273.15)).sqrt();
-                let mach_here = if sos > 0.0 { velocity_magnitude / sos } else { 0.0 };
+                let mach_here = if speed_of_sound > 0.0 {
+                    velocity_magnitude / speed_of_sound
+                } else {
+                    0.0
+                };
                 if !crossed_transonic && mach_here < 1.2 {
                     crossed_transonic = true;
                     transonic_distances.push(position.x);
@@ -1006,9 +1038,6 @@ impl TrajectorySolver {
 
             // Calculate pitch damping if enabled (RK4 solver)
             if self.inputs.enable_pitch_damping {
-                let temp_c = self.atmosphere.temperature;
-                let temp_k = temp_c + 273.15;
-                let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                 let mach = velocity_magnitude / speed_of_sound;
 
                 // Track when we enter transonic
@@ -1029,9 +1058,6 @@ impl TrajectorySolver {
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
                     let velocity_magnitude = velocity.magnitude();
-                    let temp_c = self.atmosphere.temperature;
-                    let temp_k = temp_c + 273.15;
-                    let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                     let mach = velocity_magnitude / speed_of_sound;
 
                     // Calculate spin rate from twist rate and velocity
@@ -1081,22 +1107,22 @@ impl TrajectorySolver {
             let dt = self.time_step;
 
             // k1
-            let acc1 = self.calculate_acceleration(&position, &velocity, air_density, &wind_vector);
+            let acc1 = self.calculate_acceleration(&position, &velocity, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
 
             // k2
             let pos2 = position + velocity * (dt * 0.5);
             let vel2 = velocity + acc1 * (dt * 0.5);
-            let acc2 = self.calculate_acceleration(&pos2, &vel2, air_density, &wind_vector);
+            let acc2 = self.calculate_acceleration(&pos2, &vel2, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
 
             // k3
             let pos3 = position + vel2 * (dt * 0.5);
             let vel3 = velocity + acc2 * (dt * 0.5);
-            let acc3 = self.calculate_acceleration(&pos3, &vel3, air_density, &wind_vector);
+            let acc3 = self.calculate_acceleration(&pos3, &vel3, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
 
             // k4
             let pos4 = position + vel3 * dt;
             let vel4 = velocity + acc3 * dt;
-            let acc4 = self.calculate_acceleration(&pos4, &vel4, air_density, &wind_vector);
+            let acc4 = self.calculate_acceleration(&pos4, &vel4, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
 
             // Update position and velocity
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
@@ -1215,7 +1241,7 @@ impl TrajectorySolver {
 
         // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
         // are immutable); compute once instead of every iteration (mirrors solve_rk4).
-        let air_density = calculate_air_density(&self.atmosphere);
+        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         let wind_vector = Vector3::new(
@@ -1277,8 +1303,11 @@ impl TrajectorySolver {
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
             // transonic_mach tracking). Each threshold is recorded once, in descending order.
             {
-                let sos = (1.4 * 287.05 * (self.atmosphere.temperature + 273.15)).sqrt();
-                let mach_here = if sos > 0.0 { velocity_magnitude / sos } else { 0.0 };
+                let mach_here = if speed_of_sound > 0.0 {
+                    velocity_magnitude / speed_of_sound
+                } else {
+                    0.0
+                };
                 if !crossed_transonic && mach_here < 1.2 {
                     crossed_transonic = true;
                     transonic_distances.push(position.x);
@@ -1296,8 +1325,6 @@ impl TrajectorySolver {
             // Pitch damping (RK45 solver) — track the minimum coefficient and the
             // Mach at which the projectile enters the transonic band (MBA-966).
             if self.inputs.enable_pitch_damping {
-                let temp_k = self.atmosphere.temperature + 273.15;
-                let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                 let mach = velocity_magnitude / speed_of_sound;
                 if transonic_mach.is_none() && mach < 1.2 && mach > 0.8 {
                     transonic_mach = Some(mach);
@@ -1313,8 +1340,6 @@ impl TrajectorySolver {
             // with the variable-step trajectory.
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
-                    let temp_k = self.atmosphere.temperature + 273.15;
-                    let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
                     let mach = velocity_magnitude / speed_of_sound;
 
                     let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
@@ -1339,9 +1364,7 @@ impl TrajectorySolver {
                         nutation_damping_factor: 0.05,
                     };
 
-                    *state = calculate_combined_angular_motion(
-                        &params, state, time, dt, 0.001,
-                    );
+                    *state = calculate_combined_angular_motion(&params, state, time, dt, 0.001);
 
                     if state.yaw_angle.abs() > max_yaw_angle {
                         max_yaw_angle = state.yaw_angle.abs();
@@ -1360,6 +1383,7 @@ impl TrajectorySolver {
                 air_density,
                 &wind_vector,
                 tolerance,
+                (speed_of_sound, resolved_temp_c, resolved_press_hpa),
             );
 
             // Advance state and time by the dt actually used for THIS step. (Previously dt
@@ -1399,8 +1423,7 @@ impl TrajectorySolver {
                     let interp_vel_mag = prev.velocity_magnitude
                         + (velocity.magnitude() - prev.velocity_magnitude) * frac;
                     let interp_time = prev.time + (time - prev.time) * frac;
-                    let interp_ke =
-                        0.5 * self.inputs.bullet_mass * interp_vel_mag * interp_vel_mag;
+                    let interp_ke = 0.5 * self.inputs.bullet_mass * interp_vel_mag * interp_vel_mag;
                     points.push(TrajectoryPoint {
                         time: interp_time,
                         position: interp_pos,
@@ -1493,6 +1516,7 @@ impl TrajectorySolver {
         air_density: f64,
         wind_vector: &Vector3<f64>,
         tolerance: f64,
+        resolved_atmo: (f64, f64, f64), // (speed_of_sound, temp_c, press_hpa)
     ) -> (Vector3<f64>, Vector3<f64>, f64) {
         // Dormand-Prince coefficients
         const A21: f64 = 1.0 / 5.0;
@@ -1532,37 +1556,37 @@ impl TrajectorySolver {
         const B7_ERR: f64 = 1.0 / 40.0;
 
         // Compute RK45 stages
-        let k1_v = self.calculate_acceleration(position, velocity, air_density, wind_vector);
+        let k1_v = self.calculate_acceleration(position, velocity, air_density, wind_vector, resolved_atmo);
         let k1_p = *velocity;
 
         let p2 = position + dt * A21 * k1_p;
         let v2 = velocity + dt * A21 * k1_v;
-        let k2_v = self.calculate_acceleration(&p2, &v2, air_density, wind_vector);
+        let k2_v = self.calculate_acceleration(&p2, &v2, air_density, wind_vector, resolved_atmo);
         let k2_p = v2;
 
         let p3 = position + dt * (A31 * k1_p + A32 * k2_p);
         let v3 = velocity + dt * (A31 * k1_v + A32 * k2_v);
-        let k3_v = self.calculate_acceleration(&p3, &v3, air_density, wind_vector);
+        let k3_v = self.calculate_acceleration(&p3, &v3, air_density, wind_vector, resolved_atmo);
         let k3_p = v3;
 
         let p4 = position + dt * (A41 * k1_p + A42 * k2_p + A43 * k3_p);
         let v4 = velocity + dt * (A41 * k1_v + A42 * k2_v + A43 * k3_v);
-        let k4_v = self.calculate_acceleration(&p4, &v4, air_density, wind_vector);
+        let k4_v = self.calculate_acceleration(&p4, &v4, air_density, wind_vector, resolved_atmo);
         let k4_p = v4;
 
         let p5 = position + dt * (A51 * k1_p + A52 * k2_p + A53 * k3_p + A54 * k4_p);
         let v5 = velocity + dt * (A51 * k1_v + A52 * k2_v + A53 * k3_v + A54 * k4_v);
-        let k5_v = self.calculate_acceleration(&p5, &v5, air_density, wind_vector);
+        let k5_v = self.calculate_acceleration(&p5, &v5, air_density, wind_vector, resolved_atmo);
         let k5_p = v5;
 
         let p6 = position + dt * (A61 * k1_p + A62 * k2_p + A63 * k3_p + A64 * k4_p + A65 * k5_p);
         let v6 = velocity + dt * (A61 * k1_v + A62 * k2_v + A63 * k3_v + A64 * k4_v + A65 * k5_v);
-        let k6_v = self.calculate_acceleration(&p6, &v6, air_density, wind_vector);
+        let k6_v = self.calculate_acceleration(&p6, &v6, air_density, wind_vector, resolved_atmo);
         let k6_p = v6;
 
         let p7 = position + dt * (A71 * k1_p + A73 * k3_p + A74 * k4_p + A75 * k5_p + A76 * k6_p);
         let v7 = velocity + dt * (A71 * k1_v + A73 * k3_v + A74 * k4_v + A75 * k5_v + A76 * k6_v);
-        let k7_v = self.calculate_acceleration(&p7, &v7, air_density, wind_vector);
+        let k7_v = self.calculate_acceleration(&p7, &v7, air_density, wind_vector, resolved_atmo);
         let k7_p = v7;
 
         // 5th order solution
@@ -1606,6 +1630,7 @@ impl TrajectorySolver {
         velocity: &Vector3<f64>,
         air_density: f64,
         wind_vector: &Vector3<f64>,
+        resolved_atmo: (f64, f64, f64), // (speed_of_sound, temp_c, press_hpa) hoisted per-solve
     ) -> Vector3<f64> {
         // Resolve the wind at this point. Downrange-segmented wind (when supplied)
         // takes precedence and is sampled by downrange distance (position.x) per
@@ -1624,11 +1649,11 @@ impl TrajectorySolver {
         let velocity_magnitude = relative_velocity.magnitude();
 
         if velocity_magnitude < 0.001 {
-            return Vector3::new(0.0, -crate::constants::G_ACCEL_MPS2, 0.0);
+            return self.gravity_acceleration();
         }
 
         // Get drag coefficient from drag model (Mach-indexed from drag tables)
-        let cd = self.calculate_drag_coefficient(velocity_magnitude);
+        let cd = self.calculate_drag_coefficient(velocity_magnitude, resolved_atmo.0);
 
         // Convert velocity to fps for BC lookups
         let velocity_fps = velocity_magnitude * 3.28084;
@@ -1665,7 +1690,7 @@ impl TrajectorySolver {
         // This matches the proven formula from fast_trajectory.rs
         // The standard retardation factor converts Cd to drag deceleration
         // Note: velocity_fps already calculated above for BC segment lookup
-        let cd_to_retard = 0.000683 * 0.30; // Standard ballistics constant
+        let cd_to_retard = crate::constants::CD_TO_RETARD;
         let standard_factor = cd * cd_to_retard;
         let density_scale = air_density / 1.225; // Scale relative to standard air (1.225 kg/m³)
 
@@ -1677,8 +1702,9 @@ impl TrajectorySolver {
         // Apply drag opposite to velocity direction
         let drag_acceleration = -a_drag_m_s2 * (relative_velocity / velocity_magnitude);
 
-        // Total acceleration = drag + gravity
-        let mut accel = drag_acceleration + Vector3::new(0.0, -crate::constants::G_ACCEL_MPS2, 0.0);
+        // Total acceleration = drag + gravity. `shooting_angle` rotates gravity into the shot
+        // frame for inclined fire; at 0 deg this is the normal vertical-only gravity vector.
+        let mut accel = drag_acceleration + self.gravity_acceleration();
 
         // Coriolis (Earth rotation). McCoy frame: X=downrange, Y=vertical, Z=lateral,
         // azimuth 0 = North. McCoy frame: X=downrange, Y=vertical, Z=lateral.
@@ -1687,11 +1713,11 @@ impl TrajectorySolver {
                 let omega_earth = 7.2921159e-5_f64; // rad/s
                 let lat = lat_deg.to_radians();
                 let az = self.inputs.shot_azimuth; // compass bearing (0=N), NOT the aiming offset
-                // Earth's angular velocity in the shot frame (X=downrange, Y=up,
-                // Z=lateral). Projecting Omega=(0, Ω cosφ, Ω sinφ) [local E,N,U] onto
-                // the azimuth-rotated shot axes gives a NEGATIVE lateral component:
-                // lateral = downrange × up points East for a North shot, and
-                // Omega·East = -Ω cosφ sin(az). The previous code dropped that sign.
+                                                   // Earth's angular velocity in the shot frame (X=downrange, Y=up,
+                                                   // Z=lateral). Projecting Omega=(0, Ω cosφ, Ω sinφ) [local E,N,U] onto
+                                                   // the azimuth-rotated shot axes gives a NEGATIVE lateral component:
+                                                   // lateral = downrange × up points East for a North shot, and
+                                                   // Omega·East = -Ω cosφ sin(az). The previous code dropped that sign.
                 let omega = Vector3::new(
                     omega_earth * lat.cos() * az.cos(),  // X: downrange
                     omega_earth * lat.sin(),             // Y: vertical
@@ -1712,8 +1738,8 @@ impl TrajectorySolver {
         {
             let (_, spin_rad_s) =
                 crate::spin_drift::calculate_spin_rate(velocity_magnitude, self.inputs.twist_rate);
-            let temp_k = self.atmosphere.temperature + 273.15;
-            let speed_of_sound = (1.4 * 287.05 * temp_k).sqrt();
+            let (speed_of_sound, temp_c, press_hpa) = resolved_atmo;
+            let temp_k = temp_c + 273.15;
             let mach = velocity_magnitude / speed_of_sound;
 
             // Imperial conversions for the stability / yaw-of-repose helpers.
@@ -1727,7 +1753,6 @@ impl TrajectorySolver {
             // MBA-958: apply the canonical linear Miller density correction (T/T0)*(P0/P) to the
             // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.
             // No-op at sea-level standard (15 C, 1013.25 hPa -> factor 1.0).
-            let press_hpa = self.atmosphere.pressure;
             let density_correction = if press_hpa > 0.0 && temp_k > 0.0 {
                 (temp_k / 288.15) * (1013.25 / press_hpa)
             } else {
@@ -1783,13 +1808,7 @@ impl TrajectorySolver {
         accel
     }
 
-    fn calculate_drag_coefficient(&self, velocity: f64) -> f64 {
-        // Calculate speed of sound based on atmospheric temperature
-        let temp_c = self.atmosphere.temperature;
-        let temp_k = temp_c + 273.15;
-        let gamma = 1.4; // Ratio of specific heats for air
-        let r_specific = 287.05; // Specific gas constant for air (J/kg·K)
-        let speed_of_sound = (gamma * r_specific * temp_k).sqrt();
+    fn calculate_drag_coefficient(&self, velocity: f64, speed_of_sound: f64) -> f64 {
         let mach = velocity / speed_of_sound;
 
         // MBA-940: a user-supplied custom drag table is the final Cd, used as-is — no G-model
@@ -1802,43 +1821,12 @@ impl TrajectorySolver {
         // Get drag coefficient from the drag tables (Mach-indexed)
         let base_cd = crate::drag::get_drag_coefficient(mach, &self.inputs.bc_type);
 
-        // Borrowed &'static str for the drag-model name. bc_type.to_string() goes through
-        // Debug and heap-allocates a String on every call; this match is bit-identical
-        // (Display == Debug == variant name) with no per-step allocation.
-        let bc_type_str: &str = match self.inputs.bc_type {
-            crate::DragModel::G1 => "G1",
-            crate::DragModel::G2 => "G2",
-            crate::DragModel::G5 => "G5",
-            crate::DragModel::G6 => "G6",
-            crate::DragModel::G7 => "G7",
-            crate::DragModel::G8 => "G8",
-            crate::DragModel::GI => "GI",
-            crate::DragModel::GS => "GS",
-        };
-
-        // Determine projectile shape for transonic corrections (MBA-949: shared resolver so
-        // derivatives/fast_trajectory honor named shapes too; caliber in INCHES, weight in grains).
-        let projectile_shape = crate::transonic_drag::resolve_projectile_shape(
-            self.inputs.bullet_model.as_deref(),
-            self.inputs.caliber_inches,
-            self.inputs.bullet_mass / 0.00006479891, // kg -> grains
-            bc_type_str,
-        );
-
-        // Apply transonic corrections
-        // Note: Wave drag is disabled because G7/G1 drag functions already include
-        // transonic effects. Adding wave drag on top would double-count the drag rise.
-        // Wave drag should only be enabled for custom drag functions that don't
-        // include transonic behavior.
-        let include_wave_drag = false;
-        let cd = transonic_correction(mach, base_cd, projectile_shape, include_wave_drag);
-
         // MBA-948: honor use_form_factor here too — previously only derivatives.rs applied it,
         // so cli_api and fast_trajectory silently ignored the flag. apply_form_factor_to_drag
         // short-circuits when the flag is false, so this is a no-op for every current consumer
         // (the flag is false on all CLI/FFI/WASM/binding surfaces and defaults false).
         crate::form_factor::apply_form_factor_to_drag(
-            cd,
+            base_cd,
             self.inputs.bullet_model.as_deref(),
             &self.inputs.bc_type,
             self.inputs.use_form_factor,
@@ -1935,9 +1923,21 @@ pub fn run_monte_carlo_with_wind(
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
 
+    let atmosphere = AtmosphericConditions {
+        temperature: base_inputs.temperature,
+        pressure: base_inputs.pressure,
+        humidity: base_inputs.humidity_percent(),
+        altitude: base_inputs.altitude,
+    };
+    let target_hint = params
+        .target_distance
+        .unwrap_or(base_inputs.target_distance);
+    let solver_max_range = target_hint.max(1000.0) * 2.0;
+
     // First, calculate baseline trajectory with no variations
-    let baseline_solver =
-        TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), Default::default());
+    let mut baseline_solver =
+        TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), atmosphere.clone());
+    baseline_solver.set_max_range(solver_max_range);
     let baseline_result = baseline_solver.solve()?;
 
     // Determine target distance: use explicit target or baseline max range
@@ -1961,15 +1961,10 @@ pub fn run_monte_carlo_with_wind(
     // conflation (m/s scaled as radians) — there is no dedicated wind_direction_std_dev field yet.
     // The dead WASM `--wind-dir-std` setter was removed (it set nothing). A proper fix is an
     // API-breaking wind_direction_std_dev on MonteCarloParams plumbed through WASM/FFI/main.
-    let wind_dir_dist =
-        Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1)
-            .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
+    let wind_dir_dist = Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1)
+        .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
     let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
         .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
-
-    // Create distribution for pointing errors (simulates shooter's aiming consistency)
-    let pointing_error_dist = Normal::new(0.0, params.angle_std_dev * target_distance)
-        .map_err(|e| format!("Invalid pointing distribution: {}", e))?;
 
     for _ in 0..params.num_simulations {
         // Create varied inputs
@@ -1986,7 +1981,8 @@ pub fn run_monte_carlo_with_wind(
         };
 
         // Run trajectory
-        let solver = TrajectorySolver::new(inputs, wind, Default::default());
+        let mut solver = TrajectorySolver::new(inputs, wind, atmosphere.clone());
+        solver.set_max_range(solver_max_range);
         match solver.solve() {
             Ok(result) => {
                 // MBA-967: do NOT skip samples that fall short of the target. range/velocity are
@@ -1995,28 +1991,23 @@ pub fn run_monte_carlo_with_wind(
                 // All three result vectors still grow together per sample, so the equal-length FFI
                 // ABI (exposed under one count) is preserved.
                 let deviation = if result.max_range < target_distance {
-                    // MBA-971: this sample never reached the target plane -> a definite MISS.
-                    // Record the downrange shortfall as the (vertical) deviation magnitude: it is
-                    // large (never within a hit radius), finite, and roughly indicates how far
-                    // short the sample fell. Do NOT use position_at_range's clamped ground-impact
-                    // point — when the baseline also falls short it clamps too, so the deviation
-                    // would be spuriously near zero and count as a false hit.
-                    Vector3::new(0.0, -(target_distance - result.max_range), 0.0)
+                    // This sample never reached the target plane -> definite miss. Keep the
+                    // encoded miss finite but far outside any practical target radius.
+                    Vector3::new(0.0, -1.0e9, 0.0)
                 } else {
                     let pos_at_target = match result.position_at_range(target_distance) {
                         Some(p) => p,
                         None => continue, // defensive: skip the whole sample (keeps vectors aligned)
                     };
                     // Deviation from baseline at the SAME target distance (McCoy): X = downrange
-                    // (0 here), Y = vertical (elevation), Z = lateral (windage), plus a pointing
-                    // error to simulate realistic group sizes.
-                    let mut d = Vector3::new(
+                    // (0 here), Y = vertical (elevation), Z = lateral (windage). Muzzle-angle
+                    // sampling already models vertical pointing dispersion, so do not add a
+                    // second independent vertical pointing draw here.
+                    Vector3::new(
                         0.0,
                         pos_at_target.y - baseline_at_target.y,
                         pos_at_target.z - baseline_at_target.z,
-                    );
-                    d.y += pointing_error_dist.sample(&mut rng);
-                    d
+                    )
                 };
 
                 ranges.push(result.max_range);
@@ -2311,24 +2302,6 @@ pub fn estimate_bc_from_trajectory(
     Ok(best_bc)
 }
 
-// Helper function to calculate air density
-fn calculate_air_density(atmosphere: &AtmosphericConditions) -> f64 {
-    // Use the shared atmosphere model so ALL solvers agree on air density. An explicitly-set
-    // pressure/temperature is authoritative; the previous body's extra exp(-altitude/8000) factor
-    // double-counted altitude and ignored humidity. resolve_station_pressure / _temperature pass
-    // explicit values through unchanged, but when either is left at its sea-level default they
-    // return None so altitude drives BOTH the station pressure AND the lapse-rate temperature via
-    // the ICAO standard — otherwise `--altitude` alone gave sea-level density (and, with only the
-    // pressure derived, still 15 °C air, ~7% too thin at 3 km). Humidity (0-100) is always applied.
-    crate::atmosphere::calculate_atmosphere(
-        atmosphere.altitude,
-        crate::atmosphere::resolve_station_temperature(atmosphere.temperature, atmosphere.altitude),
-        crate::atmosphere::resolve_station_pressure(atmosphere.pressure, atmosphere.altitude),
-        atmosphere.humidity,
-    )
-    .0
-}
-
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
@@ -2348,7 +2321,10 @@ mod ground_termination_tests {
             inputs.muzzle_angle = 0.1; // ~5.7 deg: arcs up, then descends past launch level
             inputs.use_rk4 = true;
             inputs.use_adaptive_rk45 = adaptive;
-            assert_eq!(inputs.ground_threshold, -100.0, "default ground_threshold is -100 m");
+            assert_eq!(
+                inputs.ground_threshold, -100.0,
+                "default ground_threshold is -100 m"
+            );
 
             let mut solver = TrajectorySolver::new(
                 inputs,

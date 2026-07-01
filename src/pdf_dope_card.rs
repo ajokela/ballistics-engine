@@ -117,7 +117,7 @@ pub fn calculate_lead_mil(target_speed_mph: f64, time_of_flight_s: f64, range_yd
 /// and most ballistic tools report pressure.
 ///
 /// Formula: PA = 145442 * (1 - (P/29.92)^0.190284)
-///          DA = PA + 120 * (OAT - ISA_temp)
+///          DA = PA + 66.7 * (OAT_F - ISA_temp_F)
 pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f: f64) -> f64 {
     // Calculate pressure altitude from station pressure using barometric formula
     // This is the altitude in standard atmosphere that has the given pressure
@@ -126,8 +126,9 @@ pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f:
     // ISA temperature at pressure altitude (lapse rate: 3.57°F per 1000 ft)
     let isa_temp_f = 59.0 - (pressure_alt / 1000.0) * 3.57;
 
-    // Density altitude = pressure altitude + temperature correction
-    pressure_alt + 120.0 * (temp_f - isa_temp_f)
+    // Density altitude = pressure altitude + temperature correction.
+    // The common 120 ft/degree rule is per degree Celsius; these values are Fahrenheit.
+    pressure_alt + (120.0 * 5.0 / 9.0) * (temp_f - isa_temp_f)
 }
 
 /// Find font file - tries external locations first (for user overrides),
@@ -254,8 +255,12 @@ pub fn generate_dope_card_pdf(
     config: &DopeCardConfig,
     rows: &[DopeCardRow],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let (doc, page1, layer1) =
-        PdfDocument::new(&format!("{} Dope Card", config.rifle_name), Mm(PAGE_WIDTH), Mm(PAGE_HEIGHT), "Layer 1");
+    let (doc, page1, layer1) = PdfDocument::new(
+        &format!("{} Dope Card", config.rifle_name),
+        Mm(PAGE_WIDTH),
+        Mm(PAGE_HEIGHT),
+        "Layer 1",
+    );
 
     // Load font
     let font_data = find_font_file("LiberationSans-Regular")?;
@@ -267,10 +272,10 @@ pub fn generate_dope_card_pdf(
     // Only scale the data table — header/footer stay at base size
     // so they don't overflow or consume disproportionate page space
     let font_scale = config.font_scale.clamp(0.5, 3.0);
-    let header_size = HEADER_FONT_SIZE;           // UNSCALED
+    let header_size = HEADER_FONT_SIZE; // UNSCALED
     let table_size = TABLE_FONT_SIZE * font_scale; // SCALED
-    let footer_size = FOOTER_FONT_SIZE;           // UNSCALED
-    let row_height = ROW_HEIGHT * font_scale;     // SCALED
+    let footer_size = FOOTER_FONT_SIZE; // UNSCALED
+    let row_height = ROW_HEIGHT * font_scale; // SCALED
 
     // Calculate visual rows per page (accounting for header and footer)
     // Each visual row shows 2 data points (left + right columns)
@@ -287,13 +292,30 @@ pub fn generate_dope_card_pdf(
         let (current_page, current_layer) = if page_num == 0 {
             (page1, layer1)
         } else {
-            doc.add_page(Mm(PAGE_WIDTH), Mm(PAGE_HEIGHT), &format!("Page {}", page_num + 1))
+            doc.add_page(
+                Mm(PAGE_WIDTH),
+                Mm(PAGE_HEIGHT),
+                &format!("Page {}", page_num + 1),
+            )
         };
 
         let layer = doc.get_page(current_page).get_layer(current_layer);
 
-        render_page(&layer, &font, &font_bold, config, page_rows, page_num + 1, total_pages,
-                     header_size, table_size, footer_size, row_height, font_scale, config.bold_data)?;
+        render_page(
+            &layer,
+            &font,
+            &font_bold,
+            config,
+            page_rows,
+            page_num + 1,
+            total_pages,
+            header_size,
+            table_size,
+            footer_size,
+            row_height,
+            font_scale,
+            config.bold_data,
+        )?;
     }
 
     let mut buffer = Vec::new();
@@ -319,17 +341,20 @@ fn render_page(
     let mut y = PAGE_HEIGHT - MARGIN;
 
     // Header line 1 (auto-truncate long text)
-    let header1 = truncate_for_header(&format!(
-        "{} Loc: {} DA:{:.0} ft Pressure:{:.2}/{:.0} Temp:{:.0} Alt:{:.0} Wind:{:.0} Mph",
-        config.rifle_name,
-        config.location,
-        config.density_altitude_ft,
-        config.pressure_inhg,
-        config.pressure_hpa,
-        config.temperature_f,
-        config.altitude_ft,
-        config.wind_speed_mph
-    ), 77);
+    let header1 = truncate_for_header(
+        &format!(
+            "{} Loc: {} DA:{:.0} ft Pressure:{:.2}/{:.0} Temp:{:.0} Alt:{:.0} Wind:{:.0} Mph",
+            config.rifle_name,
+            config.location,
+            config.density_altitude_ft,
+            config.pressure_inhg,
+            config.pressure_hpa,
+            config.temperature_f,
+            config.altitude_ft,
+            config.wind_speed_mph
+        ),
+        77,
+    );
     draw_centered_text(layer, font, header_size, y, &header1, COLOR_BLACK);
     y -= 4.0;
 
@@ -370,11 +395,22 @@ fn render_page(
         }
 
         // Draw left side data
-        draw_data_row(layer, data_font, table_x, y, left, true, table_size, font_scale);
+        draw_data_row(
+            layer, data_font, table_x, y, left, true, table_size, font_scale,
+        );
 
         // Draw right side data
         if let Some(r) = right {
-            draw_data_row(layer, data_font, table_x + 4.0 * COL_WIDTH, y, r, false, table_size, font_scale);
+            draw_data_row(
+                layer,
+                data_font,
+                table_x + 4.0 * COL_WIDTH,
+                y,
+                r,
+                false,
+                table_size,
+                font_scale,
+            );
         }
 
         y -= row_height;
@@ -429,7 +465,14 @@ fn draw_row_stripe(layer: &PdfLayerReference, x: f32, y: f32, width: f32, height
     layer.add_polygon(rect);
 }
 
-fn draw_table_header(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32, table_size: f32, font_scale: f32) {
+fn draw_table_header(
+    layer: &PdfLayerReference,
+    font: &IndirectFontRef,
+    x: f32,
+    y: f32,
+    table_size: f32,
+    font_scale: f32,
+) {
     let headers = [
         ("Range", COLOR_BLACK),
         ("Drop", COLOR_RED),
@@ -445,11 +488,29 @@ fn draw_table_header(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, 
     for (i, ((header, color), sub)) in headers.iter().zip(sub_headers.iter()).enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
         draw_text(layer, font, table_size, col_x, y, header, *color, true);
-        draw_text(layer, font, table_size - 1.0, col_x, y - 3.0 * font_scale, sub, *color, true);
+        draw_text(
+            layer,
+            font,
+            table_size - 1.0,
+            col_x,
+            y - 3.0 * font_scale,
+            sub,
+            *color,
+            true,
+        );
     }
 }
 
-fn draw_data_row(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f32, row: &DopeCardRow, _is_left: bool, table_size: f32, font_scale: f32) {
+fn draw_data_row(
+    layer: &PdfLayerReference,
+    font: &IndirectFontRef,
+    x: f32,
+    y: f32,
+    row: &DopeCardRow,
+    _is_left: bool,
+    table_size: f32,
+    font_scale: f32,
+) {
     let values = [
         (row.range_yd.to_string(), COLOR_BLACK),
         (format!("{:.1}", row.drop_mil), COLOR_RED),
@@ -459,7 +520,16 @@ fn draw_data_row(layer: &PdfLayerReference, font: &IndirectFontRef, x: f32, y: f
 
     for (i, (value, color)) in values.iter().enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
-        draw_text(layer, font, table_size, col_x, y - 2.5 * font_scale, value, *color, true);
+        draw_text(
+            layer,
+            font,
+            table_size,
+            col_x,
+            y - 2.5 * font_scale,
+            value,
+            *color,
+            true,
+        );
     }
 }
 
@@ -477,7 +547,7 @@ fn draw_text(
 
     // Approximate centering by estimating text width
     let text_width = if center {
-        text.len() as f32 * size * 0.3  // Rough approximation
+        text.len() as f32 * size * 0.3 // Rough approximation
     } else {
         0.0
     };
@@ -569,14 +639,7 @@ fn get_timestamp() -> String {
 
     format!(
         "{} {} {:02} {:02}:{:02}:{:02} {} UTC {}",
-        day_names[day_of_week],
-        month_names[month],
-        day,
-        hour_12,
-        minutes,
-        seconds,
-        am_pm,
-        year
+        day_names[day_of_week], month_names[month], day, hour_12, minutes, seconds, am_pm, year
     )
 }
 
@@ -609,8 +672,11 @@ mod tests {
         // altitude=2500ft, pressure=27.32inHg (station), temp=55°F
         // Glenn's tool: DA ≈ 2835 ft
         let da = calculate_density_altitude(2500.0, 27.32, 55.0);
-        assert!(da > 2500.0 && da < 3500.0,
-            "DA should be ~3000 ft for near-standard conditions, got {}", da);
+        assert!(
+            da > 2500.0 && da < 3500.0,
+            "DA should be ~3000 ft for near-standard conditions, got {}",
+            da
+        );
 
         // Higher temp should increase DA
         let da_hot = calculate_density_altitude(2500.0, 27.32, 95.0);
@@ -622,7 +688,10 @@ mod tests {
 
         // Standard conditions at sea level: DA ≈ 0
         let da_standard = calculate_density_altitude(0.0, 29.92, 59.0);
-        assert!(da_standard.abs() < 100.0,
-            "Standard conditions should give DA near 0, got {}", da_standard);
+        assert!(
+            da_standard.abs() < 100.0,
+            "Standard conditions should give DA near 0, got {}",
+            da_standard
+        );
     }
 }

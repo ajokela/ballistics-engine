@@ -200,6 +200,7 @@ pub extern "C" fn ballistics_calculate_trajectory(
 
     let inputs = unsafe { &*inputs };
     let ballistic_inputs = convert_inputs(inputs);
+    let twist_rate_in = ballistic_inputs.twist_rate;
 
     let wind_conditions = if wind.is_null() {
         WindConditions::default()
@@ -224,6 +225,18 @@ pub extern "C" fn ballistics_calculate_trajectory(
     };
 
     // Create solver and calculate trajectory
+    let (sample_temp_c, sample_pressure_hpa) = crate::atmosphere::resolve_station_conditions(
+        atmospheric_conditions.temperature,
+        atmospheric_conditions.pressure,
+        atmospheric_conditions.altitude,
+    );
+    let (_, sample_speed_of_sound) = crate::atmosphere::calculate_atmosphere(
+        atmospheric_conditions.altitude,
+        Some(sample_temp_c),
+        Some(sample_pressure_hpa),
+        atmospheric_conditions.humidity,
+    );
+
     let mut solver =
         TrajectorySolver::new(ballistic_inputs, wind_conditions, atmospheric_conditions);
 
@@ -277,8 +290,16 @@ pub extern "C" fn ballistics_calculate_trajectory(
                             energy_joules: sample.energy_j,
                             drop_meters: sample.drop_m,
                             windage_meters: sample.wind_drift_m,
-                            mach: 0.0,          // Would need to calculate from velocity
-                            spin_rate_rps: 0.0, // Not available in TrajectorySample
+                            mach: if sample_speed_of_sound > 0.0 {
+                                sample.velocity_mps / sample_speed_of_sound
+                            } else {
+                                0.0
+                            },
+                            spin_rate_rps: if twist_rate_in > 0.0 {
+                                sample.velocity_mps / (twist_rate_in * 0.0254)
+                            } else {
+                                0.0
+                            },
                         });
                     }
                     let count = ffi_samples.len() as c_int;
@@ -473,7 +494,7 @@ pub extern "C" fn ballistics_quick_trajectory(
             // Find the drop at target distance
             for point in result.points {
                 if point.position[0] >= target_distance {
-                    return -point.position[1]; // Return drop (negative y is drop)
+                    return sight_height - point.position[1];
                 }
             }
             f64::NAN
@@ -486,7 +507,7 @@ pub extern "C" fn ballistics_quick_trajectory(
 #[no_mangle]
 pub extern "C" fn ballistics_monte_carlo(
     inputs: *const FFIBallisticInputs,
-    _atmosphere: *const FFIAtmosphericConditions,
+    atmosphere: *const FFIAtmosphericConditions,
     params: *const FFIMonteCarloParams,
 ) -> *mut FFIMonteCarloResults {
     if inputs.is_null() || params.is_null() {
@@ -507,10 +528,16 @@ pub extern "C" fn ballistics_monte_carlo(
     }
 
     // Convert FFI inputs to internal types
-    let ballistic_inputs = convert_inputs(inputs);
-
-    // Note: Atmospheric conditions are already included in the conversion
-    // from FFIBallisticInputs (temperature, altitude, etc.)
+    let mut ballistic_inputs = convert_inputs(inputs);
+    ballistic_inputs.muzzle_height = 1.5;
+    ballistic_inputs.ground_threshold = 0.0;
+    if !atmosphere.is_null() {
+        let atmo = unsafe { &*atmosphere };
+        ballistic_inputs.temperature = atmo.temperature;
+        ballistic_inputs.pressure = atmo.pressure;
+        ballistic_inputs.humidity = (atmo.humidity / 100.0).clamp(0.0, 1.0);
+        ballistic_inputs.altitude = atmo.altitude;
+    }
 
     // Create Monte Carlo parameters
     let mc_params = MonteCarloParams {
