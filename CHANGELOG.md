@@ -5,6 +5,25 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.2] - 2026-07-04
+
+### Added
+
+- **`--powder-temp-curve`: a measured powder-temperature → muzzle-velocity table.** The
+  linear `--powder-temp-sensitivity` model assumes a constant fps/°F, but real powders are
+  non-linear (temperature-stable powders flatten; others steepen when hot). This flag takes
+  comma-separated `TEMP:VELOCITY` points (e.g. `"40:2620,70:2700,100:2760"`, in °F/fps or
+  °C/m·s⁻¹ per `--units`) and interpolates the muzzle velocity at the ambient `--temperature`,
+  clamped at the endpoints (no extrapolation beyond measured data). When supplied it
+  supersedes the linear sensitivity model. It is data-driven — the shooter enters points they
+  actually chronographed — rather than a guessed curve shape, and mirrors the existing
+  `bc_segments` interpolation design.
+- The curve composes with `--auto-zero`: with `--zero-temperature`, the zero angle is solved
+  using the curve's velocity at the zeroing-day temperature (an explicit `--zero-velocity`
+  still takes precedence). Wired into both the native CLI and the WASM command surface, with
+  integration tests for exact points, interpolation, endpoint clamping, and backward
+  compatibility.
+
 ## [0.22.1] - 2026-07-04
 
 ### Added

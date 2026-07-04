@@ -210,6 +210,9 @@ impl WasmBallistics {
         } else {
             21.0
         };
+        // Optional measured powder-temperature -> velocity curve ("TEMP:VEL,..."),
+        // parsed after unit resolution. Supersedes the linear sensitivity model.
+        let mut powder_temp_curve_str: Option<String> = None;
 
         // Zero-day condition overrides. When --auto-zero is used, these let the zero
         // ANGLE be solved under the conditions the rifle was actually zeroed in (a
@@ -466,6 +469,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--powder-temp-curve" => {
+                    if i + 1 < args.len() {
+                        powder_temp_curve_str = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
                 "--zero-velocity" => {
                     if i + 1 < args.len() {
                         zero_velocity = Some(
@@ -603,6 +612,44 @@ impl WasmBallistics {
             UnitSystem::Imperial => (powder_temp - 32.0) * 5.0 / 9.0,
             UnitSystem::Metric => powder_temp,
         };
+        // Parse the optional powder-temperature -> velocity curve into SI points.
+        if let Some(curve_str) = &powder_temp_curve_str {
+            let mut pts: Vec<(f64, f64)> = Vec::new();
+            for raw in curve_str.split(',') {
+                let part = raw.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let (t_str, v_str) = part.split_once(':').ok_or_else(|| {
+                    JsValue::from_str("--powder-temp-curve point must be TEMP:VELOCITY")
+                })?;
+                let t: f64 = t_str
+                    .trim()
+                    .parse()
+                    .map_err(|_| JsValue::from_str("Invalid temperature in --powder-temp-curve"))?;
+                let v: f64 = v_str
+                    .trim()
+                    .parse()
+                    .map_err(|_| JsValue::from_str("Invalid velocity in --powder-temp-curve"))?;
+                if !(v > 0.0) {
+                    return Err(JsValue::from_str(
+                        "--powder-temp-curve velocity must be positive",
+                    ));
+                }
+                let (t_c, v_ms) = match units {
+                    UnitSystem::Imperial => ((t - 32.0) * 5.0 / 9.0, v * 0.3048),
+                    UnitSystem::Metric => (t, v),
+                };
+                pts.push((t_c, v_ms));
+            }
+            if pts.len() < 2 {
+                return Err(JsValue::from_str(
+                    "--powder-temp-curve needs at least 2 TEMP:VELOCITY points",
+                ));
+            }
+            pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            inputs.powder_temp_curve = Some(pts);
+        }
 
         // Set wind conditions
         let mut wind = WindConditions::default();

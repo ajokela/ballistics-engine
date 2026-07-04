@@ -120,6 +120,13 @@ pub struct BallisticInputs {
     pub use_powder_sensitivity: bool,
     pub powder_temp_sensitivity: f64,
     pub powder_temp: f64,           // Celsius
+    /// Optional measured powder-temperature -> muzzle-velocity curve, as
+    /// (temperature_celsius, muzzle_velocity_m_s) points sorted ascending by
+    /// temperature. When present it supersedes the linear `powder_temp_sensitivity`
+    /// model: the muzzle velocity is interpolated from this table at the ambient
+    /// `temperature` (clamped to the endpoints — no extrapolation beyond measured
+    /// data). This is the data-driven, non-linear alternative to the constant slope.
+    pub powder_temp_curve: Option<Vec<(f64, f64)>>,
     pub tipoff_yaw: f64,            // radians
     pub tipoff_decay_distance: f64, // meters
     pub use_bc_segments: bool,
@@ -215,6 +222,7 @@ impl Default for BallisticInputs {
             use_powder_sensitivity: false,
             powder_temp_sensitivity: 0.0,
             powder_temp: 15.0,
+            powder_temp_curve: None,
             tipoff_yaw: 0.0,
             tipoff_decay_distance: 50.0,
             use_bc_segments: false,
@@ -238,6 +246,48 @@ impl Default for BallisticInputs {
             bc_type_str: None,
         }
     }
+}
+
+/// Interpolate a muzzle velocity (m/s) from a measured powder-temperature curve at
+/// `temp_c` (Celsius). `curve` is `(temperature_celsius, velocity_m_s)` points; it is
+/// sorted ascending by temperature before use. Values below the first point or above
+/// the last are CLAMPED to the endpoint velocity (no extrapolation beyond measured
+/// data), and segments are linearly interpolated. A single point yields a constant.
+pub fn interpolate_powder_temp_curve(curve: &[(f64, f64)], temp_c: f64) -> f64 {
+    debug_assert!(!curve.is_empty());
+    if curve.is_empty() {
+        return 0.0;
+    }
+    // Defensive: accept unsorted input by sorting a local copy only when needed.
+    // Callers (CLI/WASM parsers) already sort, so the common path is a no-op scan.
+    let mut sorted;
+    let pts: &[(f64, f64)] = if curve.windows(2).all(|w| w[0].0 <= w[1].0) {
+        curve
+    } else {
+        sorted = curve.to_vec();
+        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        &sorted
+    };
+    let n = pts.len();
+    if temp_c <= pts[0].0 {
+        return pts[0].1; // clamp below the coldest measured point
+    }
+    if temp_c >= pts[n - 1].0 {
+        return pts[n - 1].1; // clamp above the hottest measured point
+    }
+    for i in 1..n {
+        let (t0, v0) = pts[i - 1];
+        let (t1, v1) = pts[i];
+        if temp_c <= t1 {
+            let span = t1 - t0;
+            if span.abs() < f64::EPSILON {
+                return v1; // coincident temps: avoid divide-by-zero, take the upper
+            }
+            let f = (temp_c - t0) / span;
+            return v0 + f * (v1 - v0);
+        }
+    }
+    pts[n - 1].1
 }
 
 // Wind conditions
@@ -372,13 +422,20 @@ impl TrajectorySolver {
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
         inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
 
-        // Apply powder-temperature sensitivity to the muzzle velocity before
-        // integration (MBA-963). Previously this only happened on the WASM path,
-        // so the native CLI solve ignored --use-powder-sensitivity entirely.
-        // All quantities are canonical SI here: powder_temp_sensitivity is in
-        // (m/s) per degree Celsius and the temperatures are in Celsius, so the
-        // adjustment is a simple additive shift matching wasm.rs.
-        if inputs.use_powder_sensitivity {
+        // Resolve the muzzle velocity for the ambient temperature before integration.
+        // A measured powder-temperature -> velocity curve (data-driven, non-linear)
+        // takes precedence when supplied; otherwise fall back to the linear
+        // powder-temperature-sensitivity model (MBA-963). Both operate in canonical
+        // SI (Celsius, m/s) and are applied here so every solver built from these
+        // inputs — the main trajectory AND the zero-angle search — sees the same
+        // temperature-resolved velocity. In particular, when a zero solve passes the
+        // zero-day temperature, the curve automatically yields the zero-day velocity.
+        if let Some(curve) = inputs.powder_temp_curve.as_ref() {
+            if !curve.is_empty() {
+                // Absolute override (idempotent): interpolate at the ambient temp.
+                inputs.muzzle_velocity = interpolate_powder_temp_curve(curve, inputs.temperature);
+            }
+        } else if inputs.use_powder_sensitivity {
             let temp_delta_c = inputs.temperature - inputs.powder_temp;
             inputs.muzzle_velocity += inputs.powder_temp_sensitivity * temp_delta_c;
         }
