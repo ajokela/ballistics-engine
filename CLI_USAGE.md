@@ -398,6 +398,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --zero-pressure | Zero-day barometric pressure (auto-zero only) | shot-day pressure | inHg | hPa |
 | --zero-humidity | Zero-day relative humidity (auto-zero only) | shot-day humidity | percent | percent |
 | --zero-altitude | Zero-day altitude (auto-zero only) | shot-day altitude | feet | meters |
+| --powder-temp-curve | Measured `TEMP:VEL,...` powder-temp→velocity table (interpolated at ambient temp, clamped; overrides --powder-temp-sensitivity) | none | °F & fps | °C & m/s |
 | --sight-height | Sight height above bore | 0.05 | yards | meters |
 | --bore-height | Bore height above ground | 5 | feet | meters |
 | --ignore-ground-impact | Disable ground impact detection | false | - | - |

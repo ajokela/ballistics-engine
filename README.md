@@ -171,6 +171,35 @@ shot-day value, so leaving them all off reproduces the previous behavior exactly
 | `--zero-humidity` | Relative humidity on the zeroing day | percent |
 | `--zero-altitude` | Altitude on the zeroing day | feet / meters |
 
+#### Powder Temperature
+
+Propellant temperature changes muzzle velocity. Two models are available:
+
+**Linear** — a constant sensitivity (fps or m/s per degree) applied relative to the
+temperature the load was chronographed at:
+
+```bash
+./ballistics trajectory -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+  --temperature 85 --use-powder-sensitivity \
+  --powder-temp-sensitivity 1.2 --powder-temp 70   # +1.2 fps per F above 70 F
+```
+
+**Measured curve (non-linear)** — real powders aren't perfectly linear (temperature-
+stable powders flatten; others steepen when hot). If you've chronographed the load at
+several temperatures, pass the points directly and the muzzle velocity is interpolated
+at the ambient `--temperature` (clamped at the endpoints — no extrapolation). This
+**overrides** `--powder-temp-sensitivity` when supplied:
+
+```bash
+./ballistics trajectory -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+  --temperature 85 \
+  --powder-temp-curve "40:2620,70:2700,100:2760"   # TEMP:VELOCITY points
+```
+
+The curve also composes with `--auto-zero`: if you supply `--zero-temperature`, the
+zero angle is solved using the curve's velocity at the zeroing-day temperature (unless
+you override it with an explicit `--zero-velocity`).
+
 #### Bore Height and Ground Impact
 
 Control bore height above ground and ground impact detection:

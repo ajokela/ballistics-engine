@@ -568,6 +568,15 @@ enum Commands {
         #[arg(long, default_value = "70.0")]
         powder_temp: f64,
 
+        /// Measured powder-temperature -> muzzle-velocity curve as comma-separated
+        /// TEMP:VELOCITY points, e.g. "40:2620,70:2700,100:2760" (temps in F/C,
+        /// velocities in fps / m·s⁻¹ per --units). The muzzle velocity is interpolated
+        /// from this table at the ambient --temperature (clamped at the endpoints, no
+        /// extrapolation). Data-driven, non-linear alternative that OVERRIDES
+        /// --powder-temp-sensitivity when supplied.
+        #[arg(long = "powder-temp-curve", value_name = "TEMP:VEL,...")]
+        powder_temp_curve: Option<String>,
+
         // Zero-day condition overrides for --auto-zero. When supplied, the zero ANGLE is
         // solved under these conditions (the day/velocity the rifle was actually zeroed in)
         // while the trajectory runs under the current shot-day conditions. Any flag left
@@ -1666,6 +1675,8 @@ struct TrajectoryConfig {
     use_powder_sensitivity: bool,
     powder_temp_sensitivity: f64,
     powder_temp: f64,
+    // Optional measured (temperature_celsius, muzzle_velocity_m_s) curve; SI, sorted.
+    powder_temp_curve: Option<Vec<(f64, f64)>>,
 
     // PDF metadata
     pdf_metadata: Option<PdfMetadata>,
@@ -2122,6 +2133,59 @@ fn parse_drag_model_arg(s: &str) -> DragModelArg {
     }
 }
 
+/// Parse a `--powder-temp-curve` value `"TEMP:VEL,TEMP:VEL,..."` into engine-canonical
+/// `(temperature_celsius, muzzle_velocity_m_s)` points, converting from the CLI display
+/// units. Points are sorted ascending by temperature; at least two distinct-temperature
+/// points are required.
+fn parse_powder_temp_curve(s: &str, units: UnitSystem) -> Result<Vec<(f64, f64)>, String> {
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    for (i, raw) in s.split(',').enumerate() {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (t_str, v_str) = part.split_once(':').ok_or_else(|| {
+            format!(
+                "--powder-temp-curve point {} '{}' must be TEMP:VELOCITY",
+                i + 1,
+                part
+            )
+        })?;
+        let t: f64 = t_str
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid temperature '{}' in --powder-temp-curve", t_str.trim()))?;
+        let v: f64 = v_str
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid velocity '{}' in --powder-temp-curve", v_str.trim()))?;
+        if !(v > 0.0) {
+            return Err(format!(
+                "--powder-temp-curve velocity must be positive (got {})",
+                v
+            ));
+        }
+        // Convert to SI: absolute temperature F->C and velocity fps->m/s (metric passes through).
+        pts.push((
+            UnitConverter::temperature_to_metric(t, units),
+            UnitConverter::velocity_to_metric(v, units),
+        ));
+    }
+    if pts.len() < 2 {
+        return Err(format!(
+            "--powder-temp-curve needs at least 2 TEMP:VELOCITY points (got {})",
+            pts.len()
+        ));
+    }
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for w in pts.windows(2) {
+        if (w[0].0 - w[1].0).abs() < f64::EPSILON {
+            return Err("--powder-temp-curve has duplicate temperatures".to_string());
+        }
+    }
+    Ok(pts)
+}
+
 /// Parse a `--wind-segment` value `"SPEED:ANGLE:UNTIL_DISTANCE"` into an engine
 /// `WindSegment` `(speed_kmh, angle_deg, until_distance_m)`. SPEED and UNTIL_DISTANCE
 /// are interpreted in the CLI display units (mph & yards imperial, m/s & meters
@@ -2197,6 +2261,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             use_powder_sensitivity,
             powder_temp_sensitivity,
             powder_temp,
+            powder_temp_curve,
             zero_velocity,
             zero_temperature,
             zero_pressure,
@@ -2440,6 +2505,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 0.3048 / (5.0 / 9.0)
             } else {
                 powder_temp_sensitivity
+            };
+
+            // Parse the optional measured powder-temperature -> velocity curve into
+            // canonical SI points. When present it supersedes the linear sensitivity
+            // model at solve time (see cli_api::TrajectorySolver::new).
+            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref()
+            {
+                Some(s) => Some(parse_powder_temp_curve(s, cli.units)?),
+                None => None,
             };
 
             // Apply truing adjustments
@@ -2933,6 +3007,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     temperature: zero_temperature_metric,
                     pressure: zero_pressure_metric,
                     humidity: zero_humidity_value,
+                    // Let a powder curve set the zero-day velocity at the zero-day
+                    // temperature — UNLESS an explicit --zero-velocity was given, which
+                    // takes precedence (the constructor would otherwise override it).
+                    powder_temp_curve: if zero_velocity.is_some() {
+                        None
+                    } else {
+                        powder_temp_curve_si.clone()
+                    },
                     ..Default::default()
                 };
 
@@ -3021,6 +3103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 use_powder_sensitivity,
                 powder_temp_sensitivity,
                 powder_temp,
+                powder_temp_curve: powder_temp_curve_si.clone(),
                 pdf_metadata: pdf_metadata.clone(),
             };
 
@@ -3164,6 +3247,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             / UnitConverter::temperature_delta_to_metric(1.0, cli.units)
                                     } else { 0.0 },
                                     powder_temp: UnitConverter::temperature_to_metric(powder_temp, cli.units),
+                                    powder_temp_curve: powder_temp_curve_si.clone(),
                                     tipoff_yaw: 0.0,
                                     tipoff_decay_distance: 50.0,
                                     use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
@@ -4584,6 +4668,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         use_powder_sensitivity,
         powder_temp_sensitivity,
         powder_temp,
+        ref powder_temp_curve,
         ref pdf_metadata,
     } = *config;
 
@@ -4657,6 +4742,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             0.0
         },
         powder_temp: UnitConverter::temperature_to_metric(powder_temp, units),
+        powder_temp_curve: powder_temp_curve.clone(),
         tipoff_yaw: 0.0,
         tipoff_decay_distance: 50.0,
         // Use BC segments if: 1) table generated them (parameter), 2) --use-bc-segments flag, 3) neither
