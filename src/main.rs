@@ -568,6 +568,31 @@ enum Commands {
         #[arg(long, default_value = "70.0")]
         powder_temp: f64,
 
+        // Zero-day condition overrides for --auto-zero. When supplied, the zero ANGLE is
+        // solved under these conditions (the day/velocity the rifle was actually zeroed in)
+        // while the trajectory runs under the current shot-day conditions. Any flag left
+        // unset falls back to the corresponding shot-day value (backward compatible).
+        /// Zero-day muzzle velocity for --auto-zero (fps imperial / m·s⁻¹ metric). Use when the
+        /// rifle was zeroed at a different velocity than this shot (e.g. a powder-temp/velocity table).
+        #[arg(long, value_parser = f64_range(0.0, 6000.0))]
+        zero_velocity: Option<f64>,
+
+        /// Zero-day air temperature for --auto-zero (°F imperial / °C metric)
+        #[arg(long, allow_hyphen_values = true)]
+        zero_temperature: Option<f64>,
+
+        /// Zero-day barometric pressure for --auto-zero (inHg imperial / hPa metric)
+        #[arg(long)]
+        zero_pressure: Option<f64>,
+
+        /// Zero-day relative humidity for --auto-zero (percent, 0-100)
+        #[arg(long, value_parser = f64_range(0.0, 100.0))]
+        zero_humidity: Option<f64>,
+
+        /// Zero-day altitude for --auto-zero (feet imperial / meters metric)
+        #[arg(long, allow_hyphen_values = true)]
+        zero_altitude: Option<f64>,
+
         // Online Mode Parameters (feature-gated)
         /// Use Flask API for ML-enhanced trajectory calculation
         #[cfg(feature = "online")]
@@ -2172,6 +2197,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             use_powder_sensitivity,
             powder_temp_sensitivity,
             powder_temp,
+            zero_velocity,
+            zero_temperature,
+            zero_pressure,
+            zero_humidity,
+            zero_altitude,
             #[cfg(feature = "online")]
             online,
             #[cfg(feature = "online")]
@@ -2845,9 +2875,44 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let zero_distance_metric =
                     UnitConverter::distance_to_metric(zero_distance, cli.units);
 
+                // Resolve the condition set the zero ANGLE is solved under: shot-day values
+                // overridden by any --zero-* flags supplied. This models a rifle zeroed on a
+                // different day (different air density) and/or at a different muzzle velocity
+                // (e.g. from a powder-temp/velocity table), while the trajectory below still
+                // runs under the current shot-day conditions. Omitting all --zero-* flags
+                // falls through to the shot-day values, reproducing the prior behavior.
+                let zero_velocity_metric = match zero_velocity {
+                    Some(v) => UnitConverter::velocity_to_metric(v, cli.units),
+                    None => velocity_metric,
+                };
+                let zero_temperature_metric = match zero_temperature {
+                    Some(t) => UnitConverter::temperature_to_metric(t, cli.units),
+                    None => temperature_metric,
+                };
+                let zero_pressure_metric = match zero_pressure {
+                    Some(p) => UnitConverter::pressure_to_metric(p, cli.units),
+                    None => pressure_metric,
+                };
+                let zero_humidity_value = zero_humidity.unwrap_or(final_humidity);
+                let zero_altitude_metric = match zero_altitude {
+                    Some(a) => UnitConverter::altitude_to_metric(a, cli.units),
+                    None => altitude_metric,
+                };
+                if zero_velocity.is_some()
+                    || zero_temperature.is_some()
+                    || zero_pressure.is_some()
+                    || zero_humidity.is_some()
+                    || zero_altitude.is_some()
+                {
+                    eprintln!(
+                        "Solving zero angle under supplied zero-day conditions (velocity/atmosphere \
+                         may differ from the shot-day trajectory)."
+                    );
+                }
+
                 // Create inputs for zero calculation
                 let zero_inputs = BallisticInputs {
-                    muzzle_velocity: velocity_metric,
+                    muzzle_velocity: zero_velocity_metric,
                     bc_value: trued_bc,
                     bc_type: match drag_model {
                         DragModelArg::G1 => DragModel::G1,
@@ -2864,10 +2929,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sight_height: sight_height_metric,
                     muzzle_height: bore_height_metric,
                     ground_threshold: 0.0,
-                    altitude: altitude_metric,
-                    temperature: temperature_metric,
-                    pressure: pressure_metric,
-                    humidity: final_humidity,
+                    altitude: zero_altitude_metric,
+                    temperature: zero_temperature_metric,
+                    pressure: zero_pressure_metric,
+                    humidity: zero_humidity_value,
                     ..Default::default()
                 };
 
@@ -2876,10 +2941,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     direction: final_wind_direction.to_radians(),
                 };
                 let zero_atmosphere = AtmosphericConditions {
-                    temperature: temperature_metric,
-                    pressure: pressure_metric,
-                    humidity: final_humidity,
-                    altitude: altitude_metric,
+                    temperature: zero_temperature_metric,
+                    pressure: zero_pressure_metric,
+                    humidity: zero_humidity_value,
+                    altitude: zero_altitude_metric,
                     ..Default::default()
                 };
 

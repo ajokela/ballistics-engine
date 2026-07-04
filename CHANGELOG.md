@@ -5,6 +5,26 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1] - 2026-07-04
+
+### Added
+
+- **Zero-day condition overrides for `--auto-zero`.** New optional flags let the zero
+  **angle** be solved under the conditions the rifle was actually zeroed in, while the
+  trajectory runs under the current shot-day conditions — correctly modeling the point-of-
+  impact shift when you sight in on one day/velocity and shoot on another (e.g. a cold vs.
+  warm powder temperature drawn from a powder-temp/velocity table):
+  - `--zero-velocity` — zero-day muzzle velocity (fps / m·s⁻¹)
+  - `--zero-temperature` — zero-day air temperature (°F / °C)
+  - `--zero-pressure` — zero-day barometric pressure (inHg / hPa)
+  - `--zero-humidity` — zero-day relative humidity (percent)
+  - `--zero-altitude` — zero-day altitude (feet / meters)
+
+  Each flag is independently optional; any omitted flag falls back to the corresponding
+  shot-day value, so supplying none of them reproduces the previous single-condition
+  behavior exactly (verified: zero output diff). Wired into both the native CLI and the
+  WASM command surface.
+
 ## [0.22.0] - 2026-07-01
 
 A large correctness pass from an adversarial logic/math audit of the whole crate (44

@@ -211,6 +211,19 @@ impl WasmBallistics {
             21.0
         };
 
+        // Zero-day condition overrides. When --auto-zero is used, these let the zero
+        // ANGLE be solved under the conditions the rifle was actually zeroed in (a
+        // different day: air temperature, pressure, humidity, altitude, and — via the
+        // caller's own powder-temp/velocity table — muzzle velocity), while the
+        // trajectory itself runs under the current shot-day conditions. Any flag left
+        // unset falls back to the shot-day value, so omitting all of them reproduces the
+        // previous single-condition behavior exactly (backward compatible).
+        let mut zero_velocity: Option<f64> = None;
+        let mut zero_temperature: Option<f64> = None;
+        let mut zero_pressure: Option<f64> = None;
+        let mut zero_humidity: Option<f64> = None;
+        let mut zero_altitude: Option<f64> = None;
+
         // Parse arguments
         let mut i = 0;
         while i < args.len() {
@@ -453,6 +466,56 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--zero-velocity" => {
+                    if i + 1 < args.len() {
+                        zero_velocity = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero velocity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--zero-temperature" => {
+                    if i + 1 < args.len() {
+                        zero_temperature = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero temperature"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--zero-pressure" => {
+                    if i + 1 < args.len() {
+                        zero_pressure = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero pressure"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--zero-humidity" => {
+                    if i + 1 < args.len() {
+                        zero_humidity = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero humidity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--zero-altitude" => {
+                    if i + 1 < args.len() {
+                        zero_altitude = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero altitude"))?,
+                        );
+                        i += 1;
+                    }
+                }
                 _ => {}
             }
             i += 1;
@@ -583,24 +646,77 @@ impl WasmBallistics {
                 UnitSystem::Metric => zero_distance,
             };
 
+            // Build the condition set the zero ANGLE is solved under. It starts from the
+            // shot-day inputs/atmosphere and is overridden only by whichever --zero-*
+            // flags the caller supplied, so a rifle zeroed on a different day (different
+            // air density and/or muzzle velocity) is modeled correctly while the
+            // trajectory below still runs under the current shot-day conditions.
+            let mut zero_inputs = inputs.clone();
+            let mut zero_atmosphere = atmosphere.clone();
+            let mut zero_day_overridden = false;
+            if let Some(zv) = zero_velocity {
+                zero_inputs.muzzle_velocity = match units {
+                    UnitSystem::Imperial => zv * 0.3048, // fps to m/s
+                    UnitSystem::Metric => zv,
+                };
+                zero_day_overridden = true;
+            }
+            if let Some(zt) = zero_temperature {
+                let t_c = match units {
+                    UnitSystem::Imperial => (zt - 32.0) * 5.0 / 9.0, // F to C
+                    UnitSystem::Metric => zt,
+                };
+                zero_atmosphere.temperature = t_c;
+                zero_inputs.temperature = t_c;
+                zero_day_overridden = true;
+            }
+            if let Some(zp) = zero_pressure {
+                let p_hpa = match units {
+                    UnitSystem::Imperial => zp * 33.863886666667, // inHg to hPa
+                    UnitSystem::Metric => zp,
+                };
+                zero_atmosphere.pressure = p_hpa;
+                zero_inputs.pressure = p_hpa;
+                zero_day_overridden = true;
+            }
+            if let Some(zh) = zero_humidity {
+                zero_atmosphere.humidity = zh;
+                zero_inputs.humidity = (zh / 100.0).clamp(0.0, 1.0);
+                zero_day_overridden = true;
+            }
+            if let Some(za) = zero_altitude {
+                let a_m = match units {
+                    UnitSystem::Imperial => za * 0.3048, // feet to meters
+                    UnitSystem::Metric => za,
+                };
+                zero_atmosphere.altitude = a_m;
+                zero_inputs.altitude = a_m;
+                zero_day_overridden = true;
+            }
+
             match calculate_zero_angle_with_conditions(
-                inputs.clone(),
+                zero_inputs.clone(),
                 zero_distance_m,
-                inputs.muzzle_height + inputs.sight_height, // Zero crosses the line of sight (matches CLI)
+                zero_inputs.muzzle_height + zero_inputs.sight_height, // Zero crosses the line of sight (matches CLI)
                 wind.clone(),
-                atmosphere.clone(),
+                zero_atmosphere.clone(),
             ) {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
                     let moa_adjustment = zero_angle * 180.0 / std::f64::consts::PI * 60.0;
                     let mrad_adjustment = zero_angle * 1000.0;
                     zero_info = format!(
-                        "Rifle zeroed at {} {} (Adjustment: {:.2} MOA / {:.2} mrad up)\n\n",
+                        "Rifle zeroed at {} {}{} (Adjustment: {:.2} MOA / {:.2} mrad up)\n\n",
                         zero_distance,
                         if units == UnitSystem::Imperial {
                             "yards"
                         } else {
                             "meters"
+                        },
+                        if zero_day_overridden {
+                            " under supplied zero-day conditions"
+                        } else {
+                            ""
                         },
                         moa_adjustment,
                         mrad_adjustment
