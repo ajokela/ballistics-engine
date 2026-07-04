@@ -393,6 +393,11 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | -d, --diameter | Projectile diameter | Required | inches | mm |
 | --drag-model | Drag model (g1/g7) | g1 | - | - |
 | --auto-zero | Auto-zero distance | None | yards | meters |
+| --zero-velocity | Zero-day muzzle velocity (auto-zero only) | shot-day velocity | fps | m/s |
+| --zero-temperature | Zero-day air temperature (auto-zero only) | shot-day temperature | °F | °C |
+| --zero-pressure | Zero-day barometric pressure (auto-zero only) | shot-day pressure | inHg | hPa |
+| --zero-humidity | Zero-day relative humidity (auto-zero only) | shot-day humidity | percent | percent |
+| --zero-altitude | Zero-day altitude (auto-zero only) | shot-day altitude | feet | meters |
 | --sight-height | Sight height above bore | 0.05 | yards | meters |
 | --bore-height | Bore height above ground | 5 | feet | meters |
 | --ignore-ground-impact | Disable ground impact detection | false | - | - |

@@ -138,6 +138,39 @@ Automatically calculate and apply the zero angle for a specific distance:
   --sight-height 0.055  # 2.2 inches in yards
 ```
 
+#### Zero-Day Conditions (zero shift)
+
+A rifle's zero is a fixed barrel angle set on the day you sighted in. If you later shoot
+in different weather — or with a different muzzle velocity (e.g. a cold vs. warm powder
+temperature) — the point of impact shifts. By default `--auto-zero` solves the zero angle
+using the same conditions you pass for the shot, which assumes you zeroed in today's
+conditions. The `--zero-*` flags let you decouple the two: the zero **angle** is solved
+under the conditions the rifle was actually zeroed in, while the trajectory itself runs
+under the current shot-day conditions.
+
+```bash
+# Zeroed on a cold morning (28 F) at 2600 fps; shooting this afternoon at 85 F / 2700 fps.
+# The zero angle is solved for the cold/slow load, then the warm/fast trajectory is
+# computed against it — so the dope correctly shows the point of impact drifting high.
+./ballistics trajectory \
+  -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+  --temperature 85 --pressure 29.92 \
+  --auto-zero 100 --max-range 1000 --full \
+  --zero-velocity 2600 \
+  --zero-temperature 28
+```
+
+Available overrides (each independently optional; any omitted flag falls back to the
+shot-day value, so leaving them all off reproduces the previous behavior exactly):
+
+| Flag | Meaning | Units (imperial / metric) |
+|------|---------|---------------------------|
+| `--zero-velocity` | Muzzle velocity on the zeroing day | fps / m·s⁻¹ |
+| `--zero-temperature` | Air temperature on the zeroing day | °F / °C |
+| `--zero-pressure` | Barometric pressure on the zeroing day | inHg / hPa |
+| `--zero-humidity` | Relative humidity on the zeroing day | percent |
+| `--zero-altitude` | Altitude on the zeroing day | feet / meters |
+
 #### Bore Height and Ground Impact
 
 Control bore height above ground and ground impact detection:

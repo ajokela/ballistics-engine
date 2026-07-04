@@ -114,3 +114,5 @@ glenn_update_bc5d.md
 
 # Superpowers planning/spec artifacts (not part of the crate or repo)
 docs/superpowers/
+ADV_ISSUES-JUL1-2026.md
+MIPS_BUILD_NOTES.md
