@@ -2155,8 +2155,8 @@ pub fn calculate_zero_angle_with_conditions(
     // Use only positive angles to ensure proper ballistic arc (upward trajectory)
     let mut low_angle = 0.0; // radians (horizontal)
     let mut high_angle = 0.2; // radians (about 11 degrees)
-    let tolerance = 0.00001; // radians
-    let max_iterations = 50;
+    let tolerance = 1e-7; // radians
+    let max_iterations = 60;
 
     // MBA-194: Validate bracketing before starting binary search
     // Check that the target height is actually between low and high angle trajectories
@@ -2253,8 +2253,11 @@ pub fn calculate_zero_angle_with_conditions(
             Some(height) => {
                 let error = height - target_height;
                 // MBA-193: Check height error FIRST (primary convergence criterion)
-                // Height accuracy is what matters for zeroing - angle tolerance is secondary
-                if error.abs() < 0.001 {
+                // Height accuracy is what matters for zeroing - angle tolerance is secondary.
+                // 0.0001 m (0.1 mm) at the zero distance: fine enough that the (small)
+                // zero-day atmosphere effect on a short zero still resolves the zero angle
+                // instead of quantizing two very different atmospheres to an identical angle.
+                if error.abs() < 0.0001 {
                     return Ok(mid_angle);
                 }
 

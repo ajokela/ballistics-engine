@@ -155,3 +155,24 @@ fn zeroed_hot_and_fast_prints_low() {
         );
     }
 }
+
+/// Regression (Bero/David): extreme zero-day atmosphere at a SHORT (100 yd) zero must
+/// still change the trajectory. A 100 yd zero is nearly density-independent so the effect
+/// is small, but the zero solve's convergence must be fine enough that it doesn't quantize
+/// two very different atmospheres to a byte-identical zero angle (it used to converge at
+/// only 1 mm of height, which rounded the effect to zero at short zeros).
+#[test]
+fn zero_day_atmosphere_resolves_at_short_zero() {
+    let base = run_traj(&[]); // run_traj already zeroes at 100 yd
+    let extreme = run_traj(&[
+        "--zero-temperature", "20", "--zero-pressure", "20", "--zero-humidity", "90",
+        "--zero-altitude", "12000",
+    ]);
+    // Measure near the far end of run_traj's 300 yd range.
+    let far = 290.0;
+    let diff = (height_at(&base, far) - height_at(&extreme, far)).abs();
+    assert!(
+        diff > 0.001, // yards (~0.036"); the real effect here is ~0.1"
+        "extreme zero-day atmosphere must change the come-up at {far} yd, got diff {diff} yd"
+    );
+}
