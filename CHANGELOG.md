@@ -5,6 +5,18 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.4] - 2026-07-05
+
+### Fixed
+
+- **The WASM command surface now rejects unknown flags instead of silently ignoring
+  them.** The hand-rolled WASM argument parser used a catch-all that dropped any
+  unrecognized token, so a typo or a flag that isn't wired into the WASM surface looked
+  like a successful no-op — making "no error" an unreliable signal that a flag is active.
+  Unrecognized `--flags` now return an `Unknown flag: <name>` error, matching the native
+  CLI's clap behavior. Applied to all WASM subcommands (trajectory, zero, monte-carlo,
+  estimate-bc).
+
 ## [0.22.3] - 2026-07-04
 
 ### Added
