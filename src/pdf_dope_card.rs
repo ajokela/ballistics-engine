@@ -1,7 +1,8 @@
 //! PDF Dope Card Generation Module
 //!
 //! Generates printable dope cards in Glenn's proven field-ready format.
-//! Format: Two-column layout with Range, Drop MIL, Wind MIL, Lead MIL
+//! Format: Two-column layout with Range (yd) and Drop/Wind/Lead in MIL or MOA
+//! (selected via DopeCardConfig::unit_label; values pre-converted by the caller)
 //! Color coding: Black=Range, Red=Drop, Green=Wind, Blue=Lead
 //! Row striping for improved readability.
 
@@ -33,6 +34,9 @@ pub struct DopeCardConfig {
     pub velocity_fps: f64,
     pub font_scale: f32,
     pub bold_data: bool,
+    /// Angular unit label shown in the Drop/Wind/Lead column sub-headers ("MIL" or
+    /// "MOA"). The row values in DopeCardRow are already expressed in this unit.
+    pub unit_label: String,
 }
 
 /// Preset font size profiles for dope cards
@@ -66,9 +70,11 @@ impl FontSizePreset {
 #[derive(Debug, Clone)]
 pub struct DopeCardRow {
     pub range_yd: u32,
-    pub drop_mil: f64,
-    pub wind_mil: f64,
-    pub lead_mil: f64,
+    /// Drop/wind/lead adjustments, already expressed in the card's angular unit
+    /// (MIL or MOA — see DopeCardConfig::unit_label).
+    pub drop_adj: f64,
+    pub wind_adj: f64,
+    pub lead_adj: f64,
 }
 
 // Page dimensions (Letter size in mm)
@@ -92,23 +98,9 @@ const COLOR_GREEN: (f32, f32, f32) = (0.0, 0.5, 0.0);
 const COLOR_BLUE: (f32, f32, f32) = (0.0, 0.0, 0.78);
 const COLOR_STRIPE: (f32, f32, f32) = (0.94, 0.94, 0.94); // Light gray for alternating rows
 
-/// Convert drop in yards to MILs
-pub fn yards_to_mil(drop_yd: f64, range_yd: f64) -> f64 {
-    if range_yd < 1.0 {
-        return 0.0;
-    }
-    (drop_yd / range_yd) * 1000.0
-}
-
-/// Calculate lead MIL for moving target
-pub fn calculate_lead_mil(target_speed_mph: f64, time_of_flight_s: f64, range_yd: f64) -> f64 {
-    if range_yd < 1.0 || target_speed_mph < 0.001 {
-        return 0.0;
-    }
-    let target_speed_yps = target_speed_mph * 1760.0 / 3600.0;
-    let target_movement_yd = target_speed_yps * time_of_flight_s;
-    yards_to_mil(target_movement_yd, range_yd)
-}
+// The angular conversion (drop_yd/range_yd -> MIL or MOA) and moving-target lead now
+// live in main.rs::drop_to_adjustment, so both card units share one code path; the
+// caller fills DopeCardRow's drop_adj/wind_adj/lead_adj already in the chosen unit.
 
 /// Calculate density altitude from environmental conditions
 ///
@@ -374,7 +366,15 @@ fn render_page(
     let table_x = (PAGE_WIDTH - (8.0 * COL_WIDTH)) / 2.0;
 
     // Draw table header
-    draw_table_header(layer, font_bold, table_x, y, table_size, font_scale);
+    draw_table_header(
+        layer,
+        font_bold,
+        table_x,
+        y,
+        table_size,
+        font_scale,
+        &config.unit_label,
+    );
     y -= row_height;
 
     // Split rows into left and right columns
@@ -472,6 +472,7 @@ fn draw_table_header(
     y: f32,
     table_size: f32,
     font_scale: f32,
+    unit: &str,
 ) {
     let headers = [
         ("Range", COLOR_BLACK),
@@ -483,7 +484,8 @@ fn draw_table_header(
         ("Wind", COLOR_GREEN),
         ("Lead", COLOR_BLUE),
     ];
-    let sub_headers = ["Yd", "MIL", "MIL", "MIL", "Yd", "MIL", "MIL", "MIL"];
+    // Range columns are yards; Drop/Wind/Lead are in the card's angular unit (MIL/MOA).
+    let sub_headers = ["Yd", unit, unit, unit, "Yd", unit, unit, unit];
 
     for (i, ((header, color), sub)) in headers.iter().zip(sub_headers.iter()).enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
@@ -513,9 +515,9 @@ fn draw_data_row(
 ) {
     let values = [
         (row.range_yd.to_string(), COLOR_BLACK),
-        (format!("{:.1}", row.drop_mil), COLOR_RED),
-        (format!("{:.1}", row.wind_mil), COLOR_GREEN),
-        (format!("{:.1}", row.lead_mil), COLOR_BLUE),
+        (format!("{:.1}", row.drop_adj), COLOR_RED),
+        (format!("{:.1}", row.wind_adj), COLOR_GREEN),
+        (format!("{:.1}", row.lead_adj), COLOR_BLUE),
     ];
 
     for (i, (value, color)) in values.iter().enumerate() {
@@ -650,21 +652,6 @@ fn is_leap_year(year: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_yards_to_mil() {
-        let mil = yards_to_mil(0.1, 100.0);
-        assert!((mil - 1.0).abs() < 0.01);
-
-        let mil = yards_to_mil(1.78, 500.0);
-        assert!((mil - 3.56).abs() < 0.1);
-    }
-
-    #[test]
-    fn test_lead_mil() {
-        let lead = calculate_lead_mil(4.0, 0.73, 500.0);
-        assert!((lead - 2.86).abs() < 0.2);
-    }
 
     #[test]
     fn test_density_altitude() {

@@ -16,10 +16,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(feature = "pdf")]
 mod pdf_dope_card;
 #[cfg(feature = "pdf")]
-use pdf_dope_card::{
-    calculate_density_altitude, calculate_lead_mil, yards_to_mil, DopeCardConfig, DopeCardRow,
-    FontSizePreset,
-};
+use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
 
 #[cfg(feature = "online")]
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder, TrueVelocityRequest};
@@ -695,6 +692,10 @@ enum Commands {
         /// Use bold font for data cells in PDF output
         #[arg(long)]
         bold_data: bool,
+
+        /// Angular unit for the PDF dope card's Drop/Wind/Lead columns (mil or moa)
+        #[arg(long, value_enum, default_value = "mil")]
+        adjustment_unit: AdjustmentUnit,
     },
 
     /// Run Monte Carlo simulation
@@ -1495,9 +1496,10 @@ impl WindShearModelArg {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
 enum AdjustmentUnit {
     /// Milliradians (1 MIL = 3.6 inches at 100 yards)
+    #[default]
     Mil,
     /// Minutes of Angle (1 MOA = 1.047 inches at 100 yards)
     Moa,
@@ -2293,6 +2295,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             font_scale,
             font_preset,
             bold_data,
+            adjustment_unit,
         } => {
             // Load profile from CSV if specified
             let profile_data: HashMap<String, String> =
@@ -2939,6 +2942,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     },
                     font_scale: effective_font_scale,
                     bold_data,
+                    adjustment_unit,
                 })
             } else {
                 None
@@ -4526,6 +4530,7 @@ struct PdfMetadata {
     weight_gr: f64,
     font_scale: f32,
     bold_data: bool,
+    adjustment_unit: AdjustmentUnit,
 }
 
 // ============================================================================
@@ -5389,6 +5394,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 velocity_fps: pdf_meta.velocity_fps,
                 font_scale: pdf_meta.font_scale,
                 bold_data: pdf_meta.bold_data,
+                unit_label: match pdf_meta.adjustment_unit {
+                    AdjustmentUnit::Mil => "MIL".to_string(),
+                    AdjustmentUnit::Moa => "MOA".to_string(),
+                },
             };
 
             // Convert sampled trajectory to dope card rows
@@ -5406,17 +5415,22 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     let drop_yd = s.drop_m / 0.9144; // meters to yards
                                                      // Convert drift to yards
                     let drift_yd = s.wind_drift_m / 0.9144;
+                    // Lead: how far the target moves during the bullet's flight, as an
+                    // angular hold. Movement (yd) = speed (yd/s) * time; 1760/3600 = mph->yd/s.
+                    let lead_yd = (pdf_meta.target_speed_mph * 1760.0 / 3600.0) * s.time_s;
+                    let unit = pdf_meta.adjustment_unit;
 
                     DopeCardRow {
                         range_yd: range_yd.round() as u32,
-                        // Drop MIL: positive = dial up (bullet below LOS). drop_m is already
+                        // Drop: positive = dial up (bullet below LOS). drop_m is already
                         // positive-below-LOS (sample_trajectory: los_y - y_interp), matching the
                         // come-up / range tables, so do NOT negate it (this column was sign-flipped).
-                        drop_mil: yards_to_mil(drop_yd, range_yd),
-                        // Wind MIL: positive = dial right for wind from right
-                        wind_mil: yards_to_mil(drift_yd, range_yd),
-                        // Lead MIL for moving target
-                        lead_mil: calculate_lead_mil(pdf_meta.target_speed_mph, s.time_s, range_yd),
+                        // Rendered in MIL or MOA per --adjustment-unit (MBA-724).
+                        drop_adj: drop_to_adjustment(drop_yd, range_yd, unit),
+                        // Wind: positive = dial right for wind from right
+                        wind_adj: drop_to_adjustment(drift_yd, range_yd, unit),
+                        // Lead for a moving target
+                        lead_adj: drop_to_adjustment(lead_yd, range_yd, unit),
                     }
                 })
                 .collect();
@@ -7905,4 +7919,33 @@ fn handle_range_table(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod adjustment_unit_tests {
+    use super::*;
+
+    #[test]
+    fn mil_conversion_matches_geometry() {
+        // 0.1 yd of drop at 100 yd = 1.0 MIL (1 MIL subtends 0.1 yd at 100 yd).
+        assert!((drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Mil) - 1.0).abs() < 1e-9);
+        // 1.78 yd at 500 yd ~ 3.56 MIL.
+        assert!((drop_to_adjustment(1.78, 500.0, AdjustmentUnit::Mil) - 3.56).abs() < 0.01);
+    }
+
+    #[test]
+    fn moa_is_3438_thousandths_per_radian_ratio() {
+        // MOA uses 3438 (arcminutes per radian) vs MIL's 1000, so MOA/MIL == 3.438.
+        let mil = drop_to_adjustment(1.0, 100.0, AdjustmentUnit::Mil);
+        let moa = drop_to_adjustment(1.0, 100.0, AdjustmentUnit::Moa);
+        assert!((moa / mil - 3.438).abs() < 1e-9, "moa={moa} mil={mil}");
+        // 0.1 yd at 100 yd -> 3.438 MOA.
+        assert!((drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Moa) - 3.438).abs() < 1e-9);
+    }
+
+    #[test]
+    fn short_range_returns_zero() {
+        assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Moa), 0.0);
+        assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Mil), 0.0);
+    }
 }
