@@ -213,6 +213,10 @@ impl WasmBallistics {
         // Optional measured powder-temperature -> velocity curve ("TEMP:VEL,..."),
         // parsed after unit resolution. Supersedes the linear sensitivity model.
         let mut powder_temp_curve_str: Option<String> = None;
+        // Track whether --powder-temp was explicitly given. When a curve is present it
+        // becomes the powder temperature the curve is interpolated at (decoupled from the
+        // air temperature); when not given, the curve falls back to the air temperature.
+        let mut powder_temp_provided = false;
 
         // Zero-day condition overrides. When --auto-zero is used, these let the zero
         // ANGLE be solved under the conditions the rifle was actually zeroed in (a
@@ -226,6 +230,7 @@ impl WasmBallistics {
         let mut zero_pressure: Option<f64> = None;
         let mut zero_humidity: Option<f64> = None;
         let mut zero_altitude: Option<f64> = None;
+        let mut zero_powder_temp: Option<f64> = None;
 
         // Parse arguments
         let mut i = 0;
@@ -466,6 +471,7 @@ impl WasmBallistics {
                         powder_temp = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid powder temp"))?;
+                        powder_temp_provided = true;
                         i += 1;
                     }
                 }
@@ -521,6 +527,16 @@ impl WasmBallistics {
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid zero altitude"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--zero-powder-temp" => {
+                    if i + 1 < args.len() {
+                        zero_powder_temp = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero powder temp"))?,
                         );
                         i += 1;
                     }
@@ -619,6 +635,14 @@ impl WasmBallistics {
             UnitSystem::Imperial => (powder_temp - 32.0) * 5.0 / 9.0,
             UnitSystem::Metric => powder_temp,
         };
+        // When --powder-temp was explicitly given, it becomes the POWDER temperature the
+        // curve is interpolated at (decoupled from --temperature / air density). When not
+        // given, powder_curve_temp_c stays None so the curve falls back to the air temp.
+        inputs.powder_curve_temp_c = if powder_temp_provided {
+            Some(inputs.powder_temp)
+        } else {
+            None
+        };
         // Parse the optional powder-temperature -> velocity curve into SI points.
         if let Some(curve_str) = &powder_temp_curve_str {
             let mut pts: Vec<(f64, f64)> = Vec::new();
@@ -713,6 +737,10 @@ impl WasmBallistics {
                     UnitSystem::Imperial => zv * 0.3048, // fps to m/s
                     UnitSystem::Metric => zv,
                 };
+                // An explicit zero-day velocity takes precedence: disable the curve for
+                // the zero solve so it doesn't re-interpolate over the supplied velocity.
+                // (zero_inputs is a clone of inputs, which may carry the shot-day curve.)
+                zero_inputs.powder_temp_curve = None;
                 zero_day_overridden = true;
             }
             if let Some(zt) = zero_temperature {
@@ -745,6 +773,16 @@ impl WasmBallistics {
                 };
                 zero_atmosphere.altitude = a_m;
                 zero_inputs.altitude = a_m;
+                zero_day_overridden = true;
+            }
+            // Zero-day powder temperature for the curve: --zero-powder-temp if given,
+            // else fall back to the zero-day AIR temperature (reset the shot-day powder
+            // temp inherited from the clone above so it isn't reused in the zero solve).
+            zero_inputs.powder_curve_temp_c = zero_powder_temp.map(|zpt| match units {
+                UnitSystem::Imperial => (zpt - 32.0) * 5.0 / 9.0,
+                UnitSystem::Metric => zpt,
+            });
+            if zero_powder_temp.is_some() {
                 zero_day_overridden = true;
             }
 

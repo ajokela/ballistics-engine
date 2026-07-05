@@ -187,7 +187,7 @@ temperature the load was chronographed at:
 **Measured curve (non-linear)** — real powders aren't perfectly linear (temperature-
 stable powders flatten; others steepen when hot). If you've chronographed the load at
 several temperatures, pass the points directly and the muzzle velocity is interpolated
-at the ambient `--temperature` (clamped at the endpoints — no extrapolation). This
+at the powder temperature (clamped at the endpoints — no extrapolation). This
 **overrides** `--powder-temp-sensitivity` when supplied:
 
 ```bash
@@ -196,9 +196,21 @@ at the ambient `--temperature` (clamped at the endpoints — no extrapolation). 
   --powder-temp-curve "40:2620,70:2700,100:2760"   # TEMP:VELOCITY points
 ```
 
-The curve also composes with `--auto-zero`: if you supply `--zero-temperature`, the
-zero angle is solved using the curve's velocity at the zeroing-day temperature (unless
-you override it with an explicit `--zero-velocity`).
+**Powder temperature vs air temperature.** The curve maps *powder* temperature to
+velocity, while `--temperature` drives air *density*. These are decoupled: the curve is
+looked up at `--powder-temp` when given, otherwise at `--temperature` (powder assumed at
+air temperature). So a load left in a hot chamber or a cold pocket:
+
+```bash
+# 85 F air (density), but the powder is at 60 F (velocity from the curve at 60 F)
+./ballistics trajectory ... --temperature 85 --powder-temp 60 \
+  --powder-temp-curve "40:2620,70:2700,100:2760"
+```
+
+The curve also composes with `--auto-zero`, symmetrically. On the zeroing day the zero
+velocity is resolved from the curve at `--zero-powder-temp` (or `--zero-temperature` if
+unset), while `--zero-temperature`/`--zero-pressure`/etc. drive the zero-day air density.
+An explicit `--zero-velocity` still takes precedence over the curve.
 
 #### Bore Height and Ground Impact
 
