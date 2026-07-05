@@ -525,6 +525,13 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                // Reject unrecognized flags instead of silently ignoring them, so a
+                // typo or a flag that isn't wired into this WASM surface is caught
+                // immediately rather than looking like a no-op. (The native CLI's clap
+                // parser already does this; the hand-rolled WASM parser did not.)
+                other if other.starts_with('-') => {
+                    return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
+                }
                 _ => {}
             }
             i += 1;
@@ -910,6 +917,13 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                // Reject unrecognized flags instead of silently ignoring them, so a
+                // typo or a flag that isn't wired into this WASM surface is caught
+                // immediately rather than looking like a no-op. (The native CLI's clap
+                // parser already does this; the hand-rolled WASM parser did not.)
+                other if other.starts_with('-') => {
+                    return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
+                }
                 _ => {}
             }
             i += 1;
@@ -1110,6 +1124,13 @@ impl WasmBallistics {
                         drag_model = args[i + 1];
                         i += 1;
                     }
+                }
+                // Reject unrecognized flags instead of silently ignoring them, so a
+                // typo or a flag that isn't wired into this WASM surface is caught
+                // immediately rather than looking like a no-op. (The native CLI's clap
+                // parser already does this; the hand-rolled WASM parser did not.)
+                other if other.starts_with('-') => {
+                    return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
                 }
                 _ => {}
             }
@@ -1364,6 +1385,13 @@ impl WasmBallistics {
                         }
                         i += 1;
                     }
+                }
+                // Reject unrecognized flags instead of silently ignoring them, so a
+                // typo or a flag that isn't wired into this WASM surface is caught
+                // immediately rather than looking like a no-op. (The native CLI's clap
+                // parser already does this; the hand-rolled WASM parser did not.)
+                other if other.starts_with('-') => {
+                    return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
                 }
                 _ => {}
             }
