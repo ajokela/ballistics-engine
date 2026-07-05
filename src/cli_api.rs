@@ -127,6 +127,10 @@ pub struct BallisticInputs {
     /// `temperature` (clamped to the endpoints — no extrapolation beyond measured
     /// data). This is the data-driven, non-linear alternative to the constant slope.
     pub powder_temp_curve: Option<Vec<(f64, f64)>>,
+    /// Temperature (Celsius) at which to interpolate `powder_temp_curve` — the POWDER
+    /// temperature, which may differ from the ambient `temperature` (air). `None` uses
+    /// `temperature`. Decouples the velocity lookup from the air-density temperature.
+    pub powder_curve_temp_c: Option<f64>,
     pub tipoff_yaw: f64,            // radians
     pub tipoff_decay_distance: f64, // meters
     pub use_bc_segments: bool,
@@ -223,6 +227,7 @@ impl Default for BallisticInputs {
             powder_temp_sensitivity: 0.0,
             powder_temp: 15.0,
             powder_temp_curve: None,
+            powder_curve_temp_c: None,
             tipoff_yaw: 0.0,
             tipoff_decay_distance: 50.0,
             use_bc_segments: false,
@@ -432,8 +437,12 @@ impl TrajectorySolver {
         // zero-day temperature, the curve automatically yields the zero-day velocity.
         if let Some(curve) = inputs.powder_temp_curve.as_ref() {
             if !curve.is_empty() {
-                // Absolute override (idempotent): interpolate at the ambient temp.
-                inputs.muzzle_velocity = interpolate_powder_temp_curve(curve, inputs.temperature);
+                // Interpolate at the POWDER temperature, which defaults to the ambient
+                // air temperature but can be decoupled (powder warmed/cooled relative to
+                // the air) via powder_curve_temp_c. Air temperature still drives density
+                // separately; this only sets the velocity. Absolute override (idempotent).
+                let lookup_c = inputs.powder_curve_temp_c.unwrap_or(inputs.temperature);
+                inputs.muzzle_velocity = interpolate_powder_temp_curve(curve, lookup_c);
             }
         } else if inputs.use_powder_sensitivity {
             let temp_delta_c = inputs.temperature - inputs.powder_temp;

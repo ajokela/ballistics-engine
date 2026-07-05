@@ -5,6 +5,33 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.5] - 2026-07-05
+
+### Added
+
+- **Decoupled powder temperature for the curve, symmetric on shot and zero days.** The
+  `--powder-temp-curve` maps *powder* temperature to velocity, but was interpolated at the
+  ambient *air* temperature. Powder isn't always at air temperature (warmed in a chamber,
+  cooled in a pocket), so velocity and air density now use separate temperatures:
+  - `--powder-temp` (now accepts no value / is optional) sets the powder temperature the
+    curve is interpolated at on the shot side; it defaults to `--temperature` when omitted.
+    (With the linear `--powder-temp-sensitivity` model instead, `--powder-temp` keeps its
+    existing "reference temperature" meaning, default 70°F/21°C — the models are mutually
+    exclusive.)
+  - `--zero-powder-temp` (new) sets the zero-day powder temperature for the curve on the
+    `--auto-zero` side, defaulting to `--zero-temperature`. An explicit `--zero-velocity`
+    still takes precedence.
+  - Air temperature (`--temperature` / `--zero-temperature`) continues to exclusively drive
+    air density. Fully backward compatible: with neither flag, the curve is looked up at the
+    air temperature exactly as before. Native CLI + WASM; integration tests added.
+
+### Fixed
+
+- **WASM: an explicit `--zero-velocity` was overridden by a shot-day `--powder-temp-curve`
+  during the zero solve.** The WASM zero solve cloned the shot inputs (carrying the curve),
+  which re-interpolated over the supplied zero velocity. `--zero-velocity` now disables the
+  curve for the zero solve, matching the native CLI.
+
 ## [0.22.4] - 2026-07-05
 
 ### Fixed

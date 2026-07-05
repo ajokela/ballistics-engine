@@ -230,6 +230,7 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         powder_temp_sensitivity: 0.0,
         powder_temp: 59.0,
         powder_temp_curve: None,
+        powder_curve_temp_c: None,
         tipoff_decay_distance: 0.0,
         ground_threshold: params.ground_threshold, // MBA-954: honor the configured ground plane
         bc_segments: params.bc_segments.clone(),

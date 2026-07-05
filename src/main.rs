@@ -561,16 +561,20 @@ enum Commands {
         #[arg(long, default_value = "1.0")]
         powder_temp_sensitivity: f64,
 
-        /// Powder temperature
-        #[arg(long, default_value = "70.0")]
-        powder_temp: f64,
+        /// Powder temperature (°F/°C). With --powder-temp-curve, this is the powder
+        /// temperature the curve is interpolated at to resolve muzzle velocity (defaults
+        /// to --temperature when omitted, i.e. powder assumed at air temperature). With
+        /// --powder-temp-sensitivity (linear model), it is the reference temperature the
+        /// stated velocity was measured at (defaults to 70°F / 21°C).
+        #[arg(long)]
+        powder_temp: Option<f64>,
 
         /// Measured powder-temperature -> muzzle-velocity curve as comma-separated
         /// TEMP:VELOCITY points, e.g. "40:2620,70:2700,100:2760" (temps in F/C,
         /// velocities in fps / m·s⁻¹ per --units). The muzzle velocity is interpolated
-        /// from this table at the ambient --temperature (clamped at the endpoints, no
-        /// extrapolation). Data-driven, non-linear alternative that OVERRIDES
-        /// --powder-temp-sensitivity when supplied.
+        /// from this table at the powder temperature (--powder-temp, or --temperature if
+        /// unset; clamped at the endpoints, no extrapolation). Data-driven, non-linear
+        /// alternative that OVERRIDES --powder-temp-sensitivity when supplied.
         #[arg(long = "powder-temp-curve", value_name = "TEMP:VEL,...")]
         powder_temp_curve: Option<String>,
 
@@ -598,6 +602,13 @@ enum Commands {
         /// Zero-day altitude for --auto-zero (feet imperial / meters metric)
         #[arg(long, allow_hyphen_values = true)]
         zero_altitude: Option<f64>,
+
+        /// Zero-day powder temperature for --auto-zero (°F/°C). With --powder-temp-curve,
+        /// the curve is interpolated at this temperature to resolve the zero-day muzzle
+        /// velocity (defaults to --zero-temperature when omitted). An explicit
+        /// --zero-velocity still takes precedence.
+        #[arg(long, allow_hyphen_values = true)]
+        zero_powder_temp: Option<f64>,
 
         // Online Mode Parameters (feature-gated)
         /// Use Flask API for ML-enhanced trajectory calculation
@@ -1679,6 +1690,8 @@ struct TrajectoryConfig {
     powder_temp: f64,
     // Optional measured (temperature_celsius, muzzle_velocity_m_s) curve; SI, sorted.
     powder_temp_curve: Option<Vec<(f64, f64)>>,
+    // Powder temperature (Celsius) to interpolate the curve at; None = ambient temp.
+    powder_curve_temp_c: Option<f64>,
 
     // PDF metadata
     pdf_metadata: Option<PdfMetadata>,
@@ -2269,6 +2282,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             zero_pressure,
             zero_humidity,
             zero_altitude,
+            zero_powder_temp,
             #[cfg(feature = "online")]
             online,
             #[cfg(feature = "online")]
@@ -2493,14 +2507,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Imperial => t,
                 UnitSystem::Metric => t / 25.4, // mm/turn -> inches/turn
             });
-            let powder_temp = if use_powder_sensitivity
-                && matches!(cli.units, UnitSystem::Metric)
-                && (powder_temp - 70.0).abs() < f64::EPSILON
-            {
-                21.111_111_111_111_11
-            } else {
-                powder_temp
-            };
+            // --powder-temp serves two roles (the models are mutually exclusive):
+            //   * with --powder-temp-curve: the POWDER temperature to interpolate at.
+            //     Only set when the user supplied it; otherwise the curve falls back to
+            //     the ambient --temperature (powder assumed at air temperature).
+            //   * with --powder-temp-sensitivity (linear): the reference temperature the
+            //     stated velocity was measured at (default 70°F / 21°C).
+            // powder_curve_temp_c is the curve override in Celsius (Some iff provided);
+            // powder_temp is the linear reference in display units (always resolved).
+            let powder_curve_temp_c: Option<f64> =
+                powder_temp.map(|t| UnitConverter::temperature_to_metric(t, cli.units));
+            let powder_temp = powder_temp.unwrap_or(match cli.units {
+                UnitSystem::Imperial => 70.0,
+                UnitSystem::Metric => 21.111_111_111_111_11,
+            });
             let powder_temp_sensitivity = if use_powder_sensitivity
                 && matches!(cli.units, UnitSystem::Metric)
                 && (powder_temp_sensitivity - 1.0).abs() < f64::EPSILON
@@ -3019,6 +3039,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     } else {
                         powder_temp_curve_si.clone()
                     },
+                    // Zero-day powder temperature for the curve lookup: --zero-powder-temp
+                    // if given, else None -> the curve falls back to the zero-day AIR
+                    // temperature (zero_inputs.temperature, set above). This also resets
+                    // the shot-day powder temp so it isn't inherited into the zero solve.
+                    powder_curve_temp_c: zero_powder_temp
+                        .map(|t| UnitConverter::temperature_to_metric(t, cli.units)),
                     ..Default::default()
                 };
 
@@ -3108,6 +3134,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 powder_temp_sensitivity,
                 powder_temp,
                 powder_temp_curve: powder_temp_curve_si.clone(),
+                powder_curve_temp_c,
                 pdf_metadata: pdf_metadata.clone(),
             };
 
@@ -3252,6 +3279,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     } else { 0.0 },
                                     powder_temp: UnitConverter::temperature_to_metric(powder_temp, cli.units),
                                     powder_temp_curve: powder_temp_curve_si.clone(),
+                                    powder_curve_temp_c,
                                     tipoff_yaw: 0.0,
                                     tipoff_decay_distance: 50.0,
                                     use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
@@ -4674,6 +4702,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         powder_temp_sensitivity,
         powder_temp,
         ref powder_temp_curve,
+        powder_curve_temp_c,
         ref pdf_metadata,
     } = *config;
 
@@ -4748,6 +4777,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         },
         powder_temp: UnitConverter::temperature_to_metric(powder_temp, units),
         powder_temp_curve: powder_temp_curve.clone(),
+        powder_curve_temp_c,
         tipoff_yaw: 0.0,
         tipoff_decay_distance: 50.0,
         // Use BC segments if: 1) table generated them (parameter), 2) --use-bc-segments flag, 3) neither

@@ -94,3 +94,22 @@ fn curve_requires_two_points() {
         .expect("run");
     assert!(!out.status.success(), "single-point curve should be rejected");
 }
+
+/// With `--powder-temp` given, the curve is interpolated at the POWDER temperature,
+/// decoupled from `--temperature` (which drives air density only). MBA follow-up.
+#[test]
+fn curve_uses_powder_temp_decoupled_from_air() {
+    // Hot air (100 F), cold powder (40 F) -> velocity from the 40 F curve point.
+    let v = muzzle_velocity("100", &["--powder-temp-curve", CURVE, "--powder-temp", "40"]);
+    assert!((v - 2620.0).abs() < 0.5, "cold powder in hot air -> 2620, got {v}");
+    // Cold air (40 F), hot powder (100 F) -> 2760.
+    let v = muzzle_velocity("40", &["--powder-temp-curve", CURVE, "--powder-temp", "100"]);
+    assert!((v - 2760.0).abs() < 0.5, "hot powder in cold air -> 2760, got {v}");
+}
+
+/// Without `--powder-temp`, the curve still uses the air temperature (backward compatible).
+#[test]
+fn curve_defaults_to_air_temp_without_powder_temp() {
+    let v = muzzle_velocity("100", &["--powder-temp-curve", CURVE]);
+    assert!((v - 2760.0).abs() < 0.5, "no --powder-temp -> curve at air temp 100 = 2760, got {v}");
+}
