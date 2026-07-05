@@ -5,6 +5,22 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.6] - 2026-07-05
+
+### Fixed
+
+- **Zero-day atmosphere appeared to have no effect at a short auto-zero.** With
+  `--auto-zero 100`, a base command and one adding extreme zero-day atmosphere
+  (`--zero-temperature 20 --zero-pressure 20 --zero-humidity 90 --zero-altitude 12000`)
+  produced byte-identical output. The atmosphere *was* reaching the zero solve, but the
+  zero-angle search converged as soon as the height error at the zero distance was under
+  1 mm (~0.037 MOA at 100 yd) — coarser than the small zero-day-density effect there — so
+  two very different atmospheres rounded to the same zero angle. Tightened the convergence
+  to 0.1 mm (angle tolerance 1e-7 rad), so the effect now resolves even at short zeros. It
+  remains physically small (a 100 yd zero is nearly density-independent: ~0.04" at 100 yd,
+  ~0.2" at 490 yd for those extreme conditions) but is no longer quantized to zero. This
+  also makes the zero angle itself more precise. Reported by an external user.
+
 ## [0.22.5] - 2026-07-05
 
 ### Added
