@@ -367,14 +367,17 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | Parameter | Description |
 |-----------|-------------|
 | `--output-file` | Output file path (required for PDF) |
+| `--adjustment-unit` | Angular unit for Drop/Wind/Lead columns: `mil` (default) or `moa` |
 | `--target-speed` | Target speed in mph for lead calculation |
 | `--powder` | Powder type (shown in footer) |
 | `--bullet-name` | Bullet name (shown in footer) |
 | `--location-name` | Location name (shown in header) |
 | `--profile-row` | Rifle name (shown in header) |
+| `--font-scale` / `--font-preset` | Data-table font size |
+| `--bold-data` | Bold font for data cells |
 
 **PDF features:**
-- Two-column table layout with Range, Drop MIL, Wind MIL, Lead MIL
+- Two-column table layout with Range (yd) and Drop/Wind/Lead in **MIL or MOA** (via `--adjustment-unit`)
 - Color coding: Black=Range, Red=Drop, Green=Wind, Blue=Lead
 - Alternating row stripes for easy tracking in field conditions
 - Header with rifle, location, density altitude, atmospheric data
