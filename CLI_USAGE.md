@@ -256,6 +256,26 @@ data basis you supply.
 Options: `--data "dist,drop;..."` (yd,in / m,mm), `--velocity-data "dist,vel;..."`
 (yd,fps / m,m/s), `--drag-model g1|g7|both` (default `both`), `-o table|json|csv`.
 
+**Dope-card (zeroed) data — use `--zero-range` and match the atmosphere.** A dope card's
+drops are measured below your line of sight from a rifle **zeroed** at some range (so the
+drop is ~0 at the zero and grows downrange). Pass `--zero-range` so the fit matches that
+frame, and give the conditions the card was made at — BC only means something relative to
+air density:
+
+```bash
+./ballistics estimate-bc -v 2650 -m 77 -d 0.224 \
+  --data "100,0;300,14.2;500,61.4;700,162.4;900,343.0;1100,643.0" \
+  --zero-range 100 --sight-height 2.0 \
+  --temperature 59 --pressure 29.92 --altitude 0 --drag-model g7
+```
+
+Without `--zero-range`, drop is treated as **bore-referenced** (flat-fire drop below the
+extended bore) — correct only for a bore-drop table, not a dope card; the tool warns if your
+data looks zeroed. A fit that can't determine a value from the data (too few/short-range
+points, or wrong zero/atmosphere) is flagged **UNRELIABLE** rather than returning a bogus
+number. Atmosphere flags: `--temperature` (°F/°C), `--pressure` (inHg/hPa), `--humidity`
+(%), `--altitude` (ft/m); `--zero-range` (yd/m), `--sight-height` (in/mm).
+
 ### True Velocity Calculation
 
 Find the effective muzzle velocity that produces a measured drop at a known range. This helps "true" your ballistic system by identifying discrepancies between chronograph readings and real-world ballistic performance.

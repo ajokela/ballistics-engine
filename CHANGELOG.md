@@ -5,6 +5,31 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.9] - 2026-07-06
+
+### Fixed / Added
+
+- **`estimate-bc` now fits real dope-card data correctly.** Two defects made it return
+  wrong BCs from dope cards (reported by an external user):
+  - It hard-coded a fixed ICAO-standard atmosphere with no way to change it, so a card
+    measured at a different air density fit to the wrong BC. Added `--temperature`,
+    `--pressure`, `--humidity`, `--altitude` (same units as the trajectory command) so the
+    fit runs at the conditions the data actually came from.
+  - It fit **bore-referenced** (flat-fire) drop, but dope cards are **zeroed** (drop below
+    line of sight). A zeroed card has a ~0-drop point at the zero range, which is impossible
+    for a flat-fire model and drove the fit to nonsense (a sparse 3-point card pinned both
+    G1 and G7 at the sweep ceiling). Added `--zero-range` (+ `--sight-height`): given it,
+    drop is fit as drop-below-LOS from a rifle zeroed there — exactly what a dope card
+    prints. Omitted, drop stays bore-referenced (unchanged, backward compatible).
+  - `estimate-bc` now **warns** when drop data looks zeroed (a point near 0 drop) but
+    `--zero-range` wasn't supplied, and **flags a fit as UNRELIABLE** when it runs to the BC
+    search limit instead of silently returning a boundary value. G7 fits are capped at a
+    physical 0.70 (they were sharing G1's 1.2 ceiling).
+
+  Native CLI (table/json/csv; JSON/CSV gain a `reliable` field) and WASM. Public API:
+  `estimate_bc_fit` gains `atmosphere` / `zero_range` / `sight_height` params, and
+  `BcEstimate` gains an `at_bound` flag.
+
 ## [0.22.8] - 2026-07-06
 
 ### Added

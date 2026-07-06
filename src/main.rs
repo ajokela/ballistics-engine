@@ -852,6 +852,32 @@ enum Commands {
         #[arg(long, default_value = "both")]
         drag_model: String,
 
+        /// Zero range of the drop data, in yd/m (dope cards are zeroed). Given → drop is
+        /// fit as drop-below-line-of-sight from a rifle zeroed here. Omitted → drop is
+        /// treated as bore-referenced (flat-fire drop below the extended bore axis).
+        #[arg(long)]
+        zero_range: Option<f64>,
+
+        /// Sight height above bore (inches/mm) for the zeroed drop fit [default 2 in / 50 mm]
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Air temperature the data was measured at (°F imperial / °C metric) [default 59 F / 15 C]
+        #[arg(long)]
+        temperature: Option<f64>,
+
+        /// Barometric pressure the data was measured at (inHg imperial / hPa metric) [default 29.92 / 1013.25]
+        #[arg(long)]
+        pressure: Option<f64>,
+
+        /// Relative humidity the data was measured at (percent, 0–100)
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        humidity: f64,
+
+        /// Altitude the data was measured at (feet imperial / meters metric)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
         /// Distance 1 (yd/m) — legacy 2-point drop input
         #[arg(long)]
         distance1: Option<f64>,
@@ -3560,6 +3586,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             data,
             velocity_data,
             drag_model,
+            zero_range,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
             distance1,
             drop1,
             distance2,
@@ -3570,6 +3602,30 @@ fn main() -> Result<(), Box<dyn Error>> {
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
             let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
             let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+
+            // Atmosphere the data was measured at — BC is only meaningful relative to air
+            // density, so this must match the dope card's conditions (defaults = ICAO std).
+            let atmosphere = AtmosphericConditions {
+                temperature: temperature
+                    .map(|t| UnitConverter::temperature_to_metric(t, cli.units))
+                    .unwrap_or(15.0),
+                pressure: pressure
+                    .map(|p| UnitConverter::pressure_to_metric(p, cli.units))
+                    .unwrap_or(1013.25),
+                humidity,
+                altitude: match cli.units {
+                    UnitSystem::Imperial => altitude * 0.3048,
+                    UnitSystem::Metric => altitude,
+                },
+            };
+            // Zero range (dope-card frame) and sight height, in meters.
+            let zero_range_m = zero_range.map(|z| UnitConverter::distance_to_metric(z, cli.units));
+            let sight_height_m = sight_height
+                .map(|s| match cli.units {
+                    UnitSystem::Imperial => s * 0.0254,
+                    UnitSystem::Metric => s / 1000.0,
+                })
+                .unwrap_or(0.05);
 
             // Drop series: from --data (n-point) or the legacy --distance1/--drop1/... pair.
             let drop_raw: Vec<(f64, f64)> = if let Some(s) = &data {
@@ -3619,6 +3675,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let models = parse_drag_models(&drag_model)?;
 
+            // Guard the most common mistake: feeding a zeroed dope card (a point with ~0
+            // drop) without --zero-range, which makes the fit treat it as bore-referenced
+            // and returns a wrong (often maxed-out) BC.
+            if zero_range_m.is_none()
+                && drop_metric.iter().any(|(_, dr)| dr.abs() < 0.05)
+                && drop_metric.iter().any(|(_, dr)| dr.abs() > 0.25)
+            {
+                let zd = drop_metric
+                    .iter()
+                    .min_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+                    .map(|(d, _)| match cli.units {
+                        UnitSystem::Imperial => *d / 0.9144,
+                        UnitSystem::Metric => *d,
+                    })
+                    .unwrap_or(0.0);
+                let unit = if cli.units == UnitSystem::Imperial { "yd" } else { "m" };
+                eprintln!(
+                    "Warning: your drop data looks zeroed near {zd:.0} {unit} (a point has ~0 drop), \
+                     but --zero-range was not given."
+                );
+                eprintln!(
+                    "         Dope-card drops are below line of sight; pass --zero-range {zd:.0} \
+                     for an accurate BC. Without it, drop is treated as bore-referenced (flat fire)."
+                );
+            }
+
             run_bc_estimation_multi(
                 velocity_metric,
                 mass_metric,
@@ -3626,6 +3708,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &drop_metric,
                 &vel_metric,
                 &models,
+                atmosphere,
+                zero_range_m,
+                sight_height_m,
                 cli.units,
                 output,
             )?;
@@ -6205,6 +6290,7 @@ fn parse_drag_models(s: &str) -> Result<Vec<DragModel>, Box<dyn Error>> {
 /// Estimate BC for every (drag model × available data basis) combination and print the
 /// results. `drop_points` are `(m, m)`, `vel_points` are `(m, m/s)`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_bc_estimation_multi(
     velocity: f64,
     mass: f64,
@@ -6212,6 +6298,9 @@ fn run_bc_estimation_multi(
     drop_points: &[(f64, f64)],
     vel_points: &[(f64, f64)],
     models: &[DragModel],
+    atmosphere: AtmosphericConditions,
+    zero_range: Option<f64>,
+    sight_height: f64,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
@@ -6243,11 +6332,27 @@ fn run_bc_estimation_multi(
         rms_user: f64,
         rms_unit: &'static str,
         n: usize,
+        at_bound: bool,
     }
     let mut variants: Vec<Variant> = Vec::new();
     for &model in models {
         for basis in &bases {
-            let est = estimate_bc_fit(velocity, mass, diameter, basis.points, model, basis.mode)?;
+            // Zero range only shapes a drop fit; a velocity fit is frame-independent.
+            let zr = match basis.mode {
+                BcFitMode::Drop => zero_range,
+                BcFitMode::Velocity => None,
+            };
+            let est = estimate_bc_fit(
+                velocity,
+                mass,
+                diameter,
+                basis.points,
+                model,
+                basis.mode,
+                atmosphere.clone(),
+                zr,
+                sight_height,
+            )?;
             // Convert the RMS residual back to user units for a readable fit-quality column.
             let (rms_user, rms_unit) = match basis.mode {
                 BcFitMode::Drop => match units {
@@ -6266,6 +6371,7 @@ fn run_bc_estimation_multi(
                 rms_user,
                 rms_unit,
                 n: basis.points.len(),
+                at_bound: est.at_bound,
             });
         }
     }
@@ -6292,6 +6398,7 @@ fn run_bc_estimation_multi(
                         "fit_rms": (v.rms_user * 1000.0).round() / 1000.0,
                         "fit_rms_unit": v.rms_unit,
                         "n_points": v.n,
+                        "reliable": !v.at_bound,
                     })
                 })
                 .collect();
@@ -6305,16 +6412,17 @@ fn run_bc_estimation_multi(
         }
 
         OutputFormat::Csv => {
-            println!("drag_model,fit_basis,estimated_bc,fit_rms,fit_rms_unit,n_points");
+            println!("drag_model,fit_basis,estimated_bc,fit_rms,fit_rms_unit,n_points,reliable");
             for v in &variants {
                 println!(
-                    "{},{},{:.4},{:.3},{},{}",
+                    "{},{},{:.4},{:.3},{},{},{}",
                     model_name(v.model),
                     basis_name(v.mode),
                     v.bc,
                     v.rms_user,
                     v.rms_unit,
-                    v.n
+                    v.n,
+                    !v.at_bound
                 );
             }
         }
@@ -6322,19 +6430,26 @@ fn run_bc_estimation_multi(
         OutputFormat::Table => {
             println!("BC Estimation");
             println!(
-                "  {:<6} {:<20} {:>12}   {}",
-                "Model", "Fit basis", "Estimated BC", "Fit RMS"
+                "  {:<6} {:<20} {:>12}   {:<10} {}",
+                "Model", "Fit basis", "Estimated BC", "Fit RMS", ""
             );
             println!("  {:-<6} {:-<20} {:->12}   {:-<10}", "", "", "", "");
             for v in &variants {
                 println!(
-                    "  {:<6} {:<20} {:>12.3}   {:>6.2} {}",
+                    "  {:<6} {:<20} {:>12.3}   {:>6.2} {:<4}{}",
                     model_name(v.model),
                     format!("{} ({} pts)", basis_name(v.mode), v.n),
                     v.bc,
                     v.rms_user,
-                    v.rms_unit
+                    v.rms_unit,
+                    if v.at_bound { " ⚠ UNRELIABLE (hit BC limit)" } else { "" }
                 );
+            }
+            if variants.iter().any(|v| v.at_bound) {
+                println!();
+                println!("  ⚠ One or more fits ran to the BC search limit — the data did not");
+                println!("    determine a real value. Add more (and longer-range) points, and");
+                println!("    check --zero-range / --temperature / --pressure match the data.");
             }
         }
 
