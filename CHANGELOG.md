@@ -5,6 +5,25 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.10] - 2026-07-06
+
+### Added
+
+- **BC5D correction tables now usable from WASM (Node/browser).** The 5-dimensional BC
+  correction tables (hosted at https://ballistics.tools/downloads/bc5d/) could previously
+  only be applied by the native CLI via `--bc-table-dir`, because loading them required
+  filesystem access. WASM has no filesystem, so a JS/Node host now fetches the `.bin` and
+  hands the raw bytes to the engine:
+  - New WASM binding `loadBc5dTable(bytes: Uint8Array)` parses a `bc5d_<caliber>.bin` in
+    memory and returns a short summary. `hasBc5dTable()` reports whether one is loaded.
+  - Once a table is loaded, any `trajectory` run with `--use-bc-segments` synthesizes
+    velocity-dependent BC segments from the table and applies them — the same offline
+    parity with the online solver (ClusterBCDegradation + BC segments + weather) that the
+    native `--bc-table-dir` path produces. Load a table matching the bullet's caliber.
+  - Public library API: `Bc5dTable::from_bytes(&[u8])` (a filesystem-free counterpart to
+    `Bc5dTable::load`) and `Bc5dTable::generate_segments(base_bc, drag_type, weight_grains,
+    muzzle_velocity_fps)` (the table→`BCSegmentData` synthesis, previously CLI-only).
+
 ## [0.22.9] - 2026-07-06
 
 ### Fixed / Added

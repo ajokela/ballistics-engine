@@ -8,9 +8,17 @@ use crate::cli_api::{
     WindConditions,
 };
 use crate::drag_model::DragModel;
+use crate::bc_table_5d::Bc5dTable;
+use std::cell::RefCell;
 
 #[wasm_bindgen]
-pub struct WasmBallistics;
+pub struct WasmBallistics {
+    /// Optional BC5D correction table loaded from an in-memory `.bin`. When
+    /// present, trajectory runs with `--use-bc-segments` synthesize
+    /// velocity-dependent BC segments from it (offline parity with the online
+    /// solver's ClusterBCDegradation + BC-segment + weather corrections).
+    bc5d_table: RefCell<Option<Bc5dTable>>,
+}
 
 // Unit system for conversions
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,7 +58,40 @@ impl OutputFormat {
 impl WasmBallistics {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        WasmBallistics
+        WasmBallistics {
+            bc5d_table: RefCell::new(None),
+        }
+    }
+
+    /// Load a BC5D correction table from the raw bytes of a `bc5d_<caliber>.bin`
+    /// file. The host (browser `fetch()` or Node `fs`/`fetch`) is responsible
+    /// for retrieving the file — WASM has no filesystem or network — and passes
+    /// the bytes here.
+    ///
+    /// Once loaded, any `trajectory` run that includes `--use-bc-segments` will
+    /// apply velocity-dependent BC segments synthesized from this table. Load a
+    /// table matching the bullet's caliber (e.g. `bc5d_308.bin` for a .308).
+    ///
+    /// Returns a short human-readable summary of the loaded table. Replaces any
+    /// previously loaded table.
+    #[wasm_bindgen(js_name = loadBc5dTable)]
+    pub fn load_bc5d_table(&self, bytes: &[u8]) -> Result<String, JsValue> {
+        let table = Bc5dTable::from_bytes(bytes)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse BC5D table: {}", e)))?;
+        let summary = format!(
+            "Loaded BC5D table: caliber {:.3}\", {} cells, api_version {}",
+            table.caliber(),
+            table.total_cells(),
+            table.api_version()
+        );
+        *self.bc5d_table.borrow_mut() = Some(table);
+        Ok(summary)
+    }
+
+    /// Report whether a BC5D table is currently loaded.
+    #[wasm_bindgen(js_name = hasBc5dTable)]
+    pub fn has_bc5d_table(&self) -> bool {
+        self.bc5d_table.borrow().is_some()
     }
 
     /// Run a command and return the output
@@ -614,6 +655,28 @@ impl WasmBallistics {
         inputs.enable_precession_nutation = enable_precession;
         inputs.use_bc_segments = use_bc_segments;
         inputs.use_powder_sensitivity = use_powder_sensitivity;
+
+        // BC5D offline correction: if a table has been loaded via loadBc5dTable()
+        // and the caller asked for BC segments, synthesize velocity-dependent BC
+        // segments from the table and hand them to the solver. The table's native
+        // units are grains + fps, so convert from metric when needed.
+        if use_bc_segments {
+            if let Some(table) = self.bc5d_table.borrow().as_ref() {
+                let (weight_grains, muzzle_fps) = match units {
+                    UnitSystem::Imperial => (mass, velocity),
+                    // grams -> grains, m/s -> fps
+                    UnitSystem::Metric => (mass * 15.4323584, velocity * 3.280839895),
+                };
+                if let Some(segments) = table.generate_segments(
+                    bc,
+                    drag_model,
+                    weight_grains,
+                    Some(muzzle_fps),
+                ) {
+                    inputs.bc_segments_data = Some(segments);
+                }
+            }
+        }
 
         // Set additional parameters
         if let Some(rate) = twist_rate {

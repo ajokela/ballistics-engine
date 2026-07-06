@@ -122,8 +122,20 @@ impl Bc5dTable {
     /// Load a BC5D table from a binary file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Bc5dError> {
         let file = File::open(&path)?;
-        let mut reader = BufReader::new(file);
+        Self::from_reader(BufReader::new(file))
+    }
 
+    /// Parse a BC5D table directly from an in-memory byte slice.
+    ///
+    /// Behaves identically to [`Bc5dTable::load`] but performs no filesystem
+    /// access, which makes it usable from WASM (`wasm32-unknown-unknown`, where
+    /// there is no `std::fs`). The host JS/Node layer fetches the `.bin` and
+    /// hands the raw bytes across the boundary.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Bc5dError> {
+        Self::from_reader(std::io::Cursor::new(bytes))
+    }
+
+    fn from_reader<R: Read>(mut reader: R) -> Result<Self, Bc5dError> {
         // Read and validate magic
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
@@ -301,6 +313,73 @@ impl Bc5dTable {
     ) -> f64 {
         let correction = self.lookup(weight_grains, base_bc, muzzle_velocity, current_velocity, drag_type);
         base_bc * correction
+    }
+
+    /// Generate velocity-dependent BC segments for a bullet from this table.
+    ///
+    /// This mirrors the CLI's `--bc-table-dir` segment synthesis: the 4D
+    /// correction surface is sampled at a fixed ladder of velocity breakpoints
+    /// (from 500 fps up through the muzzle velocity) and each adjacent pair
+    /// becomes a [`crate::BCSegmentData`] carrying the corrected BC over that
+    /// band. The solver consumes these via `inputs.bc_segments_data` +
+    /// `use_bc_segments`, giving the same velocity-dependent BC degradation
+    /// offline that the online solver produces.
+    ///
+    /// All velocities are in fps and `weight_grains` in grains, matching the
+    /// table's native units. Returns `None` when the table carries no
+    /// meaningful correction for this bullet (every sampled cell ~= 1.0), so
+    /// callers can leave the constant published BC in place.
+    pub fn generate_segments(
+        &self,
+        base_bc: f64,
+        drag_type: &str,
+        weight_grains: f64,
+        muzzle_velocity_fps: Option<f64>,
+    ) -> Option<Vec<crate::BCSegmentData>> {
+        let mut breakpoints: Vec<f64> = vec![
+            4000.0, 3500.0, 3000.0, 2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0, 1700.0,
+            1600.0, 1500.0, 1400.0, 1350.0, 1300.0, 1250.0, 1200.0, 1150.0, 1100.0, 1050.0, 1000.0,
+            950.0, 900.0, 850.0, 800.0, 700.0, 600.0, 500.0,
+        ];
+        if let Some(mv) = muzzle_velocity_fps {
+            breakpoints.push(mv);
+        }
+
+        let mut velocities: Vec<f64> = breakpoints
+            .into_iter()
+            .filter(|&v| v >= 500.0 && muzzle_velocity_fps.map_or(true, |mv| v <= mv))
+            .collect();
+        velocities.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        velocities.dedup();
+
+        // Correction factors were generated relative to the highest (muzzle)
+        // velocity, so anchor every lookup to that reference.
+        let reference_mv = velocities.first().copied().unwrap_or(3000.0);
+
+        let mut segments: Vec<crate::BCSegmentData> = Vec::new();
+        let mut any_correction = false;
+        for i in 0..velocities.len().saturating_sub(1) {
+            let vel_max = velocities[i];
+            let vel_min = velocities[i + 1];
+            let vel_mid = (vel_max + vel_min) / 2.0;
+
+            let correction =
+                self.lookup(weight_grains, base_bc, reference_mv, vel_mid, drag_type);
+            if (correction - 1.0).abs() > 1e-6 {
+                any_correction = true;
+            }
+            segments.push(crate::BCSegmentData {
+                velocity_min: vel_min,
+                velocity_max: vel_max,
+                bc_value: base_bc * correction,
+            });
+        }
+
+        if any_correction && !segments.is_empty() {
+            Some(segments)
+        } else {
+            None
+        }
     }
 
     /// Find interpolation index and weight for a value in bins
@@ -640,6 +719,91 @@ mod tests {
             version: 2,
             api_version: "test".to_string(),
             timestamp: 0,
+        }
+    }
+
+    /// Serialize a table into the BC5D v2 `.bin` byte layout so we can exercise
+    /// the `from_bytes` parser without depending on an external file.
+    fn serialize_test_table(t: &Bc5dTable) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&t.version.to_le_bytes());
+        out.extend_from_slice(&t.caliber.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // padding
+        out.extend_from_slice(&(t.weight_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(t.bc_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(t.muzzle_vel_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(t.current_vel_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(t.num_drag_types as u32).to_le_bytes());
+        out.extend_from_slice(&t.timestamp.to_le_bytes());
+
+        // Checksum is CRC32 of bins + data, in declaration order.
+        let mut checksum_data = Vec::new();
+        for v in t.weight_bins.iter().chain(&t.bc_bins).chain(&t.muzzle_vel_bins)
+            .chain(&t.current_vel_bins).chain(&t.data) {
+            checksum_data.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&crc32_ieee(&checksum_data).to_le_bytes());
+
+        let mut api = [0u8; 16];
+        let bytes = t.api_version.as_bytes();
+        api[..bytes.len().min(16)].copy_from_slice(&bytes[..bytes.len().min(16)]);
+        out.extend_from_slice(&api);
+        out.extend_from_slice(&[0u8; 12]); // reserved
+
+        for v in t.weight_bins.iter().chain(&t.bc_bins).chain(&t.muzzle_vel_bins)
+            .chain(&t.current_vel_bins).chain(&t.data) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn test_from_bytes_roundtrip() {
+        let original = create_test_table();
+        let bytes = serialize_test_table(&original);
+        let parsed = Bc5dTable::from_bytes(&bytes).expect("from_bytes should parse");
+
+        assert_eq!(parsed.caliber, original.caliber);
+        assert_eq!(parsed.num_drag_types, original.num_drag_types);
+        assert_eq!(parsed.weight_bins, original.weight_bins);
+        assert_eq!(parsed.current_vel_bins, original.current_vel_bins);
+        assert_eq!(parsed.data, original.data);
+        assert_eq!(parsed.api_version, original.api_version);
+
+        // A corrupted body must be rejected by the CRC check.
+        let mut bad = bytes.clone();
+        *bad.last_mut().unwrap() ^= 0xFF;
+        assert!(Bc5dTable::from_bytes(&bad).is_err());
+    }
+
+    #[test]
+    fn test_generate_segments() {
+        // A table whose corrections are all exactly 1.0 carries no useful
+        // correction, so generate_segments returns None (leave published BC).
+        let mut uniform = create_test_table();
+        uniform.data.iter_mut().for_each(|v| *v = 1.0);
+        assert!(uniform
+            .generate_segments(0.4, "G1", 150.0, Some(2700.0))
+            .is_none());
+
+        // A table with a real (0.9) correction across the sampled slice must
+        // produce contiguous, descending velocity segments carrying bc*corr.
+        let mut corrected = create_test_table();
+        corrected.data.iter_mut().for_each(|v| *v = 0.9);
+        let segments = corrected
+            .generate_segments(0.4, "G1", 150.0, Some(2700.0))
+            .expect("segments expected for a table with corrections");
+        assert!(!segments.is_empty());
+        for w in segments.windows(2) {
+            // Bands are contiguous and descend in velocity.
+            assert!((segments[0].velocity_max - w[0].velocity_max).abs() >= 0.0);
+            assert!(w[0].velocity_min >= w[1].velocity_max - 1e-6);
+        }
+        for s in &segments {
+            assert!((s.bc_value - 0.4 * 0.9).abs() < 1e-6); // base_bc * correction
+            assert!(s.velocity_max > s.velocity_min);
         }
     }
 
