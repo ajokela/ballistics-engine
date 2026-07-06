@@ -2318,13 +2318,27 @@ pub struct BcEstimate {
     pub drag_model: DragModel,
     /// Whether the fit was against drop or velocity data.
     pub mode: BcFitMode,
+    /// True if the best fit landed at the edge of the physical BC search range — i.e. the
+    /// data did not pin down an interior optimum (too sparse/short-range, or wrong units /
+    /// atmosphere / zero). The reported `bc` is then a floor/ceiling, not a real estimate.
+    pub at_bound: bool,
 }
 
 /// Interpolate the fitted quantity (drop in meters, or speed in m/s) at a downrange
 /// distance from a solved trajectory. `None` if the trajectory never reaches `target_dist`.
-fn fit_value_at(points: &[TrajectoryPoint], target_dist: f64, mode: BcFitMode) -> Option<f64> {
+///
+/// `drop_offset` is subtracted-from convention: for `Drop` the returned value is
+/// `drop_offset - y`. With `drop_offset = 0` this is bore-referenced drop (flat fire);
+/// with `drop_offset = sight_height` and a zeroed trajectory it is drop below the
+/// (horizontal) line of sight — i.e. dope-card drop.
+fn fit_value_at(
+    points: &[TrajectoryPoint],
+    target_dist: f64,
+    mode: BcFitMode,
+    drop_offset: f64,
+) -> Option<f64> {
     let val = |p: &TrajectoryPoint| match mode {
-        BcFitMode::Drop => -p.position.y,
+        BcFitMode::Drop => drop_offset - p.position.y,
         BcFitMode::Velocity => p.velocity_magnitude,
     };
     for i in 0..points.len() {
@@ -2351,6 +2365,16 @@ fn fit_value_at(points: &[TrajectoryPoint], target_dist: f64, mode: BcFitMode) -
 ///
 /// `points` are `(distance_m, value_m_or_mps)` where the second element is drop in meters
 /// (`BcFitMode::Drop`) or remaining speed in m/s (`BcFitMode::Velocity`).
+///
+/// The fit runs under `atmosphere` — BC is only meaningful relative to the air density the
+/// data was measured at, so this must match the conditions the drop/velocity came from
+/// (pass ICAO standard for a standard-atmosphere dope card).
+///
+/// `zero_range` selects the drop reference frame (ignored for velocity fits):
+/// - `None` → **bore-referenced**: flat 0° fire, drop below the extended bore axis.
+/// - `Some(range_m)` → **sight/dope-card-referenced**: the trajectory is zeroed at
+///   `range_m` (using `sight_height`), and drop is measured below the horizontal line of
+///   sight — i.e. exactly what a dope card zeroed at that range prints.
 pub fn estimate_bc_fit(
     velocity: f64,
     mass: f64,
@@ -2358,6 +2382,9 @@ pub fn estimate_bc_fit(
     points: &[(f64, f64)],
     drag_model: DragModel,
     mode: BcFitMode,
+    atmosphere: AtmosphericConditions,
+    zero_range: Option<f64>,
+    sight_height: f64,
 ) -> Result<BcEstimate, BallisticsError> {
     if points.is_empty() {
         return Err(BallisticsError::from(
@@ -2365,24 +2392,42 @@ pub fn estimate_bc_fit(
         ));
     }
     let max_dist = points.iter().map(|(d, _)| *d).fold(0.0_f64, f64::max);
+    // For a zeroed drop fit, drop is below the horizontal LOS which sits `sight_height`
+    // above the bore at the muzzle: drop = sight_height - y. Bore-referenced fits use 0.
+    let drop_offset = if zero_range.is_some() { sight_height } else { 0.0 };
 
     // Sum of squared residuals for a trial BC; None if the solve can't reach the data.
     let sse = |bc_value: f64| -> Option<f64> {
-        let inputs = BallisticInputs {
+        let mut inputs = BallisticInputs {
             muzzle_velocity: velocity,
             bc_value,
             bc_type: drag_model,
             bullet_mass: mass,
             bullet_diameter: diameter,
+            sight_height,
             ..Default::default()
         };
-        let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+        // Zeroed fit: tilt the bore so the bullet crosses LOS at the zero range, so the
+        // downrange drops match a dope card zeroed there. Bore fit leaves muzzle_angle = 0.
+        if let Some(zr) = zero_range {
+            let za = calculate_zero_angle_with_conditions(
+                inputs.clone(),
+                zr,
+                0.0,
+                WindConditions::default(),
+                atmosphere.clone(),
+            )
+            .ok()?;
+            inputs.muzzle_angle = za;
+        }
+        let mut solver =
+            TrajectorySolver::new(inputs, WindConditions::default(), atmosphere.clone());
         solver.set_max_range(max_dist * 1.5);
         let result = solver.solve().ok()?;
         let mut total = 0.0;
         let mut matched = 0;
         for (target_dist, target_val) in points {
-            if let Some(v) = fit_value_at(&result.points, *target_dist, mode) {
+            if let Some(v) = fit_value_at(&result.points, *target_dist, mode, drop_offset) {
                 let e = v - target_val;
                 total += e * e;
                 matched += 1;
@@ -2395,11 +2440,19 @@ pub fn estimate_bc_fit(
         }
     };
 
-    // Coarse sweep. Lower bound 0.05 covers small G7 BCs; upper 1.20 covers high G1 BCs.
+    // Physical BC search range, per drag model. Real G7 BCs top out well under 0.5 (0.7 is
+    // a generous ceiling); G1 BCs run higher. Keeping G7 out of G1 territory means a fit
+    // that runs to the ceiling reports a sane bound, not a nonsensical 1.2.
+    let (bc_min, bc_max) = match drag_model {
+        DragModel::G7 => (0.05, 0.70),
+        _ => (0.10, 1.20),
+    };
+
+    // Coarse sweep across the physical range.
     let mut best_bc = f64::NAN;
     let mut best_sse = f64::MAX;
-    let mut bc = 0.05;
-    while bc <= 1.20 + 1e-9 {
+    let mut bc = bc_min;
+    while bc <= bc_max + 1e-9 {
         if let Some(s) = sse(bc) {
             if s < best_sse {
                 best_sse = s;
@@ -2415,9 +2468,9 @@ pub fn estimate_bc_fit(
         ));
     }
 
-    // Local refine at 0.001 resolution around the coarse best.
-    let lo = (best_bc - 0.01).max(0.01);
-    let hi = best_bc + 0.01;
+    // Local refine at 0.001 resolution around the coarse best (kept within the range).
+    let lo = (best_bc - 0.01).max(bc_min);
+    let hi = (best_bc + 0.01).min(bc_max);
     let mut bc = lo;
     while bc <= hi + 1e-9 {
         if let Some(s) = sse(bc) {
@@ -2429,12 +2482,16 @@ pub fn estimate_bc_fit(
         bc += 0.001;
     }
 
+    // A solution sitting on the search boundary means the data didn't determine an interior
+    // optimum — the fit ran to the floor/ceiling. Flag it so callers don't trust the number.
+    let at_bound = best_bc <= bc_min + 0.011 || best_bc >= bc_max - 0.011;
     let rms_error = (best_sse / points.len() as f64).sqrt();
     Ok(BcEstimate {
         bc: best_bc,
         rms_error,
         drag_model,
         mode,
+        at_bound,
     })
 }
 
@@ -2453,6 +2510,9 @@ pub fn estimate_bc_from_trajectory(
         points,
         DragModel::G1,
         BcFitMode::Drop,
+        AtmosphericConditions::default(),
+        None,
+        0.05,
     )
     .map(|e| e.bc)
 }

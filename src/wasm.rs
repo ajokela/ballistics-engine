@@ -1370,6 +1370,12 @@ impl WasmBallistics {
         let mut data_points: Vec<(f64, f64)> = Vec::new();
         let mut vel_points: Vec<(f64, f64)> = Vec::new();
         let mut drag_model_str = String::from("both");
+        let mut zero_range: Option<f64> = None;
+        let mut sight_height: Option<f64> = None;
+        let mut temperature: Option<f64> = None;
+        let mut pressure: Option<f64> = None;
+        let mut humidity: f64 = 50.0;
+        let mut altitude: f64 = 0.0;
 
         // Parse "d,v;d,v;..." pairs, tolerating surrounding quotes/whitespace.
         fn parse_pairs(raw: &str) -> Result<Vec<(f64, f64)>, JsValue> {
@@ -1448,6 +1454,42 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--zero-range" => {
+                    if i + 1 < args.len() {
+                        zero_range = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid zero-range"))?);
+                        i += 1;
+                    }
+                }
+                "--sight-height" => {
+                    if i + 1 < args.len() {
+                        sight_height = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid sight-height"))?);
+                        i += 1;
+                    }
+                }
+                "--temperature" => {
+                    if i + 1 < args.len() {
+                        temperature = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid temperature"))?);
+                        i += 1;
+                    }
+                }
+                "--pressure" => {
+                    if i + 1 < args.len() {
+                        pressure = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid pressure"))?);
+                        i += 1;
+                    }
+                }
+                "--humidity" => {
+                    if i + 1 < args.len() {
+                        humidity = args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                        i += 1;
+                    }
+                }
+                "--altitude" => {
+                    if i + 1 < args.len() {
+                        altitude = args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                        i += 1;
+                    }
+                }
                 // Reject unrecognized flags instead of silently ignoring them, so a
                 // typo or a flag that isn't wired into this WASM surface is caught
                 // immediately rather than looking like a no-op. (The native CLI's clap
@@ -1493,6 +1535,38 @@ impl WasmBallistics {
             UnitSystem::Metric => diameter * 0.001,
         };
 
+        // Atmosphere the data was measured at (defaults = ICAO standard). BC only means
+        // something relative to air density, so this must match the dope card's conditions.
+        let atmosphere = AtmosphericConditions {
+            temperature: temperature
+                .map(|t| match units {
+                    UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0,
+                    UnitSystem::Metric => t,
+                })
+                .unwrap_or(15.0),
+            pressure: pressure
+                .map(|p| match units {
+                    UnitSystem::Imperial => p * 33.8639,
+                    UnitSystem::Metric => p,
+                })
+                .unwrap_or(1013.25),
+            humidity,
+            altitude: match units {
+                UnitSystem::Imperial => altitude * 0.3048,
+                UnitSystem::Metric => altitude,
+            },
+        };
+        let zero_m = zero_range.map(|z| match units {
+            UnitSystem::Imperial => z * 0.9144,
+            UnitSystem::Metric => z,
+        });
+        let sight_m = sight_height
+            .map(|s| match units {
+                UnitSystem::Imperial => s * 0.0254,
+                UnitSystem::Metric => s / 1000.0,
+            })
+            .unwrap_or(0.05);
+
         // Convert both series to metric (drop -> m, velocity -> m/s; metric drop input is mm).
         let drop_metric: Vec<(f64, f64)> = data_points
             .iter()
@@ -1535,10 +1609,46 @@ impl WasmBallistics {
                 "Model", "Fit basis", "Estimated BC", "Fit RMS"
             ),
         ];
+        // Guard the common mistake: a zeroed dope card (a point with ~0 drop) fed without
+        // --zero-range, which makes the drop fit bore-referenced and returns a wrong BC.
+        if zero_m.is_none()
+            && drop_metric.iter().any(|(_, dr)| dr.abs() < 0.05)
+            && drop_metric.iter().any(|(_, dr)| dr.abs() > 0.25)
+        {
+            let zd = drop_metric
+                .iter()
+                .min_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+                .map(|(d, _)| match units {
+                    UnitSystem::Imperial => d / 0.9144,
+                    UnitSystem::Metric => *d,
+                })
+                .unwrap_or(0.0);
+            let du2 = if units == UnitSystem::Imperial { "yd" } else { "m" };
+            lines.insert(0, format!(
+                "⚠ Data looks zeroed near {zd:.0} {du2} but --zero-range not given; drop is being"
+            ));
+            lines.insert(1, format!(
+                "  treated as bore-referenced. For a dope card, pass --zero-range {zd:.0}."
+            ));
+            lines.insert(2, String::new());
+        }
+
+        let mut any_unreliable = false;
         for &model in &models {
             for &(mode, pts) in &bases {
-                let est = estimate_bc_fit(velocity_mps, mass_kg, diameter_m, pts, model, mode)
-                    .map_err(|e| JsValue::from_str(&format!("Error estimating BC: {}", e)))?;
+                // Zero range only shapes a drop fit; a velocity fit is frame-independent.
+                let zr = match mode {
+                    BcFitMode::Drop => zero_m,
+                    BcFitMode::Velocity => None,
+                };
+                let est = estimate_bc_fit(
+                    velocity_mps, mass_kg, diameter_m, pts, model, mode,
+                    atmosphere.clone(), zr, sight_m,
+                )
+                .map_err(|e| JsValue::from_str(&format!("Error estimating BC: {}", e)))?;
+                if est.at_bound {
+                    any_unreliable = true;
+                }
                 let (rms_user, unit) = match mode {
                     BcFitMode::Drop => match units {
                         UnitSystem::Imperial => (est.rms_error / 0.0254, "in"),
@@ -1559,14 +1669,20 @@ impl WasmBallistics {
                     BcFitMode::Velocity => "velocity",
                 };
                 lines.push(format!(
-                    "  {:<6} {:<20} {:>12.3}   {:>6.2} {}",
+                    "  {:<6} {:<20} {:>12.3}   {:>6.2} {:<4}{}",
                     model_name,
                     format!("{} ({} pts)", basis, pts.len()),
                     est.bc,
                     rms_user,
-                    unit
+                    unit,
+                    if est.at_bound { " ⚠ UNRELIABLE (hit BC limit)" } else { "" }
                 ));
             }
+        }
+        if any_unreliable {
+            lines.push(String::new());
+            lines.push("⚠ A fit ran to the BC search limit — the data did not determine a real".to_string());
+            lines.push("  value. Add more/longer-range points and check --zero-range / --temperature.".to_string());
         }
         Ok(lines.join("\n"))
     }
@@ -2025,10 +2141,19 @@ Estimate BC Command:
     --data <PAIRS>               Drop data: "dist,drop;..." (yd,in / m,mm)
     --velocity-data <PAIRS>      Velocity data: "dist,vel;..." (yd,fps / m,m/s)
     --drag-model <MODEL>         g1, g7, or both [default: both]
+    --zero-range <DIST>          Zero range of the drop data (yd/m). Dope cards are
+                                 zeroed — pass this so drop is fit below line of sight.
+    --sight-height <H>           Sight height above bore (in/mm) for the zeroed fit
+    --temperature <T>            Air temp the data was measured at (°F/°C) [59/15]
+    --pressure <P>               Pressure the data was measured at (inHg/hPa) [29.92/1013.25]
+    --humidity <H>               Relative humidity (percent) [50]
+    --altitude <A>               Altitude the data was measured at (ft/m) [0]
 
-  Prints a BC for each drag model x data basis you supply. Give --data for a drop
-  fit, --velocity-data for a velocity-retention fit (immune to zero/angle error),
-  or both for all four variants.
+  Prints a BC for each drag model x data basis you supply. For a DOPE CARD, pass
+  --zero-range (drop is below line of sight) and set the atmosphere it was made at.
+  Without --zero-range, drop is treated as bore-referenced (flat-fire). --velocity-data
+  gives a velocity-retention fit (immune to zero/angle). A fit that can't be pinned
+  down is flagged UNRELIABLE.
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
