@@ -25,7 +25,7 @@ jobs:
             arch: aarch64
     
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -62,7 +62,7 @@ jobs:
             use_cross: true
     
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -110,7 +110,7 @@ jobs:
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -143,10 +143,10 @@ jobs:
     name: Build FreeBSD binary
     
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     
     - name: Build in FreeBSD VM
-      uses: cross-platform-actions/action@v0.32.0
+      uses: cross-platform-actions/action@v1.3.0
       with:
         operating_system: freebsd
         version: '14.0'
@@ -178,10 +178,10 @@ jobs:
     name: Build NetBSD binary
     
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     
     - name: Build in NetBSD VM
-      uses: cross-platform-actions/action@v0.32.0
+      uses: cross-platform-actions/action@v1.3.0
       with:
         operating_system: netbsd
         version: '10.0'
@@ -215,7 +215,7 @@ jobs:
     timeout-minutes: 45
     
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     
     - name: Build with QEMU OpenBSD VM
       run: |
@@ -430,7 +430,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     
     - name: Download all artifacts
       uses: actions/download-artifact@v8
