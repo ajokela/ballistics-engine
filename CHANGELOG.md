@@ -5,6 +5,30 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.7] - 2026-07-05
+
+### Changed
+
+- **Dependency updates.** Bumped core dependencies to their current major
+  versions. No engine API or physics changes; the native binary, the WASM
+  build, and the full test suite are all unchanged and green.
+  - `nalgebra` 0.34 → 0.35
+  - `rand` 0.9 → 0.10
+  - `rand_distr` 0.5 → 0.6
+  - `getrandom` 0.3 → 0.4 (the wasm32 `wasm_js` backend)
+
+- **Monte Carlo RNG stream changed (seeded-output note).** `rand` 0.10 revised
+  its internal generator, so a given seed now produces a different sequence of
+  draws than 0.22.6 and earlier. Monte Carlo *statistical* results — means,
+  spreads, confidence intervals — are unchanged, but if you depend on a fixed
+  seed reproducing an exact set of simulated shots, those specific values will
+  differ from prior versions. This is a one-time shift from the dependency
+  update, not a change in the physics.
+
+  (`printpdf` 0.9 was evaluated and deliberately **not** taken: it is a full
+  API rewrite that would require rewriting the dope-card PDF layer for no
+  user-facing gain, so `printpdf` stays pinned at 0.7.)
+
 ## [0.22.6] - 2026-07-05
 
 ### Fixed
