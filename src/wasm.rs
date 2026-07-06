@@ -3,9 +3,9 @@ use serde_json;
 use wasm_bindgen::prelude::*;
 
 use crate::cli_api::{
-    calculate_zero_angle_with_conditions, estimate_bc_from_trajectory, run_monte_carlo,
-    AtmosphericConditions, BallisticInputs as InternalBallisticInputs, MonteCarloParams,
-    TrajectorySolver, WindConditions,
+    calculate_zero_angle_with_conditions, estimate_bc_fit, run_monte_carlo, AtmosphericConditions,
+    BallisticInputs as InternalBallisticInputs, BcFitMode, MonteCarloParams, TrajectorySolver,
+    WindConditions,
 };
 use crate::drag_model::DragModel;
 
@@ -1368,6 +1368,37 @@ impl WasmBallistics {
         let mut mass = default_mass;
         let mut diameter = default_diameter;
         let mut data_points: Vec<(f64, f64)> = Vec::new();
+        let mut vel_points: Vec<(f64, f64)> = Vec::new();
+        let mut drag_model_str = String::from("both");
+
+        // Parse "d,v;d,v;..." pairs, tolerating surrounding quotes/whitespace.
+        fn parse_pairs(raw: &str) -> Result<Vec<(f64, f64)>, JsValue> {
+            let s = raw.trim().trim_matches('\'').trim_matches('"');
+            let mut out = Vec::new();
+            for pair in s.split(';') {
+                let pair = pair.trim();
+                if pair.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = pair.split(',').collect();
+                if parts.len() != 2 {
+                    return Err(JsValue::from_str(&format!(
+                        "Malformed data pair '{}': expected \"distance,value\"",
+                        pair
+                    )));
+                }
+                let d: f64 = parts[0]
+                    .trim()
+                    .parse()
+                    .map_err(|_| JsValue::from_str(&format!("Invalid distance '{}'", parts[0].trim())))?;
+                let v: f64 = parts[1]
+                    .trim()
+                    .parse()
+                    .map_err(|_| JsValue::from_str(&format!("Invalid value '{}'", parts[1].trim())))?;
+                out.push((d, v));
+            }
+            Ok(out)
+        }
 
         // Parse arguments
         let mut i = 0;
@@ -1398,29 +1429,22 @@ impl WasmBallistics {
                     }
                 }
                 "--data" => {
-                    // Parse distance,drop pairs
+                    // Drop data: distance,drop pairs.
                     if i + 1 < args.len() {
-                        // Remove quotes if present
-                        let data_str = args[i + 1].trim_matches('\'').trim_matches('"');
-                        let pairs: Vec<&str> = data_str.split(';').collect();
-                        for pair in pairs {
-                            let parts: Vec<&str> = pair.split(',').collect();
-                            if parts.len() == 2 {
-                                let distance: f64 = parts[0].trim().parse().map_err(|e| {
-                                    JsValue::from_str(&format!(
-                                        "Invalid distance '{}': {}",
-                                        parts[0], e
-                                    ))
-                                })?;
-                                let drop: f64 = parts[1].trim().parse().map_err(|e| {
-                                    JsValue::from_str(&format!(
-                                        "Invalid drop '{}': {}",
-                                        parts[1], e
-                                    ))
-                                })?;
-                                data_points.push((distance, drop));
-                            }
-                        }
+                        data_points = parse_pairs(args[i + 1])?;
+                        i += 1;
+                    }
+                }
+                "--velocity-data" => {
+                    // Velocity-retention data: distance,velocity pairs.
+                    if i + 1 < args.len() {
+                        vel_points = parse_pairs(args[i + 1])?;
+                        i += 1;
+                    }
+                }
+                "--drag-model" => {
+                    if i + 1 < args.len() {
+                        drag_model_str = args[i + 1].to_lowercase();
                         i += 1;
                     }
                 }
@@ -1436,67 +1460,115 @@ impl WasmBallistics {
             i += 1;
         }
 
-        if data_points.is_empty() {
-            return Ok("Error: No trajectory data provided. Use --data with distance,drop pairs separated by semicolons.\nExample: --data \"100,2.5;200,10.2;300,23.5\"".to_string());
+        if data_points.is_empty() && vel_points.is_empty() {
+            return Ok("Error: No data provided. Use --data \"dist,drop;...\" and/or \
+                 --velocity-data \"dist,vel;...\".\nExample: --data \"300,29.0;500,89.9;700,204.6\""
+                .to_string());
         }
 
-        // Convert units
+        // Select drag models to estimate.
+        let models: Vec<DragModel> = match drag_model_str.as_str() {
+            "g1" => vec![DragModel::G1],
+            "g7" => vec![DragModel::G7],
+            "both" | "all" | "g1,g7" | "g1g7" => vec![DragModel::G1, DragModel::G7],
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "Unknown --drag-model '{}'; use g1, g7, or both.",
+                    other
+                )))
+            }
+        };
+
+        // Convert scalar inputs to metric.
         let velocity_mps = match units {
             UnitSystem::Imperial => velocity * 0.3048,
             UnitSystem::Metric => velocity,
         };
-
         let mass_kg = match units {
             UnitSystem::Imperial => mass * 0.00006479891,
             UnitSystem::Metric => mass * 0.001,
         };
-
         let diameter_m = match units {
             UnitSystem::Imperial => diameter * 0.0254,
             UnitSystem::Metric => diameter * 0.001,
         };
 
-        // Convert data points to meters
-        let metric_points: Vec<(f64, f64)> = data_points
+        // Convert both series to metric (drop -> m, velocity -> m/s; metric drop input is mm).
+        let drop_metric: Vec<(f64, f64)> = data_points
             .iter()
             .map(|(dist, drop)| match units {
                 UnitSystem::Imperial => (*dist * 0.9144, *drop * 0.0254),
                 UnitSystem::Metric => (*dist, *drop * 0.001),
             })
             .collect();
+        let vel_metric: Vec<(f64, f64)> = vel_points
+            .iter()
+            .map(|(dist, v)| match units {
+                UnitSystem::Imperial => (*dist * 0.9144, *v * 0.3048),
+                UnitSystem::Metric => (*dist, *v),
+            })
+            .collect();
 
-        match estimate_bc_from_trajectory(velocity_mps, mass_kg, diameter_m, &metric_points) {
-            Ok(estimated_bc) => Ok(format!(
-                "BC Estimation Results\n\
-                     ====================\n\
-                     Estimated BC: {:.3}\n\
-                     Based on {} data points\n\
-                     Velocity: {} {}\n\
-                     Mass: {} {}\n\
-                     Diameter: {} {}",
-                estimated_bc,
-                data_points.len(),
-                velocity,
-                if units == UnitSystem::Imperial {
-                    "fps"
-                } else {
-                    "m/s"
-                },
-                mass,
-                if units == UnitSystem::Imperial {
-                    "grains"
-                } else {
-                    "grams"
-                },
-                diameter,
-                if units == UnitSystem::Imperial {
-                    "inches"
-                } else {
-                    "mm"
-                }
-            )),
-            Err(e) => Ok(format!("Error estimating BC: {}", e)),
+        // Data bases in a stable order (drop first, then velocity).
+        let mut bases: Vec<(BcFitMode, &[(f64, f64)])> = Vec::new();
+        if !drop_metric.is_empty() {
+            bases.push((BcFitMode::Drop, &drop_metric));
         }
+        if !vel_metric.is_empty() {
+            bases.push((BcFitMode::Velocity, &vel_metric));
+        }
+
+        let (vu, mu, du) = match units {
+            UnitSystem::Imperial => ("fps", "grains", "inches"),
+            UnitSystem::Metric => ("m/s", "grams", "mm"),
+        };
+        let mut lines = vec![
+            "BC Estimation Results".to_string(),
+            "=====================".to_string(),
+            format!(
+                "Inputs: v={} {}, m={} {}, d={} {}",
+                velocity, vu, mass, mu, diameter, du
+            ),
+            String::new(),
+            format!(
+                "  {:<6} {:<20} {:>12}   {}",
+                "Model", "Fit basis", "Estimated BC", "Fit RMS"
+            ),
+        ];
+        for &model in &models {
+            for &(mode, pts) in &bases {
+                let est = estimate_bc_fit(velocity_mps, mass_kg, diameter_m, pts, model, mode)
+                    .map_err(|e| JsValue::from_str(&format!("Error estimating BC: {}", e)))?;
+                let (rms_user, unit) = match mode {
+                    BcFitMode::Drop => match units {
+                        UnitSystem::Imperial => (est.rms_error / 0.0254, "in"),
+                        UnitSystem::Metric => (est.rms_error * 1000.0, "mm"),
+                    },
+                    BcFitMode::Velocity => match units {
+                        UnitSystem::Imperial => (est.rms_error / 0.3048, "fps"),
+                        UnitSystem::Metric => (est.rms_error, "m/s"),
+                    },
+                };
+                let model_name = match model {
+                    DragModel::G7 => "G7",
+                    DragModel::G1 => "G1",
+                    _ => "G?",
+                };
+                let basis = match mode {
+                    BcFitMode::Drop => "drop",
+                    BcFitMode::Velocity => "velocity",
+                };
+                lines.push(format!(
+                    "  {:<6} {:<20} {:>12.3}   {:>6.2} {}",
+                    model_name,
+                    format!("{} ({} pts)", basis, pts.len()),
+                    est.bc,
+                    rms_user,
+                    unit
+                ));
+            }
+        }
+        Ok(lines.join("\n"))
     }
 
     fn format_trajectory_table(
@@ -1950,7 +2022,13 @@ Estimate BC Command:
     -v, --velocity <VEL>         Muzzle velocity (fps/m/s)
     -m, --mass <MASS>            Mass (grains/grams)
     -d, --diameter <DIA>         Diameter (inches/mm)
-    --data <PAIRS>               Trajectory data: "dist,drop;..." (yd,in / m,mm)
+    --data <PAIRS>               Drop data: "dist,drop;..." (yd,in / m,mm)
+    --velocity-data <PAIRS>      Velocity data: "dist,vel;..." (yd,fps / m,m/s)
+    --drag-model <MODEL>         g1, g7, or both [default: both]
+
+  Prints a BC for each drag model x data basis you supply. Give --data for a drop
+  fit, --velocity-data for a velocity-retention fit (immune to zero/angle error),
+  or both for all four variants.
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
@@ -1958,6 +2036,8 @@ Examples:
   ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9
   ballistics zero --target-distance 300
   ballistics estimate-bc -v 2700 -m 168 -d 0.308 --data "100,2.1;200,9.4;300,22.8"
+  ballistics estimate-bc -v 2650 -m 77 -d 0.224 --data "300,29;500,89.9" \
+    --velocity-data "300,1980;500,1560" --drag-model both
   ballistics monte-carlo -n 1000 --velocity-std 10"#
             .to_string()
     }

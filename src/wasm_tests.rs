@@ -113,7 +113,28 @@ mod tests {
             .unwrap();
         assert!(result.contains("BC Estimation Results"));
         assert!(result.contains("Estimated BC"));
-        assert!(result.contains("Based on 3 data points"));
+        // Default --drag-model is "both", so a G1 and a G7 row are printed, each fit to the
+        // 3-point drop series.
+        assert!(result.contains("G1"));
+        assert!(result.contains("G7"));
+        assert!(result.contains("drop (3 pts)"));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_estimate_bc_velocity_and_drag_model() {
+        let wasm = WasmBallistics::new();
+        // G7-only, fit against a velocity-retention series.
+        let result = wasm
+            .run_command(
+                "estimate-bc -v 2650 -m 77 -d 0.224 \
+                 --velocity-data \"200,2270;400,1930;600,1610\" --drag-model g7",
+            )
+            .unwrap();
+        assert!(result.contains("BC Estimation Results"));
+        assert!(result.contains("G7"));
+        assert!(result.contains("velocity (3 pts)"));
+        // g7-only must NOT print a G1 row.
+        assert!(!result.contains("G1"));
     }
 
     #[wasm_bindgen_test]
@@ -273,7 +294,7 @@ mod tests {
         let result = wasm
             .run_command("estimate-bc -v 2700 -m 168 -d 0.308")
             .unwrap();
-        assert!(result.contains("Error: No trajectory data provided"));
+        assert!(result.contains("Error: No data provided"));
         assert!(result.contains("Example"));
     }
 
