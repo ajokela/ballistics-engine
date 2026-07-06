@@ -16,10 +16,10 @@
 
 // Re-export the main types and functions
 pub use cli_api::{
-    calculate_zero_angle, calculate_zero_angle_with_conditions, estimate_bc_from_trajectory,
-    run_monte_carlo, run_monte_carlo_with_wind, AtmosphericConditions, BallisticInputs,
-    BallisticsError, MonteCarloParams, MonteCarloResults, TrajectoryPoint, TrajectoryResult,
-    TrajectorySolver, WindConditions, DEFAULT_HIT_RADIUS_M,
+    calculate_zero_angle, calculate_zero_angle_with_conditions, estimate_bc_fit,
+    estimate_bc_from_trajectory, run_monte_carlo, run_monte_carlo_with_wind, AtmosphericConditions,
+    BallisticInputs, BallisticsError, BcEstimate, BcFitMode, MonteCarloParams, MonteCarloResults,
+    TrajectoryPoint, TrajectoryResult, TrajectorySolver, WindConditions, DEFAULT_HIT_RADIUS_M,
 };
 pub use drag_model::DragModel;
 

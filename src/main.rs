@@ -824,7 +824,7 @@ enum Commands {
         output: OutputFormat,
     },
 
-    /// Estimate BC from trajectory data
+    /// Estimate BC from trajectory data (drop and/or velocity), for G1, G7, or both
     EstimateBC {
         /// Initial velocity (m/s)
         #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
@@ -838,21 +838,35 @@ enum Commands {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
-        /// Distance 1 (meters)
+        /// Drop data: "dist,drop;dist,drop;..." (distance in yd/m, drop in in/m).
+        /// n-point alternative to --distance1/--drop1/--distance2/--drop2.
         #[arg(long)]
-        distance1: f64,
+        data: Option<String>,
 
-        /// Drop at distance 1 (inches for imperial, meters for metric)
-        #[arg(long, allow_hyphen_values = true)]
-        drop1: f64,
-
-        /// Distance 2 (meters)
+        /// Velocity data: "dist,vel;dist,vel;..." (distance in yd/m, velocity in fps/mps).
+        /// Enables the velocity-retention fit variants.
         #[arg(long)]
-        distance2: f64,
+        velocity_data: Option<String>,
 
-        /// Drop at distance 2 (inches for imperial, meters for metric)
+        /// Drag model to estimate: g1, g7, or both
+        #[arg(long, default_value = "both")]
+        drag_model: String,
+
+        /// Distance 1 (yd/m) — legacy 2-point drop input
+        #[arg(long)]
+        distance1: Option<f64>,
+
+        /// Drop at distance 1 (inches for imperial, meters for metric) — legacy
         #[arg(long, allow_hyphen_values = true)]
-        drop2: f64,
+        drop1: Option<f64>,
+
+        /// Distance 2 (yd/m) — legacy 2-point drop input
+        #[arg(long)]
+        distance2: Option<f64>,
+
+        /// Drop at distance 2 (inches for imperial, meters for metric) — legacy
+        #[arg(long, allow_hyphen_values = true)]
+        drop2: Option<f64>,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -3543,36 +3557,76 @@ fn main() -> Result<(), Box<dyn Error>> {
             velocity,
             mass,
             diameter,
+            data,
+            velocity_data,
+            drag_model,
             distance1,
             drop1,
             distance2,
             drop2,
             output,
         } => {
-            let bullet_mass = mass;
-            let bullet_diameter = diameter;
-            // Convert inputs to metric (MBA-716)
+            // Convert scalar inputs to metric (MBA-716).
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
-            let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
-            let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
-            let distance1_metric = UnitConverter::distance_to_metric(distance1, cli.units);
-            let drop1_metric = match cli.units {
-                UnitSystem::Imperial => drop1 * 0.0254,
-                UnitSystem::Metric => drop1,
+            let mass_metric = UnitConverter::mass_to_metric(mass, cli.units);
+            let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
+
+            // Drop series: from --data (n-point) or the legacy --distance1/--drop1/... pair.
+            let drop_raw: Vec<(f64, f64)> = if let Some(s) = &data {
+                parse_data_pairs(s)?
+            } else if let (Some(d1), Some(dr1), Some(d2), Some(dr2)) =
+                (distance1, drop1, distance2, drop2)
+            {
+                vec![(d1, dr1), (d2, dr2)]
+            } else {
+                Vec::new()
             };
-            let distance2_metric = UnitConverter::distance_to_metric(distance2, cli.units);
-            let drop2_metric = match cli.units {
-                UnitSystem::Imperial => drop2 * 0.0254,
-                UnitSystem::Metric => drop2,
+            // Velocity series: from --velocity-data (n-point).
+            let vel_raw: Vec<(f64, f64)> = match &velocity_data {
+                Some(s) => parse_data_pairs(s)?,
+                None => Vec::new(),
             };
-            run_bc_estimation(
+
+            if drop_raw.is_empty() && vel_raw.is_empty() {
+                return Err("No data provided. Supply drop data (--data \"d,drop;...\" or \
+                     --distance1/--drop1/--distance2/--drop2) and/or velocity data \
+                     (--velocity-data \"d,vel;...\")."
+                    .into());
+            }
+
+            // Convert both series to metric (distance -> m, drop in -> m, velocity fps -> m/s).
+            let drop_metric: Vec<(f64, f64)> = drop_raw
+                .iter()
+                .map(|(d, drop)| {
+                    (
+                        UnitConverter::distance_to_metric(*d, cli.units),
+                        match cli.units {
+                            UnitSystem::Imperial => *drop * 0.0254,
+                            UnitSystem::Metric => *drop,
+                        },
+                    )
+                })
+                .collect();
+            let vel_metric: Vec<(f64, f64)> = vel_raw
+                .iter()
+                .map(|(d, v)| {
+                    (
+                        UnitConverter::distance_to_metric(*d, cli.units),
+                        UnitConverter::velocity_to_metric(*v, cli.units),
+                    )
+                })
+                .collect();
+
+            let models = parse_drag_models(&drag_model)?;
+
+            run_bc_estimation_multi(
                 velocity_metric,
                 mass_metric,
                 diameter_metric,
-                distance1_metric,
-                drop1_metric,
-                distance2_metric,
-                drop2_metric,
+                &drop_metric,
+                &vel_metric,
+                &models,
+                cli.units,
                 output,
             )?;
         }
@@ -6106,98 +6160,182 @@ fn run_bc_segment_generation(
     Ok(())
 }
 
-fn run_bc_estimation(
+/// Parse a `"d,v;d,v;..."` data string into `(f64, f64)` pairs, tolerating surrounding
+/// quotes and whitespace. Errors on any malformed pair.
+fn parse_data_pairs(s: &str) -> Result<Vec<(f64, f64)>, Box<dyn Error>> {
+    let cleaned = s.trim().trim_matches('\'').trim_matches('"');
+    let mut out = Vec::new();
+    for pair in cleaned.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = pair.split(',').collect();
+        if parts.len() != 2 {
+            return Err(
+                format!("Malformed data pair '{}': expected \"distance,value\".", pair).into(),
+            );
+        }
+        let d: f64 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid distance '{}'.", parts[0].trim()))?;
+        let v: f64 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid value '{}'.", parts[1].trim()))?;
+        out.push((d, v));
+    }
+    if out.is_empty() {
+        return Err("No valid data pairs found.".into());
+    }
+    Ok(out)
+}
+
+/// Parse the `--drag-model` selector into the list of drag models to estimate.
+fn parse_drag_models(s: &str) -> Result<Vec<DragModel>, Box<dyn Error>> {
+    match s.trim().to_lowercase().as_str() {
+        "g1" => Ok(vec![DragModel::G1]),
+        "g7" => Ok(vec![DragModel::G7]),
+        "both" | "all" | "g1,g7" | "g1g7" => Ok(vec![DragModel::G1, DragModel::G7]),
+        other => Err(format!("Unknown --drag-model '{}'; use g1, g7, or both.", other).into()),
+    }
+}
+
+/// Estimate BC for every (drag model × available data basis) combination and print the
+/// results. `drop_points` are `(m, m)`, `vel_points` are `(m, m/s)`.
+#[allow(clippy::too_many_arguments)]
+fn run_bc_estimation_multi(
     velocity: f64,
     mass: f64,
     diameter: f64,
-    distance1: f64,
-    drop1: f64,
-    distance2: f64,
-    drop2: f64,
+    drop_points: &[(f64, f64)],
+    vel_points: &[(f64, f64)],
+    models: &[DragModel],
+    units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    // Create trajectory points for BC estimation
-    let points = vec![(distance1, drop1), (distance2, drop2)];
+    use ballistics_engine::{estimate_bc_fit, BcFitMode};
 
-    // Estimate BC
-    let estimated_bc =
-        ballistics_engine::estimate_bc_from_trajectory(velocity, mass, diameter, &points)?;
+    // The data bases we can fit against, in a stable order (drop first, then velocity).
+    struct Basis<'a> {
+        mode: BcFitMode,
+        points: &'a [(f64, f64)],
+    }
+    let mut bases: Vec<Basis> = Vec::new();
+    if !drop_points.is_empty() {
+        bases.push(Basis {
+            mode: BcFitMode::Drop,
+            points: drop_points,
+        });
+    }
+    if !vel_points.is_empty() {
+        bases.push(Basis {
+            mode: BcFitMode::Velocity,
+            points: vel_points,
+        });
+    }
 
-    // Verify the estimation by running a trajectory
-    let inputs = BallisticInputs {
-        muzzle_velocity: velocity,
-        bc_value: estimated_bc,
-        bullet_mass: mass,
-        bullet_diameter: diameter,
-        ..Default::default()
+    struct Variant {
+        model: DragModel,
+        mode: BcFitMode,
+        bc: f64,
+        rms_user: f64,
+        rms_unit: &'static str,
+        n: usize,
+    }
+    let mut variants: Vec<Variant> = Vec::new();
+    for &model in models {
+        for basis in &bases {
+            let est = estimate_bc_fit(velocity, mass, diameter, basis.points, model, basis.mode)?;
+            // Convert the RMS residual back to user units for a readable fit-quality column.
+            let (rms_user, rms_unit) = match basis.mode {
+                BcFitMode::Drop => match units {
+                    UnitSystem::Imperial => (est.rms_error / 0.0254, "in"),
+                    UnitSystem::Metric => (est.rms_error, "m"),
+                },
+                BcFitMode::Velocity => match units {
+                    UnitSystem::Imperial => (est.rms_error / 0.3048, "fps"),
+                    UnitSystem::Metric => (est.rms_error, "m/s"),
+                },
+            };
+            variants.push(Variant {
+                model,
+                mode: basis.mode,
+                bc: est.bc,
+                rms_user,
+                rms_unit,
+                n: basis.points.len(),
+            });
+        }
+    }
+
+    let model_name = |m: DragModel| match m {
+        DragModel::G7 => "G7",
+        DragModel::G1 => "G1",
+        _ => "G?",
     };
-
-    let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
-    // Bound the verification range like the estimator does (estimate_bc_from_trajectory caps at
-    // last_point * 1.5); the solver default of 1000 m otherwise gives a bogus 100% error for
-    // long-range inputs (no point reaches distance2, so calc_drop2 falls back to 0.0). Metric.
-    solver.set_max_range(distance1.max(distance2) * 1.5);
-    let trajectory = solver.solve()?;
-
-    // Find drops at the specified distances (X is downrange)
-    let calc_drop1 = trajectory
-        .points
-        .iter()
-        .find(|p| p.position.x >= distance1)
-        .map(|p| -p.position.y)
-        .unwrap_or(0.0);
-
-    let calc_drop2 = trajectory
-        .points
-        .iter()
-        .find(|p| p.position.x >= distance2)
-        .map(|p| -p.position.y)
-        .unwrap_or(0.0);
-
-    let error1 = ((calc_drop1 - drop1) / drop1 * 100.0).abs();
-    let error2 = ((calc_drop2 - drop2) / drop2 * 100.0).abs();
+    let basis_name = |mode: BcFitMode| match mode {
+        BcFitMode::Drop => "drop",
+        BcFitMode::Velocity => "velocity",
+    };
 
     match output {
         OutputFormat::Json => {
+            let vs: Vec<_> = variants
+                .iter()
+                .map(|v| {
+                    serde_json::json!({
+                        "drag_model": model_name(v.model),
+                        "fit_basis": basis_name(v.mode),
+                        "estimated_bc": (v.bc * 1000.0).round() / 1000.0,
+                        "fit_rms": (v.rms_user * 1000.0).round() / 1000.0,
+                        "fit_rms_unit": v.rms_unit,
+                        "n_points": v.n,
+                    })
+                })
+                .collect();
             let result = serde_json::json!({
-                "estimated_bc": estimated_bc,
-                "verification": {
-                    "distance1_m": distance1,
-                    "actual_drop1_m": drop1,
-                    "calculated_drop1_m": calc_drop1,
-                    "error1_percent": error1,
-                    "distance2_m": distance2,
-                    "actual_drop2_m": drop2,
-                    "calculated_drop2_m": calc_drop2,
-                    "error2_percent": error2,
-                }
+                "velocity": velocity,
+                "mass": mass,
+                "diameter": diameter,
+                "variants": vs,
             });
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
         OutputFormat::Csv => {
-            println!("metric,value");
-            println!("estimated_bc,{:.4}", estimated_bc);
-            println!("error_at_{}m_percent,{:.2}", distance1, error1);
-            println!("error_at_{}m_percent,{:.2}", distance2, error2);
+            println!("drag_model,fit_basis,estimated_bc,fit_rms,fit_rms_unit,n_points");
+            for v in &variants {
+                println!(
+                    "{},{},{:.4},{:.3},{},{}",
+                    model_name(v.model),
+                    basis_name(v.mode),
+                    v.bc,
+                    v.rms_user,
+                    v.rms_unit,
+                    v.n
+                );
+            }
         }
 
         OutputFormat::Table => {
-            println!("╔════════════════════════════════════════╗");
-            println!("║         BC ESTIMATION RESULT           ║");
-            println!("╠════════════════════════════════════════╣");
-            println!("║ Estimated BC:      {:>8.4}            ║", estimated_bc);
-            println!("╠════════════════════════════════════════╣");
-            println!("║ Verification:                          ║");
-            println!("║ At {:.0}m:                             ║", distance1);
-            println!("║   Actual drop:     {:>8.3} m          ║", drop1);
-            println!("║   Calculated:      {:>8.3} m          ║", calc_drop1);
-            println!("║   Error:           {:>8.2} %          ║", error1);
-            println!("║ At {:.0}m:                             ║", distance2);
-            println!("║   Actual drop:     {:>8.3} m          ║", drop2);
-            println!("║   Calculated:      {:>8.3} m          ║", calc_drop2);
-            println!("║   Error:           {:>8.2} %          ║", error2);
-            println!("╚════════════════════════════════════════╝");
+            println!("BC Estimation");
+            println!(
+                "  {:<6} {:<20} {:>12}   {}",
+                "Model", "Fit basis", "Estimated BC", "Fit RMS"
+            );
+            println!("  {:-<6} {:-<20} {:->12}   {:-<10}", "", "", "", "");
+            for v in &variants {
+                println!(
+                    "  {:<6} {:<20} {:>12.3}   {:>6.2} {}",
+                    model_name(v.model),
+                    format!("{} ({} pts)", basis_name(v.mode), v.n),
+                    v.bc,
+                    v.rms_user,
+                    v.rms_unit
+                );
+            }
         }
 
         OutputFormat::Pdf => {

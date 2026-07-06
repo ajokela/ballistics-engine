@@ -5,6 +5,28 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.8] - 2026-07-06
+
+### Added
+
+- **`estimate-bc` now estimates G1 *and* G7 BCs, and can fit velocity data as well as drop
+  data.** Previously the command fit a single G1 BC from a drop curve only. New options:
+  - `--drag-model g1|g7|both` (default `both`) — estimate the BC referenced to either
+    standard drag model, or both at once. (A bullet's G7 BC is a different number from its G1
+    BC — for a boat-tail, roughly half; both are now reported side by side.)
+  - `--velocity-data "dist,vel;..."` — fit against a downrange velocity-retention curve
+    instead of, or in addition to, drop. A velocity fit doesn't depend on the zero, sight
+    height, or launch angle, so it is often the more reliable basis.
+  - `--data "dist,drop;..."` on the native CLI too (n-point drop series), alongside the
+    existing `--distance1/--drop1/--distance2/--drop2` input (now optional).
+
+  The command prints one row per (drag model × supplied data basis), each with a fit-quality
+  RMS. Supplying both a drop series and a velocity series with `--drag-model both` yields all
+  four variants (G1/drop, G1/velocity, G7/drop, G7/velocity). Native CLI (table/json/csv) and
+  WASM. New public API `estimate_bc_fit` / `BcFitMode` / `BcEstimate`; the existing
+  `estimate_bc_from_trajectory` remains as a G1/drop convenience wrapper. Requested by an
+  external WASM user.
+
 ## [0.22.7] - 2026-07-05
 
 ### Changed

@@ -230,14 +230,31 @@ Statistical analysis with parameter variations:
 
 ### BC Estimation
 
-Estimate ballistic coefficient from observed trajectory:
+Estimate ballistic coefficient from observed data. Supports both the **G1 and G7** drag
+models and two fit bases — a **drop** curve or a downrange **velocity** curve (the latter is
+immune to zero / sight-height / launch-angle error). A row is printed for each drag model ×
+data basis you supply.
 
 ```bash
+# Legacy two-point drop input (G1 + G7 by default)
 ./ballistics estimate-bc \
   -v 2700 -m 168 -d 0.308 \
   --distance1 100 --drop1 0.0 \
   --distance2 200 --drop2 0.023
+
+# n-point drop series, G7 only
+./ballistics estimate-bc -v 2650 -m 77 -d 0.224 \
+  --data "300,29.0;500,89.9;700,204.6" --drag-model g7
+
+# All four variants: G1/G7 x drop/velocity
+./ballistics estimate-bc -v 2650 -m 77 -d 0.224 \
+  --data "300,29.0;500,89.9;700,204.6" \
+  --velocity-data "300,1980;500,1560;700,1240" \
+  --drag-model both
 ```
+
+Options: `--data "dist,drop;..."` (yd,in / m,mm), `--velocity-data "dist,vel;..."`
+(yd,fps / m,m/s), `--drag-model g1|g7|both` (default `both`), `-o table|json|csv`.
 
 ### True Velocity Calculation
 

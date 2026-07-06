@@ -2297,78 +2297,164 @@ pub fn calculate_zero_angle_with_conditions(
     Err("Failed to find zero angle".into())
 }
 
-// Estimate BC from trajectory data
+/// What a BC estimate is fit against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BcFitMode {
+    /// Data points are `(distance_m, drop_m)` — the classic drop-curve fit.
+    Drop,
+    /// Data points are `(distance_m, velocity_mps)` — a velocity-retention fit,
+    /// which is immune to zero / sight-height / launch-angle error.
+    Velocity,
+}
+
+/// The result of a single BC fit (one drag model, one fit basis).
+#[derive(Debug, Clone, Copy)]
+pub struct BcEstimate {
+    /// The estimated ballistic coefficient.
+    pub bc: f64,
+    /// RMS residual across the data points, in fit units (meters of drop, or m/s of speed).
+    pub rms_error: f64,
+    /// Which standard drag model this BC is referenced to.
+    pub drag_model: DragModel,
+    /// Whether the fit was against drop or velocity data.
+    pub mode: BcFitMode,
+}
+
+/// Interpolate the fitted quantity (drop in meters, or speed in m/s) at a downrange
+/// distance from a solved trajectory. `None` if the trajectory never reaches `target_dist`.
+fn fit_value_at(points: &[TrajectoryPoint], target_dist: f64, mode: BcFitMode) -> Option<f64> {
+    let val = |p: &TrajectoryPoint| match mode {
+        BcFitMode::Drop => -p.position.y,
+        BcFitMode::Velocity => p.velocity_magnitude,
+    };
+    for i in 0..points.len() {
+        if points[i].position.x >= target_dist {
+            if i == 0 {
+                return Some(val(&points[0]));
+            }
+            let p1 = &points[i - 1];
+            let p2 = &points[i];
+            let dx = p2.position.x - p1.position.x;
+            if dx.abs() < 1e-9 {
+                return Some(val(p2));
+            }
+            let t = (target_dist - p1.position.x) / dx;
+            return Some(val(p1) + t * (val(p2) - val(p1)));
+        }
+    }
+    None
+}
+
+/// Estimate a BC by fitting a simulated trajectory to measured data, for a chosen drag
+/// model (G1, G7, …) and fit basis (drop or velocity). Uses a coarse 0.01 sweep over
+/// plausible BCs followed by a 0.001 local refine around the coarse best.
+///
+/// `points` are `(distance_m, value_m_or_mps)` where the second element is drop in meters
+/// (`BcFitMode::Drop`) or remaining speed in m/s (`BcFitMode::Velocity`).
+pub fn estimate_bc_fit(
+    velocity: f64,
+    mass: f64,
+    diameter: f64,
+    points: &[(f64, f64)],
+    drag_model: DragModel,
+    mode: BcFitMode,
+) -> Result<BcEstimate, BallisticsError> {
+    if points.is_empty() {
+        return Err(BallisticsError::from(
+            "No data points provided for BC estimation.".to_string(),
+        ));
+    }
+    let max_dist = points.iter().map(|(d, _)| *d).fold(0.0_f64, f64::max);
+
+    // Sum of squared residuals for a trial BC; None if the solve can't reach the data.
+    let sse = |bc_value: f64| -> Option<f64> {
+        let inputs = BallisticInputs {
+            muzzle_velocity: velocity,
+            bc_value,
+            bc_type: drag_model,
+            bullet_mass: mass,
+            bullet_diameter: diameter,
+            ..Default::default()
+        };
+        let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+        solver.set_max_range(max_dist * 1.5);
+        let result = solver.solve().ok()?;
+        let mut total = 0.0;
+        let mut matched = 0;
+        for (target_dist, target_val) in points {
+            if let Some(v) = fit_value_at(&result.points, *target_dist, mode) {
+                let e = v - target_val;
+                total += e * e;
+                matched += 1;
+            }
+        }
+        if matched == 0 {
+            None
+        } else {
+            Some(total)
+        }
+    };
+
+    // Coarse sweep. Lower bound 0.05 covers small G7 BCs; upper 1.20 covers high G1 BCs.
+    let mut best_bc = f64::NAN;
+    let mut best_sse = f64::MAX;
+    let mut bc = 0.05;
+    while bc <= 1.20 + 1e-9 {
+        if let Some(s) = sse(bc) {
+            if s < best_sse {
+                best_sse = s;
+                best_bc = bc;
+            }
+        }
+        bc += 0.01;
+    }
+    if !best_bc.is_finite() {
+        return Err(BallisticsError::from(
+            "Unable to estimate BC from provided data. Check that the values and units are correct."
+                .to_string(),
+        ));
+    }
+
+    // Local refine at 0.001 resolution around the coarse best.
+    let lo = (best_bc - 0.01).max(0.01);
+    let hi = best_bc + 0.01;
+    let mut bc = lo;
+    while bc <= hi + 1e-9 {
+        if let Some(s) = sse(bc) {
+            if s < best_sse {
+                best_sse = s;
+                best_bc = bc;
+            }
+        }
+        bc += 0.001;
+    }
+
+    let rms_error = (best_sse / points.len() as f64).sqrt();
+    Ok(BcEstimate {
+        bc: best_bc,
+        rms_error,
+        drag_model,
+        mode,
+    })
+}
+
+/// Estimate a G1 BC from a drop curve. Back-compatible wrapper over [`estimate_bc_fit`];
+/// `points` are `(distance_m, drop_m)`.
 pub fn estimate_bc_from_trajectory(
     velocity: f64,
     mass: f64,
     diameter: f64,
     points: &[(f64, f64)], // (distance, drop) pairs
 ) -> Result<f64, BallisticsError> {
-    // Simple BC estimation using least squares
-    let mut best_bc = 0.5;
-    let mut best_error = f64::MAX;
-    let mut found_valid = false;
-
-    // Try different BC values
-    for bc in (100..1000).step_by(10) {
-        let bc_value = bc as f64 / 1000.0;
-
-        let inputs = BallisticInputs {
-            muzzle_velocity: velocity,
-            bc_value,
-            bullet_mass: mass,
-            bullet_diameter: diameter,
-            ..Default::default()
-        };
-
-        let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
-        // Set max range for BC estimation
-        solver.set_max_range(points.last().map(|(d, _)| *d * 1.5).unwrap_or(1000.0));
-
-        let result = match solver.solve() {
-            Ok(r) => r,
-            Err(_) => continue, // Skip this BC value if solve fails
-        };
-
-        // Calculate error
-        let mut total_error = 0.0;
-        for (target_dist, target_drop) in points {
-            // Find drop at this distance
-            let mut calculated_drop = None;
-            for i in 0..result.points.len() {
-                if result.points[i].position.x >= *target_dist {
-                    if i > 0 {
-                        // Linear interpolation
-                        let p1 = &result.points[i - 1];
-                        let p2 = &result.points[i];
-                        let t = (target_dist - p1.position.x) / (p2.position.x - p1.position.x);
-                        calculated_drop =
-                            Some(-(p1.position.y + t * (p2.position.y - p1.position.y)));
-                    } else {
-                        calculated_drop = Some(-result.points[i].position.y);
-                    }
-                    break;
-                }
-            }
-
-            if let Some(drop) = calculated_drop {
-                let error = (drop - target_drop).abs();
-                total_error += error * error;
-            }
-        }
-
-        if total_error < best_error {
-            best_error = total_error;
-            best_bc = bc_value;
-            found_valid = true;
-        }
-    }
-
-    if !found_valid {
-        return Err(BallisticsError::from("Unable to estimate BC from provided data. Check that drop values are in correct units.".to_string()));
-    }
-
-    Ok(best_bc)
+    estimate_bc_fit(
+        velocity,
+        mass,
+        diameter,
+        points,
+        DragModel::G1,
+        BcFitMode::Drop,
+    )
+    .map(|e| e.bc)
 }
 
 // Add rand dependencies for Monte Carlo
