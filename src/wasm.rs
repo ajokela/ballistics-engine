@@ -591,6 +591,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                // --units/-u (+ its value) is consumed globally in run_command, which
+                // pre-scans it to set the unit system before dispatch. Skip it here so
+                // it isn't rejected as an unknown flag (this is what blocked metric input).
+                "--units" | "-u" => {
+                    i += 1;
+                }
                 // Reject unrecognized flags instead of silently ignoring them, so a
                 // typo or a flag that isn't wired into this WASM surface is caught
                 // immediately rather than looking like a no-op. (The native CLI's clap
@@ -1071,6 +1077,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                // --units/-u (+ its value) is consumed globally in run_command, which
+                // pre-scans it to set the unit system before dispatch. Skip it here so
+                // it isn't rejected as an unknown flag (this is what blocked metric input).
+                "--units" | "-u" => {
+                    i += 1;
+                }
                 // Reject unrecognized flags instead of silently ignoring them, so a
                 // typo or a flag that isn't wired into this WASM surface is caught
                 // immediately rather than looking like a no-op. (The native CLI's clap
@@ -1278,6 +1290,12 @@ impl WasmBallistics {
                         drag_model = args[i + 1];
                         i += 1;
                     }
+                }
+                // --units/-u (+ its value) is consumed globally in run_command, which
+                // pre-scans it to set the unit system before dispatch. Skip it here so
+                // it isn't rejected as an unknown flag (this is what blocked metric input).
+                "--units" | "-u" => {
+                    i += 1;
                 }
                 // Reject unrecognized flags instead of silently ignoring them, so a
                 // typo or a flag that isn't wired into this WASM surface is caught
@@ -1605,6 +1623,12 @@ impl WasmBallistics {
                         altitude = args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid altitude"))?;
                         i += 1;
                     }
+                }
+                // --units/-u (+ its value) is consumed globally in run_command, which
+                // pre-scans it to set the unit system before dispatch. Skip it here so
+                // it isn't rejected as an unknown flag (this is what blocked metric input).
+                "--units" | "-u" => {
+                    i += 1;
                 }
                 // Reject unrecognized flags instead of silently ignoring them, so a
                 // typo or a flag that isn't wired into this WASM surface is caught
