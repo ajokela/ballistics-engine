@@ -389,6 +389,13 @@ enum Commands {
         #[arg(long = "wind-segment", value_name = "SPEED:ANGLE:DIST", action = clap::ArgAction::Append)]
         wind_segment: Vec<String>,
 
+        /// Manual velocity-dependent BC segment(s): "VMIN:VMAX:BC" (repeatable). VMIN/VMAX are
+        /// velocities in --units (fps imperial, m/s metric); the given BC applies while the
+        /// bullet's speed is in [VMIN, VMAX). Segments are keyed to VELOCITY (independent of
+        /// distance/wind). Overrides --bc-table-dir and implies --use-bc-segments.
+        #[arg(long = "bc-segment", value_name = "VMIN:VMAX:BC", action = clap::ArgAction::Append)]
+        bc_segment: Vec<String>,
+
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
         temperature: Option<f64>,
@@ -2252,6 +2259,49 @@ fn parse_wind_segment(
     ballistics_engine::wind::parse_wind_segment_str(s, matches!(units, UnitSystem::Imperial))
 }
 
+/// Parse a `--bc-segment` value `"VMIN:VMAX:BC"` into a velocity-keyed `BCSegmentData`.
+/// VMIN/VMAX are in the CLI display velocity units (fps imperial, m/s metric) and are
+/// converted to fps (the engine's segment unit); BC is dimensionless. The BC applies while
+/// the bullet's current velocity is in `[VMIN, VMAX)`.
+fn parse_bc_segment(s: &str, units: UnitSystem) -> Result<BCSegmentData, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!(
+            "--bc-segment expects VMIN:VMAX:BC (e.g. 1500:1800:0.243), got '{}'",
+            s
+        ));
+    }
+    let vmin: f64 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| format!("--bc-segment: invalid VMIN in '{}'", s))?;
+    let vmax: f64 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| format!("--bc-segment: invalid VMAX in '{}'", s))?;
+    let bc: f64 = parts[2]
+        .trim()
+        .parse()
+        .map_err(|_| format!("--bc-segment: invalid BC in '{}'", s))?;
+    if !(vmin < vmax) {
+        return Err(format!("--bc-segment: VMIN must be < VMAX in '{}'", s));
+    }
+    if bc <= 0.0 {
+        return Err(format!("--bc-segment: BC must be > 0 in '{}'", s));
+    }
+    // Display velocity -> fps (the unit the solver compares segment bounds against).
+    let to_fps = if matches!(units, UnitSystem::Imperial) {
+        1.0
+    } else {
+        3.280_839_895
+    };
+    Ok(BCSegmentData {
+        velocity_min: vmin * to_fps,
+        velocity_max: vmax * to_fps,
+        bc_value: bc,
+    })
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
@@ -2275,6 +2325,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_speed,
             wind_direction,
             wind_segment,
+            bc_segment,
             temperature,
             pressure,
             humidity,
@@ -3008,6 +3059,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None
             };
 
+            // Manual velocity:BC segments (--bc-segment "VMIN:VMAX:BC", display units
+            // -> fps) take precedence over any --bc-table-dir / BC5D segments resolved
+            // above. Resolved BEFORE the auto-zero solve below so the zero angle is
+            // computed with the SAME velocity-keyed BC the trajectory uses (otherwise a
+            // segment that changes early-flight drag would mis-zero the shot); via
+            // bc_table_segments.is_some() this also implies --use-bc-segments.
+            let manual_bc_segments: Vec<BCSegmentData> = bc_segment
+                .iter()
+                .map(|s| parse_bc_segment(s, cli.units))
+                .collect::<Result<Vec<_>, String>>()?;
+            if !manual_bc_segments.is_empty() {
+                bc_table_segments = Some(manual_bc_segments.clone());
+                // Manual segments fully override a --bc-table-dir table. If that table
+                // scaled the base BC via a muzzle correction, undo it here so the
+                // out-of-segment fallback uses the raw --bc (not the table-corrected
+                // value), keeping the "override" contract and parity with WASM.
+                if let Some(corr) = bc_table_5d_correction {
+                    if corr.abs() > f64::EPSILON {
+                        trued_bc /= corr;
+                    }
+                }
+            }
+
             // Calculate zero angle if auto-zero is specified (from CLI or profile)
             let muzzle_angle = if let Some(zero_distance) = final_auto_zero {
                 let zero_distance_metric =
@@ -3085,6 +3159,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // the shot-day powder temp so it isn't inherited into the zero solve.
                     powder_curve_temp_c: zero_powder_temp
                         .map(|t| UnitConverter::temperature_to_metric(t, cli.units)),
+                    // Zero the rifle with the SAME velocity-keyed BC the trajectory
+                    // uses (manual --bc-segment or a BC5D table, held in
+                    // bc_table_segments). Without this the launch-angle solve runs on
+                    // the base --bc only, so a segment that changes early-flight drag
+                    // grounds the shot short of the requested zero (and diverged from WASM).
+                    use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
+                    bc_segments_data: bc_table_segments.clone(),
                     ..Default::default()
                 };
 
@@ -8230,5 +8311,48 @@ mod adjustment_unit_tests {
     fn short_range_returns_zero() {
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Moa), 0.0);
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Mil), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod bc_segment_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_imperial_pair_as_fps() {
+        let seg = parse_bc_segment("1500:1800:0.243", UnitSystem::Imperial).unwrap();
+        assert_eq!(seg.velocity_min, 1500.0);
+        assert_eq!(seg.velocity_max, 1800.0);
+        assert!((seg.bc_value - 0.243).abs() < 1e-12);
+    }
+
+    #[test]
+    fn converts_metric_velocity_to_fps() {
+        // 305 m/s -> 1000.66 fps, 427 m/s -> 1400.92 fps; BC unchanged.
+        let seg = parse_bc_segment("305:427:0.15", UnitSystem::Metric).unwrap();
+        assert!((seg.velocity_min - 305.0 * 3.280_839_895).abs() < 1e-6);
+        assert!((seg.velocity_max - 427.0 * 3.280_839_895).abs() < 1e-6);
+        assert!((seg.bc_value - 0.15).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rejects_wrong_field_count() {
+        assert!(parse_bc_segment("1000:1400", UnitSystem::Imperial).is_err());
+        assert!(parse_bc_segment("1000:1400:0.2:extra", UnitSystem::Imperial).is_err());
+    }
+
+    #[test]
+    fn rejects_vmin_not_less_than_vmax() {
+        assert!(parse_bc_segment("1400:1000:0.2", UnitSystem::Imperial).is_err());
+        assert!(parse_bc_segment("1400:1400:0.2", UnitSystem::Imperial).is_err());
+    }
+
+    #[test]
+    fn rejects_nonpositive_bc_and_nonnumeric() {
+        assert!(parse_bc_segment("1000:1400:0", UnitSystem::Imperial).is_err());
+        assert!(parse_bc_segment("1000:1400:-0.1", UnitSystem::Imperial).is_err());
+        assert!(parse_bc_segment("abc:1400:0.2", UnitSystem::Imperial).is_err());
+        assert!(parse_bc_segment("1000:xyz:0.2", UnitSystem::Imperial).is_err());
+        assert!(parse_bc_segment("1000:1400:bc", UnitSystem::Imperial).is_err());
     }
 }

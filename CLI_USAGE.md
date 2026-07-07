@@ -454,6 +454,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --humidity | Relative humidity | 50 | % | % |
 | --altitude | Altitude | 0 | feet | meters |
 | --use-bc-segments | Enable BC segmentation | false | - | - |
+| --bc-segment | Manual velocity-keyed BC segment `VMIN:VMAX:BC` (repeatable) | — | fps | m/s |
 | --full | Show all trajectory points | false | - | - |
 | --enable-magnus | Enable Magnus effect | false | - | - |
 | --enable-coriolis | Enable Coriolis effect | false | - | - |
@@ -470,6 +471,28 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --enable-pitch-damping | Transonic stability analysis | false | - | - |
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
+
+### Manual BC Segments (`--bc-segment`)
+
+A bullet's effective BC changes with its **velocity** (it degrades as the bullet slows,
+sharpest through transonic). `--bc-segment VMIN:VMAX:BC` (repeatable) lets you supply your
+own velocity-keyed BC ladder — the given BC applies while the bullet's current speed is in
+`[VMIN, VMAX)`:
+
+```bash
+# BC 0.243 above 1800 fps, 0.228 from 1500-1800, 0.205 from 1200-1500
+ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-range 1000 \
+  --bc-segment 1800:4000:0.243 \
+  --bc-segment 1500:1800:0.228 \
+  --bc-segment 1200:1500:0.205
+```
+
+- **VMIN/VMAX** follow `--units` (fps imperial, m/s metric); **BC** is dimensionless.
+- Segments are keyed to **velocity**, not distance — this is orthogonal to `--wind-segment`
+  (which is distance-keyed). You can combine both; each applies on its own axis.
+- Passing any `--bc-segment` implies `--use-bc-segments` and **overrides** `--bc-table-dir`
+  (manual pairs are highest priority). A velocity outside every segment falls back to the
+  base `--bc`.
 
 ### Downrange Wind Segments (`--wind-segment`)
 

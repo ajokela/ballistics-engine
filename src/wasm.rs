@@ -202,6 +202,9 @@ impl WasmBallistics {
         // Raw "SPEED:ANGLE:UNTIL" strings; every --wind-segment occurrence is collected
         // (the parse loop visits all args, so repeats accumulate here).
         let mut wind_segment_strs: Vec<String> = Vec::new();
+        // Raw "VMIN:VMAX:BC" strings from every --bc-segment occurrence (manual
+        // velocity-keyed BC segments; take precedence over a loaded BC5D table).
+        let mut bc_segment_strs: Vec<String> = Vec::new();
         let mut temperature = default_temp;
         let mut pressure = default_pressure;
         let mut humidity = 50.0;
@@ -358,6 +361,12 @@ impl WasmBallistics {
                 "--wind-segment" => {
                     if i + 1 < args.len() {
                         wind_segment_strs.push(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                "--bc-segment" => {
+                    if i + 1 < args.len() {
+                        bc_segment_strs.push(args[i + 1].to_string());
                         i += 1;
                     }
                 }
@@ -656,23 +665,67 @@ impl WasmBallistics {
         inputs.use_bc_segments = use_bc_segments;
         inputs.use_powder_sensitivity = use_powder_sensitivity;
 
-        // BC5D offline correction: if a table has been loaded via loadBc5dTable()
-        // and the caller asked for BC segments, synthesize velocity-dependent BC
-        // segments from the table and hand them to the solver. The table's native
-        // units are grains + fps, so convert from metric when needed.
-        if use_bc_segments {
+        // Velocity-keyed BC segments, in priority order:
+        //   1. manual --bc-segment "VMIN:VMAX:BC" pairs (explicit user input)
+        //   2. a BC5D table loaded via loadBc5dTable() + --use-bc-segments
+        // Velocities are in the command's display units (fps imperial, m/s metric);
+        // the solver compares against fps, so convert.
+        let vel_to_fps = match units {
+            UnitSystem::Imperial => 1.0,
+            UnitSystem::Metric => 3.280_839_895,
+        };
+        let mut manual_bc_segments: Vec<crate::BCSegmentData> = Vec::new();
+        for s in &bc_segment_strs {
+            let parts: Vec<&str> = s.split(':').collect();
+            if parts.len() != 3 {
+                return Err(JsValue::from_str(&format!(
+                    "--bc-segment expects VMIN:VMAX:BC (e.g. 1500:1800:0.243), got '{}'",
+                    s
+                )));
+            }
+            let vmin: f64 = parts[0].trim().parse().map_err(|_| {
+                JsValue::from_str(&format!("--bc-segment: invalid VMIN in '{}'", s))
+            })?;
+            let vmax: f64 = parts[1].trim().parse().map_err(|_| {
+                JsValue::from_str(&format!("--bc-segment: invalid VMAX in '{}'", s))
+            })?;
+            let bcv: f64 = parts[2].trim().parse().map_err(|_| {
+                JsValue::from_str(&format!("--bc-segment: invalid BC in '{}'", s))
+            })?;
+            if !(vmin < vmax) {
+                return Err(JsValue::from_str(&format!(
+                    "--bc-segment: VMIN must be < VMAX in '{}'",
+                    s
+                )));
+            }
+            if bcv <= 0.0 {
+                return Err(JsValue::from_str(&format!(
+                    "--bc-segment: BC must be > 0 in '{}'",
+                    s
+                )));
+            }
+            manual_bc_segments.push(crate::BCSegmentData {
+                velocity_min: vmin * vel_to_fps,
+                velocity_max: vmax * vel_to_fps,
+                bc_value: bcv,
+            });
+        }
+
+        if !manual_bc_segments.is_empty() {
+            // Manual segments win; imply --use-bc-segments so they're applied.
+            inputs.bc_segments_data = Some(manual_bc_segments);
+            inputs.use_bc_segments = true;
+        } else if use_bc_segments {
+            // BC5D offline correction: synthesize velocity-dependent BC segments
+            // from a loaded table. The table's native units are grains + fps.
             if let Some(table) = self.bc5d_table.borrow().as_ref() {
                 let (weight_grains, muzzle_fps) = match units {
                     UnitSystem::Imperial => (mass, velocity),
-                    // grams -> grains, m/s -> fps
                     UnitSystem::Metric => (mass * 15.4323584, velocity * 3.280839895),
                 };
-                if let Some(segments) = table.generate_segments(
-                    bc,
-                    drag_model,
-                    weight_grains,
-                    Some(muzzle_fps),
-                ) {
+                if let Some(segments) =
+                    table.generate_segments(bc, drag_model, weight_grains, Some(muzzle_fps))
+                {
                     inputs.bc_segments_data = Some(segments);
                 }
             }
@@ -2152,7 +2205,8 @@ Trajectory Command:
     --time-step <SECONDS>        Integration time step (seconds) [default: 0.001]
     --sample-trajectory          Enable trajectory sampling
     --sample-interval <DIST>     Trajectory sampling interval (yards/meters) [default: 10]
-    --use-bc-segments            Use velocity-based BC
+    --use-bc-segments            Use velocity-based BC (from a loaded BC5D table)
+    --bc-segment <VMIN:VMAX:BC>  Manual velocity-keyed BC segment (repeatable; fps/m/s per --units)
     --use-powder-sensitivity     Enable powder temp sensitivity
     
   Additional Parameters:
