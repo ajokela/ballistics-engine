@@ -5,6 +5,31 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.11] - 2026-07-07
+
+### Added
+
+- **`--bc-segment VMIN:VMAX:BC` — manual velocity-keyed BC segments** (CLI + WASM, repeatable).
+  Supply your own velocity-dependent BC ladder directly instead of relying on the auto-estimator
+  or a BC5D table: the given BC applies while the bullet's current speed is in `[VMIN, VMAX)`.
+  Requested by an external user doing downrange BC work.
+  - VMIN/VMAX follow `--units` (fps imperial, m/s metric); converted to fps internally.
+  - Keyed to **velocity**, orthogonal to distance-keyed `--wind-segment` — combine both and each
+    applies on its own axis. A velocity outside every segment falls back to the base `--bc`.
+  - Passing any `--bc-segment` implies `--use-bc-segments` and **overrides** `--bc-table-dir`.
+  - WASM: `--bc-segment` accepted by `runCommand`; validation errors thrown as JS exceptions.
+
+### Fixed
+
+- **`--auto-zero` now solves the launch angle with the active velocity-keyed BC** (manual
+  `--bc-segment`, `--use-bc-segments`, or a `--bc-table-dir` table) instead of the base `--bc`.
+  Previously the native CLI zero-angle solver ignored BC segments, so a segment that changed
+  early-flight drag mis-zeroed the shot (it grounded short of the requested zero distance and
+  reported wrong drop/range). Now matches the WASM build. (Pre-existing bug, surfaced by
+  `--bc-segment`.)
+- **`--bc-segment` + `--bc-table-dir` together**: the out-of-segment fallback base BC is no
+  longer scaled by the BC5D table's muzzle correction — manual segments are a clean override.
+
 ## [0.22.10] - 2026-07-06
 
 ### Added
