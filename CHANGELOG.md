@@ -5,6 +5,17 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.12] - 2026-07-07
+
+### Fixed
+
+- **WASM: `--units metric` (and `-u`) now works.** `run_command` pre-scanned `--units` to
+  select the unit system but left the flag in the argument list, and the `trajectory` / `zero`
+  handlers' unknown-flag rejection then threw `Unknown flag: --units`. Metric commands were
+  therefore unusable from WASM (including metric `--bc-segment`), despite `--help` advertising
+  the flag. The handlers now skip `--units`/`-u` (its value is already consumed globally).
+  Native CLI was unaffected. WASM-only change.
+
 ## [0.22.11] - 2026-07-07
 
 ### Added
