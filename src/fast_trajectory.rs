@@ -4,7 +4,7 @@
 //! that provides significant performance improvements for long-range calculations.
 
 use crate::{
-    atmosphere::get_local_atmosphere,
+    atmosphere::get_local_atmosphere_humid,
     constants::{G_ACCEL_MPS2, MPS_TO_FPS},
     drag::get_drag_coefficient,
     wind::WindSock,
@@ -520,19 +520,21 @@ fn compute_derivatives(
         // Calculate drag
         let v_fps = v_mag * MPS_TO_FPS;
 
-        // Calculate speed of sound from altitude using standard lapse rate
-        // atmo_params: (base_alt, base_temp_c, base_press_hpa, base_ratio)
+        // Calculate speed of sound from altitude using standard lapse rate.
+        // atmo_params: (base_alt, base_temp_c, base_press_hpa, base_ratio).
+        // MBA-1136 (rank 9): route the local speed of sound through the moist-air formula. Only
+        // the speed of sound is used here (density is discarded), so the base_ratio arg is inert
+        // (pass 1.0). Humidity is NOT plumbed to this call site: on the fast path
+        // (fast_integrate) the `humidity` FIELD is overwritten with atmo_params.3 (the density
+        // RATIO), so `inputs.humidity` is not a real RH — pass 0.0 (dry) rather than fabricate.
         let altitude = inputs.altitude + pos.y;
-        let (_, speed_of_sound) = get_local_atmosphere(
+        let (_, speed_of_sound) = get_local_atmosphere_humid(
             altitude,
             inputs.altitude, // base_alt approximation
             inputs.temperature,
             inputs.pressure,
-            if inputs.humidity > 0.0 {
-                inputs.humidity
-            } else {
-                1.0
-            },
+            1.0, // base_ratio inert (density discarded)
+            0.0, // humidity not available here (see note above)
         );
         let mach = v_mag / speed_of_sound;
 

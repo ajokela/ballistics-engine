@@ -20,8 +20,6 @@ struct AtmosphereLayer {
 const G_ACCEL_MPS2: f64 = 9.80665;
 const R_AIR: f64 = 287.0531; // Specific gas constant for dry air (J/(kg·K))
 const GAMMA: f64 = 1.4; // Heat capacity ratio for air
-const R_DRY: f64 = 287.05; // Gas constant for dry air
-const R_VAPOR: f64 = 461.495; // Gas constant for water vapor
 
 /// CIPM constants for precise air density calculation
 const R: f64 = 8.314472; // Universal gas constant
@@ -223,49 +221,59 @@ pub fn calculate_atmosphere(
         (final_temp_k, final_pressure_pa)
     };
 
-    // Enhanced humidity effects on air density and speed of sound
+    // Humidity clamp shared by the CIPM density and the moist speed of sound.
     let humidity_clamped = humidity_percent.clamp(0.0, 100.0);
-
-    // Calculate saturation vapor pressure (enhanced Magnus formula)
     let temp_c = temp_k - 273.15;
-    let es_hpa = if temp_c >= 0.0 {
-        // Over water (Arden Buck): es = 6.1121 * exp[(18.678 - T/234.5) * (T/(257.14+T))].
-        // The ENTIRE product is the exponent; previously the linear factor sat OUTSIDE exp,
-        // over-estimating es by ~7x at 15C and corrupting humidity-dependent air density.
-        6.1121 * ((18.678 - temp_c / 234.5) * (temp_c / (257.14 + temp_c))).exp()
-    } else {
-        // Over ice (Arden Buck): es = 6.1115 * exp[(23.036 - T/333.7) * (T/(279.82+T))].
-        6.1115 * ((23.036 - temp_c / 333.7) * (temp_c / (279.82 + temp_c))).exp()
-    };
 
-    // Calculate actual vapor pressure
-    let vapor_pressure_pa = humidity_clamped / 100.0 * es_hpa * 100.0;
-    let dry_pressure_pa = (pressure_pa - vapor_pressure_pa).max(0.0);
+    // Density: CIPM-2007 is the single canonical humid-air density model. Every solver
+    // (cli_api / monte_carlo / ffi / fast_trajectory) reaches this one formula through
+    // calculate_atmosphere, so there is no second (Arden-Buck ideal-gas) density path to drift.
+    let density = calculate_air_density_cimp(temp_c, pressure_pa / 100.0, humidity_clamped);
 
-    // Calculate air density with humidity effects
-    let density = dry_pressure_pa / (R_DRY * temp_k) + vapor_pressure_pa / (R_VAPOR * temp_k);
-
-    // Enhanced speed of sound calculation with humidity effects
-    // Speed of sound in moist air (Cramer, 1993)
-    // Guard pressure_pa == 0 (a 0 hPa override would otherwise give +Inf -> -Inf gamma -> NaN
-    // speed of sound) and cap the mole fraction at the physical maximum of 1.
-    let mole_fraction_vapor = (vapor_pressure_pa / pressure_pa.max(f64::MIN_POSITIVE)).min(1.0);
-    let temp_c_abs = temp_k;
-
-    // Heat capacity ratio for moist air. The coefficient is for vapor mole fraction.
-    let gamma_moist = GAMMA * (1.0 - mole_fraction_vapor * 0.062);
-
-    // Gas constant for moist air. 0.6078 belongs to specific humidity; for mole fraction the
-    // dry-air molecular-weight ratio gives approximately 0.378.
-    let r_moist = R_AIR * (1.0 + 0.378 * mole_fraction_vapor);
-
-    // Speed of sound in moist air (Cramer, 1993) — physics-based correction only. The
-    // gamma_moist / r_moist terms above already yield the correct humid speed of sound; the
-    // previous extra empirical humidity_correction factor double-counted the humidity effect
-    // (roughly doubling it), over-predicting the public speed_of_sound and the reported MC Mach.
-    let speed_of_sound = (gamma_moist * r_moist * temp_c_abs).sqrt();
+    // Speed of sound in moist air (Cramer, 1993). Extracted into `moist_speed_of_sound` so the
+    // integrators can share it; its vapor pressure comes from the SAME IAPWS saturation formula
+    // (`enhanced_saturation_vapor_pressure`) + CIPM enhancement factor that the density above
+    // uses, so ONE vapor formula feeds both density and c.
+    let speed_of_sound = moist_speed_of_sound(temp_k, pressure_pa, humidity_clamped);
 
     (density, speed_of_sound)
+}
+
+/// Speed of sound in moist air (Cramer, 1993).
+///
+/// The water-vapor mole fraction is derived from the SAME IAPWS saturation vapor pressure
+/// (`enhanced_saturation_vapor_pressure`) and CIPM-2007 enhancement factor used by
+/// [`calculate_air_density_cimp`], so a single vapor formula feeds both density and c.
+///
+/// # Arguments
+/// * `temp_k` - Temperature in Kelvin
+/// * `pressure_pa` - Total (station) pressure in Pa
+/// * `humidity_percent` - Relative humidity percentage (0-100)
+///
+/// # Returns
+/// Speed of sound in m/s
+pub fn moist_speed_of_sound(temp_k: f64, pressure_pa: f64, humidity_percent: f64) -> f64 {
+    let humidity_clamped = humidity_percent.clamp(0.0, 100.0);
+    let temp_c = temp_k - 273.15;
+
+    // Water-vapor partial pressure p_v = RH * f * p_sv, matching CIPM's x_v exactly. p_sv is in
+    // hPa (enhanced_saturation_vapor_pressure returns hPa), so convert to Pa before forming the
+    // mole fraction against the Pa total pressure.
+    let p_sv_hpa = enhanced_saturation_vapor_pressure(temp_k);
+    let f = enhanced_enhancement_factor(pressure_pa, temp_c);
+    let vapor_pressure_pa = humidity_clamped / 100.0 * f * p_sv_hpa * 100.0;
+
+    // Cap the mole fraction at the physical maximum of 1 and guard pressure_pa == 0 (a 0 hPa
+    // override would otherwise give +Inf -> NaN speed of sound).
+    let mole_fraction_vapor = (vapor_pressure_pa / pressure_pa.max(f64::MIN_POSITIVE)).min(1.0);
+
+    // Heat-capacity ratio and gas constant for moist air (mole-fraction coefficients). 0.378 is
+    // the dry-air molecular-weight ratio (0.6078 would belong to specific humidity, not mole
+    // fraction).
+    let gamma_moist = GAMMA * (1.0 - mole_fraction_vapor * 0.062);
+    let r_moist = R_AIR * (1.0 + 0.378 * mole_fraction_vapor);
+
+    (gamma_moist * r_moist * temp_k).sqrt()
 }
 
 /// Enhanced air density calculation using CIPM formula with ICAO atmosphere.
@@ -343,21 +351,20 @@ fn enhanced_saturation_vapor_pressure(t_k: f64) -> f64 {
     220640.0 * ln_p_ratio.exp() // Critical pressure in hPa (22.064 MPa)
 }
 
-/// Enhanced enhancement factor with altitude and temperature dependence.
+/// CIPM-2007 enhancement factor `f = alpha + beta*p + gamma*t^2` (p in Pa, t in Celsius).
 #[inline(always)]
 fn enhanced_enhancement_factor(p: f64, t: f64) -> f64 {
     const ALPHA: f64 = 1.00062;
     const BETA: f64 = 3.14e-8;
     const GAMMA: f64 = 5.6e-7;
-    const DELTA: f64 = 1.2e-10; // Additional temperature term
 
-    ALPHA + BETA * p + GAMMA * t * t + DELTA * p * t
+    ALPHA + BETA * p + GAMMA * t * t
 }
 
-/// Enhanced compressibility factor with improved accuracy.
+/// CIPM-2007 compressibility factor `Z` (virial expansion, second order in `p/T`).
 #[inline(always)]
 fn enhanced_compressibility_factor(p: f64, t_k: f64, x_v: f64) -> f64 {
-    // Enhanced virial coefficients for better accuracy
+    // CIPM-2007 molar virial coefficients (p in Pa, t in Celsius).
     const A0: f64 = 1.58123e-6;
     const A1: f64 = -2.9331e-8;
     const A2: f64 = 1.1043e-10;
@@ -367,10 +374,6 @@ fn enhanced_compressibility_factor(p: f64, t_k: f64, x_v: f64) -> f64 {
     const C1: f64 = -2.376e-6;
     const D: f64 = 1.83e-11;
     const E: f64 = -0.765e-8;
-
-    // Additional third-order terms for enhanced accuracy
-    const F0: f64 = 2.1e-12;
-    const F1: f64 = -1.1e-14;
 
     // Ensure temperature is positive
     let t_k_safe = t_k.max(173.15); // -100°C minimum
@@ -382,10 +385,7 @@ fn enhanced_compressibility_factor(p: f64, t_k: f64, x_v: f64) -> f64 {
 
     let z_third_order = p_t * p_t * (D + E * x_v * x_v);
 
-    // Enhanced fourth-order correction
-    let z_fourth_order = p_t * p_t * p_t * (F0 + F1 * x_v * x_v * x_v);
-
-    z_second_order + z_third_order + z_fourth_order
+    z_second_order + z_third_order
 }
 
 /// Enhanced local atmospheric calculation with variable lapse rates.
@@ -406,6 +406,56 @@ pub fn get_local_atmosphere(
     base_press_hpa: f64,
     base_ratio: f64,
 ) -> (f64, f64) {
+    let (temp_k, _pressure_pa, density) =
+        local_temp_pressure_density(altitude_m, base_alt, base_temp_c, base_press_hpa, base_ratio);
+
+    // Dry speed of sound. 401.874 ~ gamma * R_air; kept exactly for back-compat with existing
+    // callers (get_local_atmosphere_humid uses the precise moist formula instead).
+    let speed_of_sound = (temp_k * 401.874).sqrt();
+
+    (density, speed_of_sound)
+}
+
+/// Humidity-aware companion to [`get_local_atmosphere`]: identical local density, but the speed
+/// of sound is the moist-air value ([`moist_speed_of_sound`]) evaluated at the LOCAL temperature
+/// and pressure.
+///
+/// [`get_local_atmosphere`] is intentionally left unchanged (dry speed of sound) for
+/// API/back-compat; call this variant only where a real relative humidity is available.
+///
+/// # Arguments
+/// * `altitude_m` - Query altitude in meters
+/// * `base_alt` - Base (station) altitude in meters
+/// * `base_temp_c` - Base temperature in Celsius
+/// * `base_press_hpa` - Base pressure in hPa
+/// * `base_ratio` - Base density ratio (density / 1.225)
+/// * `humidity_percent` - Relative humidity percentage (0-100)
+///
+/// # Returns
+/// Tuple of (air_density_kg_m3, moist_speed_of_sound_mps)
+pub fn get_local_atmosphere_humid(
+    altitude_m: f64,
+    base_alt: f64,
+    base_temp_c: f64,
+    base_press_hpa: f64,
+    base_ratio: f64,
+    humidity_percent: f64,
+) -> (f64, f64) {
+    let (temp_k, pressure_pa, density) =
+        local_temp_pressure_density(altitude_m, base_alt, base_temp_c, base_press_hpa, base_ratio);
+    (density, moist_speed_of_sound(temp_k, pressure_pa, humidity_percent))
+}
+
+/// Shared local temperature / pressure / density computation for [`get_local_atmosphere`] and
+/// [`get_local_atmosphere_humid`]. Returns `(local_temp_k, local_pressure_pa, density_kg_m3)`.
+#[inline]
+fn local_temp_pressure_density(
+    altitude_m: f64,
+    base_alt: f64,
+    base_temp_c: f64,
+    base_press_hpa: f64,
+    base_ratio: f64,
+) -> (f64, f64, f64) {
     // Round altitude to the nearest meter for caching in Python
     let altitude_m_rounded = altitude_m.round();
     let height_diff = altitude_m_rounded - base_alt;
@@ -432,10 +482,7 @@ pub fn get_local_atmosphere(
     let density_ratio = base_ratio * (base_temp_k * pressure_hpa) / (base_press_hpa * temp_k);
     let density = density_ratio * 1.225;
 
-    // Enhanced speed of sound calculation
-    let speed_of_sound = (temp_k * 401.874).sqrt(); // More precise constant
-
-    (density, speed_of_sound)
+    (temp_k, pressure_hpa * 100.0, density)
 }
 
 /// Determine local lapse rate based on altitude and atmospheric layer.
@@ -472,6 +519,125 @@ pub fn calculate_air_density_cipm(temp_c: f64, pressure_hpa: f64, humidity_perce
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- MBA-1136: CIPM-2007 as the single canonical humid-air density ----
+
+    /// Gate 1: dry sea-level (15 C, 1013.25 hPa, 0% RH) must stay at the ISA reference — density
+    /// 1.225 +- 0.002 kg/m^3 and speed of sound 340.3 +- 0.6 m/s. CIPM-2007 at 0% RH reduces to
+    /// dry-air ideal gas to within rounding, so this is essentially unchanged from the pre-CIPM
+    /// baseline (baseline was 1.225012 / 340.294; now 1.225521 / 340.294 — the tiny density bump
+    /// is CIPM compressibility + exact molar mass, the speed of sound is bit-identical).
+    #[test]
+    fn test_mba1136_dry_sea_level_reference() {
+        let (density, sos) = calculate_atmosphere(0.0, Some(15.0), Some(1013.25), 0.0);
+        assert!(
+            (density - 1.225).abs() < 0.002,
+            "dry sea-level density {density} not within 1.225 +- 0.002"
+        );
+        assert!(
+            (sos - 340.3).abs() < 0.6,
+            "dry sea-level speed of sound {sos} not within 340.3 +- 0.6"
+        );
+    }
+
+    /// Gate 2: humid air (15 C, 1013.25 hPa, 50% RH) is the CIPM-2007 value (~1.2211 +- 0.002),
+    /// STRICTLY lighter than dry air at the same T/P, with a speed of sound slightly ABOVE dry.
+    #[test]
+    fn test_mba1136_humid_lighter_than_dry() {
+        let (dry_rho, dry_sos) = calculate_atmosphere(0.0, Some(15.0), Some(1013.25), 0.0);
+        let (moist_rho, moist_sos) = calculate_atmosphere(0.0, Some(15.0), Some(1013.25), 50.0);
+
+        assert!(
+            (moist_rho - 1.2211).abs() < 0.002,
+            "50% RH density {moist_rho} not within CIPM 1.2211 +- 0.002"
+        );
+        assert!(
+            moist_rho < dry_rho,
+            "moist air ({moist_rho}) must be lighter than dry ({dry_rho})"
+        );
+        assert!(
+            moist_sos > dry_sos,
+            "moist speed of sound ({moist_sos}) must exceed dry ({dry_sos})"
+        );
+    }
+
+    /// Gate 3: density is monotone-decreasing in humidity (100% RH < 50% RH < 0% RH).
+    #[test]
+    fn test_mba1136_density_monotone_in_humidity() {
+        let (rho_0, _) = calculate_atmosphere(0.0, Some(15.0), Some(1013.25), 0.0);
+        let (rho_50, _) = calculate_atmosphere(0.0, Some(15.0), Some(1013.25), 50.0);
+        let (rho_100, _) = calculate_atmosphere(0.0, Some(15.0), Some(1013.25), 100.0);
+        assert!(
+            rho_100 < rho_50 && rho_50 < rho_0,
+            "humidity monotonicity violated: 100%={rho_100}, 50%={rho_50}, 0%={rho_0}"
+        );
+    }
+
+    /// rank 28: `calculate_atmosphere`'s density is exactly `calculate_air_density_cimp` — there
+    /// is a single canonical humid-air density path (no separate Arden-Buck ideal-gas density).
+    #[test]
+    fn test_mba1136_atmosphere_density_is_cipm() {
+        for (t, p, h) in [
+            (15.0, 1013.25, 0.0),
+            (15.0, 1013.25, 50.0),
+            (30.0, 1000.0, 80.0),
+            (-10.0, 1020.0, 20.0),
+        ] {
+            let (density, _) = calculate_atmosphere(0.0, Some(t), Some(p), h);
+            let cipm = calculate_air_density_cimp(t, p, h);
+            assert_eq!(
+                density, cipm,
+                "calculate_atmosphere density must equal CIPM at {t}C/{p}hPa/{h}%"
+            );
+        }
+    }
+
+    /// rank 9: the extracted `moist_speed_of_sound` is exactly what `calculate_atmosphere`
+    /// returns (behavior-identical extraction), across dry and humid conditions.
+    #[test]
+    fn test_mba1136_moist_speed_of_sound_extraction() {
+        for (t, p, h) in [
+            (15.0, 1013.25, 0.0),
+            (15.0, 1013.25, 50.0),
+            (25.0, 900.0, 100.0),
+        ] {
+            let (_, sos) = calculate_atmosphere(0.0, Some(t), Some(p), h);
+            let extracted = moist_speed_of_sound(t + 273.15, p * 100.0, h);
+            assert_eq!(
+                sos, extracted,
+                "extracted moist_speed_of_sound must match calculate_atmosphere at {t}C/{p}hPa/{h}%"
+            );
+        }
+    }
+
+    /// rank 9: `get_local_atmosphere` is behavior-locked after the shared-helper refactor.
+    /// Reference values captured from the pre-refactor implementation
+    /// (base: 500 m, 10 C, 950 hPa, ratio 1.05).
+    #[test]
+    fn test_mba1136_get_local_atmosphere_unchanged() {
+        let (d0, c0) = get_local_atmosphere(500.0, 500.0, 10.0, 950.0, 1.05);
+        assert!((d0 - 1.286250000000).abs() < 1e-9, "local density@500m drifted: {d0}");
+        assert!((c0 - 337.328657395129).abs() < 1e-9, "local sos@500m drifted: {c0}");
+        let (d1, c1) = get_local_atmosphere(1500.0, 500.0, 10.0, 950.0, 1.05);
+        assert!((d1 - 1.165201643681).abs() < 1e-9, "local density@1500m drifted: {d1}");
+        assert!((c1 - 333.434314520866).abs() < 1e-9, "local sos@1500m drifted: {c1}");
+    }
+
+    /// rank 9: `get_local_atmosphere_humid` returns the SAME density as `get_local_atmosphere`,
+    /// and at 0% RH its speed of sound reduces to the dry value (within the 401.874-vs-gamma*R
+    /// constant rounding). At real humidity the speed of sound exceeds the dry value.
+    #[test]
+    fn test_mba1136_get_local_atmosphere_humid() {
+        let (d_dry, c_dry) = get_local_atmosphere(1500.0, 500.0, 10.0, 950.0, 1.05);
+        let (d_h0, c_h0) = get_local_atmosphere_humid(1500.0, 500.0, 10.0, 950.0, 1.05, 0.0);
+        assert_eq!(d_dry, d_h0, "humid variant must not change density");
+        assert!(
+            (c_h0 - c_dry).abs() < 1e-3,
+            "0% RH humid sos {c_h0} should match dry sos {c_dry}"
+        );
+        let (_, c_h80) = get_local_atmosphere_humid(1500.0, 500.0, 10.0, 950.0, 1.05, 80.0);
+        assert!(c_h80 > c_dry, "humid sos {c_h80} should exceed dry {c_dry}");
+    }
 
     #[test]
     fn test_icao_standard_atmosphere() {
