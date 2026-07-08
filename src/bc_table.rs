@@ -240,8 +240,18 @@ impl BcCorrectionTable {
         caliber_inches: f64,
         velocity_fps: f64,
     ) -> f64 {
-        // Estimate bullet length from caliber (typical rifle bullets are 3-4 calibers long)
-        let estimated_length = caliber_inches * 3.5;
+        // MBA-1135: estimate bullet length from mass + caliber (was a mass-blind caliber*3.5
+        // heuristic). Length is a real interpolation axis of this table, so a weight-aware
+        // estimate improves the correction. Fall back to the old heuristic if mass is unavailable.
+        let est_m = crate::stability::estimate_bullet_length_m(
+            caliber_inches * 0.0254,
+            mass_grains * 0.00006479891,
+        );
+        let estimated_length = if est_m > 0.0 {
+            est_m / 0.0254
+        } else {
+            caliber_inches * 3.5
+        };
         self.lookup(bc, bc_type, mass_grains, estimated_length, velocity_fps)
     }
 

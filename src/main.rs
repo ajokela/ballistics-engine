@@ -2674,8 +2674,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             })
                             .unwrap_or_else(|| {
-                                // Estimate: typical rifle bullets are ~3.5 calibers long
-                                caliber_in * 3.5
+                                // MBA-1135: mass-based length estimate (was a mass-blind
+                                // caliber*3.5 heuristic). Length is a real axis of this BC
+                                // correction table. Fall back to caliber*3.5 only if mass<=0.
+                                let mass_gr = match cli.units {
+                                    UnitSystem::Imperial => final_mass,
+                                    UnitSystem::Metric => final_mass * 15.4324,
+                                };
+                                let est_m = ballistics_engine::stability::estimate_bullet_length_m(
+                                    caliber_in * 0.0254,
+                                    mass_gr * 0.00006479891,
+                                );
+                                if est_m > 0.0 {
+                                    est_m / 0.0254
+                                } else {
+                                    caliber_in * 3.5
+                                }
                             });
 
                         // Get bullet mass in grains
@@ -2887,7 +2901,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         });
                     let length_is_user = bullet_length_user.is_some();
-                    let bullet_length_in = bullet_length_user.unwrap_or(caliber_in * 3.5);
+                    let bullet_length_in = bullet_length_user.unwrap_or_else(|| {
+                        // MBA-1135: mass-based length estimate (was a mass-blind caliber*3.5
+                        // heuristic). Informational for the v2 BC5D table (length is not a
+                        // lookup axis); fall back to caliber*3.5 only if mass<=0.
+                        let est_m = ballistics_engine::stability::estimate_bullet_length_m(
+                            caliber_in * 0.0254,
+                            mass_grains * 0.00006479891,
+                        );
+                        if est_m > 0.0 {
+                            est_m / 0.0254
+                        } else {
+                            caliber_in * 3.5
+                        }
+                    });
 
                     if let Some(segments) = generate_bc5d_segments(
                         &mut manager,
@@ -3147,7 +3174,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             UnitSystem::Imperial => l * 0.0254,
                             UnitSystem::Metric => l * 0.001,
                         })
-                        .unwrap_or(diameter_metric * 4.5),
+                        .unwrap_or_else(|| fallback_bullet_length_m(diameter_metric, mass_metric)),
                     sight_height: sight_height_metric,
                     muzzle_height: bore_height_metric,
                     ground_threshold: 0.0,
@@ -3224,7 +3251,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         UnitSystem::Imperial => l * 0.0254,
                         UnitSystem::Metric => l * 0.001,
                     })
-                    .unwrap_or(diameter_metric * 4.5),
+                    .unwrap_or_else(|| fallback_bullet_length_m(diameter_metric, mass_metric)),
                 drag_model,
                 max_range: max_range_metric,
                 time_step,
@@ -3372,7 +3399,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             UnitSystem::Imperial => l * 0.0254,
                                             UnitSystem::Metric => l * 0.001,
                                         })
-                                        .unwrap_or(diameter_metric * 4.5),
+                                        .unwrap_or_else(|| fallback_bullet_length_m(diameter_metric, mass_metric)),
                                     muzzle_angle: muzzle_angle.to_radians(),
                                     target_distance: max_range_metric,
                                     azimuth_angle: 0.0,
@@ -3389,7 +3416,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     latitude,
                                     wind_speed: wind_speed_metric,
                                     wind_angle: final_wind_direction,
-                                    twist_rate: twist_rate.unwrap_or(12.0),
+                                    // MBA-1135: caliber/weight-aware default twist (Miller-inverse)
+                                    // instead of a fixed 1:12" when the shooter omits --twist-rate.
+                                    twist_rate: twist_rate.unwrap_or_else(|| {
+                                        ballistics_engine::stability::default_twist_inches(
+                                            diameter_metric,
+                                            mass_metric,
+                                            velocity_metric,
+                                        )
+                                    }),
                                     is_twist_right: twist_right,
                                     caliber_inches: diameter_metric / 0.0254,
                                     weight_grains: mass_metric / 0.00006479891,
@@ -4856,7 +4891,18 @@ fn generate_bc5d_segments(
     }
 
     if any_correction_found && !segments.is_empty() {
-        let length_display = bullet_length_in.unwrap_or_else(|| caliber * 3.5);
+        let length_display = bullet_length_in.unwrap_or_else(|| {
+            // MBA-1135: mass-based length estimate (was a mass-blind caliber*3.5 heuristic).
+            let est_m = ballistics_engine::stability::estimate_bullet_length_m(
+                caliber * 0.0254,
+                weight_grains * 0.00006479891,
+            );
+            if est_m > 0.0 {
+                est_m / 0.0254
+            } else {
+                caliber * 3.5
+            }
+        });
         eprintln!(
             "BC5D Table: Generated {} velocity-dependent BC segments",
             segments.len()
@@ -4914,6 +4960,20 @@ fn generate_bc5d_segments(
     }
 }
 
+/// Resolve a bullet length (meters) for a bullet whose length the shooter did not supply (MBA-1135).
+///
+/// Prefers the mass-based physical estimate ([`ballistics_engine::stability::estimate_bullet_length_m`]),
+/// falling back to the historical 4.5-caliber heuristic only when mass is unavailable so the caller
+/// always gets a positive length. `diameter_m` and `mass_kg` are SI.
+fn fallback_bullet_length_m(diameter_m: f64, mass_kg: f64) -> f64 {
+    let est = ballistics_engine::stability::estimate_bullet_length_m(diameter_m, mass_kg);
+    if est > 0.0 {
+        est
+    } else {
+        diameter_m * 4.5
+    }
+}
+
 fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // Destructure config for convenient access throughout the function
     let TrajectoryConfig {
@@ -4967,6 +5027,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         ref pdf_metadata,
     } = *config;
 
+    // MBA-1135: track whether the twist is a synthesized default (shooter omitted --twist-rate)
+    // so the stability summary can be honest about it rather than presenting an assumed-twist Sg
+    // as a hard "STABLE" / "UNSTABLE" verdict.
+    let twist_assumed = twist_rate.is_none();
+
     // Create ballistic inputs with all required fields
     let drag_model_enum = match drag_model {
         DragModelArg::G1 => DragModel::G1,
@@ -5009,7 +5074,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         wind_angle: wind_direction,
 
         // Bullet characteristics
-        twist_rate: twist_rate.unwrap_or(12.0),
+        // MBA-1135: caliber/weight-aware default twist (Miller-inverse) instead of a fixed 1:12"
+        // when the shooter omits --twist-rate. `twist_assumed` (above) records that this happened.
+        twist_rate: twist_rate.unwrap_or_else(|| {
+            ballistics_engine::stability::default_twist_inches(diameter, mass, velocity)
+        }),
         is_twist_right: twist_right,
         caliber_inches: diameter / 0.0254,
         weight_grains: mass / 0.00006479891,
@@ -5432,14 +5501,21 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             if stability > 0.0 {
                 println!("╠════════════════════════════════════════╣");
                 println!("║ Stability (SG):    {:>8.2}            ║", stability);
-                let stability_status = if stability < 1.0 {
-                    "UNSTABLE"
-                } else if stability < 1.5 {
-                    "MARGINAL"
+                if twist_assumed {
+                    // MBA-1135: the twist was synthesized (shooter omitted --twist-rate), so this
+                    // Sg is essentially the design target of the assumed twist. Do NOT present a
+                    // hard STABLE/UNSTABLE verdict; a note after the box explains the assumption.
+                    println!("║ Status:            {:>8}            ║", "assumed");
                 } else {
-                    "STABLE  "
-                };
-                println!("║ Status:            {:>8}            ║", stability_status);
+                    let stability_status = if stability < 1.0 {
+                        "UNSTABLE"
+                    } else if stability < 1.5 {
+                        "MARGINAL"
+                    } else {
+                        "STABLE  "
+                    };
+                    println!("║ Status:            {:>8}            ║", stability_status);
+                }
             }
             if spin_drift.abs() > 0.0001 {
                 let drift_display = UnitConverter::distance_from_metric(spin_drift.abs(), units);
@@ -5499,6 +5575,21 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             }
 
             println!("╚════════════════════════════════════════╝");
+
+            // MBA-1135: be explicit when the twist was synthesized rather than supplied. The Sg
+            // (and any spin-drift) above are estimates computed from an assumed twist, not values
+            // derived from a real barrel; do not read the Sg as an evaluated stability verdict.
+            if twist_assumed && stability > 0.0 {
+                let twist_note = match units {
+                    UnitSystem::Imperial => format!("1:{:.1}\"", effective_twist_rate),
+                    UnitSystem::Metric => format!("1:{:.1}mm", effective_twist_rate * 25.4),
+                };
+                println!(
+                    "note: twist rate not supplied; assumed {} for the stability/spin-drift \
+                     estimate — Sg shown is not an evaluated stability verdict.",
+                    twist_note
+                );
+            }
 
             // Report termination. A run that ran out the integration time cap
             // (MBA-969) is NOT a ground impact even though its capped y is far
@@ -6751,7 +6842,7 @@ fn calculate_drop_at_velocity(
         bc_type: drag_model_enum,
         bullet_mass: mass_kg,
         bullet_diameter: diameter_m,
-        bullet_length: diameter_m * 4.5, // Approximate
+        bullet_length: fallback_bullet_length_m(diameter_m, mass_kg), // MBA-1135 mass-based estimate
         sight_height: sight_height_m,
         target_distance: range_m + 100.0, // Overshoot to ensure we have data
         use_bc_segments: bc_segments.is_some(),
@@ -6962,7 +7053,7 @@ fn build_trajectory_components(
         bullet_mass: mass,
         muzzle_velocity: velocity,
         bullet_diameter: diameter,
-        bullet_length: diameter * 4.5,
+        bullet_length: fallback_bullet_length_m(diameter, mass),
         muzzle_angle: 0.0,
         target_distance: max_range,
         sight_height,
@@ -7111,7 +7202,7 @@ fn handle_mpbr(
             bullet_mass: mass_kg,
             muzzle_velocity: velocity_m,
             bullet_diameter: diameter_m,
-            bullet_length: diameter_m * 4.5,
+            bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
             sight_height: sight_height_m,
             use_rk4: true,
             ..Default::default()
@@ -7226,7 +7317,7 @@ fn handle_mpbr(
         bullet_mass: mass_kg,
         muzzle_velocity: velocity_m,
         bullet_diameter: diameter_m,
-        bullet_length: diameter_m * 4.5,
+        bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
         ..Default::default()
@@ -7471,7 +7562,7 @@ fn handle_come_ups(
         bullet_mass: mass_kg,
         muzzle_velocity: velocity_m,
         bullet_diameter: diameter_m,
-        bullet_length: diameter_m * 4.5,
+        bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
         ..Default::default()
@@ -7686,7 +7777,7 @@ fn handle_wind_card(
         bullet_mass: mass_kg,
         muzzle_velocity: velocity_m,
         bullet_diameter: diameter_m,
-        bullet_length: diameter_m * 4.5,
+        bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
         ..Default::default()
@@ -8094,7 +8185,7 @@ fn handle_range_table(
         bullet_mass: mass_kg,
         muzzle_velocity: velocity_m,
         bullet_diameter: diameter_m,
-        bullet_length: diameter_m * 4.5,
+        bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
         ..Default::default()
