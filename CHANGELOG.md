@@ -5,6 +5,20 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.14] - 2026-07-08
+
+### Added
+- `--print-bc-segments` (trajectory command): prints the BC5D-generated
+  velocity:BC segment ladder as ready-to-paste `--bc-segment` arguments, in the
+  active `--units`. Lets devices that cannot hold the 5D tables (e.g. the WASM
+  CLI) run BC5D-equivalent corrections from a transcribed ladder.
+
+### Fixed
+- BC5D info line labeled the bullet length "(est)" even when supplied via
+  `--bullet-length`/CSV; it now reports the source ("user"/"est") and notes
+  that length is not a v2 table lookup axis (axes: drag type, weight, BC,
+  muzzle velocity, current velocity).
+
 ## [0.22.13] - 2026-07-08
 
 ### Fixed
