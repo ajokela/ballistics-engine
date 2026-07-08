@@ -455,6 +455,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --altitude | Altitude | 0 | feet | meters |
 | --use-bc-segments | Enable BC segmentation | false | - | - |
 | --bc-segment | Manual velocity-keyed BC segment `VMIN:VMAX:BC` (repeatable) | — | fps | m/s |
+| --print-bc-segments | Print the BC5D-generated segment ladder as ready-to-paste `--bc-segment` arguments (requires `--bc-table-dir`) | false | fps | m/s |
 | --full | Show all trajectory points | false | - | - |
 | --enable-magnus | Enable Magnus effect | false | - | - |
 | --enable-coriolis | Enable Coriolis effect | false | - | - |
@@ -493,6 +494,13 @@ ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-ran
 - Passing any `--bc-segment` implies `--use-bc-segments` and **overrides** `--bc-table-dir`
   (manual pairs are highest priority). A velocity outside every segment falls back to the
   base `--bc`.
+- To run BC5D-equivalent corrections on a device that cannot hold the tables (e.g. the
+  WASM CLI), run once with `--bc-table-dir ... --use-bc-segments --print-bc-segments`:
+  the generated ladder prints as ready-to-paste `--bc-segment` lines (velocities in the
+  active `--units`). Pasting the full ladder reproduces the table trajectory to well
+  under 1%. Note `--bullet-length` is informational for BC5D: the v2 table axes are
+  drag type x weight x BC x muzzle velocity x current velocity — length is not a lookup
+  dimension.
 
 ### Downrange Wind Segments (`--wind-segment`)
 

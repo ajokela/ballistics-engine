@@ -440,6 +440,12 @@ enum Commands {
         #[arg(long)]
         use_bc_segments: bool,
 
+        /// Print the BC5D-generated segment ladder as ready-to-paste
+        /// --bc-segment arguments (requires --bc-table-dir; velocities in
+        /// the active --units)
+        #[arg(long)]
+        print_bc_segments: bool,
+
         // Advanced Physics Parameters
         /// Enable Magnus effect (requires twist-rate)
         #[arg(long)]
@@ -2337,6 +2343,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             bore_height,
             ignore_ground_impact,
             use_bc_segments,
+            print_bc_segments,
             enable_magnus,
             enable_coriolis,
             enable_spin_drift,
@@ -2862,7 +2869,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    let bullet_length_in = bullet_length
+                    let bullet_length_user: Option<f64> = bullet_length
                         .map(|l| match cli.units {
                             UnitSystem::Imperial => l,
                             UnitSystem::Metric => l / 25.4,
@@ -2878,8 +2885,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             } else {
                                 None
                             }
-                        })
-                        .unwrap_or(caliber_in * 3.5);
+                        });
+                    let length_is_user = bullet_length_user.is_some();
+                    let bullet_length_in = bullet_length_user.unwrap_or(caliber_in * 3.5);
 
                     if let Some(segments) = generate_bc5d_segments(
                         &mut manager,
@@ -2889,6 +2897,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         mass_grains,
                         Some(trued_velocity_fps),
                         Some(bullet_length_in),
+                        length_is_user,
+                        if print_bc_segments { Some(cli.units) } else { None },
                     ) {
                         bc_table_segments = Some(segments);
 
@@ -3943,6 +3953,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         weight_gr,
                         None,
                         bullet_length,
+                        bullet_length.is_some(),
+                        None,
                     )
                 } else {
                     None
@@ -4794,6 +4806,8 @@ fn generate_bc5d_segments(
     weight_grains: f64,
     muzzle_velocity_fps: Option<f64>,
     bullet_length_in: Option<f64>,
+    length_is_user: bool,
+    print_ladder_units: Option<UnitSystem>,
 ) -> Option<Vec<BCSegmentData>> {
     let mut velocity_breakpoints: Vec<f64> = vec![
         4000.0, 3500.0, 3000.0, 2700.0, 2500.0, 2300.0, 2100.0, 2000.0, 1900.0, 1800.0, 1700.0,
@@ -4847,9 +4861,16 @@ fn generate_bc5d_segments(
             "BC5D Table: Generated {} velocity-dependent BC segments",
             segments.len()
         );
+        // Length is informational only: the v2 5D table axes are
+        // [drag_type][weight][bc][muzzle_vel][current_vel] — length is NOT a
+        // lookup dimension. Label the value's source honestly (a previous
+        // version printed "(est)" even for user-supplied values).
         eprintln!(
-            "BC5D Table: {:.3}\" caliber, {:.1}gr, {:.3}\" length (est)",
-            caliber, weight_grains, length_display
+            "BC5D Table: {:.3}\" caliber, {:.1}gr, {:.3}\" length ({}; not a lookup axis)",
+            caliber,
+            weight_grains,
+            length_display,
+            if length_is_user { "user" } else { "est" }
         );
         let min_bc = segments
             .iter()
@@ -4863,6 +4884,26 @@ fn generate_bc5d_segments(
             "BC5D Table: BC range {:.5} - {:.5} across velocity envelope",
             min_bc, max_bc
         );
+        // --print-bc-segments: dump the ladder as ready-to-paste --bc-segment
+        // arguments (e.g. to run BC5D-equivalent corrections offline in the
+        // WASM CLI, which accepts --bc-segment but cannot hold the tables).
+        if let Some(units) = print_ladder_units {
+            let (to_unit, unit_label) = match units {
+                UnitSystem::Imperial => (1.0, "fps"),
+                UnitSystem::Metric => (1.0 / 3.280_839_895, "m/s"),
+            };
+            eprintln!(
+                "BC5D Table: segment ladder (velocities in {unit_label}; paste as arguments):"
+            );
+            for seg in &segments {
+                eprintln!(
+                    "  --bc-segment {:.0}:{:.0}:{:.5}",
+                    seg.velocity_min * to_unit,
+                    seg.velocity_max * to_unit,
+                    seg.bc_value
+                );
+            }
+        }
         Some(segments)
     } else {
         eprintln!(
