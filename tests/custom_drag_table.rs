@@ -58,3 +58,88 @@ fn custom_drag_table_is_honored() {
          (custom={custom_vel:.1} m/s, g7={g7_vel:.1} m/s) — table was likely ignored"
     );
 }
+
+// Regression guard: a custom drag table's Cd is the projectile's ACTUAL drag coefficient, so
+// the retardation denominator is the SECTIONAL DENSITY (lb/in²) derived from the bullet's
+// mass/diameter — NOT bc_value (Cd_own / SD == Cd_ref / BC). Previously all solver paths
+// divided the curve's Cd by bc_value, so custom-table trajectories wrongly scaled with
+// whatever BC happened to be set.
+#[test]
+fn custom_drag_table_is_bc_invariant() {
+    let table = DragTable::new(
+        vec![0.0, 0.8, 1.0, 1.2, 2.0, 5.0],
+        vec![0.20, 0.22, 0.40, 0.38, 0.30, 0.25],
+    );
+    let range = 500.0;
+
+    let run = |bc: f64, with_table: bool| -> (f64, f64) {
+        let mut i = base();
+        i.bc_value = bc;
+        if with_table {
+            i.custom_drag_table = Some(table.clone());
+        }
+        let mut s = TrajectorySolver::new(
+            i,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        s.set_max_range(range * 1.2);
+        let r = s.solve().expect("solve");
+        for p in &r.points {
+            if p.position[0] >= range {
+                return (p.position[1], p.velocity_magnitude);
+            }
+        }
+        let p = r.points.last().unwrap();
+        (p.position[1], p.velocity_magnitude)
+    };
+
+    let (drop_a, vel_a) = run(0.505, true);
+    let (drop_b, vel_b) = run(0.264, true);
+    let (drop_c, vel_c) = run(0.150, true);
+
+    assert!(
+        (drop_a - drop_b).abs() < 1e-9 && (drop_b - drop_c).abs() < 1e-9,
+        "trajectory with a custom drag table must not depend on bc_value \
+         (drop: bc=0.505 -> {drop_a}, bc=0.264 -> {drop_b}, bc=0.150 -> {drop_c})"
+    );
+    assert!(
+        (vel_a - vel_b).abs() < 1e-9 && (vel_b - vel_c).abs() < 1e-9,
+        "velocity with a custom drag table must not depend on bc_value \
+         (bc=0.505 -> {vel_a}, bc=0.264 -> {vel_b}, bc=0.150 -> {vel_c})"
+    );
+
+    // And the table run must actually differ from the G7 (no-table) run.
+    let (drop_g7, vel_g7) = run(0.505, false);
+    assert!(
+        (drop_a - drop_g7).abs() > 1e-3 || (vel_a - vel_g7).abs() > 1.0,
+        "custom-table run should differ from the no-table G7 run \
+         (drop {drop_a} vs {drop_g7}, vel {vel_a} vs {vel_g7})"
+    );
+}
+
+// The SD denominator itself: 168 gr / 7000 / 0.308^2 in² ≈ 0.25305 lb/in², derived from
+// either the imperial mirror fields or the SI mass/diameter fallback; None when both are
+// unusable (that case falls back to bc_value inside the solvers, with a warning).
+#[test]
+fn sectional_density_denominator_sources() {
+    let i = base();
+    let sd = i.sectional_density_lb_in2().expect("SD from imperial fields");
+    assert!((sd - 168.0 / 7000.0 / (0.308 * 0.308)).abs() < 1e-12);
+
+    // SI-only caller: imperial mirrors zeroed, SI kg/meters populated.
+    let mut si = base();
+    si.caliber_inches = 0.0;
+    si.weight_grains = 0.0;
+    let sd_si = si.sectional_density_lb_in2().expect("SD from SI fallback");
+    assert!((sd_si - sd).abs() < 1e-9);
+
+    // Degenerate inputs -> None (solvers fall back to bc_value instead of panicking).
+    let mut none = base();
+    none.caliber_inches = 0.0;
+    none.weight_grains = 0.0;
+    none.bullet_mass = 0.0;
+    none.bullet_diameter = 0.0;
+    assert!(none.sectional_density_lb_in2().is_none());
+    assert_eq!(none.custom_drag_denominator(0.42), 0.42);
+}

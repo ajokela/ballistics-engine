@@ -557,8 +557,14 @@ fn compute_derivatives(
         // embed the rise.
         // MBA-940: a user-supplied custom drag table is the final Cd, used as-is (no G-model
         // lookup, transonic, or form-factor correction — the curve already encodes the true drag).
-        let drag_factor = if let Some(ref table) = inputs.custom_drag_table {
-            table.interpolate(mach)
+        // Its Cd is the projectile's ACTUAL drag coefficient, so the retardation denominator
+        // must be the sectional density (lb/in²), not a BC: Cd_own / SD == Cd_ref / BC
+        // (see BallisticInputs::custom_drag_denominator).
+        let (drag_factor, retard_denom) = if let Some(ref table) = inputs.custom_drag_table {
+            (
+                table.interpolate(mach),
+                inputs.custom_drag_denominator(bc_current),
+            )
         } else {
             let base_cd = get_drag_coefficient(mach, drag_model);
             let cd =
@@ -566,12 +572,13 @@ fn compute_derivatives(
             // MBA-948: honor use_form_factor in the fast path too (was derivatives.rs-only). No-op
             // when the flag is false (apply_form_factor_to_drag short-circuits), as it is on every
             // current consumer surface.
-            crate::form_factor::apply_form_factor_to_drag(
+            let cd = crate::form_factor::apply_form_factor_to_drag(
                 cd,
                 inputs.bullet_model.as_deref(),
                 &inputs.bc_type,
                 inputs.use_form_factor,
-            )
+            );
+            (cd, bc_current)
         };
 
         // Calculate drag acceleration using proper ballistics formula
@@ -580,7 +587,7 @@ fn compute_derivatives(
         let density_scale = base_density / 1.225;
 
         // Drag acceleration in ft/s^2
-        let a_drag_ft_s2 = (v_fps * v_fps) * standard_factor * density_scale / bc_current;
+        let a_drag_ft_s2 = (v_fps * v_fps) * standard_factor * density_scale / retard_denom;
 
         // Convert to m/s^2 and apply to velocity vector
         let a_drag_m_s2 = a_drag_ft_s2 * 0.3048; // ft/s^2 to m/s^2

@@ -289,15 +289,21 @@ pub fn compute_derivatives(
         // as-is — the transonic/Reynolds/form-factor corrections above are intentionally NOT
         // applied to it (the curve already encodes the projectile's true drag, so applying them
         // would distort/double-count it).
-        let drag_factor = match inputs.custom_drag_table {
-            Some(ref table) => table.interpolate(mach),
-            None => drag_factor,
+        // The custom table's Cd is the projectile's ACTUAL drag coefficient, so the
+        // retardation denominator must be the sectional density (lb/in²), not a BC:
+        // Cd_own / SD == Cd_ref / BC (see BallisticInputs::custom_drag_denominator).
+        let (drag_factor, retard_denom) = match inputs.custom_drag_table {
+            Some(ref table) => (
+                table.interpolate(mach),
+                inputs.custom_drag_denominator(bc_val),
+            ),
+            None => (drag_factor, bc_val),
         };
 
         // Calculate drag acceleration
         let standard_factor = drag_factor * CD_TO_RETARD;
         let a_drag_ft_s2 =
-            (v_rel_fps.powi(2) * standard_factor * yaw_multiplier * density_scale) / bc_val;
+            (v_rel_fps.powi(2) * standard_factor * yaw_multiplier * density_scale) / retard_denom;
         let a_drag_m_s2 = a_drag_ft_s2 * FPS_TO_MPS;
 
         // Apply drag in opposite direction of relative velocity
