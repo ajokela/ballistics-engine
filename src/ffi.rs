@@ -167,7 +167,19 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     // Set derived values
     ballistic_inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
     ballistic_inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
-    ballistic_inputs.bullet_length = inputs.bullet_diameter * 4.5; // match the CLI 4.5-cal default
+    // MBA-1135: mass-based length estimate (was a mass-blind 4.5-caliber default). The C ABI does
+    // not carry a bullet length, so derive it from diameter + mass; fall back to 4.5-cal if mass<=0.
+    ballistic_inputs.bullet_length = {
+        let est = crate::stability::estimate_bullet_length_m(
+            ballistic_inputs.bullet_diameter,
+            ballistic_inputs.bullet_mass,
+        );
+        if est > 0.0 {
+            est
+        } else {
+            ballistic_inputs.bullet_diameter * 4.5
+        }
+    };
 
     // New advanced physics flags
     ballistic_inputs.enable_wind_shear = inputs.enable_wind_shear != 0;

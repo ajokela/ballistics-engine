@@ -347,7 +347,16 @@ pub fn compute_derivatives(
             let l_in = if inputs.bullet_length > 0.0 {
                 inputs.bullet_length / 0.0254 // meters -> inches
             } else {
-                4.5 * d_in.max(1e-9)
+                // MBA-1135: mass-based length estimate (was a mass-blind 4.5-caliber default).
+                let est_m = crate::stability::estimate_bullet_length_m(
+                    inputs.bullet_diameter,
+                    inputs.bullet_mass,
+                );
+                if est_m > 0.0 {
+                    est_m / 0.0254
+                } else {
+                    4.5 * d_in.max(1e-9)
+                }
             };
             // MBA-958: apply the canonical linear Miller density correction (rho0/rho) to the
             // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.

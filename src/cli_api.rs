@@ -231,7 +231,10 @@ impl Default for BallisticInputs {
             bullet_mass: mass_kg,
             muzzle_velocity: 800.0,
             bullet_diameter: diameter_m,
-            bullet_length: diameter_m * 4.5, // Approximate (match the CLI's 4.5-caliber heuristic)
+            // MBA-1135: mass-based length estimate so the default is self-consistent with the
+            // default mass/diameter (was a mass-blind 4.5-caliber literal). The twist default below
+            // stays a fixed 1:12" per the ticket (a constant is a sensible velocity-agnostic default).
+            bullet_length: crate::stability::estimate_bullet_length_m(diameter_m, mass_kg),
 
             // Targeting and positioning
             muzzle_angle: muzzle_angle_rad,
@@ -1872,7 +1875,16 @@ impl TrajectorySolver {
             let l_in = if self.inputs.bullet_length > 0.0 {
                 self.inputs.bullet_length / 0.0254
             } else {
-                4.5 * d_in
+                // MBA-1135: mass-based length estimate (was a mass-blind 4.5-caliber default).
+                let est_m = crate::stability::estimate_bullet_length_m(
+                    self.inputs.bullet_diameter,
+                    self.inputs.bullet_mass,
+                );
+                if est_m > 0.0 {
+                    est_m / 0.0254
+                } else {
+                    4.5 * d_in
+                }
             };
             // MBA-958: apply the canonical linear Miller density correction (T/T0)*(P0/P) to the
             // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.

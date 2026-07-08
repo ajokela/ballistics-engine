@@ -631,10 +631,14 @@ impl WasmBallistics {
                 inputs.target_height = target_height * 0.001; // mm to meters
             }
         }
-        // Derive bullet_length from diameter (4.5-caliber heuristic), mirroring the CLI and FFI.
-        // WASM otherwise left it at the struct default (~0.0343 m) regardless of --diameter,
-        // skewing the Miller Sg / enhanced spin drift / Magnus for non-default calibers.
-        inputs.bullet_length = inputs.bullet_diameter * 4.5;
+        // MBA-1135: mass-based length estimate (mirrors CLI/FFI), replacing the mass-blind
+        // 4.5-caliber heuristic. WASM otherwise left it at the struct default regardless of the
+        // supplied caliber/weight, skewing the Miller Sg / enhanced spin drift / Magnus.
+        inputs.bullet_length =
+            crate::stability::estimate_bullet_length_m(inputs.bullet_diameter, inputs.bullet_mass);
+        if inputs.bullet_length <= 0.0 {
+            inputs.bullet_length = inputs.bullet_diameter * 4.5;
+        }
 
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
@@ -1113,8 +1117,13 @@ impl WasmBallistics {
                 inputs.sight_height = sight_height * 0.001;
             }
         }
-        // Derive bullet_length from diameter (mirrors CLI/FFI); WASM left it at the default.
-        inputs.bullet_length = inputs.bullet_diameter * 4.5;
+        // MBA-1135: mass-based length estimate (mirrors CLI/FFI); replaces the mass-blind
+        // 4.5-caliber heuristic. WASM otherwise left it at the struct default.
+        inputs.bullet_length =
+            crate::stability::estimate_bullet_length_m(inputs.bullet_diameter, inputs.bullet_mass);
+        if inputs.bullet_length <= 0.0 {
+            inputs.bullet_length = inputs.bullet_diameter * 4.5;
+        }
 
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
@@ -1326,8 +1335,13 @@ impl WasmBallistics {
             }
         }
 
-        // Derive bullet_length from diameter (mirrors CLI/FFI); WASM left it at the default.
-        inputs.bullet_length = inputs.bullet_diameter * 4.5;
+        // MBA-1135: mass-based length estimate (mirrors CLI/FFI); replaces the mass-blind
+        // 4.5-caliber heuristic. WASM otherwise left it at the struct default.
+        inputs.bullet_length =
+            crate::stability::estimate_bullet_length_m(inputs.bullet_diameter, inputs.bullet_mass);
+        if inputs.bullet_length <= 0.0 {
+            inputs.bullet_length = inputs.bullet_diameter * 4.5;
+        }
 
         inputs.bc_value = bc;
         // Honor --drag-model (mirrors the trajectory/zero handlers); previously the Monte

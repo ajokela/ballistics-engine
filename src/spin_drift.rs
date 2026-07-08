@@ -71,12 +71,18 @@ pub fn litz_drift_meters(sg: f64, t_s: f64, is_twist_right: bool) -> f64 {
 /// `temp_c` / `press_hpa` are the resolved muzzle atmosphere.
 ///
 /// `compute_stability_coefficient` returns 0.0 when `bullet_length` is unset, so this first
-/// substitutes the historical 4.5-caliber fallback length, preserving the spin-drift behavior for
-/// callers that do not supply a real bullet length.
+/// substitutes a length estimate. MBA-1135: use the mass-based [`crate::stability::estimate_bullet_length_m`]
+/// (falling back to the historical 4.5-caliber literal only when mass is unavailable) instead of a
+/// mass-blind 4.5-caliber default, so heavier/longer bullets get a physically consistent Sg.
 pub fn effective_sg_from_inputs(inputs: &BallisticInputs, temp_c: f64, press_hpa: f64) -> f64 {
     let mut eff = inputs.clone();
     if eff.bullet_length <= 0.0 && eff.bullet_diameter > 0.0 {
-        eff.bullet_length = 4.5 * eff.bullet_diameter; // 4.5 calibers (typical match bullet)
+        let est = crate::stability::estimate_bullet_length_m(eff.bullet_diameter, eff.bullet_mass);
+        eff.bullet_length = if est > 0.0 {
+            est
+        } else {
+            4.5 * eff.bullet_diameter // 4.5 calibers, mass unavailable
+        };
     }
     // atmo_params = (altitude, temp_c, press_hpa, _): compute_stability_coefficient reads only
     // temp_c and press_hpa (altitude is ignored there), so pass the resolved muzzle values.
@@ -663,18 +669,29 @@ mod tests {
             "sg {sg} != bare {bare} * vel_corr {vel_corr}"
         );
 
-        // (3) 4.5-cal length fallback: zero length must reproduce an explicit 4.5-cal length.
+        // (3) MBA-1135: the zero-length fallback now uses the mass-based length estimate
+        // (crate::stability::estimate_bullet_length_m), NOT the old mass-blind 4.5-caliber
+        // length. Zero length must reproduce an explicit estimate-length input.
         let mut no_len = inputs.clone();
         no_len.bullet_length = 0.0;
         let sg_fallback = effective_sg_from_inputs(&no_len, temp_c, press_hpa);
         let mut explicit = inputs.clone();
-        explicit.bullet_length = 4.5 * explicit.bullet_diameter;
+        explicit.bullet_length =
+            crate::stability::estimate_bullet_length_m(inputs.bullet_diameter, inputs.bullet_mass);
         let sg_explicit = effective_sg_from_inputs(&explicit, temp_c, press_hpa);
         assert!(
             (sg_fallback - sg_explicit).abs() < 1e-12,
-            "zero-length fallback {sg_fallback} != explicit 4.5-cal {sg_explicit}"
+            "zero-length fallback {sg_fallback} != explicit estimate-length {sg_explicit}"
         );
         assert!(sg_fallback > 0.0);
+        // And it must differ from the retired 4.5-caliber default (the whole point of MBA-1135).
+        let mut old_default = inputs.clone();
+        old_default.bullet_length = 4.5 * old_default.bullet_diameter;
+        let sg_old = effective_sg_from_inputs(&old_default, temp_c, press_hpa);
+        assert!(
+            (sg_fallback - sg_old).abs() > 1e-6,
+            "mass-based fallback should differ from the old 4.5-cal default"
+        );
     }
 
     #[test]
