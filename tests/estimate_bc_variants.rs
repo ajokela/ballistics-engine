@@ -153,10 +153,15 @@ fn zeroed_points(bc: f64, model: DragModel) -> Vec<TrajectoryPoint> {
         sight_height: SIGHT_H,
         ..Default::default()
     };
+    // MBA-1130: a real dope card is zeroed to the LINE OF SIGHT (y = sight_height) at the
+    // zero range, not the bore line (y = 0) — and drop is then measured below the LOS
+    // (`zeroed_drop_at` uses SIGHT_H - y). Generate the synthetic card the same way so it is
+    // a faithful dope card and the corrected estimate_bc_fit (which now also zeros to LOS)
+    // round-trips exactly.
     let za = calculate_zero_angle_with_conditions(
         inputs.clone(),
         ZERO_M,
-        0.0,
+        SIGHT_H,
         WindConditions::default(),
         AtmosphericConditions::default(),
     )
