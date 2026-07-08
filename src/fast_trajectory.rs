@@ -777,6 +777,27 @@ pub fn fast_integrate_with_segments(
         },
     ];
 
+    // MBA-1134 (rank 10): the derivatives kernel no longer integrates spin drift, so apply the
+    // canonical empirical Litz drift as a post-process to the lateral (McCoy Z) of every point at
+    // its time of flight — matching cli_api::apply_spin_drift and the Monte-Carlo path so all three
+    // solver families agree. Uses the SAME muzzle Sg (spin_drift::effective_sg_from_inputs).
+    if inputs.use_enhanced_spin_drift {
+        // Standard-mode atmo_params is (base_alt, temp_c, press_hpa, ratio); direct mode
+        // (density, sound, 0, 0) carries no explicit temp/pressure, so fall back to sea-level
+        // standard (the Sg density correction is a no-op there).
+        let (sd_temp_c, sd_press_hpa) = if params.atmo_params.2 > 0.0 {
+            (params.atmo_params.1, params.atmo_params.2)
+        } else {
+            (15.0, 1013.25)
+        };
+        let sg = crate::spin_drift::effective_sg_from_inputs(inputs, sd_temp_c, sd_press_hpa);
+        for (t, state) in times.iter().zip(states.iter_mut()) {
+            if *t > 0.0 {
+                state[2] += crate::spin_drift::litz_drift_meters(sg, *t, inputs.is_twist_right);
+            }
+        }
+    }
+
     FastSolution::from_trajectory_data(times, states, t_events)
 }
 

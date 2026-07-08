@@ -2,6 +2,7 @@ use crate::pitch_damping::{
     calculate_damped_yaw_of_repose, calculate_pitch_damping_moment, PitchDampingCoefficients,
 };
 use crate::spin_decay::{update_spin_rate, SpinDecayParameters};
+use crate::BallisticInputs;
 use std::f64::consts::PI;
 
 /// Components of enhanced spin drift calculation
@@ -40,6 +41,46 @@ pub(crate) fn miller_stability(
         return 0.0;
     }
     30.0 * weight_gr / denom
+}
+
+/// Empirical Litz spin-drift MAGNITUDE in inches from the muzzle gyroscopic stability `sg`
+/// and time of flight `t_s` (seconds):
+///   `drift_inches = 1.25 * (Sg + 1.2) * t^1.83`
+///
+/// This is the single source of the Litz drift coefficient (MBA-1134). It is UNSIGNED — the
+/// caller applies the twist-direction sign (see [`litz_drift_meters`]). cli_api::apply_spin_drift
+/// and the fast / Monte-Carlo path both go through this so the three solver families stay
+/// bit-identical on the drift math.
+pub fn litz_drift_inches(sg: f64, t_s: f64) -> f64 {
+    1.25 * (sg + 1.2) * t_s.powf(1.83)
+}
+
+/// Signed Litz spin drift in METERS along McCoy Z (lateral / windage). A right-hand twist
+/// drifts to the right (+Z); a left-hand twist drifts left (-Z). MBA-1134.
+pub fn litz_drift_meters(sg: f64, t_s: f64, is_twist_right: bool) -> f64 {
+    let sign = if is_twist_right { 1.0 } else { -1.0 };
+    sign * litz_drift_inches(sg, t_s) * 0.0254
+}
+
+/// Canonical muzzle gyroscopic stability Sg for the empirical Litz spin-drift model, shared by
+/// cli_api and the fast / Monte-Carlo path so every solver family uses ONE Sg (MBA-1134, rank 31).
+///
+/// Delegates to [`crate::stability::compute_stability_coefficient`], the single source of truth
+/// for Miller Sg. That INCLUDES the `(v/2800)^(1/3)` muzzle-velocity term (matching the reported
+/// SG and the aerodynamic-jump Sg) and the linear Miller density correction `(T/T0)*(P0/P)`.
+/// `temp_c` / `press_hpa` are the resolved muzzle atmosphere.
+///
+/// `compute_stability_coefficient` returns 0.0 when `bullet_length` is unset, so this first
+/// substitutes the historical 4.5-caliber fallback length, preserving the spin-drift behavior for
+/// callers that do not supply a real bullet length.
+pub fn effective_sg_from_inputs(inputs: &BallisticInputs, temp_c: f64, press_hpa: f64) -> f64 {
+    let mut eff = inputs.clone();
+    if eff.bullet_length <= 0.0 && eff.bullet_diameter > 0.0 {
+        eff.bullet_length = 4.5 * eff.bullet_diameter; // 4.5 calibers (typical match bullet)
+    }
+    // atmo_params = (altitude, temp_c, press_hpa, _): compute_stability_coefficient reads only
+    // temp_c and press_hpa (altitude is ignored there), so pass the resolved muzzle values.
+    crate::stability::compute_stability_coefficient(&eff, (eff.altitude, temp_c, press_hpa, 0.0))
 }
 
 /// Calculate bullet spin rate from velocity and twist rate
@@ -286,7 +327,13 @@ pub fn calculate_gyroscopic_drift(
     drift_in * 0.0254
 }
 
-/// Calculate enhanced spin drift with all components
+/// Calculate enhanced spin drift with all components.
+///
+/// DEPRECATED (MBA-1134): this in-integration acceleration model is no longer wired into any
+/// solver path — spin drift is now the single canonical empirical Litz post-process
+/// ([`litz_drift_meters`], via [`effective_sg_from_inputs`]). Retained for backward compatibility
+/// and unit tests only. Do NOT reintroduce it into an integration loop alongside the Litz model,
+/// or lateral drift will be double-counted.
 pub fn calculate_enhanced_spin_drift(
     bullet_mass: f64,
     velocity_mps: f64,
@@ -412,7 +459,11 @@ pub fn calculate_enhanced_spin_drift(
     }
 }
 
-/// Apply enhanced spin drift acceleration to derivatives
+/// Apply enhanced spin drift acceleration to derivatives.
+///
+/// DEPRECATED (MBA-1134): companion to [`calculate_enhanced_spin_drift`]; no longer called by any
+/// integration path. Spin drift is now the canonical Litz post-process ([`litz_drift_meters`]).
+/// Retained for backward compatibility and unit tests only.
 pub fn apply_enhanced_spin_drift(
     derivatives: &mut [f64; 6],
     spin_components: &SpinDriftComponents,
@@ -559,6 +610,71 @@ mod tests {
         assert!(components.total_drift_m.abs() > 0.0);
         assert!(components.spin_rate_rps > 0.0);
         assert!(components.stability_factor > 0.0);
+    }
+
+    #[test]
+    fn test_litz_drift_helpers_sign_and_magnitude() {
+        // litz_drift_inches is unsigned and matches 1.25*(Sg+1.2)*t^1.83 exactly.
+        let sg = 2.0_f64;
+        let t = 1.5_f64;
+        let expected_in = 1.25 * (sg + 1.2) * t.powf(1.83);
+        assert!((litz_drift_inches(sg, t) - expected_in).abs() < 1e-12);
+        // litz_drift_meters applies the twist sign and the inch->meter conversion.
+        let right = litz_drift_meters(sg, t, true);
+        let left = litz_drift_meters(sg, t, false);
+        assert!((right - expected_in * 0.0254).abs() < 1e-12);
+        assert!((right + left).abs() < 1e-12, "left twist must mirror right");
+        assert!(right > 0.0 && left < 0.0);
+    }
+
+    #[test]
+    fn test_effective_sg_from_inputs_includes_velocity_term_and_length_fallback() {
+        // effective_sg_from_inputs must (1) equal compute_stability_coefficient, (2) INCLUDE the
+        // (v/2800)^(1/3) muzzle-velocity term (so it differs from the bare geometric miller_stability),
+        // and (3) apply the 4.5-caliber length fallback when bullet_length is unset.
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0, // 2624.7 fps -> velocity term < 1.0
+            bullet_mass: 175.0 * 0.00006479891,
+            bullet_diameter: 0.308 * 0.0254,
+            bullet_length: 1.24 * 0.0254,
+            twist_rate: 10.0,
+            ..Default::default()
+        };
+
+        let temp_c = 15.0;
+        let press_hpa = 1013.25;
+        let sg = effective_sg_from_inputs(&inputs, temp_c, press_hpa);
+
+        // (1) identical to compute_stability_coefficient on the same (length-filled) inputs.
+        let direct =
+            crate::stability::compute_stability_coefficient(&inputs, (0.0, temp_c, press_hpa, 0.0));
+        assert!((sg - direct).abs() < 1e-12, "sg {sg} != direct {direct}");
+
+        // (2) includes the velocity term: at sea-level standard the density factor is 1.0, so
+        //     sg == bare_geometric_Sg * (v_fps/2800)^(1/3).
+        let d_in = inputs.bullet_diameter / 0.0254;
+        let m_gr = inputs.bullet_mass / 0.00006479891;
+        let l_in = inputs.bullet_length / 0.0254;
+        let bare = miller_stability(d_in, m_gr, inputs.twist_rate, l_in);
+        let vel_corr = (inputs.muzzle_velocity * 3.28084 / 2800.0).powf(1.0 / 3.0);
+        assert!(vel_corr < 1.0, "muzzle < 2800 fps should shrink Sg");
+        assert!(
+            (sg - bare * vel_corr).abs() < 1e-6,
+            "sg {sg} != bare {bare} * vel_corr {vel_corr}"
+        );
+
+        // (3) 4.5-cal length fallback: zero length must reproduce an explicit 4.5-cal length.
+        let mut no_len = inputs.clone();
+        no_len.bullet_length = 0.0;
+        let sg_fallback = effective_sg_from_inputs(&no_len, temp_c, press_hpa);
+        let mut explicit = inputs.clone();
+        explicit.bullet_length = 4.5 * explicit.bullet_diameter;
+        let sg_explicit = effective_sg_from_inputs(&explicit, temp_c, press_hpa);
+        assert!(
+            (sg_fallback - sg_explicit).abs() < 1e-12,
+            "zero-length fallback {sg_fallback} != explicit 4.5-cal {sg_explicit}"
+        );
+        assert!(sg_fallback > 0.0);
     }
 
     #[test]
