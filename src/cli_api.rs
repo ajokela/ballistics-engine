@@ -719,52 +719,44 @@ impl TrajectorySolver {
             return;
         }
 
-        // Real length when available, else 4.5 cal (typical match bullet).
-        let length_in = if self.inputs.bullet_length > 0.0 {
-            self.inputs.bullet_length / 0.0254
-        } else {
-            4.5 * d_in
-        };
-        // MBA-942: apply the canonical Miller atmospheric correction (LINEAR in density ratio,
-        // = rho0/rho via ideal gas: (T/T0)*(P0/P)), matching stability.rs and py_ballisticcalc.
-        // miller_stability returns the bare geometric Sg with no density dependence, so without
-        // this the spin drift under-predicts at altitude (Sg should rise as the air thins). At
-        // standard sea level (15 C, 1013.25 hPa) the factor is exactly 1.0 — a no-op there.
-        let (_, _, temp_c, press_hpa) = self.resolved_atmosphere();
-        let temp_k = temp_c + 273.15; // Celsius -> Kelvin
-        let density_correction = if press_hpa > 0.0 && temp_k > 0.0 {
-            (temp_k / 288.15) * (1013.25 / press_hpa)
-        } else {
-            1.0
-        };
-        let sg = crate::spin_drift::miller_stability(d_in, m_gr, twist_in, length_in)
-            * density_correction;
-        let sign = if self.inputs.is_twist_right {
-            1.0
-        } else {
-            -1.0
-        };
+        // MBA-1134 (rank 31): single source of truth for the muzzle Sg —
+        // stability::compute_stability_coefficient via spin_drift::effective_sg_from_inputs. This
+        // ADDS the (v/2800)^(1/3) muzzle-velocity term the bare miller_stability() lacked, so the
+        // spin-drift Sg now matches the reported SG and the aerodynamic-jump Sg. The linear Miller
+        // density correction ((T/T0)*(P0/P), a no-op at sea-level standard) and the 4.5-caliber
+        // length fallback are handled inside effective_sg_from_inputs.
+        let sg = self.effective_spin_drift_sg();
 
         for p in result.points.iter_mut() {
             if p.time <= 0.0 {
                 continue;
             }
-            let sd_in = 1.25 * (sg + 1.2) * p.time.powf(1.83); // Litz drift, inches
-            p.position.z += sign * sd_in * 0.0254; // in -> m, Z = lateral
+            // Canonical Litz drift, shared with the fast / Monte-Carlo path (spin_drift::litz_*).
+            p.position.z +=
+                crate::spin_drift::litz_drift_meters(sg, p.time, self.inputs.is_twist_right);
         }
 
         // sampled_points are snapshotted from the PRE-drift trajectory inside each solver, so the
         // sampled wind_drift_m column would omit the spin drift that result.points carry. Apply
-        // the same Litz drift to keep the two user-facing outputs consistent.
+        // the same canonical Litz drift to keep the two user-facing outputs consistent.
         if let Some(samples) = result.sampled_points.as_mut() {
             for s in samples.iter_mut() {
                 if s.time_s <= 0.0 {
                     continue;
                 }
-                let sd_in = 1.25 * (sg + 1.2) * s.time_s.powf(1.83);
-                s.wind_drift_m += sign * sd_in * 0.0254;
+                s.wind_drift_m +=
+                    crate::spin_drift::litz_drift_meters(sg, s.time_s, self.inputs.is_twist_right);
             }
         }
+    }
+
+    /// Muzzle gyroscopic stability Sg used by the empirical Litz spin-drift post-process
+    /// (MBA-1134). Extracted so the exact value is unit-testable and provably identical to the Sg
+    /// the fast / Monte-Carlo path uses — both go through
+    /// [`crate::spin_drift::effective_sg_from_inputs`] with the resolved muzzle atmosphere.
+    fn effective_spin_drift_sg(&self) -> f64 {
+        let (_, _, temp_c, press_hpa) = self.resolved_atmosphere();
+        crate::spin_drift::effective_sg_from_inputs(&self.inputs, temp_c, press_hpa)
     }
 
     fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
@@ -1858,7 +1850,13 @@ impl TrajectorySolver {
         }
 
         // Magnus side force (spinning projectile). SI units in this solver.
+        // MBA-1134 (rank 35): the canonical empirical Litz spin-drift post-process
+        // (apply_spin_drift) already captures the gyroscopic yaw-of-repose lateral, so the
+        // explicit Magnus side force must NOT be added on top of it — otherwise the two lateral
+        // models stack and double-count the drift. Suppress Magnus whenever Litz spin drift is
+        // active. (The inverse is intentionally NOT done: Litz is not suppressed when Magnus is on.)
         if self.inputs.enable_magnus
+            && !self.inputs.use_enhanced_spin_drift
             && self.inputs.bullet_diameter > 0.0
             && self.inputs.twist_rate > 0.0
         {

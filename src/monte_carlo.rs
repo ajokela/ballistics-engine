@@ -152,14 +152,32 @@ pub fn solve_trajectory_for_monte_carlo(
     let los_y = sight_height_m + (0.0 - sight_height_m) * (final_downrange / target_distance_m);
     let drop = los_y - final_y;
 
+    // MBA-1134 (rank 6/10): apply the canonical empirical Litz spin drift as a post-process. The
+    // fast kernel (fast_trajectory::compute_derivatives) does NOT integrate spin drift, so we add
+    // it here at the endpoint time-of-flight exactly as cli_api::apply_spin_drift does — using the
+    // SAME muzzle Sg (spin_drift::effective_sg_from_inputs with the resolved muzzle atmosphere), so
+    // this Monte-Carlo path agrees with the TrajectorySolver. Report `spin_drift` as the real Litz
+    // value (the old `// Approximation for now` copied total lateral) and fold it into the total
+    // lateral `wind_drift`.
+    let spin_drift_m = if inputs.use_enhanced_spin_drift {
+        let sg = crate::spin_drift::effective_sg_from_inputs(
+            inputs,
+            resolved_temp_c,
+            resolved_pressure_hpa,
+        );
+        crate::spin_drift::litz_drift_meters(sg, solution.t[final_idx], inputs.is_twist_right)
+    } else {
+        0.0
+    };
+
     Ok(TrajectoryOutput {
         drop,
-        wind_drift: final_lateral,
+        wind_drift: final_lateral + spin_drift_m,
         time: solution.t[final_idx],
         velocity: final_speed,
         energy: final_energy,
         mach: final_mach,
-        spin_drift: final_lateral, // Approximation for now
+        spin_drift: spin_drift_m,
         distance: final_downrange,
     })
 }

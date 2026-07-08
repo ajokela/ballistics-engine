@@ -3,13 +3,11 @@ use crate::bc_estimation::BCSegmentEstimator;
 use crate::constants::*;
 use crate::drag::get_drag_coefficient_full;
 use crate::form_factor::apply_form_factor_to_drag;
-use crate::spin_drift::{apply_enhanced_spin_drift, calculate_enhanced_spin_drift};
 use crate::InternalBallisticInputs as BallisticInputs;
 use nalgebra::Vector3;
 
 // Physics constants
 const INCHES_PER_FOOT: f64 = 12.0;
-const STANDARD_AIR_DENSITY_METRIC: f64 = 1.225; // kg/m³ at sea level
 
 // Magnus Effect Constants
 //
@@ -110,7 +108,9 @@ pub fn compute_derivatives(
     atmos_params: (f64, f64, f64, f64),
     bc_used: f64,
     omega_vector: Option<Vector3<f64>>,
-    time: f64,
+    // MBA-1134: the in-integration spin-drift term that consumed `time` is deprecated (spin drift
+    // is now a Litz post-process), so this is currently unused; kept in the signature for callers.
+    _time: f64,
 ) -> [f64; 6] {
     // Gravity acceleration vector, rotated into the shot-aligned frame by shooting_angle
     // (uphill/downhill inclined fire), matching cli_api::TrajectorySolver::gravity_acceleration.
@@ -311,7 +311,16 @@ pub fn compute_derivatives(
 
         // Magnus Effect calculation. Gated on enable_magnus specifically so it is
         // independent of Coriolis (matches the cli_api solver's decoupled flags).
-        if inputs.enable_magnus && inputs.bullet_diameter > 0.0 && inputs.twist_rate > 0.0 {
+        // MBA-1134 (rank 35): when the canonical empirical Litz spin-drift post-process is active
+        // (use_enhanced_spin_drift + advanced effects — the same condition that drove the now-
+        // deprecated in-integration spin-drift term), it already captures the gyroscopic/yaw-of-
+        // repose lateral. The explicit Magnus side force must NOT be added on top or the two
+        // lateral models stack and double-count the drift, so suppress Magnus in that case.
+        if inputs.enable_magnus
+            && !(inputs.use_enhanced_spin_drift && inputs.enable_advanced_effects)
+            && inputs.bullet_diameter > 0.0
+            && inputs.twist_rate > 0.0
+        {
             // Calculate spin rate from twist rate and velocity
             let spin_rate_rad_s = calculate_spin_rate(inputs.twist_rate, speed_air);
 
@@ -416,71 +425,19 @@ pub fn compute_derivatives(
         accel += accel_coriolis;
     }
 
-    // Apply enhanced spin drift if enabled
-    let mut derivatives = [vel[0], vel[1], vel[2], accel[0], accel[1], accel[2]];
-
-    if inputs.use_enhanced_spin_drift && inputs.enable_advanced_effects && time > 0.0 {
-        // Calculate crosswind component
-        let velocity_adjusted = vel - wind_vector;
-        let crosswind_speed = if velocity_adjusted.norm() > crate::constants::MIN_VELOCITY_THRESHOLD
-        {
-            let trajectory_unit = velocity_adjusted / velocity_adjusted.norm();
-            let crosswind = wind_vector - wind_vector.dot(&trajectory_unit) * trajectory_unit;
-            crosswind.norm()
-        } else {
-            0.0
-        };
-
-        // Get air density (already calculated above)
-        let air_density = if speed_air > crate::constants::MIN_VELOCITY_THRESHOLD {
-            let altitude_at_pos = inputs.altitude + pos[1];
-            let (density, _) = if atmos_params.0 < MAX_REALISTIC_DENSITY
-                && atmos_params.1 > MIN_REALISTIC_SPEED_OF_SOUND
-                && atmos_params.2 == 0.0
-                && atmos_params.3 == 0.0
-            {
-                get_direct_atmosphere(atmos_params.0, atmos_params.1)
-            } else {
-                get_local_atmosphere(
-                    altitude_at_pos,
-                    atmos_params.0,
-                    atmos_params.1,
-                    atmos_params.2,
-                    atmos_params.3,
-                )
-            };
-            density
-        } else {
-            STANDARD_AIR_DENSITY_METRIC // Standard air density
-        };
-
-        // Calculate enhanced spin drift components
-        // calculate_enhanced_spin_drift is imperial (grains/inches): convert at boundary.
-        let spin_components = calculate_enhanced_spin_drift(
-            inputs.weight_grains,
-            vel.norm(),
-            inputs.twist_rate,
-            inputs.caliber_inches,
-            inputs.bullet_length / 0.0254, // meters -> inches
-            inputs.is_twist_right,
-            time,
-            air_density,
-            crosswind_speed,
-            0.0,   // pitch_rate_rad_s - we don't track angular rates yet
-            false, // use_pitch_damping - disabled for now
-        );
-
-        // Apply enhanced spin drift acceleration
-        apply_enhanced_spin_drift(
-            &mut derivatives,
-            &spin_components,
-            time,
-            inputs.is_twist_right,
-        );
-    }
+    // MBA-1134 (rank 10): the in-integration enhanced-spin-drift ACCELERATION term
+    // (spin_drift::calculate_enhanced_spin_drift / apply_enhanced_spin_drift) is DEPRECATED and is
+    // no longer applied here. It carried a unit bug and was a SECOND, inconsistent lateral model.
+    // Spin drift is now the single canonical empirical Litz post-process
+    // (spin_drift::litz_drift_meters), applied by cli_api::apply_spin_drift and the fast /
+    // Monte-Carlo path (fast_trajectory + monte_carlo) at the endpoint time-of-flight. Keeping only
+    // one model here guarantees the three solver families agree on lateral drift and prevents the
+    // Magnus + spin-drift double-count (see the Magnus gate above). The `calculate_enhanced_spin_drift`
+    // / `apply_enhanced_spin_drift` helpers remain in spin_drift.rs for backward compatibility but
+    // are no longer wired into any integration path.
 
     // Return state derivatives: [velocity, acceleration]
-    derivatives
+    [vel[0], vel[1], vel[2], accel[0], accel[1], accel[2]]
 }
 
 /// Calculate appropriate BC fallback based on available bullet parameters
