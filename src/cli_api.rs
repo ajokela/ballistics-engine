@@ -815,6 +815,11 @@ impl TrajectorySolver {
 
         // Calculate air density
         let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
+        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
+        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
+        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
+        let base_ratio = air_density / 1.225;
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -954,9 +959,9 @@ impl TrajectorySolver {
             // calculate_acceleration applies BC-retardation drag, gravity, Coriolis, Magnus, wind
             // shear, and the zero-relative-velocity gravity-only guard.
             let acceleration =
-                self.calculate_acceleration(&position, &velocity, air_density,
+                self.calculate_acceleration(&position, &velocity,
                     &wind_vector,
-                    (speed_of_sound, resolved_temp_c, resolved_press_hpa),
+                    (resolved_temp_c, resolved_press_hpa, base_ratio),
                 );
 
             // Update state
@@ -1092,6 +1097,11 @@ impl TrajectorySolver {
 
         // Calculate air density
         let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
+        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
+        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
+        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
+        let base_ratio = air_density / 1.225;
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -1218,22 +1228,22 @@ impl TrajectorySolver {
             let dt = self.time_step;
 
             // k1
-            let acc1 = self.calculate_acceleration(&position, &velocity, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
+            let acc1 = self.calculate_acceleration(&position, &velocity, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
 
             // k2
             let pos2 = position + velocity * (dt * 0.5);
             let vel2 = velocity + acc1 * (dt * 0.5);
-            let acc2 = self.calculate_acceleration(&pos2, &vel2, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
+            let acc2 = self.calculate_acceleration(&pos2, &vel2, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
 
             // k3
             let pos3 = position + vel2 * (dt * 0.5);
             let vel3 = velocity + acc2 * (dt * 0.5);
-            let acc3 = self.calculate_acceleration(&pos3, &vel3, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
+            let acc3 = self.calculate_acceleration(&pos3, &vel3, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
 
             // k4
             let pos4 = position + vel3 * dt;
             let vel4 = velocity + acc3 * dt;
-            let acc4 = self.calculate_acceleration(&pos4, &vel4, air_density, &wind_vector, (speed_of_sound, resolved_temp_c, resolved_press_hpa));
+            let acc4 = self.calculate_acceleration(&pos4, &vel4, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
 
             // Update position and velocity
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
@@ -1353,6 +1363,11 @@ impl TrajectorySolver {
         // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
         // are immutable); compute once instead of every iteration (mirrors solve_rk4).
         let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
+        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
+        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
+        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
+        let base_ratio = air_density / 1.225;
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         let wind_vector = Vector3::new(
@@ -1491,10 +1506,9 @@ impl TrajectorySolver {
                 &position,
                 &velocity,
                 dt,
-                air_density,
                 &wind_vector,
                 tolerance,
-                (speed_of_sound, resolved_temp_c, resolved_press_hpa),
+                (resolved_temp_c, resolved_press_hpa, base_ratio),
             );
 
             // Advance state and time by the dt actually used for THIS step. (Previously dt
@@ -1624,10 +1638,9 @@ impl TrajectorySolver {
         position: &Vector3<f64>,
         velocity: &Vector3<f64>,
         dt: f64,
-        air_density: f64,
         wind_vector: &Vector3<f64>,
         tolerance: f64,
-        resolved_atmo: (f64, f64, f64), // (speed_of_sound, temp_c, press_hpa)
+        resolved_atmo: (f64, f64, f64), // (base_temp_c, base_press_hpa, base_ratio)
     ) -> (Vector3<f64>, Vector3<f64>, f64) {
         // Dormand-Prince coefficients
         const A21: f64 = 1.0 / 5.0;
@@ -1667,37 +1680,37 @@ impl TrajectorySolver {
         const B7_ERR: f64 = 1.0 / 40.0;
 
         // Compute RK45 stages
-        let k1_v = self.calculate_acceleration(position, velocity, air_density, wind_vector, resolved_atmo);
+        let k1_v = self.calculate_acceleration(position, velocity, wind_vector, resolved_atmo);
         let k1_p = *velocity;
 
         let p2 = position + dt * A21 * k1_p;
         let v2 = velocity + dt * A21 * k1_v;
-        let k2_v = self.calculate_acceleration(&p2, &v2, air_density, wind_vector, resolved_atmo);
+        let k2_v = self.calculate_acceleration(&p2, &v2, wind_vector, resolved_atmo);
         let k2_p = v2;
 
         let p3 = position + dt * (A31 * k1_p + A32 * k2_p);
         let v3 = velocity + dt * (A31 * k1_v + A32 * k2_v);
-        let k3_v = self.calculate_acceleration(&p3, &v3, air_density, wind_vector, resolved_atmo);
+        let k3_v = self.calculate_acceleration(&p3, &v3, wind_vector, resolved_atmo);
         let k3_p = v3;
 
         let p4 = position + dt * (A41 * k1_p + A42 * k2_p + A43 * k3_p);
         let v4 = velocity + dt * (A41 * k1_v + A42 * k2_v + A43 * k3_v);
-        let k4_v = self.calculate_acceleration(&p4, &v4, air_density, wind_vector, resolved_atmo);
+        let k4_v = self.calculate_acceleration(&p4, &v4, wind_vector, resolved_atmo);
         let k4_p = v4;
 
         let p5 = position + dt * (A51 * k1_p + A52 * k2_p + A53 * k3_p + A54 * k4_p);
         let v5 = velocity + dt * (A51 * k1_v + A52 * k2_v + A53 * k3_v + A54 * k4_v);
-        let k5_v = self.calculate_acceleration(&p5, &v5, air_density, wind_vector, resolved_atmo);
+        let k5_v = self.calculate_acceleration(&p5, &v5, wind_vector, resolved_atmo);
         let k5_p = v5;
 
         let p6 = position + dt * (A61 * k1_p + A62 * k2_p + A63 * k3_p + A64 * k4_p + A65 * k5_p);
         let v6 = velocity + dt * (A61 * k1_v + A62 * k2_v + A63 * k3_v + A64 * k4_v + A65 * k5_v);
-        let k6_v = self.calculate_acceleration(&p6, &v6, air_density, wind_vector, resolved_atmo);
+        let k6_v = self.calculate_acceleration(&p6, &v6, wind_vector, resolved_atmo);
         let k6_p = v6;
 
         let p7 = position + dt * (A71 * k1_p + A73 * k3_p + A74 * k4_p + A75 * k5_p + A76 * k6_p);
         let v7 = velocity + dt * (A71 * k1_v + A73 * k3_v + A74 * k4_v + A75 * k5_v + A76 * k6_v);
-        let k7_v = self.calculate_acceleration(&p7, &v7, air_density, wind_vector, resolved_atmo);
+        let k7_v = self.calculate_acceleration(&p7, &v7, wind_vector, resolved_atmo);
         let k7_p = v7;
 
         // 5th order solution
@@ -1739,9 +1752,8 @@ impl TrajectorySolver {
         &self,
         position: &Vector3<f64>,
         velocity: &Vector3<f64>,
-        air_density: f64,
         wind_vector: &Vector3<f64>,
-        resolved_atmo: (f64, f64, f64), // (speed_of_sound, temp_c, press_hpa) hoisted per-solve
+        resolved_atmo: (f64, f64, f64), // (base_temp_c, base_press_hpa, base_ratio) hoisted per-solve
     ) -> Vector3<f64> {
         // Resolve the wind at this point. Downrange-segmented wind (when supplied)
         // takes precedence and is sampled by downrange distance (position.x) per
@@ -1763,8 +1775,24 @@ impl TrajectorySolver {
             return self.gravity_acceleration();
         }
 
+        // MBA-1136 (rank 30): recompute the atmosphere at the LOCAL substep altitude instead of
+        // holding the frozen station scalars for the whole flight. This mirrors what
+        // derivatives.rs / fast_trajectory.rs already do, so all three solver families vary air
+        // density AND speed of sound with altitude (matters on elevated / long-range shots; a
+        // no-op at the shooter altitude, where the ratio-based density recovers the station value
+        // exactly). base_* were resolved once per solve via resolved_atmosphere().
+        let (base_temp_c, base_press_hpa, base_ratio) = resolved_atmo;
+        let local_alt = self.atmosphere.altitude + position.y;
+        let (air_density, speed_of_sound) = crate::atmosphere::get_local_atmosphere(
+            local_alt,
+            self.atmosphere.altitude,
+            base_temp_c,
+            base_press_hpa,
+            base_ratio,
+        );
+
         // Get drag coefficient from drag model (Mach-indexed from drag tables)
-        let cd = self.calculate_drag_coefficient(velocity_magnitude, resolved_atmo.0);
+        let cd = self.calculate_drag_coefficient(velocity_magnitude, speed_of_sound);
 
         // Convert velocity to fps for BC lookups
         let velocity_fps = velocity_magnitude * 3.28084;
@@ -1865,8 +1893,10 @@ impl TrajectorySolver {
         {
             let (_, spin_rad_s) =
                 crate::spin_drift::calculate_spin_rate(velocity_magnitude, self.inputs.twist_rate);
-            let (speed_of_sound, temp_c, press_hpa) = resolved_atmo;
-            let temp_k = temp_c + 273.15;
+            // Stability (Sg) is a launch property, so its Miller density correction uses the
+            // STATION temperature/pressure (base_*); the Mach that feeds the Magnus-moment
+            // coefficient uses the LOCAL speed of sound recomputed above.
+            let temp_k = base_temp_c + 273.15;
             let mach = velocity_magnitude / speed_of_sound;
 
             // Imperial conversions for the stability / yaw-of-repose helpers.
@@ -1889,8 +1919,8 @@ impl TrajectorySolver {
             // MBA-958: apply the canonical linear Miller density correction (T/T0)*(P0/P) to the
             // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.
             // No-op at sea-level standard (15 C, 1013.25 hPa -> factor 1.0).
-            let density_correction = if press_hpa > 0.0 && temp_k > 0.0 {
-                (temp_k / 288.15) * (1013.25 / press_hpa)
+            let density_correction = if base_press_hpa > 0.0 && temp_k > 0.0 {
+                (temp_k / 288.15) * (1013.25 / base_press_hpa)
             } else {
                 1.0
             };

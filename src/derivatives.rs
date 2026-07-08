@@ -1,4 +1,4 @@
-use crate::atmosphere::{get_direct_atmosphere, get_local_atmosphere};
+use crate::atmosphere::{get_direct_atmosphere, get_local_atmosphere_humid};
 use crate::bc_estimation::BCSegmentEstimator;
 use crate::constants::*;
 use crate::drag::get_drag_coefficient_full;
@@ -153,13 +153,19 @@ pub fn compute_derivatives(
             let (rho, sound) = get_direct_atmosphere(atmos_params.0, atmos_params.1);
             (rho, sound, sound * sound / (1.4 * 287.05) - 273.15)
         } else {
-            // Calculate from base parameters
-            let (rho, sound) = get_local_atmosphere(
+            // Calculate from base parameters. MBA-1136 (rank 9): route the local speed of sound
+            // through the moist-air formula. Humidity is NOT plumbed to this call site — on the
+            // sole production path (trajectory_integration::build_inputs) the `humidity` FIELD is
+            // overwritten with atmos_params.3 (the density RATIO), so `inputs.humidity` here is not
+            // a real RH. Pass 0.0 (dry) rather than fabricate humidity; density is unchanged and
+            // the dry speed of sound is numerically identical to the old get_local_atmosphere.
+            let (rho, sound) = get_local_atmosphere_humid(
                 altitude_at_pos,
                 atmos_params.0, // base_alt
                 atmos_params.1, // base_temp_c
                 atmos_params.2, // base_press_hpa
                 atmos_params.3, // base_ratio
+                0.0,            // humidity not available here (see note above)
             );
             // LOCAL temperature at the projectile altitude, back-computed from the LOCAL speed of
             // sound (get_local_atmosphere returns density/sound at altitude_at_pos but not temp;
