@@ -2470,10 +2470,15 @@ pub fn estimate_bc_fit(
         // Zeroed fit: tilt the bore so the bullet crosses LOS at the zero range, so the
         // downrange drops match a dope card zeroed there. Bore fit leaves muzzle_angle = 0.
         if let Some(zr) = zero_range {
+            // MBA-1130: zero to the LINE OF SIGHT (y = sight_height) at the zero range,
+            // not the bore line (y = 0). Drop is measured as `drop_offset - y` with
+            // drop_offset = sight_height, so a bore-referenced zero left drop != 0 at the
+            // zero range and the drop-fit no longer round-tripped to the true BC. This
+            // matches how range-table / come-up / dope-card generation zero.
             let za = calculate_zero_angle_with_conditions(
                 inputs.clone(),
                 zr,
-                0.0,
+                sight_height,
                 WindConditions::default(),
                 atmosphere.clone(),
             )

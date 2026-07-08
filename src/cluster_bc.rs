@@ -1,149 +1,153 @@
 //! Cluster-based BC degradation for improved accuracy
 //!
-//! This module implements empirical BC corrections based on bullet clustering.
-//! Bullets are classified into 4 clusters based on their physical characteristics,
-//! and each cluster has unique velocity-dependent BC degradation curves derived
-//! from real-world ballistic data.
+//! This module implements empirical velocity-dependent BC corrections based on
+//! bullet clustering. Bullets are classified into 4 clusters from their physical
+//! characteristics, and each cluster carries a velocity-keyed multiplier ladder.
+//!
+//! MBA-1127 (2026-07): this is a faithful port of the Python reference model
+//! `ballistics.ml.cluster_bc_degradation.ClusterBCDegradation`
+//! (version tag `2026-07-08-radar-recal-mba1126`), which is the single source of
+//! truth. The ladders and the classifier below MUST stay byte-for-byte equivalent
+//! to that model; `tests::test_parity_with_python_reference` locks the values with
+//! goldens generated from the Python implementation.
+//!
+//! MBA-1126 recalibration notes (why these values differ from the old MBA-645
+//! ladders): the multipliers are ratios r(v) = BC_G7(v) / BC_G7_banded_avg computed
+//! in form-factor space against the 84-point standard G7 table, from 50 Lapua radar
+//! .drg curves + 281 doppler-derived curves. Because the G7 reference curve already
+//! carries the transonic drag rise, a G7 BC is nearly FLAT through the supersonic
+//! band and actually RISES slightly (~+4-8%) around 1000-1200 fps for match bullets.
+//! The old deep transonic dips (0.82-0.90 at 1200-1500) were G1-band shapes
+//! misapplied to G7 semantics and over-degraded every transonic trajectory (and the
+//! BC5D tables sampled from this model). Multipliers may therefore exceed 1.0.
 
-#[derive(Debug, Clone, Copy)]
-pub struct ClusterBCDegradation {
-    /// Pre-calculated cluster centroids
-    centroids: [(f64, f64, f64); 4],
-}
+/// One velocity band: (velocity_threshold_fps, multiplier). Bands are ordered by
+/// DESCENDING threshold, matching the Python reference; `get_bc_multiplier`
+/// interpolates linearly between adjacent bands.
+type VelocityBand = (f64, f64);
+
+/// Per-cluster velocity ladders (MBA-1126 radar-recalibrated, G7-referenced).
+/// Index = cluster id (0..=3). Kept identical to the Python `velocity_bands`.
+const VELOCITY_BANDS: [[VelocityBand; 8]; 4] = [
+    // Cluster 0: Standard Long-Range (Sierra MatchKing, etc.; n~248)
+    [
+        (3500.0, 1.00),
+        (3000.0, 1.01),
+        (2500.0, 1.01),
+        (2000.0, 0.99),
+        (1500.0, 0.99),
+        (1200.0, 1.03),
+        (1000.0, 1.05),
+        (0.0, 0.94),
+    ],
+    // Cluster 1: Low-Drag Specialty (blunt/monolithic + stubby varmint; n~12,
+    // shrunk ~25% toward 1.0). G7 BC runs below the banded avg high, rises
+    // steeply through transonic.
+    [
+        (3500.0, 0.90),
+        (3000.0, 0.91),
+        (2500.0, 0.94),
+        (2000.0, 1.02),
+        (1500.0, 1.06),
+        (1200.0, 1.17),
+        (1000.0, 1.40),
+        (0.0, 1.14),
+    ],
+    // Cluster 2: Light Varmint/Target (n~54)
+    [
+        (3500.0, 1.00),
+        (3000.0, 1.00),
+        (2500.0, 1.01),
+        (2000.0, 0.99),
+        (1500.0, 0.985),
+        (1200.0, 1.01),
+        (1000.0, 1.03),
+        (0.0, 0.90),
+    ],
+    // Cluster 3: Heavy Magnums (n~6, shrunk 50% toward 1.0)
+    [
+        (3500.0, 1.00),
+        (3000.0, 1.01),
+        (2500.0, 1.00),
+        (2000.0, 0.99),
+        (1500.0, 0.99),
+        (1200.0, 1.02),
+        (1000.0, 1.04),
+        (0.0, 0.94),
+    ],
+];
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClusterBCDegradation;
 
 impl ClusterBCDegradation {
     pub fn new() -> Self {
-        Self {
-            // Cluster centroids: (caliber_normalized, weight_normalized, bc_normalized)
-            centroids: [
-                (0.605, 0.415, 0.613), // Cluster 0: Standard Long-Range
-                (0.516, 0.324, 0.643), // Cluster 1: Low-Drag Specialty
-                (0.307, 0.088, 0.336), // Cluster 2: Light Varmint
-                (0.750, 0.805, 0.505), // Cluster 3: Heavy Magnums
-            ],
-        }
+        Self
     }
 
-    /// Predict which cluster a bullet belongs to
-    pub fn predict_cluster(&self, caliber: f64, weight_gr: f64, bc_g1: f64) -> usize {
-        // Normalize features to [0, 1] range
-        // Bounds derived from training data and centroid values:
-        // - Caliber: 0.172 (.17 HMR) to 0.750 (.50 BMG) - matches cluster 3 centroid
-        // - Weight: 15gr (light varmint) to 750gr (heavy magnum)
-        // - BC G1: 0.05 (low drag) to 1.2 (high BC match bullets)
-        let caliber_norm = (caliber - 0.172) / (0.750 - 0.172);
-        let weight_norm = (weight_gr - 15.0) / (750.0 - 15.0);
-        let bc_norm = (bc_g1 - 0.05) / (1.2 - 0.05);
-
-        // Find nearest centroid
-        let mut min_distance = f64::INFINITY;
-        let mut best_cluster = 0;
-
-        for (i, &(c_cal, c_wt, c_bc)) in self.centroids.iter().enumerate() {
-            let distance = ((caliber_norm - c_cal).powi(2)
-                + (weight_norm - c_wt).powi(2)
-                + (bc_norm - c_bc).powi(2))
-            .sqrt();
-
-            if distance < min_distance {
-                min_distance = distance;
-                best_cluster = i;
-            }
-        }
-
-        best_cluster
-    }
-
-    /// Get BC multiplier for a given velocity and cluster
+    /// Predict which cluster a bullet belongs to.
     ///
-    /// MBA-645: Recalibrated from 170 bullets with measured BC segments.
-    /// Previous values were too aggressive (predicted 65% at subsonic,
-    /// measured data shows 93%).
-    pub fn get_bc_multiplier(&self, velocity_fps: f64, cluster_id: usize) -> f64 {
-        match cluster_id {
-            0 => {
-                // Standard Long-Range: calibrated from measured BC segment curves
-                // Notable: transonic dip at 1200-1500 fps, recovery below 1200
-                if velocity_fps > 3500.0 {
-                    1.0
-                } else if velocity_fps > 3000.0 {
-                    1.0 - 0.01 * (3500.0 - velocity_fps) / 500.0 // 1.00 -> 0.99
-                } else if velocity_fps > 2500.0 {
-                    0.99 - 0.01 * (3000.0 - velocity_fps) / 500.0 // 0.99 -> 0.98
-                } else if velocity_fps > 2000.0 {
-                    0.98 // flat at 98% through mid velocities
-                } else if velocity_fps > 1500.0 {
-                    0.98 - 0.02 * (2000.0 - velocity_fps) / 500.0 // 0.98 -> 0.96
-                } else if velocity_fps > 1200.0 {
-                    0.96 - 0.10 * (1500.0 - velocity_fps) / 300.0 // 0.96 -> 0.86 transonic dip
-                } else if velocity_fps > 1000.0 {
-                    0.86 + 0.11 * (1200.0 - velocity_fps) / 200.0 // 0.86 -> 0.97 recovery
-                } else {
-                    0.97 - 0.04 * (1000.0 - velocity_fps) / 1000.0 // 0.97 -> 0.93 subsonic
-                }
-            }
-            1 => {
-                // Low-Drag Specialty (VLD, ELD, A-TIP): superior transonic performance
-                if velocity_fps > 3500.0 {
-                    1.0
-                } else if velocity_fps > 3000.0 {
-                    1.0 - 0.01 * (3500.0 - velocity_fps) / 500.0 // 1.00 -> 0.99
-                } else if velocity_fps > 2500.0 {
-                    0.99 - 0.01 * (3000.0 - velocity_fps) / 500.0 // 0.99 -> 0.98
-                } else if velocity_fps > 2000.0 {
-                    0.98 - 0.01 * (2500.0 - velocity_fps) / 500.0 // 0.98 -> 0.97
-                } else if velocity_fps > 1500.0 {
-                    0.97 - 0.02 * (2000.0 - velocity_fps) / 500.0 // 0.97 -> 0.95
-                } else if velocity_fps > 1200.0 {
-                    0.95 - 0.05 * (1500.0 - velocity_fps) / 300.0 // 0.95 -> 0.90 milder dip
-                } else if velocity_fps > 1000.0 {
-                    0.90 + 0.06 * (1200.0 - velocity_fps) / 200.0 // 0.90 -> 0.96
-                } else {
-                    0.96 - 0.02 * (1000.0 - velocity_fps) / 1000.0 // 0.96 -> 0.94
-                }
-            }
-            2 => {
-                // Light Varmint/Target: more degradation but not as severe as before
-                if velocity_fps > 3500.0 {
-                    1.0
-                } else if velocity_fps > 3000.0 {
-                    1.0 - 0.02 * (3500.0 - velocity_fps) / 500.0 // 1.00 -> 0.98
-                } else if velocity_fps > 2500.0 {
-                    0.98 - 0.02 * (3000.0 - velocity_fps) / 500.0 // 0.98 -> 0.96
-                } else if velocity_fps > 2000.0 {
-                    0.96 - 0.02 * (2500.0 - velocity_fps) / 500.0 // 0.96 -> 0.94
-                } else if velocity_fps > 1500.0 {
-                    0.94 - 0.04 * (2000.0 - velocity_fps) / 500.0 // 0.94 -> 0.90
-                } else if velocity_fps > 1200.0 {
-                    0.90 - 0.08 * (1500.0 - velocity_fps) / 300.0 // 0.90 -> 0.82 sharper dip
-                } else if velocity_fps > 1000.0 {
-                    0.82 + 0.06 * (1200.0 - velocity_fps) / 200.0 // 0.82 -> 0.88
-                } else {
-                    0.88 - 0.03 * (1000.0 - velocity_fps) / 1000.0 // 0.88 -> 0.85
-                }
-            }
-            3 => {
-                // Heavy Magnums: best BC retention across velocity range
-                if velocity_fps > 3500.0 {
-                    1.0
-                } else if velocity_fps > 3000.0 {
-                    1.0 - 0.01 * (3500.0 - velocity_fps) / 500.0 // 1.00 -> 0.99
-                } else if velocity_fps > 2500.0 {
-                    0.99 - 0.01 * (3000.0 - velocity_fps) / 500.0 // 0.99 -> 0.98
-                } else if velocity_fps > 2000.0 {
-                    0.98 - 0.01 * (2500.0 - velocity_fps) / 500.0 // 0.98 -> 0.97
-                } else if velocity_fps > 1500.0 {
-                    0.97 - 0.01 * (2000.0 - velocity_fps) / 500.0 // 0.97 -> 0.96
-                } else if velocity_fps > 1200.0 {
-                    0.96 - 0.04 * (1500.0 - velocity_fps) / 300.0 // 0.96 -> 0.92 mild dip
-                } else if velocity_fps > 1000.0 {
-                    0.92 + 0.05 * (1200.0 - velocity_fps) / 200.0 // 0.92 -> 0.97
-                } else {
-                    0.97 - 0.02 * (1000.0 - velocity_fps) / 1000.0 // 0.97 -> 0.95
-                }
-            }
-            _ => 1.0, // Default: no adjustment
+    /// Rule-based classifier ported verbatim from the Python reference
+    /// `predict_cluster`. `caliber` must be in INCHES (the sectional-density and
+    /// form-factor thresholds are inch-referenced); passing meters misclassifies.
+    pub fn predict_cluster(&self, caliber: f64, weight_gr: f64, bc_g1: f64) -> usize {
+        // Sectional density (grains / (7000 * caliber_in^2))
+        let sd = if caliber > 0.0 {
+            weight_gr / (7000.0 * caliber * caliber)
+        } else {
+            0.0
+        };
+        // Approximate form factor
+        let form_factor = if sd > 0.0 { bc_g1 / sd } else { 1.5 };
+
+        // Heavy magnum check
+        if weight_gr > 400.0 && caliber > 0.35 {
+            return 3;
         }
+        // Low-drag specialty check (low form factor)
+        if form_factor < 1.1 && bc_g1 < 0.2 {
+            return 1;
+        }
+        // Light varmint check
+        if weight_gr < 100.0 && caliber < 0.3 {
+            return 2;
+        }
+        // Default to standard long-range
+        0
+    }
+
+    /// Get the BC multiplier for a given velocity and cluster.
+    ///
+    /// Mirrors the Python reference: iterate the cluster's bands (descending
+    /// threshold); at the first band whose threshold `<=` velocity, return the
+    /// band multiplier if it is the top band, otherwise linearly interpolate
+    /// between it and the band above. Below the lowest threshold, return the last
+    /// band's multiplier. Unknown clusters fall back to cluster 0 (matching Python,
+    /// which coerces an unknown id to the standard profile — NOT to 1.0).
+    pub fn get_bc_multiplier(&self, velocity_fps: f64, cluster_id: usize) -> f64 {
+        let cid = if cluster_id < VELOCITY_BANDS.len() {
+            cluster_id
+        } else {
+            0
+        };
+        let bands = &VELOCITY_BANDS[cid];
+
+        for i in 0..bands.len() {
+            let (v_threshold, multiplier) = bands[i];
+            if velocity_fps >= v_threshold {
+                if i == 0 {
+                    // Above the highest threshold
+                    return multiplier;
+                }
+                // Interpolate between bands[i-1] (high) and bands[i] (low)
+                let (v_high, mult_high) = bands[i - 1];
+                let (v_low, mult_low) = bands[i];
+                let t = (velocity_fps - v_low) / (v_high - v_low);
+                return mult_low + t * (mult_high - mult_low);
+            }
+        }
+        // Below the lowest threshold
+        bands[bands.len() - 1].1
     }
 
     /// Get cluster name for display
@@ -157,7 +161,8 @@ impl ClusterBCDegradation {
         }
     }
 
-    /// Apply cluster-based BC correction
+    /// Apply cluster-based BC correction: classify, then scale by the
+    /// velocity-dependent multiplier.
     pub fn apply_correction(
         &self,
         bc: f64,
@@ -171,12 +176,6 @@ impl ClusterBCDegradation {
     }
 }
 
-impl Default for ClusterBCDegradation {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,27 +184,21 @@ mod tests {
     fn test_cluster_prediction() {
         let cluster_bc = ClusterBCDegradation::new();
 
-        // Test standard long-range bullet (308 Win 168gr)
-        let cluster = cluster_bc.predict_cluster(0.308, 168.0, 0.475);
-        assert!(
-            cluster <= 3,
-            "Standard long-range should be in a valid cluster"
-        );
+        // Standard long-range bullet (.308 Win 168gr) -> cluster 0
+        assert_eq!(cluster_bc.predict_cluster(0.308, 168.0, 0.475), 0);
 
-        // Test light varmint bullet (223 Rem 55gr)
-        let cluster = cluster_bc.predict_cluster(0.224, 55.0, 0.250);
-        assert_eq!(cluster, 2);
+        // Light varmint bullet (.223 Rem 55gr) -> cluster 2
+        assert_eq!(cluster_bc.predict_cluster(0.224, 55.0, 0.250), 2);
 
-        // Test heavy magnum (458 Win Mag 500gr)
-        let cluster = cluster_bc.predict_cluster(0.458, 500.0, 0.295);
-        assert_eq!(cluster, 3);
+        // Heavy magnum (.458 Win Mag 500gr) -> cluster 3
+        assert_eq!(cluster_bc.predict_cluster(0.458, 500.0, 0.295), 3);
     }
 
     #[test]
     fn test_caliber_must_be_inches_not_meters() {
-        // predict_cluster normalizes caliber against an INCHES range (0.172..0.750).
-        // Passing the caliber in meters (the old cli_api bug, caliber_inches * 0.0254)
-        // pins caliber_norm strongly negative and misclassifies every bullet. Guard it:
+        // predict_cluster's SD/form-factor thresholds are inch-referenced.
+        // Passing the caliber in meters (the old cli_api bug, caliber_inches *
+        // 0.0254) collapses the sectional density and misclassifies. Guard it.
         let cluster_bc = ClusterBCDegradation::new();
         let inches = cluster_bc.predict_cluster(0.458, 500.0, 0.295);
         let meters = cluster_bc.predict_cluster(0.458 * 0.0254, 500.0, 0.295);
@@ -217,65 +210,105 @@ mod tests {
     }
 
     #[test]
-    fn test_bc_multiplier() {
+    fn test_bc_multiplier_g7_semantics() {
         let cluster_bc = ClusterBCDegradation::new();
 
-        // Test high velocity (minimal degradation)
-        let mult = cluster_bc.get_bc_multiplier(3000.0, 0);
-        assert!(mult > 0.95 && mult <= 1.0);
-
-        // Test low velocity - MBA-645: now expects ~93% retention, not <85%
-        let mult = cluster_bc.get_bc_multiplier(1000.0, 0);
+        // MBA-1126: G7-referenced multipliers hover around 1.0 and may exceed it.
+        // Cluster 0 at 3000 fps is 1.01 (slight rise), not a sub-1.0 degradation.
+        let mult_hi = cluster_bc.get_bc_multiplier(3000.0, 0);
         assert!(
-            mult > 0.90 && mult < 1.0,
-            "Subsonic should retain ~93% BC, got {}",
-            mult
+            (mult_hi - 1.01).abs() < 1e-9,
+            "cluster 0 @3000fps should be 1.01, got {mult_hi}"
         );
 
-        // Test transonic dip (1200-1500 fps should be the minimum)
-        let mult_transonic = cluster_bc.get_bc_multiplier(1300.0, 0);
-        let mult_subsonic = cluster_bc.get_bc_multiplier(900.0, 0);
+        // Transonic RISE for match bullets (the old deep dip is gone): the
+        // 1000-1200 fps region is above the mid-supersonic (1500-2000) values.
+        let mult_transonic = cluster_bc.get_bc_multiplier(1100.0, 0);
+        let mult_mid = cluster_bc.get_bc_multiplier(1750.0, 0);
         assert!(
-            mult_transonic < mult_subsonic,
-            "Transonic ({}) should be lower than subsonic ({})",
-            mult_transonic,
-            mult_subsonic
+            mult_transonic > mult_mid,
+            "G7 transonic ({mult_transonic}) should now rise above mid-supersonic ({mult_mid})"
         );
     }
 
     #[test]
-    fn test_apply_correction() {
+    fn test_apply_correction_g7() {
         let cluster_bc = ClusterBCDegradation::new();
+        let bc = 0.475;
 
-        // Test that correction reduces BC at transonic (1300 fps is the dip)
-        let bc_original = 0.475;
-        let bc_corrected = cluster_bc.apply_correction(bc_original, 0.308, 168.0, 1300.0);
-        assert!(bc_corrected < bc_original);
+        // High velocity: minimal change (>=95% retention).
+        let hi = cluster_bc.apply_correction(bc, 0.308, 168.0, 2800.0);
+        assert!(hi >= bc * 0.95, "high-v should keep >=95% BC, got {}", hi / bc);
 
-        // Test that correction is minimal at high velocity
-        let bc_corrected_high = cluster_bc.apply_correction(bc_original, 0.308, 168.0, 2800.0);
+        // Transonic (1100 fps): cluster 0 G7 BC rises, so the corrected BC is
+        // ABOVE the stated BC (this is the MBA-1126 correction vs the old dip).
+        let transonic = cluster_bc.apply_correction(bc, 0.308, 168.0, 1100.0);
         assert!(
-            bc_corrected_high >= bc_original * 0.95,
-            "High velocity should have minimal BC reduction (>95%), got {}",
-            bc_corrected_high / bc_original
+            transonic > bc,
+            "cluster-0 transonic G7 BC should rise above stated, got {}",
+            transonic / bc
         );
+    }
 
-        // Test that subsonic retains good BC (MBA-645: >80% for all clusters)
-        // Note: 308 168gr gets classified as cluster 2 (Light Varmint) due to
-        // centroid proximity, which has 85% subsonic retention
-        let bc_subsonic = cluster_bc.apply_correction(bc_original, 0.308, 168.0, 800.0);
-        assert!(
-            bc_subsonic >= bc_original * 0.80,
-            "Subsonic should retain >80% BC, got {}",
-            bc_subsonic / bc_original
-        );
+    /// Golden parity test — values generated directly from the Python reference
+    /// `ClusterBCDegradation` (tag 2026-07-08-radar-recal-mba1126). If this fails,
+    /// the Rust port has drifted from the source of truth; regenerate and reconcile.
+    #[test]
+    fn test_parity_with_python_reference() {
+        let m = ClusterBCDegradation::new();
 
-        // Test cluster 0 directly for higher retention
-        let mult_subsonic_c0 = cluster_bc.get_bc_multiplier(800.0, 0);
-        assert!(
-            mult_subsonic_c0 >= 0.90,
-            "Cluster 0 subsonic should retain >90% BC, got {}",
-            mult_subsonic_c0
-        );
+        // (cluster, velocity_fps, expected_multiplier)
+        let mult_goldens: &[(usize, f64, f64)] = &[
+            (0, 3600.0, 1.000000), (0, 3500.0, 1.000000), (0, 3250.0, 1.005000),
+            (0, 3000.0, 1.010000), (0, 2800.0, 1.010000), (0, 2500.0, 1.010000),
+            (0, 2250.0, 1.000000), (0, 2000.0, 0.990000), (0, 1750.0, 0.990000),
+            (0, 1500.0, 0.990000), (0, 1350.0, 1.010000), (0, 1200.0, 1.030000),
+            (0, 1100.0, 1.040000), (0, 1000.0, 1.050000), (0, 900.0, 1.039000),
+            (0, 800.0, 1.028000), (0, 500.0, 0.995000), (0, 0.0, 0.940000),
+            (1, 3600.0, 0.900000), (1, 3500.0, 0.900000), (1, 3250.0, 0.905000),
+            (1, 3000.0, 0.910000), (1, 2800.0, 0.922000), (1, 2500.0, 0.940000),
+            (1, 2250.0, 0.980000), (1, 2000.0, 1.020000), (1, 1750.0, 1.040000),
+            (1, 1500.0, 1.060000), (1, 1350.0, 1.115000), (1, 1200.0, 1.170000),
+            (1, 1100.0, 1.285000), (1, 1000.0, 1.400000), (1, 900.0, 1.374000),
+            (1, 800.0, 1.348000), (1, 500.0, 1.270000), (1, 0.0, 1.140000),
+            (2, 3600.0, 1.000000), (2, 3500.0, 1.000000), (2, 3250.0, 1.000000),
+            (2, 3000.0, 1.000000), (2, 2800.0, 1.004000), (2, 2500.0, 1.010000),
+            (2, 2250.0, 1.000000), (2, 2000.0, 0.990000), (2, 1750.0, 0.987500),
+            (2, 1500.0, 0.985000), (2, 1350.0, 0.997500), (2, 1200.0, 1.010000),
+            (2, 1100.0, 1.020000), (2, 1000.0, 1.030000), (2, 900.0, 1.017000),
+            (2, 800.0, 1.004000), (2, 500.0, 0.965000), (2, 0.0, 0.900000),
+            (3, 3600.0, 1.000000), (3, 3500.0, 1.000000), (3, 3250.0, 1.005000),
+            (3, 3000.0, 1.010000), (3, 2800.0, 1.006000), (3, 2500.0, 1.000000),
+            (3, 2250.0, 0.995000), (3, 2000.0, 0.990000), (3, 1750.0, 0.990000),
+            (3, 1500.0, 0.990000), (3, 1350.0, 1.005000), (3, 1200.0, 1.020000),
+            (3, 1100.0, 1.030000), (3, 1000.0, 1.040000), (3, 900.0, 1.030000),
+            (3, 800.0, 1.020000), (3, 500.0, 0.990000), (3, 0.0, 0.940000),
+        ];
+        for &(c, v, expected) in mult_goldens {
+            let got = m.get_bc_multiplier(v, c);
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "multiplier parity: cluster {c} @{v}fps expected {expected}, got {got}"
+            );
+        }
+
+        // (caliber_in, weight_gr, bc_g1, expected_cluster)
+        let cluster_goldens: &[(f64, f64, f64, usize)] = &[
+            (0.308, 168.0, 0.475, 0), (0.308, 168.0, 0.223, 0),
+            (0.224, 55.0, 0.250, 2), (0.224, 77.0, 0.372, 2),
+            (0.458, 500.0, 0.295, 3), (0.375, 350.0, 0.310, 0),
+            (0.264, 140.0, 0.315, 0), (0.284, 180.0, 0.360, 0),
+            (0.338, 300.0, 0.400, 0), (0.243, 105.0, 0.278, 0),
+            (0.20, 40.0, 0.15, 1), (0.172, 20.0, 0.10, 1),
+            (0.510, 750.0, 0.500, 3), (0.30, 150.0, 0.19, 1),
+            (0.36, 410.0, 0.40, 3),
+        ];
+        for &(cal, wt, bc, expected) in cluster_goldens {
+            let got = m.predict_cluster(cal, wt, bc);
+            assert_eq!(
+                got, expected,
+                "cluster parity: ({cal}, {wt}, {bc}) expected {expected}, got {got}"
+            );
+        }
     }
 }

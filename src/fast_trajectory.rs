@@ -246,15 +246,6 @@ pub fn fast_integrate(
         0.0001
     };
 
-    // Maximum integration time. This bounds BOTH the step-array pre-allocation (n_steps) AND the
-    // integration loop itself (the loop runs for at most n_steps-1 iterations); the
-    // hit_target / hit_ground early-breaks below terminate the loop sooner for real shots. Estimate
-    // the flight time from the HORIZONTAL velocity with a 4x margin: the previous 2x estimate using
-    // the FULL muzzle speed truncated long-range trajectories once drag slowed the bullet (real
-    // time of flight to the target far exceeds horiz/v0), so Monte Carlo reported impact metrics
-    // at a too-short downrange. NOTE: the 4x factor is a heuristic, NOT a proven upper bound — it
-    // can still be exceeded by extreme high-drag / high-launch-angle shots, which would truncate
-    // the loop before impact.
     // MBA-959: aerodynamic jump perturbs the prebuilt launch velocity vertically (this path is
     // handed an initial_state, not a muzzle angle). A no-op returning the original when disabled.
     let mut initial_state = params.initial_state;
@@ -263,16 +254,27 @@ pub fn fast_integrate(
         rotate_launch_velocity(&mut initial_state, aj_offset);
     }
     let vx = initial_state[3]; // horizontal (downrange) velocity
-    let t_max = if vx > 1e-6 && params.horiz > 0.0 {
-        (4.0 * params.horiz / vx).min(params.t_span.1)
-    } else {
-        params.t_span.1
-    };
 
-    // Initialize arrays
-    let n_steps = ((t_max / dt) as usize) + 1;
-    let mut times = Vec::with_capacity(n_steps);
-    let mut states = Vec::with_capacity(n_steps);
+    // MBA-1145: decouple the integration-loop ceiling from the pre-allocation heuristic.
+    // Previously t_max = min(4*horiz/vx, t_span.1) bounded BOTH the Vec sizing AND the loop
+    // itself, so the 4x-horiz/vx estimate doubled as the loop cap. That estimate is only a
+    // heuristic — extreme high-drag or high-launch-angle shots exceed it, and the loop then
+    // terminated BEFORE hit_target/hit_ground, silently truncating the trajectory tail (Monte
+    // Carlo reported impact metrics short of the real range). The loop already breaks on
+    // hit_target (pos.x >= horiz) and hit_ground (pos.y <= ground_threshold), and any real
+    // trajectory descends below the ground threshold within a few seconds of apex, so the loop
+    // bound's only job is a runaway safety ceiling: use the full t_span.1 (default 30 s). The
+    // 4x estimate is retained ONLY to size the pre-allocation (keeps the small-allocation fast
+    // path for short shots); the Vec grows for the rare long run because the loop bound is n_steps.
+    let n_steps = ((params.t_span.1 / dt) as usize) + 1;
+    let est_steps = if vx > 1e-6 && params.horiz > 0.0 {
+        (((4.0 * params.horiz / vx) / dt) as usize) + 1
+    } else {
+        n_steps
+    };
+    let cap = est_steps.min(n_steps);
+    let mut times = Vec::with_capacity(cap);
+    let mut states = Vec::with_capacity(cap);
 
     // Initial state (with the aerodynamic-jump launch perturbation applied above)
     times.push(0.0);
