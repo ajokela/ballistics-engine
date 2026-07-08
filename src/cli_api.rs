@@ -164,6 +164,56 @@ impl BallisticInputs {
     pub fn humidity_percent(&self) -> f64 {
         (self.humidity * 100.0).clamp(0.0, 100.0)
     }
+
+    /// Sectional density in lb/in²: `weight_grains / 7000 / diameter_in²`.
+    ///
+    /// Derived from the imperial mirror fields (`weight_grains` / `caliber_inches`), falling
+    /// back to the SI `bullet_mass` (kg) / `bullet_diameter` (meters) for SI-only callers
+    /// (mirrors the fallbacks in derivatives.rs). `None` when neither source is usable.
+    pub fn sectional_density_lb_in2(&self) -> Option<f64> {
+        let weight_gr = if self.weight_grains > 0.0 {
+            self.weight_grains
+        } else {
+            self.bullet_mass / 0.00006479891 // kg -> grains
+        };
+        let diameter_in = if self.caliber_inches > 0.0 {
+            self.caliber_inches
+        } else {
+            self.bullet_diameter / 0.0254 // meters -> inches
+        };
+        if weight_gr > 0.0 && diameter_in > 0.0 {
+            Some(weight_gr / 7000.0 / (diameter_in * diameter_in))
+        } else {
+            None
+        }
+    }
+
+    /// Retardation denominator to use when `custom_drag_table` is active.
+    ///
+    /// A custom drag table supplies the projectile's ACTUAL drag coefficient, so the
+    /// point-mass retardation formula must divide it by the projectile's SECTIONAL DENSITY
+    /// (lb/in²), not by a ballistic coefficient: BC = SD / i (form factor i vs the reference
+    /// projectile), and with the projectile's own curve i == 1, so Cd_own / SD == Cd_ref / BC.
+    /// Dividing the curve's Cd by `bc_value` made custom-table trajectories wrongly scale
+    /// with whatever BC happened to be set.
+    ///
+    /// Falls back to `fallback_bc` (with a one-time stderr warning) when mass/diameter are
+    /// unavailable, so degenerate inputs degrade to the old behavior instead of panicking.
+    pub fn custom_drag_denominator(&self, fallback_bc: f64) -> f64 {
+        match self.sectional_density_lb_in2() {
+            Some(sd) => sd,
+            None => {
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    eprintln!(
+                        "Warning: custom drag table active but bullet mass/diameter are \
+                         unavailable; falling back to bc_value for the retardation denominator"
+                    );
+                });
+                fallback_bc
+            }
+        }
+    }
 }
 
 impl Default for BallisticInputs {
@@ -1752,6 +1802,16 @@ impl TrajectorySolver {
         // BCs (>= 0.001).
         let effective_bc = effective_bc.max(1e-6);
 
+        // When a custom drag table is active, calculate_drag_coefficient returned the
+        // projectile's ACTUAL Cd, so the retardation denominator must be the sectional
+        // density (lb/in²), not a BC: Cd_own / SD == Cd_ref / BC
+        // (see BallisticInputs::custom_drag_denominator).
+        let retard_denom = if self.inputs.custom_drag_table.is_some() {
+            self.inputs.custom_drag_denominator(effective_bc)
+        } else {
+            effective_bc
+        };
+
         // Use proper ballistics retardation formula
         // This matches the proven formula from fast_trajectory.rs
         // The standard retardation factor converts Cd to drag deceleration
@@ -1762,7 +1822,7 @@ impl TrajectorySolver {
 
         // Drag acceleration in ft/s² then convert to m/s²
         let a_drag_ft_s2 =
-            (velocity_fps * velocity_fps) * standard_factor * density_scale / effective_bc;
+            (velocity_fps * velocity_fps) * standard_factor * density_scale / retard_denom;
         let a_drag_m_s2 = a_drag_ft_s2 * 0.3048; // ft/s² to m/s²
 
         // Apply drag opposite to velocity direction

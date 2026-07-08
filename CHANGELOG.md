@@ -5,6 +5,30 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.13] - 2026-07-08
+
+### Fixed
+
+- **CIPM air density ignored humidity.** `calculate_air_density_cipm` formed the water-vapor
+  mole fraction by dividing the vapor pressure (hPa) by the total pressure in Pa, making it
+  100x too small and returning essentially dry-air density regardless of relative humidity
+  (e.g. 15 C / 1013.25 hPa / 50% RH gave ~1.2254 kg/m³ instead of the CIPM-2007 moist value
+  ~1.2211 — moist air is lighter than dry air). The vapor pressure is now converted to Pa
+  before the division. Added a regression test pinning the result to the reference Python
+  implementation (0.1% tolerance) at three temperature/pressure/humidity combinations.
+
+- **Custom drag tables used the wrong retardation denominator.** All three solver paths
+  (`derivatives.rs`, `fast_trajectory.rs`, `cli_api.rs`) divided a custom drag table's Cd by
+  `bc_value`. A custom curve supplies the projectile's ACTUAL drag coefficient, so the
+  physically correct denominator is the SECTIONAL DENSITY in lb/in²
+  (`weight_grains / 7000 / diameter_in²`): `Cd_own / SD == Cd_ref / BC`. Trajectories with a
+  custom table therefore wrongly scaled with whatever `bc_value` happened to be set. The
+  denominator is now the sectional density derived from the bullet's mass/diameter (imperial
+  mirror fields, with SI fallback); if both are unavailable it falls back to `bc_value` with a
+  one-time warning instead of panicking. New `BallisticInputs::sectional_density_lb_in2` /
+  `custom_drag_denominator` helpers; regression test asserts custom-table trajectories are
+  invariant to `bc_value` and still differ from the G-model run.
+
 ## [0.22.12] - 2026-07-07
 
 ### Fixed

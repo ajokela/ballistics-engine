@@ -288,15 +288,23 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // Enhanced enhancement factor with temperature dependence. CIPM constants use Pa.
     let f = enhanced_enhancement_factor(pressure_pa, temp_c);
 
-    // Vapor pressure with clamping
+    // Vapor pressure with clamping. p_sv is in hPa (enhanced_saturation_vapor_pressure
+    // returns hPa — its critical-pressure constant is 220640 hPa), so p_v is in hPa too.
     let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv;
+
+    // Convert the vapor pressure to Pa BEFORE forming the mole fraction: the divisor below
+    // is in Pa. Dividing the hPa p_v by the Pa total made x_v 100x too small, which erased
+    // the humidity term and returned essentially dry-air density (e.g. 15 C / 1013.25 hPa /
+    // 50% RH gave ~1.2254 instead of the CIPM-2007 moist value ~1.2211 — moist air is
+    // LIGHTER than dry air).
+    let p_v_pa = p_v * 100.0;
 
     // Floor the pressure divisor (mirrors calculate_atmosphere): a 0 hPa pressure would
     // otherwise make x_v = +Inf -> NaN density. No-op for all valid (>0) pressures.
     let p_pa = pressure_pa.max(f64::MIN_POSITIVE);
 
     // Mole fraction of water vapor (capped at the physical maximum of 1)
-    let x_v = (p_v / p_pa).min(1.0);
+    let x_v = (p_v_pa / p_pa).min(1.0);
 
     // Enhanced compressibility factor. CIPM virial constants use Pa.
     let z = enhanced_compressibility_factor(p_pa, t_k, x_v);
@@ -593,6 +601,39 @@ mod tests {
         // Test with humidity
         let density_humid = calculate_air_density_cimp(15.0, 1013.25, 50.0);
         assert!(density_humid < density);
+    }
+
+    #[test]
+    fn test_cipm_moist_air_matches_python_reference() {
+        // Regression for the hPa/Pa mole-fraction slip: p_v (hPa) was divided by the total
+        // pressure in Pa, making x_v 100x too small and erasing the humidity effect entirely.
+        // Reference values computed with the validated Python implementation
+        // (ballistics.physics.atmosphere_icao.calculate_air_density_cipm_icao), same cases as
+        // the Flask suite's tests/test_atmosphere.py::TestCalculateAirDensityCIPM. Tolerance
+        // 0.1% (matches that suite's Rust-vs-Python assertion).
+        let cases = [
+            (15.0, 1013.25, 50.0, 1.221125867723075),
+            (30.0, 1000.0, 80.0, 1.1344071877123691),
+            (-10.0, 1020.0, 20.0, 1.3500610713710515),
+        ];
+        for (temp_c, pressure_hpa, humidity_pct, expected) in cases {
+            let density = calculate_air_density_cipm(temp_c, pressure_hpa, humidity_pct);
+            let rel_err = ((density - expected) / expected).abs();
+            assert!(
+                rel_err < 1e-3,
+                "CIPM density at {temp_c} C / {pressure_hpa} hPa / {humidity_pct}% RH: \
+                 got {density}, expected {expected} (rel err {rel_err:.2e} >= 1e-3)"
+            );
+        }
+
+        // Moist air must be materially lighter than dry air at the same temp/pressure
+        // (the broken version returned a difference of only ~4e-5 kg/m^3).
+        let dry = calculate_air_density_cipm(15.0, 1013.25, 0.0);
+        let moist = calculate_air_density_cipm(15.0, 1013.25, 50.0);
+        assert!(
+            dry - moist > 3e-3,
+            "humidity effect too small: dry {dry} vs 50% RH {moist}"
+        );
     }
 
     #[test]
