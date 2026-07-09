@@ -21,6 +21,7 @@ pub use cli_api::{
     BallisticInputs, BallisticsError, BcEstimate, BcFitMode, MonteCarloParams, MonteCarloResults,
     TrajectoryPoint, TrajectoryResult, TrajectorySolver, WindConditions, DEFAULT_HIT_RADIUS_M,
 };
+pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;
 
 // Module declarations

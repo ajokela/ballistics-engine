@@ -284,6 +284,7 @@ fn fast_integrate_applies_aerodynamic_jump() {
             initial_state,
             t_span: (0.0, 3.0),
             atmo_params: (0.0, 15.0, 1013.25, 1.0),
+            atmo_sock: None,
         };
         let sol = fast_integrate(&inputs, &WindSock::new(vec![]), params);
         // FastSolution.y is column-major [6][n_points]: y[0]=x series, y[1]=vertical series.

@@ -114,6 +114,10 @@ pub fn solve_trajectory_for_monte_carlo(
             resolved_pressure_hpa,
             base_ratio,
         ),
+        // MBA-1137: the Monte-Carlo entry takes a single BallisticInputs with no downrange
+        // atmosphere, so no zones here. The fast kernel still honors the field for callers that
+        // build a FastIntegrationParams directly with a Some(AtmoSock).
+        atmo_sock: None,
     };
 
     // Solve trajectory

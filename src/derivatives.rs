@@ -1,4 +1,6 @@
-use crate::atmosphere::{get_direct_atmosphere, get_local_atmosphere_humid};
+use crate::atmosphere::{
+    calculate_air_density_cimp, get_direct_atmosphere, get_local_atmosphere_humid, AtmoSock,
+};
 use crate::bc_estimation::BCSegmentEstimator;
 use crate::constants::*;
 use crate::drag::get_drag_coefficient_full;
@@ -100,6 +102,7 @@ pub(crate) fn calculate_magnus_moment_coefficient(mach: f64) -> f64 {
 }
 
 /// Compute ballistic derivatives for trajectory integration
+#[allow(clippy::too_many_arguments)]
 pub fn compute_derivatives(
     pos: Vector3<f64>,
     vel: Vector3<f64>,
@@ -111,6 +114,11 @@ pub fn compute_derivatives(
     // MBA-1134: the in-integration spin-drift term that consumed `time` is deprecated (spin drift
     // is now a Litz post-process), so this is currently unused; kept in the signature for callers.
     _time: f64,
+    // MBA-1137: optional downrange-segmented atmosphere. When `Some`, the STANDARD-mode base
+    // (station-referenced) T/P/H is swapped for the zone selected by downrange distance (pos.x)
+    // before the altitude lapse; the direct-atmosphere sentinel path is left untouched. `None`
+    // (every existing caller) is byte-identical to the pre-feature behavior.
+    atmo_sock: Option<&AtmoSock>,
 ) -> [f64; 6] {
     // Gravity acceleration vector, rotated into the shot-aligned frame by shooting_angle
     // (uphill/downhill inclined fire), matching cli_api::TrajectorySolver::gravity_acceleration.
@@ -159,12 +167,27 @@ pub fn compute_derivatives(
             // overwritten with atmos_params.3 (the density RATIO), so `inputs.humidity` here is not
             // a real RH. Pass 0.0 (dry) rather than fabricate humidity; density is unchanged and
             // the dry speed of sound is numerically identical to the old get_local_atmosphere.
+            //
+            // MBA-1137: when a downrange-segmented atmosphere is present, swap the BASE
+            // (station-referenced) temp/pressure/ratio for the zone selected by downrange distance
+            // (pos[0]) BEFORE the altitude lapse. The zone base_ratio is recomputed via CIPM from
+            // the zone (temp, pressure, humidity); the swapped base then flows through the same
+            // altitude-lapse pipeline, so the X zone and the Y lapse compose without double-count.
+            // Only the base density changes — the local speed of sound is independent of base_ratio,
+            // so it still tracks the lapsed temperature/pressure. `None` -> byte-identical.
+            let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
+                Some(sock) => {
+                    let (zt, zp, zh) = sock.atmo_for_range(pos[0]);
+                    (zt, zp, calculate_air_density_cimp(zt, zp, zh) / 1.225)
+                }
+                None => (atmos_params.1, atmos_params.2, atmos_params.3),
+            };
             let (rho, sound) = get_local_atmosphere_humid(
                 altitude_at_pos,
                 atmos_params.0, // base_alt
-                atmos_params.1, // base_temp_c
-                atmos_params.2, // base_press_hpa
-                atmos_params.3, // base_ratio
+                base_temp_c,    // base_temp_c (zone-swapped when AtmoSock present)
+                base_press_hpa, // base_press_hpa (zone-swapped when AtmoSock present)
+                base_ratio,     // base_ratio (zone-swapped when AtmoSock present)
                 0.0,            // humidity not available here (see note above)
             );
             // LOCAL temperature at the projectile altitude, back-computed from the LOCAL speed of
@@ -723,6 +746,7 @@ mod tests {
             bc_used,
             None,
             0.0,
+            None,
         );
 
         // Check that we get velocity and acceleration components
@@ -758,6 +782,7 @@ mod tests {
             bc_used,
             None,
             0.0,
+            None,
         );
 
         // With tailwind, effective velocity should be lower, thus less drag
@@ -784,6 +809,7 @@ mod tests {
             bc_used,
             Some(omega),
             0.0,
+            None,
         );
 
         // Should have Coriolis effect
@@ -841,6 +867,7 @@ mod tests {
             bc_used,
             None,
             0.0,
+            None,
         );
 
         // Magnus is a small lateral (z) acceleration, positive (right) for RH twist,

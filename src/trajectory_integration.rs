@@ -183,6 +183,10 @@ pub struct TrajectoryParams {
     /// MBA-954: altitude (m, relative to launch) below which integration stops. -1000.0 is the
     /// historical default — effectively "no early ground impact" for normal flat-fire shots.
     pub ground_threshold: f64,
+    /// MBA-1137: optional downrange-segmented atmosphere. When `Some`, `compute_derivatives`
+    /// swaps the standard-mode base T/P/H for the zone selected by downrange distance before the
+    /// altitude lapse. `None` (default) is byte-identical to pre-feature behavior.
+    pub atmo_sock: Option<crate::atmosphere::AtmoSock>,
 }
 
 /// Build the loop-invariant BallisticInputs for the derivatives function ONCE per integration,
@@ -319,6 +323,7 @@ fn compute_derivatives_vec(
         params.bc,
         params.omega_vector,
         t,
+        params.atmo_sock.as_ref(),
     );
 
     Vector6::new(
@@ -564,6 +569,7 @@ pub fn solve_trajectory_rust(
         bc_segments: None,       // No BC segments for legacy function
         use_bc_segments: false,
         ground_threshold: -1000.0, // MBA-954: preserve the historical default
+        atmo_sock: None,           // MBA-1137: legacy entry has no downrange atmosphere
     };
 
     let trajectory =
@@ -614,6 +620,7 @@ mod tests {
             bc_segments: None,
             use_bc_segments: false,
             ground_threshold: -1000.0,
+            atmo_sock: None,
         }
     }
 
@@ -671,6 +678,7 @@ mod tests {
             bc_segments: None,
             use_bc_segments: false,
             ground_threshold: -1000.0,
+            atmo_sock: None,
         };
 
         println!("Running integrate_trajectory test...");

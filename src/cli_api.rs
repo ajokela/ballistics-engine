@@ -468,6 +468,13 @@ pub struct TrajectorySolver {
     /// field is ignored. When `None`, the constant `wind` vector is used (default),
     /// so a non-segmented solve is numerically identical to pre-feature behavior.
     wind_sock: Option<crate::wind::WindSock>,
+    /// Optional downrange-segmented atmosphere (MBA-1137). When `Some`, the per-substep drag
+    /// density recompute samples the base (station-referenced) temperature/pressure/humidity by
+    /// downrange distance from this `AtmoSock`, then feeds them through the SAME altitude-lapse
+    /// pipeline as a single-station solve — so the downrange zone and the vertical altitude lapse
+    /// compose without double-counting. When `None` (default), the resolved single-station
+    /// conditions are used and a solve is numerically identical to pre-feature behavior.
+    atmo_sock: Option<crate::atmosphere::AtmoSock>,
 }
 
 impl TrajectorySolver {
@@ -517,6 +524,7 @@ impl TrajectorySolver {
             time_step: 0.001,
             cluster_bc,
             wind_sock: None,
+            atmo_sock: None,
         }
     }
 
@@ -539,6 +547,22 @@ impl TrajectorySolver {
             None
         } else {
             Some(crate::wind::WindSock::new(segments))
+        };
+    }
+
+    /// Supply downrange-segmented atmosphere (MBA-1137). Each segment is
+    /// `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`, defined at the shooter base
+    /// altitude; the per-substep drag density recompute selects the active zone by downrange
+    /// distance (first zone whose `until_distance_m` exceeds it; the last zone is held beyond the
+    /// final threshold). The zone's base conditions are composed with the vertical altitude lapse
+    /// via `get_local_atmosphere`, so a steeply-arcing shot still sees the y-lapse on top of the
+    /// zone base. An empty list clears segmented atmosphere (reverts to the resolved single-station
+    /// conditions), so a non-segmented solve is numerically identical to pre-feature behavior.
+    pub fn set_atmo_segments(&mut self, segments: Vec<crate::atmosphere::AtmoSegment>) {
+        self.atmo_sock = if segments.is_empty() {
+            None
+        } else {
+            Some(crate::atmosphere::AtmoSock::new(segments))
         };
     }
 
@@ -1781,14 +1805,37 @@ impl TrajectorySolver {
         // density AND speed of sound with altitude (matters on elevated / long-range shots; a
         // no-op at the shooter altitude, where the ratio-based density recovers the station value
         // exactly). base_* were resolved once per solve via resolved_atmosphere().
-        let (base_temp_c, base_press_hpa, base_ratio) = resolved_atmo;
+        //
+        // `base_temp_c` / `base_press_hpa` are the STATION conditions and drive the Magnus/Sg
+        // launch-density correction below (a launch property).
+        let (base_temp_c, base_press_hpa, _station_ratio) = resolved_atmo;
+
+        // MBA-1137: downrange-segmented atmosphere. When an AtmoSock is present, swap the BASE
+        // (station-referenced) T/P/H tuple for the active zone selected by downrange distance
+        // (position.x), recomputing the per-zone base density ratio via CIPM. That swapped base
+        // then flows through the SAME altitude-lapse pipeline (get_local_atmosphere), so the X-axis
+        // zone and the Y-axis altitude lapse compose orthogonally — the zone sets the base density,
+        // the lapse multiplies on top of it (no double-count). When None, this is exactly the
+        // resolved single-station base, so the drag path is byte-identical to pre-feature behavior.
+        let (drag_base_temp_c, drag_base_press_hpa, drag_base_ratio) =
+            if let Some(ref sock) = self.atmo_sock {
+                let (zone_temp_c, zone_press_hpa, zone_humidity) = sock.atmo_for_range(position.x);
+                let zone_base_ratio = crate::atmosphere::calculate_air_density_cimp(
+                    zone_temp_c,
+                    zone_press_hpa,
+                    zone_humidity,
+                ) / 1.225;
+                (zone_temp_c, zone_press_hpa, zone_base_ratio)
+            } else {
+                resolved_atmo
+            };
         let local_alt = self.atmosphere.altitude + position.y;
         let (air_density, speed_of_sound) = crate::atmosphere::get_local_atmosphere(
             local_alt,
             self.atmosphere.altitude,
-            base_temp_c,
-            base_press_hpa,
-            base_ratio,
+            drag_base_temp_c,
+            drag_base_press_hpa,
+            drag_base_ratio,
         );
 
         // Get drag coefficient from drag model (Mach-indexed from drag tables)

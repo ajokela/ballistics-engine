@@ -516,6 +516,78 @@ pub fn calculate_air_density_cipm(temp_c: f64, pressure_hpa: f64, humidity_perce
     calculate_air_density_cimp(temp_c, pressure_hpa, humidity_percent)
 }
 
+/// A single downrange-referenced atmosphere zone:
+/// `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`.
+///
+/// The T/P/H are the STATION-REFERENCED conditions (defined at the shooter base altitude) that
+/// apply from the previous segment's threshold out to `until_distance_m`. This mirrors
+/// [`crate::wind::WindSegment`]'s `(speed, angle, until_distance)` shape so the two segmented
+/// models compose the same way (wind by X, atmosphere by X, altitude lapse by Y).
+pub type AtmoSegment = (f64, f64, f64, f64);
+
+/// Downrange-segmented atmosphere handler (MBA-1137), the density analogue of
+/// [`crate::wind::WindSock`].
+///
+/// Holds a set of station-referenced atmosphere zones ordered by their `until_distance_m`
+/// threshold and answers a stateless downrange lookup ([`AtmoSock::atmo_for_range`]).
+///
+/// The zone T/P/H are the base (shooter-altitude) conditions for that stretch of range; the
+/// solver swaps them into the SAME `get_local_atmosphere` altitude-lapse pipeline that a
+/// single-station solve uses, so the downrange (X) zone and the vertical (Y) altitude lapse
+/// compose orthogonally without double-counting (the zone sets the base tuple, the lapse
+/// multiplies on top of it).
+#[derive(Debug, Clone)]
+pub struct AtmoSock {
+    /// Zones sorted ascending by `until_distance_m` (segment slot 3).
+    segments: Vec<AtmoSegment>,
+}
+
+impl AtmoSock {
+    /// Create a new `AtmoSock` from station-referenced atmosphere zones.
+    ///
+    /// Each segment is `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`. Segments are
+    /// sorted by `until_distance_m` (NaN thresholds are ordered last, matching `WindSock::new`).
+    pub fn new(mut segments: Vec<AtmoSegment>) -> Self {
+        // Sort by until_distance, treating NaN as greater than any value (mirrors WindSock::new).
+        segments.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Greater));
+        AtmoSock { segments }
+    }
+
+    /// True when this sock carries no zones (a lookup falls back to sea-level ISA).
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    /// Stateless downrange lookup of the active zone's `(temp_c, pressure_hpa, humidity_percent)`.
+    ///
+    /// Selection matches [`crate::wind::WindSock::vector_for_range_stateless`]: the first segment
+    /// whose `until_distance_m` STRICTLY exceeds `downrange_m` wins (thresholds are upper-exclusive).
+    /// Unlike wind — which returns zero past the last threshold — the LAST zone is used for any
+    /// distance at or beyond the final threshold (there is no "zero atmosphere"). An empty sock
+    /// returns the sea-level ISA reference `(15 C, 1013.25 hPa, 0% RH)`.
+    ///
+    /// This is stateless and safe for numerical integration (the same X may be queried repeatedly
+    /// or out of order across RK substeps).
+    pub fn atmo_for_range(&self, downrange_m: f64) -> (f64, f64, f64) {
+        if self.segments.is_empty() {
+            return (15.0, 1013.25, 0.0); // sea-level ISA fallback
+        }
+        // NaN X can't be ordered; use the first (nearest) zone deterministically.
+        if downrange_m.is_nan() {
+            let s = self.segments[0];
+            return (s.0, s.1, s.2);
+        }
+        for seg in &self.segments {
+            if downrange_m < seg.3 {
+                return (seg.0, seg.1, seg.2);
+            }
+        }
+        // Beyond the final threshold: hold the last zone (no zeroing).
+        let last = self.segments[self.segments.len() - 1];
+        (last.0, last.1, last.2)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +882,64 @@ mod tests {
 
         assert!((lapse_tropo - (-0.0065)).abs() < 0.0001);
         assert!(lapse_strato > 0.0); // Positive lapse rate in stratosphere
+    }
+
+    // ---- MBA-1137: AtmoSock stateless downrange lookup (mirrors the WindSock tests) ----
+
+    #[test]
+    fn test_atmo_sock_empty_falls_back_to_isa() {
+        let sock = AtmoSock::new(vec![]);
+        assert!(sock.is_empty());
+        // Empty sock returns the sea-level ISA reference regardless of distance.
+        assert_eq!(sock.atmo_for_range(0.0), (15.0, 1013.25, 0.0));
+        assert_eq!(sock.atmo_for_range(500.0), (15.0, 1013.25, 0.0));
+    }
+
+    #[test]
+    fn test_atmo_sock_single_segment_holds_beyond_last() {
+        // One zone until 100 m; it must apply BOTH before and beyond the threshold (unlike wind,
+        // which zeroes past the last segment — atmosphere holds the last zone).
+        let sock = AtmoSock::new(vec![(25.0, 1000.0, 30.0, 100.0)]);
+        assert_eq!(sock.atmo_for_range(50.0), (25.0, 1000.0, 30.0));
+        assert_eq!(sock.atmo_for_range(100.0), (25.0, 1000.0, 30.0)); // beyond last -> hold
+        assert_eq!(sock.atmo_for_range(5000.0), (25.0, 1000.0, 30.0));
+    }
+
+    #[test]
+    fn test_atmo_sock_boundary_is_upper_exclusive() {
+        // A zone's until_distance_m is exclusive: a query exactly at the boundary rolls to the
+        // next zone (mirrors WindSock::test_wind_sock_boundary_is_upper_exclusive).
+        let sock = AtmoSock::new(vec![
+            (30.0, 1010.0, 80.0, 100.0), // hot/humid near zone
+            (-5.0, 900.0, 10.0, 200.0),  // cold/thin far zone
+        ]);
+        // Just below 100 m -> first zone.
+        assert_eq!(sock.atmo_for_range(99.999), (30.0, 1010.0, 80.0));
+        // Exactly 100 m -> second zone.
+        assert_eq!(sock.atmo_for_range(100.0), (-5.0, 900.0, 10.0));
+        // Beyond the last boundary -> hold the last zone (NOT zeroed).
+        assert_eq!(sock.atmo_for_range(200.0), (-5.0, 900.0, 10.0));
+        assert_eq!(sock.atmo_for_range(1e6), (-5.0, 900.0, 10.0));
+    }
+
+    #[test]
+    fn test_atmo_sock_sorts_unordered_segments() {
+        // Segments supplied out of order are sorted by until_distance so the lookup is monotone.
+        let sock = AtmoSock::new(vec![
+            (-5.0, 900.0, 10.0, 200.0),
+            (30.0, 1010.0, 80.0, 100.0),
+        ]);
+        assert_eq!(sock.atmo_for_range(50.0), (30.0, 1010.0, 80.0));
+        assert_eq!(sock.atmo_for_range(150.0), (-5.0, 900.0, 10.0));
+    }
+
+    #[test]
+    fn test_atmo_sock_nan_uses_first_zone() {
+        let sock = AtmoSock::new(vec![
+            (30.0, 1010.0, 80.0, 100.0),
+            (-5.0, 900.0, 10.0, 200.0),
+        ]);
+        // NaN can't be ordered; deterministically use the nearest (first) zone rather than panic.
+        assert_eq!(sock.atmo_for_range(f64::NAN), (30.0, 1010.0, 80.0));
     }
 }
