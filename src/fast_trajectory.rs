@@ -478,6 +478,31 @@ pub fn fast_integrate(
         },
     ];
 
+    // MBA-1134 (rank 10) — regression fix: apply the canonical empirical Litz drift as a
+    // post-process to the lateral (McCoy Z) here too. The derivatives kernel no longer
+    // integrates spin drift, and this plain fast_integrate is the single-shot fast path
+    // (solve_trajectory_rust / the API), so without this it would carry NO spin drift and
+    // twist direction would have no effect (the Magnus term is also suppressed when
+    // use_enhanced_spin_drift is set). Mirrors fast_integrate_with_segments,
+    // cli_api::apply_spin_drift and the Monte-Carlo path so all solver families agree; uses
+    // the SAME muzzle Sg (spin_drift::effective_sg_from_inputs).
+    if inputs.use_enhanced_spin_drift {
+        // Standard-mode atmo_params is (base_alt, temp_c, press_hpa, ratio); direct mode
+        // (density, sound, 0, 0) carries no explicit temp/pressure, so fall back to sea-level
+        // standard (the Sg density correction is a no-op there).
+        let (sd_temp_c, sd_press_hpa) = if params.atmo_params.2 > 0.0 {
+            (params.atmo_params.1, params.atmo_params.2)
+        } else {
+            (15.0, 1013.25)
+        };
+        let sg = crate::spin_drift::effective_sg_from_inputs(inputs, sd_temp_c, sd_press_hpa);
+        for (t, state) in times.iter().zip(states.iter_mut()) {
+            if *t > 0.0 {
+                state[2] += crate::spin_drift::litz_drift_meters(sg, *t, inputs.is_twist_right);
+            }
+        }
+    }
+
     FastSolution::from_trajectory_data(times, states, t_events)
 }
 
