@@ -7,8 +7,11 @@
 //! three families together so no path silently uses a different (or stacked) spin-drift model.
 
 use ballistics_engine::atmosphere::{calculate_atmosphere, resolve_station_conditions};
-use ballistics_engine::fast_trajectory::{fast_integrate_with_segments, FastIntegrationParams};
+use ballistics_engine::fast_trajectory::{
+    fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
+};
 use ballistics_engine::monte_carlo::solve_trajectory_for_monte_carlo;
+use ballistics_engine::wind::WindSock;
 use ballistics_engine::{
     AtmosphericConditions, BallisticInputs, DragModel, TrajectorySolver, WindConditions,
 };
@@ -92,6 +95,36 @@ fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
     sol.y[2][n - 1] // McCoy Z (lateral)
 }
 
+/// (d) plain fast_integrate — the SINGLE-SHOT fast path (solve_trajectory_rust / the API).
+/// MBA-1134 regression guard: this path lost spin drift when the in-integration term was removed
+/// and the Litz post-process was only added to the MC / segmented paths. It must now agree too.
+fn lateral_fast_integrate(i: &BallisticInputs) -> f64 {
+    let (resolved_temp_c, resolved_pressure_hpa) =
+        resolve_station_conditions(i.temperature, i.pressure, i.altitude);
+    let (air_density, _) = calculate_atmosphere(
+        i.altitude,
+        Some(resolved_temp_c),
+        Some(resolved_pressure_hpa),
+        i.humidity_percent(),
+    );
+    let base_ratio = air_density / 1.225;
+
+    let v = i.muzzle_velocity;
+    let a = i.muzzle_angle;
+    let initial_state = [0.0, i.sight_height, 0.0, v * a.cos(), v * a.sin(), 0.0];
+    let params = FastIntegrationParams {
+        initial_state,
+        t_span: (0.0, 30.0),
+        horiz: TARGET_M,
+        vert: 0.0,
+        atmo_params: (i.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
+    };
+    let sol = fast_integrate(i, &WindSock::new(vec![]), params);
+    assert!(sol.success, "fast_integrate should succeed");
+    let n = sol.t.len();
+    sol.y[2][n - 1] // McCoy Z (lateral)
+}
+
 #[test]
 fn litz_spin_drift_parity_across_three_solvers() {
     let i = parity_inputs();
@@ -99,39 +132,37 @@ fn litz_spin_drift_parity_across_three_solvers() {
     let a = lateral_cli_api(&i);
     let b = lateral_monte_carlo(&i);
     let c = lateral_fast_segments(&i);
+    let d = lateral_fast_integrate(&i);
 
     let to_in = |m: f64| m / 0.0254;
     println!("MBA-1134 spin-drift parity (.308 175gr, 1:10 RH, 1000 yd, no wind):");
     println!("  (a) cli_api TrajectorySolver : {:.6} m ({:.4} in)", a, to_in(a));
     println!("  (b) monte_carlo fast_integrate: {:.6} m ({:.4} in)", b, to_in(b));
     println!("  (c) fast_integrate_w_segments : {:.6} m ({:.4} in)", c, to_in(c));
+    println!("  (d) plain fast_integrate      : {:.6} m ({:.4} in)", d, to_in(d));
 
-    // Right-hand twist => positive (rightward) drift on all three.
+    // Right-hand twist => positive (rightward) drift on all four.
     assert!(a > 0.0, "cli_api drift should be positive (RH twist), got {a}");
     assert!(b > 0.0, "monte_carlo drift should be positive (RH twist), got {b}");
     assert!(c > 0.0, "fast_segments drift should be positive (RH twist), got {c}");
+    assert!(d > 0.0, "fast_integrate drift should be positive (RH twist), got {d}");
 
-    assert!(
-        (a - b).abs() < TOL_M,
-        "cli_api vs monte_carlo lateral disagree: {:.4} in vs {:.4} in (Δ {:.4} in > 0.3 in)",
-        to_in(a),
-        to_in(b),
-        to_in((a - b).abs())
-    );
-    assert!(
-        (a - c).abs() < TOL_M,
-        "cli_api vs fast_segments lateral disagree: {:.4} in vs {:.4} in (Δ {:.4} in > 0.3 in)",
-        to_in(a),
-        to_in(c),
-        to_in((a - c).abs())
-    );
-    assert!(
-        (b - c).abs() < TOL_M,
-        "monte_carlo vs fast_segments lateral disagree: {:.4} in vs {:.4} in (Δ {:.4} in > 0.3 in)",
-        to_in(b),
-        to_in(c),
-        to_in((b - c).abs())
-    );
+    for (name, x, y) in [
+        ("cli_api vs monte_carlo", a, b),
+        ("cli_api vs fast_segments", a, c),
+        ("cli_api vs fast_integrate", a, d),
+        ("monte_carlo vs fast_segments", b, c),
+        ("monte_carlo vs fast_integrate", b, d),
+        ("fast_segments vs fast_integrate", c, d),
+    ] {
+        assert!(
+            (x - y).abs() < TOL_M,
+            "{name} lateral disagree: {:.4} in vs {:.4} in (Δ {:.4} in > 0.3 in)",
+            to_in(x),
+            to_in(y),
+            to_in((x - y).abs())
+        );
+    }
 }
 
 #[test]
@@ -146,6 +177,7 @@ fn litz_spin_drift_flips_with_twist_hand_all_paths() {
         ("cli_api", lateral_cli_api as fn(&BallisticInputs) -> f64),
         ("monte_carlo", lateral_monte_carlo),
         ("fast_segments", lateral_fast_segments),
+        ("fast_integrate", lateral_fast_integrate),
     ] {
         let r = f(&right);
         let l = f(&left);
