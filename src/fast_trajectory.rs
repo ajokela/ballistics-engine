@@ -4,7 +4,7 @@
 //! that provides significant performance improvements for long-range calculations.
 
 use crate::{
-    atmosphere::get_local_atmosphere_humid,
+    atmosphere::{calculate_air_density_cimp, get_local_atmosphere_humid, AtmoSock},
     constants::{G_ACCEL_MPS2, MPS_TO_FPS},
     drag::get_drag_coefficient,
     wind::WindSock,
@@ -147,6 +147,11 @@ pub struct FastIntegrationParams {
     /// `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` (slot 3 is a density
     /// RATIO, not humidity); direct mode is `(air_density, speed_of_sound, 0.0, 0.0)`.
     pub atmo_params: (f64, f64, f64, f64),
+    /// MBA-1137: optional downrange-segmented atmosphere. When `Some`, the per-substep drag
+    /// density samples the base (station-referenced) T/P/H for the zone at the current downrange
+    /// distance before applying the altitude lapse. `None` (default) keeps the single-station
+    /// base and — combined with the MBA-1137 density-freeze fix — varies density with altitude only.
+    pub atmo_sock: Option<AtmoSock>,
 }
 
 /// Aerodynamic-jump vertical launch-angle offset (radians) for the fast-integrate path.
@@ -295,6 +300,9 @@ pub fn fast_integrate(
         1.225 // standard sea-level air density (kg/m^3)
     };
 
+    // MBA-1137: borrow the optional downrange-segmented atmosphere once (queried 4x per step).
+    let atmo_sock = params.atmo_sock.as_ref();
+
     // Hoist invariants out of compute_derivatives (called 4x per step). Both the drag-model name
     // and the projectile shape depend only on inputs, not on state/mach, so computing them per
     // call wasted an allocation + heuristic every k1..k4. Mirrors cli_api.rs exactly.
@@ -396,6 +404,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            atmo_sock,
         );
 
         let mut state2 = state;
@@ -413,6 +422,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            atmo_sock,
         );
 
         let mut state3 = state;
@@ -430,6 +440,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            atmo_sock,
         );
 
         let mut state4 = state;
@@ -447,6 +458,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            atmo_sock,
         );
 
         // Update state
@@ -507,6 +519,7 @@ pub fn fast_integrate(
 }
 
 /// Compute derivatives for the state vector
+#[allow(clippy::too_many_arguments)]
 fn compute_derivatives(
     state: &[f64; 6],
     inputs: &BallisticInputs,
@@ -518,6 +531,8 @@ fn compute_derivatives(
     has_bc_segments: bool,
     has_bc_segments_data: bool,
     omega: Option<Vector3<f64>>,
+    // MBA-1137: optional downrange-segmented atmosphere (zone base swapped by pos.x before lapse).
+    atmo_sock: Option<&AtmoSock>,
 ) -> [f64; 6] {
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
@@ -545,20 +560,39 @@ fn compute_derivatives(
         // Calculate drag
         let v_fps = v_mag * MPS_TO_FPS;
 
-        // Calculate speed of sound from altitude using standard lapse rate.
-        // atmo_params: (base_alt, base_temp_c, base_press_hpa, base_ratio).
-        // MBA-1136 (rank 9): route the local speed of sound through the moist-air formula. Only
-        // the speed of sound is used here (density is discarded), so the base_ratio arg is inert
-        // (pass 1.0). Humidity is NOT plumbed to this call site: on the fast path
-        // (fast_integrate) the `humidity` FIELD is overwritten with atmo_params.3 (the density
-        // RATIO), so `inputs.humidity` is not a real RH — pass 0.0 (dry) rather than fabricate.
+        // Calculate LOCAL density and speed of sound from the substep altitude using the standard
+        // lapse rate. `inputs.temperature`/`inputs.pressure` are the base (station) T/P set by
+        // fast_integrate from atmo_params; `base_density` is the station-altitude density, so
+        // `base_density / 1.225` recovers the station base_ratio the lapse pipeline expects.
+        //
+        // MBA-1137 (density-freeze fix): previously ONLY the speed of sound was taken from this
+        // call and `density_scale` used the flight-constant `base_density`, so the fast/MC path
+        // held density frozen for the whole flight (density did NOT vary with altitude — a latent
+        // bug the cli_api/derivatives paths already avoid). Now the LOCAL density is used for
+        // `density_scale` below, so the fast path varies density with altitude too.
+        //
+        // MBA-1137 (zones): when a downrange-segmented atmosphere is present, swap the BASE
+        // (station-referenced) temp/pressure/ratio for the zone at the current downrange distance
+        // (pos.x), recomputing the zone base_ratio via CIPM, BEFORE the altitude lapse — so the X
+        // zone and the Y lapse compose without double-count. `None` keeps the single-station base.
+        //
+        // Humidity is NOT plumbed to this call site: on the fast path (fast_integrate) the
+        // `humidity` FIELD is overwritten with atmo_params.3 (the density RATIO), so
+        // `inputs.humidity` is not a real RH — pass 0.0 (dry) rather than fabricate.
         let altitude = inputs.altitude + pos.y;
-        let (_, speed_of_sound) = get_local_atmosphere_humid(
+        let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
+            Some(sock) => {
+                let (zt, zp, zh) = sock.atmo_for_range(pos.x);
+                (zt, zp, calculate_air_density_cimp(zt, zp, zh) / 1.225)
+            }
+            None => (inputs.temperature, inputs.pressure, base_density / 1.225),
+        };
+        let (local_density, speed_of_sound) = get_local_atmosphere_humid(
             altitude,
             inputs.altitude, // base_alt approximation
-            inputs.temperature,
-            inputs.pressure,
-            1.0, // base_ratio inert (density discarded)
+            base_temp_c,
+            base_press_hpa,
+            base_ratio,
             0.0, // humidity not available here (see note above)
         );
         let mach = v_mag / speed_of_sound;
@@ -613,7 +647,9 @@ fn compute_derivatives(
         // Calculate drag acceleration using proper ballistics formula
         let cd_to_retard = crate::constants::CD_TO_RETARD;
         let standard_factor = drag_factor * cd_to_retard;
-        let density_scale = base_density / 1.225;
+        // MBA-1137: use the LOCAL (per-substep) density, not the frozen flight-constant
+        // `base_density`, so drag varies with altitude AND downrange zone.
+        let density_scale = local_density / 1.225;
 
         // Drag acceleration in ft/s^2
         let a_drag_ft_s2 = (v_fps * v_fps) * standard_factor * density_scale / retard_denom;
@@ -729,6 +765,8 @@ pub fn fast_integrate_with_segments(
         // threading inputs.ground_threshold would change the default ground plane for existing
         // callers. Direct TrajectoryParams constructors can now configure it.
         ground_threshold: -1000.0,
+        // MBA-1137: forward the downrange-segmented atmosphere to the RK45 derivatives path.
+        atmo_sock: params.atmo_sock,
     };
 
     // Use RK45 adaptive integration
@@ -984,6 +1022,7 @@ mod tests {
             initial_state: [0.0, 0.0, 0.0, 800.0, 50.0, 0.0], // McCoy: vx=downrange
             t_span: (0.0, 5.0),
             atmo_params: (0.0, 59.0, 29.92, 0.0),
+            atmo_sock: None,
         };
 
         assert_eq!(params.horiz, 1000.0);
@@ -1040,6 +1079,7 @@ mod tests {
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
                 atmo_params: (0.0, 59.0, 29.92, 0.0),
+                atmo_sock: None,
             };
             let sol = fast_integrate_with_segments(&inputs, vec![], params);
             let n = sol.y[0].len();
@@ -1088,6 +1128,7 @@ mod tests {
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
                 atmo_params: (0.0, 59.0, 29.92, 0.0),
+                atmo_sock: None,
             };
             let sol = fast_integrate_with_segments(&inputs, vec![], params);
             let n = sol.y[0].len();
@@ -1123,6 +1164,7 @@ mod tests {
             initial_state: [0.0, 0.0, 0.0, v * e.cos(), v * e.sin(), 0.0],
             t_span: (0.0, 5.0),
             atmo_params: atmo,
+            atmo_sock: None,
         };
         // pressure <= 0 -> fail loudly (success=false) instead of a 1-point stub as success.
         let zero_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 0.0, 50.0)));
@@ -1172,6 +1214,7 @@ mod tests {
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
                 atmo_params: (0.0, 15.0, 1013.25, 50.0),
+                atmo_sock: None,
             };
             fast_integrate_with_segments(&inputs, vec![], params)
         };

@@ -88,6 +88,7 @@ fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
         horiz: TARGET_M,
         vert: 0.0,
         atmo_params: (i.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
+        atmo_sock: None,
     };
     let sol = fast_integrate_with_segments(i, vec![], params);
     assert!(sol.success, "fast_integrate_with_segments should succeed");
@@ -118,6 +119,7 @@ fn lateral_fast_integrate(i: &BallisticInputs) -> f64 {
         horiz: TARGET_M,
         vert: 0.0,
         atmo_params: (i.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
+        atmo_sock: None,
     };
     let sol = fast_integrate(i, &WindSock::new(vec![]), params);
     assert!(sol.success, "fast_integrate should succeed");
