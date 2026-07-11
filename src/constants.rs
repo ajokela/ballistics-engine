@@ -31,7 +31,7 @@ pub const AIR_DENSITY_SEA_LEVEL: f64 = 1.225;
 
 /// Speed of sound at sea level, standard atmospheric conditions
 ///
-/// Value: 340.29 m/s (1116.8 ft/s)
+/// Value: 340.29 m/s (1116.44 ft/s)
 /// Conditions: 15°C (59°F), 1013.25 hPa, dry air
 ///
 /// Temperature dependence: c = 331.3 * sqrt(T_kelvin / 273.15)
