@@ -19,11 +19,14 @@ pub struct PitchDampingCoefficients {
 
 impl Default for PitchDampingCoefficients {
     fn default() -> Self {
+        // These values use the q * S * d * (pitch_rate * d / V) convention in
+        // `calculate_pitch_damping_moment`. Published small-arms coefficients are order 1-10;
+        // a representative 7.62 mm pitch-damping coefficient is about -4.7.
         Self {
-            subsonic: -0.8,
-            transonic_low: -0.3,
-            transonic_high: 0.2,
-            supersonic: -0.5,
+            subsonic: -8.0,
+            transonic_low: -3.0,
+            transonic_high: 2.0,
+            supersonic: -5.0,
         }
     }
 }
@@ -33,35 +36,35 @@ impl PitchDampingCoefficients {
     pub fn from_bullet_type(bullet_type: &str) -> Self {
         match bullet_type.to_lowercase().as_str() {
             "match_boat_tail" => Self {
-                subsonic: -0.9,
-                transonic_low: -0.4,
-                transonic_high: 0.1,
-                supersonic: -0.6,
+                subsonic: -9.0,
+                transonic_low: -4.0,
+                transonic_high: 1.0,
+                supersonic: -6.0,
             },
             "match_flat_base" => Self {
-                subsonic: -0.7,
-                transonic_low: -0.2,
-                transonic_high: 0.3,
-                supersonic: -0.4,
+                subsonic: -7.0,
+                transonic_low: -2.0,
+                transonic_high: 3.0,
+                supersonic: -4.0,
             },
             "vld" => Self {
                 // Very Low Drag - more stable
-                subsonic: -1.0,
-                transonic_low: -0.5,
-                transonic_high: -0.1,
-                supersonic: -0.7,
+                subsonic: -10.0,
+                transonic_low: -5.0,
+                transonic_high: -1.0,
+                supersonic: -7.0,
             },
             "hunting" => Self {
-                subsonic: -0.6,
-                transonic_low: -0.1,
-                transonic_high: 0.4,
-                supersonic: -0.3,
+                subsonic: -6.0,
+                transonic_low: -1.0,
+                transonic_high: 4.0,
+                supersonic: -3.0,
             },
             "fmj" => Self {
-                subsonic: -0.7,
-                transonic_low: -0.2,
-                transonic_high: 0.2,
-                supersonic: -0.5,
+                subsonic: -7.0,
+                transonic_low: -2.0,
+                transonic_high: 2.0,
+                supersonic: -5.0,
             },
             _ => Self::default(),
         }
@@ -284,15 +287,15 @@ mod tests {
         let coeffs = PitchDampingCoefficients::default();
 
         // Subsonic
-        assert_eq!(calculate_pitch_damping_coefficient(0.5, &coeffs), -0.8);
+        assert_eq!(calculate_pitch_damping_coefficient(0.5, &coeffs), -8.0);
 
         // Transonic
         let transonic = calculate_pitch_damping_coefficient(0.9, &coeffs);
-        assert!(transonic > -0.8 && transonic < -0.3);
+        assert!(transonic > -8.0 && transonic < -3.0);
 
         // Supersonic
         let supersonic = calculate_pitch_damping_coefficient(2.0, &coeffs);
-        assert_eq!(supersonic, -0.5);
+        assert_eq!(supersonic, -5.0);
     }
 
     #[test]
@@ -310,6 +313,30 @@ mod tests {
 
         // Should be negative (opposing motion)
         assert!(moment < 0.0);
+    }
+
+    #[test]
+    fn default_308_pitch_rate_damps_on_small_arms_timescale() {
+        let pitch_rate = 0.1;
+        let velocity = 850.0;
+        let density = 1.225;
+        let caliber = 0.308 * 0.0254;
+        let length = 1.3 * 0.0254;
+        let mass = 175.0 * 0.00006479891;
+        let mach = velocity / 343.0;
+        let coeffs = PitchDampingCoefficients::default();
+
+        let moment = calculate_pitch_damping_moment(
+            pitch_rate, velocity, density, caliber, length, mach, &coeffs,
+        );
+        let inertia = calculate_transverse_moment_of_inertia(mass, caliber, length, "ogive");
+        let angular_accel = calculate_angular_acceleration(moment, inertia);
+        let time_constant = (pitch_rate / angular_accel).abs();
+
+        assert!(
+            (0.05..=0.25).contains(&time_constant),
+            ".308 pitch damping should settle on a small-arms timescale, got tau={time_constant}s"
+        );
     }
 
     #[test]
@@ -331,6 +358,10 @@ mod tests {
 
             // Check that supersonic eventually stabilizes
             assert!(coeffs.supersonic < 0.0);
+
+            // Stable-regime presets must stay on the published small-arms coefficient scale.
+            assert!(coeffs.subsonic.abs() >= 3.0);
+            assert!(coeffs.supersonic.abs() >= 3.0);
 
             // Check that VLD is most stable
             if *bullet_type == "vld" {
@@ -458,16 +489,15 @@ mod tests {
     fn test_mach_interpolation() {
         let coeffs = PitchDampingCoefficients::default();
 
-        // Test smooth transition through Mach regimes
-        let mach_values = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5, 2.0];
-        let mut last_value = calculate_pitch_damping_coefficient(mach_values[0], &coeffs);
+        // Test continuity at every piecewise interpolation boundary without assuming a scale.
+        let epsilon = 1e-9;
+        for boundary in [0.8, 1.0, 1.2, 2.0] {
+            let at_boundary = calculate_pitch_damping_coefficient(boundary, &coeffs);
+            let below = calculate_pitch_damping_coefficient(boundary - epsilon, &coeffs);
+            let above = calculate_pitch_damping_coefficient(boundary + epsilon, &coeffs);
 
-        for &mach in &mach_values[1..] {
-            let value = calculate_pitch_damping_coefficient(mach, &coeffs);
-
-            // Check continuity (no huge jumps)
-            assert!((value - last_value).abs() < 1.0);
-            last_value = value;
+            assert!((at_boundary - below).abs() < 1e-6);
+            assert!((at_boundary - above).abs() < 1e-6);
         }
     }
 

@@ -834,7 +834,7 @@ impl TrajectorySolver {
 
         let mut points = Vec::new();
         let mut max_height = position.y;
-        let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
+        let mut min_pitch_damping = f64::INFINITY; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
                                        // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
                                        // (subsonic), so the sampled trajectory output can flag those transitions
@@ -975,7 +975,7 @@ impl TrajectorySolver {
                         velocity_mps: velocity_magnitude,
                         air_density_kg_m3: air_density,
                         mach,
-                        pitch_damping_coeff: -0.8,
+                        pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
                         nutation_damping_factor: 0.05,
                     };
 
@@ -1116,7 +1116,7 @@ impl TrajectorySolver {
 
         let mut points = Vec::new();
         let mut max_height = position.y;
-        let mut min_pitch_damping = 1.0; // Track minimum pitch damping coefficient
+        let mut min_pitch_damping = f64::INFINITY; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
                                        // Downrange distances where the projectile crosses Mach 1.2 (transonic) then Mach 1.0
                                        // (subsonic), so the sampled trajectory output can flag those transitions
@@ -1247,7 +1247,7 @@ impl TrajectorySolver {
                         velocity_mps: velocity_magnitude,
                         air_density_kg_m3: air_density,
                         mach,
-                        pitch_damping_coeff: -0.8,
+                        pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
                         nutation_damping_factor: 0.05,
                     };
 
@@ -1427,7 +1427,7 @@ impl TrajectorySolver {
         // Euler and fixed-RK4 solvers tracked these, so the default adaptive
         // RK45 path always reported null even with --enable-pitch-damping /
         // --enable-precession set. Mirror the RK4 tracking here.
-        let mut min_pitch_damping = 1.0;
+        let mut min_pitch_damping = f64::INFINITY;
         let mut transonic_mach: Option<f64> = None;
         let pitch_coeffs = PitchDampingCoefficients::from_bullet_type(
             self.inputs.bullet_model.as_deref().unwrap_or("default"),
@@ -1542,7 +1542,7 @@ impl TrajectorySolver {
                         velocity_mps: velocity_magnitude,
                         air_density_kg_m3: air_density,
                         mach,
-                        pitch_damping_coeff: -0.8,
+                        pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
                         nutation_damping_factor: 0.05,
                     };
 
