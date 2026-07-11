@@ -1710,7 +1710,7 @@ struct TrajectoryConfig {
     // BC options
     use_bc_segments: bool,
     use_cluster_bc: bool,
-    bc_table_segments: Option<Vec<BCSegmentData>>,
+    bc_segments_data: Option<Vec<BCSegmentData>>,
 
     // Advanced physics toggles
     enable_magnus: bool,
@@ -2448,6 +2448,38 @@ fn parse_bc_segment(s: &str, units: UnitSystem) -> Result<BCSegmentData, String>
         velocity_max: vmax * to_fps,
         bc_value: bc,
     })
+}
+
+/// Resolve the velocity-keyed BC schedule once so auto-zero, native flight, and compare flight
+/// cannot synthesize different drag inputs. Explicit manual/table segments take precedence over
+/// the characteristic-based estimator.
+fn resolve_velocity_bc_segments(
+    provided: Option<&[BCSegmentData]>,
+    use_estimator: bool,
+    bc: f64,
+    diameter_m: f64,
+    mass_kg: f64,
+    drag_model: DragModelArg,
+) -> Option<Vec<BCSegmentData>> {
+    if let Some(segments) = provided {
+        return Some(segments.to_vec());
+    }
+    if !use_estimator {
+        return None;
+    }
+
+    Some(
+        ballistics_engine::bc_estimation::BCSegmentEstimator::estimate_bc_segments(
+            bc,
+            diameter_m / 0.0254,
+            mass_kg / 0.00006479891,
+            "",
+            match drag_model {
+                DragModelArg::G1 => "G1",
+                DragModelArg::G7 => "G7",
+            },
+        ),
+    )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -3261,6 +3293,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
 
+            // Resolve the final velocity-keyed BC schedule before auto-zero. This is the single
+            // schedule cloned into the zero solve, native flight, and compare-local flight.
+            let bc_segments_data = resolve_velocity_bc_segments(
+                bc_table_segments.as_deref(),
+                use_bc_segments,
+                trued_bc,
+                diameter_metric,
+                mass_metric,
+                drag_model,
+            );
+            let effective_use_bc_segments = use_bc_segments || bc_segments_data.is_some();
+
             // Calculate zero angle if auto-zero is specified (from CLI or profile)
             let muzzle_angle = if let Some(zero_distance) = final_auto_zero {
                 let zero_distance_metric =
@@ -3311,6 +3355,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     },
                     bullet_mass: mass_metric,
                     bullet_diameter: diameter_metric,
+                    caliber_inches: diameter_metric / 0.0254,
+                    weight_grains: mass_metric / 0.00006479891,
                     bullet_length: bullet_length
                         .map(|l| match cli.units {
                             UnitSystem::Imperial => l * 0.0254,
@@ -3338,13 +3384,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // the shot-day powder temp so it isn't inherited into the zero solve.
                     powder_curve_temp_c: zero_powder_temp
                         .map(|t| UnitConverter::temperature_to_metric(t, cli.units)),
-                    // Zero the rifle with the SAME velocity-keyed BC the trajectory
-                    // uses (manual --bc-segment or a BC5D table, held in
-                    // bc_table_segments). Without this the launch-angle solve runs on
-                    // the base --bc only, so a segment that changes early-flight drag
-                    // grounds the shot short of the requested zero (and diverged from WASM).
-                    use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
-                    bc_segments_data: bc_table_segments.clone(),
+                    // Zero with the exact BC configuration the subsequent flight uses. The
+                    // resolved schedule covers manual/BC5D data and estimator-generated data;
+                    // cluster correction remains a scalar-BC fallback under MBA-1175.
+                    use_bc_segments: effective_use_bc_segments,
+                    bc_segments_data: bc_segments_data.clone(),
+                    use_cluster_bc,
                     ..Default::default()
                 };
 
@@ -3410,9 +3455,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 sight_height: sight_height_metric,
                 bore_height: bore_height_metric,
                 ignore_ground_impact,
-                use_bc_segments,
+                use_bc_segments: effective_use_bc_segments,
                 use_cluster_bc,
-                bc_table_segments: bc_table_segments.clone(),
+                bc_segments_data: bc_segments_data.clone(),
                 enable_magnus,
                 enable_coriolis,
                 enable_spin_drift,
@@ -3594,20 +3639,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     powder_curve_temp_c,
                                     tipoff_yaw: 0.0,
                                     tipoff_decay_distance: 50.0,
-                                    use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
+                                    use_bc_segments: effective_use_bc_segments,
                                     bc_segments: None,
-                                    bc_segments_data: bc_table_segments.clone().or_else(|| {
-                                        if use_bc_segments {
-                                            use ballistics_engine::bc_estimation::BCSegmentEstimator;
-                                            Some(BCSegmentEstimator::estimate_bc_segments(
-                                                trued_bc,
-                                                diameter_metric / 0.0254,
-                                                mass_metric / 0.00006479891,
-                                                "",
-                                                match drag_model { DragModelArg::G1 => "G1", DragModelArg::G7 => "G7" },
-                                            ))
-                                        } else { None }
-                                    }),
+                                    bc_segments_data: bc_segments_data.clone(),
                                     use_enhanced_spin_drift: enable_spin_drift,
                                     enable_aerodynamic_jump,
                                     use_form_factor: false,
@@ -5173,7 +5207,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         ignore_ground_impact,
         use_bc_segments,
         use_cluster_bc,
-        ref bc_table_segments,
+        ref bc_segments_data,
         enable_magnus,
         enable_coriolis,
         enable_spin_drift,
@@ -5282,31 +5316,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         powder_curve_temp_c,
         tipoff_yaw: 0.0,
         tipoff_decay_distance: 50.0,
-        // Use BC segments if: 1) table generated them (parameter), 2) --use-bc-segments flag, 3) neither
-        use_bc_segments: use_bc_segments || bc_table_segments.is_some(),
+        // The schedule was resolved once before auto-zero and is shared by every local path.
+        use_bc_segments,
         bc_segments: None,
-        bc_segments_data: if let Some(ref segments) = *bc_table_segments {
-            // Use segments passed from BC table (highest priority)
-            Some(segments.clone())
-        } else if use_bc_segments {
-            // Generate BC segments automatically from estimator
-            use ballistics_engine::bc_estimation::BCSegmentEstimator;
-            let weight_grains = mass / 0.00006479891;
-            let caliber_inches = diameter / 0.0254;
-            let segments = BCSegmentEstimator::estimate_bc_segments(
-                bc,
-                caliber_inches,
-                weight_grains,
-                "", // No specific model
-                match drag_model {
-                    DragModelArg::G1 => "G1",
-                    DragModelArg::G7 => "G7",
-                },
-            );
-            Some(segments)
-        } else {
-            None
-        },
+        bc_segments_data: bc_segments_data.clone(),
         use_enhanced_spin_drift: enable_spin_drift,
         enable_aerodynamic_jump,
         use_form_factor: false,
@@ -8748,6 +8761,61 @@ mod adjustment_unit_tests {
 #[cfg(test)]
 mod bc_segment_parse_tests {
     use super::*;
+
+    #[test]
+    fn resolved_bc_schedule_preserves_explicit_precedence_and_estimator_fallback() {
+        let explicit = vec![BCSegmentData {
+            velocity_min: 0.0,
+            velocity_max: 5_000.0,
+            bc_value: 0.42,
+        }];
+        let provided = resolve_velocity_bc_segments(
+            Some(&explicit),
+            true,
+            0.19,
+            0.224 * 0.0254,
+            77.0 * 0.00006479891,
+            DragModelArg::G7,
+        )
+        .unwrap();
+        assert_eq!(provided.len(), 1);
+        assert_eq!(provided[0].bc_value.to_bits(), 0.42_f64.to_bits());
+
+        let estimated = resolve_velocity_bc_segments(
+            None,
+            true,
+            0.19,
+            0.224 * 0.0254,
+            77.0 * 0.00006479891,
+            DragModelArg::G7,
+        )
+        .unwrap();
+        let expected = ballistics_engine::bc_estimation::BCSegmentEstimator::estimate_bc_segments(
+            0.19, 0.224, 77.0, "", "G7",
+        );
+        assert_eq!(estimated.len(), expected.len());
+        for (actual, expected) in estimated.iter().zip(&expected) {
+            assert_eq!(
+                actual.velocity_min.to_bits(),
+                expected.velocity_min.to_bits()
+            );
+            assert_eq!(
+                actual.velocity_max.to_bits(),
+                expected.velocity_max.to_bits()
+            );
+            assert_eq!(actual.bc_value.to_bits(), expected.bc_value.to_bits());
+        }
+
+        assert!(resolve_velocity_bc_segments(
+            None,
+            false,
+            0.19,
+            0.224 * 0.0254,
+            77.0 * 0.00006479891,
+            DragModelArg::G7,
+        )
+        .is_none());
+    }
 
     #[test]
     fn parses_valid_imperial_pair_as_fps() {
