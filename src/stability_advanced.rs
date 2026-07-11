@@ -236,12 +236,15 @@ pub fn calculate_dynamic_stability(
     static_stability * yaw_factor * precession_factor
 }
 
-/// Predict stability over trajectory with velocity decay
+/// Predict stability over trajectory with velocity and spin decay.
+///
+/// `spin_decay_factor` is the current spin rate divided by muzzle spin rate, typically 0.95-0.98
+/// because axial spin decays much more slowly than forward velocity.
 pub fn predict_stability_at_distance(
     initial_stability: f64,
     initial_velocity_fps: f64,
     current_velocity_fps: f64,
-    spin_decay_factor: f64, // Typically 0.95-0.98
+    spin_decay_factor: f64,
 ) -> f64 {
     if initial_velocity_fps == 0.0 || current_velocity_fps == 0.0 {
         return initial_stability;
@@ -250,12 +253,11 @@ pub fn predict_stability_at_distance(
     // Velocity ratio
     let velocity_ratio = current_velocity_fps / initial_velocity_fps;
 
-    // Spin decays slower than velocity
-    let spin_ratio = velocity_ratio * spin_decay_factor;
-
-    // Stability changes with velocity and spin
-    // SG ∝ (spin²/velocity)
-    let stability_ratio = spin_ratio.powi(2) / velocity_ratio;
+    // At otherwise fixed aerodynamic conditions, gyroscopic stability follows
+    // Sg ∝ spin_rate² / velocity². `spin_decay_factor` is already the independent spin-rate
+    // retention ratio; multiplying it by velocity_ratio would incorrectly force spin to decay in
+    // lockstep with forward speed and invert the downrange trend (MBA-1161).
+    let stability_ratio = (spin_decay_factor / velocity_ratio).powi(2);
 
     initial_stability * stability_ratio
 }
@@ -324,12 +326,11 @@ mod tests {
 
     #[test]
     fn test_stability_prediction() {
-        // Use higher initial stability to maintain adequate stability through velocity drop
         let (is_stable, terminal_sg, status) = check_trajectory_stability(
-            2.2,    // muzzle stability (well above marginal)
+            2.2,    // muzzle stability
             2700.0, // muzzle velocity
-            1900.0, // terminal velocity (moderate drop)
-            0.98,   // spin decay factor (good spin retention)
+            1900.0, // terminal velocity
+            0.98,   // independent spin retention
         );
 
         println!(
@@ -342,10 +343,11 @@ mod tests {
             "Expected stable trajectory but got: is_stable={}, terminal_sg={}, status={}",
             is_stable, terminal_sg, status
         );
-        assert!(terminal_sg > 1.0, "Terminal SG {} too low", terminal_sg);
         assert!(
-            status.contains("ADEQUATE") || status.contains("GOOD") || status.contains("MARGINAL")
+            terminal_sg > 2.2,
+            "SG must grow as velocity decays faster than spin: {terminal_sg}"
         );
+        assert!(status.contains("OVER-STABILIZED"));
     }
 
     #[test]
@@ -471,12 +473,21 @@ mod tests {
         let current_vel = 2000.0;
         let spin_decay = 0.97;
 
-        let predicted = predict_stability_at_distance(initial_sg, initial_vel, current_vel, spin_decay);
+        let predicted =
+            predict_stability_at_distance(initial_sg, initial_vel, current_vel, spin_decay);
+        let expected = initial_sg * (spin_decay / (current_vel / initial_vel)).powi(2);
 
-        // Should be different from initial
-        assert!(predicted != initial_sg);
-        // Should still be positive
-        assert!(predicted > 0.0);
+        assert!((predicted - expected).abs() < 1e-12);
+        assert!(
+            predicted > initial_sg,
+            "retaining 97% spin while losing velocity must increase SG: {predicted}"
+        );
+
+        let slower = predict_stability_at_distance(initial_sg, initial_vel, 1400.0, spin_decay);
+        assert!(
+            slower > predicted,
+            "SG must increase monotonically as velocity falls at fixed spin retention"
+        );
     }
 
     #[test]
@@ -494,24 +505,23 @@ mod tests {
 
     #[test]
     fn test_trajectory_stability_status_messages() {
-        // Unstable (< 1.0)
-        let (is_stable, sg, status) = check_trajectory_stability(0.8, 2700.0, 1500.0, 0.95);
+        // Use identical muzzle/terminal velocity and full spin retention to isolate status
+        // thresholds from the downrange stability correction.
+        let (is_stable, sg, status) = check_trajectory_stability(0.8, 2700.0, 2700.0, 1.0);
         assert!(!is_stable);
         assert!(sg < 1.0);
         assert!(status.contains("UNSTABLE"));
 
         // Marginal (1.0 - 1.3)
-        let (is_stable, sg, status) = check_trajectory_stability(1.4, 2700.0, 2200.0, 0.98);
-        assert!(!is_stable || sg >= 1.0);
-        if sg >= 1.0 && sg < 1.3 {
-            assert!(status.contains("MARGINAL"));
-        }
+        let (is_stable, sg, status) = check_trajectory_stability(1.15, 2700.0, 2700.0, 1.0);
+        assert!(!is_stable);
+        assert!((1.0..1.3).contains(&sg));
+        assert!(status.contains("MARGINAL"));
 
         // Over-stabilized (> 2.5)
-        let (_, sg, status) = check_trajectory_stability(4.0, 2700.0, 2500.0, 0.99);
-        if sg > 2.5 {
-            assert!(status.contains("OVER-STABILIZED"));
-        }
+        let (_, sg, status) = check_trajectory_stability(4.0, 2700.0, 2700.0, 1.0);
+        assert!(sg > 2.5);
+        assert!(status.contains("OVER-STABILIZED"));
     }
 
     #[test]
