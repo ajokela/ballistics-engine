@@ -722,6 +722,57 @@ fn test_true_velocity_offline_metric_units() {
 }
 
 #[test]
+fn true_velocity_metric_default_sight_height_matches_explicit_50_mm() {
+    let run = |sight_height: Option<&str>| {
+        let mut args = vec![
+            "true-velocity",
+            "--measured-drop",
+            "5.1",
+            "--range",
+            "550",
+            "--bc",
+            "0.27",
+            "--drag-model",
+            "g7",
+            "--mass",
+            "9.07",
+            "--diameter",
+            "6.7",
+            "--units",
+            "metric",
+            "--offline",
+            "--output",
+            "json",
+        ];
+        if let Some(value) = sight_height {
+            args.extend(["--sight-height", value]);
+        }
+
+        let output = Command::new(get_cli_binary())
+            .args(args)
+            .output()
+            .expect("Failed to execute metric true-velocity command");
+        assert!(
+            output.status.success(),
+            "metric true-velocity failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).expect("Should produce valid JSON")
+    };
+
+    let default = run(None);
+    let explicit = run(Some("50"));
+    let default_velocity = default["effective_velocity"].as_f64().unwrap();
+    let explicit_velocity = explicit["effective_velocity"].as_f64().unwrap();
+
+    assert_eq!(
+        default_velocity.to_bits(),
+        explicit_velocity.to_bits(),
+        "metric default should be 50 mm: omitted={default_velocity} m/s explicit={explicit_velocity} m/s"
+    );
+}
+
+#[test]
 fn test_true_velocity_offline_extreme_drop() {
     // Test with high drop value (long range)
     let output = Command::new(get_cli_binary())

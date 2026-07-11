@@ -973,9 +973,9 @@ enum Commands {
         #[arg(long, default_value = "100.0")]
         zero_distance: f64,
 
-        /// Sight height above bore (inches for imperial, mm for metric)
-        #[arg(long, default_value = "2.0")]
-        sight_height: f64,
+        /// Sight height above bore (inches for imperial, mm for metric) [default: 2 in / 50 mm]
+        #[arg(long)]
+        sight_height: Option<f64>,
 
         /// Temperature (Fahrenheit for imperial, Celsius for metric; default 59 F / 15 C)
         #[arg(long)]
@@ -3948,6 +3948,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Imperial => zero_distance,
                 UnitSystem::Metric => zero_distance / 0.9144,
             };
+            let sight_height_default = match units {
+                UnitSystem::Imperial => 2.0,
+                UnitSystem::Metric => 50.0,
+            };
+            let sight_height = sight_height.unwrap_or(sight_height_default);
             let sight_in = match units {
                 UnitSystem::Imperial => sight_height,
                 UnitSystem::Metric => sight_height / 25.4, // mm to inches
