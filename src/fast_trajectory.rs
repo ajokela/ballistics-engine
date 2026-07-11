@@ -113,6 +113,20 @@ impl FastSolution {
     }
 }
 
+fn direct_atmosphere_values(
+    atmo_params: (f64, f64, f64, f64),
+) -> Option<(f64, f64)> {
+    let (a, b, c, d) = atmo_params;
+    (a.is_finite()
+        && b.is_finite()
+        && c == 0.0
+        && d == 0.0
+        && a > 0.0
+        && a < 2.0
+        && b > 200.0)
+        .then_some((a, b))
+}
+
 /// True if `atmo_params` can yield a finite, positive air density. `atmo_params` has TWO
 /// modes that `compute_derivatives` distinguishes:
 ///   * **Standard**: `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` —
@@ -132,9 +146,19 @@ fn atmo_is_physical(atmo_params: (f64, f64, f64, f64)) -> bool {
     }
     // Direct-atmosphere mode: (density, speed_of_sound, 0, 0). Constants mirror
     // derivatives.rs (MAX_REALISTIC_DENSITY = 2.0 kg/m³, MIN_REALISTIC_SPEED_OF_SOUND = 200 m/s).
-    let direct_mode = c == 0.0 && d == 0.0 && a > 0.0 && a < 2.0 && b > 200.0;
     // Standard mode: positive station pressure (hPa).
-    direct_mode || c > 0.0
+    direct_atmosphere_values(atmo_params).is_some() || c > 0.0
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FastAtmosphere {
+    Direct {
+        air_density: f64,
+        speed_of_sound: f64,
+    },
+    Standard {
+        base_density: f64,
+    },
 }
 
 /// Fast trajectory integration parameters
@@ -285,19 +309,24 @@ pub fn fast_integrate(
     times.push(0.0);
     states.push(initial_state);
 
-    // Base drag density = the muzzle (shooter-altitude) density. atmo_params.3 is base_ratio
-    // = air_density/1.225 at the shooter altitude (the MC caller computes it via
-    // calculate_atmosphere). Previously this called get_local_atmosphere with query alt 0.0
-    // while base_alt = shooter altitude, which re-scaled that ratio DOWN to sea level —
-    // discarding the correct altitude density and inflating drag for every elevated MC run.
-    // Guard a missing/absent ratio (base_ratio <= 0, e.g. legacy or uninitialized atmo_params):
-    // fall back to the standard sea-level density rather than 0, so a zero ratio cannot collapse
-    // density_scale to 0 and silently disable drag entirely. (atmo_params.0 is base_alt here, not
-    // a density, so it is not a usable fallback.)
-    let base_density = if params.atmo_params.3 > 0.0 {
-        params.atmo_params.3 * 1.225
+    // Direct mode supplies a fixed density and speed of sound. Standard mode supplies station
+    // conditions plus base_ratio; its local density/sound speed are lapsed at every substep.
+    // Guard a missing standard-mode ratio by falling back to sea-level density (MBA-1157 owns
+    // stricter validation of that separate contract).
+    let atmosphere = if let Some((air_density, speed_of_sound)) =
+        direct_atmosphere_values(params.atmo_params)
+    {
+        FastAtmosphere::Direct {
+            air_density,
+            speed_of_sound,
+        }
     } else {
-        1.225 // standard sea-level air density (kg/m^3)
+        let base_density = if params.atmo_params.3 > 0.0 {
+            params.atmo_params.3 * 1.225
+        } else {
+            1.225
+        };
+        FastAtmosphere::Standard { base_density }
     };
 
     // MBA-1137: borrow the optional downrange-segmented atmosphere once (queried 4x per step).
@@ -397,7 +426,7 @@ pub fn fast_integrate(
             &state,
             inputs,
             wind_sock,
-            base_density,
+            atmosphere,
             drag_model,
             projectile_shape,
             bc,
@@ -415,7 +444,7 @@ pub fn fast_integrate(
             &state2,
             inputs,
             wind_sock,
-            base_density,
+            atmosphere,
             drag_model,
             projectile_shape,
             bc,
@@ -433,7 +462,7 @@ pub fn fast_integrate(
             &state3,
             inputs,
             wind_sock,
-            base_density,
+            atmosphere,
             drag_model,
             projectile_shape,
             bc,
@@ -451,7 +480,7 @@ pub fn fast_integrate(
             &state4,
             inputs,
             wind_sock,
-            base_density,
+            atmosphere,
             drag_model,
             projectile_shape,
             bc,
@@ -524,7 +553,7 @@ fn compute_derivatives(
     state: &[f64; 6],
     inputs: &BallisticInputs,
     wind_sock: &WindSock,
-    base_density: f64,
+    atmosphere: FastAtmosphere,
     drag_model: &DragModel,
     projectile_shape: crate::transonic_drag::ProjectileShape,
     bc: f64,
@@ -560,8 +589,9 @@ fn compute_derivatives(
         // Calculate drag
         let v_fps = v_mag * MPS_TO_FPS;
 
-        // Calculate LOCAL density and speed of sound from the substep altitude using the standard
-        // lapse rate. `inputs.temperature`/`inputs.pressure` are the base (station) T/P set by
+        // Resolve LOCAL density and speed of sound. Direct mode uses its supplied fixed values;
+        // standard mode evaluates the substep altitude with the lapse-rate pipeline.
+        // `inputs.temperature`/`inputs.pressure` are the standard-mode base (station) T/P set by
         // fast_integrate from atmo_params; `base_density` is the station-altitude density, so
         // `base_density / 1.225` recovers the station base_ratio the lapse pipeline expects.
         //
@@ -579,22 +609,30 @@ fn compute_derivatives(
         // Humidity is NOT plumbed to this call site: on the fast path (fast_integrate) the
         // `humidity` FIELD is overwritten with atmo_params.3 (the density RATIO), so
         // `inputs.humidity` is not a real RH — pass 0.0 (dry) rather than fabricate.
-        let altitude = inputs.altitude + pos.y;
-        let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
-            Some(sock) => {
-                let (zt, zp, zh) = sock.atmo_for_range(pos.x);
-                (zt, zp, calculate_air_density_cimp(zt, zp, zh) / 1.225)
+        let (local_density, speed_of_sound) = match atmosphere {
+            FastAtmosphere::Direct {
+                air_density,
+                speed_of_sound,
+            } => (air_density, speed_of_sound),
+            FastAtmosphere::Standard { base_density } => {
+                let altitude = inputs.altitude + pos.y;
+                let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
+                    Some(sock) => {
+                        let (zt, zp, zh) = sock.atmo_for_range(pos.x);
+                        (zt, zp, calculate_air_density_cimp(zt, zp, zh) / 1.225)
+                    }
+                    None => (inputs.temperature, inputs.pressure, base_density / 1.225),
+                };
+                get_local_atmosphere_humid(
+                    altitude,
+                    inputs.altitude, // base_alt approximation
+                    base_temp_c,
+                    base_press_hpa,
+                    base_ratio,
+                    0.0, // humidity not available here (see note above)
+                )
             }
-            None => (inputs.temperature, inputs.pressure, base_density / 1.225),
         };
-        let (local_density, speed_of_sound) = get_local_atmosphere_humid(
-            altitude,
-            inputs.altitude, // base_alt approximation
-            base_temp_c,
-            base_press_hpa,
-            base_ratio,
-            0.0, // humidity not available here (see note above)
-        );
         let mach = v_mag / speed_of_sound;
 
         // Get BC value (potentially from segments)
@@ -1184,6 +1222,52 @@ mod tests {
         assert!(
             direct.success,
             "direct-atmosphere mode (pressure=0 sentinel) must yield success=true"
+        );
+    }
+
+    #[test]
+    fn plain_fast_path_honors_direct_atmosphere_values() {
+        fn final_speed(muzzle_velocity: f64, atmo_params: (f64, f64, f64, f64)) -> f64 {
+            let mut inputs = BallisticInputs::default();
+            inputs.muzzle_velocity = muzzle_velocity;
+            inputs.bc_value = 0.5;
+            inputs.bc_type = DragModel::G7;
+            inputs.ground_threshold = -100.0;
+
+            let wind_sock = WindSock::new(vec![]);
+            let solution = fast_integrate(
+                &inputs,
+                &wind_sock,
+                FastIntegrationParams {
+                    horiz: 10_000.0,
+                    vert: 0.0,
+                    initial_state: [0.0, 0.0, 0.0, muzzle_velocity, 0.0, 0.0],
+                    t_span: (0.0, 0.2),
+                    atmo_params,
+                    atmo_sock: None,
+                },
+            );
+            assert!(solution.success);
+
+            let last = solution.y[0].len() - 1;
+            (solution.y[3][last].powi(2)
+                + solution.y[4][last].powi(2)
+                + solution.y[5][last].powi(2))
+            .sqrt()
+        }
+
+        let thin_air = final_speed(800.0, (0.905, 340.0, 0.0, 0.0));
+        let dense_air = final_speed(800.0, (1.225, 340.0, 0.0, 0.0));
+        assert!(
+            thin_air > dense_air,
+            "lower supplied density must retain more velocity: thin={thin_air}, dense={dense_air}"
+        );
+
+        let low_sound_speed = final_speed(340.0, (1.0, 300.0, 0.0, 0.0));
+        let high_sound_speed = final_speed(340.0, (1.0, 400.0, 0.0, 0.0));
+        assert!(
+            (low_sound_speed - high_sound_speed).abs() > 1e-6,
+            "supplied sound speed must affect Mach-dependent drag"
         );
     }
 
