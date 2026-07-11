@@ -27,11 +27,16 @@ fuzz_target!(|data: &[u8]| {
         enable_precession_nutation: 0, enable_spin_drift: 0, enable_magnus: 0,
         enable_coriolis: 0, shot_azimuth: 0.0,
     };
+    // FFI step_size is internally divided by 1000 (dt = step_size/1000 s), so the
+    // README/tests use [0.1, 1.0] (dt 1e-4..1e-3 s). Fuzz within that sane band.
+    // Finding #2 (logged): a far smaller step_size drives unbounded trajectory-point
+    // allocation / OOM through this ABI — tracked separately, not re-triggered here.
+    let Ok(step) = ranged(&mut u, 0.1, 1.0) else { return };
     // SAFETY: valid pointers to locals; result freed via the paired free fn.
     unsafe {
         let wind = FFIWindConditions { speed: 0.0, direction: 0.0 };
         let atmo = FFIAtmosphericConditions { temperature: 15.0, pressure: 1013.25, humidity: 50.0, altitude: 0.0 };
-        let res = ballistics_calculate_trajectory(&ffi_in, &wind, &atmo, 3000.0, 0.001);
+        let res = ballistics_calculate_trajectory(&ffi_in, &wind, &atmo, 3000.0, step);
         if !res.is_null() {
             ballistics_free_trajectory_result(res);
         }
