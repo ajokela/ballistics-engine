@@ -70,3 +70,10 @@ path = "fuzz_targets/analytic_vacuum.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "solver_zero"
+path = "fuzz_targets/solver_zero.rs"
+test = false
+doc = false
+bench = false
