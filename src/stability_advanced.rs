@@ -150,21 +150,12 @@ fn calculate_miller_refined(
     numerator / denominator
 }
 
-/// Velocity correction using Miller's refined approach
+/// Velocity correction using the engine's canonical Miller cube-root approximation.
 fn apply_velocity_correction(sg_base: f64, velocity_fps: f64) -> f64 {
-    // Miller's refined velocity correction
-    // Uses 2800 fps as reference with cube root relationship
     const VELOCITY_REFERENCE: f64 = 2800.0;
 
-    // For velocities below 1400 fps, use modified correction
-    if velocity_fps < 1400.0 {
-        let velocity_factor = (velocity_fps / 1400.0).powf(0.5);
-        sg_base * velocity_factor * 0.5 // Additional reduction for very low velocities
-    } else {
-        // Standard Miller velocity correction
-        let velocity_factor = (velocity_fps / VELOCITY_REFERENCE).powf(1.0 / 3.0);
-        sg_base * velocity_factor
-    }
+    let velocity_factor = (velocity_fps / VELOCITY_REFERENCE).powf(1.0 / 3.0);
+    sg_base * velocity_factor
 }
 
 /// Atmospheric correction for non-standard conditions
@@ -408,6 +399,34 @@ mod tests {
     }
 
     #[test]
+    fn velocity_correction_is_continuous_at_1400_fps() {
+        let sg_base = 2.0;
+        let epsilon = 1e-6;
+        let below = apply_velocity_correction(sg_base, 1400.0 - epsilon);
+        let at_boundary = apply_velocity_correction(sg_base, 1400.0);
+        let above = apply_velocity_correction(sg_base, 1400.0 + epsilon);
+
+        assert!(
+            (below - at_boundary).abs() <= 1e-8,
+            "velocity correction jumped from {below} to {at_boundary} at 1400 fps"
+        );
+        assert!((above - at_boundary).abs() <= 1e-8);
+    }
+
+    #[test]
+    fn subsonic_velocity_uses_canonical_miller_cube_root() {
+        let sg_base = 2.0_f64;
+        let velocity_fps = 1050.0_f64;
+        let expected = sg_base * (velocity_fps / 2800.0).powf(1.0 / 3.0);
+        let actual = apply_velocity_correction(sg_base, velocity_fps);
+
+        assert!(
+            (actual - expected).abs() <= expected * 1e-12,
+            "subsonic correction was {actual}, expected Miller value {expected}"
+        );
+    }
+
+    #[test]
     fn test_hypervelocity_correction() {
         // Test Bowman-Howell correction kicks in above 3000 fps
         let normal_vel = calculate_advanced_stability(
@@ -449,8 +468,14 @@ mod tests {
         let mass_kg = 0.0109; // 168 grains
 
         // Zero yaw should give stability close to static
-        let dynamic_zero_yaw =
-            calculate_dynamic_stability(static_sg, velocity_mps, spin_rate, 0.0, caliber_m, mass_kg);
+        let dynamic_zero_yaw = calculate_dynamic_stability(
+            static_sg,
+            velocity_mps,
+            spin_rate,
+            0.0,
+            caliber_m,
+            mass_kg,
+        );
 
         // Some yaw should reduce stability
         let dynamic_with_yaw = calculate_dynamic_stability(
@@ -493,13 +518,11 @@ mod tests {
     #[test]
     fn test_predict_stability_edge_cases() {
         // Zero initial velocity should return initial stability
-        let zero_initial =
-            predict_stability_at_distance(1.5, 0.0, 2000.0, 0.97);
+        let zero_initial = predict_stability_at_distance(1.5, 0.0, 2000.0, 0.97);
         assert_eq!(zero_initial, 1.5);
 
         // Zero current velocity should return initial stability
-        let zero_current =
-            predict_stability_at_distance(1.5, 2800.0, 0.0, 0.97);
+        let zero_current = predict_stability_at_distance(1.5, 2800.0, 0.0, 0.97);
         assert_eq!(zero_current, 1.5);
     }
 
