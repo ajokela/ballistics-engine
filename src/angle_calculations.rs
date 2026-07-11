@@ -2,7 +2,8 @@ use crate::InternalBallisticInputs;
 use std::f64;
 
 // Constants for unit conversions
-const FPS_TO_MPS: f64 = 0.3048;
+const FEET_TO_METERS: f64 = 0.3048;
+const FPS_TO_MPS: f64 = FEET_TO_METERS;
 const YARDS_TO_METERS: f64 = 0.9144;
 const DEGREES_TO_RADIANS: f64 = std::f64::consts::PI / 180.0;
 const RADIANS_TO_DEGREES: f64 = 180.0 / std::f64::consts::PI;
@@ -327,32 +328,62 @@ pub fn solve_muzzle_angle(
     )
 }
 
-/// Calculate simple ballistic drop approximation for quick estimates
+/// Estimate bore-line drop for a horizontal shot in ICAO sea-level conditions.
+///
+/// Inputs are muzzle velocity in feet per second, distance in yards, bullet mass in grains, and
+/// a G1 ballistic coefficient; the returned drop is meters. Bullet mass is retained for API
+/// compatibility but does not enter the retardation calculation because G1 BC already includes
+/// the projectile's sectional density and form factor.
 pub fn quick_drop_estimate(
     muzzle_velocity_fps: f64,
     distance_yards: f64,
     _bullet_mass_grains: f64,
     bc: f64,
 ) -> f64 {
-    let mv_mps = muzzle_velocity_fps * FPS_TO_MPS;
-    let distance_m = distance_yards * YARDS_TO_METERS;
-
-    // Simple ballistic approximation with safe divisions
-    if mv_mps <= 0.0 || distance_m <= 0.0 {
+    if muzzle_velocity_fps <= 0.0 || distance_yards <= 0.0 {
         return 0.0; // No drop if no velocity or distance
     }
 
-    let time_of_flight = distance_m / mv_mps;
-    let gravity = 9.80665;
-
-    // Basic drop calculation with BC approximation
     let bc_safe = bc.max(0.1);
-    let drag_factor = 1.0 / bc_safe;
-    let velocity_loss = drag_factor * time_of_flight * 0.1;
-    let effective_velocity = mv_mps * (1.0 - velocity_loss).max(0.1); // Ensure positive
-    let adjusted_time = distance_m / effective_velocity;
+    let distance_ft = distance_yards * 3.0;
+    let step_count = ((distance_yards / 5.0).ceil() as usize).clamp(32, 4096);
+    let step_ft = distance_ft / step_count as f64;
+    let gravity_ft_s2 = crate::constants::G_ACCEL_MPS2 / FEET_TO_METERS;
+    let speed_of_sound_fps = crate::constants::SPEED_OF_SOUND_MPS / FPS_TO_MPS;
 
-    0.5 * gravity * adjusted_time * adjusted_time
+    // State is vertical position, downrange velocity, and vertical velocity, all in imperial
+    // units. Integrating over downrange distance keeps the work bounded and still captures the
+    // Mach-dependent G1 retardation and vertical drag that control flight time and drop.
+    let derivatives = |state: &[f64; 3]| -> Option<[f64; 3]> {
+        let [_, vx, vy] = *state;
+        if !(vx.is_finite() && vy.is_finite() && vx > 1e-9) {
+            return None;
+        }
+        let speed = vx.hypot(vy);
+        let mach = speed / speed_of_sound_fps;
+        let cd = crate::drag::get_drag_coefficient(mach, &crate::DragModel::G1);
+        let drag_accel = speed.powi(2) * cd * crate::constants::CD_TO_RETARD / bc_safe;
+
+        Some([
+            vy / vx,
+            -drag_accel / speed,
+            (-gravity_ft_s2 - drag_accel * vy / speed) / vx,
+        ])
+    };
+
+    let mut state = [0.0, muzzle_velocity_fps, 0.0];
+    for _ in 0..step_count {
+        let Some(k1) = derivatives(&state) else {
+            return f64::NAN;
+        };
+        let midpoint: [f64; 3] = std::array::from_fn(|i| state[i] + 0.5 * step_ft * k1[i]);
+        let Some(k2) = derivatives(&midpoint) else {
+            return f64::NAN;
+        };
+        state = std::array::from_fn(|i| state[i] + step_ft * k2[i]);
+    }
+
+    -state[0] * FEET_TO_METERS
 }
 
 #[cfg(test)]
@@ -480,6 +511,41 @@ mod tests {
         // Test that higher BC gives less drop
         let drop_high_bc = quick_drop_estimate(2700.0, 500.0, 168.0, 0.8);
         assert!(drop_high_bc < drop);
+    }
+
+    #[test]
+    fn quick_drop_tracks_g1_point_mass_reference() {
+        let distance_yards = 500.0;
+        let distance_m = distance_yards * YARDS_TO_METERS;
+        let inputs = InternalBallisticInputs {
+            muzzle_velocity: 1200.0 * FPS_TO_MPS,
+            bc_value: 0.5,
+            bc_type: crate::DragModel::G1,
+            bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
+            bullet_diameter: 0.308 * 0.0254,
+            muzzle_height: 0.0,
+            ground_threshold: f64::NEG_INFINITY,
+            ..Default::default()
+        };
+
+        let mut solver =
+            crate::TrajectorySolver::new(inputs, Default::default(), Default::default());
+        solver.set_max_range(distance_m);
+        let reference = solver.solve().unwrap();
+        let position = reference.position_at_range(distance_m).unwrap();
+        let reference_drop_m = -position.y;
+        assert!(
+            (9.2..=9.6).contains(&reference_drop_m),
+            "unexpected canonical G1 fixture: {reference_drop_m} m"
+        );
+
+        let estimated_drop_m = quick_drop_estimate(1200.0, distance_yards, 168.0, 0.5);
+        let relative_error = (estimated_drop_m - reference_drop_m).abs() / reference_drop_m;
+        assert!(
+            relative_error < 0.1,
+            "quick G1 drop {estimated_drop_m} m differs from reference {reference_drop_m} m by {:.1}%",
+            relative_error * 100.0
+        );
     }
 
     #[test]
