@@ -10,7 +10,7 @@ use crate::trajectory_sampling::{
 };
 use crate::wind_shear::WindShearModel;
 use crate::DragModel;
-use nalgebra::Vector3;
+use nalgebra::{Vector3, Vector6};
 use std::error::Error;
 use std::fmt;
 
@@ -425,6 +425,27 @@ const RK45_TOLERANCE: f64 = 1e-6;
 const RK45_SAFETY_FACTOR: f64 = 0.9;
 const RK45_MAX_DT: f64 = 0.01;
 const RK45_MIN_DT: f64 = 1e-6;
+
+/// Pack the CLI solver's split position/velocity vectors into the shared six-component RK45 norm.
+fn cli_rk45_error_norm(
+    position: &Vector3<f64>,
+    velocity: &Vector3<f64>,
+    fifth_position: &Vector3<f64>,
+    fifth_velocity: &Vector3<f64>,
+    fourth_position: &Vector3<f64>,
+    fourth_velocity: &Vector3<f64>,
+) -> f64 {
+    let pack_state = |position: &Vector3<f64>, velocity: &Vector3<f64>| {
+        Vector6::new(
+            position.x, position.y, position.z, velocity.x, velocity.y, velocity.z,
+        )
+    };
+    let state = pack_state(position, velocity);
+    let fifth_order = pack_state(fifth_position, fifth_velocity);
+    let fourth_order = pack_state(fourth_position, fourth_velocity);
+
+    crate::trajectory_integration::rk45_error_norm(&state, &fifth_order, &fourth_order)
+}
 
 struct Rk45Trial {
     position: Vector3<f64>,
@@ -1838,9 +1859,7 @@ impl TrajectorySolver {
                 + B7_ERR * k7_v);
 
         // Estimate error
-        let pos_error = (new_pos - pos_err).magnitude();
-        let vel_error = (new_vel - vel_err).magnitude();
-        let error = (pos_error + vel_error) / (1.0 + position.magnitude() + velocity.magnitude());
+        let error = cli_rk45_error_norm(position, velocity, &new_pos, &new_vel, &pos_err, &vel_err);
 
         // Calculate new step size
         let dt_new = if error < tolerance {
@@ -3554,6 +3573,31 @@ mod form_factor_drag_tests {
 #[cfg(test)]
 mod rk45_adaptivity_tests {
     use super::*;
+
+    #[test]
+    fn cli_rk45_error_norm_scales_components_independently() {
+        let position = Vector3::new(1.0e9, 0.0, 0.0);
+        let velocity = Vector3::new(800.0, 0.0, 0.0);
+        let fifth_position = position;
+        let fifth_velocity = velocity;
+        let fourth_position = position;
+        let fourth_velocity = Vector3::new(800.0, 1.0e-3, 0.0);
+
+        let error = cli_rk45_error_norm(
+            &position,
+            &velocity,
+            &fifth_position,
+            &fifth_velocity,
+            &fourth_position,
+            &fourth_velocity,
+        );
+        let expected = 1.0e-3 / 6.0_f64.sqrt();
+
+        assert!(
+            (error - expected).abs() <= 1e-15,
+            "large downrange position masked a velocity-component error: {error}"
+        );
+    }
 
     fn discontinuous_wind_solver() -> TrajectorySolver {
         let inputs = BallisticInputs::default();
