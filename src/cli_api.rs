@@ -2272,6 +2272,20 @@ impl MonteCarloResults {
     }
 }
 
+fn wind_from_signed_speed_sample(signed_speed: f64, sampled_direction: f64) -> WindConditions {
+    if signed_speed < 0.0 {
+        WindConditions {
+            speed: -signed_speed,
+            direction: sampled_direction + std::f64::consts::PI,
+        }
+    } else {
+        WindConditions {
+            speed: signed_speed,
+            direction: sampled_direction,
+        }
+    }
+}
+
 // Run Monte Carlo simulation (backwards compatibility)
 pub fn run_monte_carlo(
     base_inputs: BallisticInputs,
@@ -2352,10 +2366,10 @@ pub fn run_monte_carlo_with_wind(
         inputs.azimuth_angle = azimuth_dist.sample(&mut rng); // Add horizontal variation
 
         // Create varied wind (now based on base wind conditions)
-        let wind = WindConditions {
-            speed: wind_speed_dist.sample(&mut rng).abs(),
-            direction: wind_dir_dist.sample(&mut rng),
-        };
+        let wind = wind_from_signed_speed_sample(
+            wind_speed_dist.sample(&mut rng),
+            wind_dir_dist.sample(&mut rng),
+        );
 
         // Run trajectory
         let mut solver = TrajectorySolver::new(inputs, wind, atmosphere.clone());
@@ -2936,6 +2950,35 @@ mod monte_carlo_powder_curve_tests {
             "20 m/s muzzle spread collapsed after curve resolution: impact-velocity span={} m/s",
             max_velocity - min_velocity
         );
+    }
+}
+
+#[cfg(test)]
+mod monte_carlo_wind_sampling_tests {
+    use super::*;
+
+    #[test]
+    fn negative_speed_sample_reverses_wind_direction() {
+        let direction = 0.25;
+        let signed_speed = -2.5;
+        let wind = wind_from_signed_speed_sample(signed_speed, direction);
+        let positive_wind = wind_from_signed_speed_sample(2.5, direction);
+
+        assert_eq!(wind.speed, 2.5);
+        assert!(
+            (wind.direction - (direction + std::f64::consts::PI)).abs() < f64::EPSILON,
+            "negative speed must reverse direction by pi: got {}",
+            wind.direction
+        );
+        assert_eq!(positive_wind.speed, 2.5);
+        assert_eq!(positive_wind.direction, direction);
+
+        let normalized_x = -wind.speed * wind.direction.cos();
+        let normalized_z = -wind.speed * wind.direction.sin();
+        let signed_x = -signed_speed * direction.cos();
+        let signed_z = -signed_speed * direction.sin();
+        assert!((normalized_x - signed_x).abs() < 1e-12);
+        assert!((normalized_z - signed_z).abs() < 1e-12);
     }
 }
 
