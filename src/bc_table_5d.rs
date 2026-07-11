@@ -296,8 +296,13 @@ impl Bc5dTable {
             }
         }
 
-        // Clamp result to valid range
-        result.max(0.5).min(1.5)
+        // A correction is multiplicative, so an undefined table result must be neutral rather
+        // than silently becoming the most aggressive allowed degradation.
+        if !result.is_finite() {
+            return 1.0;
+        }
+
+        result.clamp(0.5, 1.5)
     }
 
     /// Get the effective BC at a given velocity
@@ -875,6 +880,27 @@ mod tests {
         let table = create_single_cell_test_table();
 
         assert_eq!(table.lookup(f64::NAN, 0.4, 2500.0, 2000.0, "G1"), 0.875);
+    }
+
+    #[test]
+    fn test_lookup_non_finite_table_cells_are_neutral() {
+        for cell in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut source = create_test_table();
+            source.data.fill(cell);
+            let bytes = serialize_test_table(&source);
+            let table = Bc5dTable::from_bytes(&bytes).expect("CRC-valid table should load");
+
+            assert_eq!(
+                table.lookup(125.0, 0.35, 2750.0, 1500.0, "G1"),
+                1.0,
+                "non-finite cell {cell:?} must produce a neutral correction"
+            );
+            assert_eq!(
+                table.get_effective_bc(125.0, 0.35, 2750.0, 1500.0, "G1"),
+                0.35,
+                "neutral correction must preserve base BC for {cell:?}"
+            );
+        }
     }
 
     #[test]
