@@ -591,6 +591,74 @@ mod tests {
     }
 
     #[test]
+    fn yaw_of_repose_increases_with_physical_spin_stability() {
+        let calculate = |stability_factor, spin_rate_rad_s, use_pitch_damping| {
+            calculate_yaw_of_repose(
+                stability_factor,
+                300.0,
+                spin_rate_rad_s,
+                0.0,
+                0.01,
+                1.225,
+                0.308,
+                1.3,
+                175.0,
+                300.0 / 343.0,
+                "match",
+                use_pitch_damping,
+            )
+            .0
+        };
+        let low_stability: f64 = 1.1;
+        let high_stability: f64 = 4.0;
+        let low_spin = 19_000.0;
+        let high_spin = low_spin * (high_stability / low_stability).sqrt();
+        let expected_ratio = (high_stability / low_stability).sqrt();
+
+        for use_pitch_damping in [false, true] {
+            let low = calculate(low_stability, low_spin, use_pitch_damping);
+            let high = calculate(high_stability, high_spin, use_pitch_damping);
+
+            assert!(high > low, "yaw decreased as physical spin/Sg increased");
+            assert!(
+                (high / low - expected_ratio).abs() <= expected_ratio * 1e-12,
+                "yaw stability ratio was {}, expected {expected_ratio}",
+                high / low
+            );
+        }
+    }
+
+    #[test]
+    fn yaw_of_repose_has_inverse_cube_velocity_scaling() {
+        let calculate = |stability_factor, velocity_mps, use_pitch_damping| {
+            calculate_yaw_of_repose(
+                stability_factor,
+                velocity_mps,
+                19_000.0,
+                0.0,
+                0.01,
+                1.225,
+                0.308,
+                1.3,
+                175.0,
+                velocity_mps / 343.0,
+                "match",
+                use_pitch_damping,
+            )
+            .0
+        };
+
+        // With spin fixed, halving velocity increases physical Sg by four. The classical
+        // reduction yaw = 4*Iy*Sg*g/(Ix*p*V) must therefore increase by 4*2 = 8 (V^-3).
+        for use_pitch_damping in [false, true] {
+            let fast = calculate(1.5, 800.0, use_pitch_damping);
+            let slow = calculate(6.0, 400.0, use_pitch_damping);
+
+            assert!((slow / fast - 8.0).abs() <= 8e-12);
+        }
+    }
+
+    #[test]
     fn crosswind_does_not_change_yaw_of_repose_in_either_model() {
         let calculate = |wind_velocity_mps, use_pitch_damping| {
             calculate_yaw_of_repose(
