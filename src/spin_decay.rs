@@ -2,18 +2,22 @@
 //!
 //! This module implements realistic spin decay modeling based on:
 //! - Aerodynamic torque opposing spin
-//! - Skin friction effects
+//! - Calibrated roll-damping coefficients
 //! - Velocity-dependent decay rates
-//! - Surface roughness effects
+//! - Projectile shape and surface-finish presets
 
 use std::f64::consts::PI;
+
+const MATCH_REFERENCE_DECAY_RATE_PER_SECOND: f64 = 0.025;
+const GENERAL_REFERENCE_DECAY_RATE_PER_SECOND: f64 = 0.04;
 
 /// Parameters affecting spin decay rate
 #[derive(Debug, Clone, Copy)]
 pub struct SpinDecayParameters {
     /// Surface roughness in meters (typical: 0.1mm)
     pub surface_roughness: f64,
-    /// Very low for streamlined spinning bullets
+    /// Effective dimensionless roll-damping coefficient magnitude (`|C_lp|`) before applying
+    /// `form_factor`. The field name is retained for API compatibility.
     pub skin_friction_coefficient: f64,
     /// Shape factor for spin damping
     pub form_factor: f64,
@@ -22,34 +26,38 @@ pub struct SpinDecayParameters {
 impl SpinDecayParameters {
     /// Create default parameters
     pub fn new() -> Self {
+        // The effective coefficient (coefficient * form factor) is calibrated against the
+        // empirical 4%/s reference decay used by update_spin_rate for a 175gr .308 ogive.
         Self {
             surface_roughness: 0.0001,
-            skin_friction_coefficient: 0.00001,
+            skin_friction_coefficient: 0.00363,
             form_factor: 1.0,
         }
     }
 
     /// Get typical parameters for different bullet types
     pub fn from_bullet_type(bullet_type: &str) -> Self {
+        // Match bullets calibrate to the empirical 2.5%/s reference; the other presets calibrate
+        // to 4%/s after their shape form factor is applied.
         match bullet_type.to_lowercase().as_str() {
             "match" => Self {
                 surface_roughness: 0.00005,
-                skin_friction_coefficient: 0.000008,
+                skin_friction_coefficient: 0.00252,
                 form_factor: 0.9,
             },
             "hunting" => Self {
                 surface_roughness: 0.0001,
-                skin_friction_coefficient: 0.00001,
+                skin_friction_coefficient: 0.00363,
                 form_factor: 1.0,
             },
             "fmj" => Self {
                 surface_roughness: 0.00015,
-                skin_friction_coefficient: 0.000012,
+                skin_friction_coefficient: 0.00330,
                 form_factor: 1.1,
             },
             "cast" => Self {
                 surface_roughness: 0.0002,
-                skin_friction_coefficient: 0.000015,
+                skin_friction_coefficient: 0.00303,
                 form_factor: 1.2,
             },
             _ => Self::new(),
@@ -63,12 +71,14 @@ impl Default for SpinDecayParameters {
     }
 }
 
-/// Calculate the aerodynamic moment opposing spin
+/// Calculate the magnitude of the aerodynamic moment opposing spin.
 ///
-/// Based on:
-/// - Skin friction on the bullet surface
-/// - Pressure drag effects
-/// - Magnus moment damping
+/// Uses the conventional roll-damping relation
+/// `M = 1/4 * rho * V * S * d^2 * |C_lp| * |p|`, where `S` is projectile reference area.
+/// Here `C_lp` is the derivative with respect to reduced spin `p*d/(2*V)`; conventions using
+/// `p*d/V` report a coefficient smaller by a factor of two.
+/// The returned value is nonnegative; [`calculate_spin_decay_rate`] applies the direction that
+/// opposes the signed spin rate.
 pub fn calculate_spin_damping_moment(
     spin_rate_rad_s: f64,
     velocity_mps: f64,
@@ -77,34 +87,34 @@ pub fn calculate_spin_damping_moment(
     length_m: f64,
     decay_params: &SpinDecayParameters,
 ) -> f64 {
-    if spin_rate_rad_s == 0.0 || velocity_mps == 0.0 {
+    if !spin_rate_rad_s.is_finite()
+        || spin_rate_rad_s == 0.0
+        || !velocity_mps.is_finite()
+        || velocity_mps <= 0.0
+        || !air_density_kg_m3.is_finite()
+        || air_density_kg_m3 <= 0.0
+        || !caliber_m.is_finite()
+        || caliber_m <= 0.0
+        || !length_m.is_finite()
+        || length_m <= 0.0
+        || !decay_params.skin_friction_coefficient.is_finite()
+        || decay_params.skin_friction_coefficient <= 0.0
+        || !decay_params.form_factor.is_finite()
+        || decay_params.form_factor <= 0.0
+    {
         return 0.0;
     }
 
-    // Reynolds number based on spin
-    let radius = caliber_m / 2.0;
-    let tangential_velocity = spin_rate_rad_s * radius;
-    let _re_spin = air_density_kg_m3 * tangential_velocity * caliber_m / 1.81e-5; // Air viscosity
+    let reference_area = PI * (caliber_m / 2.0).powi(2);
+    let roll_damping_coefficient =
+        decay_params.skin_friction_coefficient * decay_params.form_factor;
 
-    // Skin friction coefficient (modified for spinning cylinder)
-    let cf = decay_params.skin_friction_coefficient;
-
-    // Surface area
-    let surface_area = PI * caliber_m * length_m;
-
-    // Tangential force due to skin friction
-    let f_tangential = 0.5 * air_density_kg_m3 * cf * surface_area * tangential_velocity.powi(2);
-
-    // Moment arm is the radius
-    let moment_skin = f_tangential * radius * decay_params.form_factor;
-
-    // Additional damping from Magnus effect
-    let spin_ratio = tangential_velocity / velocity_mps.max(1.0);
-    let magnus_damping_factor = 0.01 * spin_ratio; // Reduced empirical factor
-    let moment_magnus = magnus_damping_factor * moment_skin;
-
-    // Total damping moment (always opposes spin)
-    moment_skin + moment_magnus
+    0.25 * air_density_kg_m3
+        * velocity_mps
+        * reference_area
+        * caliber_m.powi(2)
+        * roll_damping_coefficient
+        * spin_rate_rad_s.abs()
 }
 
 /// Calculate moment of inertia about the longitudinal axis
@@ -165,9 +175,9 @@ pub fn calculate_spin_decay_rate(
     // Calculate moment of inertia
     let moment_of_inertia = calculate_moment_of_inertia(mass_kg, caliber_m, length_m, bullet_shape);
 
-    // Angular deceleration = -M / I
-    if moment_of_inertia > 0.0 {
-        -damping_moment / moment_of_inertia
+    // Apply the damping-moment magnitude opposite to either signed spin direction.
+    if moment_of_inertia > 0.0 && spin_rate_rad_s.is_finite() {
+        -spin_rate_rad_s.signum() * damping_moment / moment_of_inertia
     } else {
         0.0
     }
@@ -222,13 +232,13 @@ pub fn update_spin_rate(
     let base_decay_rate = if let Some(params) = decay_params {
         if params.form_factor < 1.0 {
             // Match bullet
-            0.025 // 2.5% per second
+            MATCH_REFERENCE_DECAY_RATE_PER_SECOND
         } else {
             // Hunting/FMJ bullet
-            0.04 // 4% per second
+            GENERAL_REFERENCE_DECAY_RATE_PER_SECOND
         }
     } else {
-        0.04 // Default to hunting bullet
+        GENERAL_REFERENCE_DECAY_RATE_PER_SECOND
     };
 
     // Adjusted decay rate blending empirical model with physical parameters.
@@ -393,6 +403,177 @@ mod tests {
         // Decay rate should be negative (spin decreases)
         assert!(decay_rate < 0.0);
         assert!(decay_rate > -1000.0); // Should be reasonable magnitude
+    }
+
+    #[test]
+    fn physical_spin_decay_matches_empirical_reference_rate() {
+        let spin_rate = 17_000.0;
+        let velocity = 800.0;
+        let cases = [
+            SpinDecayParameters::from_bullet_type("match"),
+            SpinDecayParameters::from_bullet_type("hunting"),
+        ];
+
+        for params in cases {
+            let actual_rate = calculate_spin_decay_rate(
+                spin_rate, velocity, 1.225, 175.0, 0.308, 1.3, &params, "ogive",
+            );
+            let empirical_spin_after_one_second = update_spin_rate(
+                spin_rate,
+                1.0,
+                velocity,
+                1.225,
+                175.0,
+                0.308,
+                1.3,
+                Some(&params),
+            );
+            let expected_rate = (empirical_spin_after_one_second / spin_rate).ln() * spin_rate;
+
+            assert!(
+                (actual_rate - expected_rate).abs() <= expected_rate.abs() * 0.05,
+                "physical rate {actual_rate} did not match empirical reference {expected_rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn roll_damping_uses_canonical_reduced_spin_moment() {
+        let params = SpinDecayParameters {
+            surface_roughness: 0.0,
+            skin_friction_coefficient: 0.01,
+            form_factor: 1.0,
+        };
+        let moment = calculate_spin_damping_moment(
+            17_000.0,
+            800.0,
+            1.225,
+            0.308 * 0.0254,
+            1.3 * 0.0254,
+            &params,
+        );
+        let expected = 1.225_300_524_995_314e-4;
+
+        assert!((moment - expected).abs() <= expected * 1e-12);
+    }
+
+    #[test]
+    fn roll_damping_moment_has_physical_scaling() {
+        let params = SpinDecayParameters::from_bullet_type("match");
+        let caliber = 0.308 * 0.0254;
+        let length = 1.3 * 0.0254;
+        let moment = |spin, velocity, density, diameter, projectile_length| {
+            calculate_spin_damping_moment(
+                spin,
+                velocity,
+                density,
+                diameter,
+                projectile_length,
+                &params,
+            )
+        };
+        let base = moment(17_000.0, 800.0, 1.225, caliber, length);
+        let doubled_coefficient_params = SpinDecayParameters {
+            skin_friction_coefficient: 2.0 * params.skin_friction_coefficient,
+            ..params
+        };
+        let doubled_form_factor_params = SpinDecayParameters {
+            form_factor: 2.0 * params.form_factor,
+            ..params
+        };
+        let cases = [
+            ("spin", moment(34_000.0, 800.0, 1.225, caliber, length), 2.0),
+            (
+                "velocity",
+                moment(17_000.0, 1_600.0, 1.225, caliber, length),
+                2.0,
+            ),
+            (
+                "density",
+                moment(17_000.0, 800.0, 2.45, caliber, length),
+                2.0,
+            ),
+            (
+                "caliber",
+                moment(17_000.0, 800.0, 1.225, 2.0 * caliber, length),
+                16.0,
+            ),
+            (
+                "length",
+                moment(17_000.0, 800.0, 1.225, caliber, 2.0 * length),
+                1.0,
+            ),
+            (
+                "coefficient",
+                calculate_spin_damping_moment(
+                    17_000.0,
+                    800.0,
+                    1.225,
+                    caliber,
+                    length,
+                    &doubled_coefficient_params,
+                ),
+                2.0,
+            ),
+            (
+                "form factor",
+                calculate_spin_damping_moment(
+                    17_000.0,
+                    800.0,
+                    1.225,
+                    caliber,
+                    length,
+                    &doubled_form_factor_params,
+                ),
+                2.0,
+            ),
+        ];
+
+        for (name, moment, expected_ratio) in cases {
+            let actual_ratio = moment / base;
+            assert!(
+                (actual_ratio - expected_ratio).abs() <= expected_ratio * 1e-12,
+                "{name} scaling was {actual_ratio}, expected {expected_ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn spin_decay_always_opposes_spin_direction() {
+        let params = SpinDecayParameters::from_bullet_type("match");
+        let positive =
+            calculate_spin_decay_rate(17_000.0, 800.0, 1.225, 175.0, 0.308, 1.3, &params, "ogive");
+        let negative =
+            calculate_spin_decay_rate(-17_000.0, 800.0, 1.225, 175.0, 0.308, 1.3, &params, "ogive");
+
+        assert!(positive < 0.0);
+        assert!(negative > 0.0);
+        assert!((positive + negative).abs() <= positive.abs() * 1e-12);
+    }
+
+    #[test]
+    fn roll_damping_rejects_nonphysical_inputs() {
+        let params = SpinDecayParameters::from_bullet_type("match");
+        let invalid_states = [
+            (0.0, 800.0, 1.225, 0.00782, 0.033),
+            (17_000.0, 0.0, 1.225, 0.00782, 0.033),
+            (17_000.0, -800.0, 1.225, 0.00782, 0.033),
+            (17_000.0, 800.0, 0.0, 0.00782, 0.033),
+            (17_000.0, 800.0, -1.225, 0.00782, 0.033),
+            (17_000.0, 800.0, 1.225, 0.0, 0.033),
+            (17_000.0, 800.0, 1.225, -0.00782, 0.033),
+            (17_000.0, 800.0, 1.225, 0.00782, 0.0),
+            (17_000.0, 800.0, 1.225, 0.00782, -0.033),
+        ];
+
+        for (spin, velocity, density, caliber, length) in invalid_states {
+            let moment =
+                calculate_spin_damping_moment(spin, velocity, density, caliber, length, &params);
+            assert_eq!(
+                moment, 0.0,
+                "nonphysical state produced damping moment {moment}"
+            );
+        }
     }
 
     #[test]
