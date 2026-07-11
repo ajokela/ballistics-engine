@@ -2686,6 +2686,26 @@ fn fit_value_at(
     None
 }
 
+fn fit_residual_sse(
+    trajectory: &[TrajectoryPoint],
+    observations: &[(f64, f64)],
+    mode: BcFitMode,
+    drop_offset: f64,
+) -> Option<f64> {
+    if observations.is_empty() {
+        return None;
+    }
+    let mut total = 0.0;
+    for (target_dist, target_val) in observations {
+        // Scores are comparable only when every candidate contains every residual term.
+        // Reject a trajectory that terminates before even one observation (MBA-1178).
+        let value = fit_value_at(trajectory, *target_dist, mode, drop_offset)?;
+        let error = value - target_val;
+        total += error * error;
+    }
+    Some(total)
+}
+
 /// Estimate a BC by fitting a simulated trajectory to measured data, for a chosen drag
 /// model (G1, G7, …) and fit basis (drop or velocity). Uses a coarse 0.01 sweep over
 /// plausible BCs followed by a 0.001 local refine around the coarse best.
@@ -2723,7 +2743,7 @@ pub fn estimate_bc_fit(
     // above the bore at the muzzle: drop = sight_height - y. Bore-referenced fits use 0.
     let drop_offset = if zero_range.is_some() { sight_height } else { 0.0 };
 
-    // Sum of squared residuals for a trial BC; None if the solve can't reach the data.
+    // Sum of squared residuals for a trial BC; None unless the solve reaches ALL data points.
     let sse = |bc_value: f64| -> Option<f64> {
         let mut inputs = BallisticInputs {
             muzzle_velocity: velocity,
@@ -2756,20 +2776,7 @@ pub fn estimate_bc_fit(
             TrajectorySolver::new(inputs, WindConditions::default(), atmosphere.clone());
         solver.set_max_range(max_dist * 1.5);
         let result = solver.solve().ok()?;
-        let mut total = 0.0;
-        let mut matched = 0;
-        for (target_dist, target_val) in points {
-            if let Some(v) = fit_value_at(&result.points, *target_dist, mode, drop_offset) {
-                let e = v - target_val;
-                total += e * e;
-                matched += 1;
-            }
-        }
-        if matched == 0 {
-            None
-        } else {
-            Some(total)
-        }
+        fit_residual_sse(&result.points, points, mode, drop_offset)
     };
 
     // Physical BC search range, per drag model. Real G7 BCs top out well under 0.5 (0.7 is
@@ -2817,6 +2824,8 @@ pub fn estimate_bc_fit(
     // A solution sitting on the search boundary means the data didn't determine an interior
     // optimum — the fit ran to the floor/ceiling. Flag it so callers don't trust the number.
     let at_bound = best_bc <= bc_min + 0.011 || best_bc >= bc_max - 0.011;
+    // fit_residual_sse rejects partial trajectories, so best_sse contains exactly one residual
+    // per input point and this denominator is also the honest matched-point count.
     let rms_error = (best_sse / points.len() as f64).sqrt();
     Ok(BcEstimate {
         bc: best_bc,
@@ -2979,6 +2988,42 @@ mod monte_carlo_wind_sampling_tests {
         let signed_z = -signed_speed * direction.sin();
         assert!((normalized_x - signed_x).abs() < 1e-12);
         assert!((normalized_z - signed_z).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod bc_fit_objective_tests {
+    use super::*;
+
+    fn velocity_point(range_m: f64, velocity_mps: f64) -> TrajectoryPoint {
+        TrajectoryPoint {
+            time: 0.0,
+            position: Vector3::new(range_m, 0.0, 0.0),
+            velocity_magnitude: velocity_mps,
+            kinetic_energy: 0.0,
+        }
+    }
+
+    #[test]
+    fn candidate_that_misses_an_observation_has_no_score() {
+        let trajectory = vec![velocity_point(0.0, 800.0), velocity_point(100.0, 700.0)];
+        let observations = vec![(50.0, 750.0), (150.0, 600.0)];
+
+        assert!(
+            fit_residual_sse(&trajectory, &observations, BcFitMode::Velocity, 0.0).is_none(),
+            "a candidate that reaches only one of two observations must not compete on partial SSE"
+        );
+
+        let complete_observations = vec![(50.0, 740.0), (100.0, 680.0)];
+        assert_eq!(
+            fit_residual_sse(
+                &trajectory,
+                &complete_observations,
+                BcFitMode::Velocity,
+                0.0,
+            ),
+            Some(500.0)
+        );
     }
 }
 
