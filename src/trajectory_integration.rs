@@ -277,15 +277,15 @@ pub struct TrajectoryParams {
 
 /// Build the loop-invariant BallisticInputs for the derivatives function ONCE per integration,
 /// instead of rebuilding it (a "none".to_string() alloc plus bc_segments / custom_drag_table
-/// clones) on every derivative evaluation (4x per RK4 step, 7x per RK45 step). muzzle_velocity is
-/// set to 0.0 because compute_derivatives never reads it on this path; every other field depends
-/// only on `params`, so the struct is constant for the whole integration.
-fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
+/// clones) on every derivative evaluation (4x per RK4 step, 7x per RK45 step). The launch-speed
+/// magnitude supplies the muzzle-set Magnus spin; every other field depends only on `params`, so
+/// the struct is constant for the whole integration.
+fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> BallisticInputs {
     let mut inputs = BallisticInputs {
         bc_value: params.bc,
         bc_type: params.drag_model,
-        bullet_mass: params.mass_kg,             // kg
-        muzzle_velocity: 0.0,                    // unread by compute_derivatives on this path
+        bullet_mass: params.mass_kg, // kg
+        muzzle_velocity: muzzle_velocity_mps,
         bullet_diameter: params.bullet_diameter, // MBA-717: real geometry, not placeholders
         bullet_length: params.bullet_length,
         twist_rate: params.twist_rate,
@@ -447,7 +447,9 @@ pub fn integrate_trajectory(
 
     // Build the (loop-invariant) derivative inputs once for the whole integration, instead of
     // rebuilding the struct on every derivative evaluation.
-    let inputs = build_inputs(&params);
+    let muzzle_velocity_mps =
+        Vector3::new(initial_state[3], initial_state[4], initial_state[5]).norm();
+    let inputs = build_inputs(&params, muzzle_velocity_mps);
 
     match method {
         "RK4" => {
@@ -768,13 +770,43 @@ mod tests {
     }
 
     #[test]
+    fn derivative_inputs_preserve_initial_velocity_as_muzzle_speed() {
+        let params = create_test_params(1_000.0);
+        let launch_velocity = Vector3::new(700.0, 30.0, -20.0);
+        let inputs = build_inputs(&params, launch_velocity.norm());
+
+        assert_eq!(
+            inputs.muzzle_velocity.to_bits(),
+            launch_velocity.norm().to_bits()
+        );
+    }
+
+    #[test]
+    fn integrated_magnus_retains_nonzero_launch_spin() {
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
+        let mut params = create_test_params(1_000.0);
+        params.enable_magnus = true;
+
+        let trajectory =
+            integrate_trajectory(initial_state, (0.0, 0.1), params, "RK4", 1e-6, 0.001);
+        let lateral_position = trajectory.last().expect("trajectory is empty").1[2];
+
+        assert!(
+            lateral_position.is_finite() && lateral_position > 0.0,
+            "right-twist Magnus should retain a nonzero launch spin, got z={lateral_position}"
+        );
+    }
+
+    #[test]
     fn rk45_retries_rejected_wind_boundary_step() {
         let initial_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
         let mut params = create_test_params(100.0);
         params.wind_segments = vec![(0.0, 90.0, 4.0), (1_000.0, 90.0, 10_000.0)];
 
         let state = Vector6::from_row_slice(&initial_state);
-        let inputs = build_inputs(&params);
+        let launch_speed =
+            Vector3::new(initial_state[3], initial_state[4], initial_state[5]).norm();
+        let inputs = build_inputs(&params, launch_speed);
         let initial_dt = 0.01;
         let tolerance = 1e-6;
         let (rejected_state, suggested_dt, error) =

@@ -2096,8 +2096,13 @@ impl TrajectorySolver {
             && self.inputs.bullet_diameter > 0.0
             && self.inputs.twist_rate > 0.0
         {
-            let (_, spin_rad_s) =
-                crate::spin_drift::calculate_spin_rate(velocity_magnitude, self.inputs.twist_rate);
+            let diameter_m = self.inputs.bullet_diameter;
+            let (spin_rad_s, spin_param) = crate::spin_drift::calculate_magnus_spin_state(
+                self.inputs.muzzle_velocity,
+                velocity_magnitude,
+                self.inputs.twist_rate,
+                diameter_m,
+            );
             // Stability (Sg) is a launch property, so its Miller density correction uses the
             // STATION temperature/pressure (base_*); the Mach that feeds the Magnus-moment
             // coefficient uses the LOCAL speed of sound recomputed above.
@@ -2149,8 +2154,6 @@ impl TrajectorySolver {
             );
 
             // Proper McCoy Magnus FORCE: F = q S C_Npa (pd/2V) sin(alpha_R).
-            let diameter_m = self.inputs.bullet_diameter; // already meters
-            let spin_param = spin_rad_s * diameter_m / (2.0 * velocity_magnitude);
             let c_np = crate::derivatives::calculate_magnus_moment_coefficient(mach);
             let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
             let magnus_force = 0.5
