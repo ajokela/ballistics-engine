@@ -3318,8 +3318,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
 
                     // Build API request
-                    let zero_range_metric =
-                        final_auto_zero.map(|d| UnitConverter::distance_to_metric(d, cli.units));
+                    // With no --auto-zero, use 100 in the active CLI distance units.
+                    // Convert that fallback before the API request so imperial means
+                    // 100 yd (91.44 m), not the previous 100 m / 109.4 yd (MBA-1158).
+                    let zero_range_metric = final_auto_zero
+                        .map(|d| UnitConverter::distance_to_metric(d, cli.units))
+                        .unwrap_or_else(|| UnitConverter::distance_to_metric(100.0, cli.units));
 
                     let api_request = TrajectoryRequestBuilder::new()
                         .bc_value(trued_bc)
@@ -3330,7 +3334,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .bullet_mass(mass_metric * 1000.0) // kg to grams
                         .muzzle_velocity(velocity_metric)
                         .target_distance(max_range_metric)
-                        .zero_range(zero_range_metric.unwrap_or(100.0))
+                        .zero_range(zero_range_metric)
                         .wind_speed(wind_speed_metric)
                         .wind_angle(final_wind_direction)
                         .temperature(temperature_metric)
@@ -3388,7 +3392,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     DragModelArg::G7 => DragModel::G7,
                                 };
 
-                                let local_inputs = BallisticInputs {
+                                let mut local_inputs = BallisticInputs {
                                     bc_value: trued_bc,
                                     bc_type: drag_model_enum,
                                     bullet_mass: mass_metric,
@@ -3489,6 +3493,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     ..Default::default()
                                 };
 
+                                // The API always zeroes the shot at `zero_range_metric`. If the
+                                // user did not supply --auto-zero, zero the local comparison leg
+                                // at that same default range instead of firing it at the raw
+                                // --angle while comparing it to a zeroed API trajectory.
+                                if final_auto_zero.is_none() {
+                                    local_inputs.muzzle_angle =
+                                        ballistics_engine::calculate_zero_angle_with_conditions(
+                                            local_inputs.clone(),
+                                            zero_range_metric,
+                                            bore_height_metric + sight_height_metric,
+                                            local_wind.clone(),
+                                            local_atmo.clone(),
+                                        )?;
+                                }
+
                                 let mut local_solver =
                                     TrajectorySolver::new(local_inputs, local_wind, local_atmo);
                                 local_solver.set_max_range(max_range_metric);
@@ -3538,11 +3557,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                                 if let Some(ref local_res) = local_result {
                                     if let Some(pos) = local_res.position_at_range(point.range) {
+                                        // API drop is signed height relative to the horizontal
+                                        // line of sight (negative below). Local `pos.y` is an
+                                        // absolute height above ground, so remove both bore height
+                                        // and the sight-over-bore offset before comparing.
+                                        let local_drop =
+                                            pos.y - (bore_height_metric + sight_height_metric);
                                         let local_drop_display =
                                             if cli.units == UnitSystem::Imperial {
-                                                pos.y * 39.3701
+                                                local_drop * 39.3701
                                             } else {
-                                                pos.y
+                                                local_drop
                                             };
                                         let delta = api_drop_display - local_drop_display;
                                         println!(

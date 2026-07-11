@@ -1,6 +1,16 @@
 use serde_json::Value;
+#[cfg(feature = "online")]
+use std::fs;
+#[cfg(feature = "online")]
+use std::io::{Read, Write};
+#[cfg(feature = "online")]
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(feature = "online")]
+use std::thread;
+#[cfg(feature = "online")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn get_cli_binary() -> PathBuf {
     // Try to find the built binary
@@ -18,6 +28,132 @@ fn get_cli_binary() -> PathBuf {
     }
 
     path
+}
+
+#[cfg(feature = "online")]
+fn accepted_tos_home() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let home = std::env::temp_dir().join(format!(
+        "ballistics-compare-test-{}-{nonce}",
+        std::process::id()
+    ));
+    let config_dir = home.join(".ballistics");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("tos.json"),
+        r#"{
+  "accepted": true,
+  "accepted_version": "2026-01-26",
+  "accepted_at": "test",
+  "terms_hash": "test"
+}"#,
+    )
+    .unwrap();
+    home
+}
+
+#[cfg(feature = "online")]
+fn comparison_rows(stdout: &str) -> Vec<[f64; 4]> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let values: Vec<f64> = line
+                .split(['║', '│'])
+                .filter_map(|cell| cell.trim().parse().ok())
+                .collect();
+            (values.len() == 4).then(|| [values[0], values[1], values[2], values[3]])
+        })
+        .collect()
+}
+
+#[cfg(feature = "online")]
+#[test]
+fn compare_uses_api_drop_frame_and_same_default_zero() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let bytes = stream.read(&mut buffer).unwrap();
+            if bytes == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..bytes]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let body = r#"{
+  "results": {"barrel_angle": 0.0},
+  "trajectory": [
+    {"distance": {"value": 0.0}, "drop": {"value": -1.5}, "wind_drift": 0.0, "velocity": 2600.0, "energy": 2600.0, "time": 0.0},
+    {"distance": {"value": 100.0}, "drop": {"value": 0.0}, "wind_drift": 0.0, "velocity": 2400.0, "energy": 2200.0, "time": 0.12}
+  ]
+}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+        String::from_utf8(request).unwrap()
+    });
+
+    let home = accepted_tos_home();
+    let output = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "trajectory",
+            "--velocity",
+            "2600",
+            "--bc",
+            "0.243",
+            "--mass",
+            "175",
+            "--diameter",
+            "0.308",
+            "--drag-model",
+            "g7",
+            "--max-range",
+            "200",
+            "--sight-height",
+            "1.5",
+            "--compare",
+            "--ignore-ground-impact",
+            "--api-url",
+            &format!("http://{address}"),
+        ])
+        .output()
+        .expect("failed to execute comparison command");
+    let request = server.join().unwrap();
+    fs::remove_dir_all(home).unwrap();
+
+    assert!(
+        output.status.success(),
+        "comparison failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        request.lines().next().unwrap().contains("zero_distance=100.0"),
+        "imperial comparison must use the API's 100-yard default zero: {request}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rows = comparison_rows(&stdout);
+    assert_eq!(rows.len(), 2, "unexpected comparison output:\n{stdout}");
+    assert_eq!(rows[0], [0.0, -1.5, -1.5, 0.0]);
+    assert!(
+        rows[1][2].abs() <= 0.05 && rows[1][3].abs() <= 0.05,
+        "both legs must be zeroed at 100 yards: {:?}\n{stdout}",
+        rows[1]
+    );
 }
 
 #[test]
