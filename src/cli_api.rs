@@ -1938,13 +1938,11 @@ impl TrajectorySolver {
         {
             // Find matching segment for current velocity.
             (
-                segments
-                    .iter()
-                    .find(|seg| {
-                        velocity_fps >= seg.velocity_min && velocity_fps < seg.velocity_max
-                    })
-                    .map(|seg| seg.bc_value)
-                    .unwrap_or(self.inputs.bc_value),
+                crate::bc_estimation::velocity_segment_bc(
+                    velocity_fps,
+                    segments,
+                    self.inputs.bc_value,
+                ),
                 true,
             )
         } else if let Some(segments) = self

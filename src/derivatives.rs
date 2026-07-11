@@ -1,7 +1,7 @@
 use crate::atmosphere::{
     calculate_air_density_cimp, get_direct_atmosphere, get_local_atmosphere_humid, AtmoSock,
 };
-use crate::bc_estimation::BCSegmentEstimator;
+use crate::bc_estimation::{velocity_segment_bc, BCSegmentEstimator};
 use crate::constants::*;
 use crate::drag::get_drag_coefficient_full;
 use crate::form_factor::apply_form_factor_to_drag;
@@ -637,23 +637,21 @@ fn get_bc_for_velocity(velocity_fps: f64, inputs: &BallisticInputs, bc_used: f64
     }
 
     // Try direct BC segments data first
-    if let Some(ref bc_segments_data) = inputs.bc_segments_data {
-        for segment in bc_segments_data {
-            if velocity_fps >= segment.velocity_min && velocity_fps <= segment.velocity_max {
-                return segment.bc_value;
-            }
-        }
+    if let Some(bc_segments_data) = inputs
+        .bc_segments_data
+        .as_ref()
+        .filter(|segments| !segments.is_empty())
+    {
+        // An explicit table is authoritative even when this velocity lies in a coverage gap.
+        // Do not silently replace it with an auto-estimated table after a miss.
+        return velocity_segment_bc(velocity_fps, bc_segments_data, bc_used);
     }
 
     // Try BC estimation if we have bullet details but no segments. MBA-955: the estimation is
     // factored into estimate_bc_segments_for so the per-integration setup (build_inputs) can
     // pre-populate bc_segments_data ONCE rather than rebuilding it here every step.
     if let Some(segments) = estimate_bc_segments_for(inputs, bc_used) {
-        for segment in &segments {
-            if velocity_fps >= segment.velocity_min && velocity_fps <= segment.velocity_max {
-                return segment.bc_value;
-            }
-        }
+        return velocity_segment_bc(velocity_fps, &segments, bc_used);
     }
 
     // Fallback to constant BC
@@ -757,6 +755,31 @@ mod tests {
                 b[component]
             );
         }
+    }
+
+    #[test]
+    fn explicit_velocity_segment_gap_uses_scalar_bc_without_auto_estimation() {
+        let mut inputs = create_test_inputs();
+        inputs.bc_value = 0.91;
+        inputs.use_bc_segments = true;
+        inputs.bc_segments_data = Some(vec![
+            crate::BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 999.0,
+                bc_value: 0.2,
+            },
+            crate::BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.3,
+            },
+        ]);
+
+        assert_eq!(
+            get_bc_for_velocity(999.5, &inputs, inputs.bc_value),
+            inputs.bc_value,
+            "an explicit table gap must not be replaced by an auto-estimated segment"
+        );
     }
 
     #[test]

@@ -5,10 +5,11 @@
 
 use crate::{
     atmosphere::{calculate_air_density_cimp, get_local_atmosphere_humid, AtmoSock},
+    bc_estimation::velocity_segment_bc,
     constants::{G_ACCEL_MPS2, MPS_TO_FPS},
     drag::get_drag_coefficient,
     wind::WindSock,
-    BCSegmentData, DragModel, InternalBallisticInputs as BallisticInputs,
+    DragModel, InternalBallisticInputs as BallisticInputs,
 };
 use nalgebra::Vector3;
 
@@ -643,7 +644,7 @@ fn compute_derivatives(
 
         // Get BC value (potentially from segments)
         let bc_current = if has_bc_segments_data && inputs.bc_segments_data.is_some() {
-            get_bc_from_velocity_segments(v_fps, inputs.bc_segments_data.as_ref().unwrap())
+            velocity_segment_bc(v_fps, inputs.bc_segments_data.as_ref().unwrap(), bc)
         } else if has_bc_segments && inputs.bc_segments.is_some() {
             crate::derivatives::interpolated_bc(
                 mach,
@@ -714,31 +715,6 @@ fn compute_derivatives(
 
     // Return derivatives [vx, vy, vz, ax, ay, az]
     [vel.x, vel.y, vel.z, accel.x, accel.y, accel.z]
-}
-
-/// Get BC from velocity-based segments
-fn get_bc_from_velocity_segments(velocity_fps: f64, segments: &[BCSegmentData]) -> f64 {
-    for segment in segments {
-        if velocity_fps >= segment.velocity_min && velocity_fps <= segment.velocity_max {
-            return segment.bc_value;
-        }
-    }
-
-    // If no matching segment, use the BC from the closest segment
-    if let Some(first) = segments.first() {
-        if velocity_fps < first.velocity_min {
-            return first.bc_value;
-        }
-    }
-
-    if let Some(last) = segments.last() {
-        if velocity_fps > last.velocity_max {
-            return last.bc_value;
-        }
-    }
-
-    // Fallback (shouldn't reach here if segments are properly defined)
-    0.5
 }
 
 /// Fast integration with explicit wind segments using RK45
@@ -913,6 +889,7 @@ pub fn fast_integrate_with_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BCSegmentData;
 
     #[test]
     fn inclined_positions_at_same_world_altitude_have_same_fast_acceleration() {
@@ -1007,13 +984,13 @@ mod tests {
             },
         ];
 
-        assert_eq!(get_bc_from_velocity_segments(500.0, &segments), 0.5);
-        assert_eq!(get_bc_from_velocity_segments(1500.0, &segments), 0.52);
-        assert_eq!(get_bc_from_velocity_segments(2500.0, &segments), 0.55);
+        assert_eq!(velocity_segment_bc(500.0, &segments, 0.5), 0.5);
+        assert_eq!(velocity_segment_bc(1500.0, &segments, 0.5), 0.52);
+        assert_eq!(velocity_segment_bc(2500.0, &segments, 0.5), 0.55);
 
         // Test edge cases
-        assert_eq!(get_bc_from_velocity_segments(-100.0, &segments), 0.5); // Below min
-        assert_eq!(get_bc_from_velocity_segments(3500.0, &segments), 0.55); // Above max
+        assert_eq!(velocity_segment_bc(-100.0, &segments, 0.5), 0.5); // Below min
+        assert_eq!(velocity_segment_bc(3500.0, &segments, 0.5), 0.55); // Above max
     }
 
     #[test]
@@ -1078,12 +1055,12 @@ mod tests {
             bc_value: 0.5,
         }];
 
-        assert_eq!(get_bc_from_velocity_segments(500.0, &single_segment), 0.5); // Below
-        assert_eq!(get_bc_from_velocity_segments(1500.0, &single_segment), 0.5); // In range
-        assert_eq!(get_bc_from_velocity_segments(2500.0, &single_segment), 0.5); // Above
+        assert_eq!(velocity_segment_bc(500.0, &single_segment, 0.5), 0.5); // Below
+        assert_eq!(velocity_segment_bc(1500.0, &single_segment, 0.5), 0.5); // In range
+        assert_eq!(velocity_segment_bc(2500.0, &single_segment, 0.5), 0.5); // Above
 
         // Test with exact boundary values
-        // Note: When velocity matches boundary, first matching segment wins
+        // Half-open bands make a shared boundary belong to the band that starts there.
         let segments = vec![
             BCSegmentData {
                 velocity_min: 0.0,
@@ -1097,9 +1074,45 @@ mod tests {
             },
         ];
 
-        assert_eq!(get_bc_from_velocity_segments(1000.0, &segments), 0.50); // At second segment start
-        assert_eq!(get_bc_from_velocity_segments(0.0, &segments), 0.45); // At min
-        assert_eq!(get_bc_from_velocity_segments(999.0, &segments), 0.45); // At first segment max
+        assert_eq!(velocity_segment_bc(1000.0, &segments, 0.7), 0.50); // At second segment start
+        assert_eq!(velocity_segment_bc(0.0, &segments, 0.7), 0.45); // At min
+        assert_eq!(velocity_segment_bc(998.999, &segments, 0.7), 0.45); // Just below exclusive max
+        assert_eq!(velocity_segment_bc(999.0, &segments, 0.7), 0.7); // Gap starts at exclusive max
+    }
+
+    #[test]
+    fn velocity_segment_gaps_and_clamps_do_not_depend_on_order() {
+        let fallback_bc = 0.73;
+        let ascending_with_gap = vec![
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 999.0,
+                bc_value: 0.6,
+            },
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.8,
+            },
+        ];
+        assert_eq!(
+            velocity_segment_bc(999.5, &ascending_with_gap, fallback_bc),
+            fallback_bc,
+            "coverage gaps must use the projectile's base BC"
+        );
+
+        let mut descending = ascending_with_gap.clone();
+        descending.reverse();
+        assert_eq!(
+            velocity_segment_bc(-100.0, &descending, fallback_bc),
+            0.6,
+            "below coverage must clamp to the lowest-velocity band"
+        );
+        assert_eq!(
+            velocity_segment_bc(2500.0, &descending, fallback_bc),
+            0.8,
+            "above coverage must clamp to the highest-velocity band"
+        );
     }
 
     #[test]
@@ -1107,8 +1120,8 @@ mod tests {
         let empty_segments: Vec<BCSegmentData> = vec![];
 
         // With empty segments, should return fallback value
-        let result = get_bc_from_velocity_segments(1500.0, &empty_segments);
-        assert_eq!(result, 0.5); // Fallback value
+        let result = velocity_segment_bc(1500.0, &empty_segments, 0.73);
+        assert_eq!(result, 0.73); // Caller-provided fallback value
     }
 
     #[test]
