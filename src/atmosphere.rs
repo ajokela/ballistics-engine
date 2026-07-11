@@ -246,20 +246,26 @@ pub fn calculate_atmosphere(
     // calculate_atmosphere, so there is no second (Arden-Buck ideal-gas) density path to drift.
     let density = calculate_air_density_cimp(temp_c, pressure_pa / 100.0, humidity_clamped);
 
-    // Speed of sound in moist air (Cramer, 1993). Extracted into `moist_speed_of_sound` so the
-    // integrators can share it; its vapor pressure comes from the SAME IAPWS saturation formula
+    // Speed of sound uses an ideal-gas moist-air mixture approximation, first order in the
+    // water-vapor mole fraction. Extracted into `moist_speed_of_sound` so the integrators can
+    // share it; its vapor pressure comes from the SAME IAPWS saturation formula
     // (`enhanced_saturation_vapor_pressure`) + CIPM enhancement factor that the density above
-    // uses, so ONE vapor formula feeds both density and c.
+    // uses. Only the vapor fraction is shared; the acoustic relation remains ideal-gas.
     let speed_of_sound = moist_speed_of_sound(temp_k, pressure_pa, humidity_clamped);
 
     (density, speed_of_sound)
 }
 
-/// Speed of sound in moist air (Cramer, 1993).
+/// Speed of sound using an ideal-gas moist-air mixture approximation, first order in the
+/// water-vapor mole fraction.
 ///
 /// The water-vapor mole fraction is derived from the SAME IAPWS saturation vapor pressure
 /// (`enhanced_saturation_vapor_pressure`) and CIPM-2007 enhancement factor used by
-/// [`calculate_air_density_cimp`], so a single vapor formula feeds both density and c.
+/// [`calculate_air_density_cimp`], so a single vapor formula feeds both density and c. Only the
+/// vapor fraction is shared with the CIPM path; the acoustic relation itself remains ideal-gas.
+/// The mixture applies first-order humidity corrections to the dry-air heat-capacity ratio and
+/// gas constant, then evaluates `sqrt(gamma * R * T)`. It is not Cramer's full real-gas
+/// polynomial and does not include Cramer's pressure or carbon-dioxide terms.
 ///
 /// # Arguments
 /// * `temp_k` - Temperature in Kelvin
