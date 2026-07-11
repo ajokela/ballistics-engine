@@ -1419,7 +1419,7 @@ enum ProfileAction {
         #[arg(long, default_value = "g1")]
         drag_model: DragModelArg,
 
-        /// Barrel twist rate (inches per turn)
+        /// Barrel twist rate (inches per turn for imperial, mm per turn for metric)
         #[arg(long)]
         twist_rate: Option<f64>,
 
@@ -1475,7 +1475,7 @@ enum ProfileAction {
         #[arg(long)]
         use_bc_segments: Option<bool>,
 
-        /// Bullet length in inches (for BC table lookup)
+        /// Bullet length (inches for imperial, mm for metric; used for BC table lookup)
         #[arg(long)]
         bullet_length: Option<f64>,
     },
@@ -1909,10 +1909,56 @@ impl UnitConverter {
         }
     }
 
+    fn mass_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val * 1000.0,          // kg to grams
+            UnitSystem::Imperial => val / 0.00006479891, // kg to grains
+        }
+    }
+
+    fn diameter_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val * 1000.0,   // meters to mm
+            UnitSystem::Imperial => val / 0.0254, // meters to inches
+        }
+    }
+
+    fn sight_height_from_metric(val: f64, units: UnitSystem) -> f64 {
+        Self::diameter_from_metric(val, units)
+    }
+
     fn distance_from_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val / 0.9144, // meters to yards
+        }
+    }
+
+    fn wind_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val / 0.44704, // m/s to mph
+        }
+    }
+
+    fn temperature_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val * 9.0 / 5.0 + 32.0, // Celsius to Fahrenheit
+        }
+    }
+
+    fn pressure_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val / 33.8639, // hPa to inHg
+        }
+    }
+
+    fn altitude_from_metric(val: f64, units: UnitSystem) -> f64 {
+        match units {
+            UnitSystem::Metric => val,
+            UnitSystem::Imperial => val / 0.3048, // meters to feet
         }
     }
 
@@ -1921,6 +1967,94 @@ impl UnitConverter {
             UnitSystem::Metric => val,
             UnitSystem::Imperial => val * 0.737562, // Joules to ft-lbs
         }
+    }
+}
+
+impl ProfileData {
+    /// Convert a loaded profile's display-unit values into the active CLI unit system before
+    /// merging them with explicit arguments. The persisted profile remains unchanged.
+    fn converted_to(mut self, target: UnitSystem) -> Result<Self, Box<dyn Error>> {
+        let source = match self.units.trim().to_ascii_lowercase().as_str() {
+            "imperial" => UnitSystem::Imperial,
+            "metric" => UnitSystem::Metric,
+            other => {
+                return Err(format!(
+                    "Profile '{}' has unsupported units '{}'; expected 'imperial' or 'metric'",
+                    self.name, other
+                )
+                .into())
+            }
+        };
+
+        // Avoid needless round trips (and preserve every stored bit) for the common same-unit load.
+        if source == target {
+            return Ok(self);
+        }
+
+        self.velocity = UnitConverter::velocity_from_metric(
+            UnitConverter::velocity_to_metric(self.velocity, source),
+            target,
+        );
+        self.mass = UnitConverter::mass_from_metric(
+            UnitConverter::mass_to_metric(self.mass, source),
+            target,
+        );
+        self.diameter = UnitConverter::diameter_from_metric(
+            UnitConverter::diameter_to_metric(self.diameter, source),
+            target,
+        );
+        self.twist_rate = self.twist_rate.map(|value| {
+            UnitConverter::diameter_from_metric(
+                UnitConverter::diameter_to_metric(value, source),
+                target,
+            )
+        });
+        self.sight_height = self.sight_height.map(|value| {
+            UnitConverter::sight_height_from_metric(
+                UnitConverter::sight_height_to_metric(value, source),
+                target,
+            )
+        });
+        self.zero_distance = self.zero_distance.map(|value| {
+            UnitConverter::distance_from_metric(
+                UnitConverter::distance_to_metric(value, source),
+                target,
+            )
+        });
+        self.temperature = UnitConverter::temperature_from_metric(
+            UnitConverter::temperature_to_metric(self.temperature, source),
+            target,
+        );
+        self.pressure = UnitConverter::pressure_from_metric(
+            UnitConverter::pressure_to_metric(self.pressure, source),
+            target,
+        );
+        self.altitude = UnitConverter::altitude_from_metric(
+            UnitConverter::altitude_to_metric(self.altitude, source),
+            target,
+        );
+        self.wind_speed = self.wind_speed.map(|value| {
+            UnitConverter::wind_from_metric(UnitConverter::wind_to_metric(value, source), target)
+        });
+        self.auto_zero = self.auto_zero.map(|value| {
+            UnitConverter::distance_from_metric(
+                UnitConverter::distance_to_metric(value, source),
+                target,
+            )
+        });
+        self.bullet_length = self.bullet_length.map(|value| {
+            UnitConverter::diameter_from_metric(
+                UnitConverter::diameter_to_metric(value, source),
+                target,
+            )
+        });
+        self.units = match target {
+            UnitSystem::Imperial => "imperial",
+            UnitSystem::Metric => "metric",
+        }
+        .to_string();
+
+        Ok(self)
     }
 }
 
@@ -2143,6 +2277,11 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     let content = fs::read_to_string(&path)?;
     let profile: ProfileData = serde_json::from_str(&content)?;
     Ok(profile)
+}
+
+/// Load a profile for calculation, converting its stored display units to the active CLI units.
+fn load_profile_for_units(name: &str, units: UnitSystem) -> Result<ProfileData, Box<dyn Error>> {
+    load_profile(name)?.converted_to(units)
 }
 
 /// List all saved profiles
@@ -2431,7 +2570,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Load saved JSON profile if specified
             let saved_profile_data: Option<ProfileData> = saved_profile.as_ref().map(|name| {
-                load_profile(name).unwrap_or_else(|e| {
+                load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error loading saved profile: {}", e);
                     std::process::exit(1);
                 })
@@ -4252,7 +4391,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             // Load profile if specified
             let profile_data = profile.as_ref().map(|name| {
-                load_profile(name).unwrap_or_else(|e| {
+                load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
@@ -4329,7 +4468,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
-                load_profile(name).unwrap_or_else(|e| {
+                load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
@@ -4411,7 +4550,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
-                load_profile(name).unwrap_or_else(|e| {
+                load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
@@ -4494,7 +4633,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
-                load_profile(name).unwrap_or_else(|e| {
+                load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
@@ -4552,7 +4691,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
-                load_profile(name).unwrap_or_else(|e| {
+                load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
@@ -8450,6 +8589,131 @@ fn handle_range_table(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod profile_unit_tests {
+    use super::*;
+
+    fn metric_profile() -> ProfileData {
+        ProfileData {
+            name: "metric-exact".to_string(),
+            velocity: 762.0,
+            bc: 0.243,
+            mass: 11.339_809_25,
+            diameter: 7.8232,
+            drag_model: "G7".to_string(),
+            twist_rate: Some(254.0),
+            sight_height: Some(50.8),
+            zero_distance: Some(91.44),
+            units: "metric".to_string(),
+            temperature: 15.0,
+            pressure: 1_013.207_888,
+            humidity: 55.0,
+            altitude: 304.8,
+            bullet_name: Some("175gr SMK".to_string()),
+            created: Some("test".to_string()),
+            wind_speed: Some(4.4704),
+            wind_direction: Some(90.0),
+            shooting_angle: Some(-5.0),
+            auto_zero: Some(91.44),
+            twist_right: Some(false),
+            use_bc_segments: Some(true),
+            bullet_length: Some(30.48),
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        let tolerance = expected.abs().max(1.0) * 1e-12;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    #[test]
+    fn profile_conversion_preserves_physics_and_unitless_fields() {
+        let metric = metric_profile();
+        let imperial = metric.clone().converted_to(UnitSystem::Imperial).unwrap();
+
+        assert_eq!(imperial.units, "imperial");
+        assert_close(imperial.velocity, 2500.0);
+        assert_close(imperial.mass, 175.0);
+        assert_close(imperial.diameter, 0.308);
+        assert_close(imperial.twist_rate.unwrap(), 10.0);
+        assert_close(imperial.sight_height.unwrap(), 2.0);
+        assert_close(imperial.zero_distance.unwrap(), 100.0);
+        assert_close(imperial.temperature, 59.0);
+        assert_close(imperial.pressure, 29.92);
+        assert_close(imperial.altitude, 1000.0);
+        assert_close(imperial.wind_speed.unwrap(), 10.0);
+        assert_close(imperial.auto_zero.unwrap(), 100.0);
+        assert_close(imperial.bullet_length.unwrap(), 1.2);
+        assert_eq!(imperial.bc.to_bits(), metric.bc.to_bits());
+        assert_eq!(imperial.humidity.to_bits(), metric.humidity.to_bits());
+        assert_eq!(imperial.wind_direction, metric.wind_direction);
+        assert_eq!(imperial.shooting_angle, metric.shooting_angle);
+        assert_eq!(imperial.twist_right, metric.twist_right);
+        assert_eq!(imperial.use_bc_segments, metric.use_bc_segments);
+        assert_eq!(imperial.bullet_name, metric.bullet_name);
+
+        let round_trip = imperial.converted_to(UnitSystem::Metric).unwrap();
+        assert_close(round_trip.velocity, metric.velocity);
+        assert_close(round_trip.mass, metric.mass);
+        assert_close(round_trip.diameter, metric.diameter);
+        assert_close(round_trip.twist_rate.unwrap(), metric.twist_rate.unwrap());
+        assert_close(
+            round_trip.sight_height.unwrap(),
+            metric.sight_height.unwrap(),
+        );
+        assert_close(round_trip.temperature, metric.temperature);
+        assert_close(round_trip.pressure, metric.pressure);
+        assert_close(round_trip.altitude, metric.altitude);
+    }
+
+    #[test]
+    fn same_unit_profile_conversion_is_bit_preserving() {
+        let profile = metric_profile();
+        let before = serde_json::to_string(&profile).unwrap();
+        let after = profile.converted_to(UnitSystem::Metric).unwrap();
+        assert_eq!(serde_json::to_string(&after).unwrap(), before);
+    }
+
+    #[test]
+    fn converted_profile_keeps_explicit_cli_precedence() {
+        let profile = Some(metric_profile().converted_to(UnitSystem::Imperial).unwrap());
+        assert_eq!(
+            resolve_param(Some(2600.0), &profile, |p| p.velocity),
+            Some(2600.0)
+        );
+        assert_eq!(resolve_param(None, &profile, |p| p.velocity), Some(2500.0));
+        assert_eq!(
+            Some(2.5).or_else(|| profile.as_ref().and_then(|p| p.sight_height)),
+            Some(2.5)
+        );
+        assert_eq!(
+            None.or_else(|| profile.as_ref().and_then(|p| p.sight_height)),
+            Some(2.0)
+        );
+    }
+
+    #[test]
+    fn legacy_profiles_default_to_imperial_and_unknown_units_are_rejected() {
+        let legacy: ProfileData = serde_json::from_str(
+            r#"{"name":"legacy","velocity":2500.0,"bc":0.243,"mass":175.0,"diameter":0.308,"drag_model":"G7"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.units, "imperial");
+        let metric = legacy.converted_to(UnitSystem::Metric).unwrap();
+        assert_close(metric.velocity, 762.0);
+        assert_close(metric.mass, 11.339_809_25);
+        assert_close(metric.diameter, 7.8232);
+
+        let mut invalid = metric_profile();
+        invalid.units = "si".to_string();
+        let error = invalid.converted_to(UnitSystem::Imperial).unwrap_err();
+        assert!(error.to_string().contains("unsupported units 'si'"));
+    }
 }
 
 #[cfg(test)]
