@@ -128,7 +128,11 @@ pub(crate) fn calculate_magnus_spin_state(
     (spin_rate_rad_s, spin_parameter)
 }
 
-/// Calculate dynamic gyroscopic stability factor using Miller formula
+/// Calculate current gyroscopic stability from retained spin using the Miller formula.
+///
+/// The effective twist is back-calculated from the supplied roll rate and current airspeed, then
+/// corrected for current velocity and density. Callers that do not integrate roll should pass the
+/// muzzle-set spin rate while allowing `velocity_mps` and `air_density_kg_m3` to evolve.
 pub fn calculate_dynamic_stability(
     bullet_mass_grains: f64,
     velocity_mps: f64,
@@ -137,72 +141,40 @@ pub fn calculate_dynamic_stability(
     length_inches: f64,
     air_density_kg_m3: f64,
 ) -> f64 {
-    if spin_rate_rad_s == 0.0 || velocity_mps == 0.0 {
+    if spin_rate_rad_s == 0.0 || velocity_mps == 0.0 || caliber_inches <= 0.0 {
         return 0.0;
     }
 
     // Convert velocity to fps for Miller formula
     let velocity_fps = velocity_mps * 3.28084;
 
-    // Calculate twist rate in calibers
-    if caliber_inches > 0.0 {
-        // Back-calculate twist rate from spin rate
-        let spin_rps = spin_rate_rad_s / (2.0 * PI);
-        let velocity_ips = velocity_fps * 12.0; // inches per second
-        let twist_inches = if spin_rps > 0.0 {
-            velocity_ips / spin_rps
-        } else {
-            0.0
-        };
-        let twist_calibers = if twist_inches > 0.0 {
-            twist_inches / caliber_inches
-        } else {
-            0.0
-        };
-
-        // Length to diameter ratio
-        let length_calibers = if caliber_inches > 0.0 {
-            length_inches / caliber_inches
-        } else {
-            0.0
-        };
-
-        // Miller stability formula (simplified)
-        // Sg = 30 * m / (t^2 * d^3 * l * (1 + l^2))
-        // Where: m = mass in grains, t = twist in calibers, d = diameter in inches
-        //        l = length in calibers
-
-        if twist_calibers == 0.0 || length_calibers == 0.0 {
-            return 0.0;
-        }
-
-        let numerator = 30.0 * bullet_mass_grains;
-        let denominator = twist_calibers.powi(2)
-            * caliber_inches.powi(3)
-            * length_calibers
-            * (1.0 + length_calibers.powi(2));
-
-        if denominator == 0.0 {
-            return 0.0;
-        }
-
-        // Base stability
-        let sg_base = numerator / denominator;
-
-        // Velocity correction (compared to standard 2800 fps)
-        let velocity_factor = (velocity_fps / 2800.0).powf(1.0 / 3.0);
-
-        // Atmospheric correction (MBA-942): canonical Miller is LINEAR in density ratio
-        // (FTP = (T/T0)*(P0/P) = rho0/rho), matching stability.rs and py_ballisticcalc. The
-        // previous sqrt(1.225/rho) under-corrected Sg by ~14% at altitude. Standard
-        // conditions: 59°F, 29.92 inHg = 1.225 kg/m³ (sqrt(1)=1, so sea level is unchanged).
-        let density_factor = 1.225 / air_density_kg_m3;
-
-        // Final stability
-        sg_base * velocity_factor * density_factor
-    } else {
-        0.0
+    // Back-calculate the effective twist from the retained spin and current velocity.
+    let spin_rps = spin_rate_rad_s / (2.0 * PI);
+    if spin_rps <= 0.0 {
+        return 0.0;
     }
+    let velocity_ips = velocity_fps * 12.0; // inches per second
+    let twist_inches = velocity_ips / spin_rps;
+    let sg_base = miller_stability(
+        caliber_inches,
+        bullet_mass_grains,
+        twist_inches,
+        length_inches,
+    );
+    if sg_base == 0.0 {
+        return 0.0;
+    }
+
+    // Velocity correction (compared to standard 2800 fps)
+    let velocity_factor = (velocity_fps / 2800.0).powf(1.0 / 3.0);
+
+    // Atmospheric correction (MBA-942): canonical Miller is LINEAR in density ratio
+    // (FTP = (T/T0)*(P0/P) = rho0/rho), matching stability.rs and py_ballisticcalc. The
+    // previous sqrt(1.225/rho) under-corrected Sg by ~14% at altitude. Standard
+    // conditions: 59°F, 29.92 inHg = 1.225 kg/m³ (sqrt(1)=1, so sea level is unchanged).
+    let density_factor = 1.225 / air_density_kg_m3;
+
+    sg_base * velocity_factor * density_factor
 }
 
 /// Calculate the yaw of repose (equilibrium yaw angle)

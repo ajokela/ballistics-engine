@@ -429,19 +429,18 @@ pub fn compute_derivatives(
                     4.5 * d_in.max(1e-9)
                 }
             };
-            // Preserve the existing local-density correction and add the canonical Miller
-            // cube-root muzzle-velocity correction (V/2800 fps)^(1/3). Density is a no-op at
-            // sea-level standard (rho ~= 1.225 -> factor ~= 1.0).
-            let density_correction = if air_density > 0.0 {
-                STANDARD_AIR_DENSITY / air_density
-            } else {
-                1.0
-            };
-            let velocity_correction =
-                crate::stability::miller_velocity_correction(inputs.muzzle_velocity);
-            let sg = crate::spin_drift::miller_stability(d_in, m_gr, inputs.twist_rate, l_in)
-                * density_correction
-                * velocity_correction;
+            // Use current-flight Sg with the muzzle-set spin. Back-calculating the effective
+            // twist from fixed spin and current airspeed lets gyroscopic stability (and therefore
+            // yaw of repose) grow as translational velocity decays; local density supplies the
+            // canonical Miller atmospheric correction.
+            let sg = crate::spin_drift::calculate_dynamic_stability(
+                m_gr,
+                speed_air,
+                spin_rate_rad_s,
+                d_in,
+                l_in,
+                air_density,
+            );
             let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
                 sg,
                 speed_air,
@@ -1278,6 +1277,45 @@ mod tests {
         assert_eq!(
             enabled, disabled,
             "canonical Sg below 1 must suppress every Magnus acceleration component"
+        );
+    }
+
+    #[test]
+    fn magnus_force_grows_as_fixed_spin_projectile_slows() {
+        let mut inputs = create_test_inputs();
+        inputs.muzzle_velocity = 800.0;
+        inputs.twist_rate = 12.0;
+        inputs.enable_magnus = true;
+
+        let magnus_acceleration = |speed_mps| {
+            let evaluate = |enable_magnus| {
+                let mut run_inputs = inputs.clone();
+                run_inputs.enable_magnus = enable_magnus;
+                compute_derivatives(
+                    Vector3::zeros(),
+                    Vector3::new(speed_mps, 0.0, 0.0),
+                    &run_inputs,
+                    Vector3::zeros(),
+                    (1.225, 340.0, 0.0, 0.0),
+                    0.5,
+                    None,
+                    0.0,
+                    None,
+                )[4]
+            };
+            (evaluate(true) - evaluate(false)).abs()
+        };
+
+        let fast = magnus_acceleration(200.0);
+        let slow = magnus_acceleration(100.0);
+        let ratio = slow / fast;
+        let expected_ratio = 2.0_f64.powf(5.0 / 3.0);
+
+        assert!(fast > 0.0 && slow > 0.0, "fast={fast}, slow={slow}");
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-3,
+            "fixed-spin Magnus acceleration must grow downrange; slow/fast={ratio}, \
+             expected={expected_ratio}"
         );
     }
 
