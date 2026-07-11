@@ -458,25 +458,20 @@ fn local_temp_pressure_density(
 ) -> (f64, f64, f64) {
     // Round altitude to the nearest meter for caching in Python
     let altitude_m_rounded = altitude_m.round();
-    let height_diff = altitude_m_rounded - base_alt;
-
-    // Determine appropriate lapse rate based on altitude
-    let lapse_rate = determine_local_lapse_rate(altitude_m_rounded);
-
-    // Calculate temperature with variable lapse rate
-    let temp_c = base_temp_c + lapse_rate * height_diff;
-    let temp_k = temp_c + 273.15;
     let base_temp_k = base_temp_c + 273.15;
 
-    // Calculate pressure using barometric formula
-    let pressure_hpa = if lapse_rate.abs() < 1e-10 {
-        // Isothermal atmosphere
-        base_press_hpa * (-G_ACCEL_MPS2 * height_diff / (R_AIR * base_temp_k)).exp()
-    } else {
-        // Non-isothermal atmosphere
-        let temp_ratio = temp_k / base_temp_k;
-        base_press_hpa * temp_ratio.powf(-G_ACCEL_MPS2 / (lapse_rate * R_AIR))
-    };
+    // A non-finite endpoint would make the boundary walk fail to advance. The
+    // previous single-column formula also produced non-finite outputs here.
+    if !altitude_m_rounded.is_finite() || !base_alt.is_finite() {
+        return (f64::NAN, f64::NAN, f64::NAN);
+    }
+
+    let (temp_k, pressure_hpa) = integrate_local_atmosphere_layers(
+        base_alt,
+        altitude_m_rounded,
+        base_temp_k,
+        base_press_hpa,
+    );
 
     // Enhanced density calculation
     let density_ratio = base_ratio * (base_temp_k * pressure_hpa) / (base_press_hpa * temp_k);
@@ -485,7 +480,81 @@ fn local_temp_pressure_density(
     (temp_k, pressure_hpa * 100.0, density)
 }
 
+/// Carry arbitrary station temperature and pressure through each crossed ICAO
+/// layer. The layer table supplies lapse rates and boundaries only; station
+/// deviations from the standard atmosphere remain anchored at `base_alt`.
+fn integrate_local_atmosphere_layers(
+    base_alt: f64,
+    target_alt: f64,
+    mut temp_k: f64,
+    mut pressure_hpa: f64,
+) -> (f64, f64) {
+    let mut current_alt = base_alt;
+
+    if target_alt > current_alt {
+        while current_alt < target_alt {
+            // At an exact boundary, ascent starts in the higher layer.
+            let layer_index = ICAO_LAYERS
+                .iter()
+                .rposition(|layer| current_alt >= layer.base_altitude)
+                .unwrap_or(0);
+            let segment_end = ICAO_LAYERS
+                .get(layer_index + 1)
+                .map_or(target_alt, |next| target_alt.min(next.base_altitude));
+            (temp_k, pressure_hpa) = integrate_local_atmosphere_segment(
+                temp_k,
+                pressure_hpa,
+                segment_end - current_alt,
+                ICAO_LAYERS[layer_index].lapse_rate,
+            );
+            current_alt = segment_end;
+        }
+    } else {
+        while current_alt > target_alt {
+            // At an exact boundary, descent starts in the lower layer. The
+            // strict comparison is what makes a cross-layer round trip reversible.
+            let layer_index = ICAO_LAYERS
+                .iter()
+                .rposition(|layer| current_alt > layer.base_altitude)
+                .unwrap_or(0);
+            let segment_end = if layer_index == 0 {
+                target_alt
+            } else {
+                target_alt.max(ICAO_LAYERS[layer_index].base_altitude)
+            };
+            (temp_k, pressure_hpa) = integrate_local_atmosphere_segment(
+                temp_k,
+                pressure_hpa,
+                segment_end - current_alt,
+                ICAO_LAYERS[layer_index].lapse_rate,
+            );
+            current_alt = segment_end;
+        }
+    }
+
+    (temp_k, pressure_hpa)
+}
+
+#[inline]
+fn integrate_local_atmosphere_segment(
+    base_temp_k: f64,
+    base_pressure_hpa: f64,
+    height_diff: f64,
+    lapse_rate: f64,
+) -> (f64, f64) {
+    let temp_k = base_temp_k + lapse_rate * height_diff;
+    let pressure_hpa = if lapse_rate.abs() < 1e-10 {
+        base_pressure_hpa * (-G_ACCEL_MPS2 * height_diff / (R_AIR * base_temp_k)).exp()
+    } else {
+        let temp_ratio = temp_k / base_temp_k;
+        base_pressure_hpa * temp_ratio.powf(-G_ACCEL_MPS2 / (lapse_rate * R_AIR))
+    };
+
+    (temp_k, pressure_hpa)
+}
+
 /// Determine local lapse rate based on altitude and atmospheric layer.
+#[cfg(test)]
 #[inline(always)]
 fn determine_local_lapse_rate(altitude_m: f64) -> f64 {
     // Find the current atmospheric layer to get appropriate lapse rate
@@ -726,6 +795,70 @@ mod tests {
         // Test stratosphere
         let (temp_25km, _) = calculate_icao_standard_atmosphere(25000.0);
         assert!(temp_25km > 216.65); // Temperature increases in stratosphere
+    }
+
+    #[test]
+    fn local_atmosphere_walks_icao_layers_continuously() {
+        for altitude_m in [
+            10999.0, 11000.0, 11001.0, 11050.0, 19999.0, 20000.0, 20001.0, 25000.0,
+        ] {
+            let (local_temp_k, local_pressure_pa, _) =
+                local_temp_pressure_density(altitude_m, 0.0, 15.0, 1013.25, 1.0);
+            let (standard_temp_k, standard_pressure_pa) =
+                calculate_icao_standard_atmosphere(altitude_m);
+
+            assert!(
+                (local_temp_k - standard_temp_k).abs() < 1e-9,
+                "local temperature diverged from ICAO at {altitude_m} m: local={local_temp_k}, standard={standard_temp_k}"
+            );
+            assert!(
+                ((local_pressure_pa - standard_pressure_pa) / standard_pressure_pa).abs() < 5e-5,
+                "local pressure diverged from ICAO at {altitude_m} m: local={local_pressure_pa}, standard={standard_pressure_pa}"
+            );
+        }
+
+        let (density_below, sound_below) =
+            get_local_atmosphere(10999.0, 0.0, 15.0, 1013.25, 1.0);
+        let (density_above, sound_above) =
+            get_local_atmosphere(11001.0, 0.0, 15.0, 1013.25, 1.0);
+        assert!(
+            (density_below - density_above).abs() < 0.001,
+            "density jumped across 11 km: below={density_below}, above={density_above}"
+        );
+        assert!(
+            (sound_below - sound_above).abs() < 0.1,
+            "speed of sound jumped across 11 km: below={sound_below}, above={sound_above}"
+        );
+    }
+
+    #[test]
+    fn local_atmosphere_preserves_nonstandard_station_offset_and_round_trips() {
+        let base_alt = 7500.0;
+        let base_temp_c = 5.0;
+        let base_pressure_hpa = 410.0;
+        let base_ratio = 0.72;
+
+        let (high_temp_k, high_pressure_pa, high_density) = local_temp_pressure_density(
+            25000.0,
+            base_alt,
+            base_temp_c,
+            base_pressure_hpa,
+            base_ratio,
+        );
+        assert!((high_temp_k - 260.4).abs() < 1e-9);
+        assert!((high_pressure_pa / 100.0 - 40.505969).abs() < 1e-6);
+        assert!((high_density - 0.093076885).abs() < 1e-9);
+
+        let (back_temp_k, back_pressure_pa, back_density) = local_temp_pressure_density(
+            base_alt,
+            25000.0,
+            high_temp_k - 273.15,
+            high_pressure_pa / 100.0,
+            high_density / 1.225,
+        );
+        assert!((back_temp_k - (base_temp_c + 273.15)).abs() < 1e-9);
+        assert!((back_pressure_pa / 100.0 - base_pressure_hpa).abs() < 1e-8);
+        assert!((back_density - base_ratio * 1.225).abs() < 1e-9);
     }
 
     #[test]
