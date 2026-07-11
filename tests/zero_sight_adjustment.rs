@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const TARGET_DISTANCE_YARDS: f64 = 100.0;
+const YARDS_TO_METERS: f64 = 0.9144;
 
 fn get_cli_binary() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -74,5 +75,18 @@ fn elevated_target_sight_adjustment_removes_los_slope() {
     assert!(
         (actual - expected).abs() < 1e-12,
         "sight adjustment used the wrong LOS frame: actual={actual} expected={expected}"
+    );
+}
+
+#[test]
+fn point_blank_range_ignores_the_initial_bore_to_sight_offset() {
+    let result = run_zero(0.0);
+    let point_blank_range = result["point_blank_range"].as_f64().unwrap();
+    let target_distance_m = TARGET_DISTANCE_YARDS * YARDS_TO_METERS;
+    let solver_horizon_m = target_distance_m * 3.0;
+
+    assert!(
+        point_blank_range > target_distance_m && point_blank_range < solver_horizon_m,
+        "point-blank range did not use the post-zero band exit: pbr={point_blank_range} m zero={target_distance_m} m horizon={solver_horizon_m} m"
     );
 }
