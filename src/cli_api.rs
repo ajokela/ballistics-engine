@@ -1925,35 +1925,50 @@ impl TrajectorySolver {
         // first, then legacy Mach-keyed segments, then the scalar BC. Explicit Mach segments
         // remain active even when `use_bc_segments` is false; derivatives.rs and the fast solver
         // preserve that legacy contract for callers that provide the table directly.
-        let base_bc = if let Some(segments) = self
+        let (base_bc, bc_from_segments) = if let Some(segments) = self
             .inputs
             .bc_segments_data
             .as_ref()
             .filter(|segments| !segments.is_empty())
         {
             // Find matching segment for current velocity.
-            segments
-                .iter()
-                .find(|seg| velocity_fps >= seg.velocity_min && velocity_fps < seg.velocity_max)
-                .map(|seg| seg.bc_value)
-                .unwrap_or(self.inputs.bc_value)
+            (
+                segments
+                    .iter()
+                    .find(|seg| {
+                        velocity_fps >= seg.velocity_min && velocity_fps < seg.velocity_max
+                    })
+                    .map(|seg| seg.bc_value)
+                    .unwrap_or(self.inputs.bc_value),
+                true,
+            )
         } else if let Some(segments) = self
             .inputs
             .bc_segments
             .as_ref()
             .filter(|segments| !segments.is_empty())
         {
-            crate::derivatives::interpolated_bc(
-                velocity_magnitude / speed_of_sound,
-                segments,
-                Some(&self.inputs),
+            (
+                crate::derivatives::interpolated_bc(
+                    velocity_magnitude / speed_of_sound,
+                    segments,
+                    Some(&self.inputs),
+                ),
+                true,
             )
         } else {
-            self.inputs.bc_value
+            (self.inputs.bc_value, false)
         };
 
-        // Apply cluster BC correction if enabled (on top of segment BC)
-        let effective_bc = self.apply_cluster_bc_correction(base_bc, velocity_fps);
+        // Segment tables already own the velocity-dependent BC shape. Stacking the empirical
+        // cluster ladder on top would apply that shape twice (MBA-1175). Cluster correction is
+        // therefore only a fallback for a scalar BC, regardless of which explicit segment
+        // representation supplied the active value.
+        let effective_bc = if bc_from_segments {
+            base_bc
+        } else {
+            self.apply_cluster_bc_correction(base_bc, velocity_fps)
+        };
         // Guard bc_value == 0 (allowed on the FFI/WASM surfaces, which lack the CLI's 0.001
         // lower bound): dividing by effective_bc below would be Inf -> NaN. Inert for valid
         // BCs (>= 0.001).
@@ -2880,6 +2895,23 @@ mod monte_carlo_result_tests {
 mod cluster_bc_reference_space_tests {
     use super::*;
 
+    fn acceleration_at_1100_fps(inputs: BallisticInputs) -> Vector3<f64> {
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let position = Vector3::zeros();
+        let velocity = Vector3::new(1100.0 / 3.28084, 0.0, 0.0);
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        solver.calculate_acceleration(
+            &position,
+            &velocity,
+            &Vector3::zeros(),
+            (temp_c, pressure_hpa, density / 1.225),
+        )
+    }
+
     #[test]
     fn solver_passes_g7_reference_model_to_cluster_classifier() {
         let mut inputs = BallisticInputs::default();
@@ -2900,6 +2932,73 @@ mod cluster_bc_reference_space_tests {
             (corrected / 0.190 - 1.004).abs() < 1e-12,
             "solver selected the wrong G7 cluster multiplier: {}",
             corrected / 0.190
+        );
+    }
+
+    #[test]
+    fn velocity_bc_segments_are_not_cluster_corrected_twice() {
+        let segmented_clustered = BallisticInputs {
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            use_bc_segments: true,
+            bc_segments_data: Some(vec![
+                crate::BCSegmentData {
+                    velocity_min: 0.0,
+                    velocity_max: 1_600.0,
+                    bc_value: 0.4,
+                },
+                crate::BCSegmentData {
+                    velocity_min: 1_600.0,
+                    velocity_max: 5_000.0,
+                    bc_value: 0.45,
+                },
+            ]),
+            use_cluster_bc: true,
+            ..BallisticInputs::default()
+        };
+        let mut segmented_only = segmented_clustered.clone();
+        segmented_only.use_cluster_bc = false;
+        let mut constant_clustered = segmented_clustered.clone();
+        constant_clustered.bc_value = 0.4;
+        constant_clustered.bc_segments_data = None;
+
+        let stacked = acceleration_at_1100_fps(segmented_clustered);
+        let segment_only = acceleration_at_1100_fps(segmented_only);
+        let cluster_only = acceleration_at_1100_fps(constant_clustered);
+
+        assert!(
+            (stacked.x - segment_only.x).abs() < 1e-12,
+            "segment BC already owns the velocity shape: stacked ax={} segment-only ax={}",
+            stacked.x,
+            segment_only.x
+        );
+        assert!(
+            (cluster_only.x - segment_only.x).abs() > 1e-6,
+            "cluster correction must remain active for a constant BC"
+        );
+    }
+
+    #[test]
+    fn mach_bc_segments_are_not_cluster_corrected_twice() {
+        let mach_segmented_clustered = BallisticInputs {
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            use_bc_segments: false,
+            bc_segments: Some(vec![(0.5, 0.3), (1.5, 0.5)]),
+            use_cluster_bc: true,
+            ..BallisticInputs::default()
+        };
+        let mut mach_segmented_only = mach_segmented_clustered.clone();
+        mach_segmented_only.use_cluster_bc = false;
+
+        let stacked = acceleration_at_1100_fps(mach_segmented_clustered);
+        let segment_only = acceleration_at_1100_fps(mach_segmented_only);
+
+        assert!(
+            (stacked.x - segment_only.x).abs() < 1e-12,
+            "Mach segment BC already owns the velocity shape: stacked ax={} segment-only ax={}",
+            stacked.x,
+            segment_only.x
         );
     }
 }
