@@ -20,6 +20,8 @@ struct AtmosphereLayer {
 const G_ACCEL_MPS2: f64 = 9.80665;
 const R_AIR: f64 = 287.0531; // Specific gas constant for dry air (J/(kg·K))
 const GAMMA: f64 = 1.4; // Heat capacity ratio for air
+const MIN_STANDARD_ALTITUDE_M: f64 = -5000.0;
+const MAX_STANDARD_ALTITUDE_M: f64 = 84000.0;
 
 /// CIPM constants for precise air density calculation
 const R: f64 = 8.314472; // Universal gas constant
@@ -29,7 +31,7 @@ const M_V: f64 = 18.01528e-3; // Molar mass of water vapor (kg/mol)
 /// ICAO Standard Atmosphere layer data up to 84 km
 /// Pressures calculated using barometric formula between layers
 const ICAO_LAYERS: &[AtmosphereLayer] = &[
-    // Troposphere (0 - 11 km)
+    // Troposphere (-5 - 11 km; the sea-level base extrapolates smoothly below 0 m)
     AtmosphereLayer {
         base_altitude: 0.0,
         base_temperature: 288.15, // 15°C
@@ -86,13 +88,12 @@ const ICAO_LAYERS: &[AtmosphereLayer] = &[
 /// atmospheric layers up to 84 km altitude.
 ///
 /// # Arguments
-/// * `altitude_m` - Altitude in meters (0 to 84000)
+/// * `altitude_m` - Altitude in meters (-5000 to 84000; values outside are clamped)
 ///
 /// # Returns
 /// Tuple of (temperature_k, pressure_pa)
 fn calculate_icao_standard_atmosphere(altitude_m: f64) -> (f64, f64) {
-    // Clamp altitude to valid range
-    let altitude = altitude_m.clamp(0.0, 84000.0);
+    let altitude = altitude_m.clamp(MIN_STANDARD_ALTITUDE_M, MAX_STANDARD_ALTITUDE_M);
 
     // Find the appropriate atmospheric layer
     let layer = ICAO_LAYERS
@@ -835,6 +836,30 @@ mod tests {
         // Test stratosphere
         let (temp_25km, _) = calculate_icao_standard_atmosphere(25000.0);
         assert!(temp_25km > 216.65); // Temperature increases in stratosphere
+    }
+
+    #[test]
+    fn standard_atmosphere_extends_below_sea_level() {
+        let altitude_m = -430.0;
+        let (temp_k, pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
+
+        assert!((temp_k - 290.945).abs() < 1e-9);
+        assert!((pressure_pa - 106_598.399_445_557).abs() < 0.1);
+
+        let (station_temp_c, station_pressure_hpa) =
+            resolve_station_conditions(15.0, 1013.25, altitude_m);
+        assert!((station_temp_c - 17.795).abs() < 1e-9);
+        assert!((station_pressure_hpa - 1_065.983_994_456).abs() < 1e-6);
+
+        let (sea_density, _) = calculate_atmosphere(0.0, None, None, 0.0);
+        let (below_sea_density, _) = calculate_atmosphere(altitude_m, None, None, 0.0);
+        assert!((below_sea_density - 1.276_905_111_96).abs() < 1e-6);
+        assert!(below_sea_density > sea_density * 1.04);
+
+        assert_eq!(
+            calculate_icao_standard_atmosphere(-6000.0),
+            calculate_icao_standard_atmosphere(MIN_STANDARD_ALTITUDE_M)
+        );
     }
 
     #[test]
