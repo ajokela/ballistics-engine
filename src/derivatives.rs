@@ -277,13 +277,12 @@ pub fn compute_derivatives(
         // valid BCs (>= 0.001).
         let bc_val = bc_val.max(1e-6);
 
-        // Calculate yaw effect with safe division
-        let yaw_deg = if inputs.tipoff_decay_distance.abs() > 1e-9 {
+        // Apply the documented radian tip-off yaw, decaying exponentially with distance.
+        let yaw_rad = if inputs.tipoff_decay_distance.abs() > 1e-9 {
             inputs.tipoff_yaw * (-pos[0] / inputs.tipoff_decay_distance).exp()
         } else {
             inputs.tipoff_yaw // No decay if distance is zero
         };
-        let yaw_rad = yaw_deg.to_radians();
         let yaw_multiplier = 1.0 + yaw_rad.powi(2);
 
         // Calculate density scaling
@@ -729,6 +728,44 @@ mod tests {
             direct_mode_temp_c > 10.0 && direct_mode_temp_c < 20.0,
             "direct-mode 340 m/s must be interpreted as sound speed, not 340 C"
         );
+    }
+
+    #[test]
+    fn tipoff_yaw_uses_documented_radians_for_drag_and_decay() {
+        let mut baseline_inputs = create_test_inputs();
+        baseline_inputs.tipoff_yaw = 0.0;
+        baseline_inputs.tipoff_decay_distance = 50.0;
+        let mut yawed_inputs = baseline_inputs.clone();
+        yawed_inputs.tipoff_yaw = 0.1;
+
+        let drag_x = |inputs: &BallisticInputs, downrange_m: f64| {
+            compute_derivatives(
+                Vector3::new(downrange_m, 0.0, 0.0),
+                Vector3::new(300.0, 0.0, 0.0),
+                inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                0.5,
+                None,
+                0.0,
+                None,
+            )[3]
+        };
+
+        for (downrange_m, expected_ratio) in
+            [(0.0_f64, 1.01), (50.0 * std::f64::consts::LN_2, 1.0025)]
+        {
+            let baseline_drag = drag_x(&baseline_inputs, downrange_m);
+            let yawed_drag = drag_x(&yawed_inputs, downrange_m);
+            let actual_ratio = yawed_drag / baseline_drag;
+
+            assert!(baseline_drag < 0.0, "baseline must be downrange drag");
+            assert!(
+                (actual_ratio - expected_ratio).abs() < 1e-12,
+                "tip-off yaw at x={downrange_m} m used the wrong angular unit or decay: \
+                 ratio={actual_ratio}, expected={expected_ratio}"
+            );
+        }
     }
 
     fn create_test_inputs() -> BallisticInputs {
