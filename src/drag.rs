@@ -21,7 +21,8 @@ impl DragTable {
         }
     }
 
-    /// Interpolate drag coefficient for given Mach number using cubic spline-like interpolation
+    /// Interpolate drag coefficient for a Mach number, holding the nearest tabulated endpoint
+    /// outside the table's measured domain.
     pub fn interpolate(&self, mach: f64) -> f64 {
         let n = self.mach_values.len();
 
@@ -33,28 +34,13 @@ impl DragTable {
             return self.cd_values[0];
         }
 
-        // Handle out-of-bounds cases with extrapolation
+        // A table has no information beyond its measured Mach domain. Hold the nearest endpoint
+        // rather than extending the local edge slope indefinitely (which can drive Cd to 0.01).
         if mach <= self.mach_values[0] {
-            // Linear extrapolation below range, but prevent negative values
-            if n >= 2 {
-                let slope = (self.cd_values[1] - self.cd_values[0])
-                    / (self.mach_values[1] - self.mach_values[0]);
-                let extrapolated = self.cd_values[0] + slope * (mach - self.mach_values[0]);
-                // Clamp to minimum reasonable value to prevent negative drag coefficients
-                return extrapolated.max(0.01);
-            }
             return self.cd_values[0];
         }
 
         if mach >= self.mach_values[n - 1] {
-            // Linear extrapolation above range, but prevent negative values
-            if n >= 2 {
-                let slope = (self.cd_values[n - 1] - self.cd_values[n - 2])
-                    / (self.mach_values[n - 1] - self.mach_values[n - 2]);
-                let extrapolated = self.cd_values[n - 1] + slope * (mach - self.mach_values[n - 1]);
-                // Clamp to minimum reasonable value to prevent negative drag coefficients
-                return extrapolated.max(0.01);
-            }
             return self.cd_values[n - 1];
         }
 
@@ -686,12 +672,12 @@ mod tests {
     }
 
     #[test]
-    fn test_extrapolation_bounds() {
-        // Test extrapolation below range
+    fn test_endpoint_bounds() {
+        // Test endpoint hold below range
         let cd_low = get_drag_coefficient(0.0, &DragModel::G1);
         assert!(cd_low > 0.01 && cd_low < 0.5, "Low Mach G1: {cd_low}");
 
-        // Test extrapolation above range - should be clamped to positive values
+        // Test endpoint hold above range
         let cd_high = get_drag_coefficient(10.0, &DragModel::G1);
         assert!(cd_high > 0.01, "High Mach G1 should be positive: {cd_high}");
 
@@ -752,12 +738,32 @@ mod tests {
         let mid = table.interpolate(1.5);
         assert!((mid - 0.5).abs() < 1e-10);
 
-        // Extrapolation
+        // Out-of-range values hold the nearest endpoint.
         let below = table.interpolate(0.5);
-        assert!(below.abs() > 1e-10); // Should have some value
+        assert_eq!(below.to_bits(), 0.4_f64.to_bits());
 
         let above = table.interpolate(3.0);
-        assert!(above.abs() > 1e-10); // Should have some value
+        assert_eq!(above.to_bits(), 0.6_f64.to_bits());
+    }
+
+    #[test]
+    fn out_of_range_mach_holds_boundary_cd() {
+        let table = DragTable::new(vec![0.5, 1.0, 2.0], vec![0.2, 0.5, 0.3]);
+
+        for mach in [f64::NEG_INFINITY, -10.0, 0.49, 0.5] {
+            assert_eq!(
+                table.interpolate(mach).to_bits(),
+                0.2_f64.to_bits(),
+                "Mach {mach} must hold the first tabulated Cd"
+            );
+        }
+        for mach in [2.0, 2.01, 100.0, f64::INFINITY] {
+            assert_eq!(
+                table.interpolate(mach).to_bits(),
+                0.3_f64.to_bits(),
+                "Mach {mach} must hold the last tabulated Cd"
+            );
+        }
     }
 
     #[test]
