@@ -1,5 +1,6 @@
-//! MBA-1137: per-zone (downrange-varying) atmosphere affecting DRAG, composing with the
-//! MBA-1136 altitude-lapse density.
+//! MBA-1137: per-zone (downrange-varying) atmosphere affecting drag, composing with the
+//! MBA-1136 altitude-lapse density. The CLI also applies zone humidity to local sound speed;
+//! the fast path retains its documented dry-sound fallback.
 //!
 //! Validation gates:
 //!  - Identity: a flat AtmoSock whose zones equal the station base → BIT-IDENTICAL trajectory.
@@ -9,8 +10,8 @@
 //!    altitude contribution.
 //!  - Physical direction: hot (low-density) near zone → less drag / more retained velocity than a
 //!    cold near zone, matching an offline CIPM hand calc.
-//!  - Fast/cli parity: the same per-zone inputs through cli_api and the fast path agree on the
-//!    endpoint (catches an incomplete fast_trajectory.rs density-freeze fix).
+//!  - Fast/cli parity: the same per-zone density inputs through cli_api and the fast path agree
+//!    loosely on the endpoint (catches an incomplete fast_trajectory.rs density-freeze fix).
 
 use ballistics_engine::atmosphere::{calculate_air_density_cimp, AtmoSock};
 use ballistics_engine::fast_trajectory::{fast_integrate, FastIntegrationParams};
@@ -252,9 +253,10 @@ fn atmo_sock_hot_near_retains_more_velocity_than_cold_near() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Fast/cli parity: the same per-zone inputs through cli_api and the fast path agree on the
-// endpoint. If the fast density-freeze (fast_trajectory.rs :616) were not fixed, the zone would
-// have NO effect on the fast path and this would diverge.
+// Fast/cli parity: the same per-zone density inputs through cli_api and the fast path agree loosely
+// on the endpoint. If the fast density-freeze (fast_trajectory.rs :616) were not fixed, the zone
+// would have NO effect on the fast path and this would diverge. The CLI uses real zone RH for
+// sound speed; the fast path retains its documented dry-sound fallback.
 // ------------------------------------------------------------------------------------------------
 
 /// Run the plain fast_integrate path with an optional AtmoSock; return endpoint velocity and y.
@@ -336,8 +338,9 @@ fn atmo_sock_fast_and_cli_agree_on_zoned_endpoint() {
     let cli = solve_with(&inputs, &atmo, Some(hot_near), TARGET_M);
     let v_cli = impact_velocity(&cli);
 
-    // Two independent integrators (fast fixed-step RK4 vs cli_api adaptive RK45) with the SAME
-    // per-zone atmosphere must agree to within a few percent on retained velocity.
+    // Two independent integrators (fast fixed-step RK4 vs cli_api adaptive RK45) with the same
+    // per-zone density base should agree within a few percent despite their documented sound-speed
+    // humidity difference.
     let rel = (v_fast - v_cli).abs() / v_cli;
     assert!(
         rel < 0.05,
