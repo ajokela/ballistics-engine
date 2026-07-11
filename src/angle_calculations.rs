@@ -19,12 +19,15 @@ pub struct AngleResult {
     pub success: bool,
 }
 
-/// Brent's method for root finding - optimized implementation
+/// Brent's method for root finding - optimized implementation.
+///
+/// `x_tolerance` is an absolute tolerance in the same units as `a` and `b`.
+/// [`AngleResult::final_error`] reports `|f(x)|` in the function's output units.
 pub fn brent_root_find<F>(
     f: F,
     mut a: f64,
     mut b: f64,
-    tolerance: f64,
+    x_tolerance: f64,
     max_iterations: usize,
 ) -> Result<AngleResult, String>
 where
@@ -53,7 +56,7 @@ where
     while iterations < max_iterations {
         iterations += 1;
 
-        if fb.abs() < tolerance {
+        if fb == 0.0 {
             return Ok(AngleResult {
                 angle_rad: b,
                 iterations_used: iterations,
@@ -71,7 +74,7 @@ where
             fc = fa;
         }
 
-        let tolerance_scaled = 2.0 * f64::EPSILON * b.abs() + 0.5 * tolerance;
+        let tolerance_scaled = 2.0 * f64::EPSILON * b.abs() + 0.5 * x_tolerance;
         let m = 0.5 * (c - b);
 
         if m.abs() <= tolerance_scaled {
@@ -156,7 +159,7 @@ where
         angle_rad: b,
         iterations_used: iterations,
         final_error: fb.abs(),
-        success: fb.abs() < tolerance * 10.0, // Relaxed success criteria
+        success: false,
     })
 }
 
@@ -403,6 +406,33 @@ mod tests {
 
         assert!(result.success);
         assert!((result.angle_rad - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn brent_angle_tolerance_is_invariant_to_residual_units() {
+        let expected_root = 2.0_f64.sqrt();
+        let x_tolerance = 1e-8;
+
+        for scale in [1.0, 1e-9] {
+            let result = brent_root_find(
+                |angle_rad| scale * (angle_rad * angle_rad - 2.0),
+                1.0,
+                2.0,
+                x_tolerance,
+                100,
+            )
+            .unwrap();
+
+            assert!(result.success);
+            assert!(
+                (result.angle_rad - expected_root).abs() <= x_tolerance,
+                "residual scale {scale} loosened the angular tolerance: {result:?}"
+            );
+            assert!(result.iterations_used > 1);
+        }
+
+        let exhausted = brent_root_find(|x| 1e-9 * (x * x - 2.0), 1.0, 2.0, 1e-6, 0).unwrap();
+        assert!(!exhausted.success);
     }
 
     #[test]
