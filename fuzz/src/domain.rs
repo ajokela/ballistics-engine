@@ -72,7 +72,7 @@ pub fn hostile_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
 /// Every scalar output is finite and physically non-negative; every trajectory
 /// point is finite. Panics (= a libFuzzer crash) on violation.
 pub fn assert_finite_sane(r: &TrajectoryResult) {
-    assert!(r.max_range.is_finite(), "max_range not finite");
+    assert!(r.max_range.is_finite() && r.max_range >= 0.0, "bad max_range {}", r.max_range);
     assert!(r.max_height.is_finite(), "max_height not finite");
     assert!(r.time_of_flight.is_finite() && r.time_of_flight >= 0.0, "bad time_of_flight {}", r.time_of_flight);
     assert!(r.impact_velocity.is_finite() && r.impact_velocity >= 0.0, "bad impact_velocity {}", r.impact_velocity);

@@ -45,8 +45,9 @@ fuzz_target!(|data: &[u8]| {
             "higher BC dropped more at {range} m: base_y={y_lo}, hi_bc_y={y_hi}");
     }
 
-    // Property B: farther downrange => equal-or-more drop (monotone descent after apex).
-    // Compare two ranges past a modest distance to stay beyond the ascending arc.
+    // Property B: farther downrange => equal-or-more drop. With flat fire the
+    // trajectory descends monotonically from the muzzle (no apex), so this holds
+    // across the whole flight.
     let near = 200.0_f64.min(base.target_distance * 0.4);
     let far = (near * 2.0).min(base.target_distance * 0.9);
     if far > near + 1.0 {

@@ -86,8 +86,9 @@ fuzz_target!(|data: &[u8]| {
     // RELATIONSHIP MODE: both versions must agree on the SIGN of the drop response
     // to a BC increase. Absolute values legitimately differ across 0.21->0.22.
     if let (Some(sc), Some(sp)) = (response_sign_current(&cur), response_sign_prev(&prev)) {
-        // Both should be <= 0 (more BC never increases drop). Disagreement on a
-        // NON-zero sign is a regression in a qualitative property.
+        // We assert only that the two engine versions AGREE on the sign of the
+        // BC->drop response (relationship-mode), not the direction itself.
+        // Disagreement on a NON-zero sign is a regression in a qualitative property.
         if sc != 0 && sp != 0 {
             assert_eq!(sc, sp,
                 "BC->drop response sign diverged: current={sc}, prev(0.21.5)={sp}");
