@@ -188,10 +188,11 @@ impl ClusterBCDegradation {
         }
     }
 
-    /// Apply cluster-based BC correction with the legacy G1 classification contract.
+    /// Legacy G1 entry point retained for API compatibility.
     ///
-    /// Retained for API compatibility. Use [`Self::apply_correction_for_drag_model`]
-    /// when the BC's reference drag model is known.
+    /// The active multiplier ladder is G7-referenced, so G1 correction is intentionally
+    /// an identity. Use [`Self::apply_correction_for_drag_model`] with [`DragModel::G7`]
+    /// to apply the calibrated ladder.
     pub fn apply_correction(
         &self,
         bc: f64,
@@ -202,12 +203,12 @@ impl ClusterBCDegradation {
         self.apply_correction_for_drag_model(bc, caliber, weight_gr, velocity_fps, DragModel::G1)
     }
 
-    /// Apply cluster-based BC correction in the BC's reference-model space.
+    /// Apply cluster-based BC correction when the BC is in G7 reference-model space.
     ///
-    /// The classifier's thresholds are calibrated for G1 BCs, while the velocity
-    /// ladders are ratios that scale the caller's original BC. G7 values are
-    /// therefore converted to an approximate G1 equivalent for classification
-    /// only; the selected multiplier is still applied to the original G7 value.
+    /// The velocity ladders are G7-derived ratios and are not physically valid for G1/G2/etc.;
+    /// non-G7 inputs are returned byte-identically unchanged (MBA-1179). For G7, the classifier's
+    /// thresholds are G1-keyed, so the BC is converted to an approximate G1 equivalent for
+    /// classification only; the selected multiplier still scales the original G7 value.
     pub fn apply_correction_for_drag_model(
         &self,
         bc: f64,
@@ -216,6 +217,9 @@ impl ClusterBCDegradation {
         velocity_fps: f64,
         drag_model: DragModel,
     ) -> f64 {
+        if drag_model != DragModel::G7 {
+            return bc;
+        }
         let cluster_id = self.predict_cluster_for_drag_model(caliber, weight_gr, bc, drag_model);
         let multiplier = self.get_bc_multiplier(velocity_fps, cluster_id);
         bc * multiplier
@@ -321,7 +325,8 @@ mod tests {
             transonic / bc
         );
 
-        // The existing API remains byte-identical to explicit G1 classification.
+        // The legacy API remains byte-identical to the explicit G1 gate (both are inert because
+        // the active multiplier ladder is G7-referenced).
         let legacy = cluster_bc.apply_correction(bc, 0.224, 77.0, 2800.0);
         let explicit_g1 = cluster_bc.apply_correction_for_drag_model(
             bc,
@@ -331,6 +336,42 @@ mod tests {
             DragModel::G1,
         );
         assert_eq!(legacy.to_bits(), explicit_g1.to_bits());
+    }
+
+    #[test]
+    fn g7_reference_ladder_is_inert_for_other_drag_models() {
+        let cluster_bc = ClusterBCDegradation::new();
+        let bc = 0.475;
+
+        for drag_model in [
+            DragModel::G1,
+            DragModel::G2,
+            DragModel::G5,
+            DragModel::G6,
+            DragModel::G8,
+            DragModel::GI,
+            DragModel::GS,
+        ] {
+            let corrected = cluster_bc.apply_correction_for_drag_model(
+                bc,
+                0.308,
+                168.0,
+                1100.0,
+                drag_model,
+            );
+            assert_eq!(
+                corrected.to_bits(),
+                bc.to_bits(),
+                "G7-reference multiplier must not shape {drag_model} BC"
+            );
+        }
+        assert_eq!(
+            cluster_bc
+                .apply_correction(bc, 0.308, 168.0, 1100.0)
+                .to_bits(),
+            bc.to_bits(),
+            "legacy G1 entry point must also remain unmodified"
+        );
     }
 
     /// Golden parity test — values generated directly from the Python reference
