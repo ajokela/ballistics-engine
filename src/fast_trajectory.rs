@@ -686,15 +686,6 @@ fn compute_derivatives(
             let base_cd = get_drag_coefficient(mach, drag_model);
             let cd =
                 crate::transonic_drag::transonic_correction(mach, base_cd, projectile_shape, false);
-            // MBA-948: honor use_form_factor in the fast path too (was derivatives.rs-only). No-op
-            // when the flag is false (apply_form_factor_to_drag short-circuits), as it is on every
-            // current consumer surface.
-            let cd = crate::form_factor::apply_form_factor_to_drag(
-                cd,
-                inputs.bullet_model.as_deref(),
-                &inputs.bc_type,
-                inputs.use_form_factor,
-            );
             (cd, bc_current)
         };
 
@@ -904,6 +895,50 @@ pub fn fast_integrate_with_segments(
 mod tests {
     use super::*;
     use crate::BCSegmentData;
+
+    #[test]
+    fn measured_bc_fast_drag_ignores_name_based_form_factor_flag() {
+        let derivatives_with_flag = |use_form_factor| {
+            let inputs = BallisticInputs {
+                bc_value: 0.462,
+                bc_type: DragModel::G1,
+                bullet_model: Some("168gr SMK Match".to_string()),
+                use_form_factor,
+                temperature: 15.0,
+                pressure: 1013.25,
+                ..BallisticInputs::default()
+            };
+
+            compute_derivatives(
+                &[0.0, 0.0, 0.0, 600.0, 0.0, 0.0],
+                &inputs,
+                &WindSock::new(vec![]),
+                FastAtmosphere::Standard {
+                    base_density: 1.225,
+                },
+                &inputs.bc_type,
+                crate::transonic_drag::ProjectileShape::Spitzer,
+                inputs.bc_value,
+                false,
+                false,
+                None,
+                None,
+            )
+        };
+
+        let baseline = derivatives_with_flag(false);
+        let flagged = derivatives_with_flag(true);
+
+        for component in 3..6 {
+            assert_eq!(
+                flagged[component].to_bits(),
+                baseline[component].to_bits(),
+                "published BC already encodes form factor: component {component}, baseline={} flagged={}",
+                baseline[component],
+                flagged[component]
+            );
+        }
+    }
 
     #[test]
     fn inclined_positions_at_same_world_altitude_have_same_fast_acceleration() {
