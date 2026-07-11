@@ -1772,6 +1772,20 @@ impl TrajectorySolver {
         (new_pos, new_vel, dt_new)
     }
 
+    fn apply_cluster_bc_correction(&self, base_bc: f64, velocity_fps: f64) -> f64 {
+        if let Some(ref cluster_bc) = self.cluster_bc {
+            cluster_bc.apply_correction_for_drag_model(
+                base_bc,
+                self.inputs.caliber_inches,
+                self.inputs.weight_grains,
+                velocity_fps,
+                self.inputs.bc_type,
+            )
+        } else {
+            base_bc
+        }
+    }
+
     fn calculate_acceleration(
         &self,
         position: &Vector3<f64>,
@@ -1857,16 +1871,7 @@ impl TrajectorySolver {
         };
 
         // Apply cluster BC correction if enabled (on top of segment BC)
-        let effective_bc = if let Some(ref cluster_bc) = self.cluster_bc {
-            cluster_bc.apply_correction(
-                base_bc,
-                self.inputs.caliber_inches, // predict_cluster normalizes against an inches range
-                self.inputs.weight_grains,
-                velocity_fps,
-            )
-        } else {
-            base_bc
-        };
+        let effective_bc = self.apply_cluster_bc_correction(base_bc, velocity_fps);
         // Guard bc_value == 0 (allowed on the FFI/WASM surfaces, which lack the CLI's 0.001
         // lower bound): dividing by effective_bc below would be Inf -> NaN. Inert for valid
         // BCs (>= 0.001).
@@ -2672,6 +2677,34 @@ pub fn estimate_bc_from_trajectory(
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod cluster_bc_reference_space_tests {
+    use super::*;
+
+    #[test]
+    fn solver_passes_g7_reference_model_to_cluster_classifier() {
+        let mut inputs = BallisticInputs::default();
+        inputs.bc_value = 0.190;
+        inputs.bc_type = DragModel::G7;
+        inputs.bullet_mass = 77.0 * 0.00006479891;
+        inputs.bullet_diameter = 0.224 * 0.0254;
+        inputs.use_cluster_bc = true;
+
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let corrected = solver.apply_cluster_bc_correction(0.190, 2800.0);
+
+        assert!(
+            (corrected / 0.190 - 1.004).abs() < 1e-12,
+            "solver selected the wrong G7 cluster multiplier: {}",
+            corrected / 0.190
+        );
+    }
+}
 
 #[cfg(test)]
 mod ground_termination_tests {
