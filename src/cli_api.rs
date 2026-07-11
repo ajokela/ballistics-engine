@@ -768,6 +768,51 @@ impl TrajectorySolver {
         }
     }
 
+    /// Append the state where the final integration step crossed `max_range`.
+    ///
+    /// Each solver stores its pre-step state, so a range crossing otherwise leaves the reported
+    /// endpoint one step short. Ground- and time-limit exits that do not bracket `max_range` are
+    /// intentionally left unchanged.
+    fn append_max_range_endpoint(
+        &self,
+        points: &mut Vec<TrajectoryPoint>,
+        post_position: Vector3<f64>,
+        post_velocity: Vector3<f64>,
+        post_time: f64,
+        max_height: &mut f64,
+    ) {
+        let Some(previous) = points.last().cloned() else {
+            return;
+        };
+        if previous.position.x >= self.max_range || post_position.x < self.max_range {
+            return;
+        }
+
+        let span = post_position.x - previous.position.x;
+        if !span.is_finite() || span <= 1e-9 {
+            return;
+        }
+
+        let fraction = (self.max_range - previous.position.x) / span;
+        let mut position = previous.position + (post_position - previous.position) * fraction;
+        position.x = self.max_range;
+        let velocity_magnitude = previous.velocity_magnitude
+            + (post_velocity.magnitude() - previous.velocity_magnitude) * fraction;
+        let time = previous.time + (post_time - previous.time) * fraction;
+        let kinetic_energy =
+            0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
+
+        if position.y > *max_height {
+            *max_height = position.y;
+        }
+        points.push(TrajectoryPoint {
+            time,
+            position,
+            velocity_magnitude,
+            kinetic_energy,
+        });
+    }
+
     fn gravity_acceleration(&self) -> Vector3<f64> {
         let theta = self.inputs.shooting_angle;
         Vector3::new(
@@ -1064,6 +1109,8 @@ impl TrajectorySolver {
             time += self.time_step;
         }
 
+        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
+
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
 
@@ -1320,6 +1367,8 @@ impl TrajectorySolver {
             velocity += (acc1 + acc2 * 2.0 + acc3 * 2.0 + acc4) * (dt / 6.0);
             time += dt;
         }
+
+        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
 
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
@@ -1578,39 +1627,8 @@ impl TrajectorySolver {
             return Err(BallisticsError::from("No trajectory points calculated"));
         }
 
-        // Boundary interpolation to exactly max_range (MBA-968). The adaptive
-        // loop stores the point at the TOP of each iteration, so the last stored
-        // point sits one (possibly large) step SHORT of max_range while the
-        // post-loop `position` has just overshot it. Without this, the default
-        // RK45 solver reports ~2% short of --max-range, unlike the fixed-step
-        // solvers. When the loop exited by crossing the range (not by hitting the
-        // ground / time cap / iteration cap), append a linearly-interpolated
-        // point at exactly max_range so the reported range matches the request.
-        {
-            let prev = points.last().unwrap().clone();
-            let overshoot_x = position.x;
-            let crossed_range = overshoot_x >= self.max_range && prev.position.x < self.max_range;
-            if crossed_range {
-                let span = overshoot_x - prev.position.x;
-                if span > 1e-9 {
-                    let frac = (self.max_range - prev.position.x) / span;
-                    let interp_pos = prev.position + (position - prev.position) * frac;
-                    let interp_vel_mag = prev.velocity_magnitude
-                        + (velocity.magnitude() - prev.velocity_magnitude) * frac;
-                    let interp_time = prev.time + (time - prev.time) * frac;
-                    let interp_ke = 0.5 * self.inputs.bullet_mass * interp_vel_mag * interp_vel_mag;
-                    points.push(TrajectoryPoint {
-                        time: interp_time,
-                        position: interp_pos,
-                        velocity_magnitude: interp_vel_mag,
-                        kinetic_energy: interp_ke,
-                    });
-                    if interp_pos.y > max_height {
-                        max_height = interp_pos.y;
-                    }
-                }
-            }
-        }
+        // Shared MBA-968/MBA-1218 range-crossing interpolation for all solver modes.
+        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
 
         let last_point = points.last().unwrap();
 
@@ -3326,6 +3344,87 @@ mod inclined_atmosphere_frame_tests {
             (actual - expected).norm() < 1e-12,
             "inclined Coriolis mismatch: actual={actual:?}, expected={expected:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_range_interpolation_tests {
+    use super::*;
+
+    #[test]
+    fn every_solver_appends_an_exact_max_range_endpoint() {
+        let target_range = 0.1;
+        let modes = [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ];
+
+        for (name, use_rk4, use_adaptive_rk45) in modes {
+            let inputs = BallisticInputs {
+                use_rk4,
+                use_adaptive_rk45,
+                ground_threshold: f64::NEG_INFINITY,
+                enable_trajectory_sampling: true,
+                sample_interval: target_range,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(target_range);
+
+            let result = solver.solve().expect("short-range solve should succeed");
+            let terminal = result.points.last().expect("terminal point is missing");
+            let muzzle = result.points.first().expect("muzzle point is missing");
+
+            assert_eq!(
+                terminal.position.x.to_bits(),
+                target_range.to_bits(),
+                "{name} did not terminate exactly at max_range"
+            );
+            assert_eq!(result.max_range.to_bits(), target_range.to_bits());
+            assert!(
+                result.time_of_flight > 0.0 && result.time_of_flight < solver.time_step,
+                "{name} terminal time was not interpolated within the crossing step: {}",
+                result.time_of_flight
+            );
+            assert_eq!(result.time_of_flight.to_bits(), terminal.time.to_bits());
+            assert_eq!(
+                result.impact_velocity.to_bits(),
+                terminal.velocity_magnitude.to_bits()
+            );
+            assert_eq!(
+                result.impact_energy.to_bits(),
+                terminal.kinetic_energy.to_bits()
+            );
+            let expected_energy = 0.5 * solver.inputs.bullet_mass * result.impact_velocity.powi(2);
+            assert!((result.impact_energy - expected_energy).abs() < 1e-12);
+            assert!(terminal.velocity_magnitude < muzzle.velocity_magnitude);
+            assert!(terminal.kinetic_energy < muzzle.kinetic_energy);
+
+            let terminal_sample = result
+                .sampled_points
+                .as_ref()
+                .and_then(|samples| samples.last())
+                .expect("terminal trajectory sample is missing");
+            assert_eq!(
+                terminal_sample.distance_m.to_bits(),
+                target_range.to_bits(),
+                "{name} sampling did not include max_range"
+            );
+            assert_eq!(
+                terminal_sample.time_s.to_bits(),
+                result.time_of_flight.to_bits()
+            );
+            assert_eq!(
+                terminal_sample.velocity_mps.to_bits(),
+                result.impact_velocity.to_bits()
+            );
+            assert!((terminal_sample.energy_j - result.impact_energy).abs() < 1e-12);
+        }
     }
 }
 
