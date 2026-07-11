@@ -3,6 +3,8 @@
 //! This module provides Rust-accelerated implementations of atmospheric calculations
 //! with full ICAO Standard Atmosphere support for improved accuracy at all altitudes.
 
+use std::cmp::Ordering;
+
 /// ICAO Standard Atmosphere layer definitions
 #[derive(Debug, Clone)]
 struct AtmosphereLayer {
@@ -656,10 +658,14 @@ impl AtmoSock {
     /// Create a new `AtmoSock` from station-referenced atmosphere zones.
     ///
     /// Each segment is `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`. Segments are
-    /// sorted by `until_distance_m` (NaN thresholds are ordered last, matching `WindSock::new`).
+    /// sorted by `until_distance_m`, with NaN thresholds ordered last.
     pub fn new(mut segments: Vec<AtmoSegment>) -> Self {
-        // Sort by until_distance, treating NaN as greater than any value (mirrors WindSock::new).
-        segments.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Greater));
+        segments.sort_by(|a, b| match (a.3.is_nan(), b.3.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => a.3.partial_cmp(&b.3).unwrap(),
+        });
         AtmoSock { segments }
     }
 
@@ -1203,6 +1209,26 @@ mod tests {
         ]);
         assert_eq!(sock.atmo_for_range(50.0), (30.0, 1010.0, 80.0));
         assert_eq!(sock.atmo_for_range(150.0), (-5.0, 900.0, 10.0));
+    }
+
+    #[test]
+    fn test_atmo_sock_orders_nan_thresholds_last() {
+        let positive_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0002);
+        let sock = AtmoSock::new(vec![
+            (97.0, 997.0, 97.0, positive_nan),
+            (30.0, 1030.0, 30.0, 300.0),
+            (98.0, 998.0, 98.0, negative_nan),
+            (10.0, 1010.0, 10.0, 100.0),
+            (99.0, 999.0, 99.0, f64::NAN),
+            (20.0, 1020.0, 20.0, 200.0),
+        ]);
+
+        let thresholds: Vec<_> = sock.segments.iter().map(|segment| segment.3).collect();
+        assert_eq!(&thresholds[..3], &[100.0, 200.0, 300.0]);
+        assert!(thresholds[3..].iter().all(|threshold| threshold.is_nan()));
+        assert_eq!(sock.atmo_for_range(f64::NAN), (10.0, 1010.0, 10.0));
+        assert_eq!(sock.atmo_for_range(350.0), (99.0, 999.0, 99.0));
     }
 
     #[test]
