@@ -138,23 +138,30 @@ pub fn calculate_combined_angular_motion(
     initial_disturbance: f64,
 ) -> AngularState {
     // MBA-198: Guard against division by zero in stability calculation
-    if params.transverse_inertia == 0.0 || params.velocity_mps == 0.0 || params.length_m == 0.0 {
+    if params.transverse_inertia == 0.0
+        || params.velocity_mps == 0.0
+        || params.length_m == 0.0
+        || !params.air_density_kg_m3.is_finite()
+        || params.air_density_kg_m3 <= 0.0
+    {
         // Return unchanged state if invalid parameters
         return *angular_state;
     }
 
-    // Dimensionless gyroscopic stability factor via the Miller formula (consistent with the rest
-    // of the engine), derived from geometry. Twist (in/turn) follows from spin and velocity: one
-    // turn per 2*pi*V/p metres. (MBA-941: the previous inline Sg had units of 1/m.)
+    // Dimensionless gyroscopic stability factor via the engine's canonical dynamic Miller
+    // calculation, including the (V/2800 fps)^(1/3) and rho0/rho corrections. Use spin magnitude
+    // for stability (which depends on p^2); the signed rate below still controls phase direction.
     let caliber_in = params.caliber_m / 0.0254;
     let length_in = params.length_m / 0.0254;
     let mass_gr = params.mass_kg / 0.00006479891;
-    let twist_in = if params.spin_rate_rad_s.abs() > 1e-9 {
-        (2.0 * std::f64::consts::PI * params.velocity_mps / params.spin_rate_rad_s).abs() / 0.0254
-    } else {
-        0.0
-    };
-    let stability = crate::spin_drift::miller_stability(caliber_in, mass_gr, twist_in, length_in);
+    let stability = crate::spin_drift::calculate_dynamic_stability(
+        mass_gr,
+        params.velocity_mps,
+        params.spin_rate_rad_s.abs(),
+        caliber_in,
+        length_in,
+        params.air_density_kg_m3,
+    );
 
     // Precession (slow) and nutation (fast) angular frequencies, both rad/s.
     let omega_p = calculate_precession_frequency(
@@ -498,6 +505,85 @@ mod tests {
         // Check reasonable bounds
         assert!(new_state.pitch_angle.abs() < 1.0);
         assert!(new_state.yaw_angle.abs() < 1.0);
+    }
+
+    #[test]
+    fn combined_motion_applies_velocity_and_density_to_stability() {
+        let velocity_mps = 1_000.0;
+        let spin_rate_rad_s = 15_095.0;
+        let params = PrecessionNutationParams {
+            mass_kg: 0.01134,
+            caliber_m: 0.00782,
+            length_m: 0.033,
+            spin_rate_rad_s,
+            spin_inertia: 6.94e-8,
+            transverse_inertia: 9.13e-7,
+            velocity_mps,
+            air_density_kg_m3: 1.0,
+            mach: velocity_mps / 343.0,
+            pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
+            nutation_damping_factor: 0.05,
+        };
+        let initial_state = AngularState {
+            pitch_angle: 0.0,
+            yaw_angle: 0.0,
+            pitch_rate: 0.0,
+            yaw_rate: 0.0,
+            precession_angle: 0.0,
+            nutation_phase: 0.0,
+        };
+
+        let caliber_in = params.caliber_m / 0.0254;
+        let length_in = params.length_m / 0.0254;
+        let mass_gr = params.mass_kg / 0.00006479891;
+        let spin_rps = spin_rate_rad_s / (2.0 * std::f64::consts::PI);
+        let twist_in = velocity_mps * 3.28084 * 12.0 / spin_rps;
+        let bare_sg = crate::spin_drift::miller_stability(
+            caliber_in,
+            mass_gr,
+            twist_in,
+            length_in,
+        );
+        let velocity_correction = (velocity_mps * 3.28084 / 2800.0).powf(1.0 / 3.0);
+        let density_correction = 1.225 / params.air_density_kg_m3;
+        let corrected_sg = crate::spin_drift::calculate_dynamic_stability(
+            mass_gr,
+            velocity_mps,
+            spin_rate_rad_s,
+            caliber_in,
+            length_in,
+            params.air_density_kg_m3,
+        );
+        assert!(bare_sg < 1.0);
+        assert!(bare_sg * velocity_correction < 1.0);
+        assert!(bare_sg * density_correction < 1.0);
+        assert!(corrected_sg > 1.0);
+
+        let dt = 0.0001;
+        let actual = calculate_combined_angular_motion(&params, &initial_state, 0.0, dt, 0.001);
+        let expected_precession = calculate_precession_frequency(
+            spin_rate_rad_s,
+            params.spin_inertia,
+            params.transverse_inertia,
+            corrected_sg,
+        ) * dt;
+        let expected_nutation = calculate_nutation_frequency(
+            spin_rate_rad_s,
+            params.spin_inertia,
+            params.transverse_inertia,
+            corrected_sg,
+        ) * dt;
+
+        assert!(
+            (actual.precession_angle - expected_precession).abs() < 1e-12,
+            "corrected precession phase mismatch: actual={} expected={expected_precession}",
+            actual.precession_angle
+        );
+        assert!(
+            (actual.nutation_phase - expected_nutation).abs() < 1e-12,
+            "corrected nutation phase mismatch: actual={} expected={expected_nutation}",
+            actual.nutation_phase
+        );
     }
 
     #[test]
