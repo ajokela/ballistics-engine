@@ -291,14 +291,23 @@ pub fn compute_derivatives(
             // First try velocity-based segments if available
             if inputs.bc_segments_data.is_some() {
                 bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used);
-            } else if let Some(ref segments) = inputs.bc_segments {
-                // Fall back to Mach-based segments when use_bc_segments=true but no velocity data
-                bc_val = interpolated_bc(mach, segments, Some(inputs));
             } else {
-                // No explicit segments - try BC estimation
-                bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used);
+                match inputs.bc_segments.as_deref() {
+                    // Fall back to a non-empty Mach table when no velocity data exist.
+                    Some(segments) if !segments.is_empty() => {
+                        bc_val = interpolated_bc(mach, segments, Some(inputs));
+                    }
+                    // An explicitly empty table is a no-op and preserves the active caller BC.
+                    Some(_) => {}
+                    // No explicit table: retain the opt-in automatic estimation behavior.
+                    None => bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used),
+                }
             }
-        } else if let Some(ref segments) = inputs.bc_segments {
+        } else if let Some(segments) = inputs
+            .bc_segments
+            .as_deref()
+            .filter(|segments| !segments.is_empty())
+        {
             // Explicit Mach-based segments (legacy behavior when use_bc_segments=false)
             bc_val = interpolated_bc(mach, segments, Some(inputs));
         }
@@ -503,96 +512,21 @@ pub fn compute_derivatives(
     [vel[0], vel[1], vel[2], accel[0], accel[1], accel[2]]
 }
 
-/// Calculate appropriate BC fallback based on available bullet parameters
-fn calculate_bc_fallback(
-    bullet_mass: Option<f64>,     // grains
-    bullet_diameter: Option<f64>, // inches
-    bc_type: Option<&str>,        // "G1" or "G7"
-) -> f64 {
-    use crate::constants::*;
-
-    // Weight-based fallback (most reliable predictor)
-    if let Some(weight) = bullet_mass {
-        let base_bc = if weight < 50.0 {
-            BC_FALLBACK_ULTRA_LIGHT
-        } else if weight < 100.0 {
-            BC_FALLBACK_LIGHT
-        } else if weight < 150.0 {
-            BC_FALLBACK_MEDIUM
-        } else if weight < 200.0 {
-            BC_FALLBACK_HEAVY
-        } else {
-            BC_FALLBACK_VERY_HEAVY
-        };
-
-        // G7 vs G1 adjustment
-        return if let Some(drag_model) = bc_type {
-            if drag_model == "G7" {
-                base_bc * 0.85 // G7 BCs are typically lower than G1
-            } else {
-                base_bc
-            }
-        } else {
-            base_bc
-        };
-    }
-
-    // Caliber-based fallback (second most reliable)
-    if let Some(caliber) = bullet_diameter {
-        let base_bc = if caliber <= 0.224 {
-            BC_FALLBACK_SMALL_CALIBER
-        } else if caliber <= 0.243 {
-            BC_FALLBACK_MEDIUM_CALIBER
-        } else if caliber <= 0.284 {
-            BC_FALLBACK_LARGE_CALIBER
-        } else {
-            BC_FALLBACK_XLARGE_CALIBER
-        };
-
-        // G7 vs G1 adjustment
-        return if let Some(drag_model) = bc_type {
-            if drag_model == "G7" {
-                base_bc * 0.85 // G7 BCs are typically lower than G1
-            } else {
-                base_bc
-            }
-        } else {
-            base_bc
-        };
-    }
-
-    // Final fallback - conservative overall
-    let base_fallback = BC_FALLBACK_CONSERVATIVE;
-    if let Some(drag_model) = bc_type {
-        if drag_model == "G7" {
-            return base_fallback * 0.85;
-        }
-    }
-
-    base_fallback
-}
-
-/// Interpolate ballistic coefficient from segments with dynamic fallback
+/// Interpolate a ballistic coefficient from Mach-keyed segments.
+///
+/// An empty optional table is not a request to invent a new BC: when `inputs` are present, the
+/// caller's scalar `bc_value` is preserved. Standalone calls without inputs retain the historical
+/// conservative fallback because no caller BC is available.
 pub fn interpolated_bc(
     mach: f64,
     segments: &[(f64, f64)],
     inputs: Option<&BallisticInputs>,
 ) -> f64 {
     if segments.is_empty() {
-        // Use dynamic fallback based on bullet characteristics if available
         if let Some(inputs) = inputs {
-            let bc_type_str = match inputs.bc_type {
-                crate::DragModel::G1 => "G1",
-                crate::DragModel::G7 => "G7",
-                _ => "G1", // Default to G1 for other models
-            };
-            return calculate_bc_fallback(
-                Some(inputs.weight_grains),  // grains
-                Some(inputs.caliber_inches), // inches
-                Some(bc_type_str),
-            );
+            return inputs.bc_value;
         }
-        return crate::constants::BC_FALLBACK_CONSERVATIVE; // Conservative fallback based on database analysis
+        return crate::constants::BC_FALLBACK_CONSERVATIVE;
     }
 
     if segments.len() == 1 {
@@ -1184,9 +1118,55 @@ mod tests {
                 < 1e-10
         );
 
+        let mut inputs = create_test_inputs();
+        inputs.bc_type = crate::DragModel::G7;
+        inputs.bc_value = 0.487;
+        assert_eq!(
+            interpolated_bc(1.0, &[], Some(&inputs)).to_bits(),
+            inputs.bc_value.to_bits(),
+            "an empty optional table must preserve the caller's scalar BC"
+        );
+
         // Single segment
         let single = vec![(1.0, 0.7)];
         assert!((interpolated_bc(1.5, &single, None) - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn empty_mach_segments_preserve_active_bc_used() {
+        let mut inputs = create_test_inputs();
+        inputs.bc_type = crate::DragModel::G7;
+        inputs.bc_value = 0.123; // Deliberately different from the active fitted/adjusted BC.
+
+        let drag_acceleration = |inputs: &BallisticInputs| {
+            compute_derivatives(
+                Vector3::zeros(),
+                Vector3::new(700.0, 0.0, 0.0),
+                inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                0.487,
+                None,
+                0.0,
+                None,
+            )[3]
+        };
+
+        inputs.use_bc_segments = false;
+        inputs.bc_segments = None;
+        let no_table = drag_acceleration(&inputs);
+
+        for use_bc_segments in [false, true] {
+            inputs.use_bc_segments = use_bc_segments;
+            inputs.bc_segments = Some(Vec::new());
+            let empty_table = drag_acceleration(&inputs);
+
+            assert_eq!(
+                empty_table.to_bits(),
+                no_table.to_bits(),
+                "Some(empty) must preserve bc_used when use_bc_segments={use_bc_segments}"
+            );
+        }
     }
 
     #[test]
