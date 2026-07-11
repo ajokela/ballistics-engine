@@ -76,7 +76,7 @@ fn rk4_step(
 /// Each component is scaled independently so a large downrange position cannot hide an error in
 /// a near-zero lateral velocity (and vice versa). The caller's tolerance therefore acts as both
 /// an absolute and relative tolerance in each component's own unit.
-fn rk45_error_norm(
+pub(crate) fn rk45_error_norm(
     state: &Vector6<f64>,
     fifth_order: &Vector6<f64>,
     fourth_order: &Vector6<f64>,
