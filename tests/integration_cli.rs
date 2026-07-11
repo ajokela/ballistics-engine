@@ -352,6 +352,201 @@ fn test_cli_output_format_csv() {
     assert!(stdout.contains(","), "Should be CSV format");
 }
 
+#[test]
+fn saved_metric_profile_preserves_physical_values_when_recalled_as_imperial() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let home = std::env::temp_dir().join(format!(
+        "ballistics-profile-test-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+
+    let saved = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "profile",
+            "save",
+            "metric-exact",
+            "--units",
+            "metric",
+            "--velocity",
+            "762",
+            "--bc",
+            "0.243",
+            "--mass",
+            "11.33980925",
+            "--diameter",
+            "7.8232",
+            "--drag-model",
+            "g7",
+            "--twist-rate",
+            "254",
+            "--sight-height",
+            "50.8",
+            "--auto-zero",
+            "91.44",
+            "--wind-speed",
+            "4.4704",
+            "--bullet-length",
+            "30.48",
+        ])
+        .output()
+        .expect("Failed to save metric profile");
+    assert!(
+        saved.status.success(),
+        "profile save failed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+
+    let recalled = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "trajectory",
+            "--saved-profile",
+            "metric-exact",
+            "--units",
+            "imperial",
+            "--max-range",
+            "100",
+            "--ignore-ground-impact",
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("Failed to recall metric profile as imperial");
+    let explicit = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "trajectory",
+            "--units",
+            "imperial",
+            "--velocity",
+            "2500",
+            "--bc",
+            "0.243",
+            "--mass",
+            "175",
+            "--diameter",
+            "0.308",
+            "--drag-model",
+            "g7",
+            "--twist-rate",
+            "10",
+            "--sight-height",
+            "2",
+            "--auto-zero",
+            "100",
+            "--wind-speed",
+            "10",
+            "--bullet-length",
+            "1.2",
+            "--max-range",
+            "100",
+            "--ignore-ground-impact",
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("Failed to run explicit imperial trajectory");
+    let recalled_mpbr = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "mpbr",
+            "--profile",
+            "metric-exact",
+            "--units",
+            "imperial",
+            "--vital-zone",
+            "8",
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("Failed to recall metric profile for MPBR");
+    let explicit_mpbr = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "mpbr",
+            "--units",
+            "imperial",
+            "--velocity",
+            "2500",
+            "--bc",
+            "0.243",
+            "--mass",
+            "175",
+            "--diameter",
+            "0.308",
+            "--drag-model",
+            "g7",
+            "--sight-height",
+            "2",
+            "--vital-zone",
+            "8",
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("Failed to run explicit imperial MPBR");
+
+    assert!(
+        recalled.status.success(),
+        "profile recall failed: {}",
+        String::from_utf8_lossy(&recalled.stderr)
+    );
+    assert!(
+        explicit.status.success(),
+        "explicit trajectory failed: {}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert!(
+        recalled_mpbr.status.success(),
+        "profile MPBR failed: {}",
+        String::from_utf8_lossy(&recalled_mpbr.stderr)
+    );
+    assert!(
+        explicit_mpbr.status.success(),
+        "explicit MPBR failed: {}",
+        String::from_utf8_lossy(&explicit_mpbr.stderr)
+    );
+    let recalled: Value = serde_json::from_slice(&recalled.stdout).expect("valid recalled JSON");
+    let explicit: Value = serde_json::from_slice(&explicit.stdout).expect("valid explicit JSON");
+    let recalled_mpbr: Value =
+        serde_json::from_slice(&recalled_mpbr.stdout).expect("valid recalled MPBR JSON");
+    let explicit_mpbr: Value =
+        serde_json::from_slice(&explicit_mpbr.stdout).expect("valid explicit MPBR JSON");
+    std::fs::remove_dir_all(&home).unwrap();
+
+    assert_eq!(recalled["units"], "imperial");
+    for field in [
+        "max_height",
+        "time_of_flight",
+        "impact_velocity",
+        "impact_energy",
+        "stability_coefficient",
+    ] {
+        let actual = recalled[field].as_f64().unwrap();
+        let expected = explicit[field].as_f64().unwrap();
+        let tolerance = expected.abs().max(1.0) * 1e-10;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "cross-unit profile changed {field}: recalled={actual} explicit={expected}"
+        );
+    }
+    for field in ["mpbr", "optimal_zero", "impact_velocity", "impact_energy"] {
+        let actual = recalled_mpbr[field].as_f64().unwrap();
+        let expected = explicit_mpbr[field].as_f64().unwrap();
+        let tolerance = expected.abs().max(1.0) * 1e-10;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "cross-unit profile changed MPBR {field}: recalled={actual} explicit={expected}"
+        );
+    }
+}
+
 // ============================================================================
 // True Velocity Offline Mode Tests
 // ============================================================================
