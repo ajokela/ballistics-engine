@@ -764,6 +764,10 @@ enum Commands {
         #[arg(long, default_value = "1.0")]
         wind_std: f64,
 
+        /// Wind direction standard deviation (degrees)
+        #[arg(long, visible_alias = "wind-dir-std", default_value = "0.0")]
+        wind_direction_std: f64,
+
         /// Base wind speed (mph for imperial, m/s for metric)
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
@@ -3810,6 +3814,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             angle_std,
             bc_std,
             wind_std,
+            wind_direction_std,
             wind_speed,
             wind_direction,
             target_distance,
@@ -3843,6 +3848,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 angle_std,
                 bc_std,
                 wind_std_metric,
+                wind_direction_std,
                 wind_speed_metric,
                 wind_direction,
                 target_distance_metric,
@@ -6246,6 +6252,7 @@ fn run_monte_carlo(
     angle_std: f64,
     bc_std: f64,
     wind_std: f64,
+    wind_direction_std: f64,
     wind_speed: f64,
     wind_direction: f64,
     target_distance: Option<f64>,
@@ -6288,7 +6295,12 @@ fn run_monte_carlo(
     };
 
     // Run Monte Carlo simulation
-    let results = ballistics_engine::run_monte_carlo_with_wind(base_inputs, base_wind, mc_params)?;
+    let results = ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev(
+        base_inputs,
+        base_wind,
+        mc_params,
+        wind_direction_std.to_radians(),
+    )?;
 
     // Calculate statistics
     let mean_range = results.ranges.iter().sum::<f64>() / results.ranges.len() as f64;

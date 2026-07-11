@@ -1,8 +1,9 @@
 //! FFI bindings for iOS/Swift integration
 
 use crate::{
-    calculate_zero_angle_with_conditions, run_monte_carlo, AtmosphericConditions, BallisticInputs,
-    DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
+    calculate_zero_angle_with_conditions, run_monte_carlo_with_direction_std_dev,
+    AtmosphericConditions, BallisticInputs, DragModel, MonteCarloParams, TrajectorySolver,
+    WindConditions,
 };
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
@@ -559,6 +560,34 @@ pub unsafe extern "C" fn ballistics_monte_carlo(
     atmosphere: *const FFIAtmosphericConditions,
     params: *const FFIMonteCarloParams,
 ) -> *mut FFIMonteCarloResults {
+    unsafe { ballistics_monte_carlo_impl(inputs, atmosphere, params, 0.0) }
+}
+
+/// Run a Monte Carlo simulation with independent wind-direction uncertainty through the C ABI.
+///
+/// `wind_direction_std_dev` is in radians. This additive entry point keeps
+/// [`FFIMonteCarloParams`] and [`ballistics_monte_carlo`] binary-compatible; the older function
+/// delegates with zero wind-direction uncertainty.
+///
+/// # Safety
+///
+/// The pointer and ownership requirements are identical to [`ballistics_monte_carlo`].
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_monte_carlo_with_direction_std_dev(
+    inputs: *const FFIBallisticInputs,
+    atmosphere: *const FFIAtmosphericConditions,
+    params: *const FFIMonteCarloParams,
+    wind_direction_std_dev: c_double,
+) -> *mut FFIMonteCarloResults {
+    unsafe { ballistics_monte_carlo_impl(inputs, atmosphere, params, wind_direction_std_dev) }
+}
+
+unsafe fn ballistics_monte_carlo_impl(
+    inputs: *const FFIBallisticInputs,
+    atmosphere: *const FFIAtmosphericConditions,
+    params: *const FFIMonteCarloParams,
+    wind_direction_std_dev: f64,
+) -> *mut FFIMonteCarloResults {
     if inputs.is_null() || params.is_null() {
         return ptr::null_mut();
     }
@@ -606,7 +635,11 @@ pub unsafe extern "C" fn ballistics_monte_carlo(
     };
 
     // Run Monte Carlo simulation
-    match run_monte_carlo(ballistic_inputs, mc_params) {
+    match run_monte_carlo_with_direction_std_dev(
+        ballistic_inputs,
+        mc_params,
+        wind_direction_std_dev,
+    ) {
         Ok(results) => {
             let num_results = results.ranges.len() as c_int;
 
@@ -713,14 +746,14 @@ pub unsafe extern "C" fn ballistics_monte_carlo(
     }
 }
 
-/// Release Monte Carlo results allocated by [`ballistics_monte_carlo`].
+/// Release Monte Carlo results allocated by either Monte Carlo C entry point.
 ///
 /// # Safety
 ///
-/// `results` must be null or a pointer returned by [`ballistics_monte_carlo`]
-/// that has not already been freed. Its embedded pointers and result count must
-/// be unchanged from the returned values. After this call, the result and all
-/// of its arrays must not be accessed again.
+/// `results` must be null or a pointer returned by [`ballistics_monte_carlo`] or
+/// [`ballistics_monte_carlo_with_direction_std_dev`] that has not already been freed. Its
+/// embedded pointers and result count must be unchanged from the returned values. After this
+/// call, the result and all of its arrays must not be accessed again.
 #[no_mangle]
 pub unsafe extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarloResults) {
     if results.is_null() {
@@ -784,6 +817,32 @@ pub extern "C" fn ballistics_get_version() -> *const c_char {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct LegacyFFIMonteCarloParams {
+        num_simulations: c_int,
+        velocity_std_dev: c_double,
+        angle_std_dev: c_double,
+        bc_std_dev: c_double,
+        wind_speed_std_dev: c_double,
+        target_distance: c_double,
+        base_wind_speed: c_double,
+        base_wind_direction: c_double,
+        azimuth_std_dev: c_double,
+    }
+
+    #[test]
+    fn monte_carlo_params_legacy_abi_size_is_unchanged() {
+        assert_eq!(
+            std::mem::size_of::<FFIMonteCarloParams>(),
+            std::mem::size_of::<LegacyFFIMonteCarloParams>()
+        );
+        assert_eq!(
+            std::mem::align_of::<FFIMonteCarloParams>(),
+            std::mem::align_of::<LegacyFFIMonteCarloParams>()
+        );
+    }
+
     #[test]
     fn null_pointer_contracts_return_sentinels_and_free_safely() {
         unsafe {
@@ -806,6 +865,13 @@ mod tests {
                 ballistics_monte_carlo(std::ptr::null(), std::ptr::null(), std::ptr::null(),)
                     .is_null()
             );
+            assert!(ballistics_monte_carlo_with_direction_std_dev(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0.1,
+            )
+            .is_null());
 
             ballistics_free_trajectory_result(std::ptr::null_mut());
             ballistics_free_monte_carlo_results(std::ptr::null_mut());

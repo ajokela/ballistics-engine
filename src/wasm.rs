@@ -2,13 +2,13 @@
 use serde_json;
 use wasm_bindgen::prelude::*;
 
+use crate::bc_table_5d::Bc5dTable;
 use crate::cli_api::{
-    calculate_zero_angle_with_conditions, estimate_bc_fit, run_monte_carlo, AtmosphericConditions,
-    BallisticInputs as InternalBallisticInputs, BcFitMode, MonteCarloParams, TrajectorySolver,
-    WindConditions,
+    calculate_zero_angle_with_conditions, estimate_bc_fit, run_monte_carlo_with_direction_std_dev,
+    AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcFitMode, MonteCarloParams,
+    TrajectorySolver, WindConditions,
 };
 use crate::drag_model::DragModel;
-use crate::bc_table_5d::Bc5dTable;
 use std::cell::RefCell;
 
 #[wasm_bindgen]
@@ -1212,6 +1212,7 @@ impl WasmBallistics {
         } else {
             0.5
         };
+        let mut wind_direction_std = 0.0;
         let mut drag_model = "G1";
 
         // Parse arguments
@@ -1298,6 +1299,14 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--wind-direction-std" | "--wind-dir-std" => {
+                    if i + 1 < args.len() {
+                        wind_direction_std = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid wind direction std"))?;
+                        i += 1;
+                    }
+                }
                 "--drag-model" => {
                     if i + 1 < args.len() {
                         drag_model = args[i + 1];
@@ -1379,7 +1388,11 @@ impl WasmBallistics {
             target_distance: None,
         };
 
-        match run_monte_carlo(inputs, params) {
+        match run_monte_carlo_with_direction_std_dev(
+            inputs,
+            params,
+            wind_direction_std * std::f64::consts::PI / 180.0,
+        ) {
             Ok(results) => {
                 // Calculate statistics
                 let mean_range: f64 =
@@ -2289,6 +2302,7 @@ Monte Carlo Command:
     --angle-std <STD>            Angle std deviation
     --bc-std <STD>               BC std deviation
     --wind-speed-std <STD>       Wind speed std deviation
+    --wind-direction-std <STD>   Wind direction std deviation (degrees)
 
 Estimate BC Command:
   ballistics estimate-bc [OPTIONS]
