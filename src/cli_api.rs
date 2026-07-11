@@ -418,6 +418,26 @@ pub struct TrajectoryResult {
     pub aerodynamic_jump: Option<crate::aerodynamic_jump::AerodynamicJumpComponents>,
 }
 
+const RK45_TOLERANCE: f64 = 1e-6;
+const RK45_SAFETY_FACTOR: f64 = 0.9;
+const RK45_MAX_DT: f64 = 0.01;
+const RK45_MIN_DT: f64 = 1e-6;
+
+struct Rk45Trial {
+    position: Vector3<f64>,
+    velocity: Vector3<f64>,
+    suggested_dt: f64,
+    error: f64,
+}
+
+struct Rk45AcceptedStep {
+    position: Vector3<f64>,
+    velocity: Vector3<f64>,
+    used_dt: f64,
+    next_dt: f64,
+    error: f64,
+}
+
 impl TrajectoryResult {
     /// Interpolate position at a given downrange distance (X coordinate, McCoy).
     /// Returns the interpolated (x, y, z) position at that range.
@@ -1375,10 +1395,6 @@ impl TrajectorySolver {
         let mut points = Vec::new();
         let mut max_height = position.y;
         let mut dt = 0.001; // Initial step size
-        let tolerance = 1e-6; // Error tolerance
-        let safety_factor = 0.9; // Safety factor for step size adjustment
-        let max_dt = 0.01; // Maximum step size
-        let min_dt = 1e-6; // Minimum step size
 
         // Add a point counter to debug
         let mut iteration_count = 0;
@@ -1485,9 +1501,23 @@ impl TrajectorySolver {
                 }
             }
 
-            // Precession / nutation (RK45 solver). Uses the step `dt` actually
-            // taken for this iteration so the angular integration stays in sync
-            // with the variable-step trajectory.
+            // Retry the same state until the embedded error estimate accepts the
+            // candidate. No trajectory or angular state advances on rejection.
+            let accepted_step = self.adaptive_rk45_step(
+                &position,
+                &velocity,
+                dt,
+                &wind_vector,
+                (resolved_temp_c, resolved_press_hpa, base_ratio),
+            );
+            debug_assert!(
+                accepted_step.error <= RK45_TOLERANCE
+                    || accepted_step.used_dt <= RK45_MIN_DT
+            );
+
+            // Precession / nutation advances only after the translational step
+            // is accepted, using that accepted interval rather than a rejected
+            // trial's dt.
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
                     let mach = velocity_magnitude / speed_of_sound;
@@ -1514,7 +1544,13 @@ impl TrajectorySolver {
                         nutation_damping_factor: 0.05,
                     };
 
-                    *state = calculate_combined_angular_motion(&params, state, time, dt, 0.001);
+                    *state = calculate_combined_angular_motion(
+                        &params,
+                        state,
+                        time,
+                        accepted_step.used_dt,
+                        0.001,
+                    );
 
                     if state.yaw_angle.abs() > max_yaw_angle {
                         max_yaw_angle = state.yaw_angle.abs();
@@ -1525,26 +1561,12 @@ impl TrajectorySolver {
                 }
             }
 
-            // RK45 step with adaptive step size (air_density / wind_vector hoisted above)
-            let (new_pos, new_vel, new_dt) = self.rk45_step(
-                &position,
-                &velocity,
-                dt,
-                &wind_vector,
-                tolerance,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
-
-            // Advance state and time by the dt actually used for THIS step. (Previously dt
-            // was overwritten with the adapted next-step size BEFORE `time += dt`, so every
-            // reported time advanced by the NEXT step's dt — desyncing time from state and
-            // corrupting time_of_flight and per-point / sampled times.)
-            position = new_pos;
-            velocity = new_vel;
-            time += dt;
+            position = accepted_step.position;
+            velocity = accepted_step.velocity;
+            time += accepted_step.used_dt;
 
             // Adapt the step size for the NEXT iteration.
-            dt = (safety_factor * new_dt).clamp(min_dt, max_dt);
+            dt = accepted_step.next_dt;
         }
 
         // Ensure we have at least one point
@@ -1657,6 +1679,42 @@ impl TrajectorySolver {
         })
     }
 
+    fn adaptive_rk45_step(
+        &self,
+        position: &Vector3<f64>,
+        velocity: &Vector3<f64>,
+        initial_dt: f64,
+        wind_vector: &Vector3<f64>,
+        resolved_atmo: (f64, f64, f64),
+    ) -> Rk45AcceptedStep {
+        let mut trial_dt = initial_dt;
+
+        loop {
+            let trial = self.rk45_step(
+                position,
+                velocity,
+                trial_dt,
+                wind_vector,
+                RK45_TOLERANCE,
+                resolved_atmo,
+            );
+            let next_dt = (RK45_SAFETY_FACTOR * trial.suggested_dt)
+                .clamp(RK45_MIN_DT, RK45_MAX_DT);
+
+            if trial.error <= RK45_TOLERANCE || trial_dt <= RK45_MIN_DT {
+                return Rk45AcceptedStep {
+                    position: trial.position,
+                    velocity: trial.velocity,
+                    used_dt: trial_dt,
+                    next_dt,
+                    error: trial.error,
+                };
+            }
+
+            trial_dt = next_dt;
+        }
+    }
+
     fn rk45_step(
         &self,
         position: &Vector3<f64>,
@@ -1665,7 +1723,7 @@ impl TrajectorySolver {
         wind_vector: &Vector3<f64>,
         tolerance: f64,
         resolved_atmo: (f64, f64, f64), // (base_temp_c, base_press_hpa, base_ratio)
-    ) -> (Vector3<f64>, Vector3<f64>, f64) {
+    ) -> Rk45Trial {
         // Dormand-Prince coefficients
         const A21: f64 = 1.0 / 5.0;
         const A31: f64 = 3.0 / 40.0;
@@ -1769,7 +1827,12 @@ impl TrajectorySolver {
             dt * (tolerance / error).powf(0.25).max(0.1)
         };
 
-        (new_pos, new_vel, dt_new)
+        Rk45Trial {
+            position: new_pos,
+            velocity: new_vel,
+            suggested_dt: dt_new,
+            error,
+        }
     }
 
     fn apply_cluster_bc_correction(&self, base_bc: f64, velocity_fps: f64) -> f64 {
@@ -2819,6 +2882,76 @@ mod cluster_bc_reference_space_tests {
             "solver selected the wrong G7 cluster multiplier: {}",
             corrected / 0.190
         );
+    }
+}
+
+#[cfg(test)]
+mod rk45_adaptivity_tests {
+    use super::*;
+
+    fn discontinuous_wind_solver() -> TrajectorySolver {
+        let inputs = BallisticInputs::default();
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_wind_segments(vec![
+            (0.0, 90.0, 4.0),
+            (1_000.0, 90.0, 10_000.0),
+        ]);
+        solver
+    }
+
+    #[test]
+    fn rk45_retries_discontinuous_trial_before_advancing() {
+        let solver = discontinuous_wind_solver();
+        let position = Vector3::new(0.0, solver.inputs.muzzle_height, 0.0);
+        let velocity = Vector3::new(solver.inputs.muzzle_velocity, 0.0, 0.0);
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let dt = 0.01;
+
+        let rejected_trial = solver.rk45_step(
+            &position,
+            &velocity,
+            dt,
+            &Vector3::zeros(),
+            RK45_TOLERANCE,
+            resolved_atmo,
+        );
+        assert!(
+            rejected_trial.error > RK45_TOLERANCE,
+            "discontinuous full step must exceed tolerance, got {}",
+            rejected_trial.error
+        );
+
+        let accepted = solver.adaptive_rk45_step(
+            &position,
+            &velocity,
+            dt,
+            &Vector3::zeros(),
+            resolved_atmo,
+        );
+        assert!(accepted.used_dt < dt, "oversized trial was not retried");
+        assert!(
+            accepted.error <= RK45_TOLERANCE || accepted.used_dt <= RK45_MIN_DT,
+            "accepted error {} exceeds tolerance at dt {}",
+            accepted.error,
+            accepted.used_dt
+        );
+
+        let accepted_trial = solver.rk45_step(
+            &position,
+            &velocity,
+            accepted.used_dt,
+            &Vector3::zeros(),
+            RK45_TOLERANCE,
+            resolved_atmo,
+        );
+        assert_eq!(accepted.position, accepted_trial.position);
+        assert_eq!(accepted.velocity, accepted_trial.velocity);
+        assert!((RK45_MIN_DT..=RK45_MAX_DT).contains(&accepted.next_dt));
     }
 }
 
