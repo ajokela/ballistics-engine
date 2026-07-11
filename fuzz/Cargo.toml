@@ -35,3 +35,10 @@ path = "fuzz_targets/robustness_ffi.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "robustness_montecarlo"
+path = "fuzz_targets/robustness_montecarlo.rs"
+test = false
+doc = false
+bench = false
