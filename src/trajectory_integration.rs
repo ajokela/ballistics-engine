@@ -255,13 +255,11 @@ fn build_inputs(params: &TrajectoryParams) -> BallisticInputs {
         bc_type_str: None,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
-        // MBA-959: aerodynamic jump is intentionally OFF on this path. integrate_trajectory
-        // is a low-level state integrator: it advances a raw initial_state (no muzzle angle to
-        // perturb) and an unread muzzle_velocity, so a meaningful Litz Sg can't be formed here
-        // (Sg would be ~0 and the AJ guard would suppress it regardless). AJ belongs on the
-        // BallisticInputs + TrajectorySolver path, which bindings use and already honors the flag.
-        // (Bullet geometry IS now carried through TrajectoryParams — MBA-717 — so spin-drift /
-        // Magnus on this path use the real diameter/length/twist.)
+        // MBA-959/MBA-1183: aerodynamic jump stays OFF inside this low-level raw-state integrator.
+        // The high-level fast wrappers form Sg from their complete BallisticInputs and rotate the
+        // prebuilt initial velocity before entering their integration loops; enabling it again
+        // here would double-apply the launch perturbation. Direct low-level callers likewise own
+        // any desired launch-state rotation. (Real geometry is still carried for spin/Magnus.)
         enable_aerodynamic_jump: false,
         use_rk4: true,
         use_adaptive_rk45: false,
