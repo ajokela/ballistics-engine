@@ -260,11 +260,13 @@ fn fast_path_launch_offset_sign_disabled_and_flips() {
 }
 
 #[test]
-fn fast_integrate_applies_aerodynamic_jump() {
-    use ballistics_engine::fast_trajectory::{fast_integrate, FastIntegrationParams};
+fn fast_paths_apply_aerodynamic_jump() {
+    use ballistics_engine::fast_trajectory::{
+        fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
+    };
     use ballistics_engine::wind::WindSock;
 
-    let y_at_500 = |enable_aj: bool| -> f64 {
+    let y_at_500 = |enable_aj: bool, with_segments: bool| -> f64 {
         let mut inputs = BallisticInputs::default();
         inputs.muzzle_velocity = 800.0;
         inputs.bullet_diameter = 0.00782;
@@ -286,7 +288,11 @@ fn fast_integrate_applies_aerodynamic_jump() {
             atmo_params: (0.0, 15.0, 1013.25, 1.0),
             atmo_sock: None,
         };
-        let sol = fast_integrate(&inputs, &WindSock::new(vec![]), params);
+        let sol = if with_segments {
+            fast_integrate_with_segments(&inputs, vec![], params)
+        } else {
+            fast_integrate(&inputs, &WindSock::new(vec![]), params)
+        };
         // FastSolution.y is column-major [6][n_points]: y[0]=x series, y[1]=vertical series.
         let xs = &sol.y[0];
         let ys = &sol.y[1];
@@ -302,16 +308,69 @@ fn fast_integrate_applies_aerodynamic_jump() {
         out
     };
 
-    let off = y_at_500(false);
-    let on = y_at_500(true);
+    for (path, with_segments) in [("plain", false), ("segmented", true)] {
+        let off = y_at_500(false, with_segments);
+        let on = y_at_500(true, with_segments);
+        assert!(
+            (on - off).abs() > 1e-3,
+            "AJ should shift the {path} fast-path vertical position (off={off}, on={on})"
+        );
+        assert!(
+            on > off,
+            "right twist + wind from the right should raise the {path} impact (off={off}, on={on})"
+        );
+    }
+}
+
+#[test]
+fn segmented_fast_path_records_the_same_aj_launch_state_as_plain_fast() {
+    use ballistics_engine::fast_trajectory::{
+        fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
+    };
+    use ballistics_engine::wind::WindSock;
+
+    let mut inputs = BallisticInputs {
+        muzzle_velocity: 800.0,
+        bullet_diameter: 0.00782,
+        bullet_length: 0.0312,
+        bullet_mass: 0.01134,
+        twist_rate: 11.0,
+        is_twist_right: true,
+        wind_speed: 4.4704,
+        wind_angle: PI / 2.0,
+        enable_aerodynamic_jump: true,
+        ..BallisticInputs::default()
+    };
+    let raw_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
+    let params = || FastIntegrationParams {
+        horiz: 20.0,
+        vert: 0.0,
+        initial_state: raw_state,
+        t_span: (0.0, 0.1),
+        atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        atmo_sock: None,
+    };
+
+    let plain = fast_integrate(&inputs, &WindSock::new(vec![]), params());
+    let segmented = fast_integrate_with_segments(&inputs, vec![], params());
+    for component in 3..6 {
+        assert!(
+            (plain.y[component][0] - segmented.y[component][0]).abs() < 1e-12,
+            "AJ launch component {component} differs: plain={} segmented={}",
+            plain.y[component][0],
+            segmented.y[component][0]
+        );
+    }
     assert!(
-        (on - off).abs() > 1e-3,
-        "AJ should shift the fast-path vertical position (off={off}, on={on})"
+        (plain.y[4][0] - raw_state[4]).abs() > 1e-9,
+        "enabled AJ must measurably rotate the launch elevation"
     );
-    assert!(
-        on > off,
-        "right twist + wind from the right should raise the impact (off={off}, on={on})"
-    );
+
+    inputs.enable_aerodynamic_jump = false;
+    let disabled = fast_integrate_with_segments(&inputs, vec![], params());
+    for (component, expected) in disabled.y[3..6].iter().zip(&raw_state[3..6]) {
+        assert_eq!(component[0].to_bits(), expected.to_bits());
+    }
 }
 
 #[test]

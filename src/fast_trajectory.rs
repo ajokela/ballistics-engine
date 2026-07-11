@@ -238,6 +238,18 @@ fn rotate_launch_velocity(state: &mut [f64; 6], theta_rad: f64) {
     state[5] = vz * scale;
 }
 
+fn launch_state_with_aerodynamic_jump(
+    inputs: &BallisticInputs,
+    atmo_params: (f64, f64, f64, f64),
+    mut initial_state: [f64; 6],
+) -> [f64; 6] {
+    let offset = aerodynamic_jump_launch_offset_rad(inputs, atmo_params);
+    if offset != 0.0 {
+        rotate_launch_velocity(&mut initial_state, offset);
+    }
+    initial_state
+}
+
 /// Fast fixed-step integration for longer trajectories
 pub fn fast_integrate(
     inputs: &BallisticInputs,
@@ -278,11 +290,8 @@ pub fn fast_integrate(
 
     // MBA-959: aerodynamic jump perturbs the prebuilt launch velocity vertically (this path is
     // handed an initial_state, not a muzzle angle). A no-op returning the original when disabled.
-    let mut initial_state = params.initial_state;
-    let aj_offset = aerodynamic_jump_launch_offset_rad(inputs, params.atmo_params);
-    if aj_offset != 0.0 {
-        rotate_launch_velocity(&mut initial_state, aj_offset);
-    }
+    let initial_state =
+        launch_state_with_aerodynamic_jump(inputs, params.atmo_params, params.initial_state);
     let vx = initial_state[3]; // horizontal (downrange) velocity
 
     // MBA-1145: decouple the integration-loop ceiling from the pre-allocation heuristic.
@@ -732,6 +741,11 @@ pub fn fast_integrate_with_segments(
         return FastSolution::degenerate(&params.initial_state);
     }
 
+    // Match plain fast_integrate: this entry point also receives a prebuilt launch state, so
+    // apply the experimental aerodynamic-jump angle exactly once before the low-level integrator.
+    let initial_state =
+        launch_state_with_aerodynamic_jump(inputs, params.atmo_params, params.initial_state);
+
     // Extract parameters
     let mass_kg = inputs.bullet_mass; // SI (kg)
     let bc = inputs.bc_value;
@@ -791,7 +805,7 @@ pub fn fast_integrate_with_segments(
 
     // Use RK45 adaptive integration
     let trajectory = integrate_trajectory(
-        params.initial_state,
+        initial_state,
         params.t_span,
         traj_params,
         "RK45", // Use RK45 implementation
