@@ -244,10 +244,6 @@ impl BCSegmentEstimator {
         let sd_factor = (sd / 0.25).max(0.7).min(1.3);
         let adjusted_drop = type_factors.drop / sd_factor;
 
-        // Adjust transition curve based on drag model
-        let transition_adjustment = if drag_model == "G7" { 0.8 } else { 1.0 };
-        let _adjusted_curve = type_factors.transition_curve * transition_adjustment;
-
         // Generate segments based on bullet type
         let mut segments = Vec::new();
 
@@ -351,6 +347,20 @@ impl BCSegmentEstimator {
             }
         }
 
+        // G7 reference drag follows modern boat-tail projectiles more closely,
+        // so their banded BC varies less than the G1-shaped ladders above. Scale
+        // each loss from nominal rather than the BC itself: this leaves the muzzle
+        // band unchanged by this adjustment and makes the model effective for every
+        // named and default profile. Do not run the identity algebra for G1, so
+        // its established floating-point outputs remain bit-for-bit unchanged.
+        if drag_model.eq_ignore_ascii_case("G7") {
+            const G7_DROP_SCALE: f64 = 0.8;
+            for segment in &mut segments {
+                let drop_from_nominal = base_bc - segment.bc_value;
+                segment.bc_value = base_bc - drop_from_nominal * G7_DROP_SCALE;
+            }
+        }
+
         // Apply sectional density adjustment
         for segment in &mut segments {
             segment.bc_value *= sd_factor.powf(0.5);
@@ -420,6 +430,44 @@ mod tests {
     }
 
     #[test]
+    fn g7_transition_adjustment_softens_each_band_drop() {
+        let base_bc = 0.5;
+        // SD = 0.25 exactly, so the independent sectional-density adjustment is neutral.
+        let caliber = 1.0;
+        let weight = 1750.0;
+
+        for model in ["SMK BT", "FMJ"] {
+            let g1 =
+                BCSegmentEstimator::estimate_bc_segments(base_bc, caliber, weight, model, "G1");
+            let g7 =
+                BCSegmentEstimator::estimate_bc_segments(base_bc, caliber, weight, model, "G7");
+            let lowercase_g7 =
+                BCSegmentEstimator::estimate_bc_segments(base_bc, caliber, weight, model, "g7");
+            assert_eq!(g7.len(), g1.len());
+            assert_eq!(lowercase_g7.len(), g7.len());
+
+            for ((g1_band, g7_band), lowercase_band) in
+                g1.iter().zip(&g7).zip(&lowercase_g7)
+            {
+                assert_eq!(g7_band.velocity_min, g1_band.velocity_min);
+                assert_eq!(g7_band.velocity_max, g1_band.velocity_max);
+                assert_eq!(lowercase_band.velocity_min, g7_band.velocity_min);
+                assert_eq!(lowercase_band.velocity_max, g7_band.velocity_max);
+                assert_eq!(lowercase_band.bc_value.to_bits(), g7_band.bc_value.to_bits());
+                let expected_g7 = base_bc - (base_bc - g1_band.bc_value) * 0.8;
+                assert!(
+                    (g7_band.bc_value - expected_g7).abs() < 1e-12,
+                    "{model} band {}-{} did not soften the G1 loss: G1={}, G7={}, expected={expected_g7}",
+                    g1_band.velocity_min,
+                    g1_band.velocity_max,
+                    g1_band.bc_value,
+                    g7_band.bc_value
+                );
+            }
+        }
+    }
+
+    #[test]
     fn generic_g7_bc_uses_g7_classification_space() {
         // A representative 175 gr .308 match bullet. Its G7 BC is ordinary for a
         // boat-tail projectile, but the same numeric value looks like a blunt
@@ -438,15 +486,22 @@ mod tests {
         );
 
         // The normalization is deliberately equivalent to classifying the
-        // approximate G1 BC, while the legacy entry point remains G1-compatible.
+        // approximate G1 BC, while the G7 transition adjustment then softens
+        // the loss within that same ladder and the legacy entry point remains
+        // G1-compatible.
         let g1_segments =
             BCSegmentEstimator::estimate_bc_segments(base_bc * 2.0, 0.308, 175.0, "", "G1");
         assert_eq!(segments.len(), g1_segments.len());
+        let mut saw_g7_softening = false;
         for (g7, g1) in segments.iter().zip(&g1_segments) {
             assert_eq!(g7.velocity_min.to_bits(), g1.velocity_min.to_bits());
             assert_eq!(g7.velocity_max.to_bits(), g1.velocity_max.to_bits());
-            assert!((g7.bc_value / base_bc - g1.bc_value / (base_bc * 2.0)).abs() < 1e-12);
+            let g7_retention = g7.bc_value / base_bc;
+            let g1_retention = g1.bc_value / (base_bc * 2.0);
+            assert!(g7_retention + 1e-12 >= g1_retention);
+            saw_g7_softening |= g7_retention > g1_retention + 1e-12;
         }
+        assert!(saw_g7_softening);
 
         let legacy_g1 = BCSegmentEstimator::identify_bullet_type("", 175.0, 0.308, Some(base_bc));
         assert_eq!(legacy_g1, BulletType::HuntingFlatBase);
