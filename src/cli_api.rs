@@ -657,7 +657,12 @@ impl TrajectorySolver {
         // the lateral windage sign, so a from-the-right wind on a right-twist barrel
         // jumps the impact UP and drifts it left.
         const MS_TO_MPH: f64 = 2.236_936_292_054_4;
-        let crosswind_from_right_mph = self.wind.speed * self.wind.direction.sin() * MS_TO_MPH;
+        let crosswind_from_right_mps = if let Some(sock) = &self.wind_sock {
+            -sock.vector_for_range_stateless(0.0)[2]
+        } else {
+            self.wind.speed * self.wind.direction.sin()
+        };
+        let crosswind_from_right_mph = crosswind_from_right_mps * MS_TO_MPH;
 
         let vertical_jump_moa = crate::aerodynamic_jump::litz_crosswind_jump_moa(
             sg,
