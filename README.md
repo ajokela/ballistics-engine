@@ -496,7 +496,7 @@ The ballistics engine implements comprehensive physics modeling for accurate tra
 
 ### Stability Modeling
 - **Dynamic Stability** - Gyroscopic and aerodynamic stability calculations
-- **Yaw of Repose** - Equilibrium yaw angle in crosswind
+- **Yaw of Repose** - Gravity/gyroscopic equilibrium yaw; crosswind yaw is a transient handled by aerodynamic jump
 - **Limit Cycle Yaw** - Bounded oscillatory motion analysis
 
 ## Language Bindings

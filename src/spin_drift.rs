@@ -1,5 +1,6 @@
 use crate::pitch_damping::{
-    calculate_damped_yaw_of_repose, calculate_pitch_damping_moment, PitchDampingCoefficients,
+    calculate_damped_yaw_of_repose, calculate_gravity_yaw_of_repose,
+    calculate_pitch_damping_moment, PitchDampingCoefficients,
 };
 use crate::spin_decay::{update_spin_rate, SpinDecayParameters};
 use crate::BallisticInputs;
@@ -229,26 +230,19 @@ pub fn calculate_yaw_of_repose(
         );
     }
 
-    // Original calculation (backward compatibility)
-    // Crosswind component creates yaw
-    let yaw_rad = if wind_velocity_mps == 0.0 {
-        // No wind - use typical value for spin drift
-        // Yaw develops due to nose following curved trajectory
-        0.002 // ~0.1 degrees typical
-    } else {
-        // Wind-induced yaw
-        if velocity_mps > 0.0 {
-            (wind_velocity_mps / velocity_mps).atan()
-        } else {
-            0.0
-        }
-    };
+    // Crosswind yaw is a muzzle transient, not a persistent equilibrium. The simple and damped
+    // paths share the same gravity/gyroscopic repose angle; only the damped path reports a
+    // convergence rate.
+    let yaw_rad = calculate_gravity_yaw_of_repose(
+        stability_factor,
+        velocity_mps,
+        spin_rate_rad_s,
+        mass_grains * 0.00006479891,
+        caliber_inches * 0.0254,
+        length_inches * 0.0254,
+    );
 
-    // Damping factor based on stability with safe division
-    let stability_term = (stability_factor - 1.0).max(0.0).sqrt();
-    let damping = 1.0 / (1.0 + stability_term);
-
-    (yaw_rad * damping, 0.0) // No convergence rate in simple model
+    (yaw_rad, 0.0)
 }
 
 /// Calculate Magnus effect contribution to drift
@@ -594,6 +588,37 @@ mod tests {
         // Should be small but non-zero
         assert!(yaw.abs() > 0.0);
         assert!(yaw.abs() < 0.1); // Less than ~6 degrees
+    }
+
+    #[test]
+    fn crosswind_does_not_change_yaw_of_repose_in_either_model() {
+        let calculate = |wind_velocity_mps, use_pitch_damping| {
+            calculate_yaw_of_repose(
+                2.5,
+                300.0,
+                19_000.0,
+                wind_velocity_mps,
+                0.01,
+                1.225,
+                0.308,
+                1.3,
+                175.0,
+                0.875,
+                "match",
+                use_pitch_damping,
+            )
+            .0
+        };
+
+        let simple_calm = calculate(0.0, false);
+        let simple_windy = calculate(10.0, false);
+        let damped_calm = calculate(0.0, true);
+        let damped_windy = calculate(10.0, true);
+
+        assert_eq!(simple_windy.to_bits(), simple_calm.to_bits());
+        assert_eq!(damped_windy.to_bits(), damped_calm.to_bits());
+        assert_eq!(damped_calm.to_bits(), simple_calm.to_bits());
+        assert!(simple_calm > 0.0 && simple_calm < 0.003);
     }
 
     #[test]
