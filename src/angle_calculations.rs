@@ -160,13 +160,15 @@ where
     })
 }
 
-/// Calculate adjusted muzzle velocity for powder temperature sensitivity
+/// Calculate adjusted muzzle velocity for powder temperature sensitivity.
+///
+/// `powder_temp_sensitivity` is an additive velocity slope in m/s per degree Celsius; both
+/// temperature fields are Celsius.
 pub fn adjusted_muzzle_velocity(inputs: &InternalBallisticInputs) -> f64 {
     let mut mv = inputs.muzzle_velocity;
 
     if inputs.use_powder_sensitivity {
-        mv *=
-            1.0 + inputs.powder_temp_sensitivity * (inputs.temperature - inputs.powder_temp) / 15.0;
+        mv += inputs.powder_temp_sensitivity * (inputs.temperature - inputs.powder_temp);
     }
 
     mv
@@ -408,13 +410,16 @@ mod tests {
     fn test_adjusted_muzzle_velocity_with_sensitivity() {
         let mut inputs = create_test_inputs();
         inputs.use_powder_sensitivity = true;
-        inputs.powder_temp_sensitivity = 1.0; // 1 fps per degree F
-        inputs.temperature = 85.0; // 15 degrees above powder temp
-        inputs.powder_temp = 70.0; // Base powder temp
+        inputs.powder_temp_sensitivity = 0.6; // m/s per degree Celsius
+        inputs.temperature = 31.1;
+        inputs.powder_temp = 21.1;
 
         let result = adjusted_muzzle_velocity(&inputs);
-        // Should be 823 * (1 + 1.0 * (85-70) / 15) = 823 * (1 + 1) = 1646
-        assert!((result - 1646.0).abs() < 1e-6);
+        assert!((result - 829.0).abs() < 1e-12);
+
+        inputs.temperature = 11.1;
+        let colder_result = adjusted_muzzle_velocity(&inputs);
+        assert!((colder_result - 817.0).abs() < 1e-12);
     }
 
     #[test]
