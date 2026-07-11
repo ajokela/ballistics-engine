@@ -1,4 +1,11 @@
-/// Form factor calculations for drag enhancement
+//! Legacy name-based form-factor heuristics.
+//!
+//! These category multipliers are not literature form factors and must not be multiplied into a
+//! reference drag coefficient when retardation is already divided by a published/measured BC:
+//! `BC = sectional_density / form_factor` already carries the projectile's shape efficiency.
+//! The live solvers therefore do not call this module (MBA-1184). The public helpers remain for
+//! API compatibility and possible BC-estimation experiments where no measured BC is available.
+
 use crate::DragModel;
 
 /// Get default form factor based on bullet type

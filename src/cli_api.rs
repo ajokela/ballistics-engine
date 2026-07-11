@@ -137,6 +137,8 @@ pub struct BallisticInputs {
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-BC pairs
     pub bc_segments_data: Option<Vec<crate::BCSegmentData>>, // Velocity-BC segments
     pub use_enhanced_spin_drift: bool,
+    /// Legacy compatibility flag. Name-derived "form factors" are intentionally not multiplied
+    /// into reference Cd when `bc_value` is already the retardation denominator (MBA-1184).
     pub use_form_factor: bool,
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
@@ -2136,19 +2138,9 @@ impl TrajectorySolver {
             return table.interpolate(mach);
         }
 
-        // Get drag coefficient from the drag tables (Mach-indexed)
-        let base_cd = crate::drag::get_drag_coefficient(mach, &self.inputs.bc_type);
-
-        // MBA-948: honor use_form_factor here too — previously only derivatives.rs applied it,
-        // so cli_api and fast_trajectory silently ignored the flag. apply_form_factor_to_drag
-        // short-circuits when the flag is false, so this is a no-op for every current consumer
-        // (the flag is false on all CLI/FFI/WASM/binding surfaces and defaults false).
-        crate::form_factor::apply_form_factor_to_drag(
-            base_cd,
-            self.inputs.bullet_model.as_deref(),
-            &self.inputs.bc_type,
-            self.inputs.use_form_factor,
-        )
+        // A published/measured BC already contains the projectile form factor (BC = SD / i).
+        // Multiplying reference Cd by a second name-derived factor double-counts shape.
+        crate::drag::get_drag_coefficient(mach, &self.inputs.bc_type)
     }
 }
 
@@ -3243,6 +3235,44 @@ mod inclined_atmosphere_frame_tests {
         assert!(
             (a - b).norm() < 1e-10,
             "solver acceleration differs at equal world altitude: {a:?} vs {b:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod form_factor_drag_tests {
+    use super::*;
+
+    fn acceleration_with_form_factor_flag(enabled: bool) -> Vector3<f64> {
+        let inputs = BallisticInputs {
+            bc_value: 0.462,
+            bc_type: DragModel::G1,
+            bullet_model: Some("168gr SMK Match".to_string()),
+            use_form_factor: enabled,
+            ..BallisticInputs::default()
+        };
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        solver.calculate_acceleration(
+            &Vector3::zeros(),
+            &Vector3::new(600.0, 0.0, 0.0),
+            &Vector3::zeros(),
+            (temp_c, pressure_hpa, density / 1.225),
+        )
+    }
+
+    #[test]
+    fn measured_bc_drag_does_not_apply_name_based_form_factor_again() {
+        let baseline = acceleration_with_form_factor_flag(false);
+        let flagged = acceleration_with_form_factor_flag(true);
+
+        assert!(
+            (flagged - baseline).norm() < 1e-12,
+            "published BC already encodes form factor: baseline={baseline:?} flagged={flagged:?}"
         );
     }
 }

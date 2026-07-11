@@ -4,7 +4,6 @@ use crate::atmosphere::{
 use crate::bc_estimation::{velocity_segment_bc, BCSegmentEstimator};
 use crate::constants::*;
 use crate::drag::get_drag_coefficient_full;
-use crate::form_factor::apply_form_factor_to_drag;
 use crate::InternalBallisticInputs as BallisticInputs;
 use nalgebra::Vector3;
 
@@ -221,7 +220,7 @@ pub fn compute_derivatives(
         };
 
         // Get drag coefficient with transonic and Reynolds corrections
-        let mut drag_factor = get_drag_coefficient_full(
+        let drag_factor = get_drag_coefficient_full(
             mach,
             &inputs.bc_type,
             false, // transonic applied exactly once below (was double-applied here + in block)
@@ -241,16 +240,6 @@ pub fn compute_derivatives(
             Some(air_density),
             Some(atmos_params.1), // temperature in Celsius
         );
-
-        // Apply form factor if enabled
-        if inputs.use_form_factor {
-            drag_factor = apply_form_factor_to_drag(
-                drag_factor,
-                inputs.bullet_model.as_deref(),
-                &inputs.bc_type,
-                true,
-            );
-        }
 
         // Get BC value
         let mut bc_val = bc_used;
@@ -331,8 +320,8 @@ pub fn compute_derivatives(
         // future opt-in wired across all three solvers.
 
         // MBA-940: a user-supplied custom drag table overrides the G-model Cd entirely and is used
-        // as-is — the transonic/Reynolds/form-factor corrections above are intentionally NOT
-        // applied to it (the curve already encodes the projectile's true drag, so applying them
+        // as-is — no reference-table transonic correction or name-derived form-factor multiplier
+        // is applied to it (the curve already encodes the projectile's true drag, so applying one
         // would distort/double-count it).
         // The custom table's Cd is the projectile's ACTUAL drag coefficient, so the
         // retardation denominator must be the sectional density (lb/in²), not a BC:
@@ -710,6 +699,44 @@ mod tests {
             weight_grains: 168.0,
             altitude: 1000.0,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn measured_bc_drag_ignores_name_based_form_factor_flag() {
+        let derivatives_with_flag = |use_form_factor| {
+            let inputs = BallisticInputs {
+                bc_value: 0.462,
+                bc_type: crate::DragModel::G1,
+                bullet_model: Some("168gr SMK Match".to_string()),
+                use_form_factor,
+                ..create_test_inputs()
+            };
+
+            compute_derivatives(
+                Vector3::zeros(),
+                Vector3::new(600.0, 0.0, 0.0),
+                &inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                inputs.bc_value,
+                None,
+                0.0,
+                None,
+            )
+        };
+
+        let baseline = derivatives_with_flag(false);
+        let flagged = derivatives_with_flag(true);
+
+        for component in 3..6 {
+            assert_eq!(
+                flagged[component].to_bits(),
+                baseline[component].to_bits(),
+                "published BC already encodes form factor: component {component}, baseline={} flagged={}",
+                baseline[component],
+                flagged[component]
+            );
         }
     }
 
