@@ -179,6 +179,8 @@ pub fn transonic_drag_rise(mach: f64, shape: ProjectileShape) -> f64 {
 /// Wave drag is the additional drag caused by shock waves in transonic/supersonic flow.
 /// This is additive to the base drag coefficient.
 fn wave_drag_coefficient(mach: f64, shape: ProjectileShape) -> f64 {
+    const MAX_SUBSONIC_WAVE: f64 = 0.1;
+
     if mach < 0.8 {
         return 0.0;
     }
@@ -196,8 +198,7 @@ fn wave_drag_coefficient(mach: f64, shape: ProjectileShape) -> f64 {
             return 0.0; // No wave drag if critical Mach is 1.0
         }
         let progress = (mach - m_crit) / denominator;
-        let max_subsonic_wave = 0.1;
-        max_subsonic_wave * progress.powi(2)
+        MAX_SUBSONIC_WAVE * progress.powi(2)
     } else {
         // Supersonic wave drag
         // Based on modified Whitcomb area rule
@@ -206,19 +207,22 @@ fn wave_drag_coefficient(mach: f64, shape: ProjectileShape) -> f64 {
         // Wave drag coefficient for cone-cylinder
         let cd_wave_base = 0.15 / fineness_ratio;
 
-        // Mach number correction (wave drag decreases with Mach)
-        // Avoid division by zero at Mach 1.0
-        let mach_factor = 1.0
-            / (mach * mach - 1.0)
-                .max(crate::constants::MIN_MACH_THRESHOLD)
-                .sqrt();
-
         // Shape correction
         let shape_factor = match shape {
             ProjectileShape::Spitzer => 0.8,   // Good for wave drag
             ProjectileShape::RoundNose => 1.2, // Poor for wave drag
             ProjectileShape::FlatBase => 1.5,  // Very poor
             ProjectileShape::BoatTail => 0.7,  // Best for wave drag
+        };
+
+        // Linearized supersonic theory is singular at Mach 1. Cap its factor at
+        // the subsonic endpoint so wave drag remains continuous and bounded,
+        // then follow the original decay once the approximation becomes valid.
+        let max_mach_factor = MAX_SUBSONIC_WAVE / (cd_wave_base * shape_factor);
+        let mach_factor = if mach == 1.0 {
+            max_mach_factor
+        } else {
+            (1.0 / (mach * mach - 1.0).sqrt()).min(max_mach_factor)
         };
 
         cd_wave_base * mach_factor * shape_factor
@@ -403,6 +407,40 @@ mod tests {
                 transonic_drag_rise(peak_mach + 0.01, shape) < peak,
                 "{shape:?} drag rise must descend after its peak"
             );
+        }
+    }
+
+    #[test]
+    fn wave_drag_is_bounded_and_continuous_at_sonic() {
+        const EPSILON: f64 = 1e-9;
+
+        for shape in [
+            ProjectileShape::Spitzer,
+            ProjectileShape::RoundNose,
+            ProjectileShape::FlatBase,
+            ProjectileShape::BoatTail,
+        ] {
+            let just_below = wave_drag_coefficient(1.0 - EPSILON, shape);
+            let sonic = wave_drag_coefficient(1.0, shape);
+            let just_above = wave_drag_coefficient(1.0 + EPSILON, shape);
+
+            assert!((sonic - 0.1).abs() < 1e-12);
+            assert!(
+                (just_below - sonic).abs() < 1e-6,
+                "{shape:?} wave drag discontinuity below Mach 1: below={just_below}, at={sonic}"
+            );
+            assert!(
+                (just_above - sonic).abs() < 1e-6,
+                "{shape:?} wave drag discontinuity above Mach 1: at={sonic}, above={just_above}"
+            );
+
+            for mach in [1.001, 1.01, 1.05, 1.1, 1.2] {
+                let wave_drag = wave_drag_coefficient(mach, shape);
+                assert!(
+                    wave_drag <= 0.1 + 1e-12,
+                    "{shape:?} wave drag must stay bounded near sonic: M={mach}, Cd={wave_drag}"
+                );
+            }
         }
     }
 
