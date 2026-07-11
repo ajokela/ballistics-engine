@@ -142,7 +142,12 @@ pub fn compute_derivatives(
         let v_rel_fps = speed_air * MPS_TO_FPS;
 
         // Get atmospheric conditions
-        let altitude_at_pos = inputs.altitude + pos[1];
+        let altitude_at_pos = crate::atmosphere::shot_frame_altitude(
+            inputs.altitude,
+            pos[0],
+            pos[1],
+            inputs.shooting_angle,
+        );
 
         // Check if we have direct atmosphere values
         // Direct atmosphere is indicated by having only 2 parameters where:
@@ -172,7 +177,8 @@ pub fn compute_derivatives(
             // (station-referenced) temp/pressure/ratio for the zone selected by downrange distance
             // (pos[0]) BEFORE the altitude lapse. The zone base_ratio is recomputed via CIPM from
             // the zone (temp, pressure, humidity); the swapped base then flows through the same
-            // altitude-lapse pipeline, so the X zone and the Y lapse compose without double-count.
+            // altitude-lapse pipeline, so downrange-zone selection and the world-vertical lapse
+            // compose without double-counting.
             // Only the base density changes — the local speed of sound is independent of base_ratio,
             // so it still tracks the lapsed temperature/pressure. `None` -> byte-identical.
             let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
@@ -706,6 +712,50 @@ mod tests {
             weight_grains: 168.0,
             altitude: 1000.0,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inclined_positions_at_same_world_altitude_have_same_atmospheric_acceleration() {
+        let angle = std::f64::consts::FRAC_PI_6;
+        let mut inputs = create_test_inputs();
+        inputs.altitude = 100.0;
+        inputs.shooting_angle = angle;
+        let velocity = Vector3::new(600.0, 0.0, 0.0);
+        let along_slant = Vector3::new(1_000.0, 0.0, 0.0);
+        let across_slant = Vector3::new(0.0, 500.0 / angle.cos(), 0.0);
+        let atmo = (inputs.altitude, 15.0, 1013.25, 1.0);
+
+        let a = compute_derivatives(
+            along_slant,
+            velocity,
+            &inputs,
+            Vector3::zeros(),
+            atmo,
+            inputs.bc_value,
+            None,
+            0.0,
+            None,
+        );
+        let b = compute_derivatives(
+            across_slant,
+            velocity,
+            &inputs,
+            Vector3::zeros(),
+            atmo,
+            inputs.bc_value,
+            None,
+            0.0,
+            None,
+        );
+
+        for component in 3..6 {
+            assert!(
+                (a[component] - b[component]).abs() < 1e-10,
+                "derivative component {component} differs at equal world altitude: {} vs {}",
+                a[component],
+                b[component]
+            );
         }
     }
 
