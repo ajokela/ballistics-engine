@@ -10,6 +10,43 @@
 
 use crate::pitch_damping::{calculate_pitch_damping_moment, PitchDampingCoefficients};
 
+/// Estimate the projectile's longitudinal and transverse moments of inertia from its geometry.
+///
+/// The engine models a typical pointed projectile as an ogive for both axes. Invalid geometry
+/// returns zero inertias so callers naturally take the existing no-motion guard instead of
+/// propagating non-finite angular state.
+pub(crate) fn projectile_moments_of_inertia(
+    mass_kg: f64,
+    caliber_m: f64,
+    length_m: f64,
+) -> (f64, f64) {
+    if !mass_kg.is_finite()
+        || mass_kg <= 0.0
+        || !caliber_m.is_finite()
+        || caliber_m <= 0.0
+        || !length_m.is_finite()
+        || length_m <= 0.0
+    {
+        return (0.0, 0.0);
+    }
+
+    let spin_inertia =
+        crate::spin_decay::calculate_moment_of_inertia(mass_kg, caliber_m, length_m, "ogive");
+    let transverse_inertia = crate::pitch_damping::calculate_transverse_moment_of_inertia(
+        mass_kg, caliber_m, length_m, "ogive",
+    );
+
+    if spin_inertia.is_finite()
+        && spin_inertia > 0.0
+        && transverse_inertia.is_finite()
+        && transverse_inertia > 0.0
+    {
+        (spin_inertia, transverse_inertia)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
 /// Complete angular state of the projectile
 #[derive(Debug, Clone, Copy)]
 pub struct AngularState {
@@ -302,6 +339,57 @@ pub fn calculate_limit_cycle_yaw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projectile_inertias_match_reference_and_geometry_scaling() {
+        let mass = 0.01134;
+        let caliber = 0.00782;
+        let length = 0.033;
+        let (spin, transverse) = projectile_moments_of_inertia(mass, caliber, length);
+
+        assert!((spin / 6.94e-8 - 1.0).abs() < 0.01);
+        assert!((transverse / 9.13e-7 - 1.0).abs() < 0.01);
+
+        let (double_mass_spin, double_mass_transverse) =
+            projectile_moments_of_inertia(2.0 * mass, caliber, length);
+        assert!((double_mass_spin / spin - 2.0).abs() < 1e-12);
+        assert!((double_mass_transverse / transverse - 2.0).abs() < 1e-12);
+
+        let (double_caliber_spin, double_caliber_transverse) =
+            projectile_moments_of_inertia(mass, 2.0 * caliber, length);
+        assert!((double_caliber_spin / spin - 4.0).abs() < 1e-12);
+        assert!(double_caliber_transverse > transverse);
+
+        let (double_length_spin, double_length_transverse) =
+            projectile_moments_of_inertia(mass, caliber, 2.0 * length);
+        assert!((double_length_spin / spin - 1.0).abs() < 1e-12);
+        assert!(double_length_transverse / transverse > 3.5);
+    }
+
+    #[test]
+    fn projectile_inertias_reject_invalid_geometry() {
+        let invalid = [0.0, -1.0, f64::NAN, f64::INFINITY];
+
+        for value in invalid {
+            assert_eq!(
+                projectile_moments_of_inertia(value, 0.00782, 0.033),
+                (0.0, 0.0)
+            );
+            assert_eq!(
+                projectile_moments_of_inertia(0.01134, value, 0.033),
+                (0.0, 0.0)
+            );
+            assert_eq!(
+                projectile_moments_of_inertia(0.01134, 0.00782, value),
+                (0.0, 0.0)
+            );
+        }
+
+        assert_eq!(
+            projectile_moments_of_inertia(f64::MAX, f64::MAX, f64::MAX),
+            (0.0, 0.0)
+        );
+    }
 
     #[test]
     fn test_mba941_epicyclic_relations_and_limits() {

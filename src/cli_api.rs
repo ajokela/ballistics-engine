@@ -2,7 +2,8 @@
 use crate::cluster_bc::ClusterBCDegradation;
 use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
 use crate::precession_nutation::{
-    calculate_combined_angular_motion, AngularState, PrecessionNutationParams,
+    calculate_combined_angular_motion, projectile_moments_of_inertia, AngularState,
+    PrecessionNutationParams,
 };
 use crate::trajectory_sampling::{
     sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample,
@@ -513,6 +514,8 @@ pub struct TrajectorySolver {
     max_range: f64,
     time_step: f64,
     cluster_bc: Option<ClusterBCDegradation>,
+    /// Geometry-derived `(longitudinal, transverse)` moments used by angular diagnostics.
+    precession_nutation_inertias: (f64, f64),
     /// Optional downrange-segmented wind. When `Some`, the per-step wind vector is
     /// looked up by downrange distance from this `WindSock` and the scalar `wind`
     /// field is ignored. When `None`, the constant `wind` vector is used (default),
@@ -565,6 +568,11 @@ impl TrajectorySolver {
         } else {
             None
         };
+        let precession_nutation_inertias = projectile_moments_of_inertia(
+            inputs.bullet_mass,
+            inputs.bullet_diameter,
+            inputs.bullet_length,
+        );
 
         Self {
             inputs,
@@ -573,6 +581,7 @@ impl TrajectorySolver {
             max_range: 1000.0,
             time_step: 0.001,
             cluster_bc,
+            precession_nutation_inertias,
             wind_sock: None,
             atmo_sock: None,
         }
@@ -727,6 +736,36 @@ impl TrajectorySolver {
             self.atmosphere.humidity,
         );
         (density, speed_of_sound, temp_c, pressure_hpa)
+    }
+
+    fn precession_nutation_params(
+        &self,
+        velocity_mps: f64,
+        air_density_kg_m3: f64,
+        speed_of_sound_mps: f64,
+    ) -> PrecessionNutationParams {
+        let (spin_inertia, transverse_inertia) = self.precession_nutation_inertias;
+        let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
+            let velocity_fps = velocity_mps * 3.28084;
+            let twist_rate_ft = self.inputs.twist_rate / 12.0;
+            (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI
+        } else {
+            0.0
+        };
+
+        PrecessionNutationParams {
+            mass_kg: self.inputs.bullet_mass,
+            caliber_m: self.inputs.bullet_diameter,
+            length_m: self.inputs.bullet_length,
+            spin_rate_rad_s,
+            spin_inertia,
+            transverse_inertia,
+            velocity_mps,
+            air_density_kg_m3,
+            mach: velocity_mps / speed_of_sound_mps,
+            pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
+            nutation_damping_factor: 0.05,
+        }
     }
 
     fn gravity_acceleration(&self) -> Vector3<f64> {
@@ -982,31 +1021,11 @@ impl TrajectorySolver {
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
                     let velocity_magnitude = velocity.magnitude();
-                    let mach = velocity_magnitude / speed_of_sound;
-
-                    // Calculate spin rate from twist rate and velocity
-                    let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
-                        let velocity_fps = velocity_magnitude * 3.28084;
-                        let twist_rate_ft = self.inputs.twist_rate / 12.0;
-                        (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI
-                    } else {
-                        0.0
-                    };
-
-                    // Create precession/nutation parameters
-                    let params = PrecessionNutationParams {
-                        mass_kg: self.inputs.bullet_mass,
-                        caliber_m: self.inputs.bullet_diameter,
-                        length_m: self.inputs.bullet_length,
-                        spin_rate_rad_s,
-                        spin_inertia: 6.94e-8,       // Typical value
-                        transverse_inertia: 9.13e-7, // Typical value
-                        velocity_mps: velocity_magnitude,
-                        air_density_kg_m3: air_density,
-                        mach,
-                        pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
-                        nutation_damping_factor: 0.05,
-                    };
+                    let params = self.precession_nutation_params(
+                        velocity_magnitude,
+                        air_density,
+                        speed_of_sound,
+                    );
 
                     // Update angular state
                     *state = calculate_combined_angular_motion(
@@ -1250,31 +1269,11 @@ impl TrajectorySolver {
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
                     let velocity_magnitude = velocity.magnitude();
-                    let mach = velocity_magnitude / speed_of_sound;
-
-                    // Calculate spin rate from twist rate and velocity
-                    let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
-                        let velocity_fps = velocity_magnitude * 3.28084;
-                        let twist_rate_ft = self.inputs.twist_rate / 12.0;
-                        (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI
-                    } else {
-                        0.0
-                    };
-
-                    // Create precession/nutation parameters
-                    let params = PrecessionNutationParams {
-                        mass_kg: self.inputs.bullet_mass,
-                        caliber_m: self.inputs.bullet_diameter,
-                        length_m: self.inputs.bullet_length,
-                        spin_rate_rad_s,
-                        spin_inertia: 6.94e-8,       // Typical value
-                        transverse_inertia: 9.13e-7, // Typical value
-                        velocity_mps: velocity_magnitude,
-                        air_density_kg_m3: air_density,
-                        mach,
-                        pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
-                        nutation_damping_factor: 0.05,
-                    };
+                    let params = self.precession_nutation_params(
+                        velocity_magnitude,
+                        air_density,
+                        speed_of_sound,
+                    );
 
                     // Update angular state
                     *state = calculate_combined_angular_motion(
@@ -1543,29 +1542,11 @@ impl TrajectorySolver {
             // trial's dt.
             if self.inputs.enable_precession_nutation {
                 if let Some(ref mut state) = angular_state {
-                    let mach = velocity_magnitude / speed_of_sound;
-
-                    let spin_rate_rad_s = if self.inputs.twist_rate > 0.0 {
-                        let velocity_fps = velocity_magnitude * 3.28084;
-                        let twist_rate_ft = self.inputs.twist_rate / 12.0;
-                        (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI
-                    } else {
-                        0.0
-                    };
-
-                    let params = PrecessionNutationParams {
-                        mass_kg: self.inputs.bullet_mass,
-                        caliber_m: self.inputs.bullet_diameter,
-                        length_m: self.inputs.bullet_length,
-                        spin_rate_rad_s,
-                        spin_inertia: 6.94e-8,
-                        transverse_inertia: 9.13e-7,
-                        velocity_mps: velocity_magnitude,
-                        air_density_kg_m3: air_density,
-                        mach,
-                        pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
-                        nutation_damping_factor: 0.05,
-                    };
+                    let params = self.precession_nutation_params(
+                        velocity_magnitude,
+                        air_density,
+                        speed_of_sound,
+                    );
 
                     *state = calculate_combined_angular_motion(
                         &params,
@@ -3344,6 +3325,91 @@ mod inclined_atmosphere_frame_tests {
         assert!(
             (actual - expected).norm() < 1e-12,
             "inclined Coriolis mismatch: actual={actual:?}, expected={expected:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod precession_inertia_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn solver_uses_projectile_specific_moments_of_inertia() {
+        let mass_kg = 55.0 * 0.00006479891;
+        let caliber_m = 0.224 * 0.0254;
+        let length_m = 0.75 * 0.0254;
+        let inputs = BallisticInputs {
+            bullet_mass: mass_kg,
+            bullet_diameter: caliber_m,
+            bullet_length: length_m,
+            muzzle_velocity: 800.0,
+            twist_rate: 7.0,
+            enable_precession_nutation: true,
+            use_rk4: false,
+            use_adaptive_rk45: false,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(0.1);
+
+        let (air_density, speed_of_sound, _, _) = solver.resolved_atmosphere();
+        let velocity_mps = solver.inputs.muzzle_velocity;
+        let velocity_fps = velocity_mps * 3.28084;
+        let twist_rate_ft = solver.inputs.twist_rate / 12.0;
+        let spin_rate_rad_s = (velocity_fps / twist_rate_ft) * 2.0 * std::f64::consts::PI;
+        let initial_state = AngularState {
+            pitch_angle: 0.001,
+            yaw_angle: 0.001,
+            pitch_rate: 0.0,
+            yaw_rate: 0.0,
+            precession_angle: 0.0,
+            nutation_phase: 0.0,
+        };
+        let params = PrecessionNutationParams {
+            mass_kg,
+            caliber_m,
+            length_m,
+            spin_rate_rad_s,
+            spin_inertia: crate::spin_decay::calculate_moment_of_inertia(
+                mass_kg, caliber_m, length_m, "ogive",
+            ),
+            transverse_inertia: crate::pitch_damping::calculate_transverse_moment_of_inertia(
+                mass_kg, caliber_m, length_m, "ogive",
+            ),
+            velocity_mps,
+            air_density_kg_m3: air_density,
+            mach: velocity_mps / speed_of_sound,
+            pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
+            nutation_damping_factor: 0.05,
+        };
+        let expected = calculate_combined_angular_motion(
+            &params,
+            &initial_state,
+            0.0,
+            solver.time_step,
+            0.001,
+        );
+        let actual = solver
+            .solve()
+            .expect("one-step solve should succeed")
+            .angular_state
+            .expect("precession/nutation was enabled");
+
+        assert!(
+            (actual.precession_angle - expected.precession_angle).abs() < 1e-15,
+            "precession phase used the wrong inertia: actual={}, expected={}",
+            actual.precession_angle,
+            expected.precession_angle
+        );
+        assert!(
+            (actual.nutation_phase - expected.nutation_phase).abs() < 1e-15,
+            "nutation phase used the wrong inertia: actual={}, expected={}",
+            actual.nutation_phase,
+            expected.nutation_phase
         );
     }
 }
