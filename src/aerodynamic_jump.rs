@@ -171,12 +171,19 @@ pub fn calculate_aerodynamic_jump(
 
     // Stabilization factor
     let caliber_in = caliber_m / 0.0254;
-    // mass_kg -> grains uses the kilograms->grains factor (15432.358), NOT the grams->grains
-    // factor (15.432); the latter made sg_approx ~1000x too small so stabilization_factor
-    // collapsed to ~0 for every real projectile. (Simplified Sg: length terms omitted.)
-    let sg_approx =
-        30.0 * mass_kg * 15432.358 / (twist_rate_calibers.powi(2) * caliber_in.powi(3));
-    let stabilization_factor = (sg_approx / 1.5).min(1.0);
+    let mass_grains = mass_kg * 15432.358;
+    // This backward-compatible signature predates a bullet-length argument, so use the engine's
+    // canonical mass/caliber estimate rather than dropping Miller's length term entirely.
+    let length_m = crate::stability::estimate_bullet_length_m(caliber_m, mass_kg);
+    let length_calibers = length_m / caliber_m;
+    let length_term = length_calibers * (1.0 + length_calibers.powi(2));
+    let denominator = twist_rate_calibers.powi(2) * caliber_in.powi(3) * length_term;
+    let sg_approx = if denominator > 0.0 {
+        30.0 * mass_grains / denominator
+    } else {
+        0.0
+    };
+    let stabilization_factor = (sg_approx / 1.5).clamp(0.0, 1.0);
 
     AerodynamicJumpComponents {
         vertical_jump_moa,
@@ -281,6 +288,47 @@ mod tests {
         assert!(jump.vertical_jump_moa > 0.0);
         // Just check that we have some stabilization
         assert!(jump.stabilization_factor > 0.0);
+    }
+
+    #[test]
+    fn stabilization_factor_distinguishes_stable_and_marginal_twists() {
+        let calculate = |spin_rate_rad_s, twist_rate_calibers| {
+            calculate_aerodynamic_jump(
+                800.0,
+                spin_rate_rad_s,
+                4.4704,
+                0.00782,
+                0.01134,
+                0.6096,
+                twist_rate_calibers,
+                true,
+                0.0,
+                1.225,
+            )
+        };
+
+        let stable = calculate(17_593.0, 32.47); // 1:10 twist
+        let marginal_twist_calibers = 14.0 / (0.00782 / 0.0254);
+        let marginal = calculate(14_135.0, marginal_twist_calibers); // 1:14 twist
+
+        assert!(
+            stable.stabilization_factor > marginal.stabilization_factor,
+            "stability diagnostic saturated: stable={}, marginal={}",
+            stable.stabilization_factor,
+            marginal.stabilization_factor
+        );
+
+        let caliber_m = 0.00782;
+        let mass_kg = 0.01134;
+        let length_calibers =
+            crate::stability::estimate_bullet_length_m(caliber_m, mass_kg) / caliber_m;
+        let expected_sg = 30.0 * mass_kg * 15432.358
+            / (marginal_twist_calibers.powi(2)
+                * (caliber_m / 0.0254).powi(3)
+                * length_calibers
+                * (1.0 + length_calibers.powi(2)));
+        let expected_factor = (expected_sg / 1.5).clamp(0.0, 1.0);
+        assert!((marginal.stabilization_factor - expected_factor).abs() < 1e-12);
     }
 
     #[test]
