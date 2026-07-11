@@ -257,7 +257,7 @@ impl BcCorrectionTable {
 
     /// Find interpolation index and weight for a value in bins
     fn interp_idx(&self, value: f32, bins: &[f32]) -> (usize, f64) {
-        if bins.is_empty() {
+        if bins.len() < 2 || value.is_nan() {
             return (0, 0.0);
         }
 
@@ -270,11 +270,14 @@ impl BcCorrectionTable {
         }
 
         // Binary search for interval
-        let idx = match bins
-            .binary_search_by(|probe| probe.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Equal))
-        {
-            Ok(i) => i.saturating_sub(1).min(bins.len() - 2),
-            Err(i) => i.saturating_sub(1).min(bins.len() - 2),
+        let last_interval = bins.len().saturating_sub(2);
+        let idx = match bins.binary_search_by(|probe| {
+            probe
+                .partial_cmp(&value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            Ok(i) => i.saturating_sub(1).min(last_interval),
+            Err(i) => i.saturating_sub(1).min(last_interval),
         };
 
         // Calculate interpolation weight
@@ -368,6 +371,18 @@ fn read_f32_array<R: Read>(reader: &mut R, count: usize) -> Result<Vec<f32>, std
 mod tests {
     use super::*;
 
+    fn create_single_cell_table() -> BcCorrectionTable {
+        BcCorrectionTable {
+            data: vec![0.875],
+            bc_bins: vec![0.4],
+            mass_bins: vec![168.0],
+            length_bins: vec![1.2],
+            velocity_bins: vec![2500.0],
+            num_types: 1,
+            version: 1,
+        }
+    }
+
     #[test]
     fn test_interp_idx_in_range() {
         let table = BcCorrectionTable {
@@ -412,5 +427,22 @@ mod tests {
         let (idx, weight) = table.interp_idx(0.6, &table.bc_bins);
         assert_eq!(idx, 3); // len - 2
         assert_eq!(weight, 1.0);
+    }
+
+    #[test]
+    fn test_interp_idx_nan_defaults_to_first_bin() {
+        let table = create_single_cell_table();
+        let bins = [0.1, 0.2, 0.3];
+
+        assert_eq!(table.interp_idx(f32::NAN, &bins), (0, 0.0));
+        assert_eq!(table.interp_idx(f32::NEG_INFINITY, &bins), (0, 0.0));
+        assert_eq!(table.interp_idx(f32::INFINITY, &bins), (1, 1.0));
+    }
+
+    #[test]
+    fn test_lookup_nan_with_single_bin_axes_uses_only_cell() {
+        let table = create_single_cell_table();
+
+        assert_eq!(table.lookup(f64::NAN, "G1", 168.0, 1.2, 2500.0), 0.875);
     }
 }
