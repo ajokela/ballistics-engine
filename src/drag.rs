@@ -512,7 +512,12 @@ pub fn get_drag_coefficient(mach: f64, drag_model: &DragModel) -> f64 {
     }
 }
 
-/// Get drag coefficient with optional transonic corrections
+/// Get a standard G-table drag coefficient without double-counting transonic drag.
+///
+/// Standard G tables are total-drag curves that already contain the transonic
+/// rise and wave drag. `apply_transonic_correction` and the shape inputs remain
+/// in this public API for compatibility, but enabling the option does not stack
+/// the separate empirical rise/wave model on top of a G-table coefficient.
 pub fn get_drag_coefficient_with_transonic(
     mach: f64,
     drag_model: &DragModel,
@@ -548,14 +553,21 @@ pub fn get_drag_coefficient_with_transonic(
             }
         };
 
-        // Apply correction
-        transonic_correction(mach, base_cd, shape, true)
+        // Standard G-model tables are total-drag reference curves and already
+        // contain their transonic rise and wave drag. Retain the public option
+        // for API compatibility, but do not stack the empirical rise/wave model
+        // on top of table Cd (MBA-1155).
+        transonic_correction(mach, base_cd, shape, false)
     } else {
         base_cd
     }
 }
 
-/// Get drag coefficient with optional transonic and Reynolds corrections
+/// Get drag coefficient with optional Reynolds correction.
+///
+/// The transonic option is retained for compatibility but, as documented by
+/// [`get_drag_coefficient_with_transonic`], standard G tables are not corrected
+/// a second time.
 pub fn get_drag_coefficient_full(
     mach: f64,
     drag_model: &DragModel,
@@ -607,6 +619,53 @@ mod tests {
         let cd = get_drag_coefficient(1.0, &DragModel::G7);
         // Should be close to the G7 standard value at Mach 1.0
         assert!(cd > 0.3 && cd < 0.5, "G7 CD at Mach 1.0: {cd}");
+    }
+
+    #[test]
+    fn standard_g_table_transonic_option_does_not_double_count_drag_rise() {
+        let models = [
+            DragModel::G1,
+            DragModel::G2,
+            DragModel::G5,
+            DragModel::G6,
+            DragModel::G7,
+            DragModel::G8,
+            DragModel::GI,
+            DragModel::GS,
+        ];
+        for drag_model in models {
+            for mach in [0.8, 0.95, 1.0, 1.1, 1.3] {
+                let base_cd = get_drag_coefficient(mach, &drag_model);
+                let corrected_cd = get_drag_coefficient_with_transonic(
+                    mach,
+                    &drag_model,
+                    true,
+                    Some(ProjectileShape::BoatTail),
+                    Some(0.308),
+                    Some(175.0),
+                );
+                assert_eq!(
+                    corrected_cd.to_bits(),
+                    base_cd.to_bits(),
+                    "standard {drag_model:?} table already includes transonic drag at Mach \
+                     {mach}: base={base_cd}, corrected={corrected_cd}"
+                );
+
+                let full_cd = get_drag_coefficient_full(
+                    mach,
+                    &drag_model,
+                    true,
+                    false,
+                    Some(ProjectileShape::BoatTail),
+                    Some(0.308),
+                    Some(175.0),
+                    None,
+                    None,
+                    None,
+                );
+                assert_eq!(full_cd.to_bits(), base_cd.to_bits());
+            }
+        }
     }
 
     #[test]
