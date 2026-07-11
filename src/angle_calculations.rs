@@ -174,15 +174,16 @@ pub fn adjusted_muzzle_velocity(inputs: &InternalBallisticInputs) -> f64 {
     mv
 }
 
-/// Calculate zero angle using Brent's method and Rust trajectory integration
+/// Calculate zero angle using Brent's method and Rust trajectory integration.
+///
+/// `inputs.target_distance` is meters and `inputs.shooting_angle` is radians.
 pub fn zero_angle(
     inputs: &InternalBallisticInputs,
     trajectory_func: impl Fn(&InternalBallisticInputs, f64) -> Result<f64, String> + Copy,
 ) -> Result<AngleResult, String> {
     // Set up the target vertical position based on shooting angle
     let vert = if inputs.shooting_angle.abs() > 1e-6 {
-        let angle_rad = inputs.shooting_angle * DEGREES_TO_RADIANS;
-        (inputs.target_distance * YARDS_TO_METERS) * angle_rad.sin()
+        inputs.target_distance * inputs.shooting_angle.sin()
     } else {
         0.0
     };
@@ -433,6 +434,26 @@ mod tests {
         // Test that higher BC gives less drop
         let drop_high_bc = quick_drop_estimate(2700.0, 500.0, 168.0, 0.8);
         assert!(drop_high_bc < drop);
+    }
+
+    #[test]
+    fn test_zero_angle_uses_si_distance_and_radians() {
+        let mut inputs = create_test_inputs();
+        inputs.target_distance = 800.0;
+        inputs.shooting_angle = 1.0_f64.to_radians();
+
+        let result = zero_angle(&inputs, |trajectory_inputs, look_angle_rad| {
+            Ok(trajectory_inputs.target_distance * look_angle_rad)
+        })
+        .unwrap();
+
+        assert!(result.success);
+        assert!(
+            (result.angle_rad - inputs.shooting_angle).abs() < 1e-4,
+            "SI zero target should solve near {} rad, got {}",
+            inputs.shooting_angle,
+            result.angle_rad
+        );
     }
 
     #[test]
