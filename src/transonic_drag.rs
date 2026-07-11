@@ -77,6 +77,21 @@ fn critical_mach_number(shape: ProjectileShape) -> f64 {
     }
 }
 
+fn sonic_drag_rise(shape: ProjectileShape) -> f64 {
+    let shape_factor = match shape {
+        ProjectileShape::RoundNose => 1.2,
+        _ => 1.0,
+    };
+    1.8 * shape_factor
+}
+
+fn peak_drag_mach(shape: ProjectileShape) -> f64 {
+    match shape {
+        ProjectileShape::Spitzer => 1.05,
+        _ => 1.02,
+    }
+}
+
 /// Calculate the transonic drag rise factor
 ///
 /// This models the sharp increase in drag as shock waves form and strengthen
@@ -84,6 +99,7 @@ fn critical_mach_number(shape: ProjectileShape) -> f64 {
 /// models from Anderson's "Modern Compressible Flow" and McCoy's work.
 pub fn transonic_drag_rise(mach: f64, shape: ProjectileShape) -> f64 {
     let m_crit = critical_mach_number(shape);
+    let sonic_rise = sonic_drag_rise(shape);
 
     if mach < m_crit {
         // Below critical Mach, no significant drag rise
@@ -131,31 +147,22 @@ pub fn transonic_drag_rise(mach: f64, shape: ProjectileShape) -> f64 {
             rise_factor
         };
 
-        rise_factor.min(2.5) // More realistic cap
+        // Join the transonic branch continuously at Mach 1. Shape-specific caps avoid the old
+        // inverted 2.5 -> 1.8/2.16 sonic step (MBA-1162).
+        rise_factor.min(sonic_rise)
     } else if mach < 1.2 {
         // Transonic/early supersonic (bow shock forming)
         // Peak drag occurs around Mach 1.0-1.1
 
         // Shape-dependent peak location
-        let peak_mach = match shape {
-            ProjectileShape::Spitzer => 1.05,
-            _ => 1.02,
-        };
+        let peak_mach = peak_drag_mach(shape);
 
         if mach <= peak_mach {
             // Rising to peak
-            let base_rise = 1.8; // More realistic peak around 1.8x
-            let shape_factor = match shape {
-                ProjectileShape::RoundNose => 1.2,
-                _ => 1.0,
-            };
-            base_rise * shape_factor * (1.0 + 0.3 * (mach - 1.0))
+            sonic_rise * (1.0 + 0.3 * (mach - 1.0))
         } else {
-            // Descending from peak
-            let peak_drag = match shape {
-                ProjectileShape::RoundNose => 2.2,
-                _ => 1.8,
-            };
+            // Descend from the actual rising-branch endpoint so the peak join is continuous.
+            let peak_drag = sonic_rise * (1.0 + 0.3 * (peak_mach - 1.0));
             let decline_rate = 3.0; // How fast drag drops after peak
             peak_drag * (-(decline_rate * (mach - peak_mach))).exp()
         }
@@ -358,11 +365,45 @@ mod tests {
 
         // Near Mach 1
         let rise_0_98 = transonic_drag_rise(0.98, shape);
-        assert!(rise_0_98 > 2.0);
+        let rise_1_0 = transonic_drag_rise(1.0, shape);
+        assert!(rise_0_98 > 1.0 && rise_0_98 <= rise_1_0);
 
         // Past peak
         let rise_1_1 = transonic_drag_rise(1.1, shape);
         assert!(rise_1_1 > 1.5 && rise_1_1 < 2.5);
+    }
+
+    #[test]
+    fn transonic_drag_rise_is_continuous_at_sonic_and_peak() {
+        const EPSILON: f64 = 1e-9;
+
+        for (shape, peak_mach, expected_sonic, expected_peak) in [
+            (ProjectileShape::Spitzer, 1.05, 1.8, 1.827),
+            (ProjectileShape::RoundNose, 1.02, 2.16, 2.17296),
+            (ProjectileShape::FlatBase, 1.02, 1.8, 1.8108),
+            (ProjectileShape::BoatTail, 1.02, 1.8, 1.8108),
+        ] {
+            let sonic = transonic_drag_rise(1.0, shape);
+            let just_below_sonic = transonic_drag_rise(1.0 - EPSILON, shape);
+            assert!((sonic - expected_sonic).abs() < 1e-12);
+            assert!(
+                (just_below_sonic - sonic).abs() < 1e-6,
+                "{shape:?} discontinuity at Mach 1: below={just_below_sonic}, at={sonic}"
+            );
+
+            let peak = transonic_drag_rise(peak_mach, shape);
+            let just_above_peak = transonic_drag_rise(peak_mach + EPSILON, shape);
+            assert!((peak - expected_peak).abs() < 1e-12);
+            assert!(
+                (peak - just_above_peak).abs() < 1e-6,
+                "{shape:?} discontinuity at peak Mach {peak_mach}: at={peak}, above={just_above_peak}"
+            );
+            assert!(peak > sonic, "{shape:?} peak must occur above Mach 1");
+            assert!(
+                transonic_drag_rise(peak_mach + 0.01, shape) < peak,
+                "{shape:?} drag rise must descend after its peak"
+            );
+        }
     }
 
     #[test]
