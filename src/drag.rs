@@ -567,7 +567,9 @@ pub fn get_drag_coefficient_with_transonic(
 ///
 /// The transonic option is retained for compatibility but, as documented by
 /// [`get_drag_coefficient_with_transonic`], standard G tables are not corrected
-/// a second time.
+/// a second time. Likewise, the Reynolds option only affects genuinely low-Re
+/// (`Re < 10,000`) inputs; ordinary ballistic Reynolds numbers use the standard
+/// table coefficient unchanged.
 pub fn get_drag_coefficient_full(
     mach: f64,
     drag_model: &DragModel,
@@ -590,7 +592,8 @@ pub fn get_drag_coefficient_full(
         weight_grains,
     );
 
-    // Apply Reynolds corrections for low velocities (subsonic only)
+    // Route the opt-in low-Re helper for subsonic inputs. It leaves the ordinary
+    // standard-table Reynolds-number range unchanged.
     if apply_reynolds_correction && mach < 1.0 {
         if let (Some(v), Some(cal), Some(rho), Some(temp)) =
             (velocity_mps, caliber, air_density_kg_m3, temperature_c)

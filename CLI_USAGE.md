@@ -785,7 +785,7 @@ ignored by the local solver, so east and west gave identical output.
 - **G7**: Boat-tail bullets (better for long range)
 - Full drag tables with Mach-indexed coefficients
 - Transonic corrections applied automatically
-- Reynolds number corrections for low velocities
+- Standard drag tables are used without an automatic Reynolds multiplier; a low-Re helper remains available through the Rust API only
 
 ### BC Modeling
 - **BC Segmentation**: Velocity-dependent BC based on bullet type
