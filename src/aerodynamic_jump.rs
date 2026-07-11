@@ -189,32 +189,24 @@ pub fn calculate_aerodynamic_jump(
 }
 
 /// Calculate sight corrections needed to compensate for aerodynamic jump
-// `!(x > 0.0)` is used intentionally instead of `x <= 0.0`: the negated form is also true for
-// NaN (NaN comparisons are always false), so it correctly rejects NaN as well as non-positive
-// inputs. `x <= 0.0` would let NaN through. Hence the clippy allow below.
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
+///
+/// Aerodynamic jump is an angular muzzle departure, so its equal-and-opposite
+/// sight correction is independent of zero range and sight height. Those
+/// parameters remain in the public signature for backward compatibility.
 pub fn calculate_sight_correction_for_jump(
     jump_components: &AerodynamicJumpComponents,
     zero_range_m: f64,
-    sight_height_m: f64,
+    _sight_height_m: f64,
 ) -> (f64, f64) {
-    // Guard a non-positive (or NaN) zero range (public API): 91.44 / 0 would be Inf, poisoning the
-    // returned corrections.
-    if !(zero_range_m > 0.0) {
+    // Preserve the public helper's established invalid-range behavior.
+    if !zero_range_m.is_finite() || zero_range_m <= 0.0 {
         return (0.0, 0.0);
     }
-    // Range factor
-    let range_factor = 91.44 / zero_range_m; // 100 yards / zero range
 
-    // Sight corrections (opposite of jump direction)
-    let mut vertical_correction = -jump_components.vertical_jump_moa * range_factor;
-    let horizontal_correction = -jump_components.horizontal_jump_moa * range_factor;
-
-    // Account for sight height
-    let sight_factor = 1.0 + (sight_height_m / 0.05);
-    vertical_correction *= sight_factor;
-
-    (vertical_correction, horizontal_correction)
+    (
+        -jump_components.vertical_jump_moa,
+        -jump_components.horizontal_jump_moa,
+    )
 }
 
 /// Calculate sensitivity to crosswind for aerodynamic jump (MOA per mph)
@@ -310,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sight_correction() {
+    fn sight_correction_is_the_equal_and_opposite_jump_angle() {
         let jump = AerodynamicJumpComponents {
             vertical_jump_moa: 0.5,
             horizontal_jump_moa: 0.1,
@@ -320,14 +312,43 @@ mod tests {
             stabilization_factor: 0.9,
         };
 
-        let (vert, horiz) = calculate_sight_correction_for_jump(
-            &jump, 274.32, // 300 yards
-            0.05,   // 2" sight height
-        );
+        for (zero_range_m, sight_height_m) in [
+            (22.86, 0.0),  // 25 yards
+            (91.44, 0.05), // 100 yards, 2-inch sight height
+            (274.32, 0.1), // 300 yards, tall sight
+        ] {
+            let (vertical, horizontal) =
+                calculate_sight_correction_for_jump(&jump, zero_range_m, sight_height_m);
 
-        // Corrections should be opposite of jump
-        assert!(vert < 0.0);
-        assert!(horiz < 0.0);
+            assert!(
+                (vertical + 0.5).abs() < 1e-12,
+                "vertical correction changed with range/height: range={zero_range_m}, height={sight_height_m}, correction={vertical}"
+            );
+            assert!(
+                (horizontal + 0.1).abs() < 1e-12,
+                "horizontal correction changed with range/height: range={zero_range_m}, height={sight_height_m}, correction={horizontal}"
+            );
+        }
+    }
+
+    #[test]
+    fn sight_correction_rejects_invalid_zero_ranges() {
+        let jump = AerodynamicJumpComponents {
+            vertical_jump_moa: 0.5,
+            horizontal_jump_moa: 0.1,
+            jump_angle_rad: 0.0001,
+            magnus_component_moa: 0.4,
+            yaw_component_moa: 0.1,
+            stabilization_factor: 0.9,
+        };
+
+        for zero_range_m in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                calculate_sight_correction_for_jump(&jump, zero_range_m, 0.05),
+                (0.0, 0.0),
+                "invalid zero range must be rejected: {zero_range_m}"
+            );
+        }
     }
 
     #[test]
