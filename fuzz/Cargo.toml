@@ -28,3 +28,10 @@ path = "fuzz_targets/robustness_inputs.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "robustness_ffi"
+path = "fuzz_targets/robustness_ffi.rs"
+test = false
+doc = false
+bench = false
