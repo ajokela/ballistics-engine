@@ -388,6 +388,23 @@ fn enhanced_compressibility_factor(p: f64, t_k: f64, x_v: f64) -> f64 {
     z_second_order + z_third_order
 }
 
+/// Convert an `(x, y)` position in the shot-aligned frame to true world altitude.
+///
+/// The engine rotates gravity by `shooting_angle_rad`, so shot-frame X follows the inclined
+/// line of fire and Y is perpendicular to it in the vertical plane. Atmosphere lookup needs the
+/// world-vertical projection of that position, added to the station altitude.
+#[inline]
+pub(crate) fn shot_frame_altitude(
+    base_altitude_m: f64,
+    downrange_m: f64,
+    shot_y_m: f64,
+    shooting_angle_rad: f64,
+) -> f64 {
+    base_altitude_m
+        + downrange_m * shooting_angle_rad.sin()
+        + shot_y_m * shooting_angle_rad.cos()
+}
+
 /// Enhanced local atmospheric calculation with variable lapse rates.
 ///
 /// # Arguments
@@ -660,6 +677,29 @@ impl AtmoSock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inclined_shot_frame_position_maps_to_world_altitude() {
+        let base_altitude = 100.0;
+        let downrange = 1_000.0;
+        let shot_y = 10.0;
+        let angle = std::f64::consts::FRAC_PI_6;
+        let expected = base_altitude + downrange * angle.sin() + shot_y * angle.cos();
+
+        let actual = shot_frame_altitude(base_altitude, downrange, shot_y, angle);
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "30-degree shot at x=1000/y=10 should be at {expected} m, got {actual} m"
+        );
+        assert_eq!(
+            shot_frame_altitude(base_altitude, downrange, shot_y, 0.0),
+            base_altitude + shot_y,
+            "flat-fire altitude must remain byte-identical"
+        );
+        let downhill = shot_frame_altitude(base_altitude, downrange, shot_y, -angle);
+        let expected_downhill = base_altitude - downrange * angle.sin() + shot_y * angle.cos();
+        assert!((downhill - expected_downhill).abs() < 1e-12);
+    }
 
     // ---- MBA-1136: CIPM-2007 as the single canonical humid-air density ----
 

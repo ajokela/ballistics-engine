@@ -1890,9 +1890,9 @@ impl TrajectorySolver {
         // MBA-1137: downrange-segmented atmosphere. When an AtmoSock is present, swap the BASE
         // (station-referenced) T/P/H tuple for the active zone selected by downrange distance
         // (position.x), recomputing the per-zone base density ratio via CIPM. That swapped base
-        // then flows through the SAME altitude-lapse pipeline (get_local_atmosphere), so the X-axis
-        // zone and the Y-axis altitude lapse compose orthogonally — the zone sets the base density,
-        // the lapse multiplies on top of it (no double-count). When None, this is exactly the
+        // then flows through the SAME altitude-lapse pipeline (get_local_atmosphere), so downrange
+        // zone selection and the world-vertical altitude lapse compose — the zone sets the base
+        // density, and the lapse multiplies on top of it (no double-count). When None, this is the
         // resolved single-station base, so the drag path is byte-identical to pre-feature behavior.
         let (drag_base_temp_c, drag_base_press_hpa, drag_base_ratio) =
             if let Some(ref sock) = self.atmo_sock {
@@ -1906,7 +1906,12 @@ impl TrajectorySolver {
             } else {
                 resolved_atmo
             };
-        let local_alt = self.atmosphere.altitude + position.y;
+        let local_alt = crate::atmosphere::shot_frame_altitude(
+            self.atmosphere.altitude,
+            position.x,
+            position.y,
+            self.inputs.shooting_angle,
+        );
         let (air_density, speed_of_sound) = crate::atmosphere::get_local_atmosphere(
             local_alt,
             self.atmosphere.altitude,
@@ -3198,6 +3203,48 @@ mod mach_bc_segment_tests {
             "Mach 1.5 must interpolate BC 0.3: segmented ax={} expected ax={}",
             segmented_acceleration.x,
             expected_acceleration.x
+        );
+    }
+}
+
+#[cfg(test)]
+mod inclined_atmosphere_frame_tests {
+    use super::*;
+
+    #[test]
+    fn inclined_positions_at_same_world_altitude_have_same_solver_acceleration() {
+        let angle = std::f64::consts::FRAC_PI_6;
+        let inputs = BallisticInputs {
+            shooting_angle: angle,
+            ..BallisticInputs::default()
+        };
+        let atmosphere = AtmosphericConditions {
+            altitude: 100.0,
+            ..AtmosphericConditions::default()
+        };
+        let solver = TrajectorySolver::new(inputs, WindConditions::default(), atmosphere);
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let velocity = Vector3::new(600.0, 0.0, 0.0);
+        let along_slant = Vector3::new(1_000.0, 0.0, 0.0);
+        let across_slant = Vector3::new(0.0, 500.0 / angle.cos(), 0.0);
+
+        let a = solver.calculate_acceleration(
+            &along_slant,
+            &velocity,
+            &Vector3::zeros(),
+            resolved_atmo,
+        );
+        let b = solver.calculate_acceleration(
+            &across_slant,
+            &velocity,
+            &Vector3::zeros(),
+            resolved_atmo,
+        );
+
+        assert!(
+            (a - b).norm() < 1e-10,
+            "solver acceleration differs at equal world altitude: {a:?} vs {b:?}"
         );
     }
 }

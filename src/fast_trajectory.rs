@@ -603,8 +603,9 @@ fn compute_derivatives(
         //
         // MBA-1137 (zones): when a downrange-segmented atmosphere is present, swap the BASE
         // (station-referenced) temp/pressure/ratio for the zone at the current downrange distance
-        // (pos.x), recomputing the zone base_ratio via CIPM, BEFORE the altitude lapse — so the X
-        // zone and the Y lapse compose without double-count. `None` keeps the single-station base.
+        // (pos.x), recomputing the zone base_ratio via CIPM, BEFORE the altitude lapse — so
+        // downrange-zone selection and the world-vertical lapse compose without double-counting.
+        // `None` keeps the single-station base.
         //
         // Humidity is NOT plumbed to this call site: on the fast path (fast_integrate) the
         // `humidity` FIELD is overwritten with atmo_params.3 (the density RATIO), so
@@ -615,7 +616,12 @@ fn compute_derivatives(
                 speed_of_sound,
             } => (air_density, speed_of_sound),
             FastAtmosphere::Standard { base_density } => {
-                let altitude = inputs.altitude + pos.y;
+                let altitude = crate::atmosphere::shot_frame_altitude(
+                    inputs.altitude,
+                    pos.x,
+                    pos.y,
+                    inputs.shooting_angle,
+                );
                 let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
                     Some(sock) => {
                         let (zt, zp, zh) = sock.atmo_for_range(pos.x);
@@ -907,6 +913,60 @@ pub fn fast_integrate_with_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inclined_positions_at_same_world_altitude_have_same_fast_acceleration() {
+        let angle = std::f64::consts::FRAC_PI_6;
+        let inputs = BallisticInputs {
+            altitude: 100.0,
+            temperature: 15.0,
+            pressure: 1013.25,
+            shooting_angle: angle,
+            ..BallisticInputs::default()
+        };
+        let wind_sock = WindSock::new(vec![]);
+        let atmosphere = FastAtmosphere::Standard {
+            base_density: 1.225,
+        };
+        let state_along_slant = [1_000.0, 0.0, 0.0, 600.0, 0.0, 0.0];
+        let state_across_slant = [0.0, 500.0 / angle.cos(), 0.0, 600.0, 0.0, 0.0];
+
+        let a = compute_derivatives(
+            &state_along_slant,
+            &inputs,
+            &wind_sock,
+            atmosphere,
+            &inputs.bc_type,
+            crate::transonic_drag::ProjectileShape::Spitzer,
+            inputs.bc_value,
+            false,
+            false,
+            None,
+            None,
+        );
+        let b = compute_derivatives(
+            &state_across_slant,
+            &inputs,
+            &wind_sock,
+            atmosphere,
+            &inputs.bc_type,
+            crate::transonic_drag::ProjectileShape::Spitzer,
+            inputs.bc_value,
+            false,
+            false,
+            None,
+            None,
+        );
+
+        for component in 3..6 {
+            assert!(
+                (a[component] - b[component]).abs() < 1e-10,
+                "fast derivative component {component} differs at equal world altitude: {} vs {}",
+                a[component],
+                b[component]
+            );
+        }
+    }
 
     #[test]
     fn test_fast_solution_interpolation() {
