@@ -116,7 +116,7 @@ pub struct BallisticInputs {
 
     // Advanced effects flags
     pub enable_advanced_effects: bool,
-    pub enable_magnus: bool,   // Magnus side force (independent of Coriolis)
+    pub enable_magnus: bool,   // Magnus force (independent of Coriolis)
     pub enable_coriolis: bool, // Coriolis deflection (requires latitude)
     pub use_powder_sensitivity: bool,
     pub powder_temp_sensitivity: f64, // m/s per degree Celsius
@@ -2085,7 +2085,7 @@ impl TrajectorySolver {
             }
         }
 
-        // Magnus side force (spinning projectile). SI units in this solver.
+        // Magnus force (spinning projectile). SI units in this solver.
         // MBA-1134 (rank 35): the canonical empirical Litz spin-drift post-process
         // (apply_spin_drift) already captures the gyroscopic yaw-of-repose lateral, so the
         // explicit Magnus side force must NOT be added on top of it — otherwise the two lateral
@@ -2168,18 +2168,17 @@ impl TrajectorySolver {
                 * spin_param
                 * yaw_rad.sin();
 
-            // Horizontal direction perpendicular to velocity. In McCoy (RH) frame,
-            // v_unit × up = +Z (right) for a downrange shot, matching spin-drift sign.
-            let velocity_unit = relative_velocity / velocity_magnitude;
-            let up = Vector3::new(0.0, 1.0, 0.0);
-            let mut dir = velocity_unit.cross(&up);
-            let dir_norm = dir.norm();
-            if dir_norm > 1e-12 && magnus_force.abs() > 1e-12 {
-                dir /= dir_norm;
-                if !self.inputs.is_twist_right {
-                    dir = -dir;
+            // The yaw of repose is lateral, so its Magnus force follows gravity projected normal
+            // to flight (down for right-hand twist). Lateral yaw lift belongs to the separate Litz
+            // spin-drift model and must not be synthesized from this Magnus magnitude.
+            if magnus_force.abs() > 1e-12 {
+                if let Some(dir) = crate::derivatives::yaw_of_repose_magnus_direction(
+                    relative_velocity,
+                    self.gravity_acceleration(),
+                    self.inputs.is_twist_right,
+                ) {
+                    accel += (magnus_force / self.inputs.bullet_mass) * dir;
                 }
-                accel += (magnus_force / self.inputs.bullet_mass) * dir;
             }
         }
 
@@ -3927,6 +3926,50 @@ mod magnus_stability_tests {
     use super::*;
 
     #[test]
+    fn yaw_of_repose_magnus_force_is_vertical_and_twist_signed() {
+        let acceleration = |enable_magnus, is_twist_right| {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 822.96,
+                bullet_mass: 168.0 * 0.00006479891,
+                bullet_diameter: 0.308 * 0.0254,
+                bullet_length: 1.215 * 0.0254,
+                twist_rate: 10.0,
+                is_twist_right,
+                enable_magnus,
+                ..BallisticInputs::default()
+            };
+            let solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+            solver.calculate_acceleration(
+                &Vector3::zeros(),
+                &Vector3::new(822.96, 0.0, 0.0),
+                &Vector3::zeros(),
+                (temp_c, pressure_hpa, density / 1.225),
+            )
+        };
+
+        let baseline = acceleration(false, true);
+        let right_twist = acceleration(true, true) - baseline;
+        let left_twist = acceleration(true, false) - baseline;
+
+        assert!(
+            right_twist.y < 0.0,
+            "right-hand Magnus must point down, got {right_twist:?}"
+        );
+        assert!(
+            left_twist.y > 0.0,
+            "left-hand Magnus must point up, got {left_twist:?}"
+        );
+        assert!((right_twist.y + left_twist.y).abs() < 1e-12);
+        assert!(right_twist.x.abs() < 1e-12 && right_twist.z.abs() < 1e-12);
+        assert!(left_twist.x.abs() < 1e-12 && left_twist.z.abs() < 1e-12);
+    }
+
+    #[test]
     fn magnus_uses_velocity_corrected_muzzle_stability_gate() {
         let muzzle_velocity = 1_400.0 / 3.28084;
         let inputs = BallisticInputs {
@@ -3939,7 +3982,7 @@ mod magnus_stability_tests {
             ..BallisticInputs::default()
         };
         let solver = TrajectorySolver::new(
-            inputs,
+            inputs.clone(),
             WindConditions::default(),
             AtmosphericConditions::default(),
         );
@@ -3959,12 +4002,23 @@ mod magnus_stability_tests {
             &Vector3::zeros(),
             (temp_c, pressure_hpa, density / 1.225),
         );
+        let mut baseline_inputs = inputs;
+        baseline_inputs.enable_magnus = false;
+        let baseline_solver = TrajectorySolver::new(
+            baseline_inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let baseline = baseline_solver.calculate_acceleration(
+            &Vector3::zeros(),
+            &Vector3::new(muzzle_velocity, 0.0, 0.0),
+            &Vector3::zeros(),
+            (temp_c, pressure_hpa, density / 1.225),
+        );
 
         assert_eq!(
-            acceleration.z.to_bits(),
-            0.0_f64.to_bits(),
-            "canonical Sg below 1 must suppress Magnus, got az={} m/s^2",
-            acceleration.z
+            acceleration, baseline,
+            "canonical Sg below 1 must suppress every Magnus acceleration component"
         );
     }
 }

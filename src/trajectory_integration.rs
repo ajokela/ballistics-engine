@@ -784,16 +784,33 @@ mod tests {
     #[test]
     fn integrated_magnus_retains_nonzero_launch_spin() {
         let initial_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
-        let mut params = create_test_params(1_000.0);
-        params.enable_magnus = true;
+        let baseline = integrate_trajectory(
+            initial_state,
+            (0.0, 0.1),
+            create_test_params(1_000.0),
+            "RK4",
+            1e-6,
+            0.001,
+        );
+        let mut magnus_params = create_test_params(1_000.0);
+        magnus_params.enable_magnus = true;
 
-        let trajectory =
-            integrate_trajectory(initial_state, (0.0, 0.1), params, "RK4", 1e-6, 0.001);
-        let lateral_position = trajectory.last().expect("trajectory is empty").1[2];
+        let trajectory = integrate_trajectory(
+            initial_state,
+            (0.0, 0.1),
+            magnus_params,
+            "RK4",
+            1e-6,
+            0.001,
+        );
+        let baseline_y = baseline.last().expect("baseline trajectory is empty").1[1];
+        let magnus_y = trajectory.last().expect("trajectory is empty").1[1];
+        let vertical_delta = magnus_y - baseline_y;
 
         assert!(
-            lateral_position.is_finite() && lateral_position > 0.0,
-            "right-twist Magnus should retain a nonzero launch spin, got z={lateral_position}"
+            vertical_delta.is_finite() && vertical_delta < 0.0,
+            "right-twist Magnus should retain nonzero launch spin and point down, got \
+             delta_y={vertical_delta}"
         );
     }
 
