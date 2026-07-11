@@ -6,7 +6,7 @@
 /// ICAO Standard Atmosphere layer definitions
 #[derive(Debug, Clone)]
 struct AtmosphereLayer {
-    /// Base altitude of this layer (m)
+    /// Base geopotential height of this layer (m)
     base_altitude: f64,
     /// Base temperature at layer start (K)
     base_temperature: f64,
@@ -20,8 +20,11 @@ struct AtmosphereLayer {
 const G_ACCEL_MPS2: f64 = 9.80665;
 const R_AIR: f64 = 287.0531; // Specific gas constant for dry air (J/(kg·K))
 const GAMMA: f64 = 1.4; // Heat capacity ratio for air
-const MIN_STANDARD_ALTITUDE_M: f64 = -5000.0;
-const MAX_STANDARD_ALTITUDE_M: f64 = 84000.0;
+const GEOPOTENTIAL_EARTH_RADIUS_M: f64 = 6_356_766.0;
+const MIN_GEOMETRIC_ALTITUDE_M: f64 = -5000.0;
+const MAX_GEOMETRIC_ALTITUDE_M: f64 = 84000.0;
+const MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = -5000.0;
+const MAX_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = 84000.0;
 
 /// CIPM constants for precise air density calculation
 const R: f64 = 8.314472; // Universal gas constant
@@ -88,21 +91,26 @@ const ICAO_LAYERS: &[AtmosphereLayer] = &[
 /// atmospheric layers up to 84 km altitude.
 ///
 /// # Arguments
-/// * `altitude_m` - Altitude in meters (-5000 to 84000; values outside are clamped)
+/// * `altitude_m` - Geometric altitude above mean sea level in meters (-5000 to 84000; values
+///   outside are clamped). It is converted to geopotential height before layer evaluation.
 ///
 /// # Returns
 /// Tuple of (temperature_k, pressure_pa)
 fn calculate_icao_standard_atmosphere(altitude_m: f64) -> (f64, f64) {
-    let altitude = altitude_m.clamp(MIN_STANDARD_ALTITUDE_M, MAX_STANDARD_ALTITUDE_M);
+    let geometric_altitude = altitude_m.clamp(MIN_GEOMETRIC_ALTITUDE_M, MAX_GEOMETRIC_ALTITUDE_M);
+    let geopotential_height = geometric_to_geopotential_height_m(geometric_altitude).clamp(
+        MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M,
+        MAX_STANDARD_GEOPOTENTIAL_HEIGHT_M,
+    );
 
     // Find the appropriate atmospheric layer
     let layer = ICAO_LAYERS
         .iter()
         .rev()
-        .find(|layer| altitude >= layer.base_altitude)
+        .find(|layer| geopotential_height >= layer.base_altitude)
         .unwrap_or(&ICAO_LAYERS[0]);
 
-    let height_diff = altitude - layer.base_altitude;
+    let height_diff = geopotential_height - layer.base_altitude;
     let temperature = layer.base_temperature + layer.lapse_rate * height_diff;
 
     let pressure = if layer.lapse_rate.abs() < 1e-10 {
@@ -115,6 +123,13 @@ fn calculate_icao_standard_atmosphere(altitude_m: f64) -> (f64, f64) {
     };
 
     (temperature, pressure)
+}
+
+/// Convert physical geometric altitude to the geopotential height used by ICAO layer tables.
+#[inline]
+fn geometric_to_geopotential_height_m(geometric_altitude_m: f64) -> f64 {
+    GEOPOTENTIAL_EARTH_RADIUS_M * geometric_altitude_m
+        / (GEOPOTENTIAL_EARTH_RADIUS_M + geometric_altitude_m)
 }
 
 /// Resolve the station-pressure override for an air-density calculation.
@@ -409,8 +424,8 @@ pub(crate) fn shot_frame_altitude(
 /// Enhanced local atmospheric calculation with variable lapse rates.
 ///
 /// # Arguments
-/// * `altitude_m` - Altitude in meters
-/// * `base_alt` - Base altitude for calculation
+/// * `altitude_m` - Query geometric altitude above mean sea level in meters
+/// * `base_alt` - Base geometric altitude above mean sea level in meters
 /// * `base_temp_c` - Base temperature in Celsius
 /// * `base_press_hpa` - Base pressure in hPa
 /// * `base_ratio` - Base density ratio
@@ -442,8 +457,8 @@ pub fn get_local_atmosphere(
 /// API/back-compat; call this variant only where a real relative humidity is available.
 ///
 /// # Arguments
-/// * `altitude_m` - Query altitude in meters
-/// * `base_alt` - Base (station) altitude in meters
+/// * `altitude_m` - Query geometric altitude above mean sea level in meters
+/// * `base_alt` - Base (station) geometric altitude above mean sea level in meters
 /// * `base_temp_c` - Base temperature in Celsius
 /// * `base_press_hpa` - Base pressure in hPa
 /// * `base_ratio` - Base density ratio (density / 1.225)
@@ -484,9 +499,11 @@ fn local_temp_pressure_density(
         return (f64::NAN, f64::NAN, f64::NAN);
     }
 
+    let base_geopotential_m = geometric_to_geopotential_height_m(base_alt);
+    let target_geopotential_m = geometric_to_geopotential_height_m(altitude_m_rounded);
     let (temp_k, pressure_hpa) = integrate_local_atmosphere_layers(
-        base_alt,
-        altitude_m_rounded,
+        base_geopotential_m,
+        target_geopotential_m,
         base_temp_k,
         base_press_hpa,
     );
@@ -499,18 +516,18 @@ fn local_temp_pressure_density(
 }
 
 /// Carry arbitrary station temperature and pressure through each crossed ICAO
-/// layer. The layer table supplies lapse rates and boundaries only; station
-/// deviations from the standard atmosphere remain anchored at `base_alt`.
+/// layer in geopotential-height coordinates. The layer table supplies lapse rates and boundaries
+/// only; station deviations from the standard atmosphere remain anchored at the converted base.
 fn integrate_local_atmosphere_layers(
-    base_alt: f64,
-    target_alt: f64,
+    base_geopotential_m: f64,
+    target_geopotential_m: f64,
     mut temp_k: f64,
     mut pressure_hpa: f64,
 ) -> (f64, f64) {
-    let mut current_alt = base_alt;
+    let mut current_alt = base_geopotential_m;
 
-    if target_alt > current_alt {
-        while current_alt < target_alt {
+    if target_geopotential_m > current_alt {
+        while current_alt < target_geopotential_m {
             // At an exact boundary, ascent starts in the higher layer.
             let layer_index = ICAO_LAYERS
                 .iter()
@@ -518,7 +535,9 @@ fn integrate_local_atmosphere_layers(
                 .unwrap_or(0);
             let segment_end = ICAO_LAYERS
                 .get(layer_index + 1)
-                .map_or(target_alt, |next| target_alt.min(next.base_altitude));
+                .map_or(target_geopotential_m, |next| {
+                    target_geopotential_m.min(next.base_altitude)
+                });
             (temp_k, pressure_hpa) = integrate_local_atmosphere_segment(
                 temp_k,
                 pressure_hpa,
@@ -528,7 +547,7 @@ fn integrate_local_atmosphere_layers(
             current_alt = segment_end;
         }
     } else {
-        while current_alt > target_alt {
+        while current_alt > target_geopotential_m {
             // At an exact boundary, descent starts in the lower layer. The
             // strict comparison is what makes a cross-layer round trip reversible.
             let layer_index = ICAO_LAYERS
@@ -536,9 +555,9 @@ fn integrate_local_atmosphere_layers(
                 .rposition(|layer| current_alt > layer.base_altitude)
                 .unwrap_or(0);
             let segment_end = if layer_index == 0 {
-                target_alt
+                target_geopotential_m
             } else {
-                target_alt.max(ICAO_LAYERS[layer_index].base_altitude)
+                target_geopotential_m.max(ICAO_LAYERS[layer_index].base_altitude)
             };
             (temp_k, pressure_hpa) = integrate_local_atmosphere_segment(
                 temp_k,
@@ -792,17 +811,28 @@ mod tests {
         }
     }
 
-    /// rank 9: `get_local_atmosphere` is behavior-locked after the shared-helper refactor.
-    /// Reference values captured from the pre-refactor implementation
-    /// (base: 500 m, 10 C, 950 hPa, ratio 1.05).
+    /// rank 9: local-atmosphere reference values (base: 500 m, 10 C, 950 hPa, ratio 1.05).
+    /// The 1500 m values include the geometric-to-geopotential height conversion.
     #[test]
-    fn test_mba1136_get_local_atmosphere_unchanged() {
+    fn test_mba1136_get_local_atmosphere_reference() {
         let (d0, c0) = get_local_atmosphere(500.0, 500.0, 10.0, 950.0, 1.05);
-        assert!((d0 - 1.286250000000).abs() < 1e-9, "local density@500m drifted: {d0}");
-        assert!((c0 - 337.328657395129).abs() < 1e-9, "local sos@500m drifted: {c0}");
+        assert!(
+            (d0 - 1.286250000000).abs() < 1e-9,
+            "local density@500m drifted: {d0}"
+        );
+        assert!(
+            (c0 - 337.328657395129).abs() < 1e-9,
+            "local sos@500m drifted: {c0}"
+        );
         let (d1, c1) = get_local_atmosphere(1500.0, 500.0, 10.0, 950.0, 1.05);
-        assert!((d1 - 1.165201643681).abs() < 1e-9, "local density@1500m drifted: {d1}");
-        assert!((c1 - 333.434314520866).abs() < 1e-9, "local sos@1500m drifted: {c1}");
+        assert!(
+            (d1 - 1.165238292559).abs() < 1e-9,
+            "local density@1500m drifted: {d1}"
+        );
+        assert!(
+            (c1 - 333.435546617978).abs() < 1e-9,
+            "local sos@1500m drifted: {c1}"
+        );
     }
 
     /// rank 9: `get_local_atmosphere_humid` returns the SAME density as `get_local_atmosphere`,
@@ -828,10 +858,13 @@ mod tests {
         assert!((temp - 288.15).abs() < 0.01);
         assert!((press - 101325.0).abs() < 1.0);
 
-        // Test tropopause
-        let (temp_11km, press_11km) = calculate_icao_standard_atmosphere(11000.0);
+        // The table's 11 km tropopause base is geopotential height; convert it back to the
+        // geometric altitude accepted by the public atmosphere contract.
+        let geometric_tropopause_m =
+            GEOPOTENTIAL_EARTH_RADIUS_M * 11000.0 / (GEOPOTENTIAL_EARTH_RADIUS_M - 11000.0);
+        let (temp_11km, press_11km) = calculate_icao_standard_atmosphere(geometric_tropopause_m);
         assert!((temp_11km - 216.65).abs() < 0.01);
-        assert!(press_11km < 101325.0);
+        assert!((press_11km - 22632.1).abs() < 1.0);
 
         // Test stratosphere
         let (temp_25km, _) = calculate_icao_standard_atmosphere(25000.0);
@@ -843,23 +876,39 @@ mod tests {
         let altitude_m = -430.0;
         let (temp_k, pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
 
-        assert!((temp_k - 290.945).abs() < 1e-9);
-        assert!((pressure_pa - 106_598.399_445_557).abs() < 0.1);
+        assert!((temp_k - 290.945_189_079_054).abs() < 1e-9);
+        assert!((pressure_pa - 106_598.763_552_437).abs() < 0.1);
 
         let (station_temp_c, station_pressure_hpa) =
             resolve_station_conditions(15.0, 1013.25, altitude_m);
-        assert!((station_temp_c - 17.795).abs() < 1e-9);
-        assert!((station_pressure_hpa - 1_065.983_994_456).abs() < 1e-6);
+        assert!((station_temp_c - 17.795_189_079_054).abs() < 1e-9);
+        assert!((station_pressure_hpa - 1_065.987_635_524).abs() < 1e-6);
 
         let (sea_density, _) = calculate_atmosphere(0.0, None, None, 0.0);
         let (below_sea_density, _) = calculate_atmosphere(altitude_m, None, None, 0.0);
-        assert!((below_sea_density - 1.276_905_111_96).abs() < 1e-6);
+        assert!((below_sea_density - 1.276_908_642_79).abs() < 1e-6);
         assert!(below_sea_density > sea_density * 1.04);
 
         assert_eq!(
             calculate_icao_standard_atmosphere(-6000.0),
-            calculate_icao_standard_atmosphere(MIN_STANDARD_ALTITUDE_M)
+            calculate_icao_standard_atmosphere(MIN_GEOMETRIC_ALTITUDE_M)
         );
+    }
+
+    #[test]
+    fn standard_atmosphere_converts_geometric_to_geopotential_height() {
+        let cases: [(f64, f64, f64); 3] = [
+            (10_000.0, 223.252_092_647_979, 26_499.901_600_244),
+            (30_000.0, 226.509_083_611_330, 1_197.032_108_466),
+            (84_000.0, 190.841_043_736_102, 0.531_525_514_935),
+        ];
+        for (geometric_m, expected_temp_k, expected_pressure_pa) in cases {
+            let (temp_k, pressure_pa) = calculate_icao_standard_atmosphere(geometric_m);
+            let pressure_tolerance = expected_pressure_pa.max(1.0_f64) * 1e-6;
+
+            assert!((temp_k - expected_temp_k).abs() < 1e-9);
+            assert!((pressure_pa - expected_pressure_pa).abs() < pressure_tolerance);
+        }
     }
 
     #[test]
@@ -910,9 +959,9 @@ mod tests {
             base_pressure_hpa,
             base_ratio,
         );
-        assert!((high_temp_k - 260.4).abs() < 1e-9);
-        assert!((high_pressure_pa / 100.0 - 40.505969).abs() < 1e-6);
-        assert!((high_density - 0.093076885).abs() < 1e-9);
+        assert!((high_temp_k - 260.244_615_053_376).abs() < 1e-9);
+        assert!((high_pressure_pa / 100.0 - 40.964_358_485_456).abs() < 1e-9);
+        assert!((high_density - 0.094_186_400_274).abs() < 1e-9);
 
         let (back_temp_k, back_pressure_pa, back_density) = local_temp_pressure_density(
             base_alt,
