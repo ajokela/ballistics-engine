@@ -1,5 +1,42 @@
 use crate::BCSegmentData;
 
+/// Resolve a velocity-keyed BC table without assuming segment order.
+///
+/// Bands are half-open (`velocity_min <= v < velocity_max`), so a shared boundary belongs to
+/// the upper band. Below/above global coverage, clamp to the lowest/highest-velocity band;
+/// an interior coverage gap or empty table uses the caller's projectile-specific scalar BC.
+pub(crate) fn velocity_segment_bc(
+    velocity_fps: f64,
+    segments: &[BCSegmentData],
+    fallback_bc: f64,
+) -> f64 {
+    if let Some(segment) = segments.iter().find(|segment| {
+        velocity_fps >= segment.velocity_min && velocity_fps < segment.velocity_max
+    }) {
+        return segment.bc_value;
+    }
+
+    let lowest = segments
+        .iter()
+        .min_by(|a, b| a.velocity_min.total_cmp(&b.velocity_min));
+    if let Some(segment) = lowest {
+        if velocity_fps < segment.velocity_min {
+            return segment.bc_value;
+        }
+    }
+
+    let highest = segments
+        .iter()
+        .max_by(|a, b| a.velocity_max.total_cmp(&b.velocity_max));
+    if let Some(segment) = highest {
+        if velocity_fps >= segment.velocity_max {
+            return segment.bc_value;
+        }
+    }
+
+    fallback_bc
+}
+
 /// Bullet type classification based on model name
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BulletType {
