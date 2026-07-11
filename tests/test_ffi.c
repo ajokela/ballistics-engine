@@ -28,6 +28,7 @@ typedef struct {
     int enable_spin_drift;
     int enable_magnus;
     int enable_coriolis;
+    double shot_azimuth;
 } FFIBallisticInputs;
 
 typedef struct {
@@ -112,7 +113,8 @@ int main() {
         .enable_precession_nutation = 1,// Enable precession/nutation
         .enable_spin_drift = 1,         // Enable spin drift
         .enable_magnus = 1,             // Enable Magnus effect
-        .enable_coriolis = 0            // Disable Coriolis for now
+        .enable_coriolis = 0,           // Disable Coriolis for now
+        .shot_azimuth = 0.0             // North; appended ABI field
     };
     
     FFIWindConditions wind = {

@@ -197,9 +197,19 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs
 }
 
-// Main trajectory calculation function for FFI
+/// Calculate a trajectory through the C ABI.
+///
+/// # Safety
+///
+/// `inputs` may be null, in which case this function returns null. When non-null,
+/// it must point to a valid, properly aligned [`FFIBallisticInputs`] that remains
+/// readable and is not mutated for the duration of this call. `wind` and
+/// `atmosphere` may also be null; each non-null pointer has the same requirements
+/// for its corresponding type.
+/// The returned pointer, when non-null, must be released exactly once with
+/// [`ballistics_free_trajectory_result`].
 #[no_mangle]
-pub extern "C" fn ballistics_calculate_trajectory(
+pub unsafe extern "C" fn ballistics_calculate_trajectory(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,
     atmosphere: *const FFIAtmosphericConditions,
@@ -360,9 +370,16 @@ pub extern "C" fn ballistics_calculate_trajectory(
     }
 }
 
-// Free allocated trajectory result
+/// Release a trajectory result allocated by [`ballistics_calculate_trajectory`].
+///
+/// # Safety
+///
+/// `result` must be null or a pointer returned by
+/// [`ballistics_calculate_trajectory`] that has not already been freed. Its
+/// embedded pointers and counts must be unchanged from the returned values.
+/// After this call, the result and its point arrays must not be accessed again.
 #[no_mangle]
-pub extern "C" fn ballistics_free_trajectory_result(result: *mut FFITrajectoryResult) {
+pub unsafe extern "C" fn ballistics_free_trajectory_result(result: *mut FFITrajectoryResult) {
     if !result.is_null() {
         unsafe {
             let result = Box::from_raw(result);
@@ -387,9 +404,17 @@ pub extern "C" fn ballistics_free_trajectory_result(result: *mut FFITrajectoryRe
     }
 }
 
-// Calculate zero angle for a given target distance
+/// Calculate the zero angle for a target distance through the C ABI.
+///
+/// # Safety
+///
+/// `inputs` may be null, in which case this function returns NaN. When non-null,
+/// it must point to a valid, properly aligned [`FFIBallisticInputs`] that remains
+/// readable and is not mutated for the duration of this call. `wind` and
+/// `atmosphere` may also be null; each non-null pointer has the same requirements
+/// for its corresponding type.
 #[no_mangle]
-pub extern "C" fn ballistics_calculate_zero_angle(
+pub unsafe extern "C" fn ballistics_calculate_zero_angle(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,
     atmosphere: *const FFIAtmosphericConditions,
@@ -515,9 +540,19 @@ pub extern "C" fn ballistics_quick_trajectory(
     }
 }
 
-// Monte Carlo simulation
+/// Run a Monte Carlo simulation through the C ABI.
+///
+/// # Safety
+///
+/// `inputs` and `params` may be null, in which case this function returns null.
+/// Each non-null pointer must point to a valid, properly aligned value of its
+/// corresponding FFI type that remains readable and is not mutated for the
+/// duration of this call. `atmosphere` may be null; a non-null pointer has the
+/// same requirements for [`FFIAtmosphericConditions`]. The returned pointer,
+/// when non-null, must be released exactly once with
+/// [`ballistics_free_monte_carlo_results`].
 #[no_mangle]
-pub extern "C" fn ballistics_monte_carlo(
+pub unsafe extern "C" fn ballistics_monte_carlo(
     inputs: *const FFIBallisticInputs,
     atmosphere: *const FFIAtmosphericConditions,
     params: *const FFIMonteCarloParams,
@@ -676,9 +711,16 @@ pub extern "C" fn ballistics_monte_carlo(
     }
 }
 
-// Free Monte Carlo results
+/// Release Monte Carlo results allocated by [`ballistics_monte_carlo`].
+///
+/// # Safety
+///
+/// `results` must be null or a pointer returned by [`ballistics_monte_carlo`]
+/// that has not already been freed. Its embedded pointers and result count must
+/// be unchanged from the returned values. After this call, the result and all
+/// of its arrays must not be accessed again.
 #[no_mangle]
-pub extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarloResults) {
+pub unsafe extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMonteCarloResults) {
     if results.is_null() {
         return;
     }
@@ -734,4 +776,37 @@ pub extern "C" fn ballistics_get_version() -> *const c_char {
     // Previously this leaked a freshly-allocated CString on every call and reported a
     // stale hardcoded "0.3.0"; use the real crate version with no allocation.
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_pointer_contracts_return_sentinels_and_free_safely() {
+        unsafe {
+            assert!(ballistics_calculate_trajectory(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1_000.0,
+                1.0,
+            )
+            .is_null());
+            assert!(ballistics_calculate_zero_angle(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+            )
+            .is_nan());
+            assert!(
+                ballistics_monte_carlo(std::ptr::null(), std::ptr::null(), std::ptr::null(),)
+                    .is_null()
+            );
+
+            ballistics_free_trajectory_result(std::ptr::null_mut());
+            ballistics_free_monte_carlo_results(std::ptr::null_mut());
+        }
+    }
 }
