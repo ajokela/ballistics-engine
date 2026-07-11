@@ -70,4 +70,39 @@ fn monte_carlo_agrees_with_cli_api_on_si_inputs() {
         mc.energy,
         last.kinetic_energy
     );
+
+    // Both paths use the canonical horizontal line of sight at
+    // muzzle_height + sight_height. Positive drop is below that line.
+    let cli_at_target = r
+        .position_at_range(i.target_distance)
+        .expect("CLI trajectory reaches target distance");
+    let cli_drop = i.muzzle_height + i.sight_height - cli_at_target.y;
+    assert!(
+        (mc.drop - cli_drop).abs() < 0.005,
+        "drop-frame disagreement: mc={:.4}m cli={:.4}m",
+        mc.drop,
+        cli_drop
+    );
+}
+
+#[test]
+fn sight_height_offsets_line_of_sight_not_launch_position() {
+    let mut bore_sight = si_bullet();
+    bore_sight.muzzle_height = 1.5;
+    bore_sight.sight_height = 0.0;
+    let bore_drop = solve_trajectory_for_monte_carlo(&bore_sight)
+        .expect("zero-sight-height Monte Carlo solve")
+        .drop;
+
+    let mut raised_sight = bore_sight;
+    raised_sight.sight_height = 0.05;
+    let raised_drop = solve_trajectory_for_monte_carlo(&raised_sight)
+        .expect("raised-sight Monte Carlo solve")
+        .drop;
+
+    assert!(
+        (raised_drop - bore_drop - 0.05).abs() < 1e-6,
+        "raising the LOS by 5 cm must add 5 cm of reported drop: bore={bore_drop:.6}, \
+         raised={raised_drop:.6}"
+    );
 }

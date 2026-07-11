@@ -14,7 +14,8 @@ use nalgebra::Vector3;
 /// Simple trajectory output for Monte Carlo analysis
 #[derive(Debug, Clone)]
 pub struct TrajectoryOutput {
-    pub drop: f64,       // meters
+    /// Meters below the horizontal line of sight (positive = below LOS).
+    pub drop: f64,
     pub wind_drift: f64, // meters
     pub time: f64,       // seconds
     pub velocity: f64,   // m/s
@@ -36,11 +37,10 @@ pub fn solve_trajectory_for_monte_carlo(
     let muzzle_velocity_mps = inputs.muzzle_velocity; // m/s
     let mass_kg = inputs.bullet_mass; // kg
 
-    // Guard a non-finite or non-positive target distance: los_y (and the wind segment /
-    // params.horiz) divide by or scale with target_distance_m, so 0/NaN/negative/+inf would
-    // yield a silently-NaN-or-inf result that poisons mean/stddev/CEP aggregation. The
-    // is_finite() check also rejects +inf, which `> 0.0` alone lets through. Engine default
-    // is 100 m.
+    // Guard a non-finite or non-positive target distance: the wind extent, integration target,
+    // and reachability check all scale with target_distance_m, so 0/NaN/negative/+inf would yield
+    // a degenerate result that poisons mean/stddev/CEP aggregation. The is_finite() check also
+    // rejects +inf, which `> 0.0` alone lets through. Engine default is 100 m.
     if !(target_distance_m.is_finite() && target_distance_m > 0.0) {
         return Err("target_distance must be a positive, finite distance".to_string());
     }
@@ -83,7 +83,11 @@ pub fn solve_trajectory_for_monte_carlo(
         0.0,
     );
 
-    let initial_position = Vector3::new(0.0, inputs.sight_height, 0.0); // meters
+    // Launch from the bore, not from the sight. In this shot-aligned McCoy frame the horizontal
+    // line of sight sits `sight_height` above the bore (MBA-1160).
+    let bore_y = inputs.muzzle_height;
+    let line_of_sight_y = bore_y + inputs.sight_height;
+    let initial_position = Vector3::new(0.0, bore_y, 0.0); // meters
     let mut initial_state_array = [0.0; 6];
     initial_state_array[0..3].copy_from_slice(&[
         initial_position.x,
@@ -107,7 +111,7 @@ pub fn solve_trajectory_for_monte_carlo(
         initial_state: initial_state_array,
         t_span: (0.0, 30.0),
         horiz: target_distance_m,
-        vert: 0.0, // Target at ground level
+        vert: line_of_sight_y,
         atmo_params: (
             inputs.altitude,
             resolved_temp_c,
@@ -151,10 +155,9 @@ pub fn solve_trajectory_for_monte_carlo(
     let final_mach = final_speed / speed_of_sound;
     let final_energy = 0.5 * mass_kg * final_speed * final_speed;
 
-    // Calculate line-of-sight drop
-    let sight_height_m = inputs.sight_height; // meters
-    let los_y = sight_height_m + (0.0 - sight_height_m) * (final_downrange / target_distance_m);
-    let drop = los_y - final_y;
+    // Positive drop is below the horizontal line of sight. The launch angle is already relative
+    // to that line, so it must not be used to tilt the LOS a second time.
+    let drop = line_of_sight_y - final_y;
 
     // MBA-1134 (rank 6/10): the canonical empirical Litz spin drift is now applied INSIDE
     // fast_integrate itself (post-process on the state lateral), so `final_lateral` already

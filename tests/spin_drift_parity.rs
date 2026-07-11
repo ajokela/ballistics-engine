@@ -81,12 +81,13 @@ fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
 
     let v = i.muzzle_velocity;
     let a = i.muzzle_angle;
-    let initial_state = [0.0, i.sight_height, 0.0, v * a.cos(), v * a.sin(), 0.0];
+    let sight_position = i.muzzle_height + i.sight_height;
+    let initial_state = [0.0, i.muzzle_height, 0.0, v * a.cos(), v * a.sin(), 0.0];
     let params = FastIntegrationParams {
         initial_state,
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
-        vert: 0.0,
+        vert: sight_position,
         atmo_params: (i.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
         atmo_sock: None,
     };
@@ -112,12 +113,13 @@ fn lateral_fast_integrate(i: &BallisticInputs) -> f64 {
 
     let v = i.muzzle_velocity;
     let a = i.muzzle_angle;
-    let initial_state = [0.0, i.sight_height, 0.0, v * a.cos(), v * a.sin(), 0.0];
+    let sight_position = i.muzzle_height + i.sight_height;
+    let initial_state = [0.0, i.muzzle_height, 0.0, v * a.cos(), v * a.sin(), 0.0];
     let params = FastIntegrationParams {
         initial_state,
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
-        vert: 0.0,
+        vert: sight_position,
         atmo_params: (i.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
         atmo_sock: None,
     };
