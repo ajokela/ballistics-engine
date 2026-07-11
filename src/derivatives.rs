@@ -180,7 +180,17 @@ pub fn compute_derivatives(
                     let (zt, zp, zh) = sock.atmo_for_range(pos[0]);
                     (zt, zp, calculate_air_density_cimp(zt, zp, zh) / 1.225)
                 }
-                None => (atmos_params.1, atmos_params.2, atmos_params.3),
+                None => {
+                    // A zero/nonpositive standard-mode ratio means "not supplied", not vacuum.
+                    // Match the plain fast path's sea-level fallback so sibling solvers cannot
+                    // interpret the same FastIntegrationParams tuple oppositely (MBA-1157).
+                    let base_ratio = if atmos_params.3 > 0.0 {
+                        atmos_params.3
+                    } else {
+                        1.0
+                    };
+                    (atmos_params.1, atmos_params.2, base_ratio)
+                }
             };
             let (rho, sound) = get_local_atmosphere_humid(
                 altitude_at_pos,
@@ -808,6 +818,34 @@ mod tests {
 
         // Should have drag acceleration opposing motion
         assert!(result[3] < 0.0); // Negative x acceleration due to drag
+    }
+
+    #[test]
+    fn standard_atmosphere_zero_ratio_uses_sea_level_fallback() {
+        let pos = Vector3::new(0.0, 0.0, 0.0);
+        let vel = Vector3::new(800.0, 0.0, 0.0);
+        let inputs = create_test_inputs();
+        let run = |base_ratio| {
+            compute_derivatives(
+                pos,
+                vel,
+                &inputs,
+                Vector3::zeros(),
+                (inputs.altitude, 15.0, 1013.25, base_ratio),
+                inputs.bc_value,
+                None,
+                0.0,
+                None,
+            )
+        };
+
+        let missing_ratio = run(0.0);
+        let explicit_sea_level = run(1.0);
+        assert!(
+            missing_ratio[3] < 0.0,
+            "missing standard density ratio must not produce vacuum drag"
+        );
+        assert!((missing_ratio[3] - explicit_sea_level[3]).abs() < 1e-12);
     }
 
     #[test]

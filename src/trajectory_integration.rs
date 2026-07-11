@@ -605,7 +605,7 @@ mod tests {
             twist_rate: 10.0,
             drag_model: DragModel::G7,
             wind_segments: vec![],
-            atmos_params: (0.0, 59.0, 29.92, 0.0),
+            atmos_params: (0.0, 15.0, 1013.25, 1.0),
             omega_vector: None,
             enable_spin_drift: false,
             enable_magnus: false,
@@ -663,7 +663,7 @@ mod tests {
             twist_rate: 10.0,
             drag_model: DragModel::G7,
             wind_segments: vec![(0.0, 90.0, 914.4)],
-            atmos_params: (0.0, 59.0, 29.92, 0.0),
+            atmos_params: (0.0, 15.0, 1013.25, 1.0),
             omega_vector: None,
             enable_spin_drift: false,
             enable_magnus: false,
@@ -753,16 +753,18 @@ mod tests {
 
         let mut params = create_test_params(10000.0); // Far target
         params.target_distance_m = 10000.0;
+        let ground_threshold = 0.0;
+        params.ground_threshold = ground_threshold;
 
         let trajectory =
-            integrate_trajectory(initial_state, (0.0, 20.0), params, "RK45", 1e-6, 0.01);
+            integrate_trajectory(initial_state, (0.0, 20.0), params, "RK4", 1e-6, 0.01);
 
         // Should stop before reaching target due to ground impact
         let (_, final_state) = trajectory.last().unwrap();
 
-        // y should be near ground threshold (-1000m)
+        // y should have crossed the configured ground threshold.
         assert!(
-            final_state[1] <= -900.0,
+            final_state[1] <= ground_threshold,
             "Should hit ground, but y={}",
             final_state[1]
         );

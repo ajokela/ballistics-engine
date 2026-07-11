@@ -1059,7 +1059,7 @@ mod tests {
             vert: 0.0,
             initial_state: [0.0, 0.0, 0.0, 800.0, 50.0, 0.0], // McCoy: vx=downrange
             t_span: (0.0, 5.0),
-            atmo_params: (0.0, 59.0, 29.92, 0.0),
+            atmo_params: (0.0, 15.0, 1013.25, 1.0),
             atmo_sock: None,
         };
 
@@ -1116,7 +1116,7 @@ mod tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 59.0, 29.92, 0.0),
+                atmo_params: (0.0, 15.0, 1013.25, 1.0),
                 atmo_sock: None,
             };
             let sol = fast_integrate_with_segments(&inputs, vec![], params);
@@ -1165,7 +1165,7 @@ mod tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 59.0, 29.92, 0.0),
+                atmo_params: (0.0, 15.0, 1013.25, 1.0),
                 atmo_sock: None,
             };
             let sol = fast_integrate_with_segments(&inputs, vec![], params);
@@ -1205,16 +1205,16 @@ mod tests {
             atmo_sock: None,
         };
         // pressure <= 0 -> fail loudly (success=false) instead of a 1-point stub as success.
-        let zero_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 0.0, 50.0)));
+        let zero_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 0.0, 1.0)));
         assert!(
             !zero_p.success,
             "pressure=0 atmosphere must yield success=false"
         );
         // non-finite pressure -> also rejected.
-        let nan_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, f64::NAN, 50.0)));
+        let nan_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, f64::NAN, 1.0)));
         assert!(!nan_p.success, "NaN pressure must yield success=false");
         // realistic atmosphere -> success.
-        let good = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 50.0)));
+        let good = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 1.0)));
         assert!(good.success, "realistic atmosphere must yield success=true");
         // Direct-atmosphere mode (density, speed_of_sound, 0, 0) is legitimate and must NOT
         // be rejected by the guard (regression: 0.21.2 rejected it via the pressure<=0 check).
@@ -1272,6 +1272,42 @@ mod tests {
     }
 
     #[test]
+    fn segmented_fast_path_zero_density_ratio_uses_standard_fallback() {
+        fn terminal_velocity(base_ratio: f64) -> f64 {
+            let mut inputs = BallisticInputs::default();
+            inputs.muzzle_velocity = 800.0;
+            inputs.bc_value = 0.5;
+            inputs.bc_type = DragModel::G7;
+            inputs.ground_threshold = -100.0;
+
+            let solution = fast_integrate_with_segments(
+                &inputs,
+                vec![],
+                FastIntegrationParams {
+                    horiz: 500.0,
+                    vert: 0.0,
+                    initial_state: [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+                    t_span: (0.0, 5.0),
+                    atmo_params: (0.0, 15.0, 1013.25, base_ratio),
+                    atmo_sock: None,
+                },
+            );
+            assert!(solution.success);
+
+            let last = solution.y[3].len() - 1;
+            solution.y[3][last]
+        }
+
+        let missing_ratio = terminal_velocity(0.0);
+        let explicit_sea_level = terminal_velocity(1.0);
+        assert!(
+            missing_ratio < 800.0,
+            "missing density ratio must not create a vacuum trajectory: {missing_ratio}"
+        );
+        assert!((missing_ratio - explicit_sea_level).abs() < 1e-9);
+    }
+
+    #[test]
     fn fast_path_carries_real_bullet_geometry() {
         // MBA-717: build_inputs hardcoded diameter=.308 / length=1.24in / twist=10 because
         // TrajectoryParams didn't carry them. They're now plumbed through, so the BallisticInputs
@@ -1297,7 +1333,7 @@ mod tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 15.0, 1013.25, 50.0),
+                atmo_params: (0.0, 15.0, 1013.25, 1.0),
                 atmo_sock: None,
             };
             fast_integrate_with_segments(&inputs, vec![], params)
