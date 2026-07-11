@@ -190,6 +190,19 @@ pub fn default_twist_inches(diameter_m: f64, mass_kg: f64, muzzle_velocity_mps: 
     }
 }
 
+/// Preserve a supplied twist (already converted to inches per turn), or synthesize the
+/// caliber/weight/velocity-aware default used by frontend argument parsers.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn resolve_twist_inches(
+    explicit_twist_inches: Option<f64>,
+    diameter_m: f64,
+    mass_kg: f64,
+    muzzle_velocity_mps: f64,
+) -> f64 {
+    explicit_twist_inches
+        .unwrap_or_else(|| default_twist_inches(diameter_m, mass_kg, muzzle_velocity_mps))
+}
+
 /// Calculate spin drift in meters using Litz approximation.
 ///
 /// # Arguments
@@ -457,6 +470,32 @@ mod tests {
         assert_eq!(default_twist_inches(0.00782, 0.0, 800.0), 12.0);
         assert_eq!(default_twist_inches(0.00782, 0.011, 0.0), 12.0);
         assert_eq!(default_twist_inches(f64::NAN, 0.011, 800.0), 12.0);
+    }
+
+    #[test]
+    fn test_resolve_twist_preserves_explicit_or_uses_miller_default() {
+        let diameter_m = 0.224 * IN_TO_M;
+        let mass_kg = 77.0 * GR_TO_KG;
+        let velocity_mps = 2750.0 * 0.3048;
+        let expected_default = default_twist_inches(diameter_m, mass_kg, velocity_mps);
+
+        assert_eq!(
+            resolve_twist_inches(Some(9.5), diameter_m, mass_kg, velocity_mps).to_bits(),
+            9.5_f64.to_bits()
+        );
+        assert_eq!(
+            resolve_twist_inches(None, diameter_m, mass_kg, velocity_mps).to_bits(),
+            expected_default.to_bits()
+        );
+        assert_ne!(expected_default.to_bits(), 12.0_f64.to_bits());
+
+        let metric_default = resolve_twist_inches(
+            None,
+            5.6896 * 0.001,
+            4.98951607 * 0.001,
+            838.2,
+        );
+        assert!((metric_default - expected_default).abs() < 1e-12);
     }
 
     #[test]

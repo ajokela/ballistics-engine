@@ -152,6 +152,57 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn omitted_twist_matches_miller_default_and_explicit_override_wins() {
+        let wasm = WasmBallistics::new();
+        let final_drift = |output: &str, key: &str| {
+            let json: serde_json::Value = serde_json::from_str(output).unwrap();
+            json["trajectory"].as_array().unwrap().last().unwrap()[key]
+                .as_f64()
+                .unwrap()
+        };
+        let command = "trajectory -v 2750 -b 0.219 -m 77 -d 0.224 --drag-model G7 \
+                       --enable-spin-drift --max-range 500 -o json";
+        let default_twist = crate::stability::default_twist_inches(
+            0.224 * 0.0254,
+            77.0 * 0.00006479891,
+            2750.0 * 0.3048,
+        );
+
+        let omitted = wasm.run_command(command).unwrap();
+        let explicit_default = wasm
+            .run_command(&format!("{command} --twist-rate {default_twist:.17}"))
+            .unwrap();
+        let explicit_twelve = wasm
+            .run_command(&format!("{command} --twist-rate 12"))
+            .unwrap();
+
+        let omitted_drift = final_drift(&omitted, "drift_inches");
+        let default_drift = final_drift(&explicit_default, "drift_inches");
+        let twelve_drift = final_drift(&explicit_twelve, "drift_inches");
+        assert!((omitted_drift - default_drift).abs() < 1e-9);
+        assert!((omitted_drift - twelve_drift).abs() > 0.1);
+
+        let metric_command = "trajectory --units metric -v 838.2 -b 0.219 -m 4.98951607 \
+                              -d 5.6896 --drag-model G7 --enable-spin-drift \
+                              --max-range 457.2 -o json";
+        let metric_default_twist =
+            crate::stability::default_twist_inches(5.6896 * 0.001, 4.98951607 * 0.001, 838.2);
+        let omitted_metric = wasm.run_command(metric_command).unwrap();
+        let explicit_default_metric = wasm
+            .run_command(&format!(
+                "{metric_command} --twist-rate {:.17}",
+                metric_default_twist * 25.4
+            ))
+            .unwrap();
+        assert!(
+            (final_drift(&omitted_metric, "drift_cm")
+                - final_drift(&explicit_default_metric, "drift_cm"))
+            .abs()
+                < 1e-9
+        );
+    }
+
+    #[wasm_bindgen_test]
     fn test_environmental_conditions() {
         let wasm = WasmBallistics::new();
         let result = wasm
