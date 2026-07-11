@@ -475,7 +475,7 @@ mod tests {
 
         assert!(result.success);
         // Root is at arcsin(0.5) ≈ 0.5236
-        assert!((result.angle_rad - 0.5235987755982989).abs() < 1e-6);
+        assert!((result.angle_rad - std::f64::consts::FRAC_PI_6).abs() < 1e-6);
     }
 
     #[test]

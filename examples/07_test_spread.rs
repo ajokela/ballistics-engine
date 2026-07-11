@@ -6,7 +6,7 @@ fn main() {
     // Set up base inputs
     let mut base_inputs = BallisticInputs::default();
     base_inputs.muzzle_velocity = 800.0;
-    base_inputs.muzzle_angle = 0.785398; // 45 degrees
+    base_inputs.muzzle_angle = std::f64::consts::FRAC_PI_4; // 45 degrees
     base_inputs.bc_value = 0.5;
     base_inputs.bullet_mass = 0.01;
     base_inputs.bullet_diameter = 0.008;
