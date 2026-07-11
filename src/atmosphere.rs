@@ -495,18 +495,16 @@ fn local_temp_pressure_density(
     base_press_hpa: f64,
     base_ratio: f64,
 ) -> (f64, f64, f64) {
-    // Round altitude to the nearest meter for caching in Python
-    let altitude_m_rounded = altitude_m.round();
     let base_temp_k = base_temp_c + 273.15;
 
     // A non-finite endpoint would make the boundary walk fail to advance. The
     // previous single-column formula also produced non-finite outputs here.
-    if !altitude_m_rounded.is_finite() || !base_alt.is_finite() {
+    if !altitude_m.is_finite() || !base_alt.is_finite() {
         return (f64::NAN, f64::NAN, f64::NAN);
     }
 
     let base_geopotential_m = geometric_to_geopotential_height_m(base_alt);
-    let target_geopotential_m = geometric_to_geopotential_height_m(altitude_m_rounded);
+    let target_geopotential_m = geometric_to_geopotential_height_m(altitude_m);
     let (temp_k, pressure_hpa) = integrate_local_atmosphere_layers(
         base_geopotential_m,
         target_geopotential_m,
@@ -839,6 +837,27 @@ mod tests {
             (c1 - 333.435546617978).abs() < 1e-9,
             "local sos@1500m drifted: {c1}"
         );
+    }
+
+    #[test]
+    fn fractional_station_altitude_is_not_quantized() {
+        let station_altitude_m = 500.25;
+        let station_temp_c = 10.0;
+        let station_pressure_hpa = 950.0;
+        let station_density_ratio = 1.05;
+
+        let (density, speed_of_sound) = get_local_atmosphere(
+            station_altitude_m,
+            station_altitude_m,
+            station_temp_c,
+            station_pressure_hpa,
+            station_density_ratio,
+        );
+
+        let expected_density = station_density_ratio * 1.225;
+        let expected_speed_of_sound = ((station_temp_c + 273.15) * 401.874).sqrt();
+        assert!((density - expected_density).abs() < 1e-12);
+        assert!((speed_of_sound - expected_speed_of_sound).abs() < 1e-12);
     }
 
     /// rank 9: `get_local_atmosphere_humid` returns the SAME density as `get_local_atmosphere`,
