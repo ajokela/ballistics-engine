@@ -6453,8 +6453,11 @@ fn run_zero_calculation(
     solver.set_max_range(target_distance * 3.0);
     let trajectory = solver.solve()?;
 
+    // `zero_angle` is the bore angle above horizontal. The sight line runs from
+    // (0, sight_height) to (target_distance, sight_height + target_height), so its slope is
+    // target_height / target_distance: the sight-height translation cancels between endpoints.
     let sight_adjustment_moa = zero_angle.to_degrees() * 60.0
-        + ((sight_height - target_height) / target_distance * 3437.75);
+        - (target_height / target_distance * 3437.75);
     let point_blank_range = trajectory
         .points
         .iter()
