@@ -1875,6 +1875,8 @@ impl TrajectorySolver {
         } else {
             *wind_vector
         };
+        let actual_wind =
+            crate::derivatives::level_vector_to_shot_frame(actual_wind, self.inputs.shooting_angle);
 
         let relative_velocity = velocity - actual_wind;
         let velocity_magnitude = relative_velocity.magnitude();
@@ -2021,15 +2023,19 @@ impl TrajectorySolver {
                 let omega_earth = 7.2921159e-5_f64; // rad/s
                 let lat = lat_deg.to_radians();
                 let az = self.inputs.shot_azimuth; // compass bearing (0=N), NOT the aiming offset
-                                                   // Earth's angular velocity in the shot frame (X=downrange, Y=up,
-                                                   // Z=lateral). Projecting Omega=(0, Ω cosφ, Ω sinφ) [local E,N,U] onto
-                                                   // the azimuth-rotated shot axes gives a NEGATIVE lateral component:
+                                                   // Earth's angular velocity in level downrange/up/lateral axes.
+                                                   // Projecting Omega=(0, Ω cosφ, Ω sinφ) [local E,N,U] by azimuth gives
+                                                   // a NEGATIVE lateral component:
                                                    // lateral = downrange × up points East for a North shot, and
                                                    // Omega·East = -Ω cosφ sin(az). The previous code dropped that sign.
                 let omega = Vector3::new(
                     omega_earth * lat.cos() * az.cos(),  // X: downrange
                     omega_earth * lat.sin(),             // Y: vertical
                     -omega_earth * lat.cos() * az.sin(), // Z: lateral (MBA-938: corrected sign)
+                );
+                let omega = crate::derivatives::level_vector_to_shot_frame(
+                    omega,
+                    self.inputs.shooting_angle,
                 );
                 // Coriolis acceleration is the physical -2 Ω×v (MBA-938). The old +2 with
                 // an "output-preserving relabel" justification produced left-ward drift for
@@ -3206,6 +3212,15 @@ mod mach_bc_segment_tests {
 mod inclined_atmosphere_frame_tests {
     use super::*;
 
+    fn expected_shot_frame_vector(level: Vector3<f64>, angle: f64) -> Vector3<f64> {
+        let (sin_angle, cos_angle) = angle.sin_cos();
+        Vector3::new(
+            level.x * cos_angle + level.y * sin_angle,
+            -level.x * sin_angle + level.y * cos_angle,
+            level.z,
+        )
+    }
+
     #[test]
     fn inclined_positions_at_same_world_altitude_have_same_solver_acceleration() {
         let angle = std::f64::consts::FRAC_PI_6;
@@ -3240,6 +3255,79 @@ mod inclined_atmosphere_frame_tests {
         assert!(
             (a - b).norm() < 1e-10,
             "solver acceleration differs at equal world altitude: {a:?} vs {b:?}"
+        );
+    }
+
+    #[test]
+    fn inclined_headwind_is_rotated_into_solver_frame() {
+        let angle = std::f64::consts::FRAC_PI_6;
+        let inputs = BallisticInputs {
+            shooting_angle: angle,
+            ..BallisticInputs::default()
+        };
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let level_headwind = Vector3::new(-100.0, 0.0, 0.0);
+        let velocity = expected_shot_frame_vector(level_headwind, angle);
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let actual = solver.calculate_acceleration(
+            &Vector3::zeros(),
+            &velocity,
+            &level_headwind,
+            (temp_c, pressure_hpa, density / 1.225),
+        );
+
+        assert!(
+            (actual - solver.gravity_acceleration()).norm() < 1e-12,
+            "co-moving horizontal wind must leave only shot-frame gravity: {actual:?}"
+        );
+    }
+
+    #[test]
+    fn inclined_coriolis_is_rotated_into_solver_frame() {
+        let angle = std::f64::consts::FRAC_PI_6;
+        let latitude_deg = 45.0_f64;
+        let shot_azimuth = 0.4_f64;
+        let velocity = Vector3::new(600.0, 20.0, 5.0);
+        let base_inputs = BallisticInputs {
+            shooting_angle: angle,
+            latitude: Some(latitude_deg),
+            shot_azimuth,
+            ..BallisticInputs::default()
+        };
+        let acceleration = |enable_coriolis| {
+            let mut inputs = base_inputs.clone();
+            inputs.enable_coriolis = enable_coriolis;
+            let solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+            solver.calculate_acceleration(
+                &Vector3::zeros(),
+                &velocity,
+                &Vector3::zeros(),
+                (temp_c, pressure_hpa, density / 1.225),
+            )
+        };
+
+        let omega_earth = 7.2921159e-5_f64;
+        let latitude = latitude_deg.to_radians();
+        let level_omega = Vector3::new(
+            omega_earth * latitude.cos() * shot_azimuth.cos(),
+            omega_earth * latitude.sin(),
+            -omega_earth * latitude.cos() * shot_azimuth.sin(),
+        );
+        let expected = -2.0 * expected_shot_frame_vector(level_omega, angle).cross(&velocity);
+        let actual = acceleration(true) - acceleration(false);
+
+        assert!(
+            (actual - expected).norm() < 1e-12,
+            "inclined Coriolis mismatch: actual={actual:?}, expected={expected:?}"
         );
     }
 }

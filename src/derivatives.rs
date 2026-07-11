@@ -100,7 +100,31 @@ pub(crate) fn calculate_magnus_moment_coefficient(mach: f64) -> f64 {
     }
 }
 
-/// Compute ballistic derivatives for trajectory integration
+/// Project a vector expressed in level downrange/up/lateral axes into the inclined shot frame.
+///
+/// Shot-frame X follows the slant trajectory, Y is perpendicular to it in the vertical plane,
+/// and Z remains lateral. The zero-angle return preserves level-fire values bit-for-bit.
+#[inline]
+pub(crate) fn level_vector_to_shot_frame(
+    vector: Vector3<f64>,
+    shooting_angle: f64,
+) -> Vector3<f64> {
+    if shooting_angle == 0.0 {
+        return vector;
+    }
+
+    let (sin_angle, cos_angle) = shooting_angle.sin_cos();
+    Vector3::new(
+        vector.x * cos_angle + vector.y * sin_angle,
+        -vector.x * sin_angle + vector.y * cos_angle,
+        vector.z,
+    )
+}
+
+/// Compute ballistic derivatives for trajectory integration.
+///
+/// `wind_vector` and `omega_vector` use level downrange/up/lateral axes and are projected into
+/// the inclined shot frame internally.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_derivatives(
     pos: Vector3<f64>,
@@ -128,7 +152,9 @@ pub fn compute_derivatives(
         0.0,
     );
 
-    // Wind-adjusted velocity
+    // Wind-adjusted velocity. Wind sources are defined in the level frame; rotate the selected
+    // vector into the same inclined shot frame used by velocity and gravity.
+    let wind_vector = level_vector_to_shot_frame(wind_vector, theta);
     let velocity_adjusted = vel - wind_vector;
     let speed_air = velocity_adjusted.norm();
 
@@ -459,11 +485,12 @@ pub fn compute_derivatives(
     // Total acceleration
     let mut accel = accel_gravity + accel_drag + accel_magnus;
 
-    // Add Coriolis acceleration if omega vector is provided. The physical Coriolis term is
+    // Add Coriolis acceleration if a level-frame omega vector is provided. The physical term is
     // -2 Ω×v (MBA-957: the old +2 "frame-relabel" justification was wrong — it flipped the
     // lateral drift; the caller now builds omega with the corrected lateral sign, matching the
     // validated cli_api solver, so the canonical -2 applies directly).
     if let Some(omega) = omega_vector {
+        let omega = level_vector_to_shot_frame(omega, theta);
         let accel_coriolis = -2.0 * omega.cross(&vel);
         accel += accel_coriolis;
     }
@@ -685,6 +712,25 @@ pub(crate) fn estimate_bc_segments_for(
 mod tests {
     use super::*;
 
+    fn expected_shot_frame_vector(level: Vector3<f64>, angle: f64) -> Vector3<f64> {
+        let (sin_angle, cos_angle) = angle.sin_cos();
+        Vector3::new(
+            level.x * cos_angle + level.y * sin_angle,
+            -level.x * sin_angle + level.y * cos_angle,
+            level.z,
+        )
+    }
+
+    #[test]
+    fn level_vector_projection_is_bit_exact_at_zero_incline() {
+        let level = Vector3::new(12.5, -0.0, -7.25);
+        let projected = level_vector_to_shot_frame(level, 0.0);
+
+        for component in 0..3 {
+            assert_eq!(projected[component].to_bits(), level[component].to_bits());
+        }
+    }
+
     fn create_test_inputs() -> BallisticInputs {
         // SI-canonical geometry/mass (kg, meters) — same convention as the struct
         // docs and cli_api — plus the explicit imperial mirror fields
@@ -782,6 +828,71 @@ mod tests {
                 b[component]
             );
         }
+    }
+
+    #[test]
+    fn inclined_headwind_is_rotated_into_solver_frame() {
+        let angle = std::f64::consts::FRAC_PI_6;
+        let mut inputs = create_test_inputs();
+        inputs.shooting_angle = angle;
+        let level_headwind = Vector3::new(-100.0, 0.0, 0.0);
+        let velocity = expected_shot_frame_vector(level_headwind, angle);
+        let actual = compute_derivatives(
+            Vector3::zeros(),
+            velocity,
+            &inputs,
+            level_headwind,
+            (1.225, 340.0, 0.0, 0.0),
+            inputs.bc_value,
+            None,
+            0.0,
+            None,
+        );
+        let expected = Vector3::new(
+            -G_ACCEL_MPS2 * angle.sin(),
+            -G_ACCEL_MPS2 * angle.cos(),
+            0.0,
+        );
+
+        assert!(
+            (Vector3::new(actual[3], actual[4], actual[5]) - expected).norm() < 1e-12,
+            "co-moving horizontal wind must leave only shot-frame gravity: {actual:?}"
+        );
+    }
+
+    #[test]
+    fn inclined_coriolis_is_rotated_into_solver_frame() {
+        let angle = std::f64::consts::FRAC_PI_6;
+        let mut inputs = create_test_inputs();
+        inputs.shooting_angle = angle;
+        let velocity = Vector3::new(600.0, 20.0, 5.0);
+        let level_omega = Vector3::new(3.0e-5, 6.0e-5, -2.0e-5);
+        let run = |omega| {
+            compute_derivatives(
+                Vector3::zeros(),
+                velocity,
+                &inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                inputs.bc_value,
+                omega,
+                0.0,
+                None,
+            )
+        };
+        let baseline = run(None);
+        let with_coriolis = run(Some(level_omega));
+        let actual = Vector3::new(
+            with_coriolis[3] - baseline[3],
+            with_coriolis[4] - baseline[4],
+            with_coriolis[5] - baseline[5],
+        );
+        let expected = -2.0 * expected_shot_frame_vector(level_omega, angle).cross(&velocity);
+
+        assert!(
+            (actual - expected).norm() < 1e-12,
+            "inclined Coriolis mismatch: actual={actual:?}, expected={expected:?}"
+        );
     }
 
     #[test]

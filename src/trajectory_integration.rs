@@ -246,6 +246,8 @@ pub struct TrajectoryParams {
     /// or **Direct** `(air_density, speed_of_sound, 0.0, 0.0)` — slots 2 and 3 are zero
     /// sentinels. A pressure of 0 that is not the direct-mode sentinel disables drag.
     pub atmos_params: (f64, f64, f64, f64),
+    /// Earth rotation in level downrange/up/lateral axes. The derivative kernel projects it into
+    /// the inclined shot frame using `shooting_angle` before applying Coriolis acceleration.
     pub omega_vector: Option<Vector3<f64>>,
     pub enable_spin_drift: bool,
     pub enable_magnus: bool,
