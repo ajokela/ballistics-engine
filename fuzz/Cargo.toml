@@ -49,3 +49,10 @@ path = "fuzz_targets/invariant_monotonic.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "invariant_symmetry"
+path = "fuzz_targets/invariant_symmetry.rs"
+test = false
+doc = false
+bench = false
