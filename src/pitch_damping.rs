@@ -6,6 +6,8 @@
 //! - Yaw of repose convergence
 //! - Transonic stability transitions
 
+use crate::constants::G_ACCEL_MPS2;
+use crate::spin_decay::calculate_moment_of_inertia;
 use std::f64::consts::PI;
 
 /// Aerodynamic damping coefficients for different flight regimes
@@ -170,12 +172,54 @@ pub fn calculate_angular_acceleration(moment: f64, moment_of_inertia: f64) -> f6
     }
 }
 
+/// First-order yaw-of-repose magnitude for a flat-fire trajectory.
+///
+/// Following AMCP 706-238 section 4-11.2, the classical relations
+/// `Sg = (Ix * p)^2 / (4 * Iy * M)` and
+/// `yaw = Ix * p * g / (M * V)` eliminate the unavailable static-moment slope `M`, leaving
+/// `yaw = 4 * Iy * Sg * g / (Ix * |p| * V)`. The API has no flight-path angle, so this uses
+/// the flat-fire approximation `cos(theta) = 1`. Twist direction is applied downstream.
+pub(crate) fn calculate_gravity_yaw_of_repose(
+    stability_factor: f64,
+    velocity_mps: f64,
+    spin_rate_rad_s: f64,
+    mass_kg: f64,
+    caliber_m: f64,
+    length_m: f64,
+) -> f64 {
+    if !stability_factor.is_finite()
+        || stability_factor <= 1.0
+        || !velocity_mps.is_finite()
+        || velocity_mps <= 0.0
+        || !spin_rate_rad_s.is_finite()
+        || spin_rate_rad_s == 0.0
+        || !mass_kg.is_finite()
+        || mass_kg <= 0.0
+        || !caliber_m.is_finite()
+        || caliber_m <= 0.0
+        || !length_m.is_finite()
+        || length_m <= 0.0
+    {
+        return 0.0;
+    }
+
+    let axial_inertia = calculate_moment_of_inertia(mass_kg, caliber_m, length_m, "ogive");
+    let transverse_inertia =
+        calculate_transverse_moment_of_inertia(mass_kg, caliber_m, length_m, "ogive");
+    if axial_inertia <= 0.0 || transverse_inertia <= 0.0 {
+        return 0.0;
+    }
+
+    4.0 * transverse_inertia * stability_factor * G_ACCEL_MPS2
+        / (axial_inertia * spin_rate_rad_s.abs() * velocity_mps)
+}
+
 /// Calculate yaw of repose with pitch damping effects
 pub fn calculate_damped_yaw_of_repose(
     stability_factor: f64,
     velocity_mps: f64,
     spin_rate_rad_s: f64,
-    wind_velocity_mps: f64,
+    _wind_velocity_mps: f64,
     pitch_rate_rad_s: f64,
     air_density_kg_m3: f64,
     caliber_inches: f64,
@@ -193,13 +237,16 @@ pub fn calculate_damped_yaw_of_repose(
     let length_m = length_inches * 0.0254;
     let mass_kg = mass_grains * 0.00006479891;
 
-    // Base yaw from crosswind or trajectory curvature
-    let base_yaw_rad = if wind_velocity_mps != 0.0 && velocity_mps > 0.0 {
-        (wind_velocity_mps / velocity_mps).atan()
-    } else {
-        // Natural yaw from curved trajectory
-        0.002 // ~0.1 degrees typical
-    };
+    // Crosswind creates an initial transient handled by aerodynamic-jump physics; it is not part
+    // of the persistent equilibrium yaw. Use the gravity/gyroscopic balance for repose instead.
+    let equilibrium_yaw_rad = calculate_gravity_yaw_of_repose(
+        stability_factor,
+        velocity_mps,
+        spin_rate_rad_s,
+        mass_kg,
+        caliber_m,
+        length_m,
+    );
 
     // Get damping coefficients
     let coeffs = PitchDampingCoefficients::from_bullet_type(bullet_type);
@@ -231,21 +278,6 @@ pub fn calculate_damped_yaw_of_repose(
 
     // Convergence rate (how fast it approaches equilibrium)
     let convergence_rate = 1.0 / time_constant;
-
-    // Modify equilibrium yaw based on stability and damping
-    let stability_factor_clamped = stability_factor.min(10.0);
-    let mut damping_factor = 1.0 / (1.0 + (stability_factor_clamped - 1.0).sqrt());
-
-    // In transonic region, damping may be positive (destabilizing)
-    if (0.8..=1.2).contains(&mach) {
-        let cmq = calculate_pitch_damping_coefficient(mach, &coeffs);
-        if cmq > 0.0 {
-            // Destabilizing - increase effective yaw
-            damping_factor *= 1.0 + cmq.abs();
-        }
-    }
-
-    let equilibrium_yaw_rad = base_yaw_rad * damping_factor;
 
     (equilibrium_yaw_rad, convergence_rate)
 }
@@ -459,6 +491,66 @@ mod tests {
         );
         assert_eq!(yaw_unstable, 0.0);
         assert_eq!(conv_unstable, 0.0);
+    }
+
+    #[test]
+    fn crosswind_is_not_persistent_equilibrium_yaw() {
+        let calculate = |wind_velocity_mps| {
+            calculate_damped_yaw_of_repose(
+                2.5,
+                300.0,
+                19_000.0,
+                wind_velocity_mps,
+                0.01,
+                1.225,
+                0.308,
+                1.3,
+                175.0,
+                0.875,
+                "match_boat_tail",
+            )
+        };
+
+        let (calm_yaw, calm_rate) = calculate(0.0);
+        let (windy_yaw, windy_rate) = calculate(10.0);
+
+        assert!(
+            (windy_yaw - calm_yaw).abs() < 1e-12,
+            "crosswind became persistent equilibrium yaw: calm={calm_yaw} windy={windy_yaw}"
+        );
+        assert_eq!(windy_rate.to_bits(), calm_rate.to_bits());
+        assert!(windy_yaw.abs() < 0.003);
+    }
+
+    #[test]
+    fn gravity_yaw_of_repose_matches_classical_stability_reduction() {
+        let stability_factor = 2.5;
+        let velocity_mps = 300.0;
+        let spin_rate_rad_s = 19_000.0;
+        let mass_kg = 175.0 * 0.00006479891;
+        let caliber_m = 0.308 * 0.0254;
+        let length_m = 1.3 * 0.0254;
+
+        let actual = calculate_gravity_yaw_of_repose(
+            stability_factor,
+            velocity_mps,
+            spin_rate_rad_s,
+            mass_kg,
+            caliber_m,
+            length_m,
+        );
+
+        // Independent expansion of the inertia approximations and the classical flat-fire
+        // reduction: yaw = 4 * Iy * Sg * g / (Ix * |p| * V).
+        let radius_m = caliber_m / 2.0;
+        let axial_inertia = 0.4 * mass_kg * radius_m.powi(2);
+        let transverse_inertia =
+            0.85 * mass_kg * (3.0 * radius_m.powi(2) + length_m.powi(2)) / 12.0;
+        let expected = 4.0 * transverse_inertia * stability_factor * 9.80665
+            / (axial_inertia * spin_rate_rad_s * velocity_mps);
+
+        assert!((actual - expected).abs() < 1e-15);
+        assert!((actual - 0.000226244442784).abs() < 1e-15);
     }
 
     #[test]

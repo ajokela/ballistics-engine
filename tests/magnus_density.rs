@@ -41,9 +41,11 @@ fn magnus_enabled_lateral_finite_and_altitude_responsive() {
         altitude.is_finite(),
         "altitude Magnus lateral should be finite, got {altitude}"
     );
-    // The density-corrected Sg + thinner air change the Magnus contribution at altitude.
+    // The density-corrected Sg largely offsets thinner air in the Magnus force, so check a
+    // scale-independent response rather than an absolute displacement tied to the old yaw model.
+    let relative_change = (sea_level - altitude).abs() / sea_level.abs();
     assert!(
-        (sea_level - altitude).abs() > 1e-5,
-        "Magnus should respond to altitude: sea_level={sea_level}, altitude={altitude}"
+        relative_change > 0.01,
+        "Magnus should respond to altitude: sea_level={sea_level}, altitude={altitude}, relative_change={relative_change}"
     );
 }
