@@ -1,0 +1,30 @@
+[package]
+name = "ballistics-engine-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Detach from the parent workspace so `cargo build` at the repo root ignores this crate.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+ballistics-engine = { path = ".." }
+engine_prev = { package = "ballistics-engine", version = "=0.21.5" }
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "robustness_inputs"
+path = "fuzz_targets/robustness_inputs.rs"
+test = false
+doc = false
+bench = false
