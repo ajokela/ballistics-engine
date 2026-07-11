@@ -63,3 +63,10 @@ path = "fuzz_targets/differential_prev.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "analytic_vacuum"
+path = "fuzz_targets/analytic_vacuum.rs"
+test = false
+doc = false
+bench = false
