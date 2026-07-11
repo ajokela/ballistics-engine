@@ -6458,14 +6458,26 @@ fn run_zero_calculation(
     // target_height / target_distance: the sight-height translation cancels between endpoints.
     let sight_adjustment_moa = zero_angle.to_degrees() * 60.0
         - (target_height / target_distance * 3437.75);
+    // The bullet starts below the sight line by `sight_height`, which can already exceed the
+    // 5 cm lower bound at the muzzle. Ignore that initial offset and report only a lower-bound
+    // exit after the trajectory has first entered the point-blank band.
+    let mut entered_point_blank_band = false;
     let point_blank_range = trajectory
         .points
         .iter()
-        .find(|p| {
+        .find_map(|p| {
             let los_y = sight_height + target_height * (p.position.x / target_distance);
-            p.position.y < los_y - 0.05
+            let height_from_los = p.position.y - los_y;
+
+            if height_from_los >= -0.05 {
+                entered_point_blank_band = true;
+                None
+            } else if entered_point_blank_band {
+                Some(p.position.x)
+            } else {
+                None
+            }
         })
-        .map(|p| p.position.x)
         .unwrap_or(trajectory.max_range);
 
     match output {
