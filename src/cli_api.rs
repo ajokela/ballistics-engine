@@ -1926,8 +1926,9 @@ impl TrajectorySolver {
         // no-op at the shooter altitude, where the ratio-based density recovers the station value
         // exactly). base_* were resolved once per solve via resolved_atmosphere().
         //
-        // `base_temp_c` / `base_press_hpa` are the STATION conditions and drive the Magnus/Sg
-        // launch-density correction below (a launch property).
+        // `base_temp_c` / `base_press_hpa` are the STATION conditions that seed the local
+        // atmosphere calculation below. Magnus dynamic stability consumes the resulting local
+        // density rather than freezing a launch-density correction.
         let (base_temp_c, base_press_hpa, station_ratio) = resolved_atmo;
 
         // MBA-1137: downrange-segmented atmosphere. When an AtmoSock is present, swap the BASE
@@ -2103,10 +2104,7 @@ impl TrajectorySolver {
                 self.inputs.twist_rate,
                 diameter_m,
             );
-            // Stability (Sg) is a launch property, so its Miller density correction uses the
-            // STATION temperature/pressure (base_*); the Mach that feeds the Magnus-moment
-            // coefficient uses the LOCAL speed of sound recomputed above.
-            let temp_k = base_temp_c + 273.15;
+            // Mach and dynamic stability both use the LOCAL atmosphere recomputed above.
             let mach = velocity_magnitude / speed_of_sound;
 
             // Imperial conversions for the stability / yaw-of-repose helpers.
@@ -2126,20 +2124,17 @@ impl TrajectorySolver {
                     4.5 * d_in
                 }
             };
-            // Apply the canonical Miller launch corrections to the Magnus/yaw-of-repose Sg too,
-            // matching the reported and spin-drift Sg: linear density (T/T0)*(P0/P), plus the
-            // cube-root muzzle-velocity term (V/2800 fps)^(1/3). Density is a no-op at sea-level
-            // standard (15 C, 1013.25 hPa -> factor 1.0).
-            let density_correction = if base_press_hpa > 0.0 && temp_k > 0.0 {
-                (temp_k / 288.15) * (1013.25 / base_press_hpa)
-            } else {
-                1.0
-            };
-            let velocity_correction =
-                crate::stability::miller_velocity_correction(self.inputs.muzzle_velocity);
-            let sg = crate::spin_drift::miller_stability(d_in, m_gr, self.inputs.twist_rate, l_in)
-                * density_correction
-                * velocity_correction;
+            // Use current-flight Sg with the muzzle-set spin. The helper back-calculates the
+            // effective twist from fixed spin and current airspeed, so Sg and yaw of repose grow
+            // downrange instead of remaining tied to launch conditions.
+            let sg = crate::spin_drift::calculate_dynamic_stability(
+                m_gr,
+                velocity_magnitude,
+                spin_rad_s,
+                d_in,
+                l_in,
+                air_density,
+            );
 
             // Yaw of repose (radians); zero for unstable bullets (Sg <= 1).
             let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
@@ -4019,6 +4014,53 @@ mod magnus_stability_tests {
         assert_eq!(
             acceleration, baseline,
             "canonical Sg below 1 must suppress every Magnus acceleration component"
+        );
+    }
+
+    #[test]
+    fn magnus_force_grows_as_fixed_spin_projectile_slows() {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            bullet_mass: 168.0 * 0.00006479891,
+            bullet_diameter: 0.308 * 0.0254,
+            bullet_length: 1.215 * 0.0254,
+            twist_rate: 12.0,
+            enable_magnus: true,
+            ..BallisticInputs::default()
+        };
+
+        let magnus_acceleration = |speed_mps| {
+            let evaluate = |enable_magnus| {
+                let mut run_inputs = inputs.clone();
+                run_inputs.enable_magnus = enable_magnus;
+                let solver = TrajectorySolver::new(
+                    run_inputs,
+                    WindConditions::default(),
+                    AtmosphericConditions::default(),
+                );
+                let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+                solver
+                    .calculate_acceleration(
+                        &Vector3::zeros(),
+                        &Vector3::new(speed_mps, 0.0, 0.0),
+                        &Vector3::zeros(),
+                        (temp_c, pressure_hpa, density / 1.225),
+                    )
+                    .y
+            };
+            (evaluate(true) - evaluate(false)).abs()
+        };
+
+        let fast = magnus_acceleration(200.0);
+        let slow = magnus_acceleration(100.0);
+        let ratio = slow / fast;
+        let expected_ratio = 2.0_f64.powf(5.0 / 3.0);
+
+        assert!(fast > 0.0 && slow > 0.0, "fast={fast}, slow={slow}");
+        assert!(
+            (ratio - expected_ratio).abs() < 1e-3,
+            "fixed-spin Magnus acceleration must grow downrange; slow/fast={ratio}, \
+             expected={expected_ratio}"
         );
     }
 }
