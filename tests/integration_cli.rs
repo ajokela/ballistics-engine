@@ -185,13 +185,8 @@ fn test_cli_trajectory_basic() {
 
 #[test]
 fn test_cli_monte_carlo_command() {
-    // An explicit --target-distance is REQUIRED for a stable low-sim test. Without it the
-    // Monte Carlo target defaults to the baseline's own max range (cli_api.rs), and the
-    // skip-filter then discards every perturbed draw that lands short of baseline — roughly
-    // half of all samples. With only 10 sims, an all-short batch ("No successful simulations")
-    // is hit ~10% of the time, and any legitimate change to the drag physics shifts that rate.
-    // Pinning a target well inside the trajectory keeps essentially every sample, so the test
-    // is deterministic. (The underlying self-referential-target attrition is tracked separately.)
+    // Pin the target so this remains a simple command/output smoke test rather than depending on
+    // the omitted-target baseline convention.
     let output = Command::new(get_cli_binary())
         .args(&[
             "monte-carlo",
@@ -219,6 +214,43 @@ fn test_cli_monte_carlo_command() {
         "Should contain Monte Carlo results: {}",
         stdout
     );
+}
+
+#[test]
+fn test_cli_monte_carlo_all_shortfalls_have_null_cep() {
+    let output = Command::new(get_cli_binary())
+        .args([
+            "monte-carlo",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.475",
+            "--mass",
+            "168",
+            "--diameter",
+            "0.308",
+            "--num-sims",
+            "10",
+            "--target-distance",
+            "10000",
+            "--output",
+            "full",
+        ])
+        .output()
+        .expect("failed to execute Monte Carlo command");
+
+    assert!(
+        output.status.success(),
+        "Monte Carlo command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("valid JSON output");
+    assert!(
+        result["cep"].is_null(),
+        "CEP is undefined when every sample falls short: {result}"
+    );
+    assert_eq!(result["target_shortfall_fraction"].as_f64(), Some(1.0));
+    assert_eq!(result["hit_probability"].as_f64(), Some(0.0));
 }
 
 #[test]

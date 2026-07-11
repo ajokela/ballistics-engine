@@ -119,6 +119,8 @@ pub struct FFIMonteCarloResults {
     pub ranges: *mut c_double,
     pub impact_velocities: *mut c_double,
     pub impact_positions_x: *mut c_double,
+    /// `-1.0e9` marks a sample that did not reach the target plane; exclude it from dispersion
+    /// statistics but retain it as a miss for probability calculations.
     pub impact_positions_y: *mut c_double,
     pub impact_positions_z: *mut c_double,
     pub num_results: c_int,

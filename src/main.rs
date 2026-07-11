@@ -1756,7 +1756,10 @@ struct MonteCarloResult {
     std_range: f64,
     mean_impact_velocity: f64,
     std_impact_velocity: f64,
-    cep: f64, // Circular Error Probable
+    /// Median radial miss among simulations that reached the target plane; `None` when no
+    /// simulation reached it.
+    cep: Option<f64>,
+    target_shortfall_fraction: f64,
     hit_probability: Option<f64>,
 }
 
@@ -6150,18 +6153,11 @@ fn run_monte_carlo(
         / results.impact_velocities.len() as f64;
     let std_velocity = variance_velocity.sqrt();
 
-    let mut radial_misses: Vec<f64> = results
-        .impact_positions
-        .iter()
-        .map(|p| p.norm())
-        .filter(|v| v.is_finite())
-        .collect();
-    radial_misses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let cep = if radial_misses.is_empty() {
-        0.0
-    } else {
-        radial_misses[radial_misses.len() / 2]
-    };
+    // CEP is conditional on actually reaching the target plane. Samples that fall short stay in
+    // all result vectors (and in the hit-probability denominator), but their finite -1e9 marker is
+    // not a physical target-plane impact and must not become the median (MBA-1159).
+    let cep = results.target_plane_cep();
+    let target_shortfall_fraction = results.target_shortfall_fraction();
 
     // Calculate hit probability if target distance specified
     // MBA-971: hit probability is the fraction of samples landing within the hit radius of the
@@ -6180,7 +6176,15 @@ fn run_monte_carlo(
             println!("║ Std Dev Range:     {:>8.2} m          ║", std_range);
             println!("║ Mean Impact Vel:   {:>8.2} m/s        ║", mean_velocity);
             println!("║ Std Dev Velocity:  {:>8.2} m/s        ║", std_velocity);
-            println!("║ CEP (approx):      {:>8.2} m          ║", cep);
+            if let Some(cep) = cep {
+                println!("║ CEP (arrivals):    {:>8.2} m          ║", cep);
+            } else {
+                println!("║ CEP (arrivals):         N/A            ║");
+            }
+            println!(
+                "║ Target Shortfall:  {:>8.1} %          ║",
+                target_shortfall_fraction * 100.0
+            );
             if let Some(prob) = hit_probability {
                 println!("║ Hit Probability:   {:>8.1} %          ║", prob * 100.0);
             }
@@ -6194,6 +6198,7 @@ fn run_monte_carlo(
                 mean_impact_velocity: mean_velocity,
                 std_impact_velocity: std_velocity,
                 cep,
+                target_shortfall_fraction,
                 hit_probability,
             };
             println!("{}", serde_json::to_string_pretty(&mc_result)?);
