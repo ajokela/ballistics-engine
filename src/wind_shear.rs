@@ -236,6 +236,8 @@ impl WindShearProfile {
 pub struct WindShearWindSock {
     pub segments: Vec<(f64, f64, f64)>, // (speed_mps, angle_deg, until_range_m)
     pub shear_profile: Option<WindShearProfile>,
+    /// Site elevation above sea level, retained as metadata for API compatibility. Boundary-layer
+    /// profiles use height above local ground and must not add this value.
     pub shooter_altitude_m: f64,
 }
 
@@ -271,10 +273,11 @@ impl WindShearWindSock {
 
         if let Some(profile) = &self.shear_profile {
             if profile.model != WindShearModel::None {
-                // Apply altitude-dependent shear
-                // Calculate absolute altitude by adding shooter's altitude
-                let absolute_altitude_m = altitude_m + self.shooter_altitude_m;
-                let altitude_vec = profile.get_wind_at_altitude(absolute_altitude_m);
+                // Site elevation affects atmospheric density elsewhere, but surface-layer wind
+                // profiles are keyed to height above local ground. Adding shooter_altitude_m
+                // would evaluate the profile at sea-level elevation and inflate wind at elevated
+                // shooting sites (MBA-1165).
+                let altitude_vec = profile.get_wind_at_altitude(altitude_m);
 
                 // Scale the base wind by altitude profile
                 if base_wind.norm() > 0.0 {
@@ -538,6 +541,39 @@ mod tests {
         let v100 = profile.get_wind_at_altitude(100.0).norm();
         let expected = 10.0 * (100.0_f64 / 10.0).powf(1.0 / 7.0);
         assert!((v100 - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_windsock_shear_is_independent_of_site_elevation() {
+        for model in [WindShearModel::Logarithmic, WindShearModel::PowerLaw] {
+            let profile = WindShearProfile {
+                model,
+                surface_wind: WindLayer {
+                    altitude_m: 10.0,
+                    speed_mps: 10.0,
+                    direction_deg: 90.0,
+                },
+                ..Default::default()
+            };
+            let segments = vec![(10.0, 90.0, 1_000.0)];
+            let position = Vector3::new(100.0, 10.0, 0.0);
+
+            let sea_level = WindShearWindSock::with_shooter_altitude(
+                segments.clone(),
+                Some(profile.clone()),
+                0.0,
+            )
+            .vector_for_position(position);
+            let elevated =
+                WindShearWindSock::with_shooter_altitude(segments, Some(profile), 1_600.0)
+                    .vector_for_position(position);
+
+            assert!(
+                (sea_level - elevated).norm() < 1e-12,
+                "{model:?} shear must use height above local ground, not site elevation: sea={sea_level:?}, elevated={elevated:?}"
+            );
+            assert!((elevated.norm() - 10.0).abs() < 1e-12);
+        }
     }
 }
 
