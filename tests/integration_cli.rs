@@ -200,6 +200,8 @@ fn test_cli_monte_carlo_command() {
             "0.308",
             "--num-sims",
             "10",
+            "--wind-direction-std",
+            "5",
             "--target-distance",
             "800",
         ])

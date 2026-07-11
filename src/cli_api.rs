@@ -2339,16 +2339,64 @@ fn wind_from_signed_speed_sample(signed_speed: f64, sampled_direction: f64) -> W
     }
 }
 
+struct MonteCarloWindSampler {
+    speed: rand_distr::Normal<f64>,
+    direction: rand_distr::Normal<f64>,
+}
+
+impl MonteCarloWindSampler {
+    fn new(
+        base_wind: &WindConditions,
+        wind_speed_std_dev: f64,
+        wind_direction_std_dev: f64,
+    ) -> Result<Self, BallisticsError> {
+        use rand_distr::Normal;
+
+        if !wind_direction_std_dev.is_finite() || wind_direction_std_dev < 0.0 {
+            return Err("Wind direction standard deviation must be finite and non-negative".into());
+        }
+
+        let speed = Normal::new(base_wind.speed, wind_speed_std_dev)
+            .map_err(|e| format!("Invalid wind speed distribution: {e}"))?;
+        let direction = Normal::new(base_wind.direction, wind_direction_std_dev)
+            .map_err(|e| format!("Invalid wind direction distribution: {e}"))?;
+        Ok(Self { speed, direction })
+    }
+
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> WindConditions {
+        use rand_distr::Distribution;
+
+        wind_from_signed_speed_sample(self.speed.sample(rng), self.direction.sample(rng))
+    }
+}
+
 // Run Monte Carlo simulation (backwards compatibility)
 pub fn run_monte_carlo(
     base_inputs: BallisticInputs,
     params: MonteCarloParams,
 ) -> Result<MonteCarloResults, BallisticsError> {
+    run_monte_carlo_with_direction_std_dev(base_inputs, params, 0.0)
+}
+
+/// Run Monte Carlo with an independent wind-direction standard deviation in radians.
+///
+/// The older [`run_monte_carlo`] entry point remains source compatible and delegates here with
+/// zero direction uncertainty.
+pub fn run_monte_carlo_with_direction_std_dev(
+    base_inputs: BallisticInputs,
+    params: MonteCarloParams,
+    wind_direction_std_dev: f64,
+) -> Result<MonteCarloResults, BallisticsError> {
     let base_wind = WindConditions {
         speed: params.base_wind_speed,
         direction: params.base_wind_direction,
     };
-    run_monte_carlo_with_wind(base_inputs, base_wind, params)
+    run_monte_carlo_with_wind_and_direction_std_dev(
+        base_inputs,
+        base_wind,
+        params,
+        wind_direction_std_dev,
+    )
 }
 
 // Run Monte Carlo simulation with wind
@@ -2356,6 +2404,19 @@ pub fn run_monte_carlo_with_wind(
     base_inputs: BallisticInputs,
     base_wind: WindConditions,
     params: MonteCarloParams,
+) -> Result<MonteCarloResults, BallisticsError> {
+    run_monte_carlo_with_wind_and_direction_std_dev(base_inputs, base_wind, params, 0.0)
+}
+
+/// Run Monte Carlo with explicit base wind and independent direction uncertainty in radians.
+///
+/// The older [`run_monte_carlo_with_wind`] entry point delegates here with zero direction
+/// uncertainty, preserving its API while removing the former speed-to-angle unit conflation.
+pub fn run_monte_carlo_with_wind_and_direction_std_dev(
+    base_inputs: BallisticInputs,
+    base_wind: WindConditions,
+    params: MonteCarloParams,
+    wind_direction_std_dev: f64,
 ) -> Result<MonteCarloResults, BallisticsError> {
     use rand_distr::{Distribution, Normal};
 
@@ -2399,14 +2460,13 @@ pub fn run_monte_carlo_with_wind(
         .map_err(|e| format!("Invalid angle distribution: {}", e))?;
     let bc_dist = Normal::new(base_inputs.bc_value, params.bc_std_dev)
         .map_err(|e| format!("Invalid BC distribution: {}", e))?;
-    let wind_speed_dist = Normal::new(base_wind.speed, params.wind_speed_std_dev)
-        .map_err(|e| format!("Invalid wind speed distribution: {}", e))?;
-    // MBA-952: wind-direction spread is APPROXIMATED from the wind-SPEED std dev (×0.1), a unit
-    // conflation (m/s scaled as radians) — there is no dedicated wind_direction_std_dev field yet.
-    // The dead WASM `--wind-dir-std` setter was removed (it set nothing). A proper fix is an
-    // API-breaking wind_direction_std_dev on MonteCarloParams plumbed through WASM/FFI/main.
-    let wind_dir_dist = Normal::new(base_wind.direction, params.wind_speed_std_dev * 0.1)
-        .map_err(|e| format!("Invalid wind direction distribution: {}", e))?;
+    // Direction uncertainty is an independent angular quantity in radians. Do not derive it from
+    // wind-speed uncertainty: meters/second cannot supply an angular standard deviation.
+    let wind_sampler = MonteCarloWindSampler::new(
+        &base_wind,
+        params.wind_speed_std_dev,
+        wind_direction_std_dev,
+    )?;
     let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
         .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
 
@@ -2419,10 +2479,7 @@ pub fn run_monte_carlo_with_wind(
         inputs.azimuth_angle = azimuth_dist.sample(&mut rng); // Add horizontal variation
 
         // Create varied wind (now based on base wind conditions)
-        let wind = wind_from_signed_speed_sample(
-            wind_speed_dist.sample(&mut rng),
-            wind_dir_dist.sample(&mut rng),
-        );
+        let wind = wind_sampler.sample(&mut rng);
 
         // Run trajectory
         let mut solver = TrajectorySolver::new(inputs, wind, atmosphere.clone());
@@ -3018,6 +3075,86 @@ mod monte_carlo_powder_curve_tests {
 #[cfg(test)]
 mod monte_carlo_wind_sampling_tests {
     use super::*;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn wind_speed_sigma_does_not_change_seeded_direction_draws() {
+        let base_wind = WindConditions {
+            speed: 100.0,
+            direction: 0.37,
+        };
+        let narrow_speed = MonteCarloWindSampler::new(&base_wind, 0.5, 0.2).unwrap();
+        let wide_speed = MonteCarloWindSampler::new(&base_wind, 4.0, 0.2).unwrap();
+        let mut narrow_rng = StdRng::seed_from_u64(0x5EED_1223);
+        let mut wide_rng = StdRng::seed_from_u64(0x5EED_1223);
+        let mut speed_changed = false;
+
+        for _ in 0..32 {
+            let narrow = narrow_speed.sample(&mut narrow_rng);
+            let wide = wide_speed.sample(&mut wide_rng);
+            assert!(narrow.speed > 0.0 && wide.speed > 0.0);
+            assert_eq!(narrow.direction.to_bits(), wide.direction.to_bits());
+            speed_changed |= narrow.speed.to_bits() != wide.speed.to_bits();
+        }
+        assert!(
+            speed_changed,
+            "different speed sigmas must still vary speed draws"
+        );
+    }
+
+    #[test]
+    fn zero_direction_sigma_has_no_angular_jitter() {
+        let base_wind = WindConditions {
+            speed: 100.0,
+            direction: 0.37,
+        };
+        let sampler = MonteCarloWindSampler::new(&base_wind, 4.0, 0.0).unwrap();
+        let mut rng = StdRng::seed_from_u64(0x5EED_1223);
+        let mut speed_changed = false;
+
+        for _ in 0..32 {
+            let wind = sampler.sample(&mut rng);
+            speed_changed |= wind.speed.to_bits() != base_wind.speed.to_bits();
+            assert_eq!(wind.direction.to_bits(), base_wind.direction.to_bits());
+        }
+        assert!(speed_changed, "speed uncertainty should remain active");
+    }
+
+    #[test]
+    fn direction_sigma_controls_seeded_angular_spread_in_radians() {
+        let base_wind = WindConditions {
+            speed: 100.0,
+            direction: 0.37,
+        };
+        let narrow = MonteCarloWindSampler::new(&base_wind, 4.0, 0.1).unwrap();
+        let wide = MonteCarloWindSampler::new(&base_wind, 4.0, 0.2).unwrap();
+        let mut narrow_rng = StdRng::seed_from_u64(0x5EED_1223);
+        let mut wide_rng = StdRng::seed_from_u64(0x5EED_1223);
+        let mut nonzero_direction_draw = false;
+
+        for _ in 0..32 {
+            let narrow_wind = narrow.sample(&mut narrow_rng);
+            let wide_wind = wide.sample(&mut wide_rng);
+            assert_eq!(narrow_wind.speed.to_bits(), wide_wind.speed.to_bits());
+
+            let narrow_delta = narrow_wind.direction - base_wind.direction;
+            let wide_delta = wide_wind.direction - base_wind.direction;
+            assert!((wide_delta - 2.0 * narrow_delta).abs() < 1e-12);
+            nonzero_direction_draw |= narrow_delta.abs() > 1e-6;
+        }
+        assert!(
+            nonzero_direction_draw,
+            "positive radians sigma must vary direction"
+        );
+    }
+
+    #[test]
+    fn direction_sigma_rejects_negative_or_nonfinite_values() {
+        let base_wind = WindConditions::default();
+        for sigma in [-0.1, f64::NAN, f64::INFINITY] {
+            assert!(MonteCarloWindSampler::new(&base_wind, 1.0, sigma).is_err());
+        }
+    }
 
     #[test]
     fn negative_speed_sample_reverses_wind_direction() {

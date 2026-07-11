@@ -314,6 +314,7 @@ Run statistical analysis with parameter variations:
   --angle-std 0.5     # Angle std dev (degrees)
   --bc-std 0.01       # BC std dev
   --wind-std 2        # Wind speed std dev (mph)
+  --wind-direction-std 5  # Wind direction std dev (degrees)
   --target-distance 300  # Target distance for hit probability
 ```
 
@@ -559,8 +560,10 @@ FFIMonteCarloParams params = {
     .azimuth_std_dev = 0.001        // radian variation (horizontal)
 };
 
-// Run simulation
-FFIMonteCarloResults* results = ballistics_monte_carlo(&inputs, NULL, &params);
+// Run simulation with an independent 0.1-radian wind-direction sigma.
+// Use ballistics_monte_carlo(...) when no direction variation is desired.
+FFIMonteCarloResults* results =
+    ballistics_monte_carlo_with_direction_std_dev(&inputs, NULL, &params, 0.1);
 
 // Use statistical results
 printf("Mean range: %.2f m (σ=%.2f)\n", results->mean_range, results->std_dev_range);
