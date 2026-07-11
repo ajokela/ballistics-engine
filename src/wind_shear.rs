@@ -9,6 +9,8 @@
 use nalgebra::Vector3;
 use std::f64::consts::PI;
 
+const APPROX_MUZZLE_HEIGHT_AGL_M: f64 = 1.5;
+
 /// Wind shear model types
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WindShearModel {
@@ -273,10 +275,23 @@ impl WindShearWindSock {
 
         if let Some(profile) = &self.shear_profile {
             if profile.model != WindShearModel::None {
-                // Site elevation affects atmospheric density elsewhere, but surface-layer wind
-                // profiles are keyed to height above local ground. Adding shooter_altitude_m
-                // would evaluate the profile at sea-level elevation and inflate wind at elevated
-                // shooting sites (MBA-1165).
+                if matches!(
+                    profile.model,
+                    WindShearModel::Logarithmic | WindShearModel::PowerLaw
+                ) {
+                    // McCoy Y is height relative to launch, not height above ground. Apply the
+                    // same approximate muzzle-height offset and operative-wind floor as the
+                    // high-level shear API. Site elevation above sea level is intentionally not
+                    // part of this boundary-layer height (MBA-1165, MBA-1166).
+                    let speed_ratio = profile_boundary_layer_speed_ratio(profile, altitude_m);
+                    let operative_wind = if base_wind.norm() > 0.0 {
+                        base_wind
+                    } else {
+                        profile.surface_wind.to_vector()
+                    };
+                    return operative_wind * speed_ratio;
+                }
+
                 let altitude_vec = profile.get_wind_at_altitude(altitude_m);
 
                 // Scale the base wind by altitude profile
@@ -317,6 +332,19 @@ impl WindShearWindSock {
     }
 }
 
+fn profile_boundary_layer_speed_ratio(
+    profile: &WindShearProfile,
+    height_rel_launch_m: f64,
+) -> f64 {
+    let minimum_height_m = profile.roughness_length.max(0.0) * 1.000_1;
+    let height_agl_m =
+        (height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M).max(minimum_height_m);
+    let sampled_speed_mps = profile.get_wind_at_altitude(height_agl_m).norm();
+    let reference_speed_mps = profile.surface_wind.speed_mps.abs().max(1e-9);
+
+    (sampled_speed_mps / reference_speed_mps).max(1.0)
+}
+
 /// Boundary-layer wind-speed multiplier for a projectile flying `height_rel_launch_m` above the
 /// muzzle (McCoy Y / height relative to the line of departure).
 ///
@@ -336,9 +364,9 @@ impl WindShearWindSock {
 pub fn boundary_layer_speed_ratio(height_rel_launch_m: f64, model: WindShearModel) -> f64 {
     const Z0: f64 = 0.03; // surface roughness length (short grass)
     const H_REF: f64 = 10.0; // standard meteorological reference height of the input wind
-    const MUZZLE_HEIGHT_M: f64 = 1.5; // approximate height of the bore above ground
 
-    let height_agl = (height_rel_launch_m + MUZZLE_HEIGHT_M).max(Z0 * 1.000_1);
+    let height_agl =
+        (height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M).max(Z0 * 1.000_1);
     let ratio = match model {
         WindShearModel::PowerLaw => (height_agl / H_REF).powf(1.0 / 7.0),
         WindShearModel::Logarithmic => (height_agl / Z0).ln() / (H_REF / Z0).ln(),
@@ -572,7 +600,45 @@ mod tests {
                 (sea_level - elevated).norm() < 1e-12,
                 "{model:?} shear must use height above local ground, not site elevation: sea={sea_level:?}, elevated={elevated:?}"
             );
-            assert!((elevated.norm() - 10.0).abs() < 1e-12);
+            let expected_speed = 10.0 * boundary_layer_speed_ratio(10.0, model);
+            assert!((elevated.norm() - expected_speed).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_windsock_flat_fire_preserves_operative_wind() {
+        for model in [WindShearModel::Logarithmic, WindShearModel::PowerLaw] {
+            let profile = WindShearProfile {
+                model,
+                surface_wind: WindLayer {
+                    altitude_m: 10.0,
+                    speed_mps: 10.0,
+                    direction_deg: 90.0,
+                },
+                ..Default::default()
+            };
+            let sock = WindShearWindSock::new(
+                vec![(10.0, 90.0, 1_000.0)],
+                Some(profile),
+            );
+
+            for height_rel_launch_m in [-1.0, 0.0, 1.0, 5.0] {
+                let wind = sock.vector_for_position(Vector3::new(
+                    100.0,
+                    height_rel_launch_m,
+                    0.0,
+                ));
+                assert!(
+                    (wind.norm() - 10.0).abs() < 1e-12,
+                    "{model:?} flat-fire wind at relative height {height_rel_launch_m} m must retain the operative 10 m/s input, got {wind:?}"
+                );
+            }
+
+            let aloft = sock.vector_for_position(Vector3::new(100.0, 100.0, 0.0));
+            assert!(
+                aloft.norm() > 10.0,
+                "{model:?} shear must still increase wind well above the launch height"
+            );
         }
     }
 }
