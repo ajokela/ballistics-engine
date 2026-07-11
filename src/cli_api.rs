@@ -1921,14 +1921,33 @@ impl TrajectorySolver {
         // Convert velocity to fps for BC lookups
         let velocity_fps = velocity_magnitude * 3.28084;
 
-        // Look up BC from segments if available (highest priority - most accurate)
-        let base_bc = if let Some(ref segments) = self.inputs.bc_segments_data {
-            // Find matching segment for current velocity
+        // Match the other solver families' BC precedence: explicit velocity-keyed segments
+        // first, then legacy Mach-keyed segments, then the scalar BC. Explicit Mach segments
+        // remain active even when `use_bc_segments` is false; derivatives.rs and the fast solver
+        // preserve that legacy contract for callers that provide the table directly.
+        let base_bc = if let Some(segments) = self
+            .inputs
+            .bc_segments_data
+            .as_ref()
+            .filter(|segments| !segments.is_empty())
+        {
+            // Find matching segment for current velocity.
             segments
                 .iter()
                 .find(|seg| velocity_fps >= seg.velocity_min && velocity_fps < seg.velocity_max)
                 .map(|seg| seg.bc_value)
                 .unwrap_or(self.inputs.bc_value)
+        } else if let Some(segments) = self
+            .inputs
+            .bc_segments
+            .as_ref()
+            .filter(|segments| !segments.is_empty())
+        {
+            crate::derivatives::interpolated_bc(
+                velocity_magnitude / speed_of_sound,
+                segments,
+                Some(&self.inputs),
+            )
         } else {
             self.inputs.bc_value
         };
@@ -2881,6 +2900,69 @@ mod cluster_bc_reference_space_tests {
             (corrected / 0.190 - 1.004).abs() < 1e-12,
             "solver selected the wrong G7 cluster multiplier: {}",
             corrected / 0.190
+        );
+    }
+}
+
+#[cfg(test)]
+mod mach_bc_segment_tests {
+    use super::*;
+
+    #[test]
+    fn trajectory_solver_interpolates_explicit_mach_bc_segments() {
+        let segmented_inputs = BallisticInputs {
+            bc_value: 0.8,
+            use_bc_segments: false,
+            bc_segments: Some(vec![(1.0, 0.2), (2.0, 0.4)]),
+            bc_segments_data: None,
+            ..BallisticInputs::default()
+        };
+
+        let mut expected_inputs = segmented_inputs.clone();
+        expected_inputs.bc_value = 0.3;
+        expected_inputs.bc_segments = None;
+
+        let atmosphere = AtmosphericConditions::default();
+        let segmented_solver = TrajectorySolver::new(
+            segmented_inputs,
+            WindConditions::default(),
+            atmosphere.clone(),
+        );
+        let expected_solver = TrajectorySolver::new(
+            expected_inputs,
+            WindConditions::default(),
+            atmosphere,
+        );
+        let position = Vector3::zeros();
+        let (density, _, temp_c, pressure_hpa) = segmented_solver.resolved_atmosphere();
+        let (_, local_speed_of_sound) = crate::atmosphere::get_local_atmosphere(
+            segmented_solver.atmosphere.altitude,
+            segmented_solver.atmosphere.altitude,
+            temp_c,
+            pressure_hpa,
+            density / 1.225,
+        );
+        let velocity = Vector3::new(1.5 * local_speed_of_sound, 0.0, 0.0);
+        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+
+        let segmented_acceleration = segmented_solver.calculate_acceleration(
+            &position,
+            &velocity,
+            &Vector3::zeros(),
+            resolved_atmo,
+        );
+        let expected_acceleration = expected_solver.calculate_acceleration(
+            &position,
+            &velocity,
+            &Vector3::zeros(),
+            resolved_atmo,
+        );
+
+        assert!(
+            (segmented_acceleration.x - expected_acceleration.x).abs() < 1e-12,
+            "Mach 1.5 must interpolate BC 0.3: segmented ax={} expected ax={}",
+            segmented_acceleration.x,
+            expected_acceleration.x
         );
     }
 }
