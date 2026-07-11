@@ -56,7 +56,7 @@ impl Default for PrecessionNutationParams {
             velocity_mps: 850.0,
             air_density_kg_m3: 1.225,
             mach: 2.48,
-            pitch_damping_coeff: -0.8,
+            pitch_damping_coeff: PitchDampingCoefficients::default().subsonic,
             nutation_damping_factor: 0.05,
         }
     }
@@ -560,7 +560,7 @@ mod tests {
             velocity_mps: 800.0,
             air_density_kg_m3: 1.2,
             mach: 2.3,
-            pitch_damping_coeff: -0.5,
+            pitch_damping_coeff: -5.0,
             nutation_damping_factor: 0.08,
         };
 

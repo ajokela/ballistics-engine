@@ -5719,7 +5719,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 println!("║ Min Pitch Damping: {:>8.3}            ║", min_damping);
                 let stability_warning = if min_damping > 0.0 {
                     "UNSTABLE" // Positive damping in transonic can cause instability
-                } else if min_damping > -0.2 {
+                } else if min_damping > -2.0 {
                     "MARGINAL"
                 } else {
                     "STABLE  "
