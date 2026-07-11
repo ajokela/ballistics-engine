@@ -479,7 +479,7 @@ The ballistics engine implements comprehensive physics modeling for accurate tra
 ### Aerodynamic Effects
 - **Drag Modeling** - Multiple drag functions (G1-G8, JBM, custom curves) with transonic flow corrections
 - **Form Factor** - Projectile efficiency corrections based on shape and design
-- **Reynolds Number Effects** - Viscosity and flow regime corrections
+- **Reynolds Number Effects** - Reynolds diagnostics and an opt-in helper for genuinely low-Re flow; standard drag tables are not multiplied by an extra correction
 
 ### Gyroscopic Effects  
 - **Spin Drift** - Lateral deviation due to gyroscopic and Magnus effects
@@ -704,7 +704,7 @@ When enabled, the engine calculates:
 - **Spin Drift** - Lateral drift due to gyroscopic effects
 - **Coriolis Effect** - Earth rotation effects (with latitude input)
 - **Transonic Drag** - Enhanced drag modeling in transonic regime
-- **Reynolds Number Corrections** - Viscous effects at low velocities
+- **Low-Reynolds Helper** - Opt-in viscous correction below the standard projectile-table regime
 
 ## Building from Source
 
