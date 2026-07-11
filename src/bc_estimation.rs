@@ -242,7 +242,7 @@ impl BCSegmentEstimator {
         // Adjust BC drop based on sectional density
         // Higher SD = more stable BC
         let sd_factor = (sd / 0.25).max(0.7).min(1.3);
-        let adjusted_drop = type_factors.drop / sd_factor;
+        let nominal_drop = type_factors.drop;
 
         // Generate segments based on bullet type
         let mut segments = Vec::new();
@@ -331,14 +331,14 @@ impl BCSegmentEstimator {
                     bc_value: base_bc,
                 });
 
-                let transonic_bc = base_bc * (1.0 - adjusted_drop * 0.3);
+                let transonic_bc = base_bc * (1.0 - nominal_drop * 0.3);
                 segments.push(BCSegmentData {
                     velocity_min: 1800.0,
                     velocity_max: 2800.0,
                     bc_value: transonic_bc,
                 });
 
-                let subsonic_bc = base_bc * (1.0 - adjusted_drop);
+                let subsonic_bc = base_bc * (1.0 - nominal_drop);
                 segments.push(BCSegmentData {
                     velocity_min: 0.0,
                     velocity_max: 1800.0,
@@ -361,12 +361,14 @@ impl BCSegmentEstimator {
             }
         }
 
-        // Apply sectional density adjustment
-        for segment in &mut segments {
-            segment.bc_value *= sd_factor.powf(0.5);
-            // Ensure we don't exceed nominal BC
-            if segment.bc_value > base_bc {
-                segment.bc_value = base_bc;
+        // Sectional density shapes only the degradation depth. Scaling the BC
+        // itself would alter the user's published muzzle value and would apply SD
+        // twice in the default profile. Skip identity algebra so SD=0.25 keeps
+        // established output bits unchanged.
+        if sd_factor != 1.0 {
+            for segment in &mut segments {
+                let drop_from_nominal = base_bc - segment.bc_value;
+                segment.bc_value = base_bc - drop_from_nominal / sd_factor;
             }
         }
 
@@ -465,6 +467,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sectional_density_shapes_only_band_degradation() {
+        let base_bc = 0.5;
+        let caliber = 0.224;
+        let weight = 77.0;
+        let sd = BCSegmentEstimator::calculate_sectional_density(weight, caliber);
+        let sd_factor = (sd / 0.25).clamp(0.7, 1.3);
+
+        for drag_model in ["G1", "G7"] {
+            let model_drop_scale = if drag_model == "G7" { 0.8 } else { 1.0 };
+            for (model, raw_retentions) in [
+                ("SMK BT", &[1.0, 0.985, 0.965, 0.945, 0.925][..]),
+                ("FMJ", &[1.0, 0.964, 0.88][..]),
+            ] {
+                let segments = BCSegmentEstimator::estimate_bc_segments(
+                    base_bc,
+                    caliber,
+                    weight,
+                    model,
+                    drag_model,
+                );
+                assert_eq!(segments.len(), raw_retentions.len());
+
+                for (segment, raw_retention) in segments.iter().zip(raw_retentions) {
+                    let raw_drop = base_bc * (1.0 - raw_retention) * model_drop_scale;
+                    let expected = base_bc - raw_drop / sd_factor;
+                    assert!(
+                        (segment.bc_value - expected).abs() < 1e-12,
+                        "{drag_model} {model} band {}-{} misapplied SD: got {}, expected {expected}",
+                        segment.velocity_min,
+                        segment.velocity_max,
+                        segment.bc_value
+                    );
+                }
+                assert_eq!(
+                    segments[0].bc_value.to_bits(),
+                    base_bc.to_bits(),
+                    "published muzzle BC must remain exact for {drag_model} {model}"
+                );
+            }
+        }
+
+        // High SD used to multiply every band above nominal and then cap them
+        // all to base_bc, erasing the degradation ladder.
+        let high_sd_base_bc = 0.3;
+        let high_sd_segments = BCSegmentEstimator::estimate_bc_segments(
+            high_sd_base_bc,
+            0.308,
+            220.0,
+            "SMK BT",
+            "G7",
+        );
+        assert_eq!(high_sd_segments[0].bc_value.to_bits(), high_sd_base_bc.to_bits());
+        assert!(high_sd_segments.last().unwrap().bc_value < high_sd_base_bc);
+        assert!((high_sd_segments.last().unwrap().bc_value - 0.28615384615384615).abs() < 1e-12);
     }
 
     #[test]
