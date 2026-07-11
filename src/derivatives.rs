@@ -393,16 +393,19 @@ pub fn compute_derivatives(
                     4.5 * d_in.max(1e-9)
                 }
             };
-            // MBA-958: apply the canonical linear Miller density correction (rho0/rho) to the
-            // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.
-            // No-op at sea-level standard (rho ~= 1.225 -> factor ~= 1.0).
+            // Preserve the existing local-density correction and add the canonical Miller
+            // cube-root muzzle-velocity correction (V/2800 fps)^(1/3). Density is a no-op at
+            // sea-level standard (rho ~= 1.225 -> factor ~= 1.0).
             let density_correction = if air_density > 0.0 {
                 STANDARD_AIR_DENSITY / air_density
             } else {
                 1.0
             };
+            let velocity_correction =
+                crate::stability::miller_velocity_correction(inputs.muzzle_velocity);
             let sg = crate::spin_drift::miller_stability(d_in, m_gr, inputs.twist_rate, l_in)
-                * density_correction;
+                * density_correction
+                * velocity_correction;
             let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
                 sg,
                 speed_air,
@@ -1152,6 +1155,42 @@ mod tests {
         assert!(
             result[5] < 0.05,
             "Magnus accel should be small/physical, got {}",
+            result[5]
+        );
+    }
+
+    #[test]
+    fn magnus_uses_velocity_corrected_muzzle_stability_gate() {
+        let muzzle_velocity = 1_400.0 / MPS_TO_FPS;
+        let mut inputs = create_test_inputs();
+        inputs.muzzle_velocity = muzzle_velocity;
+        inputs.twist_rate = 15.0;
+        inputs.enable_magnus = true;
+
+        let bare_sg = crate::spin_drift::miller_stability(0.308, 168.0, 15.0, 1.215);
+        let canonical_sg = crate::spin_drift::effective_sg_from_inputs(&inputs, 15.0, 1013.25);
+        assert!(bare_sg > 1.0, "test requires bare Sg above the Magnus gate");
+        assert!(
+            canonical_sg < 1.0,
+            "velocity-corrected Sg must be below the gate, got {canonical_sg}"
+        );
+
+        let result = compute_derivatives(
+            Vector3::zeros(),
+            Vector3::new(muzzle_velocity, 0.0, 0.0),
+            &inputs,
+            Vector3::zeros(),
+            (1.225, 340.0, 0.0, 0.0),
+            0.5,
+            None,
+            0.0,
+            None,
+        );
+
+        assert_eq!(
+            result[5].to_bits(),
+            0.0_f64.to_bits(),
+            "canonical Sg below 1 must suppress Magnus, got az={} m/s^2",
             result[5]
         );
     }
