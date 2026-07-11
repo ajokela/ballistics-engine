@@ -2087,6 +2087,11 @@ impl Default for MonteCarloParams {
 pub struct MonteCarloResults {
     pub ranges: Vec<f64>,
     pub impact_velocities: Vec<f64>,
+    /// Deviations from the baseline point of aim at the target plane.
+    ///
+    /// A sample that falls short of the plane is encoded as
+    /// `(0, TARGET_NOT_REACHED_SENTINEL_M, 0)` so it remains aligned with
+    /// `ranges` and `impact_velocities` and still counts as a miss.
     pub impact_positions: Vec<Vector3<f64>>,
 }
 
@@ -2094,12 +2099,64 @@ pub struct MonteCarloResults {
 /// circle. Shared by the CLI, FFI, and WASM so "hit probability" means the same thing everywhere.
 pub const DEFAULT_HIT_RADIUS_M: f64 = 0.3;
 
+/// Vertical-position marker for a Monte Carlo sample that never reached the target plane.
+///
+/// The marker preserves the equal-length result-vector and C-ABI contract. Exclude marked
+/// positions from target-plane dispersion statistics, but keep them in the denominator for hit
+/// probability because they are definite misses.
+pub const TARGET_NOT_REACHED_SENTINEL_M: f64 = -1.0e9;
+
 impl MonteCarloResults {
+    /// Whether an encoded impact position represents a finite arrival at the target plane.
+    pub fn position_reached_target(position: &Vector3<f64>) -> bool {
+        position.iter().all(|component| component.is_finite())
+            && position.y != TARGET_NOT_REACHED_SENTINEL_M
+    }
+
+    /// Number of recorded simulations that reached the target plane.
+    pub fn target_arrival_count(&self) -> usize {
+        self.impact_positions
+            .iter()
+            .filter(|position| Self::position_reached_target(position))
+            .count()
+    }
+
+    /// Fraction of recorded simulations that fell short of (or otherwise failed to produce a
+    /// finite position at) the target plane.
+    pub fn target_shortfall_fraction(&self) -> f64 {
+        if self.impact_positions.is_empty() {
+            return 0.0;
+        }
+        (self.impact_positions.len() - self.target_arrival_count()) as f64
+            / self.impact_positions.len() as f64
+    }
+
+    /// Upper-median radial miss among samples that reached the target plane.
+    ///
+    /// This preserves the CLI's historical radial-to-baseline "CEP (approx)" convention while
+    /// preventing the finite target-shortfall marker from becoming the median (MBA-1159).
+    /// Returns `None` when no recorded simulation reached the target plane.
+    pub fn target_plane_cep(&self) -> Option<f64> {
+        let mut radial_misses: Vec<f64> = self
+            .impact_positions
+            .iter()
+            .filter(|position| Self::position_reached_target(position))
+            .map(Vector3::norm)
+            .filter(|miss| miss.is_finite())
+            .collect();
+        radial_misses.sort_by(f64::total_cmp);
+        if radial_misses.is_empty() {
+            None
+        } else {
+            Some(radial_misses[radial_misses.len() / 2])
+        }
+    }
+
     /// Fraction of simulations whose impact at the target plane lands within `hit_radius_m`
     /// of the point of aim. `impact_positions` are deviations from the baseline at the target
     /// plane (the downrange component is 0), so the vector norm is the radial miss distance.
-    /// Samples that fall short of the target are clamped to their ground impact (a large
-    /// deviation) and so correctly count as misses. Returns 0.0 when there are no samples.
+    /// Samples that fall short of the target remain in the denominator and count as misses.
+    /// Returns 0.0 when there are no samples.
     ///
     /// Single source of truth for hit probability — previously the CLI used a range-precision
     /// notion and the FFI a position notion with a redundant clause, so they disagreed.
@@ -2110,7 +2167,9 @@ impl MonteCarloResults {
         let hits = self
             .impact_positions
             .iter()
-            .filter(|p| p.norm() < hit_radius_m)
+            .filter(|position| {
+                Self::position_reached_target(position) && position.norm() < hit_radius_m
+            })
             .count();
         hits as f64 / self.impact_positions.len() as f64
     }
@@ -2211,7 +2270,7 @@ pub fn run_monte_carlo_with_wind(
                 let deviation = if result.max_range < target_distance {
                     // This sample never reached the target plane -> definite miss. Keep the
                     // encoded miss finite but far outside any practical target radius.
-                    Vector3::new(0.0, -1.0e9, 0.0)
+                    Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0)
                 } else {
                     let pos_at_target = match result.position_at_range(target_distance) {
                         Some(p) => p,
@@ -2677,6 +2736,63 @@ pub fn estimate_bc_from_trajectory(
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod monte_carlo_result_tests {
+    use super::*;
+
+    fn make_results(impact_positions: Vec<Vector3<f64>>) -> MonteCarloResults {
+        let count = impact_positions.len();
+        MonteCarloResults {
+            ranges: vec![500.0; count],
+            impact_velocities: vec![300.0; count],
+            impact_positions,
+        }
+    }
+
+    #[test]
+    fn target_plane_cep_excludes_shortfall_markers() {
+        let mut positions: Vec<Vector3<f64>> = (1..=5)
+            .map(|radius| Vector3::new(0.0, radius as f64, 0.0))
+            .collect();
+        positions.extend(
+            (0..5).map(|_| Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0)),
+        );
+        let results = make_results(positions);
+
+        assert_eq!(results.target_arrival_count(), 5);
+        assert_eq!(results.target_shortfall_fraction(), 0.5);
+        assert_eq!(results.target_plane_cep(), Some(3.0));
+
+        let one_shortfall = make_results(vec![
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 2.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            Vector3::new(0.0, 4.0, 0.0),
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0),
+        ]);
+        assert_eq!(one_shortfall.target_plane_cep(), Some(3.0));
+    }
+
+    #[test]
+    fn all_shortfalls_have_no_cep_but_still_count_as_misses() {
+        let all_shortfalls = make_results(vec![
+            Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0),
+            Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0),
+        ]);
+        assert_eq!(all_shortfalls.target_arrival_count(), 0);
+        assert_eq!(all_shortfalls.target_shortfall_fraction(), 1.0);
+        assert_eq!(all_shortfalls.target_plane_cep(), None);
+        assert_eq!(all_shortfalls.hit_probability(0.3), 0.0);
+
+        let one_hit_one_shortfall = make_results(vec![
+            Vector3::new(0.0, 0.1, 0.0),
+            Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0),
+        ]);
+        assert_eq!(one_hit_one_shortfall.hit_probability(0.3), 0.5);
+    }
+}
 
 #[cfg(test)]
 mod cluster_bc_reference_space_tests {

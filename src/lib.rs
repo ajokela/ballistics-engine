@@ -20,6 +20,7 @@ pub use cli_api::{
     estimate_bc_from_trajectory, run_monte_carlo, run_monte_carlo_with_wind, AtmosphericConditions,
     BallisticInputs, BallisticsError, BcEstimate, BcFitMode, MonteCarloParams, MonteCarloResults,
     TrajectoryPoint, TrajectoryResult, TrajectorySolver, WindConditions, DEFAULT_HIT_RADIUS_M,
+    TARGET_NOT_REACHED_SENTINEL_M,
 };
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;
