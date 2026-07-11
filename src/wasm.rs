@@ -742,12 +742,16 @@ impl WasmBallistics {
         }
 
         // Set additional parameters
-        if let Some(rate) = twist_rate {
-            inputs.twist_rate = match units {
-                UnitSystem::Imperial => rate,
-                UnitSystem::Metric => rate / 25.4,
-            };
-        }
+        let explicit_twist_inches = twist_rate.map(|rate| match units {
+            UnitSystem::Imperial => rate,
+            UnitSystem::Metric => rate / 25.4,
+        });
+        inputs.twist_rate = crate::stability::resolve_twist_inches(
+            explicit_twist_inches,
+            inputs.bullet_diameter,
+            inputs.bullet_mass,
+            inputs.muzzle_velocity,
+        );
         inputs.is_twist_right = twist_right;
         if let Some(lat) = latitude {
             inputs.latitude = Some(lat);
