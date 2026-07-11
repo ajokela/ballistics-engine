@@ -56,3 +56,10 @@ path = "fuzz_targets/invariant_symmetry.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "differential_prev"
+path = "fuzz_targets/differential_prev.rs"
+test = false
+doc = false
+bench = false
