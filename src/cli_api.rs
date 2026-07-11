@@ -542,12 +542,12 @@ pub struct TrajectorySolver {
     /// field is ignored. When `None`, the constant `wind` vector is used (default),
     /// so a non-segmented solve is numerically identical to pre-feature behavior.
     wind_sock: Option<crate::wind::WindSock>,
-    /// Optional downrange-segmented atmosphere (MBA-1137). When `Some`, the per-substep drag
-    /// density recompute samples the base (station-referenced) temperature/pressure/humidity by
+    /// Optional downrange-segmented atmosphere (MBA-1137). When `Some`, the per-substep local
+    /// atmosphere recompute samples the base (station-referenced) temperature/pressure/humidity by
     /// downrange distance from this `AtmoSock`, then feeds them through the SAME altitude-lapse
     /// pipeline as a single-station solve — so the downrange zone and the vertical altitude lapse
     /// compose without double-counting. When `None` (default), the resolved single-station
-    /// conditions are used and a solve is numerically identical to pre-feature behavior.
+    /// conditions are used.
     atmo_sock: Option<crate::atmosphere::AtmoSock>,
 }
 
@@ -632,12 +632,12 @@ impl TrajectorySolver {
 
     /// Supply downrange-segmented atmosphere (MBA-1137). Each segment is
     /// `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`, defined at the shooter base
-    /// altitude; the per-substep drag density recompute selects the active zone by downrange
+    /// altitude; the per-substep local-atmosphere recompute selects the active zone by downrange
     /// distance (first zone whose `until_distance_m` exceeds it; the last zone is held beyond the
     /// final threshold). The zone's base conditions are composed with the vertical altitude lapse
-    /// via `get_local_atmosphere`, so a steeply-arcing shot still sees the y-lapse on top of the
-    /// zone base. An empty list clears segmented atmosphere (reverts to the resolved single-station
-    /// conditions), so a non-segmented solve is numerically identical to pre-feature behavior.
+    /// via `get_local_atmosphere_humid`, so a steeply-arcing shot still sees the y-lapse on top of
+    /// the zone base. An empty list clears segmented atmosphere (reverts to the resolved
+    /// single-station conditions).
     pub fn set_atmo_segments(&mut self, segments: Vec<crate::atmosphere::AtmoSegment>) {
         self.atmo_sock = if segments.is_empty() {
             None
@@ -1928,16 +1928,16 @@ impl TrajectorySolver {
         //
         // `base_temp_c` / `base_press_hpa` are the STATION conditions and drive the Magnus/Sg
         // launch-density correction below (a launch property).
-        let (base_temp_c, base_press_hpa, _station_ratio) = resolved_atmo;
+        let (base_temp_c, base_press_hpa, station_ratio) = resolved_atmo;
 
         // MBA-1137: downrange-segmented atmosphere. When an AtmoSock is present, swap the BASE
         // (station-referenced) T/P/H tuple for the active zone selected by downrange distance
         // (position.x), recomputing the per-zone base density ratio via CIPM. That swapped base
-        // then flows through the SAME altitude-lapse pipeline (get_local_atmosphere), so downrange
-        // zone selection and the world-vertical altitude lapse compose — the zone sets the base
-        // density, and the lapse multiplies on top of it (no double-count). When None, this is the
-        // resolved single-station base, so the drag path is byte-identical to pre-feature behavior.
-        let (drag_base_temp_c, drag_base_press_hpa, drag_base_ratio) =
+        // then flows through the SAME altitude-lapse pipeline, so downrange zone selection and the
+        // world-vertical altitude lapse compose — the zone sets the base density/humidity, and the
+        // lapse multiplies on top of it (no double-count). When None, this is the resolved
+        // single-station base.
+        let (drag_base_temp_c, drag_base_press_hpa, drag_base_ratio, drag_humidity_percent) =
             if let Some(ref sock) = self.atmo_sock {
                 let (zone_temp_c, zone_press_hpa, zone_humidity) = sock.atmo_for_range(position.x);
                 let zone_base_ratio = crate::atmosphere::calculate_air_density_cimp(
@@ -1945,9 +1945,14 @@ impl TrajectorySolver {
                     zone_press_hpa,
                     zone_humidity,
                 ) / 1.225;
-                (zone_temp_c, zone_press_hpa, zone_base_ratio)
+                (zone_temp_c, zone_press_hpa, zone_base_ratio, zone_humidity)
             } else {
-                resolved_atmo
+                (
+                    base_temp_c,
+                    base_press_hpa,
+                    station_ratio,
+                    self.atmosphere.humidity,
+                )
             };
         let local_alt = crate::atmosphere::shot_frame_altitude(
             self.atmosphere.altitude,
@@ -1955,12 +1960,13 @@ impl TrajectorySolver {
             position.y,
             self.inputs.shooting_angle,
         );
-        let (air_density, speed_of_sound) = crate::atmosphere::get_local_atmosphere(
+        let (air_density, speed_of_sound) = crate::atmosphere::get_local_atmosphere_humid(
             local_alt,
             self.atmosphere.altitude,
             drag_base_temp_c,
             drag_base_press_hpa,
             drag_base_ratio,
+            drag_humidity_percent,
         );
 
         // Get drag coefficient from drag model (Mach-indexed from drag tables)
@@ -3210,12 +3216,13 @@ mod mach_bc_segment_tests {
         );
         let position = Vector3::zeros();
         let (density, _, temp_c, pressure_hpa) = segmented_solver.resolved_atmosphere();
-        let (_, local_speed_of_sound) = crate::atmosphere::get_local_atmosphere(
+        let (_, local_speed_of_sound) = crate::atmosphere::get_local_atmosphere_humid(
             segmented_solver.atmosphere.altitude,
             segmented_solver.atmosphere.altitude,
             temp_c,
             pressure_hpa,
             density / 1.225,
+            segmented_solver.atmosphere.humidity,
         );
         let velocity = Vector3::new(1.5 * local_speed_of_sound, 0.0, 0.0);
         let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
@@ -3238,6 +3245,68 @@ mod mach_bc_segment_tests {
             "Mach 1.5 must interpolate BC 0.3: segmented ax={} expected ax={}",
             segmented_acceleration.x,
             expected_acceleration.x
+        );
+    }
+}
+
+#[cfg(test)]
+mod humid_local_mach_tests {
+    use super::*;
+
+    fn solver_with_station_humidity(humidity_percent: f64) -> TrajectorySolver {
+        let inputs = BallisticInputs {
+            custom_drag_table: Some(crate::drag::DragTable::new(vec![0.5, 1.5], vec![0.1, 1.1])),
+            ..BallisticInputs::default()
+        };
+        TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions {
+                temperature: 30.0,
+                pressure: 1013.25,
+                humidity: humidity_percent,
+                altitude: 0.0,
+            },
+        )
+    }
+
+    fn acceleration(solver: &TrajectorySolver, base_ratio: f64) -> Vector3<f64> {
+        solver.calculate_acceleration(
+            &Vector3::zeros(),
+            &Vector3::new(350.0, 0.0, 0.0),
+            &Vector3::zeros(),
+            (30.0, 1013.25, base_ratio),
+        )
+    }
+
+    #[test]
+    fn local_mach_uses_station_humidity_when_density_is_held_constant() {
+        let dry = acceleration(&solver_with_station_humidity(0.0), 1.0);
+        let humid = acceleration(&solver_with_station_humidity(100.0), 1.0);
+
+        assert!(
+            humid.x > dry.x,
+            "humid sound speed should lower Mach and drag on the rising test curve: dry ax={} humid ax={}",
+            dry.x,
+            humid.x
+        );
+    }
+
+    #[test]
+    fn active_atmosphere_zone_uses_zone_humidity_instead_of_station_humidity() {
+        let zone_humidity = 80.0;
+        let zone_ratio =
+            crate::atmosphere::calculate_air_density_cimp(30.0, 1013.25, zone_humidity) / 1.225;
+        let station_solver = solver_with_station_humidity(zone_humidity);
+        let mut zoned_solver = solver_with_station_humidity(0.0);
+        zoned_solver.set_atmo_segments(vec![(30.0, 1013.25, zone_humidity, 1_000.0)]);
+
+        let station = acceleration(&station_solver, zone_ratio);
+        let zoned = acceleration(&zoned_solver, zone_ratio);
+
+        assert!(
+            (zoned - station).norm() < 1e-12,
+            "active zone T/P/RH should override the station atmosphere: station={station:?} zoned={zoned:?}"
         );
     }
 }

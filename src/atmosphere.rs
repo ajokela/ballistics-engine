@@ -644,10 +644,9 @@ pub type AtmoSegment = (f64, f64, f64, f64);
 /// threshold and answers a stateless downrange lookup ([`AtmoSock::atmo_for_range`]).
 ///
 /// The zone T/P/H are the base (shooter-altitude) conditions for that stretch of range; the
-/// solver swaps them into the SAME `get_local_atmosphere` altitude-lapse pipeline that a
-/// single-station solve uses, so the downrange (X) zone and the vertical (Y) altitude lapse
-/// compose orthogonally without double-counting (the zone sets the base tuple, the lapse
-/// multiplies on top of it).
+/// solver swaps them into the same local-atmosphere altitude-lapse pipeline that a single-station
+/// solve uses, so the downrange (X) zone and the vertical (Y) altitude lapse compose orthogonally
+/// without double-counting (the zone sets the base tuple, the lapse multiplies on top of it).
 #[derive(Debug, Clone)]
 pub struct AtmoSock {
     /// Zones sorted ascending by `until_distance_m` (segment slot 3).
