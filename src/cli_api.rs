@@ -440,6 +440,34 @@ struct Rk45AcceptedStep {
     error: f64,
 }
 
+#[derive(Default)]
+struct MachTransitionTracker {
+    previous_mach: Option<f64>,
+    crossed_transonic: bool,
+    crossed_subsonic: bool,
+}
+
+impl MachTransitionTracker {
+    fn record_downward_crossings(&mut self, mach: f64, downrange_m: f64, distances: &mut Vec<f64>) {
+        if !mach.is_finite() {
+            self.previous_mach = None;
+            return;
+        }
+
+        if let Some(previous_mach) = self.previous_mach {
+            if !self.crossed_transonic && previous_mach >= 1.2 && mach < 1.2 {
+                self.crossed_transonic = true;
+                distances.push(downrange_m);
+            }
+            if !self.crossed_subsonic && previous_mach >= 1.0 && mach < 1.0 {
+                self.crossed_subsonic = true;
+                distances.push(downrange_m);
+            }
+        }
+        self.previous_mach = Some(mach);
+    }
+}
+
 impl TrajectoryResult {
     /// Interpolate position at a given downrange distance (X coordinate, McCoy).
     /// Returns the interpolated (x, y, z) position at that range.
@@ -845,8 +873,7 @@ impl TrajectorySolver {
                                        // (subsonic), so the sampled trajectory output can flag those transitions
                                        // (trajectory_sampling::add_trajectory_flags consumes this).
         let mut transonic_distances: Vec<f64> = Vec::new();
-        let mut crossed_transonic = false;
-        let mut crossed_subsonic = false;
+        let mut mach_transitions = MachTransitionTracker::default();
 
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
@@ -912,14 +939,11 @@ impl TrajectorySolver {
                 } else {
                     0.0
                 };
-                if !crossed_transonic && mach_here < 1.2 {
-                    crossed_transonic = true;
-                    transonic_distances.push(position.x);
-                }
-                if !crossed_subsonic && mach_here < 1.0 {
-                    crossed_subsonic = true;
-                    transonic_distances.push(position.x);
-                }
+                mach_transitions.record_downward_crossings(
+                    mach_here,
+                    position.x,
+                    &mut transonic_distances,
+                );
             }
 
             // Debug: log first and every 100th point. Debug builds only — this was ungated and
@@ -1127,8 +1151,7 @@ impl TrajectorySolver {
                                        // (subsonic), so the sampled trajectory output can flag those transitions
                                        // (trajectory_sampling::add_trajectory_flags consumes this).
         let mut transonic_distances: Vec<f64> = Vec::new();
-        let mut crossed_transonic = false;
-        let mut crossed_subsonic = false;
+        let mut mach_transitions = MachTransitionTracker::default();
 
         // Initialize angular state for precession/nutation tracking
         let mut angular_state = if self.inputs.enable_precession_nutation {
@@ -1194,14 +1217,11 @@ impl TrajectorySolver {
                 } else {
                     0.0
                 };
-                if !crossed_transonic && mach_here < 1.2 {
-                    crossed_transonic = true;
-                    transonic_distances.push(position.x);
-                }
-                if !crossed_subsonic && mach_here < 1.0 {
-                    crossed_subsonic = true;
-                    transonic_distances.push(position.x);
-                }
+                mach_transitions.record_downward_crossings(
+                    mach_here,
+                    position.x,
+                    &mut transonic_distances,
+                );
             }
 
             if position.y > max_height {
@@ -1425,8 +1445,7 @@ impl TrajectorySolver {
 
         // Mach-transition distances for the sampled-output flags (see solve_euler/solve_rk4).
         let mut transonic_distances: Vec<f64> = Vec::new();
-        let mut crossed_transonic = false;
-        let mut crossed_subsonic = false;
+        let mut mach_transitions = MachTransitionTracker::default();
 
         // Pitch-damping / precession diagnostics (MBA-966). Previously only the
         // Euler and fixed-RK4 solvers tracked these, so the default adaptive
@@ -1481,14 +1500,11 @@ impl TrajectorySolver {
                 } else {
                     0.0
                 };
-                if !crossed_transonic && mach_here < 1.2 {
-                    crossed_transonic = true;
-                    transonic_distances.push(position.x);
-                }
-                if !crossed_subsonic && mach_here < 1.0 {
-                    crossed_subsonic = true;
-                    transonic_distances.push(position.x);
-                }
+                mach_transitions.record_downward_crossings(
+                    mach_here,
+                    position.x,
+                    &mut transonic_distances,
+                );
             }
 
             if position.y > max_height {
@@ -3490,34 +3506,108 @@ mod coriolis_direction_tests {
     use std::f64::consts::FRAC_PI_2;
 
     #[test]
-    fn transonic_crossing_flags_a_sampled_point() {
+    fn supersonic_crossing_flags_a_positive_range_sample() {
         // A supersonic shot that slows past Mach 1 must flag a sampled point as a Mach
         // transition. The underlying transonic_distances were a Vec::new() TODO, so this
         // flag was NEVER set regardless of trajectory — this is the regression guard.
         use crate::trajectory_sampling::TrajectoryFlag;
-        let mut inputs = BallisticInputs::default();
-        inputs.muzzle_velocity = 850.0; // ~2790 fps, well supersonic
-        inputs.bc_value = 0.2; // low BC -> slows past Mach 1 within range
-        inputs.bc_type = DragModel::G7;
-        inputs.muzzle_angle = 0.03;
-        inputs.enable_trajectory_sampling = true;
-        inputs.sample_interval = 50.0;
-        let mut solver = TrajectorySolver::new(
-            inputs,
-            WindConditions::default(),
-            AtmosphericConditions::default(),
-        );
-        solver.set_max_range(2000.0);
-        let r = solver.solve().expect("solve");
-        let samples = r
-            .sampled_points
-            .expect("sampling enabled -> sampled_points present");
-        assert!(
-            samples
+
+        for (solver_name, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 850.0,
+                bc_value: 0.2,
+                bc_type: DragModel::G7,
+                muzzle_angle: 0.03,
+                enable_trajectory_sampling: true,
+                sample_interval: 50.0,
+                use_rk4,
+                use_adaptive_rk45,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(2000.0);
+            let samples = solver
+                .solve()
+                .expect("supersonic solve should succeed")
+                .sampled_points
+                .expect("sampling was enabled");
+            let flagged_distances: Vec<_> = samples
                 .iter()
-                .any(|s| s.flags.contains(&TrajectoryFlag::MachTransition)),
-            "a shot that crosses Mach 1 must flag at least one Mach-transition sample"
-        );
+                .filter(|sample| sample.flags.contains(&TrajectoryFlag::MachTransition))
+                .map(|sample| sample.distance_m)
+                .collect();
+
+            assert!(
+                !flagged_distances.is_empty()
+                    && flagged_distances.iter().all(|distance| *distance > 0.0),
+                "{solver_name} must flag genuine crossings only at positive range: {flagged_distances:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subsonic_launch_does_not_flag_a_muzzle_transition() {
+        use crate::trajectory_sampling::TrajectoryFlag;
+
+        for (solver_name, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 250.0,
+                muzzle_angle: 0.02,
+                enable_trajectory_sampling: true,
+                sample_interval: 25.0,
+                use_rk4,
+                use_adaptive_rk45,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(300.0);
+            let samples = solver
+                .solve()
+                .expect("subsonic solve should succeed")
+                .sampled_points
+                .expect("sampling was enabled");
+
+            assert!(
+                samples
+                    .iter()
+                    .all(|sample| !sample.flags.contains(&TrajectoryFlag::MachTransition)),
+                "{solver_name} marked a Mach transition for a launch already below Mach 1"
+            );
+        }
+    }
+
+    #[test]
+    fn mach_transition_tracker_requires_a_downward_crossing() {
+        fn record(mach_values: &[f64]) -> Vec<f64> {
+            let mut tracker = MachTransitionTracker::default();
+            let mut distances = Vec::new();
+            for (index, mach) in mach_values.iter().copied().enumerate() {
+                tracker.record_downward_crossings(mach, index as f64 * 10.0, &mut distances);
+            }
+            distances
+        }
+
+        assert!(record(&[0.9, 0.8, 0.7]).is_empty());
+        assert_eq!(record(&[1.1, 1.05, 0.99]), vec![20.0]);
+        assert_eq!(record(&[1.2, 1.19, 1.0, 0.99]), vec![10.0, 30.0]);
+        assert_eq!(record(&[0.9, 1.3, 1.1, 0.9, 1.3, 0.8]), vec![20.0, 30.0]);
+        assert!(record(&[1.3, f64::NAN, 1.1]).is_empty());
     }
 
     #[test]
