@@ -21,10 +21,17 @@
 //! misapplied to G7 semantics and over-degraded every transonic trajectory (and the
 //! BC5D tables sampled from this model). Multipliers may therefore exceed 1.0.
 
+use crate::DragModel;
+
 /// One velocity band: (velocity_threshold_fps, multiplier). Bands are ordered by
 /// DESCENDING threshold, matching the Python reference; `get_bc_multiplier`
 /// interpolates linearly between adjacent bands.
 type VelocityBand = (f64, f64);
+
+/// Population-average conversion used by the Python source of truth when a G7
+/// BC must be classified by the legacy G1-keyed cluster gates. The converted BC
+/// is used only to select a cluster; correction multipliers scale the original BC.
+const G7_TO_G1_CLASSIFICATION_RATIO: f64 = 1.98;
 
 /// Per-cluster velocity ladders (MBA-1126 radar-recalibrated, G7-referenced).
 /// Index = cluster id (0..=3). Kept identical to the Python `velocity_bands`.
@@ -116,6 +123,26 @@ impl ClusterBCDegradation {
         0
     }
 
+    /// Predict a cluster from a BC expressed in its active reference-model space.
+    ///
+    /// The legacy classifier is G1-keyed. G7 values are converted to the same
+    /// approximate G1 space used by the Python source of truth before applying
+    /// those unchanged gates. Other drag models retain the legacy behavior.
+    pub fn predict_cluster_for_drag_model(
+        &self,
+        caliber: f64,
+        weight_gr: f64,
+        bc: f64,
+        drag_model: DragModel,
+    ) -> usize {
+        let classification_bc_g1 = if drag_model == DragModel::G7 {
+            bc * G7_TO_G1_CLASSIFICATION_RATIO
+        } else {
+            bc
+        };
+        self.predict_cluster(caliber, weight_gr, classification_bc_g1)
+    }
+
     /// Get the BC multiplier for a given velocity and cluster.
     ///
     /// Mirrors the Python reference: iterate the cluster's bands (descending
@@ -161,8 +188,10 @@ impl ClusterBCDegradation {
         }
     }
 
-    /// Apply cluster-based BC correction: classify, then scale by the
-    /// velocity-dependent multiplier.
+    /// Apply cluster-based BC correction with the legacy G1 classification contract.
+    ///
+    /// Retained for API compatibility. Use [`Self::apply_correction_for_drag_model`]
+    /// when the BC's reference drag model is known.
     pub fn apply_correction(
         &self,
         bc: f64,
@@ -170,7 +199,24 @@ impl ClusterBCDegradation {
         weight_gr: f64,
         velocity_fps: f64,
     ) -> f64 {
-        let cluster_id = self.predict_cluster(caliber, weight_gr, bc);
+        self.apply_correction_for_drag_model(bc, caliber, weight_gr, velocity_fps, DragModel::G1)
+    }
+
+    /// Apply cluster-based BC correction in the BC's reference-model space.
+    ///
+    /// The classifier's thresholds are calibrated for G1 BCs, while the velocity
+    /// ladders are ratios that scale the caller's original BC. G7 values are
+    /// therefore converted to an approximate G1 equivalent for classification
+    /// only; the selected multiplier is still applied to the original G7 value.
+    pub fn apply_correction_for_drag_model(
+        &self,
+        bc: f64,
+        caliber: f64,
+        weight_gr: f64,
+        velocity_fps: f64,
+        drag_model: DragModel,
+    ) -> f64 {
+        let cluster_id = self.predict_cluster_for_drag_model(caliber, weight_gr, bc, drag_model);
         let multiplier = self.get_bc_multiplier(velocity_fps, cluster_id);
         bc * multiplier
     }
@@ -234,20 +280,57 @@ mod tests {
     #[test]
     fn test_apply_correction_g7() {
         let cluster_bc = ClusterBCDegradation::new();
-        let bc = 0.475;
+        let bc = 0.190;
 
-        // High velocity: minimal change (>=95% retention).
-        let hi = cluster_bc.apply_correction(bc, 0.308, 168.0, 2800.0);
-        assert!(hi >= bc * 0.95, "high-v should keep >=95% BC, got {}", hi / bc);
+        // A representative .224 77gr match bullet belongs to light-target
+        // cluster 2 when its G7 BC is classified in G1-equivalent space.
+        assert_eq!(cluster_bc.predict_cluster(0.224, 77.0, bc), 1);
+        let classification_cases = [
+            (0.224, 55.0, 0.120, 2),
+            (0.224, 69.0, 0.169, 2),
+            (0.224, 77.0, bc, 2),
+            (0.243, 87.0, 0.190, 2),
+            (0.20, 40.0, 0.075, 1),
+        ];
+        for (caliber, weight, g7_bc, expected) in classification_cases {
+            let got = cluster_bc.predict_cluster_for_drag_model(
+                caliber,
+                weight,
+                g7_bc,
+                DragModel::G7,
+            );
+            assert_eq!(
+                got,
+                expected,
+                "G7 classification for ({caliber}, {weight}, {g7_bc})"
+            );
+        }
 
-        // Transonic (1100 fps): cluster 0 G7 BC rises, so the corrected BC is
-        // ABOVE the stated BC (this is the MBA-1126 correction vs the old dip).
-        let transonic = cluster_bc.apply_correction(bc, 0.308, 168.0, 1100.0);
+        let hi = cluster_bc.apply_correction_for_drag_model(bc, 0.224, 77.0, 2800.0, DragModel::G7);
         assert!(
-            transonic > bc,
-            "cluster-0 transonic G7 BC should rise above stated, got {}",
+            (hi / bc - 1.004).abs() < 1e-12,
+            "wrong cluster: {}",
+            hi / bc
+        );
+
+        let transonic =
+            cluster_bc.apply_correction_for_drag_model(bc, 0.224, 77.0, 1100.0, DragModel::G7);
+        assert!(
+            (transonic / bc - 1.02).abs() < 1e-12,
+            "wrong transonic cluster: {}",
             transonic / bc
         );
+
+        // The existing API remains byte-identical to explicit G1 classification.
+        let legacy = cluster_bc.apply_correction(bc, 0.224, 77.0, 2800.0);
+        let explicit_g1 = cluster_bc.apply_correction_for_drag_model(
+            bc,
+            0.224,
+            77.0,
+            2800.0,
+            DragModel::G1,
+        );
+        assert_eq!(legacy.to_bits(), explicit_g1.to_bits());
     }
 
     /// Golden parity test — values generated directly from the Python reference
