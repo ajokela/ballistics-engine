@@ -118,7 +118,7 @@ pub struct BallisticInputs {
     pub enable_magnus: bool,   // Magnus side force (independent of Coriolis)
     pub enable_coriolis: bool, // Coriolis deflection (requires latitude)
     pub use_powder_sensitivity: bool,
-    pub powder_temp_sensitivity: f64,
+    pub powder_temp_sensitivity: f64, // m/s per degree Celsius
     pub powder_temp: f64,           // Celsius
     /// Optional measured powder-temperature -> muzzle-velocity curve, as
     /// (temperature_celsius, muzzle_velocity_m_s) points sorted ascending by
