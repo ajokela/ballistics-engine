@@ -2323,7 +2323,10 @@ pub fn run_monte_carlo_with_wind(
         .ok_or("Could not interpolate baseline at target distance")?;
 
     // Create normal distributions for variations
-    let velocity_dist = Normal::new(base_inputs.muzzle_velocity, params.velocity_std_dev)
+    // Sample muzzle velocity as a DELTA and apply it after TrajectorySolver::new resolves the
+    // powder-temperature model. Sampling an absolute value here let a powder curve overwrite
+    // every draw in the constructor, collapsing the requested dispersion to zero (MBA-1176).
+    let velocity_delta_dist = Normal::new(0.0, params.velocity_std_dev)
         .map_err(|e| format!("Invalid velocity distribution: {}", e))?;
     let angle_dist = Normal::new(base_inputs.muzzle_angle, params.angle_std_dev)
         .map_err(|e| format!("Invalid angle distribution: {}", e))?;
@@ -2343,7 +2346,7 @@ pub fn run_monte_carlo_with_wind(
     for _ in 0..params.num_simulations {
         // Create varied inputs
         let mut inputs = base_inputs.clone();
-        inputs.muzzle_velocity = velocity_dist.sample(&mut rng).max(0.0);
+        let muzzle_velocity_delta = velocity_delta_dist.sample(&mut rng);
         inputs.muzzle_angle = angle_dist.sample(&mut rng);
         inputs.bc_value = bc_dist.sample(&mut rng).max(0.01);
         inputs.azimuth_angle = azimuth_dist.sample(&mut rng); // Add horizontal variation
@@ -2356,6 +2359,8 @@ pub fn run_monte_carlo_with_wind(
 
         // Run trajectory
         let mut solver = TrajectorySolver::new(inputs, wind, atmosphere.clone());
+        solver.inputs.muzzle_velocity =
+            (solver.inputs.muzzle_velocity + muzzle_velocity_delta).max(0.0);
         solver.set_max_range(solver_max_range);
         match solver.solve() {
             Ok(result) => {
@@ -2888,6 +2893,49 @@ mod monte_carlo_result_tests {
             Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0),
         ]);
         assert_eq!(one_hit_one_shortfall.hit_probability(0.3), 0.5);
+    }
+}
+
+#[cfg(test)]
+mod monte_carlo_powder_curve_tests {
+    use super::*;
+
+    #[test]
+    fn powder_curve_preserves_sampled_muzzle_velocity_dispersion() {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 700.0,
+            powder_temp_curve: Some(vec![(15.0, 800.0)]),
+            powder_curve_temp_c: Some(15.0),
+            ..BallisticInputs::default()
+        };
+        let params = MonteCarloParams {
+            num_simulations: 16,
+            velocity_std_dev: 20.0,
+            angle_std_dev: 1e-12,
+            bc_std_dev: 1e-12,
+            wind_speed_std_dev: 1e-12,
+            target_distance: Some(100.0),
+            azimuth_std_dev: 1e-12,
+            ..MonteCarloParams::default()
+        };
+
+        let results = run_monte_carlo(inputs, params).expect("Monte Carlo solve");
+        let min_velocity = results
+            .impact_velocities
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max_velocity = results
+            .impact_velocities
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        assert!(
+            max_velocity - min_velocity > 1.0,
+            "20 m/s muzzle spread collapsed after curve resolution: impact-velocity span={} m/s",
+            max_velocity - min_velocity
+        );
     }
 }
 
