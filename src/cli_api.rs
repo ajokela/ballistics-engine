@@ -2126,16 +2126,20 @@ impl TrajectorySolver {
                     4.5 * d_in
                 }
             };
-            // MBA-958: apply the canonical linear Miller density correction (T/T0)*(P0/P) to the
-            // Magnus/yaw-of-repose Sg too, matching the spin-drift Sg (MBA-942) and stability.rs.
-            // No-op at sea-level standard (15 C, 1013.25 hPa -> factor 1.0).
+            // Apply the canonical Miller launch corrections to the Magnus/yaw-of-repose Sg too,
+            // matching the reported and spin-drift Sg: linear density (T/T0)*(P0/P), plus the
+            // cube-root muzzle-velocity term (V/2800 fps)^(1/3). Density is a no-op at sea-level
+            // standard (15 C, 1013.25 hPa -> factor 1.0).
             let density_correction = if base_press_hpa > 0.0 && temp_k > 0.0 {
                 (temp_k / 288.15) * (1013.25 / base_press_hpa)
             } else {
                 1.0
             };
+            let velocity_correction =
+                crate::stability::miller_velocity_correction(self.inputs.muzzle_velocity);
             let sg = crate::spin_drift::miller_stability(d_in, m_gr, self.inputs.twist_rate, l_in)
-                * density_correction;
+                * density_correction
+                * velocity_correction;
 
             // Yaw of repose (radians); zero for unstable bullets (Sg <= 1).
             let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
@@ -3778,6 +3782,53 @@ mod ground_termination_tests {
                  past launch level toward the ground_threshold floor, not stop at y = 0"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod magnus_stability_tests {
+    use super::*;
+
+    #[test]
+    fn magnus_uses_velocity_corrected_muzzle_stability_gate() {
+        let muzzle_velocity = 1_400.0 / 3.28084;
+        let inputs = BallisticInputs {
+            muzzle_velocity,
+            bullet_mass: 168.0 * 0.00006479891,
+            bullet_diameter: 0.308 * 0.0254,
+            bullet_length: 1.215 * 0.0254,
+            twist_rate: 15.0,
+            enable_magnus: true,
+            ..BallisticInputs::default()
+        };
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+
+        let bare_sg = crate::spin_drift::miller_stability(0.308, 168.0, 15.0, 1.215);
+        let canonical_sg = solver.effective_spin_drift_sg();
+        assert!(bare_sg > 1.0, "test requires bare Sg above the Magnus gate");
+        assert!(
+            canonical_sg < 1.0,
+            "velocity-corrected Sg must be below the gate, got {canonical_sg}"
+        );
+
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let acceleration = solver.calculate_acceleration(
+            &Vector3::zeros(),
+            &Vector3::new(muzzle_velocity, 0.0, 0.0),
+            &Vector3::zeros(),
+            (temp_c, pressure_hpa, density / 1.225),
+        );
+
+        assert_eq!(
+            acceleration.z.to_bits(),
+            0.0_f64.to_bits(),
+            "canonical Sg below 1 must suppress Magnus, got az={} m/s^2",
+            acceleration.z
+        );
     }
 }
 

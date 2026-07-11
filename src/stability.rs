@@ -22,7 +22,6 @@ pub fn compute_stability_coefficient(
 
     // Pre-calculated constants for efficiency
     const MILLER_CONST: f64 = 30.0;
-    const VEL_REF_FPS: f64 = 2800.0;
     const TEMP_REF_K: f64 = 288.15; // 15°C
     const PRESS_REF_HPA: f64 = 1013.25;
 
@@ -35,7 +34,6 @@ pub fn compute_stability_coefficient(
     // Convert units for Miller formula
     let mass_grains = inputs.bullet_mass / 0.00006479891; // kg to grains
     let diameter_inches = inputs.bullet_diameter / 0.0254; // meters to inches
-    let velocity_fps = inputs.muzzle_velocity * 3.28084; // m/s to fps
 
     // Miller stability formula components
     let mass_term = MILLER_CONST * mass_grains;
@@ -57,7 +55,7 @@ pub fn compute_stability_coefficient(
     let density_correction = (temp_k / TEMP_REF_K) * (PRESS_REF_HPA / current_press_hpa);
 
     // Velocity correction factor
-    let velocity_correction = (velocity_fps / VEL_REF_FPS).powf(1.0 / 3.0);
+    let velocity_correction = miller_velocity_correction(inputs.muzzle_velocity);
 
     // Final stability calculation
 
@@ -90,6 +88,14 @@ const GRAINS_PER_KG: f64 = 1.0 / 0.00006479891;
 const METERS_PER_INCH: f64 = 0.0254;
 const MPS_TO_FPS: f64 = 3.28084;
 const MILLER_VEL_REF_FPS: f64 = 2800.0;
+
+/// Miller's cube-root launch-velocity correction relative to 2800 ft/s.
+///
+/// Gyroscopic stability is a launch property, so callers must pass muzzle velocity rather than
+/// re-evaluating this term from the decaying downrange airspeed.
+pub(crate) fn miller_velocity_correction(muzzle_velocity_mps: f64) -> f64 {
+    (muzzle_velocity_mps * MPS_TO_FPS / MILLER_VEL_REF_FPS).powf(1.0 / 3.0)
+}
 
 /// Estimate a bullet's length (meters) from its diameter and mass using a constant-effective-density
 /// cylinder model (MBA-1135).
@@ -168,8 +174,7 @@ pub fn default_twist_inches(diameter_m: f64, mass_kg: f64, muzzle_velocity_mps: 
     let d_in = diameter_m / METERS_PER_INCH;
     let m_gr = mass_kg * GRAINS_PER_KG;
     let l_cal = length_m / diameter_m;
-    let v_fps = muzzle_velocity_mps * MPS_TO_FPS;
-    let velocity_correction = (v_fps / MILLER_VEL_REF_FPS).powf(1.0 / 3.0);
+    let velocity_correction = miller_velocity_correction(muzzle_velocity_mps);
 
     let geom = d_in.powi(3) * l_cal * (1.0 + l_cal * l_cal);
     let denom = DEFAULT_TWIST_SG_TARGET * geom;
