@@ -915,6 +915,10 @@ mod tests {
                 final_state[0] >= 900.0,
                 "Final x should be near target distance"
             );
+            assert!(
+                final_state[3] < 0.9 * initial_state[3],
+                "standard-atmosphere drag should reduce downrange velocity"
+            );
         }
     }
 
@@ -936,21 +940,17 @@ mod tests {
         assert!(!trajectory_rk4.is_empty());
         assert!(!trajectory_rk45.is_empty());
 
-        let (_, final_rk4) = trajectory_rk4.last().unwrap();
-        let (_, final_rk45) = trajectory_rk45.last().unwrap();
+        let (time_rk4, final_rk4) = trajectory_rk4.last().unwrap();
+        let (time_rk45, final_rk45) = trajectory_rk45.last().unwrap();
 
-        // Final downrange positions should be within 1% of each other
-        let rk4_z = final_rk4[0];
-        let rk45_z = final_rk45[0];
-        let diff_percent = ((rk4_z - rk45_z) / rk45_z).abs() * 100.0;
-
+        // Compare quantities that are not forced equal by target-distance clamping.
         assert!(
-            diff_percent < 1.0,
-            "RK4 and RK45 final positions differ by {}%: RK4={}, RK45={}",
-            diff_percent,
-            rk4_z,
-            rk45_z
+            (time_rk4 - time_rk45).abs() < 1e-4,
+            "RK4/RK45 time of flight diverged: {time_rk4} vs {time_rk45}"
         );
+        assert!((final_rk4[1] - final_rk45[1]).abs() < 1e-3);
+        assert!((final_rk4[3] - final_rk45[3]).abs() < 1e-2);
+        assert!(final_rk45[3] < 0.9 * initial_state[3]);
     }
 
     #[test]
@@ -1053,10 +1053,17 @@ mod tests {
         let drop_no_wind = final_no_wind[1];
         let drop_headwind = final_headwind[1];
 
-        // With headwind, bullet should drop more (more negative y) due to slower velocity
-        // The effect might be small, so we check that both trajectories are valid
         println!("No wind: time={}, drop={}", time_no_wind, drop_no_wind);
         println!("Headwind: time={}, drop={}", time_headwind, drop_headwind);
+
+        assert!(
+            *time_headwind > *time_no_wind + 0.001,
+            "headwind should increase time of flight: no-wind={time_no_wind}, headwind={time_headwind}"
+        );
+        assert!(
+            final_headwind[3] < final_no_wind[3] - 1.0,
+            "headwind should reduce terminal downrange velocity"
+        );
 
         // Both should reach approximately the target distance
         assert!(
@@ -1076,19 +1083,20 @@ mod tests {
         let result = solve_trajectory_rust(
             initial_state,
             (0.0, 2.0),
-            0.01134,                 // mass_kg
-            0.442,                   // bc
-            DragModel::G7,           // drag_model
-            vec![],                  // wind_segments
-            (0.0, 59.0, 29.92, 0.0), // atmos_params
-            None,                    // omega_vector
-            false,                   // enable_spin_drift
-            false,                   // enable_magnus
-            false,                   // enable_coriolis
-            "RK45".to_string(),      // method
-            1e-6,                    // tolerance
-            0.01,                    // max_step
-            500.0,                   // target_distance_m
+            0.01134,       // mass_kg
+            0.442,         // bc
+            DragModel::G7, // drag_model
+            vec![],        // wind_segments
+            // Standard atmosphere: altitude m, temperature C, pressure hPa, density ratio.
+            (0.0, 15.0, 1013.25, 1.0),
+            None,               // omega_vector
+            false,              // enable_spin_drift
+            false,              // enable_magnus
+            false,              // enable_coriolis
+            "RK45".to_string(), // method
+            1e-6,               // tolerance
+            0.01,               // max_step
+            500.0,              // target_distance_m
         );
 
         // Should return Vec of HashMaps with expected keys
@@ -1102,6 +1110,12 @@ mod tests {
         assert!(first_point.contains_key("vx"));
         assert!(first_point.contains_key("vy"));
         assert!(first_point.contains_key("vz"));
+
+        let final_point = result.last().unwrap();
+        assert!(
+            final_point["vx"] < 0.9 * initial_state[3],
+            "standard-atmosphere wrapper fixture should exercise drag"
+        );
     }
 
     #[test]
