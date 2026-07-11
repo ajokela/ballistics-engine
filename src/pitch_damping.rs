@@ -282,32 +282,27 @@ pub fn calculate_damped_yaw_of_repose(
     (equilibrium_yaw_rad, convergence_rate)
 }
 
-/// Calculate precession rate including damping effects
+/// Legacy alias for the slow-mode precession angular frequency in radians per second.
+///
+/// Pitch damping changes modal amplitude/convergence, not the slow-mode phase frequency. The
+/// removed yaw, velocity, and damping-moment arguments could not form a dimensionally valid
+/// correction. Use [`crate::precession_nutation::calculate_precession_frequency`] directly.
+#[deprecated(
+    since = "0.22.18",
+    note = "use precession_nutation::calculate_precession_frequency; damping changes modal amplitude, not phase frequency"
+)]
 pub fn calculate_precession_with_damping(
-    yaw_angle_rad: f64,
     spin_rate_rad_s: f64,
-    velocity_mps: f64,
-    pitch_damping_moment: f64,
-    transverse_inertia: f64,
     spin_inertia: f64,
+    transverse_inertia: f64,
+    stability_factor: f64,
 ) -> f64 {
-    if spin_rate_rad_s == 0.0 || velocity_mps == 0.0 {
-        return 0.0;
-    }
-
-    // Basic precession rate (gyroscopic)
-    let basic_precession = (spin_inertia * spin_rate_rad_s * yaw_angle_rad.sin())
-        / (transverse_inertia * velocity_mps);
-
-    // Damping modification
-    let damping_factor = if transverse_inertia > 0.0 {
-        let factor = 1.0 - (pitch_damping_moment.abs() / (transverse_inertia * velocity_mps));
-        factor.max(0.1) // Minimum 10% precession
-    } else {
-        1.0
-    };
-
-    basic_precession * damping_factor
+    crate::precession_nutation::calculate_precession_frequency(
+        spin_rate_rad_s,
+        spin_inertia,
+        transverse_inertia,
+        stability_factor,
+    )
 }
 
 #[cfg(test)]
@@ -554,27 +549,52 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_precession_with_damping() {
         let precession = calculate_precession_with_damping(
-            0.01,    // yaw angle rad
             19000.0, // spin rate rad/s
-            800.0,   // velocity m/s
-            -0.001,  // pitch damping moment
-            0.0001,  // transverse inertia
             0.00005, // spin inertia
+            0.0001,  // transverse inertia
+            2.5,     // stability factor
         );
 
         assert!(precession > 0.0);
 
         // Test zero spin
-        let precession_zero =
-            calculate_precession_with_damping(0.01, 0.0, 800.0, -0.001, 0.0001, 0.00005);
+        let precession_zero = calculate_precession_with_damping(0.0, 0.00005, 0.0001, 2.5);
         assert_eq!(precession_zero, 0.0);
 
-        // Test zero velocity
-        let precession_no_vel =
-            calculate_precession_with_damping(0.01, 19000.0, 0.0, -0.001, 0.0001, 0.00005);
-        assert_eq!(precession_no_vel, 0.0);
+        // Test a non-gyroscopically-stable projectile
+        let precession_unstable = calculate_precession_with_damping(19000.0, 0.00005, 0.0001, 1.0);
+        assert_eq!(precession_unstable, 0.0);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn precession_uses_slow_epicyclic_frequency() {
+        let spin_rate_rad_s = 17_522.0;
+        let spin_inertia = 6.94e-8;
+        let transverse_inertia = 9.13e-7;
+        let stability_factor = 2.0;
+        let expected = crate::precession_nutation::calculate_precession_frequency(
+            spin_rate_rad_s,
+            spin_inertia,
+            transverse_inertia,
+            stability_factor,
+        );
+
+        let actual = calculate_precession_with_damping(
+            spin_rate_rad_s,
+            spin_inertia,
+            transverse_inertia,
+            stability_factor,
+        );
+
+        assert!(
+            (actual - expected).abs() <= expected * 1e-12,
+            "precession did not use the slow epicyclic rate: actual={actual} expected={expected}"
+        );
+        assert!((150.0..250.0).contains(&actual));
     }
 
     #[test]
