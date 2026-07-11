@@ -62,7 +62,7 @@ where
             });
         }
 
-        if fa.abs() < fb.abs() {
+        if fc.abs() < fb.abs() {
             a = b;
             b = c;
             c = a;
@@ -83,14 +83,14 @@ where
             });
         }
 
-        if e.abs() >= tolerance_scaled && fc.abs() > fb.abs() {
+        if e.abs() >= tolerance_scaled && fa.abs() > fb.abs() {
             // Check for safe division before interpolation
             if fc.abs() < f64::EPSILON || fa.abs() < f64::EPSILON {
                 // Fallback to bisection if denominators are too small
                 d = m;
                 e = m;
             } else {
-                let s = fb / fc;
+                let s = fb / fa;
                 let mut p;
                 let mut q;
 
@@ -100,8 +100,8 @@ where
                     q = 1.0 - s;
                 } else {
                     // Inverse quadratic interpolation
-                    q = fc / fa;
-                    let r = fb / fa;
+                    q = fa / fc;
+                    let r = fb / fc;
                     p = s * (2.0 * m * q * (q - r) - (b - a) * (r - 1.0));
                     q = (q - 1.0) * (r - 1.0) * (s - 1.0);
                 }
@@ -377,6 +377,20 @@ mod tests {
         assert!((result.angle_rad - 2.0).abs() < 1e-6);
         assert!(result.iterations_used > 0);
         assert!(result.final_error < 1e-6);
+    }
+
+    #[test]
+    fn brent_uses_inverse_quadratic_interpolation() {
+        let f = |x: f64| x * x - 2.0;
+        let result = brent_root_find(f, 1.0, 2.0, 1e-12, 100).unwrap();
+
+        assert!(result.success);
+        assert!((result.angle_rad - 2.0_f64.sqrt()).abs() < 1e-12);
+        assert!(
+            result.iterations_used <= 10,
+            "smooth quadratic should converge superlinearly, took {} iterations",
+            result.iterations_used
+        );
     }
 
     #[test]
