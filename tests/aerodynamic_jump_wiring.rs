@@ -125,6 +125,62 @@ fn litz_magnitude_matches_engine_sg_exactly() {
 }
 
 #[test]
+fn segmented_muzzle_wind_matches_scalar_aerodynamic_jump() {
+    let inputs = BallisticInputs {
+        muzzle_velocity: 790.0,
+        twist_rate: 11.0,
+        is_twist_right: true,
+        enable_aerodynamic_jump: true,
+        muzzle_angle: 0.01,
+        ..BallisticInputs::default()
+    };
+    let atmosphere = AtmosphericConditions::default();
+
+    let mut scalar_solver = TrajectorySolver::new(
+        inputs.clone(),
+        WindConditions {
+            speed: 4.4704,
+            direction: PI / 2.0,
+        },
+        atmosphere.clone(),
+    );
+    scalar_solver.set_max_range(600.0);
+    let scalar_jump = scalar_solver
+        .solve()
+        .unwrap()
+        .aerodynamic_jump
+        .expect("scalar crosswind must produce aerodynamic jump")
+        .vertical_jump_moa;
+
+    // A conflicting 20 mph scalar wind from the left must be ignored while segments are present.
+    let mut segmented_solver = TrajectorySolver::new(
+        inputs,
+        WindConditions {
+            speed: 8.9408,
+            direction: -PI / 2.0,
+        },
+        atmosphere,
+    );
+    segmented_solver.set_max_range(600.0);
+    segmented_solver.set_wind_segments(vec![(16.09344, 90.0, 100.0), (32.18688, 270.0, 5000.0)]);
+    let segmented_jump = segmented_solver
+        .solve()
+        .unwrap()
+        .aerodynamic_jump
+        .expect("segmented muzzle crosswind must produce aerodynamic jump")
+        .vertical_jump_moa;
+
+    assert!(
+        segmented_jump > 0.0,
+        "muzzle wind from the right must jump up"
+    );
+    assert!(
+        (segmented_jump - scalar_jump).abs() < 1e-9,
+        "equivalent scalar and segmented muzzle wind must produce the same jump: scalar={scalar_jump}, segmented={segmented_jump}"
+    );
+}
+
+#[test]
 fn aj_direction_flips_with_wind_side_and_twist() {
     let v = |dir: f64, right_twist: bool| -> f64 {
         let mut inputs = BallisticInputs::default();
