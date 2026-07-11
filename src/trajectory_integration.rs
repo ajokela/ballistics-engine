@@ -14,6 +14,28 @@ use crate::wind::WindSegment;
 use crate::BallisticInputs;
 use crate::DragModel;
 
+const RK45_MIN_STEP: f64 = 1e-6;
+const RK45_DEFAULT_TOLERANCE: f64 = 1e-6;
+const RK45_SAFETY_FACTOR: f64 = 0.9;
+const RK45_MIN_SCALE: f64 = 0.1;
+const RK45_MAX_SCALE: f64 = 2.0;
+
+#[derive(Clone, Copy)]
+struct Rk45Control {
+    tolerance: f64,
+    min_step: f64,
+    max_step: f64,
+    max_trials: usize,
+}
+
+struct Rk45AcceptedStep {
+    state: Vector6<f64>,
+    used_dt: f64,
+    next_dt: f64,
+    error: f64,
+    trials: usize,
+}
+
 fn wind_vector_for_range(range_m: f64, wind_segments: &[WindSegment]) -> Vector3<f64> {
     if range_m.is_nan() {
         return Vector3::zeros();
@@ -47,6 +69,26 @@ fn rk4_step(
     let k4 = compute_derivatives_vec(&(state + dt * k3), t + dt, params, inputs);
 
     state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+/// Weighted RMS error for a mixed position/velocity state.
+///
+/// Each component is scaled independently so a large downrange position cannot hide an error in
+/// a near-zero lateral velocity (and vice versa). The caller's tolerance therefore acts as both
+/// an absolute and relative tolerance in each component's own unit.
+fn rk45_error_norm(
+    state: &Vector6<f64>,
+    fifth_order: &Vector6<f64>,
+    fourth_order: &Vector6<f64>,
+) -> f64 {
+    let scaled_error_squared: f64 = (0..6)
+        .map(|index| {
+            let scale = 1.0 + state[index].abs().max(fifth_order[index].abs());
+            ((fifth_order[index] - fourth_order[index]) / scale).powi(2)
+        })
+        .sum();
+
+    (scaled_error_squared / 6.0).sqrt()
 }
 
 /// Adaptive RK45 integration step (Dormand-Prince method)
@@ -136,18 +178,60 @@ fn rk45_step(
     let y_err = state
         + dt * (B1_ERR * k1 + B3_ERR * k3 + B4_ERR * k4 + B5_ERR * k5 + B6_ERR * k6 + B7_ERR * k7);
 
-    // Error estimate
-    let error = (y_new - y_err).norm() / (1.0 + state.norm());
+    let error = rk45_error_norm(state, &y_new, &y_err);
 
-    // Adaptive step size
-    let safety = 0.9;
-    let dt_new = if error < tol {
-        dt * safety * (tol / error).powf(0.2).min(2.0)
+    // Dormand-Prince 5(4) controls both accepted and rejected trials with a fifth-root scale.
+    let step_scale = if !error.is_finite() || !tol.is_finite() || tol <= 0.0 {
+        RK45_MIN_SCALE
+    } else if error == 0.0 {
+        RK45_MAX_SCALE
     } else {
-        dt * safety * (tol / error).powf(0.25).max(0.1)
+        (RK45_SAFETY_FACTOR * (tol / error).powf(0.2)).clamp(RK45_MIN_SCALE, RK45_MAX_SCALE)
     };
+    let dt_new = dt * step_scale;
 
     (y_new, dt_new, error)
+}
+
+/// Retry an RK45 step from the same state until its embedded error estimate is acceptable.
+///
+/// `Err(n)` means no finite acceptable candidate was found in `n` trials. Rejected candidates
+/// never escape this function, so callers cannot accidentally advance state or time with one.
+fn adaptive_rk45_step(
+    state: &Vector6<f64>,
+    t: f64,
+    initial_dt: f64,
+    params: &TrajectoryParams,
+    inputs: &BallisticInputs,
+    control: Rk45Control,
+) -> Result<Rk45AcceptedStep, usize> {
+    let mut trial_dt = initial_dt;
+
+    for trials in 1..=control.max_trials {
+        let (new_state, suggested_dt, error) =
+            rk45_step(state, t, trial_dt, params, inputs, control.tolerance);
+        let candidate_is_finite = error.is_finite()
+            && suggested_dt.is_finite()
+            && new_state.iter().all(|value| value.is_finite());
+        let next_dt = suggested_dt.min(control.max_step).max(control.min_step);
+
+        if candidate_is_finite && (error <= control.tolerance || trial_dt <= control.min_step) {
+            return Ok(Rk45AcceptedStep {
+                state: new_state,
+                used_dt: trial_dt,
+                next_dt,
+                error,
+                trials,
+            });
+        }
+
+        if trial_dt <= control.min_step {
+            return Err(trials);
+        }
+        trial_dt = next_dt;
+    }
+
+    Err(control.max_trials)
 }
 
 /// Parameters for trajectory computation
@@ -419,6 +503,14 @@ pub fn integrate_trajectory(
             // Adaptive RK45 with better sampling
             let mut last_save_x = 0.0; // X is downrange (McCoy)
             let save_interval_m = params.target_distance_m / 50.0; // Save ~50 points minimum
+            let tolerance = if tolerance.is_finite() && tolerance > 0.0 {
+                tolerance
+            } else {
+                eprintln!(
+                    "WARNING: RK45 tolerance must be finite and positive; using {RK45_DEFAULT_TOLERANCE}"
+                );
+                RK45_DEFAULT_TOLERANCE
+            };
 
             // OPTIMIZATION: Adjust max step size when wind shear is enabled
             // This improves numerical stability at long ranges
@@ -433,48 +525,95 @@ pub fn integrate_trajectory(
                 } else {
                     max_step // Use provided max_step when no wind shear
                 };
+            if !effective_max_step.is_finite() || effective_max_step <= 0.0 {
+                eprintln!("WARNING: RK45 max_step must be finite and positive");
+                return trajectory;
+            }
+            let min_step = RK45_MIN_STEP.min(effective_max_step);
 
             // Set initial step size - ensure it's reasonable
-            dt = dt.min(effective_max_step).max(0.0001); // At least 0.1ms to avoid infinite loops
+            dt = dt.min(effective_max_step).max(min_step);
 
             // Safety check: maximum iterations to prevent infinite loops
             let max_iterations = 100000; // Should be more than enough for any realistic trajectory
             let mut iteration_count = 0;
 
             while t < t_end && iteration_count < max_iterations {
-                iteration_count += 1;
-
                 // Limit time step for better resolution
                 if t + dt > t_end {
                     dt = t_end - t;
                 }
 
-                let (new_state, dt_new, _error) =
-                    rk45_step(&state, t, dt, &params, &inputs, tolerance);
+                let control = Rk45Control {
+                    tolerance,
+                    min_step,
+                    max_step: effective_max_step,
+                    max_trials: max_iterations - iteration_count,
+                };
+                let mut accepted =
+                    match adaptive_rk45_step(&state, t, dt, &params, &inputs, control) {
+                        Ok(accepted) => accepted,
+                        Err(trials) => {
+                            iteration_count += trials;
+                            if iteration_count < max_iterations {
+                                eprintln!("WARNING: RK45 minimum-step trial was non-finite");
+                            }
+                            break;
+                        }
+                    };
+                iteration_count += accepted.trials;
+                debug_assert!(accepted.error <= tolerance || accepted.used_dt <= min_step);
 
-                // Check if we're about to pass the target (X is downrange, McCoy)
-                if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
+                // Target detection only examines an accepted candidate.
+                if state[0] < params.target_distance_m
+                    && accepted.state[0] >= params.target_distance_m
+                {
                     // Interpolate to find exact target crossing
-                    let alpha = (params.target_distance_m - state[0]) / (new_state[0] - state[0]);
-                    let dt_to_target = dt * alpha;
+                    let alpha =
+                        (params.target_distance_m - state[0]) / (accepted.state[0] - state[0]);
+                    let dt_to_target = accepted.used_dt * alpha;
 
-                    // Take a smaller step to reach target exactly
-                    let (final_state, _, _) =
-                        rk45_step(&state, t, dt_to_target, &params, &inputs, tolerance);
-
-                    // Make sure we don't overshoot
-                    let mut corrected_state = final_state;
-                    if corrected_state[0] > params.target_distance_m {
-                        corrected_state[0] = params.target_distance_m;
+                    // Take a smaller step to reach the target and enforce its error estimate too.
+                    if iteration_count >= max_iterations {
+                        break;
                     }
+                    let target_control = Rk45Control {
+                        max_trials: max_iterations - iteration_count,
+                        ..control
+                    };
+                    accepted = match adaptive_rk45_step(
+                        &state,
+                        t,
+                        dt_to_target,
+                        &params,
+                        &inputs,
+                        target_control,
+                    ) {
+                        Ok(accepted) => accepted,
+                        Err(trials) => {
+                            iteration_count += trials;
+                            eprintln!(
+                                "WARNING: RK45 could not produce a finite target-crossing step"
+                            );
+                            break;
+                        }
+                    };
+                    iteration_count += accepted.trials;
+                    debug_assert!(accepted.error <= tolerance || accepted.used_dt <= min_step);
 
-                    trajectory.push((t + dt_to_target, corrected_state));
-                    break; // Stop at target - no more points after this
+                    if accepted.state[0] >= params.target_distance_m {
+                        // Make sure we don't overshoot.
+                        state = accepted.state;
+                        state[0] = params.target_distance_m;
+                        t += accepted.used_dt;
+                        trajectory.push((t, state));
+                        break;
+                    }
                 }
 
-                // Update state
-                state = new_state;
-                t += dt;
+                // Update state and time using the interval that actually passed acceptance.
+                state = accepted.state;
+                t += accepted.used_dt;
 
                 // Save trajectory point if we've moved enough distance
                 if state[0] - last_save_x >= save_interval_m || state[0] >= params.target_distance_m
@@ -484,8 +623,8 @@ pub fn integrate_trajectory(
                     last_save_x = state[0];
                 }
 
-                // Limit dt for next step - ensure we get enough resolution
-                dt = dt_new.min(effective_max_step).max(0.0001); // Use effective max step, min 0.1ms
+                // Limit the proposal for the next trial; this does not change the time just used.
+                dt = accepted.next_dt;
 
                 // Stop if we've reached the target
                 if state[0] >= params.target_distance_m {
@@ -505,7 +644,11 @@ pub fn integrate_trajectory(
             }
 
             // Warn if we hit the iteration limit
-            if iteration_count >= max_iterations {
+            if iteration_count >= max_iterations
+                && t < t_end
+                && state[0] < params.target_distance_m
+                && state[1] >= params.ground_threshold
+            {
                 eprintln!(
                     "WARNING: Trajectory integration hit maximum iteration limit ({} iterations)",
                     max_iterations
@@ -620,6 +763,72 @@ mod tests {
             ground_threshold: -1000.0,
             atmo_sock: None,
         }
+    }
+
+    #[test]
+    fn rk45_retries_rejected_wind_boundary_step() {
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
+        let mut params = create_test_params(100.0);
+        params.wind_segments = vec![(0.0, 90.0, 4.0), (1_000.0, 90.0, 10_000.0)];
+
+        let state = Vector6::from_row_slice(&initial_state);
+        let inputs = build_inputs(&params);
+        let initial_dt = 0.01;
+        let tolerance = 1e-6;
+        let (rejected_state, suggested_dt, error) =
+            rk45_step(&state, 0.0, initial_dt, &params, &inputs, tolerance);
+        assert!(
+            error > tolerance,
+            "wind-boundary trial must exceed tolerance, got {error}"
+        );
+        assert!(suggested_dt < initial_dt);
+
+        let accepted = adaptive_rk45_step(
+            &state,
+            0.0,
+            initial_dt,
+            &params,
+            &inputs,
+            Rk45Control {
+                tolerance,
+                min_step: RK45_MIN_STEP,
+                max_step: initial_dt,
+                max_trials: 100,
+            },
+        )
+        .expect("a smaller finite trial should satisfy the tolerance");
+
+        assert!(accepted.trials > 1, "oversized trial was not retried");
+        assert!(accepted.used_dt < initial_dt);
+        assert!(
+            accepted.error <= tolerance || accepted.used_dt <= RK45_MIN_STEP,
+            "accepted error {} exceeds tolerance at dt {}",
+            accepted.error,
+            accepted.used_dt
+        );
+
+        let (accepted_state, _, accepted_error) =
+            rk45_step(&state, 0.0, accepted.used_dt, &params, &inputs, tolerance);
+        assert_eq!(accepted.state, accepted_state);
+        assert_eq!(accepted.error, accepted_error);
+        assert_ne!(accepted.state, rejected_state);
+        assert!((RK45_MIN_STEP..=initial_dt).contains(&accepted.next_dt));
+    }
+
+    #[test]
+    fn rk45_error_norm_scales_components_independently() {
+        let state = Vector6::new(1.0e9, 0.0, 0.0, 800.0, 0.0, 0.0);
+        let fifth_order = state;
+        let mut fourth_order = state;
+        fourth_order[4] = 1.0e-3;
+
+        let error = rk45_error_norm(&state, &fifth_order, &fourth_order);
+        let expected = 1.0e-3 / 6.0_f64.sqrt();
+
+        assert!(
+            (error - expected).abs() <= 1e-15,
+            "large downrange position masked a velocity-component error: {error}"
+        );
     }
 
     #[test]
