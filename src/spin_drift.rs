@@ -108,6 +108,26 @@ pub fn calculate_spin_rate(velocity_mps: f64, twist_rate_inches: f64) -> (f64, f
     (spin_rate_rps, spin_rate_rad_s)
 }
 
+/// Return muzzle-set spin rate and the dimensionless spin parameter at the current airspeed.
+///
+/// These acceleration kernels do not integrate roll as a state, so spin is held at its launch
+/// value while translational airspeed changes. Modeling spin decay would require carrying roll
+/// rate through the integrator rather than re-deriving it from current velocity.
+pub(crate) fn calculate_magnus_spin_state(
+    muzzle_velocity_mps: f64,
+    current_velocity_mps: f64,
+    twist_rate_inches: f64,
+    caliber_m: f64,
+) -> (f64, f64) {
+    let (_, spin_rate_rad_s) = calculate_spin_rate(muzzle_velocity_mps, twist_rate_inches);
+    let spin_parameter = if current_velocity_mps > 1e-9 {
+        spin_rate_rad_s * caliber_m / (2.0 * current_velocity_mps)
+    } else {
+        0.0
+    };
+    (spin_rate_rad_s, spin_parameter)
+}
+
 /// Calculate dynamic gyroscopic stability factor using Miller formula
 pub fn calculate_dynamic_stability(
     bullet_mass_grains: f64,
@@ -550,6 +570,18 @@ mod tests {
         let (rps_zero, rad_s_zero) = calculate_spin_rate(800.0, 0.0);
         assert_eq!(rps_zero, 0.0);
         assert_eq!(rad_s_zero, 0.0);
+    }
+
+    #[test]
+    fn magnus_spin_is_set_at_muzzle_while_spin_parameter_grows_downrange() {
+        let muzzle_velocity = 800.0;
+        let (muzzle_spin, muzzle_parameter) =
+            calculate_magnus_spin_state(muzzle_velocity, muzzle_velocity, 10.0, 0.00782);
+        let (downrange_spin, downrange_parameter) =
+            calculate_magnus_spin_state(muzzle_velocity, muzzle_velocity / 2.0, 10.0, 0.00782);
+
+        assert_eq!(downrange_spin.to_bits(), muzzle_spin.to_bits());
+        assert!((downrange_parameter / muzzle_parameter - 2.0).abs() < 1e-12);
     }
 
     #[test]

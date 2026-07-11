@@ -7,9 +7,6 @@ use crate::drag::get_drag_coefficient_full;
 use crate::InternalBallisticInputs as BallisticInputs;
 use nalgebra::Vector3;
 
-// Physics constants
-const INCHES_PER_FOOT: f64 = 12.0;
-
 // Magnus Effect Constants
 //
 // The Magnus effect causes spinning projectiles to deflect perpendicular to both
@@ -59,23 +56,6 @@ const MAGNUS_SUPERSONIC_RANGE: f64 = 1.8; // Scaling range for supersonic recove
 // Atmosphere detection thresholds
 const MAX_REALISTIC_DENSITY: f64 = 2.0; // kg/m³
 const MIN_REALISTIC_SPEED_OF_SOUND: f64 = 200.0; // m/s
-
-/// Calculate spin rate from twist rate and velocity
-fn calculate_spin_rate(twist_rate: f64, velocity_mps: f64) -> f64 {
-    if twist_rate <= 0.0 {
-        return 0.0;
-    }
-
-    // Convert velocity to ft/s and twist rate to ft/turn
-    let velocity_fps = velocity_mps * MPS_TO_FPS;
-    let twist_rate_ft = twist_rate / INCHES_PER_FOOT;
-
-    // Calculate spin rate: revolutions per second = velocity_fps / twist_rate_ft
-    // Convert to rad/s: rad/s = (revolutions/s) * 2π
-    let revolutions_per_second = velocity_fps / twist_rate_ft;
-
-    revolutions_per_second * 2.0 * std::f64::consts::PI
-}
 
 /// Calculate Magnus moment coefficient C_Lα based on Mach number
 /// Based on McCoy's 'Modern Exterior Ballistics' and empirical data
@@ -381,20 +361,15 @@ pub fn compute_derivatives(
             && inputs.bullet_diameter > 0.0
             && inputs.twist_rate > 0.0
         {
-            // Calculate spin rate from twist rate and velocity
-            let spin_rate_rad_s = calculate_spin_rate(inputs.twist_rate, speed_air);
+            let diameter_m = inputs.bullet_diameter;
+            let (spin_rate_rad_s, spin_param) = crate::spin_drift::calculate_magnus_spin_state(
+                inputs.muzzle_velocity,
+                speed_air,
+                inputs.twist_rate,
+                diameter_m,
+            );
 
             let c_np = calculate_magnus_moment_coefficient(mach);
-
-            // bullet_diameter is SI (meters)
-            let diameter_m = inputs.bullet_diameter;
-
-            // Calculate spin parameter (dimensionless) with safe division
-            let spin_param = if speed_air > 1e-9 {
-                spin_rate_rad_s * diameter_m / (2.0 * speed_air)
-            } else {
-                0.0 // No spin effect at zero speed
-            };
 
             // Calculate reference area
             let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
