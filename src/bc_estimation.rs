@@ -68,12 +68,27 @@ impl BulletType {
 pub struct BCSegmentEstimator;
 
 impl BCSegmentEstimator {
-    /// Identify bullet type from model name and characteristics
+    /// Identify bullet type from model name and characteristics.
+    ///
+    /// This compatibility entry point interprets `bc_value` as a G1 BC. Call
+    /// [`Self::identify_bullet_type_for_drag_model`] when the reference drag
+    /// model is known.
     pub fn identify_bullet_type(
         model: &str,
         weight: f64,
         caliber: f64,
         bc_value: Option<f64>,
+    ) -> BulletType {
+        Self::identify_bullet_type_for_drag_model(model, weight, caliber, bc_value, "G1")
+    }
+
+    /// Identify bullet type while interpreting the BC in its reference-model space.
+    pub fn identify_bullet_type_for_drag_model(
+        model: &str,
+        weight: f64,
+        caliber: f64,
+        bc_value: Option<f64>,
+        drag_model: &str,
     ) -> BulletType {
         let model_lower = model.to_lowercase();
 
@@ -109,7 +124,7 @@ impl BCSegmentEstimator {
             // returns 0 for non-positive caliber, which would make bc/sd == +Inf).
             if let Some(bc) = bc_value {
                 let sd = Self::calculate_sectional_density(weight, caliber);
-                if sd > 0.0 && bc / sd > 1.6 {
+                if sd > 0.0 && Self::classification_bc_sd_ratio(bc, sd, drag_model) > 1.6 {
                     return BulletType::MatchBoatTail;
                 }
             }
@@ -165,7 +180,7 @@ impl BCSegmentEstimator {
         if let Some(bc) = bc_value {
             let sd = Self::calculate_sectional_density(weight, caliber);
             if sd > 0.0 {
-                let bc_to_sd_ratio = bc / sd;
+                let bc_to_sd_ratio = Self::classification_bc_sd_ratio(bc, sd, drag_model);
 
                 if bc_to_sd_ratio > 1.8 {
                     return BulletType::VldHighBc;
@@ -178,6 +193,19 @@ impl BCSegmentEstimator {
         }
 
         BulletType::Unknown
+    }
+
+    /// Convert the reference-model-dependent BC/SD ratio into the G1 space used
+    /// by the legacy coarse classification thresholds above. Typical boat-tail
+    /// G1 BCs are approximately twice their G7 BCs; this normalization prevents
+    /// ordinary G7 match bullets from looking like low-BC G1 flat-base bullets.
+    fn classification_bc_sd_ratio(bc: f64, sd: f64, drag_model: &str) -> f64 {
+        let g1_equivalent_bc = if drag_model.eq_ignore_ascii_case("G7") {
+            bc * 2.0
+        } else {
+            bc
+        };
+        g1_equivalent_bc / sd
     }
 
     /// Calculate sectional density (SD) from weight and caliber
@@ -199,7 +227,13 @@ impl BCSegmentEstimator {
         drag_model: &str,
     ) -> Vec<BCSegmentData> {
         // Identify bullet type
-        let bullet_type = Self::identify_bullet_type(model, weight, caliber, Some(base_bc));
+        let bullet_type = Self::identify_bullet_type_for_drag_model(
+            model,
+            weight,
+            caliber,
+            Some(base_bc),
+            drag_model,
+        );
         let type_factors = bullet_type.get_factors();
 
         // Calculate sectional density
@@ -383,5 +417,68 @@ mod tests {
         assert!((segments[0].bc_value - 0.450).abs() < 0.05);
         // BC should degrade at lower velocities
         assert!(segments[segments.len() - 1].bc_value < segments[0].bc_value);
+    }
+
+    #[test]
+    fn generic_g7_bc_uses_g7_classification_space() {
+        // A representative 175 gr .308 match bullet. Its G7 BC is ordinary for a
+        // boat-tail projectile, but the same numeric value looks like a blunt
+        // flat-base bullet when interpreted with the G1 BC/SD thresholds.
+        let base_bc = 0.243;
+        let segments = BCSegmentEstimator::estimate_bc_segments(base_bc, 0.308, 175.0, "", "G7");
+
+        assert!(
+            segments.len() >= 4,
+            "G7 match bullet should use a near-flat match/VLD ladder: {segments:?}"
+        );
+        let subsonic_bc = segments.last().unwrap().bc_value;
+        assert!(
+            subsonic_bc >= base_bc * 0.92,
+            "G7 match bullet was over-degraded: {base_bc} -> {subsonic_bc}"
+        );
+
+        // The normalization is deliberately equivalent to classifying the
+        // approximate G1 BC, while the legacy entry point remains G1-compatible.
+        let g1_segments =
+            BCSegmentEstimator::estimate_bc_segments(base_bc * 2.0, 0.308, 175.0, "", "G1");
+        assert_eq!(segments.len(), g1_segments.len());
+        for (g7, g1) in segments.iter().zip(&g1_segments) {
+            assert_eq!(g7.velocity_min.to_bits(), g1.velocity_min.to_bits());
+            assert_eq!(g7.velocity_max.to_bits(), g1.velocity_max.to_bits());
+            assert!((g7.bc_value / base_bc - g1.bc_value / (base_bc * 2.0)).abs() < 1e-12);
+        }
+
+        let legacy_g1 = BCSegmentEstimator::identify_bullet_type("", 175.0, 0.308, Some(base_bc));
+        assert_eq!(legacy_g1, BulletType::HuntingFlatBase);
+        assert_eq!(
+            legacy_g1,
+            BCSegmentEstimator::identify_bullet_type_for_drag_model(
+                "",
+                175.0,
+                0.308,
+                Some(base_bc),
+                "G1",
+            )
+        );
+        assert_eq!(
+            BCSegmentEstimator::identify_bullet_type_for_drag_model(
+                "175gr SMK",
+                175.0,
+                0.308,
+                Some(base_bc),
+                "g7",
+            ),
+            BulletType::MatchBoatTail
+        );
+        assert_eq!(
+            BCSegmentEstimator::identify_bullet_type_for_drag_model(
+                "",
+                175.0,
+                0.0,
+                Some(base_bc),
+                "G7",
+            ),
+            BulletType::Unknown
+        );
     }
 }

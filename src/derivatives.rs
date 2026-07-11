@@ -663,7 +663,12 @@ pub(crate) fn estimate_bc_segments_for(
     } else {
         format!("{}gr bullet", inputs.weight_grains as i32)
     };
-    let bc_type_str = inputs.bc_type_str.as_deref().unwrap_or("G1");
+    // Prefer the legacy explicit string when present, but otherwise preserve the
+    // typed drag model carried by every current BallisticInputs constructor.
+    let bc_type_str = inputs.bc_type_str.as_deref().unwrap_or(match inputs.bc_type {
+        crate::DragModel::G7 => "G7",
+        _ => "G1",
+    });
     Some(BCSegmentEstimator::estimate_bc_segments(
         bc_used,
         inputs.caliber_inches,
@@ -724,6 +729,47 @@ mod tests {
                 b.to_bits(),
                 "BC differs at {vf} fps: slow={a} fast={b}"
             );
+        }
+    }
+
+    #[test]
+    fn estimated_segments_inherit_typed_g7_drag_model() {
+        let mut inputs = create_test_inputs();
+        inputs.bc_value = 0.243;
+        inputs.bc_type = crate::DragModel::G7;
+        inputs.bc_type_str = None;
+        inputs.bullet_mass = 175.0 * 0.00006479891;
+        inputs.weight_grains = 175.0;
+
+        let actual = estimate_bc_segments_for(&inputs, inputs.bc_value).unwrap();
+        let expected = BCSegmentEstimator::estimate_bc_segments(
+            inputs.bc_value,
+            inputs.caliber_inches,
+            inputs.weight_grains,
+            "175gr bullet",
+            "G7",
+        );
+
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.velocity_min.to_bits(), expected.velocity_min.to_bits());
+            assert_eq!(actual.velocity_max.to_bits(), expected.velocity_max.to_bits());
+            assert_eq!(actual.bc_value.to_bits(), expected.bc_value.to_bits());
+        }
+
+        // An explicitly populated legacy string remains authoritative.
+        inputs.bc_type_str = Some("G1".to_string());
+        let legacy = estimate_bc_segments_for(&inputs, inputs.bc_value).unwrap();
+        let expected_g1 = BCSegmentEstimator::estimate_bc_segments(
+            inputs.bc_value,
+            inputs.caliber_inches,
+            inputs.weight_grains,
+            "175gr bullet",
+            "G1",
+        );
+        assert_eq!(legacy.len(), expected_g1.len());
+        for (legacy, expected) in legacy.iter().zip(&expected_g1) {
+            assert_eq!(legacy.bc_value.to_bits(), expected.bc_value.to_bits());
         }
     }
 
