@@ -57,6 +57,10 @@ const MAGNUS_SUPERSONIC_RANGE: f64 = 1.8; // Scaling range for supersonic recove
 const MAX_REALISTIC_DENSITY: f64 = 2.0; // kg/m³
 const MIN_REALISTIC_SPEED_OF_SOUND: f64 = 200.0; // m/s
 
+fn dry_air_temperature_c_from_sound_speed(speed_of_sound_mps: f64) -> f64 {
+    speed_of_sound_mps * speed_of_sound_mps / (1.4 * 287.05) - 273.15
+}
+
 /// Calculate Magnus moment coefficient C_Lα based on Mach number
 /// Based on McCoy's 'Modern Exterior Ballistics' and empirical data
 pub(crate) fn calculate_magnus_moment_coefficient(mach: f64) -> f64 {
@@ -159,17 +163,16 @@ pub fn compute_derivatives(
         // params[0] = air density, params[1] = speed of sound
         // params[2] and params[3] would be 0.0
         // BUT: we need to check if params[0] is a reasonable density value (< 2.0 kg/m³)
-        let (air_density, speed_of_sound, _temperature_c) = if atmos_params.0
-            < MAX_REALISTIC_DENSITY
+        let (air_density, speed_of_sound, temperature_c) = if atmos_params.0 < MAX_REALISTIC_DENSITY
             && atmos_params.1 > MIN_REALISTIC_SPEED_OF_SOUND
             && atmos_params.2 == 0.0
             && atmos_params.3 == 0.0
         {
             // Direct atmosphere values: atmos_params.1 is the SPEED OF SOUND here, NOT Celsius,
-            // so back-compute temperature from it (c = sqrt(1.4*287.05*T_k)) for the Reynolds
-            // correction below — which previously read atmos_params.1 as temperature directly.
+            // so back-compute temperature from it (c = sqrt(1.4*287.05*T_k)) for the optional
+            // Reynolds-correction input below.
             let (rho, sound) = get_direct_atmosphere(atmos_params.0, atmos_params.1);
-            (rho, sound, sound * sound / (1.4 * 287.05) - 273.15)
+            (rho, sound, dry_air_temperature_c_from_sound_speed(sound))
         } else {
             // Calculate from base parameters. MBA-1136 (rank 9): route the local speed of sound
             // through the moist-air formula. Humidity is NOT plumbed to this call site — on the
@@ -213,9 +216,10 @@ pub fn compute_derivatives(
             );
             // LOCAL temperature at the projectile altitude, back-computed from the LOCAL speed of
             // sound (get_local_atmosphere returns density/sound at altitude_at_pos but not temp;
-            // its sound = sqrt(1.4*287.05*T_k)). Using base_temp_c here would feed the Reynolds
-            // viscosity the shooter-altitude temperature while density/sound are local.
-            (rho, sound, sound * sound / (1.4 * 287.05) - 273.15)
+            // its sound = sqrt(1.4*287.05*T_k)). Using base_temp_c here would feed the optional
+            // Reynolds viscosity input a shooter-altitude temperature while density/sound are
+            // local if that correction is enabled later.
+            (rho, sound, dry_air_temperature_c_from_sound_speed(sound))
         };
 
         // Calculate Mach number with safe division
@@ -225,12 +229,12 @@ pub fn compute_derivatives(
             0.0 // No meaningful Mach number at zero speed of sound
         };
 
-        // Get drag coefficient with transonic and Reynolds corrections
+        // Get the base drag coefficient; optional corrections are applied or controlled below.
         let drag_factor = get_drag_coefficient_full(
             mach,
             &inputs.bc_type,
             false, // transonic applied exactly once below (was double-applied here + in block)
-            false, // Reynolds applied once below (manual block ~243); was double-applied here + there
+            false, // Reynolds remains disabled consistently across all solver families (MBA-945)
             None,  // let it determine shape
             if inputs.caliber_inches > 0.0 {
                 Some(inputs.caliber_inches)
@@ -244,7 +248,7 @@ pub fn compute_derivatives(
             },
             Some(speed_air),
             Some(air_density),
-            Some(atmos_params.1), // temperature in Celsius
+            Some(temperature_c),
         );
 
         // Get BC value
@@ -707,6 +711,24 @@ mod tests {
         for component in 0..3 {
             assert_eq!(projected[component].to_bits(), level[component].to_bits());
         }
+    }
+
+    #[test]
+    fn dry_air_sound_speed_round_trips_to_local_celsius() {
+        for expected_temp_c in [-40.0_f64, 15.0, 40.0] {
+            let sound_speed = (1.4 * 287.05 * (expected_temp_c + 273.15)).sqrt();
+            let actual_temp_c = dry_air_temperature_c_from_sound_speed(sound_speed);
+            assert!(
+                (actual_temp_c - expected_temp_c).abs() < 1e-10,
+                "sound speed {sound_speed} m/s recovered {actual_temp_c} C, expected {expected_temp_c} C"
+            );
+        }
+
+        let direct_mode_temp_c = dry_air_temperature_c_from_sound_speed(340.0);
+        assert!(
+            direct_mode_temp_c > 10.0 && direct_mode_temp_c < 20.0,
+            "direct-mode 340 m/s must be interpreted as sound speed, not 340 C"
+        );
     }
 
     fn create_test_inputs() -> BallisticInputs {
