@@ -202,31 +202,28 @@ fn apply_atmospheric_correction(sg: f64, air_density_kg_m3: f64, _temperature_k:
     sg * (STD_DENSITY / air_density_kg_m3)
 }
 
-/// Calculate dynamic stability including yaw effects
+/// Legacy compatibility shim that returns `static_stability` unchanged.
+///
+/// This signature cannot calculate the aerodynamic dynamic-stability factor from the literature:
+/// that requires lift, drag, pitch-moment, pitch-damping, angle-of-attack-rate derivatives, and
+/// projectile inertia radii that are not present here. The former yaw and spin multipliers were
+/// unsupported and have been removed.
+///
+/// [`crate::spin_drift::calculate_dynamic_stability`] is a different Miller gyroscopic-stability
+/// calculation and is not a replacement for an aerodynamic dynamic-stability model.
+#[deprecated(
+    since = "0.22.18",
+    note = "does not compute aerodynamic dynamic stability; retained as a neutral static-stability pass-through"
+)]
 pub fn calculate_dynamic_stability(
     static_stability: f64,
-    velocity_mps: f64,
-    spin_rate_rad_s: f64,
-    yaw_angle_rad: f64,
-    caliber_m: f64,
+    _velocity_mps: f64,
+    _spin_rate_rad_s: f64,
+    _yaw_angle_rad: f64,
+    _caliber_m: f64,
     _mass_kg: f64,
 ) -> f64 {
-    // Dynamic stability accounts for yaw and precession
-
-    // Calculate spin parameter
-    let spin_param = if velocity_mps > 0.0 {
-        spin_rate_rad_s * caliber_m / (2.0 * velocity_mps)
-    } else {
-        0.0
-    };
-
-    // Yaw effect on stability
-    let yaw_factor = 1.0 - 0.1 * yaw_angle_rad.abs().min(0.1);
-
-    // Precession damping factor
-    let precession_factor = 1.0 + 0.05 * spin_param.min(0.5);
-
-    static_stability * yaw_factor * precession_factor
+    static_stability
 }
 
 /// Predict stability over trajectory with velocity and spin decay.
@@ -609,35 +606,43 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_stability() {
-        let static_sg = 1.5;
-        let velocity_mps = 800.0;
-        let spin_rate = 1500.0;
-        let caliber_m = 0.00782; // 0.308"
-        let mass_kg = 0.0109; // 168 grains
+    #[allow(deprecated)]
+    fn legacy_dynamic_stability_is_neutral_without_aerodynamic_derivatives() {
+        let legacy: fn(f64, f64, f64, f64, f64, f64) -> f64 = calculate_dynamic_stability;
+        let ancillary_states = [
+            (800.0, 1500.0, 0.0, 0.00782, 0.0109),
+            (800.0, 1500.0, 0.5, 0.00782, 0.0109),
+            (0.0, 0.0, 1.0, 0.00782, 0.0109),
+            (f64::NAN, -20_000.0, f64::NAN, -0.009, f64::INFINITY),
+        ];
 
-        // Zero yaw should give stability close to static
-        let dynamic_zero_yaw = calculate_dynamic_stability(
-            static_sg,
-            velocity_mps,
-            spin_rate,
+        for static_sg in [
             0.0,
-            caliber_m,
-            mass_kg,
-        );
-
-        // Some yaw should reduce stability
-        let dynamic_with_yaw = calculate_dynamic_stability(
-            static_sg,
-            velocity_mps,
-            spin_rate,
-            0.05, // ~3 degrees
-            caliber_m,
-            mass_kg,
-        );
-
-        assert!(dynamic_with_yaw < dynamic_zero_yaw);
-        assert!(dynamic_with_yaw > 0.0);
+            -0.0,
+            1.5,
+            -1.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            for (velocity_mps, spin_rate_rad_s, yaw_angle_rad, caliber_m, mass_kg) in
+                ancillary_states
+            {
+                let actual = legacy(
+                    static_sg,
+                    velocity_mps,
+                    spin_rate_rad_s,
+                    yaw_angle_rad,
+                    caliber_m,
+                    mass_kg,
+                );
+                assert_eq!(
+                    actual.to_bits(),
+                    static_sg.to_bits(),
+                    "legacy API invented a dynamic correction without aerodynamic derivatives"
+                );
+            }
+        }
     }
 
     #[test]
