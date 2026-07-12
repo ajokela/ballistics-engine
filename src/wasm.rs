@@ -244,6 +244,7 @@ impl WasmBallistics {
         let mut latitude: Option<f64> = None;
         let mut shot_direction: Option<f64> = None; // compass bearing, degrees, 0=N (Coriolis)
         let mut shooting_angle = 0.0;
+        let mut cant_angle_deg = 0.0;
         let mut powder_temp_sensitivity = if units == UnitSystem::Imperial {
             1.0
         } else {
@@ -507,6 +508,14 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--cant" | "--cant-angle" => {
+                    if i + 1 < args.len() {
+                        cant_angle_deg = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid cant angle"))?;
+                        i += 1;
+                    }
+                }
                 "--powder-temp-sensitivity" => {
                     if i + 1 < args.len() {
                         powder_temp_sensitivity = args[i + 1]
@@ -644,6 +653,7 @@ impl WasmBallistics {
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
+        inputs.cant_angle = cant_angle_deg * std::f64::consts::PI / 180.0;
         inputs.ground_threshold = 0.0;
 
         // Set advanced physics flags. enable_advanced_effects remains the umbrella
@@ -2274,6 +2284,7 @@ Trajectory Command:
     --latitude <LAT>             Latitude for Coriolis (degrees)
     --shot-direction <DEG>       Compass bearing of the shot for Coriolis (0=N, 90=E)
     --shooting-angle <ANGLE>     Uphill/downhill angle (degrees)
+    --cant <DEGREES>             Rifle cant angle (degrees)
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
     --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm)
     --target-height <HEIGHT>     Target height above ground (inches/mm)
