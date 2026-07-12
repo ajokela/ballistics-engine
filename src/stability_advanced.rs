@@ -68,6 +68,10 @@ impl StabilityParameters {
 /// `has_plastic_tip` is retained for source compatibility, but a Boolean cannot provide the tip
 /// length required by the Courtney-Miller correction. No plastic-tip scalar is applied here; use
 /// [`apply_courtney_miller_plastic_tip_correction`] on this result when tip length is known.
+///
+/// `air_density_kg_m3` is the resolved density for the complete atmospheric state. The
+/// `temperature_k` argument is retained for source compatibility but is not applied separately;
+/// callers changing temperature must supply the corresponding density.
 pub fn calculate_advanced_stability(
     mass_grains: f64,
     velocity_fps: f64,
@@ -192,22 +196,18 @@ fn apply_velocity_correction(sg_base: f64, velocity_fps: f64) -> f64 {
 }
 
 /// Atmospheric correction for non-standard conditions
-fn apply_atmospheric_correction(sg: f64, air_density_kg_m3: f64, temperature_k: f64) -> f64 {
+fn apply_atmospheric_correction(sg: f64, air_density_kg_m3: f64, _temperature_k: f64) -> f64 {
     // Standard atmosphere at sea level
     const STD_DENSITY: f64 = 1.225; // kg/m³
-    const STD_TEMP: f64 = 288.15; // K (15°C)
 
     // Density altitude correction (MBA-942): canonical Miller is LINEAR in density ratio
-    // (rho0/rho), matching stability.rs and py_ballisticcalc — not sqrt. (This module is
-    // currently dead code, but kept consistent with the canonical correction.)
-    let density_ratio = STD_DENSITY / air_density_kg_m3;
-    let density_correction = density_ratio;
+    // (rho0/rho), matching stability.rs and py_ballisticcalc. Density already encodes the
+    // temperature/pressure state, so applying `temperature_k` again would double-count it.
+    if !air_density_kg_m3.is_finite() || air_density_kg_m3 <= 0.0 {
+        return 0.0;
+    }
 
-    // Temperature correction (affects speed of sound and viscosity)
-    let temp_ratio = temperature_k / STD_TEMP;
-    let temp_correction = temp_ratio.powf(0.17); // Empirical exponent
-
-    sg * density_correction * temp_correction
+    sg * (STD_DENSITY / air_density_kg_m3)
 }
 
 /// Bowman-Howell correction for hypervelocity projectiles
@@ -566,6 +566,58 @@ mod tests {
             high_altitude,
             sea_level
         );
+    }
+
+    #[test]
+    fn atmospheric_correction_is_only_inverse_density_ratio() {
+        let sg = 2.0_f64;
+        let temperature_k = 308.15; // Deliberately non-standard to catch a second temperature term.
+
+        for (density, expected) in [(1.225, 2.0), (1.0, 2.45), (0.6125, 4.0)] {
+            let actual = apply_atmospheric_correction(sg, density, temperature_k);
+            assert!(
+                (actual - expected).abs() <= expected * 1e-12,
+                "rho {density}: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn advanced_stability_does_not_double_count_temperature_at_fixed_density() {
+        let calculate = |temperature_k| {
+            calculate_advanced_stability(
+                168.0,
+                2800.0,
+                10.0,
+                0.308,
+                1.24,
+                1.0,
+                temperature_k,
+                "unknown",
+                false,
+                false,
+            )
+        };
+
+        let cold = calculate(253.15);
+        let standard = calculate(288.15);
+        let hot = calculate(308.15);
+        let unknown = calculate(f64::NAN);
+        assert_eq!(cold.to_bits(), standard.to_bits());
+        assert_eq!(hot.to_bits(), standard.to_bits());
+        assert_eq!(unknown.to_bits(), standard.to_bits());
+    }
+
+    #[test]
+    fn atmospheric_correction_rejects_nonphysical_density() {
+        for density in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let actual = apply_atmospheric_correction(2.0, density, 288.15);
+            assert_eq!(
+                actual.to_bits(),
+                0.0_f64.to_bits(),
+                "density {density} produced {actual}"
+            );
+        }
     }
 
     #[test]
