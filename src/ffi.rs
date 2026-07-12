@@ -275,7 +275,7 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
             let point_count = result.points.len();
             let points = if point_count > 0 {
                 let mut ffi_points = Vec::with_capacity(point_count);
-                for (i, point) in result.points.iter().enumerate() {
+                for point in result.points.iter() {
                     ffi_points.push(FFITrajectoryPoint {
                         time: point.time,
                         position_x: point.position[0],
@@ -284,17 +284,6 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
                         velocity_magnitude: point.velocity_magnitude,
                         kinetic_energy: point.kinetic_energy,
                     });
-
-                    // Debug: Log first, last, and every 100th point.
-                    // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral.
-                    // Raw position_x/_y/_z exported above are McCoy-ordered (X=downrange).
-                    #[cfg(debug_assertions)]
-                    if i == 0 || i == result.points.len() - 1 || i % 100 == 0 {
-                        eprintln!(
-                            "FFI point {}: lateral={:.2}m, vertical={:.2}m, downrange={:.2}m",
-                            i, point.position[2], point.position[1], point.position[0]
-                        );
-                    }
                 }
                 let points_ptr = ffi_points.as_mut_ptr();
                 std::mem::forget(ffi_points); // Prevent deallocation
@@ -456,16 +445,6 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
     // This means the bullet crosses the line of sight at the zero distance
     let target_height = ballistic_inputs.sight_height;
 
-    #[cfg(debug_assertions)]
-    {
-        eprintln!("FFI: Calculating zero angle for:");
-        eprintln!("  Zero distance: {} m", zero_distance);
-        eprintln!("  Target height: {} m", target_height);
-        eprintln!("  Sight height: {} m", ballistic_inputs.sight_height);
-        eprintln!("  Wind speed: {} m/s", wind_conditions.speed);
-        eprintln!("  Temperature: {} C", atmospheric_conditions.temperature);
-    }
-
     match calculate_zero_angle_with_conditions(
         ballistic_inputs,
         zero_distance,
@@ -473,20 +452,8 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
         wind_conditions,
         atmospheric_conditions,
     ) {
-        Ok(angle) => {
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "  Calculated angle: {} rad ({} deg)",
-                angle,
-                angle * 180.0 / std::f64::consts::PI
-            );
-            angle
-        }
-        Err(e) => {
-            #[cfg(debug_assertions)]
-            eprintln!("  Error: {:?}", e);
-            f64::NAN
-        }
+        Ok(angle) => angle,
+        Err(_) => f64::NAN,
     }
 }
 
