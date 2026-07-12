@@ -92,6 +92,69 @@ fn height_at(pts: &[(f64, f64)], zyd: f64) -> f64 {
     pts.last().unwrap().1
 }
 
+/// Run a deliberately temperature-sensitive load with a 500 yd zero. The stated 2650 fps
+/// velocity is referenced to 70 F, so the 110 F shot-day velocity resolves to 2850 fps.
+fn run_linear_powder_zero(extra: &[&str]) -> (Vec<(f64, f64)>, f64) {
+    let mut args = vec![
+        "trajectory",
+        "-v",
+        "2650",
+        "-b",
+        "0.19",
+        "-m",
+        "77",
+        "-d",
+        "0.224",
+        "--drag-model",
+        "g7",
+        "--temperature",
+        "110",
+        "--pressure",
+        "29.92",
+        "--powder-temp",
+        "70",
+        "--use-powder-sensitivity",
+        "--powder-temp-sensitivity",
+        "5",
+        "--auto-zero",
+        "500",
+        "--max-range",
+        "600",
+        "--bore-height",
+        "5",
+        "--sight-height",
+        "2.48",
+        "--ignore-ground-impact",
+        "--full",
+        "-o",
+        "json",
+    ];
+    args.extend_from_slice(extra);
+
+    let output = Command::new(get_cli_binary())
+        .args(args)
+        .output()
+        .expect("run linear-powder auto-zero trajectory");
+    assert!(
+        output.status.success(),
+        "trajectory command should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid trajectory JSON");
+    let trajectory = json["trajectory"].as_array().expect("trajectory array");
+    let muzzle_velocity = trajectory[0]["velocity"].as_f64().expect("muzzle velocity");
+    let points = trajectory
+        .iter()
+        .map(|point| {
+            (
+                point["z"].as_f64().expect("downrange"),
+                point["y"].as_f64().expect("height"),
+            )
+        })
+        .collect();
+    (points, muzzle_velocity)
+}
+
 /// Supplying zero-day conditions equal to the shot-day conditions must reproduce the
 /// plain auto-zero result exactly — the override path is a no-op when nothing differs,
 /// so existing callers are unaffected.
@@ -174,5 +237,41 @@ fn zero_day_atmosphere_resolves_at_short_zero() {
     assert!(
         diff > 0.001, // yards (~0.036"); the real effect here is ~0.1"
         "extreme zero-day atmosphere must change the come-up at {far} yd, got diff {diff} yd"
+    );
+}
+
+#[test]
+fn linear_powder_model_is_shared_by_auto_zero_and_flight() {
+    let (implicit, implicit_velocity) = run_linear_powder_zero(&[]);
+    let (explicit, explicit_velocity) = run_linear_powder_zero(&["--zero-velocity", "2850"]);
+
+    assert!((implicit_velocity - 2850.0).abs() < 1e-6);
+    assert!((explicit_velocity - 2850.0).abs() < 1e-6);
+    let implicit_height = height_at(&implicit, 500.0);
+    let explicit_height = height_at(&explicit, 500.0);
+    let sight_line_height = (5.0 * 12.0 + 2.48) / 36.0;
+    assert!(
+        (implicit_height - explicit_height).abs() < 1e-6,
+        "implicit linear zero must match explicit 2850 fps zero: implicit={implicit_height} yd, explicit={explicit_height} yd"
+    );
+    assert!(
+        (implicit_height - sight_line_height).abs() < 1e-4,
+        "temperature-resolved flight missed its 500 yd zero: height={implicit_height} yd, sight line={sight_line_height} yd"
+    );
+}
+
+#[test]
+fn linear_powder_zero_uses_zero_day_temperature() {
+    // At 30 F the zero-day velocity is 2650 + 5 * (30 - 70) = 2450 fps, while the
+    // shot-day trajectory remains at 2850 fps under its 110 F conditions.
+    let (implicit, _) = run_linear_powder_zero(&["--zero-temperature", "30"]);
+    let (explicit, _) =
+        run_linear_powder_zero(&["--zero-temperature", "30", "--zero-velocity", "2450"]);
+
+    let implicit_height = height_at(&implicit, 500.0);
+    let explicit_height = height_at(&explicit, 500.0);
+    assert!(
+        (implicit_height - explicit_height).abs() < 1e-6,
+        "linear zero must use the zero-day temperature: implicit={implicit_height} yd, explicit={explicit_height} yd"
     );
 }
