@@ -240,6 +240,27 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn explicit_zero_velocity_ignores_linear_powder_adjustment() {
+        let wasm = WasmBallistics::new();
+        let command = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+                       --auto-zero 300 --zero-velocity 2400 --zero-temperature 20 \
+                       --max-range 100 -o json";
+        let zero_line = |output: &str| output.lines().next().unwrap().to_string();
+
+        let without_linear = zero_line(&wasm.run_command(command).unwrap());
+        let with_linear = zero_line(
+            &wasm
+                .run_command(&format!(
+                    "{command} --use-powder-sensitivity --powder-temp-sensitivity 5"
+                ))
+                .unwrap(),
+        );
+
+        assert!(without_linear.starts_with("Rifle zeroed at 300 yards"));
+        assert_eq!(with_linear, without_linear);
+    }
+
+    #[wasm_bindgen_test]
     fn metric_default_powder_temperature_represents_70_fahrenheit() {
         let wasm = WasmBallistics::new();
         let result = wasm
