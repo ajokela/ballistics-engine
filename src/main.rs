@@ -3091,10 +3091,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     });
 
+                    // BC5D segment generation is keyed by the manually adjusted BC. Preserve
+                    // that pre-table value so the muzzle lookup samples the same BC axis.
+                    let table_base_bc = trued_bc;
+
                     if let Some(segments) = generate_bc5d_segments(
                         &mut manager,
                         caliber_in,
-                        trued_bc,
+                        table_base_bc,
                         bc_type_str,
                         mass_grains,
                         Some(trued_velocity_fps),
@@ -3108,7 +3112,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .lookup(
                                 caliber_in,
                                 mass_grains,
-                                final_bc,
+                                table_base_bc,
                                 trued_velocity_fps,
                                 trued_velocity_fps,
                                 bc_type_str,
@@ -3117,12 +3121,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         eprintln!(
                             "BC5D Table: Muzzle correction={:.4} for BC={:.3} {} {}gr @ {:.0}fps",
                             muzzle_correction,
-                            final_bc,
+                            table_base_bc,
                             bc_type_str,
                             mass_grains,
                             trued_velocity_fps
                         );
-                        trued_bc *= muzzle_correction;
+                        trued_bc = table_base_bc * muzzle_correction;
                         Some(muzzle_correction)
                     } else {
                         None
