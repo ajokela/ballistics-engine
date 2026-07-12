@@ -240,6 +240,24 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn metric_default_powder_temperature_represents_70_fahrenheit() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command(
+                "trajectory --units metric -v 800 -b 0.3 -m 10 -d 7.62 \
+                 --temperature 30 --use-powder-sensitivity \
+                 --powder-temp-sensitivity 1 --max-range 1 -o json",
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let actual_velocity = json["trajectory"][0]["velocity_mps"].as_f64().unwrap();
+        let reference_temp_c = (70.0 - 32.0) * 5.0 / 9.0;
+        let expected_velocity = 800.0 + (30.0 - reference_temp_c);
+
+        assert!((actual_velocity - expected_velocity).abs() < 1e-9);
+    }
+
+    #[wasm_bindgen_test]
     fn test_shooting_angle() {
         let wasm = WasmBallistics::new();
         let result = wasm
