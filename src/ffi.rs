@@ -206,30 +206,42 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs
 }
 
-/// Calculate a trajectory through the C ABI.
+/// Build a validated [`crate::drag::DragTable`] from borrowed C arrays.
 ///
-/// `step_size` is expressed in milliseconds and must be finite and at least
-/// [`MIN_FFI_STEP_SIZE_MS`]. This boundary contract is validated for every solver mode, although
-/// adaptive RK45 chooses its integration steps internally. Invalid values return null without
-/// starting a solve. A solve that would exceed [`crate::MAX_TRAJECTORY_POINTS`] also returns null;
-/// callers can increase `step_size`, reduce `max_range`, or select adaptive RK45.
+/// Both arrays must contain `len` elements. The data is copied; the caller retains
+/// ownership. Returns `Err(())` for null pointers, `len < 2`, or any deck that fails
+/// [`crate::drag::DragTable::try_new`] validation (non-ascending Mach, non-positive
+/// or non-finite Cd). No error detail crosses the ABI, matching the null/NAN
+/// error convention of this module.
 ///
 /// # Safety
 ///
-/// `inputs` may be null, in which case this function returns null. When non-null,
-/// it must point to a valid, properly aligned [`FFIBallisticInputs`] that remains
-/// readable and is not mutated for the duration of this call. `wind` and
-/// `atmosphere` may also be null; each non-null pointer has the same requirements
-/// for its corresponding type.
-/// The returned pointer, when non-null, must be released exactly once with
-/// [`ballistics_free_trajectory_result`].
-#[no_mangle]
-pub unsafe extern "C" fn ballistics_calculate_trajectory(
+/// When non-null, `mach` and `cd` must each point to `len` readable `f64` values
+/// that remain valid and unmutated for the duration of the call.
+unsafe fn drag_table_from_raw(
+    mach: *const c_double,
+    cd: *const c_double,
+    len: c_int,
+) -> Result<crate::drag::DragTable, ()> {
+    if mach.is_null() || cd.is_null() || len < 2 {
+        return Err(());
+    }
+    let len = len as usize;
+    let mach = unsafe { std::slice::from_raw_parts(mach, len) }.to_vec();
+    let cd = unsafe { std::slice::from_raw_parts(cd, len) }.to_vec();
+    crate::drag::DragTable::try_new(mach, cd).map_err(|_| ())
+}
+
+/// Shared implementation for the trajectory exports. `custom_drag_table`, when
+/// present, replaces the G-model + BC drag (the deck's Cd is divided by sectional
+/// density — see `BallisticInputs::custom_drag_denominator`).
+unsafe fn calculate_trajectory_impl(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,
     atmosphere: *const FFIAtmosphericConditions,
     max_range: c_double,
     step_size: c_double,
+    custom_drag_table: Option<crate::drag::DragTable>,
 ) -> *mut FFITrajectoryResult {
     if inputs.is_null() {
         return ptr::null_mut();
@@ -239,7 +251,8 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
     }
 
     let inputs = unsafe { &*inputs };
-    let ballistic_inputs = convert_inputs(inputs);
+    let mut ballistic_inputs = convert_inputs(inputs);
+    ballistic_inputs.custom_drag_table = custom_drag_table;
     let twist_rate_in = ballistic_inputs.twist_rate;
 
     let wind_conditions = if wind.is_null() {
@@ -375,6 +388,71 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
         }
         Err(_) => ptr::null_mut(),
     }
+}
+
+/// Calculate a trajectory through the C ABI.
+///
+/// `step_size` is expressed in milliseconds and must be finite and at least
+/// [`MIN_FFI_STEP_SIZE_MS`]. This boundary contract is validated for every solver mode, although
+/// adaptive RK45 chooses its integration steps internally. Invalid values return null without
+/// starting a solve. A solve that would exceed [`crate::MAX_TRAJECTORY_POINTS`] also returns null;
+/// callers can increase `step_size`, reduce `max_range`, or select adaptive RK45.
+///
+/// # Safety
+///
+/// `inputs` may be null, in which case this function returns null. When non-null,
+/// it must point to a valid, properly aligned [`FFIBallisticInputs`] that remains
+/// readable and is not mutated for the duration of this call. `wind` and
+/// `atmosphere` may also be null; each non-null pointer has the same requirements
+/// for its corresponding type.
+/// The returned pointer, when non-null, must be released exactly once with
+/// [`ballistics_free_trajectory_result`].
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_calculate_trajectory(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    max_range: c_double,
+    step_size: c_double,
+) -> *mut FFITrajectoryResult {
+    unsafe { calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, None) }
+}
+
+/// [`ballistics_calculate_trajectory`] with a caller-supplied custom drag deck
+/// (Cd vs Mach, e.g. Hornady CDM / Doppler-radar data). The deck REPLACES the
+/// G-model + BC for drag: `bc_type`/`bc_value` are ignored, and the retardation
+/// denominator becomes the projectile's sectional density (mass and diameter in
+/// `inputs` must therefore be positive). Mach values must be strictly ascending
+/// with at least 2 points and finite positive Cd; outside the deck's Mach domain
+/// the nearest endpoint Cd is held.
+///
+/// Returns null for an invalid deck (null arrays, `drag_table_len < 2`, or failed
+/// validation), in addition to every failure mode of the base function.
+///
+/// # Safety
+///
+/// Same contract as [`ballistics_calculate_trajectory`] for `inputs`, `wind`, and
+/// `atmosphere`. Additionally, when non-null, `drag_mach` and `drag_cd` must each
+/// point to `drag_table_len` readable `f64` values, borrowed only for the duration
+/// of this call (the deck is copied; the caller retains ownership — no new free
+/// function is required). The returned pointer, when non-null, must be released
+/// exactly once with [`ballistics_free_trajectory_result`].
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    max_range: c_double,
+    step_size: c_double,
+    drag_mach: *const c_double,
+    drag_cd: *const c_double,
+    drag_table_len: c_int,
+) -> *mut FFITrajectoryResult {
+    let table = match unsafe { drag_table_from_raw(drag_mach, drag_cd, drag_table_len) } {
+        Ok(t) => t,
+        Err(()) => return ptr::null_mut(),
+    };
+    unsafe { calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, Some(table)) }
 }
 
 /// Release a trajectory result allocated by [`ballistics_calculate_trajectory`].
@@ -943,6 +1021,73 @@ mod tests {
                 assert!((*result).point_count as usize <= crate::MAX_TRAJECTORY_POINTS);
                 ballistics_free_trajectory_result(result);
             }
+        }
+    }
+
+    /// A tiny valid deck: strictly ascending Mach, positive Cd.
+    const DECK_MACH: [f64; 4] = [0.5, 1.0, 2.0, 3.0];
+    /// Deliberately LOW drag so the deck measurably increases impact velocity vs G1.
+    const DECK_CD_LOW: [f64; 4] = [0.05, 0.08, 0.06, 0.05];
+
+    #[test]
+    fn trajectory_with_drag_table_applies_the_deck() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let plain = ballistics_calculate_trajectory(
+                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+            );
+            let decked = ballistics_calculate_trajectory_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+            );
+            assert!(!plain.is_null() && !decked.is_null());
+            // The low-drag deck must retain materially more velocity than the G-model.
+            assert!(
+                (*decked).impact_velocity > (*plain).impact_velocity + 1.0,
+                "deck did not change the solve: plain={} decked={}",
+                (*plain).impact_velocity,
+                (*decked).impact_velocity
+            );
+            ballistics_free_trajectory_result(plain);
+            ballistics_free_trajectory_result(decked);
+        }
+    }
+
+    #[test]
+    fn trajectory_with_drag_table_rejects_invalid_decks() {
+        let inputs = valid_trajectory_inputs();
+        let descending = [3.0, 2.0, 1.0, 0.5];
+        let negative_cd = [0.05, -0.08, 0.06, 0.05];
+        unsafe {
+            // null arrays
+            assert!(ballistics_calculate_trajectory_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                std::ptr::null(), DECK_CD_LOW.as_ptr(), 4,
+            ).is_null());
+            assert!(ballistics_calculate_trajectory_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                DECK_MACH.as_ptr(), std::ptr::null(), 4,
+            ).is_null());
+            // too few points
+            assert!(ballistics_calculate_trajectory_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 1,
+            ).is_null());
+            // non-ascending Mach
+            assert!(ballistics_calculate_trajectory_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                descending.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
+            ).is_null());
+            // non-positive Cd
+            assert!(ballistics_calculate_trajectory_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                DECK_MACH.as_ptr(), negative_cd.as_ptr(), 4,
+            ).is_null());
+            // null inputs still rejected
+            assert!(ballistics_calculate_trajectory_with_drag_table(
+                std::ptr::null(), std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
+            ).is_null());
         }
     }
 }
