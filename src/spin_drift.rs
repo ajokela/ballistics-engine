@@ -288,11 +288,15 @@ pub fn calculate_magnus_drift_component(
     0.5 * magnus_accel * time_s.powi(2)
 }
 
-/// Calculate pure gyroscopic drift (Poisson effect)
+/// Calculate the cumulative empirical Litz gyroscopic-drift component.
+///
+/// `velocity_mps` is retained for source compatibility but intentionally does not gate the
+/// accumulated displacement. A stateless current-velocity check cannot erase or freeze drift
+/// accrued earlier in flight; live solver paths use [`litz_drift_meters`] directly.
 pub fn calculate_gyroscopic_drift(
     stability_factor: f64,
     _yaw_rad: f64,
-    velocity_mps: f64,
+    _velocity_mps: f64,
     time_s: f64,
     is_right_twist: bool,
 ) -> f64 {
@@ -300,23 +304,7 @@ pub fn calculate_gyroscopic_drift(
         return 0.0;
     }
 
-    // Litz formula is not reliable for subsonic flight. Disable it.
-    let velocity_fps = velocity_mps * 3.28084;
-    if velocity_fps < 1125.0 {
-        return 0.0;
-    }
-
-    // Direction based on twist
-    let sign = if is_right_twist { 1.0 } else { -1.0 };
-
-    // Bryan Litz's empirical formula for spin drift
-    let base_coefficient = 1.25 * (stability_factor + 1.2);
-    let time_factor = time_s.powf(1.83);
-    let drift_in = sign * base_coefficient * time_factor;
-
-    // Convert to meters
-
-    drift_in * 0.0254
+    litz_drift_meters(stability_factor, time_s, is_right_twist)
 }
 
 /// Calculate enhanced spin drift with all components.
@@ -728,6 +716,50 @@ mod tests {
         assert!((right - expected_in * 0.0254).abs() < 1e-12);
         assert!((right + left).abs() < 1e-12, "left twist must mirror right");
         assert!(right > 0.0 && left < 0.0);
+    }
+
+    #[test]
+    fn gyroscopic_drift_is_continuous_at_legacy_velocity_threshold() {
+        let stability_factor = 2.0;
+        let time_s = 2.0;
+        let threshold_mps = 1125.0 / 3.28084;
+
+        for is_right_twist in [true, false] {
+            let expected = litz_drift_meters(stability_factor, time_s, is_right_twist);
+            for velocity_mps in [threshold_mps - 1e-6, threshold_mps, threshold_mps + 1e-6] {
+                let actual = calculate_gyroscopic_drift(
+                    stability_factor,
+                    0.0,
+                    velocity_mps,
+                    time_s,
+                    is_right_twist,
+                );
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn gyroscopic_drift_preserves_accumulation_below_velocity_threshold() {
+        let stability_factor = 2.0;
+        let threshold_mps = 1125.0 / 3.28084;
+        let before =
+            calculate_gyroscopic_drift(stability_factor, 0.0, threshold_mps + 1e-6, 1.5, true);
+        let after =
+            calculate_gyroscopic_drift(stability_factor, 0.0, threshold_mps - 1e-6, 2.0, true);
+        let left_after =
+            calculate_gyroscopic_drift(stability_factor, 0.0, threshold_mps - 1e-6, 2.0, false);
+
+        assert_eq!(
+            before.to_bits(),
+            litz_drift_meters(stability_factor, 1.5, true).to_bits()
+        );
+        assert_eq!(
+            after.to_bits(),
+            litz_drift_meters(stability_factor, 2.0, true).to_bits()
+        );
+        assert!(after > before, "accumulated drift must not disappear");
+        assert_eq!(left_after.to_bits(), (-after).to_bits());
     }
 
     #[test]
