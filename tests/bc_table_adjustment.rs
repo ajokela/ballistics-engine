@@ -99,6 +99,93 @@ fn run_with_table(path: &Path) -> Output {
         .expect("run ballistics")
 }
 
+fn ladder_command(metric: bool, velocity: &str) -> Command {
+    let mut command = Command::new(get_cli_binary());
+    if metric {
+        command.args(["--units", "metric"]);
+    }
+    command.arg("trajectory");
+    if metric {
+        command.args([
+            "-v",
+            velocity,
+            "-b",
+            "0.4",
+            "-m",
+            "10.886",
+            "-d",
+            "7.8232",
+            "--bullet-length",
+            "30.48",
+        ]);
+    } else {
+        command.args([
+            "-v",
+            velocity,
+            "-b",
+            "0.4",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--bullet-length",
+            "1.2",
+        ]);
+    }
+    command.args(["--drag-model", "g1", "--max-range", "5", "-o", "json"]);
+    command
+}
+
+fn print_ladder(path: &Path, metric: bool, velocity: &str) -> Output {
+    ladder_command(metric, velocity)
+        .arg("--bc-table-dir")
+        .arg(path)
+        .arg("--print-bc-segments")
+        .output()
+        .expect("print BC5D ladder")
+}
+
+fn ladder_segments(output: &Output) -> Vec<String> {
+    assert!(
+        output.status.success(),
+        "table command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("--bc-segment "))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn assert_ladder_round_trips(directory: &Path, metric: bool, velocity: &str, expected_top: &str) {
+    let printed = print_ladder(directory, metric, velocity);
+    let segments = ladder_segments(&printed);
+    assert!(!segments.is_empty(), "no ladder was printed");
+    assert!(
+        segments[0].starts_with(expected_top),
+        "top band lost its narrow boundary: {}",
+        segments[0]
+    );
+    for segment in &segments {
+        let mut fields = segment.split(':');
+        let min: f64 = fields.next().unwrap().parse().unwrap();
+        let max: f64 = fields.next().unwrap().parse().unwrap();
+        assert!(min < max, "printed degenerate segment: {segment}");
+    }
+
+    let mut pasted = ladder_command(metric, velocity);
+    for segment in &segments {
+        pasted.arg("--bc-segment").arg(segment);
+    }
+    let output = pasted.output().expect("paste BC5D ladder");
+    assert!(
+        output.status.success(),
+        "printed ladder was rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn assert_adjusted_axis_used(output: Output) {
     assert!(
         output.status.success(),
@@ -130,4 +217,36 @@ fn bc_adjustment_and_bc5d_share_the_effective_bc_axis() {
     fs::remove_dir_all(&directory).unwrap();
 
     assert_adjusted_axis_used(output);
+}
+
+#[test]
+fn printed_imperial_ladder_preserves_narrow_muzzle_band() {
+    let directory = unique_temp_dir("bc5d-print-imperial");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("bc5d_308.bin"), bc5d_fixture()).unwrap();
+    assert_ladder_round_trips(&directory, false, "2700.3", "2700:2700.3:");
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn printed_metric_ladder_preserves_narrow_muzzle_band() {
+    let directory = unique_temp_dir("bc5d-print-metric");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("bc5d_308.bin"), bc5d_fixture()).unwrap();
+    assert_ladder_round_trips(&directory, true, "823", "822.96:823:");
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn printed_metric_ladder_survives_display_unit_float_collision() {
+    let directory = unique_temp_dir("bc5d-print-metric-ulp");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("bc5d_308.bin"), bc5d_fixture()).unwrap();
+    assert_ladder_round_trips(
+        &directory,
+        true,
+        "518.1600000000001",
+        "518.1600000000001:518.1600000000002:",
+    );
+    fs::remove_dir_all(&directory).unwrap();
 }

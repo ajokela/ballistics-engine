@@ -5163,16 +5163,25 @@ fn generate_bc5d_segments(
         if let Some(units) = print_ladder_units {
             let (to_unit, unit_label) = match units {
                 UnitSystem::Imperial => (1.0, "fps"),
-                UnitSystem::Metric => (1.0 / 3.280_839_895, "m/s"),
+                UnitSystem::Metric => (0.3048, "m/s"),
             };
             eprintln!(
                 "BC5D Table: segment ladder (velocities in {unit_label}; paste as arguments):"
             );
+            // Use shortest round-trip endpoint text: fixed decimal precision can collapse a
+            // genuine narrow muzzle band into VMIN==VMAX, which the paste-back parser rejects.
             for seg in &segments {
+                let display_min = seg.velocity_min * to_unit;
+                let mut display_max = seg.velocity_max * to_unit;
+                // Multiplication can itself map adjacent fps floats to the same metric float.
+                // Preserve the strict parser contract with the smallest representable nudge.
+                if display_max <= display_min {
+                    display_max = display_min.next_up();
+                }
                 eprintln!(
-                    "  --bc-segment {:.0}:{:.0}:{:.5}",
-                    seg.velocity_min * to_unit,
-                    seg.velocity_max * to_unit,
+                    "  --bc-segment {}:{}:{:.5}",
+                    display_min,
+                    display_max,
                     seg.bc_value
                 );
             }
