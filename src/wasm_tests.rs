@@ -261,6 +261,47 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn auto_zero_inherits_explicit_shot_day_powder_temperature() {
+        let wasm = WasmBallistics::new();
+        let command = "trajectory -v 2650 -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+                       --temperature 32 --powder-temp 68 \
+                       --powder-temp-curve 32:2650,77:2720 \
+                       --auto-zero 100 --max-range 100 -o json";
+        let adjustment = |output: &str| {
+            output
+                .lines()
+                .next()
+                .and_then(|line| line.split_once("(Adjustment: "))
+                .map(|(_, value)| value.to_string())
+                .expect("successful auto-zero adjustment")
+        };
+
+        let inherited = adjustment(&wasm.run_command(command).unwrap());
+        let explicit = adjustment(
+            &wasm
+                .run_command(&format!("{command} --zero-powder-temp 68"))
+                .unwrap(),
+        );
+
+        assert_eq!(inherited, explicit);
+
+        let zero_air = adjustment(
+            &wasm
+                .run_command(&format!("{command} --zero-temperature 77"))
+                .unwrap(),
+        );
+        let explicit_zero_air = adjustment(
+            &wasm
+                .run_command(&format!(
+                    "{command} --zero-temperature 77 --zero-powder-temp 77"
+                ))
+                .unwrap(),
+        );
+
+        assert_eq!(zero_air, explicit_zero_air);
+    }
+
+    #[wasm_bindgen_test]
     fn metric_default_powder_temperature_represents_70_fahrenheit() {
         let wasm = WasmBallistics::new();
         let result = wasm

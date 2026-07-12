@@ -266,9 +266,8 @@ impl WasmBallistics {
         // ANGLE be solved under the conditions the rifle was actually zeroed in (a
         // different day: air temperature, pressure, humidity, altitude, and — via the
         // caller's own powder-temp/velocity table — muzzle velocity), while the
-        // trajectory itself runs under the current shot-day conditions. Any flag left
-        // unset falls back to the shot-day value, so omitting all of them reproduces the
-        // previous single-condition behavior exactly (backward compatible).
+        // trajectory itself runs under the current shot-day conditions. Omitting all zero-day
+        // flags reuses the shot-day values exactly; coupled powder fallbacks are resolved below.
         let mut zero_velocity: Option<f64> = None;
         let mut zero_temperature: Option<f64> = None;
         let mut zero_pressure: Option<f64> = None;
@@ -907,15 +906,18 @@ impl WasmBallistics {
                 zero_inputs.altitude = a_m;
                 zero_day_overridden = true;
             }
-            // Zero-day powder temperature for the curve: --zero-powder-temp if given,
-            // else fall back to the zero-day AIR temperature (reset the shot-day powder
-            // temp inherited from the clone above so it isn't reused in the zero solve).
-            zero_inputs.powder_curve_temp_c = zero_powder_temp.map(|zpt| match units {
-                UnitSystem::Imperial => (zpt - 32.0) * 5.0 / 9.0,
-                UnitSystem::Metric => zpt,
-            });
-            if zero_powder_temp.is_some() {
+            // An explicit zero-day powder temperature wins. Otherwise an explicit zero-day air
+            // temperature retains the established "powder follows zero-day air" behavior. With
+            // neither override, keep the cloned shot-day powder temperature so a no-override
+            // zero solve reproduces the flight conditions exactly.
+            if let Some(zpt) = zero_powder_temp {
+                zero_inputs.powder_curve_temp_c = Some(match units {
+                    UnitSystem::Imperial => (zpt - 32.0) * 5.0 / 9.0,
+                    UnitSystem::Metric => zpt,
+                });
                 zero_day_overridden = true;
+            } else if zero_temperature.is_some() {
+                zero_inputs.powder_curve_temp_c = None;
             }
 
             match calculate_zero_angle_with_conditions(

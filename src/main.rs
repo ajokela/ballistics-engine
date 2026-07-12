@@ -598,8 +598,9 @@ enum Commands {
 
         // Zero-day condition overrides for --auto-zero. When supplied, the zero ANGLE is
         // solved under these conditions (the day/velocity the rifle was actually zeroed in)
-        // while the trajectory runs under the current shot-day conditions. Any flag left
-        // unset falls back to the corresponding shot-day value (backward compatible).
+        // while the trajectory runs under the current shot-day conditions. With no zero-day
+        // flags, the shot-day values are reused exactly; coupled powder fallbacks are documented
+        // on the individual options below.
         /// Zero-day muzzle velocity for --auto-zero (fps imperial / m·s⁻¹ metric). Use when the
         /// rifle was zeroed at a different velocity than this shot. Overrides both powder models.
         #[arg(long, value_parser = f64_range(0.0, 6000.0))]
@@ -624,8 +625,9 @@ enum Commands {
 
         /// Zero-day powder temperature for --auto-zero (°F/°C). With --powder-temp-curve,
         /// the curve is interpolated at this temperature to resolve the zero-day muzzle
-        /// velocity (defaults to --zero-temperature when omitted). An explicit
-        /// --zero-velocity still takes precedence.
+        /// velocity. When omitted, the curve follows an explicit --zero-temperature; otherwise
+        /// it inherits an explicit shot-day --powder-temp. An explicit --zero-velocity still
+        /// takes precedence.
         #[arg(long, allow_hyphen_values = true)]
         zero_powder_temp: Option<f64>,
 
@@ -3399,12 +3401,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     } else {
                         powder_temp_curve_si.clone()
                     },
-                    // Zero-day powder temperature for the curve lookup: --zero-powder-temp
-                    // if given, else None -> the curve falls back to the zero-day AIR
-                    // temperature (zero_inputs.temperature, set above). This also resets
-                    // the shot-day powder temp so it isn't inherited into the zero solve.
-                    powder_curve_temp_c: zero_powder_temp
-                        .map(|t| UnitConverter::temperature_to_metric(t, cli.units)),
+                    // Explicit zero-day powder temperature wins; otherwise an explicit zero-day
+                    // air temperature retains the existing curve-at-zero-air behavior. With
+                    // neither override, inherit the shot-day powder lookup temperature.
+                    powder_curve_temp_c: if let Some(t) = zero_powder_temp {
+                        Some(UnitConverter::temperature_to_metric(t, cli.units))
+                    } else if zero_temperature.is_some() {
+                        None
+                    } else {
+                        powder_curve_temp_c
+                    },
                     // Zero with the exact BC configuration the subsequent flight uses. The
                     // resolved schedule covers manual/BC5D data and estimator-generated data;
                     // cluster correction remains a scalar-BC fallback under MBA-1175.

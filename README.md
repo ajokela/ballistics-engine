@@ -209,9 +209,10 @@ air temperature). So a load left in a hot chamber or a cold pocket:
 
 Both powder models compose with `--auto-zero`, symmetrically. For the linear model,
 `--zero-temperature` resolves zero-day velocity relative to the reference `--powder-temp`.
-For a curve, zero-day velocity is resolved at `--zero-powder-temp` (or
-`--zero-temperature` if unset). Zero-day atmosphere flags still drive air density
-independently. An explicit `--zero-velocity` takes precedence over either powder model.
+For a curve, `--zero-powder-temp` overrides the powder lookup; otherwise an explicit
+`--zero-temperature` is used, or the shot-day `--powder-temp` is inherited when no zero-day
+temperature was supplied. Zero-day atmosphere flags still drive air density independently.
+An explicit `--zero-velocity` takes precedence over either powder model.
 
 #### Bore Height and Ground Impact
 
