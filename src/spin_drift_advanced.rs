@@ -97,44 +97,34 @@ pub fn calculate_advanced_spin_drift(
     crate::spin_drift::litz_drift_meters(stability_factor, time_of_flight_s, is_right_twist)
 }
 
-/// Calculate equilibrium yaw angle using advanced model
+/// Estimate flat-fire yaw of repose for the representative projectile in
+/// [`crate::precession_nutation::PrecessionNutationParams::default`].
+///
+/// Retained for source compatibility. Crosswind is a transient and is ignored; density must
+/// already be represented in the supplied local `stability_factor`; and caliber alone cannot
+/// determine the missing inertia ratio. Use
+/// [`crate::precession_nutation::calculate_limit_cycle_yaw_with_inertias`] for a
+/// projectile-specific result.
+#[deprecated(
+    since = "0.22.18",
+    note = "use precession_nutation::calculate_limit_cycle_yaw_with_inertias"
+)]
 pub fn calculate_advanced_yaw_of_repose(
     stability_factor: f64,
     velocity_mps: f64,
-    crosswind_mps: f64,
+    _crosswind_mps: f64,
     spin_rate_rad_s: f64,
-    air_density_kg_m3: f64,
-    caliber_m: f64,
+    _air_density_kg_m3: f64,
+    _caliber_m: f64,
 ) -> f64 {
-    if stability_factor <= 1.0 || velocity_mps <= 0.0 {
-        return 0.0;
-    }
-
-    // Base yaw from crosswind
-    let wind_yaw = if crosswind_mps != 0.0 && velocity_mps > 0.0 {
-        (crosswind_mps / velocity_mps).atan()
-    } else {
-        // Natural yaw from trajectory curvature (gravity-induced)
-        // Empirical value based on typical trajectories
-        0.001 + 0.0005 * (velocity_mps / 800.0).min(2.0)
-    };
-
-    // Stability-based damping (McCoy's model)
-    let stability_term = ((stability_factor - 1.0) / stability_factor).sqrt();
-
-    // Dynamic pressure effect
-    let q = 0.5 * air_density_kg_m3 * velocity_mps.powi(2);
-    let q_factor = (q / 50000.0).min(1.5).max(0.5); // Normalize around typical q
-
-    // Spin effect on yaw response
-    let spin_factor = if spin_rate_rad_s > 0.0 {
-        let spin_param = spin_rate_rad_s * caliber_m / (2.0 * velocity_mps);
-        1.0 + 0.2 * spin_param.min(0.5)
-    } else {
-        1.0
-    };
-
-    wind_yaw * stability_term * q_factor * spin_factor
+    let reference = crate::precession_nutation::PrecessionNutationParams::default();
+    crate::precession_nutation::calculate_limit_cycle_yaw_with_inertias(
+        velocity_mps,
+        spin_rate_rad_s,
+        stability_factor,
+        reference.spin_inertia,
+        reference.transverse_inertia,
+    )
 }
 
 /// Data-driven correction factor (placeholder for ML integration)
@@ -380,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_advanced_yaw_of_repose() {
         let yaw = calculate_advanced_yaw_of_repose(
             1.5,     // stability
@@ -395,6 +386,47 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
+    fn advanced_yaw_of_repose_matches_gravity_gyroscopic_scaling() {
+        let calculate = |stability, velocity, crosswind, spin, density, caliber| {
+            calculate_advanced_yaw_of_repose(stability, velocity, crosswind, spin, density, caliber)
+        };
+
+        let reference = crate::precession_nutation::PrecessionNutationParams::default();
+        let expected = crate::precession_nutation::calculate_limit_cycle_yaw_with_inertias(
+            850.0,
+            17_522.0,
+            2.5,
+            reference.spin_inertia,
+            reference.transverse_inertia,
+        );
+        let actual = calculate(2.5, 850.0, 0.0, 17_522.0, 1.225, 0.00782);
+        assert_eq!(actual.to_bits(), expected.to_bits());
+
+        for crosswind in [-10.0, 10.0] {
+            assert_eq!(
+                calculate(2.5, 850.0, crosswind, 17_522.0, 1.225, 0.00782).to_bits(),
+                actual.to_bits()
+            );
+        }
+
+        let fixed_sg_fast = calculate(2.5, 800.0, 0.0, 17_522.0, 1.225, 0.00782);
+        let fixed_sg_slow = calculate(2.5, 400.0, 0.0, 17_522.0, 1.225, 0.00782);
+        assert!((fixed_sg_slow / fixed_sg_fast - 2.0).abs() < 2e-12);
+
+        let physical_fast = calculate(1.5, 800.0, 0.0, 17_522.0, 1.225, 0.00782);
+        let physical_slow = calculate(6.0, 400.0, 0.0, 17_522.0, 1.225, 0.00782);
+        assert!((physical_slow / physical_fast - 8.0).abs() < 8e-12);
+
+        let dense = calculate(1.5, 300.0, 0.0, 17_522.0, 1.225, 0.00782);
+        let thin_same_sg = calculate(1.5, 300.0, 0.0, 17_522.0, 0.6125, 0.00782);
+        let thin_coupled_sg = calculate(3.0, 300.0, 0.0, 17_522.0, 0.6125, 0.00782);
+        assert_eq!(thin_same_sg.to_bits(), dense.to_bits());
+        assert!((thin_coupled_sg / dense - 2.0).abs() < 2e-12);
+    }
+
+    #[test]
+    #[allow(deprecated)]
     fn test_yaw_of_repose_edge_cases() {
         // Zero stability should give zero yaw
         let zero_stability =
@@ -404,6 +436,27 @@ mod tests {
         // Zero velocity should give zero yaw
         let zero_velocity = calculate_advanced_yaw_of_repose(1.5, 0.0, 5.0, 1500.0, 1.225, 0.00782);
         assert_eq!(zero_velocity, 0.0);
+
+        let zero_spin = calculate_advanced_yaw_of_repose(1.5, 800.0, 5.0, 0.0, 1.225, 0.00782);
+        assert_eq!(zero_spin, 0.0);
+
+        let positive_spin =
+            calculate_advanced_yaw_of_repose(1.5, 800.0, 5.0, 1500.0, 1.225, 0.00782);
+        let negative_spin =
+            calculate_advanced_yaw_of_repose(1.5, 800.0, 5.0, -1500.0, 1.225, 0.00782);
+        assert_eq!(negative_spin.to_bits(), positive_spin.to_bits());
+
+        let at_boundary = calculate_advanced_yaw_of_repose(1.0, 800.0, 0.0, 1500.0, 1.225, 0.00782);
+        let below_boundary = calculate_advanced_yaw_of_repose(
+            1.0_f64.next_down(),
+            800.0,
+            0.0,
+            1500.0,
+            1.225,
+            0.00782,
+        );
+        assert!(at_boundary > 0.0);
+        assert_eq!(below_boundary, 0.0);
 
         // No crosswind should still give small yaw (trajectory curvature)
         let no_wind = calculate_advanced_yaw_of_repose(1.5, 800.0, 0.0, 1500.0, 1.225, 0.00782);
