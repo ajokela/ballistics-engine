@@ -450,6 +450,11 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         drag_table: Option<PathBuf>,
 
+        /// Rifle cant in DEGREES, positive = clockwise from the shooter (top of scope tips
+        /// right). Models "zeroed level, fired canted": POI moves right and low. 0 = level.
+        #[arg(long, alias = "cant-angle", value_name = "DEGREES", default_value_t = 0.0)]
+        cant: f64,
+
         /// Print the BC5D-generated segment ladder as ready-to-paste
         /// --bc-segment arguments (requires --bc-table-dir; velocities in
         /// the active --units)
@@ -803,6 +808,11 @@ enum Commands {
         /// bc_value is ignored when set. Mach-keyed; out-of-range Mach holds the nearest tabulated Cd.
         #[arg(long, value_name = "FILE")]
         drag_table: Option<std::path::PathBuf>,
+
+        /// Rifle cant in DEGREES, positive = clockwise from the shooter (top of scope tips
+        /// right). Models "zeroed level, fired canted": POI moves right and low. 0 = level.
+        #[arg(long, alias = "cant-angle", value_name = "DEGREES", default_value_t = 0.0)]
+        cant: f64,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "summary")]
@@ -1734,6 +1744,8 @@ struct TrajectoryConfig {
     sight_height: f64,
     bore_height: f64,
     ignore_ground_impact: bool,
+    // Rifle cant, degrees (CLI boundary; converted to radians for BallisticInputs.cant_angle).
+    cant: f64,
 
     // BC options
     use_bc_segments: bool,
@@ -2559,6 +2571,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ignore_ground_impact,
             use_bc_segments,
             drag_table,
+            cant,
             print_bc_segments,
             enable_magnus,
             enable_coriolis,
@@ -3523,6 +3536,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 sight_height: sight_height_metric,
                 bore_height: bore_height_metric,
                 ignore_ground_impact,
+                cant,
                 use_bc_segments: effective_use_bc_segments,
                 use_cluster_bc,
                 bc_segments_data: bc_segments_data.clone(),
@@ -3666,7 +3680,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     azimuth_angle: 0.0,
                                     shot_azimuth: shot_direction.map(|d| d.to_radians()).unwrap_or(0.0),
                                     shooting_angle: shooting_angle.to_radians(),
-                                    cant_angle: 0.0,
+                                    cant_angle: cant.to_radians(),
                                     sight_height: sight_height_metric,
                                     muzzle_height: bore_height_metric,
                                     target_height: 0.0,
@@ -3887,6 +3901,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             target_distance,
             target_radius,
             drag_table,
+            cant,
             output,
         } => {
             let bullet_mass = mass;
@@ -3925,6 +3940,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 target_distance_metric,
                 target_radius_metric,
                 custom_drag_table,
+                cant,
                 output,
             )?;
         }
@@ -5297,6 +5313,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         sight_height,
         bore_height,
         ignore_ground_impact,
+        cant,
         use_bc_segments,
         use_cluster_bc,
         ref bc_segments_data,
@@ -5353,7 +5370,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         azimuth_angle: 0.0,
         shot_azimuth: shot_direction.map(|d| d.to_radians()).unwrap_or(0.0),
         shooting_angle: shooting_angle.to_radians(),
-        cant_angle: 0.0,
+        cant_angle: cant.to_radians(),
         sight_height,
         muzzle_height: bore_height, // Bore height above ground from --bore-height CLI option
         target_height: 0.0,
@@ -6350,6 +6367,7 @@ fn run_monte_carlo(
     target_distance: Option<f64>,
     target_radius: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    cant: f64,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
     // Create base inputs. MBA-967: use the same bore-height/ground convention as the
@@ -6368,6 +6386,7 @@ fn run_monte_carlo(
         muzzle_height: bore_height_metric,
         ground_threshold: 0.0,
         custom_drag_table,
+        cant_angle: cant.to_radians(),
         ..Default::default()
     };
 
