@@ -452,7 +452,9 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table(
         Ok(t) => t,
         Err(()) => return ptr::null_mut(),
     };
-    unsafe { calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, Some(table)) }
+    unsafe {
+        calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, Some(table))
+    }
 }
 
 /// Release a trajectory result allocated by [`ballistics_calculate_trajectory`].
@@ -1108,11 +1110,21 @@ mod tests {
         let inputs = valid_trajectory_inputs();
         unsafe {
             let plain = ballistics_calculate_trajectory(
-                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
             );
             let decked = ballistics_calculate_trajectory_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
             );
             assert!(!plain.is_null() && !decked.is_null());
             // The low-drag deck must retain materially more velocity than the G-model.
@@ -1135,33 +1147,75 @@ mod tests {
         unsafe {
             // null arrays
             assert!(ballistics_calculate_trajectory_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
-                std::ptr::null(), DECK_CD_LOW.as_ptr(), 4,
-            ).is_null());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                std::ptr::null(),
+                DECK_CD_LOW.as_ptr(),
+                4,
+            )
+            .is_null());
             assert!(ballistics_calculate_trajectory_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
-                DECK_MACH.as_ptr(), std::ptr::null(), 4,
-            ).is_null());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                std::ptr::null(),
+                4,
+            )
+            .is_null());
             // too few points
             assert!(ballistics_calculate_trajectory_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 1,
-            ).is_null());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                1,
+            )
+            .is_null());
             // non-ascending Mach
             assert!(ballistics_calculate_trajectory_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
-                descending.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
-            ).is_null());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                descending.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                4,
+            )
+            .is_null());
             // non-positive Cd
             assert!(ballistics_calculate_trajectory_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 300.0, 1.0,
-                DECK_MACH.as_ptr(), negative_cd.as_ptr(), 4,
-            ).is_null());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                negative_cd.as_ptr(),
+                4,
+            )
+            .is_null());
             // null inputs still rejected
             assert!(ballistics_calculate_trajectory_with_drag_table(
-                std::ptr::null(), std::ptr::null(), std::ptr::null(), 300.0, 1.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
-            ).is_null());
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                4,
+            )
+            .is_null());
         }
     }
 
@@ -1170,12 +1224,16 @@ mod tests {
         // A realistic zeroing setup: 100 m zero.
         let inputs = valid_trajectory_inputs();
         unsafe {
-            let plain = ballistics_calculate_zero_angle(
-                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
-            );
+            let plain =
+                ballistics_calculate_zero_angle(&inputs, std::ptr::null(), std::ptr::null(), 100.0);
             let decked = ballistics_calculate_zero_angle_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
             );
             assert!(plain.is_finite() && decked.is_finite());
             // A much lower-drag deck needs a flatter (smaller) zero angle; at minimum it
@@ -1193,22 +1251,46 @@ mod tests {
         let descending = [3.0, 2.0, 1.0, 0.5];
         unsafe {
             assert!(ballistics_calculate_zero_angle_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
-                std::ptr::null(), DECK_CD_LOW.as_ptr(), 4,
-            ).is_nan());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                std::ptr::null(),
+                DECK_CD_LOW.as_ptr(),
+                4,
+            )
+            .is_nan());
             assert!(ballistics_calculate_zero_angle_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 0,
-            ).is_nan());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                0,
+            )
+            .is_nan());
             assert!(ballistics_calculate_zero_angle_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
-                descending.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
-            ).is_nan());
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                descending.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                4,
+            )
+            .is_nan());
             // null inputs still rejected
             assert!(ballistics_calculate_zero_angle_with_drag_table(
-                std::ptr::null(), std::ptr::null(), std::ptr::null(), 100.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
-            ).is_nan());
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                4,
+            )
+            .is_nan());
         }
     }
 
@@ -1220,14 +1302,25 @@ mod tests {
         let mut inputs = valid_trajectory_inputs();
         unsafe {
             let angle = ballistics_calculate_zero_angle_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
             );
             assert!(angle.is_finite());
             inputs.muzzle_angle = angle;
             let result = ballistics_calculate_trajectory_with_drag_table(
-                &inputs, std::ptr::null(), std::ptr::null(), 150.0, 1.0,
-                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                150.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
             );
             assert!(!result.is_null());
             // Interpolate y at exactly the zero distance (100 m) rather than snapping to the
@@ -1249,7 +1342,8 @@ mod tests {
             assert!(
                 (y_at_zero - inputs.sight_height).abs() < 0.002,
                 "zeroed flight missed the line of sight at 100 m: y={} (sight_height={})",
-                y_at_zero, inputs.sight_height
+                y_at_zero,
+                inputs.sight_height
             );
             ballistics_free_trajectory_result(result);
         }
