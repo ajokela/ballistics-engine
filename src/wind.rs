@@ -1,4 +1,5 @@
 use nalgebra::Vector3;
+use std::cmp::Ordering;
 use std::f64::consts::PI;
 
 /// Conversion constant from KMH to MPS
@@ -7,6 +8,22 @@ const KMH_TO_MPS: f64 = 1000.0 / 3600.0;
 /// Wind segment: (speed_kmh, angle_deg, until_distance_m)
 /// This matches the Python WindSock interface
 pub type WindSegment = (f64, f64, f64);
+
+/// Sort wind segments by their `until_distance_m` threshold.
+///
+/// Shared by [`WindSock`] and the low-level trajectory integrator so every segmented-wind path
+/// applies the same interval ordering.
+pub(crate) fn sort_wind_segments_by_distance(segments: &mut [WindSegment]) {
+    segments.sort_by(|a, b| match (a.2.is_nan(), b.2.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            a.2.partial_cmp(&b.2)
+                .expect("non-NaN distances are ordered")
+        }
+    });
+}
 
 /// Wind condition handler for trajectory calculations
 #[derive(Debug, Clone)]
@@ -31,7 +48,7 @@ impl WindSock {
     ///     segments: List of (speed_kmh, angle_deg, until_distance_m) tuples
     pub fn new(mut segments: Vec<WindSegment>) -> Self {
         // Sort segments by distance, handling NaN safely by treating it as greater than any value
-        segments.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Greater));
+        sort_wind_segments_by_distance(&mut segments);
 
         // Precompute each segment's wind vector once (depends only on its speed/angle).
         let wind_vecs: Vec<Vector3<f64>> = segments.iter().map(Self::calc_vec).collect();
@@ -165,6 +182,28 @@ pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segment_sort_is_stable_and_places_nan_endpoints_last() {
+        let mut segments = vec![
+            (10.0, 0.0, f64::NAN),
+            (20.0, 0.0, 100.0),
+            (30.0, 0.0, 100.0),
+            (40.0, 0.0, f64::INFINITY),
+            (50.0, 0.0, f64::NEG_INFINITY),
+            (60.0, 0.0, f64::NAN),
+        ];
+
+        sort_wind_segments_by_distance(&mut segments);
+
+        assert_eq!(segments[0].0, 50.0); // -inf first
+        assert_eq!(segments[1].0, 20.0); // equal endpoints retain input order
+        assert_eq!(segments[2].0, 30.0);
+        assert_eq!(segments[3].0, 40.0); // +inf after finite endpoints
+        assert_eq!(segments[4].0, 10.0); // NaNs last and stable
+        assert_eq!(segments[5].0, 60.0);
+        assert!(segments[4].2.is_nan() && segments[5].2.is_nan());
+    }
 
     #[test]
     fn test_wind_sock_empty() {

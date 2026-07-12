@@ -239,6 +239,7 @@ pub struct TrajectoryParams {
     pub mass_kg: f64,
     pub bc: f64,
     pub drag_model: DragModel,
+    /// Downrange wind zones, normalized by `until_distance_m` when integration begins.
     pub wind_segments: Vec<WindSegment>,
     /// Dual-mode atmosphere tuple consumed by `compute_derivatives`:
     /// **Standard** `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` — note
@@ -424,11 +425,15 @@ fn compute_derivatives_vec(
 pub fn integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),
-    params: TrajectoryParams,
+    mut params: TrajectoryParams,
     method: &str,
     tolerance: f64,
     max_step: f64,
 ) -> Vec<(f64, Vector6<f64>)> {
+    // Normalize once before build_inputs reads the first zone and before any RK stage performs a
+    // first-match lookup. Callers may supply zones in any order.
+    crate::wind::sort_wind_segments_by_distance(&mut params.wind_segments);
+
     let mut state = Vector6::new(
         initial_state[0],
         initial_state[1],
@@ -864,6 +869,42 @@ mod tests {
         assert_eq!(accepted.error, accepted_error);
         assert_ne!(accepted.state, rejected_state);
         assert!((RK45_MIN_STEP..=initial_dt).contains(&accepted.next_dt));
+    }
+
+    #[test]
+    fn integration_normalizes_wind_segments_by_distance() {
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
+        let sorted_segments = vec![(40.0, 270.0, 300.0), (20.0, 90.0, 600.0)];
+
+        let mut sorted_params = create_test_params(100.0);
+        sorted_params.wind_segments = sorted_segments.clone();
+        let mut unsorted_params = create_test_params(100.0);
+        unsorted_params.wind_segments = sorted_segments.into_iter().rev().collect();
+
+        let sorted =
+            integrate_trajectory(initial_state, (0.0, 1.0), sorted_params, "RK4", 1e-6, 0.001);
+        let unsorted = integrate_trajectory(
+            initial_state,
+            (0.0, 1.0),
+            unsorted_params,
+            "RK4",
+            1e-6,
+            0.001,
+        );
+
+        assert_eq!(unsorted.len(), sorted.len());
+        for (index, ((sorted_t, sorted_state), (unsorted_t, unsorted_state))) in
+            sorted.iter().zip(&unsorted).enumerate()
+        {
+            assert_eq!(unsorted_t.to_bits(), sorted_t.to_bits());
+            for component in 0..6 {
+                assert_eq!(
+                    unsorted_state[component].to_bits(),
+                    sorted_state[component].to_bits(),
+                    "wind segment order changed state component {component} at point {index}"
+                );
+            }
+        }
     }
 
     #[test]
