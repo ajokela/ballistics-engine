@@ -134,6 +134,8 @@ pub struct BallisticInputs {
     pub powder_curve_temp_c: Option<f64>,
     pub tipoff_yaw: f64,            // radians
     pub tipoff_decay_distance: f64, // meters
+    /// Enables velocity-keyed `bc_segments_data`. Explicit Mach-keyed `bc_segments` retain their
+    /// legacy behavior and remain active when this flag is false.
     pub use_bc_segments: bool,
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-BC pairs
     pub bc_segments_data: Option<Vec<crate::BCSegmentData>>, // Velocity-BC segments
@@ -1976,15 +1978,15 @@ impl TrajectorySolver {
         // Convert velocity to fps for BC lookups
         let velocity_fps = velocity_magnitude * 3.28084;
 
-        // Match the other solver families' BC precedence: explicit velocity-keyed segments
-        // first, then legacy Mach-keyed segments, then the scalar BC. Explicit Mach segments
-        // remain active even when `use_bc_segments` is false; derivatives.rs and the fast solver
-        // preserve that legacy contract for callers that provide the table directly.
+        // Match the other solver families' BC precedence: enabled velocity-keyed segments first,
+        // then legacy Mach-keyed segments, then the scalar BC. `use_bc_segments` gates velocity
+        // tables, while explicit Mach segments remain active when it is false; derivatives.rs and
+        // the fast solver preserve that legacy contract for callers that provide a Mach table.
         let (base_bc, bc_from_segments) = if let Some(segments) = self
             .inputs
             .bc_segments_data
             .as_ref()
-            .filter(|segments| !segments.is_empty())
+            .filter(|segments| self.inputs.use_bc_segments && !segments.is_empty())
         {
             // Find matching segment for current velocity.
             (
@@ -3319,6 +3321,71 @@ mod cluster_bc_reference_space_tests {
             "Mach segment BC already owns the velocity shape: stacked ax={} segment-only ax={}",
             stacked.x,
             segment_only.x
+        );
+    }
+}
+
+#[cfg(test)]
+mod velocity_bc_flag_tests {
+    use super::*;
+
+    fn acceleration_at_600_mps(inputs: BallisticInputs) -> Vector3<f64> {
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        solver.calculate_acceleration(
+            &Vector3::zeros(),
+            &Vector3::new(600.0, 0.0, 0.0),
+            &Vector3::zeros(),
+            (temp_c, pressure_hpa, density / 1.225),
+        )
+    }
+
+    #[test]
+    fn velocity_bc_data_requires_opt_in_in_trajectory_solver() {
+        let scalar_inputs = BallisticInputs {
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            ..BallisticInputs::default()
+        };
+        let mut disabled_inputs = scalar_inputs.clone();
+        disabled_inputs.bc_segments_data = Some(vec![crate::BCSegmentData {
+            velocity_min: 0.0,
+            velocity_max: 4_000.0,
+            bc_value: 0.46,
+        }]);
+        disabled_inputs.use_bc_segments = false;
+        let mut enabled_inputs = disabled_inputs.clone();
+        enabled_inputs.use_bc_segments = true;
+        let mut mach_only_inputs = scalar_inputs.clone();
+        mach_only_inputs.bc_segments = Some(vec![(0.0, 0.4), (3.0, 0.4)]);
+        let mut disabled_with_both = mach_only_inputs.clone();
+        disabled_with_both.bc_segments_data = disabled_inputs.bc_segments_data.clone();
+
+        let scalar = acceleration_at_600_mps(scalar_inputs);
+        let disabled = acceleration_at_600_mps(disabled_inputs);
+        let enabled = acceleration_at_600_mps(enabled_inputs);
+        let mach_only = acceleration_at_600_mps(mach_only_inputs);
+        let disabled_with_both = acceleration_at_600_mps(disabled_with_both);
+
+        assert_eq!(
+            disabled.x.to_bits(),
+            scalar.x.to_bits(),
+            "a populated velocity table must not change drag while use_bc_segments is false"
+        );
+        assert!(
+            enabled.x < disabled.x - 1.0,
+            "enabling the lower BC table must increase drag: disabled ax={} enabled ax={}",
+            disabled.x,
+            enabled.x
+        );
+        assert_eq!(
+            disabled_with_both.x.to_bits(),
+            mach_only.x.to_bits(),
+            "disabling velocity data must fall through to an explicit Mach table"
         );
     }
 }
