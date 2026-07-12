@@ -16,7 +16,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Monte Carlo Simulations** - Statistical analysis with parameter uncertainties
 - **BC Estimation** - Estimate ballistic coefficients from trajectory data
 - **Advanced Physics**:
-  - **Spin Effects**: Magnus effect, enhanced spin drift with decay modeling
+  - **Spin Effects**: Magnus effect and empirical Litz spin drift
   - **Earth Effects**: Coriolis effect with latitude-dependent calculations
   - **Angular Motion**: Gyroscopic precession and nutation physics
   - **Transonic Analysis**: Pitch damping coefficients and stability warnings
@@ -258,7 +258,7 @@ Enable advanced gyroscopic and aerodynamic effects:
   --twist-rate 10      # 1:10" barrel twist
   --twist-right        # Right-hand twist
   --enable-magnus      # Enable Magnus effect
-  --enable-spin-drift  # Enable enhanced spin drift
+  --enable-spin-drift  # Enable empirical Litz spin drift
   --wind-speed 10 \
   --wind-direction 90 \
   --max-range 1000

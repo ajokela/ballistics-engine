@@ -459,7 +459,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --full | Show all trajectory points | false | - | - |
 | --enable-magnus | Enable Magnus effect | false | - | - |
 | --enable-coriolis | Enable Coriolis effect | false | - | - |
-| --enable-spin-drift | Enable enhanced spin drift | false | - | - |
+| --enable-spin-drift | Enable empirical Litz spin drift | false | - | - |
 | --twist-rate | Barrel twist rate | 12 | inches/turn | inches/turn |
 | --twist-right | Right-hand twist | false | - | - |
 | --latitude | Latitude for Coriolis/weather | None | degrees | degrees |
