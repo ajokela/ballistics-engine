@@ -589,6 +589,89 @@ pub fn fast_integrate(
     FastSolution::from_trajectory_data(times, states, t_events)
 }
 
+fn fast_magnus_acceleration(
+    inputs: &BallisticInputs,
+    air_velocity: Vector3<f64>,
+    air_density: f64,
+    mach: f64,
+    gravity_acceleration: Vector3<f64>,
+) -> Vector3<f64> {
+    if !inputs.enable_magnus
+        || inputs.use_enhanced_spin_drift
+        || inputs.bullet_diameter <= 0.0
+        || inputs.twist_rate <= 0.0
+        || inputs.bullet_mass <= 0.0
+    {
+        return Vector3::zeros();
+    }
+
+    let speed_air = air_velocity.norm();
+    let diameter_m = inputs.bullet_diameter;
+    let (spin_rate_rad_s, spin_param) = crate::spin_drift::calculate_magnus_spin_state(
+        inputs.muzzle_velocity,
+        speed_air,
+        inputs.twist_rate,
+        diameter_m,
+    );
+    let d_in = if inputs.caliber_inches > 0.0 {
+        inputs.caliber_inches
+    } else {
+        diameter_m / 0.0254
+    };
+    let m_gr = if inputs.weight_grains > 0.0 {
+        inputs.weight_grains
+    } else {
+        inputs.bullet_mass / 0.00006479891
+    };
+    let l_in = if inputs.bullet_length > 0.0 {
+        inputs.bullet_length / 0.0254
+    } else {
+        let estimated = crate::stability::estimate_bullet_length_m(diameter_m, inputs.bullet_mass);
+        if estimated > 0.0 {
+            estimated / 0.0254
+        } else {
+            4.5 * d_in.max(1e-9)
+        }
+    };
+    let sg = crate::spin_drift::calculate_dynamic_stability(
+        m_gr,
+        speed_air,
+        spin_rate_rad_s,
+        d_in,
+        l_in,
+        air_density,
+    );
+    let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
+        sg,
+        speed_air,
+        spin_rate_rad_s,
+        0.0,
+        0.0,
+        air_density,
+        d_in,
+        l_in,
+        m_gr,
+        mach,
+        "match",
+        false,
+    );
+    let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
+    let c_np = crate::derivatives::calculate_magnus_moment_coefficient(mach);
+    let force = 0.5 * air_density * speed_air.powi(2) * area * c_np * spin_param * yaw_rad.sin();
+    if force <= 1e-12 {
+        return Vector3::zeros();
+    }
+
+    crate::derivatives::yaw_of_repose_magnus_direction(
+        air_velocity,
+        gravity_acceleration,
+        inputs.is_twist_right,
+    )
+    .map_or_else(Vector3::zeros, |direction| {
+        (force / inputs.bullet_mass) * direction
+    })
+}
+
 /// Compute derivatives for the state vector
 #[allow(clippy::too_many_arguments)]
 fn compute_derivatives(
@@ -738,8 +821,13 @@ fn compute_derivatives(
         let a_drag_m_s2 = a_drag_ft_s2 * 0.3048; // ft/s^2 to m/s^2
         let accel_drag = -a_drag_m_s2 * (vel_adjusted / v_mag);
 
+        // The Litz post-process owns the gyroscopic effect whenever it is enabled. Otherwise,
+        // honor the explicit Magnus flag with the same dynamic-Sg/yaw model as sibling solvers.
+        let accel_magnus =
+            fast_magnus_acceleration(inputs, vel_adjusted, local_density, mach, accel_gravity);
+
         // Total acceleration
-        accel_drag + accel_gravity
+        accel_drag + accel_gravity + accel_magnus
     };
 
     // Coriolis (Earth rotation), MBA-957. Omega arrives in level downrange/up/lateral axes;
