@@ -25,6 +25,18 @@ pub fn wild(u: &mut Unstructured) -> Result<f64> {
     })
 }
 
+/// A launch angle that is either non-finite or finite within the forward-fire domain. Keeping
+/// finite angles inside +/- 80 degrees makes `assert_finite_sane`'s non-negative downrange
+/// invariant meaningful while still exercising the solve boundary's NaN/Inf rejection.
+fn hostile_launch_angle(u: &mut Unstructured) -> Result<f64> {
+    Ok(match u.int_in_range(0u8..=3)? {
+        0 => f64::NAN,
+        1 => f64::INFINITY,
+        2 => f64::NEG_INFINITY,
+        _ => ranged(u, -1.396_263_401_595_463_6, 1.396_263_401_595_463_6)?,
+    })
+}
+
 /// A ballistically plausible input. Every field is finite and in a real-world
 /// envelope so invariant/differential/solver harnesses spend budget on meaningful
 /// solves rather than rejected garbage.
@@ -58,7 +70,7 @@ pub fn hostile_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
     b.bullet_diameter = wild(u)?;
     b.bullet_length = wild(u)?;
     b.muzzle_velocity = wild(u)?;
-    b.muzzle_angle = wild(u)?;
+    b.muzzle_angle = hostile_launch_angle(u)?;
     b.twist_rate = wild(u)?;
     b.temperature = wild(u)?;
     b.pressure = wild(u)?;

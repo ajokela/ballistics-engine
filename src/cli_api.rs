@@ -618,6 +618,216 @@ impl TrajectorySolver {
         self.time_step = step;
     }
 
+    /// Reject malformed state before it reaches an integration loop.
+    ///
+    /// `new` resolves powder-temperature velocity overrides and refreshes the imperial mirror
+    /// fields, so validation belongs here: it sees the effective muzzle velocity, covers values
+    /// changed through solver setters, and applies uniformly to Euler, RK4, and RK45.
+    fn validate_for_solve(&self) -> Result<(), BallisticsError> {
+        let require_finite = |name: &str, value: f64| {
+            if value.is_finite() {
+                Ok(())
+            } else {
+                Err(BallisticsError::from(format!("{name} must be finite")))
+            }
+        };
+        let require_positive = |name: &str, value: f64| {
+            if value.is_finite() && value > 0.0 {
+                Ok(())
+            } else {
+                Err(BallisticsError::from(format!(
+                    "{name} must be finite and greater than zero"
+                )))
+            }
+        };
+
+        // These four quantities are required by every point-mass solve. In particular, validate
+        // muzzle_velocity after `new` has applied a measured curve or linear powder correction.
+        require_positive("bc_value", self.inputs.bc_value)?;
+        require_positive("bullet_mass", self.inputs.bullet_mass)?;
+        require_positive("bullet_diameter", self.inputs.bullet_diameter)?;
+        require_positive("muzzle_velocity", self.inputs.muzzle_velocity)?;
+
+        require_finite("muzzle_angle", self.inputs.muzzle_angle)?;
+        require_finite("azimuth_angle", self.inputs.azimuth_angle)?;
+        require_finite("shooting_angle", self.inputs.shooting_angle)?;
+        require_finite("muzzle_height", self.inputs.muzzle_height)?;
+
+        // Negative infinity is the documented ignore-ground sentinel. NaN and positive infinity
+        // make the loop condition meaningless and are rejected.
+        if !(self.inputs.ground_threshold.is_finite()
+            || self.inputs.ground_threshold == f64::NEG_INFINITY)
+        {
+            return Err(BallisticsError::from(
+                "ground_threshold must be finite or negative infinity",
+            ));
+        }
+
+        if self.wind_sock.is_none() {
+            require_finite("wind.speed", self.wind.speed)?;
+            require_finite("wind.direction", self.wind.direction)?;
+        }
+
+        require_finite("atmosphere.temperature", self.atmosphere.temperature)?;
+        require_finite("atmosphere.pressure", self.atmosphere.pressure)?;
+        require_finite("atmosphere.humidity", self.atmosphere.humidity)?;
+        require_finite("atmosphere.altitude", self.atmosphere.altitude)?;
+
+        require_positive("max_range", self.max_range)?;
+        // Adaptive RK45 owns its step size; the caller-provided fixed step is used only by Euler
+        // and fixed RK4.
+        if !self.inputs.use_rk4 || !self.inputs.use_adaptive_rk45 {
+            require_positive("time_step", self.time_step)?;
+        }
+
+        if self.inputs.enable_trajectory_sampling {
+            require_finite("sight_height", self.inputs.sight_height)?;
+            require_positive("sample_interval", self.inputs.sample_interval)?;
+        }
+
+        if self.inputs.enable_coriolis {
+            require_finite("shot_azimuth", self.inputs.shot_azimuth)?;
+            if let Some(latitude) = self.inputs.latitude {
+                require_finite("latitude", latitude)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Public solve results must never report success with NaN or infinity. The input gate catches
+    /// malformed scalar state; this postcondition also covers overflow and malformed optional
+    /// tables/segments without imposing arbitrary upper bounds on otherwise finite inputs.
+    fn validate_result_finiteness(&self, result: &TrajectoryResult) -> Result<(), BallisticsError> {
+        let require_finite = |name: &str, value: f64| {
+            if value.is_finite() {
+                Ok(())
+            } else {
+                Err(BallisticsError::from(format!(
+                    "trajectory result contains non-finite {name}"
+                )))
+            }
+        };
+        let require_indexed_finite = |collection: &str, index: usize, field: &str, value: f64| {
+            if value.is_finite() {
+                Ok(())
+            } else {
+                Err(BallisticsError::from(format!(
+                    "trajectory result contains non-finite {collection}[{index}].{field}"
+                )))
+            }
+        };
+
+        require_finite("max_range", result.max_range)?;
+        require_finite("max_height", result.max_height)?;
+        require_finite("time_of_flight", result.time_of_flight)?;
+        require_finite("impact_velocity", result.impact_velocity)?;
+        require_finite("impact_energy", result.impact_energy)?;
+
+        for (index, point) in result.points.iter().enumerate() {
+            require_indexed_finite("points", index, "time", point.time)?;
+            require_indexed_finite("points", index, "position.x", point.position.x)?;
+            require_indexed_finite("points", index, "position.y", point.position.y)?;
+            require_indexed_finite("points", index, "position.z", point.position.z)?;
+            require_indexed_finite(
+                "points",
+                index,
+                "velocity_magnitude",
+                point.velocity_magnitude,
+            )?;
+            require_indexed_finite("points", index, "kinetic_energy", point.kinetic_energy)?;
+        }
+
+        if let Some(samples) = &result.sampled_points {
+            for (index, sample) in samples.iter().enumerate() {
+                require_indexed_finite("sampled_points", index, "distance_m", sample.distance_m)?;
+                require_indexed_finite("sampled_points", index, "drop_m", sample.drop_m)?;
+                require_indexed_finite(
+                    "sampled_points",
+                    index,
+                    "wind_drift_m",
+                    sample.wind_drift_m,
+                )?;
+                require_indexed_finite(
+                    "sampled_points",
+                    index,
+                    "velocity_mps",
+                    sample.velocity_mps,
+                )?;
+                require_indexed_finite("sampled_points", index, "energy_j", sample.energy_j)?;
+                require_indexed_finite("sampled_points", index, "time_s", sample.time_s)?;
+            }
+        }
+
+        for (name, value) in [
+            ("min_pitch_damping", result.min_pitch_damping),
+            ("transonic_mach", result.transonic_mach),
+            ("max_yaw_angle", result.max_yaw_angle),
+            ("max_precession_angle", result.max_precession_angle),
+        ] {
+            if let Some(value) = value {
+                require_finite(name, value)?;
+            }
+        }
+
+        if let Some(state) = result.angular_state {
+            for (name, value) in [
+                ("angular_state.pitch_angle", state.pitch_angle),
+                ("angular_state.yaw_angle", state.yaw_angle),
+                ("angular_state.pitch_rate", state.pitch_rate),
+                ("angular_state.yaw_rate", state.yaw_rate),
+                ("angular_state.precession_angle", state.precession_angle),
+                ("angular_state.nutation_phase", state.nutation_phase),
+            ] {
+                require_finite(name, value)?;
+            }
+        }
+
+        if let Some(jump) = result.aerodynamic_jump {
+            for (name, value) in [
+                ("aerodynamic_jump.vertical_jump_moa", jump.vertical_jump_moa),
+                (
+                    "aerodynamic_jump.horizontal_jump_moa",
+                    jump.horizontal_jump_moa,
+                ),
+                ("aerodynamic_jump.jump_angle_rad", jump.jump_angle_rad),
+                (
+                    "aerodynamic_jump.magnus_component_moa",
+                    jump.magnus_component_moa,
+                ),
+                ("aerodynamic_jump.yaw_component_moa", jump.yaw_component_moa),
+                (
+                    "aerodynamic_jump.stabilization_factor",
+                    jump.stabilization_factor,
+                ),
+            ] {
+                require_finite(name, value)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Integration methods store the pre-step state in `points`. Validate each newly accepted
+    /// state as well, otherwise a poisoned final step could terminate the loop and leave only the
+    /// previous finite point in an apparently successful result.
+    fn validate_integration_state(
+        position: &Vector3<f64>,
+        velocity: &Vector3<f64>,
+        time: f64,
+    ) -> Result<(), BallisticsError> {
+        if position.iter().all(|value| value.is_finite())
+            && velocity.iter().all(|value| value.is_finite())
+            && time.is_finite()
+        {
+            Ok(())
+        } else {
+            Err(BallisticsError::from(
+                "trajectory integration produced a non-finite state",
+            ))
+        }
+    }
+
     /// Supply downrange-segmented wind. Each segment is `(speed_kmh, angle_deg,
     /// until_distance_m)`; the wind for a given downrange distance is the first
     /// segment whose `until_distance_m` exceeds it (a step function), and wind is
@@ -879,6 +1089,7 @@ impl TrajectorySolver {
     }
 
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
+        self.validate_for_solve()?;
         let mut result = if self.inputs.use_rk4 {
             if self.inputs.use_adaptive_rk45 {
                 self.solve_rk45()?
@@ -889,6 +1100,7 @@ impl TrajectorySolver {
             self.solve_euler()?
         };
         self.apply_spin_drift(&mut result);
+        self.validate_result_finiteness(&result)?;
         Ok(result)
     }
 
@@ -999,7 +1211,8 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
+        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
+            self.resolved_atmosphere();
         // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
         // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
         // stay the frozen station values, still used for the Mach-transition, pitch-damping and
@@ -1120,16 +1333,18 @@ impl TrajectorySolver {
             // BC-retardation RK4/RK45 path), and also omitted the Magnus/Coriolis terms.
             // calculate_acceleration applies BC-retardation drag, gravity, Coriolis, Magnus, wind
             // shear, and the zero-relative-velocity gravity-only guard.
-            let acceleration =
-                self.calculate_acceleration(&position, &velocity,
-                    &wind_vector,
-                    (resolved_temp_c, resolved_press_hpa, base_ratio),
-                );
+            let acceleration = self.calculate_acceleration(
+                &position,
+                &velocity,
+                &wind_vector,
+                (resolved_temp_c, resolved_press_hpa, base_ratio),
+            );
 
             // Update state
             velocity += acceleration * self.time_step;
             position += velocity * self.time_step;
             time += self.time_step;
+            Self::validate_integration_state(&position, &velocity, time)?;
         }
 
         self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
@@ -1259,7 +1474,8 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
+        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
+            self.resolved_atmosphere();
         // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
         // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
         // stay the frozen station values, still used for the Mach-transition, pitch-damping and
@@ -1368,27 +1584,48 @@ impl TrajectorySolver {
             let dt = self.time_step;
 
             // k1
-            let acc1 = self.calculate_acceleration(&position, &velocity, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
+            let acc1 = self.calculate_acceleration(
+                &position,
+                &velocity,
+                &wind_vector,
+                (resolved_temp_c, resolved_press_hpa, base_ratio),
+            );
 
             // k2
             let pos2 = position + velocity * (dt * 0.5);
             let vel2 = velocity + acc1 * (dt * 0.5);
-            let acc2 = self.calculate_acceleration(&pos2, &vel2, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
+            let acc2 = self.calculate_acceleration(
+                &pos2,
+                &vel2,
+                &wind_vector,
+                (resolved_temp_c, resolved_press_hpa, base_ratio),
+            );
 
             // k3
             let pos3 = position + vel2 * (dt * 0.5);
             let vel3 = velocity + acc2 * (dt * 0.5);
-            let acc3 = self.calculate_acceleration(&pos3, &vel3, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
+            let acc3 = self.calculate_acceleration(
+                &pos3,
+                &vel3,
+                &wind_vector,
+                (resolved_temp_c, resolved_press_hpa, base_ratio),
+            );
 
             // k4
             let pos4 = position + vel3 * dt;
             let vel4 = velocity + acc3 * dt;
-            let acc4 = self.calculate_acceleration(&pos4, &vel4, &wind_vector, (resolved_temp_c, resolved_press_hpa, base_ratio));
+            let acc4 = self.calculate_acceleration(
+                &pos4,
+                &vel4,
+                &wind_vector,
+                (resolved_temp_c, resolved_press_hpa, base_ratio),
+            );
 
             // Update position and velocity
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
             velocity += (acc1 + acc2 * 2.0 + acc3 * 2.0 + acc4) * (dt / 6.0);
             time += dt;
+            Self::validate_integration_state(&position, &velocity, time)?;
         }
 
         self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
@@ -1500,7 +1737,8 @@ impl TrajectorySolver {
 
         // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
         // are immutable); compute once instead of every iteration (mirrors solve_rk4).
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) = self.resolved_atmosphere();
+        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
+            self.resolved_atmosphere();
         // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
         // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
         // stay the frozen station values, still used for the Mach-transition, pitch-damping and
@@ -1605,8 +1843,7 @@ impl TrajectorySolver {
                 (resolved_temp_c, resolved_press_hpa, base_ratio),
             );
             debug_assert!(
-                accepted_step.error <= RK45_TOLERANCE
-                    || accepted_step.used_dt <= RK45_MIN_DT
+                accepted_step.error <= RK45_TOLERANCE || accepted_step.used_dt <= RK45_MIN_DT
             );
 
             // Precession / nutation advances only after the translational step
@@ -1640,6 +1877,7 @@ impl TrajectorySolver {
             position = accepted_step.position;
             velocity = accepted_step.velocity;
             time += accepted_step.used_dt;
+            Self::validate_integration_state(&position, &velocity, time)?;
 
             // Adapt the step size for the NEXT iteration.
             dt = accepted_step.next_dt;
@@ -1743,8 +1981,15 @@ impl TrajectorySolver {
                 RK45_TOLERANCE,
                 resolved_atmo,
             );
-            let next_dt = (RK45_SAFETY_FACTOR * trial.suggested_dt)
-                .clamp(RK45_MIN_DT, RK45_MAX_DT);
+            // A finite-but-extreme input or malformed optional curve can overflow an embedded
+            // trial. Do not let a NaN suggested step poison `trial_dt` and retry forever: shrink
+            // to the minimum step, return the non-finite trial there, and let the immediate
+            // integration-state check turn it into a clean Err.
+            let next_dt = if trial.suggested_dt.is_finite() {
+                (RK45_SAFETY_FACTOR * trial.suggested_dt).clamp(RK45_MIN_DT, RK45_MAX_DT)
+            } else {
+                RK45_MIN_DT
+            };
 
             if trial.error <= RK45_TOLERANCE || trial_dt <= RK45_MIN_DT {
                 return Rk45AcceptedStep {
@@ -2024,9 +2269,8 @@ impl TrajectorySolver {
         } else {
             self.apply_cluster_bc_correction(base_bc, velocity_fps)
         };
-        // Guard bc_value == 0 (allowed on the FFI/WASM surfaces, which lack the CLI's 0.001
-        // lower bound): dividing by effective_bc below would be Inf -> NaN. Inert for valid
-        // BCs (>= 0.001).
+        // The scalar BC is validated at the solve boundary. Retain a small denominator floor for
+        // explicit segment tables, whose interpolated values are independent caller data.
         let effective_bc = effective_bc.max(1e-6);
 
         // When a custom drag table is active, calculate_drag_coefficient returned the
