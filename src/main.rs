@@ -444,6 +444,12 @@ enum Commands {
         #[arg(long)]
         use_bc_segments: bool,
 
+        /// Path to a custom drag deck: CSV with `mach,cd` per line (Hornady CDM / Lapua radar
+        /// style). Replaces the G-model + BC for drag; bc_value is ignored when set. Mach-keyed;
+        /// out-of-range Mach holds the nearest tabulated Cd.
+        #[arg(long, value_name = "FILE")]
+        drag_table: Option<PathBuf>,
+
         /// Print the BC5D-generated segment ladder as ready-to-paste
         /// --bc-segment arguments (requires --bc-table-dir; velocities in
         /// the active --units)
@@ -1723,6 +1729,8 @@ struct TrajectoryConfig {
     use_bc_segments: bool,
     use_cluster_bc: bool,
     bc_segments_data: Option<Vec<BCSegmentData>>,
+    // Custom drag deck (--drag-table), takes precedence over the G-model + BC when set.
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 
     // Advanced physics toggles
     enable_magnus: bool,
@@ -2462,6 +2470,17 @@ fn parse_bc_segment(s: &str, units: UnitSystem) -> Result<BCSegmentData, String>
     })
 }
 
+/// Load a user drag deck for the CLI, exiting with a clear message on any validation error.
+fn load_drag_table_or_exit(path: &std::path::Path) -> ballistics_engine::drag::DragTable {
+    match ballistics_engine::drag::DragTable::from_file(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Resolve the velocity-keyed BC schedule once so auto-zero, native flight, and compare flight
 /// cannot synthesize different drag inputs. Explicit manual/table segments take precedence over
 /// the characteristic-based estimator.
@@ -2529,6 +2548,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             bore_height,
             ignore_ground_impact,
             use_bc_segments,
+            drag_table,
             print_bc_segments,
             enable_magnus,
             enable_coriolis,
@@ -3313,6 +3333,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             let effective_use_bc_segments = use_bc_segments || bc_segments_data.is_some();
 
+            // Resolve --drag-table once, shared by the zero solve, native flight, and
+            // compare-local flight, same as the BC schedule above.
+            let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
+            if custom_drag_table.is_some() && effective_use_bc_segments {
+                eprintln!(
+                    "Warning: --drag-table and BC segments were both provided; the drag table takes \
+                     precedence and BC segments are ignored."
+                );
+            }
+
             // Calculate zero angle if auto-zero is specified (from CLI or profile)
             let muzzle_angle = if let Some(zero_distance) = final_auto_zero {
                 let zero_distance_metric =
@@ -3417,6 +3447,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     use_bc_segments: effective_use_bc_segments,
                     bc_segments_data: bc_segments_data.clone(),
                     use_cluster_bc,
+                    custom_drag_table: custom_drag_table.clone(),
                     ..Default::default()
                 };
 
@@ -3485,6 +3516,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 use_bc_segments: effective_use_bc_segments,
                 use_cluster_bc,
                 bc_segments_data: bc_segments_data.clone(),
+                custom_drag_table: custom_drag_table.clone(),
                 enable_magnus,
                 enable_coriolis,
                 enable_spin_drift,
@@ -3681,7 +3713,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     enable_precession_nutation: enable_precession,
                                     use_cluster_bc,
                                     bc_type_str: None,
-                                    custom_drag_table: None,
+                                    custom_drag_table: custom_drag_table.clone(),
                                 };
 
                                 let local_wind = WindConditions {
@@ -5247,6 +5279,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         use_bc_segments,
         use_cluster_bc,
         ref bc_segments_data,
+        ref custom_drag_table,
         enable_magnus,
         enable_coriolis,
         enable_spin_drift,
@@ -5379,7 +5412,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
         // Optional data
         bc_type_str: None,
-        custom_drag_table: None,
+        custom_drag_table: custom_drag_table.clone(),
     };
 
     // Set up wind conditions
