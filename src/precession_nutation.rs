@@ -257,8 +257,10 @@ pub fn calculate_combined_angular_motion(
     let coning_amp = initial_disturbance;
     let total_yaw =
         coning_amp * new_precession_angle.cos() + nutation_amp * new_nutation_phase.sin();
+    let damping_rate = params.nutation_damping_factor * omega_n;
     let new_yaw_rate = -coning_amp * omega_p * new_precession_angle.sin()
-        + nutation_amp * omega_n * new_nutation_phase.cos();
+        + nutation_amp
+            * (omega_n * new_nutation_phase.cos() - damping_rate * new_nutation_phase.sin());
 
     // Pitch angle evolves more slowly
     let new_pitch = angular_state.pitch_angle + new_pitch_rate * dt;
@@ -593,6 +595,47 @@ mod tests {
         // Check reasonable bounds
         assert!(new_state.pitch_angle.abs() < 1.0);
         assert!(new_state.yaw_angle.abs() < 1.0);
+    }
+
+    #[test]
+    fn combined_motion_yaw_rate_is_derivative_of_yaw() {
+        let params = PrecessionNutationParams::default();
+        let disturbance = 0.001;
+        let time = 0.02;
+        let h = 1e-7;
+        let state = |precession_angle, nutation_phase| AngularState {
+            pitch_angle: 0.0,
+            yaw_angle: 0.0,
+            pitch_rate: 0.0,
+            yaw_rate: 0.0,
+            precession_angle,
+            nutation_phase,
+        };
+
+        // A one-second phase step exposes the internally selected angular frequencies.
+        let phase_step =
+            calculate_combined_angular_motion(&params, &state(0.0, 0.0), time, 1.0, disturbance);
+        let omega_p = phase_step.precession_angle;
+        let omega_n = phase_step.nutation_phase;
+
+        // Center the nutation at a quarter-cycle, where its phase derivative vanishes and
+        // the damping-envelope derivative is isolated.
+        let center_state = state(0.0, std::f64::consts::FRAC_PI_2);
+        let center =
+            calculate_combined_angular_motion(&params, &center_state, time, 0.0, disturbance);
+        let before_state = state(-omega_p * h, std::f64::consts::FRAC_PI_2 - omega_n * h);
+        let before =
+            calculate_combined_angular_motion(&params, &before_state, time - h, 0.0, disturbance);
+        let after_state = state(omega_p * h, std::f64::consts::FRAC_PI_2 + omega_n * h);
+        let after =
+            calculate_combined_angular_motion(&params, &after_state, time + h, 0.0, disturbance);
+        let finite_difference = (after.yaw_angle - before.yaw_angle) / (2.0 * h);
+
+        assert!(
+            (center.yaw_rate - finite_difference).abs() < 1e-8,
+            "yaw_rate={} finite_difference={finite_difference}",
+            center.yaw_rate
+        );
     }
 
     #[test]
