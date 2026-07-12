@@ -1230,15 +1230,26 @@ mod tests {
                 DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
             );
             assert!(!result.is_null());
-            // find the point nearest 100 m downrange and check |y - sight_height| small
+            // Interpolate y at exactly the zero distance (100 m) rather than snapping to the
+            // nearest raw trajectory sample, so the residual reflects only zero-solver
+            // convergence, not the sampling grid's x-offset from 100 m.
+            let zero_distance = 100.0;
             let pts = std::slice::from_raw_parts((*result).points, (*result).point_count as usize);
-            let near = pts.iter().min_by(|a, b| {
-                (a.position_x - 100.0).abs().partial_cmp(&(b.position_x - 100.0).abs()).unwrap()
-            }).expect("trajectory has points");
+            let bracket = pts
+                .windows(2)
+                .find(|w| w[0].position_x <= zero_distance && w[1].position_x >= zero_distance)
+                .expect("trajectory brackets the zero distance");
+            let (lo, hi) = (&bracket[0], &bracket[1]);
+            let y_at_zero = if hi.position_x > lo.position_x {
+                let t = (zero_distance - lo.position_x) / (hi.position_x - lo.position_x);
+                lo.position_y + t * (hi.position_y - lo.position_y)
+            } else {
+                lo.position_y
+            };
             assert!(
-                (near.position_y - inputs.sight_height).abs() < 0.05,
+                (y_at_zero - inputs.sight_height).abs() < 0.002,
                 "zeroed flight missed the line of sight at 100 m: y={} (sight_height={})",
-                near.position_y, inputs.sight_height
+                y_at_zero, inputs.sight_height
             );
             ballistics_free_trajectory_result(result);
         }
