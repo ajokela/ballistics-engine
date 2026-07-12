@@ -304,6 +304,12 @@ The small offset already present at the muzzle (`drift_in = -0.35` at 0 yd) is t
 itself swinging laterally below the canted sight; windage then climbs through positive
 (rightward) values as the zero's elevation correction leaks into windage with range.
 
+**Monte Carlo caveat:** cant is a *systematic* aim bias, not a dispersion source. Because
+`monte-carlo` reports statistics as deviations about its own (canted) mean, `--cant` shifts
+the whole cloud together and has almost no effect on the reported spread — expect the
+dispersion numbers to look essentially the same as a level run. Use `trajectory --cant` to
+see the point-of-impact shift itself.
+
 ### Zero Calculation
 
 Calculate sight adjustments for specific distances:
