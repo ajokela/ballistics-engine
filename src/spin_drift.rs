@@ -828,6 +828,24 @@ mod tests {
     }
 
     #[test]
+    fn test_effective_sg_preserves_short_handgun_length_estimate() {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 1150.0 * 0.3048,
+            bullet_mass: 115.0 * 0.00006479891,
+            bullet_diameter: 0.355 * 0.0254,
+            bullet_length: 0.0,
+            twist_rate: 10.0,
+            ..Default::default()
+        };
+
+        let sg = effective_sg_from_inputs(&inputs, 15.0, 1013.25);
+        assert!(
+            (10.0..12.0).contains(&sg),
+            "expected 9 mm / 115 gr Sg near 10.9 with the modeled length, got {sg}"
+        );
+    }
+
+    #[test]
     fn test_miller_stability_308_168gr() {
         // .308, 168 gr, 1:12 twist, ~1.215 in length -> base Sg (no velocity/density correction)
         // Formula: Sg = 30*m / (t^2 * d^3 * l * (1+l^2)), t and l in calibers
