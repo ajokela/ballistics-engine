@@ -916,7 +916,7 @@ pub fn fast_integrate_with_segments(
         wind_segments,
         atmos_params: params.atmo_params,
         omega_vector,
-        enable_spin_drift: inputs.enable_advanced_effects,
+        enable_spin_drift: inputs.use_enhanced_spin_drift,
         enable_magnus: inputs.enable_magnus,
         enable_coriolis: inputs.enable_coriolis,
         target_distance_m: params.horiz,
@@ -1961,5 +1961,82 @@ mod tests {
         // overridden by a hardcoded .308). Regression sentinel for the plumbing.
         assert!(run(0.00569, 7.0).success, ".224 geometry must solve");
         assert!(run(0.00858, 10.0).success, ".338 geometry must solve");
+    }
+
+    #[test]
+    fn segmented_fast_spin_flags_do_not_depend_on_advanced_umbrella() {
+        fn endpoint(
+            enable_advanced_effects: bool,
+            enable_magnus: bool,
+            use_enhanced_spin_drift: bool,
+        ) -> Vector3<f64> {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 823.0,
+                bullet_mass: 168.0 * 0.00006479891,
+                bullet_diameter: 0.308 * 0.0254,
+                bullet_length: 1.215 * 0.0254,
+                caliber_inches: 0.308,
+                weight_grains: 168.0,
+                bc_value: 0.475,
+                bc_type: DragModel::G1,
+                twist_rate: 12.0,
+                is_twist_right: true,
+                enable_advanced_effects,
+                enable_magnus,
+                use_enhanced_spin_drift,
+                ..BallisticInputs::default()
+            };
+            let elevation = 0.02_f64;
+            let solution = fast_integrate_with_segments(
+                &inputs,
+                vec![],
+                FastIntegrationParams {
+                    horiz: 1_000.0,
+                    vert: 0.0,
+                    initial_state: [
+                        0.0,
+                        0.0,
+                        0.0,
+                        inputs.muzzle_velocity * elevation.cos(),
+                        inputs.muzzle_velocity * elevation.sin(),
+                        0.0,
+                    ],
+                    t_span: (0.0, 5.0),
+                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmo_sock: None,
+                },
+            );
+            assert!(solution.success);
+            let last = solution.t.len() - 1;
+            Vector3::new(
+                solution.y[0][last],
+                solution.y[1][last],
+                solution.y[2][last],
+            )
+        }
+
+        let baseline = endpoint(false, false, false);
+        let magnus_without_umbrella = endpoint(false, true, false);
+        let magnus_with_umbrella = endpoint(true, true, false);
+        assert!(
+            (magnus_without_umbrella - baseline).norm() > 1e-5,
+            "test shot must produce a measurable Magnus displacement"
+        );
+        assert!(
+            (magnus_with_umbrella - magnus_without_umbrella).norm() < 1e-12,
+            "the legacy umbrella must not suppress explicitly enabled Magnus: without={magnus_without_umbrella:?} with={magnus_with_umbrella:?}"
+        );
+
+        let litz_only = endpoint(false, false, true);
+        let litz_without_umbrella = endpoint(false, true, true);
+        let litz_with_umbrella = endpoint(true, true, true);
+        assert!(
+            (litz_without_umbrella - litz_only).norm() < 1e-12,
+            "Litz mode must suppress explicitly enabled Magnus: litz={litz_only:?} both={litz_without_umbrella:?}"
+        );
+        assert!(
+            (litz_with_umbrella - litz_without_umbrella).norm() < 1e-12,
+            "the legacy umbrella must not change Magnus suppression in Litz mode: without={litz_without_umbrella:?} with={litz_with_umbrella:?}"
+        );
     }
 }
