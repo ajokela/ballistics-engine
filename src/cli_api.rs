@@ -4806,7 +4806,7 @@ mod cant_tests {
 
     #[test]
     fn zero_angle_is_independent_of_cant() {
-        let mut a = base_inputs();
+        let a = base_inputs();
         let mut b = base_inputs();
         b.cant_angle = 15f64.to_radians();
         let za = calculate_zero_angle(a.clone(), 100.0, 0.0).expect("zero a");

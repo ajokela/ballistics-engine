@@ -52,6 +52,8 @@ fn canted_fire_matches_small_angle_prediction() {
     let sh = base().sight_height;
 
     // Zero at 100 m, un-canted (zero_height 0 = bore-line datum used by the zero solver).
+    // Relies on the engine zeroing un-canted (cant=0 forced in calculate_zero_angle);
+    // that invariant is independently verified by cli_api.rs cant_tests::zero_angle_is_independent_of_cant.
     let zero_angle = calculate_zero_angle(base(), 100.0, 0.0).expect("zero");
 
     // Flat reference (no elevation), zeroed reference, and canted shot.

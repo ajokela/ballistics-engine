@@ -284,8 +284,11 @@ distance_yd,drop_in,drift_in,velocity_fps,energy_ft-lb,time_s
 500.00,56.11,0.00,1867.27,1300.44,0.6686
 ```
 
-10-degree canted output — `drift_in` grows steadily with range, and `drop_in` runs
-slightly higher than the level case (the "low" half of "right and low"):
+10-degree canted output — the right-and-low effect grows with range, so `drift_in` and
+`drop_in` climb steadily above the level case with distance. Right at the muzzle it's the
+opposite: the bore itself swings toward the cant pivot before the zero's elevation
+correction has any range to leak into windage, so `drop_in` briefly runs *lower* than
+level (1.97 vs 2.00 at 0 yd) before flipping higher by 100 yd:
 
 ```
 distance_yd,drop_in,drift_in,velocity_fps,energy_ft-lb,time_s
