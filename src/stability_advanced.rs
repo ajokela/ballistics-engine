@@ -3,7 +3,6 @@
 // - Don Miller's refined stability formula (2005)
 // - Courtney-Miller's plastic-tip stability correction (2012)
 // - Bryan Litz's stability refinements
-// - Geoffrey Kolbe's Bowman-Howell stability improvements
 //
 // NOTE: Some advanced stability functions are experimental and kept for future use.
 #![allow(dead_code)]
@@ -110,14 +109,7 @@ pub fn calculate_advanced_stability(
     let sg_boat_tail = sg_atmosphere_corrected * params.boat_tail_factor;
 
     // Apply center of pressure adjustment
-    let sg_final = sg_boat_tail * params.cop_adjustment;
-
-    // Apply Bowman-Howell dynamic stability correction for very high velocities
-    if velocity_fps > 3000.0 {
-        apply_bowman_howell_correction(sg_final, velocity_fps, caliber_inches)
-    } else {
-        sg_final
-    }
+    sg_boat_tail * params.cop_adjustment
 }
 
 /// Apply the [Courtney-Miller correction] for a plastic-tipped bullet to a Miller stability value.
@@ -208,29 +200,6 @@ fn apply_atmospheric_correction(sg: f64, air_density_kg_m3: f64, _temperature_k:
     }
 
     sg * (STD_DENSITY / air_density_kg_m3)
-}
-
-/// Bowman-Howell correction for hypervelocity projectiles
-fn apply_bowman_howell_correction(sg: f64, velocity_fps: f64, caliber_inches: f64) -> f64 {
-    // For velocities above 3000 fps, additional dynamic effects occur
-    if velocity_fps <= 3000.0 {
-        return sg;
-    }
-
-    // Hypervelocity correction factor
-    let excess_velocity = (velocity_fps - 3000.0) / 1000.0;
-    let mach_correction = 1.0 - 0.05 * excess_velocity.min(2.0);
-
-    // Small caliber bullets are more affected
-    let caliber_factor = if caliber_inches < 0.264 {
-        0.95
-    } else if caliber_inches < 0.308 {
-        0.97
-    } else {
-        1.0
-    };
-
-    sg * mach_correction * caliber_factor
 }
 
 /// Calculate dynamic stability including yaw effects
@@ -536,18 +505,37 @@ mod tests {
     }
 
     #[test]
-    fn test_hypervelocity_correction() {
-        // Test Bowman-Howell correction kicks in above 3000 fps
-        let normal_vel = calculate_advanced_stability(
-            168.0, 2900.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
-        );
-        let hyper_vel = calculate_advanced_stability(
-            168.0, 3500.0, 10.0, 0.308, 1.24, 1.225, 288.15, "match", true, false,
+    fn advanced_stability_is_continuous_above_3000_fps() {
+        let calculate = |velocity_fps| {
+            calculate_advanced_stability(
+                55.0,
+                velocity_fps,
+                12.0,
+                0.224,
+                0.75,
+                1.225,
+                288.15,
+                "unknown",
+                false,
+                false,
+            )
+        };
+
+        let at_threshold = calculate(3000.0);
+        let just_above = calculate(3000.0 + 1e-6);
+        let relative_change = (just_above / at_threshold - 1.0).abs();
+        assert!(
+            relative_change < 1e-8,
+            "Sg jumped by {:.3}% immediately above 3000 fps",
+            relative_change * 100.0
         );
 
-        // Both should be valid (positive) stability values
-        assert!(normal_vel > 0.0);
-        assert!(hyper_vel > 0.0);
+        let high_velocity = calculate(4000.0);
+        let expected_ratio = (4000.0_f64 / 3000.0).powf(1.0 / 3.0);
+        assert!(
+            (high_velocity / at_threshold - expected_ratio).abs() < 1e-12,
+            "high-velocity Sg did not follow Miller cube-root scaling"
+        );
     }
 
     #[test]
