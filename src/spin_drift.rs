@@ -18,7 +18,7 @@ pub struct SpinDriftComponents {
     pub magnus_component_m: f64,     // Magnus effect contribution
     pub gyroscopic_component_m: f64, // Pure gyroscopic drift
     pub pitch_damping_moment: f64,   // Pitch damping moment (N⋅m)
-    pub yaw_convergence_rate: f64,   // Convergence rate to equilibrium (rad/s)
+    pub yaw_convergence_rate: f64,   // Signed convergence rate (1/s; negative is divergent)
     pub pitch_rate_rad_s: f64,       // Current pitch/yaw rate (rad/s)
 }
 
