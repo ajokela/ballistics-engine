@@ -276,6 +276,58 @@ fn test_cli_help() {
 }
 
 #[test]
+fn bc_tool_help_matches_selected_unit_convention() {
+    let cases = [
+        (
+            "estimate-bc",
+            [
+                "Initial velocity (fps for imperial, m/s for metric)",
+                "Mass (grains for imperial, grams for metric)",
+                "Diameter (inches for imperial, mm for metric)",
+            ],
+        ),
+        (
+            "generate-bc-segments",
+            [
+                "Projectile mass (grains for imperial, grams for metric)",
+                "Projectile diameter (inches for imperial, mm for metric)",
+                "Metric units (velocity in m/s, mass in grams, distance in meters, diameter in mm, Celsius)",
+            ],
+        ),
+    ];
+
+    for (subcommand, expected_help) in cases {
+        let output = Command::new(get_cli_binary())
+            .args([subcommand, "--help"])
+            .output()
+            .expect("Failed to execute command");
+        assert!(
+            output.status.success(),
+            "{subcommand} help failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for expected in expected_help {
+            assert!(
+                stdout.contains(expected),
+                "{subcommand} help is missing {expected:?}:\n{stdout}"
+            );
+        }
+        let stale_help: &[&str] = match subcommand {
+            "estimate-bc" => &["Initial velocity (m/s)", "Mass (kg)", "Diameter (meters)"],
+            "generate-bc-segments" => &["Projectile mass (kg)", "Projectile diameter (meters)"],
+            _ => unreachable!(),
+        };
+        for stale in stale_help {
+            assert!(
+                !stdout.contains(stale),
+                "{subcommand} help still contains contradictory SI-only text {stale:?}:\n{stdout}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_cli_invalid_command() {
     let output = Command::new(get_cli_binary())
         .args(&["invalid-command"])
