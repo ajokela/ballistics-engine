@@ -21,6 +21,50 @@ impl DragTable {
         }
     }
 
+    /// Validated constructor for user-supplied drag decks. Enforces: equal-length axes,
+    /// at least 2 points, strictly-ascending finite non-negative Mach, and finite positive Cd.
+    /// Returns a descriptive, 1-based-row error string on failure (never panics).
+    pub fn try_new(mach_values: Vec<f64>, cd_values: Vec<f64>) -> Result<Self, String> {
+        if mach_values.len() != cd_values.len() {
+            return Err(format!(
+                "drag table has {} Mach values but {} Cd values; the columns must be equal length",
+                mach_values.len(),
+                cd_values.len()
+            ));
+        }
+        if mach_values.len() < 2 {
+            return Err(format!(
+                "drag table needs at least 2 points, got {}",
+                mach_values.len()
+            ));
+        }
+        for (i, &m) in mach_values.iter().enumerate() {
+            if !m.is_finite() || m < 0.0 {
+                return Err(format!(
+                    "drag table Mach at row {} must be finite and >= 0, got {m}",
+                    i + 1
+                ));
+            }
+            if i > 0 && m <= mach_values[i - 1] {
+                return Err(format!(
+                    "drag table Mach must strictly ascend; row {} ({m}) <= row {} ({})",
+                    i + 1,
+                    i,
+                    mach_values[i - 1]
+                ));
+            }
+        }
+        for (i, &cd) in cd_values.iter().enumerate() {
+            if !cd.is_finite() || cd <= 0.0 {
+                return Err(format!(
+                    "drag table Cd at row {} must be finite and > 0, got {cd}",
+                    i + 1
+                ));
+            }
+        }
+        Ok(Self { mach_values, cd_values })
+    }
+
     /// Interpolate drag coefficient for a Mach number, holding the nearest tabulated endpoint
     /// outside the table's measured domain.
     pub fn interpolate(&self, mach: f64) -> f64 {
@@ -31,17 +75,21 @@ impl DragTable {
         }
 
         if n == 1 {
-            return self.cd_values[0];
+            return self.cd_values.first().copied().unwrap_or(0.5);
         }
 
         // A table has no information beyond its measured Mach domain. Hold the nearest endpoint
         // rather than extending the local edge slope indefinitely (which can drive Cd to 0.01).
         if mach <= self.mach_values[0] {
-            return self.cd_values[0];
+            return self.cd_values.first().copied().unwrap_or(0.5);
         }
 
         if mach >= self.mach_values[n - 1] {
-            return self.cd_values[n - 1];
+            // Guard against a caller-built mismatched table (`new` is infallible): index the Cd
+            // axis defensively rather than trusting the Mach-derived length.
+            return self.cd_values.get(n - 1).copied()
+                .or_else(|| self.cd_values.last().copied())
+                .unwrap_or(0.5);
         }
 
         // Find the segment containing the mach value. Binary search over the
@@ -963,6 +1011,44 @@ mod tests {
             "Performance test took {}ms",
             elapsed.as_millis()
         );
+    }
+
+    #[test]
+    fn try_new_accepts_valid_table() {
+        let t = DragTable::try_new(vec![0.5, 1.0, 2.0], vec![0.20, 0.40, 0.30]).unwrap();
+        assert_eq!(t.mach_values.len(), 3);
+    }
+
+    #[test]
+    fn try_new_rejects_mismatched_lengths() {
+        let e = DragTable::try_new(vec![0.5, 1.0, 2.0], vec![0.20, 0.40]).unwrap_err();
+        assert!(e.contains("Mach") && e.contains("Cd"), "got: {e}");
+    }
+
+    #[test]
+    fn try_new_rejects_too_few_points() {
+        assert!(DragTable::try_new(vec![1.0], vec![0.3]).is_err());
+    }
+
+    #[test]
+    fn try_new_rejects_non_ascending_mach() {
+        assert!(DragTable::try_new(vec![1.0, 1.0, 2.0], vec![0.3, 0.3, 0.3]).is_err());
+        assert!(DragTable::try_new(vec![2.0, 1.0], vec![0.3, 0.3]).is_err());
+    }
+
+    #[test]
+    fn try_new_rejects_nonpositive_or_nonfinite_cd() {
+        assert!(DragTable::try_new(vec![1.0, 2.0], vec![0.3, 0.0]).is_err());
+        assert!(DragTable::try_new(vec![1.0, 2.0], vec![0.3, f64::NAN]).is_err());
+    }
+
+    #[test]
+    fn interpolate_does_not_panic_on_mismatched_table() {
+        // `new` is infallible; a caller could build a bad table. interpolate must not panic.
+        let bad = DragTable::new(vec![0.5, 1.0, 2.0], vec![0.2]);
+        let _ = bad.interpolate(0.1);
+        let _ = bad.interpolate(5.0);
+        let _ = bad.interpolate(1.0);
     }
 }
 
