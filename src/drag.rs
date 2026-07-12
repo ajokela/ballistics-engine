@@ -83,7 +83,7 @@ impl DragTable {
         y0 + t * (y1 - y0)
     }
 
-    /// Cubic interpolation using 4 points (similar to cubic spline)
+    /// Cubic Hermite interpolation using four points and centered chord-slope tangents.
     pub fn cubic_interpolate(&self, mach: f64, idx: usize) -> f64 {
         // Ensure we have enough points for cubic interpolation
         if idx == 0 || idx + 1 >= self.mach_values.len() || idx + 1 >= self.cd_values.len() {
@@ -113,22 +113,30 @@ impl DragTable {
             },
         ];
 
-        // Catmull-Rom spline interpolation
-        // Ensure denominator is not zero
-        let denominator = x[2] - x[1];
-        if denominator.abs() < crate::constants::MIN_DIVISION_THRESHOLD {
-            return y[1]; // Return the value at the current point if points are too close
+        // Scale centered chord-slope tangents by this segment's actual width. This Hermite
+        // construction remains C1 across non-uniform knots; using the fixed uniform Catmull-Rom
+        // coefficient matrix here bends even affine data when adjacent Mach intervals differ.
+        let segment_width = x[2] - x[1];
+        let left_chord_width = x[2] - x[0];
+        let right_chord_width = x[3] - x[1];
+        if segment_width.abs() < crate::constants::MIN_DIVISION_THRESHOLD
+            || left_chord_width.abs() < crate::constants::MIN_DIVISION_THRESHOLD
+            || right_chord_width.abs() < crate::constants::MIN_DIVISION_THRESHOLD
+        {
+            return self.linear_interpolate(mach, idx);
         }
-        let t = (mach - x[1]) / denominator;
+        let t = (mach - x[1]) / segment_width;
         let t2 = t * t;
         let t3 = t2 * t;
 
-        let a0 = -0.5 * y[0] + 1.5 * y[1] - 1.5 * y[2] + 0.5 * y[3];
-        let a1 = y[0] - 2.5 * y[1] + 2.0 * y[2] - 0.5 * y[3];
-        let a2 = -0.5 * y[0] + 0.5 * y[2];
-        let a3 = y[1];
+        let tangent1 = segment_width * (y[2] - y[0]) / left_chord_width;
+        let tangent2 = segment_width * (y[3] - y[1]) / right_chord_width;
+        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        let h10 = t3 - 2.0 * t2 + t;
+        let h01 = -2.0 * t3 + 3.0 * t2;
+        let h11 = t3 - t2;
 
-        a0 * t3 + a1 * t2 + a2 * t + a3
+        h00 * y[1] + h10 * tangent1 + h01 * y[2] + h11 * tangent2
     }
 }
 
@@ -795,6 +803,44 @@ mod tests {
         let linear_result = table.linear_interpolate(1.25, 1);
         // Cubic and linear should be close but not identical for smooth curves
         assert!((result - linear_result).abs() < 0.2);
+    }
+
+    #[test]
+    fn nonuniform_cubic_reproduces_affine_data() {
+        let table = DragTable::new(
+            vec![0.0, 1.0, 3.0, 4.0],
+            vec![0.25, 0.3125, 0.4375, 0.5],
+        );
+
+        for mach in [1.5, 2.5] {
+            let expected = 0.25 + mach / 16.0;
+            let actual = table.interpolate(mach);
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "non-uniform cubic bent affine data at Mach {mach}: {actual} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonuniform_cubic_is_c1_at_spacing_transition() {
+        let table = DragTable::new(
+            vec![0.0, 1.0, 3.0, 4.0, 7.0],
+            vec![0.25, 0.265625, 0.390625, 0.5, 1.015625],
+        );
+        let knot = 3.0;
+        let expected_at_knot = 0.390625_f64;
+        let epsilon = 1e-6;
+        let at_knot = table.interpolate(knot);
+        let left_slope = (at_knot - table.interpolate(knot - epsilon)) / epsilon;
+        let right_slope = (table.interpolate(knot + epsilon) - at_knot) / epsilon;
+
+        assert_eq!(at_knot.to_bits(), expected_at_knot.to_bits());
+        assert!(
+            (left_slope - right_slope).abs() < 1e-5,
+            "non-uniform cubic has a derivative kink: left={left_slope}, right={right_slope}"
+        );
     }
 
     #[test]
