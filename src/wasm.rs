@@ -733,10 +733,11 @@ impl WasmBallistics {
                     UnitSystem::Imperial => (mass, velocity),
                     UnitSystem::Metric => (mass * 15.4323584, velocity * 3.280839895),
                 };
-                if let Some(segments) =
-                    table.generate_segments(bc, drag_model, weight_grains, Some(muzzle_fps))
+                if let Some(schedule) =
+                    table.generate_segment_schedule(bc, drag_model, weight_grains, muzzle_fps)
                 {
-                    inputs.bc_segments_data = Some(segments);
+                    inputs.bc_segments_data = Some(schedule.segments);
+                    inputs.bc_value = schedule.fallback_bc;
                 }
             }
         }
