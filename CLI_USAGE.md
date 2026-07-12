@@ -79,6 +79,50 @@ Calculate ballistic trajectories with advanced physics modeling:
   --auto-zero 600
 ```
 
+### Custom Drag Tables
+
+Supply a measured or manufacturer-published drag curve — Hornady CDM data, a Lapua/Doppler-radar-derived deck, or your own — instead of relying on a G1/G7 reference curve plus a single BC value. Available via `--drag-table <FILE>` on the `trajectory`, `zero`, and `monte-carlo` subcommands.
+
+**CSV format:** two columns, `mach,cd`, one point per line.
+- A single leading header row (e.g. `mach,cd`) is tolerated and skipped.
+- Blank lines and lines starting with `#` are ignored.
+- Mach must be strictly ascending, with at least 2 data points.
+- Cd must be finite and greater than 0.
+- **Mach-keyed only.** Velocity-keyed decks (e.g. raw Doppler output in fps/m/s) must be converted by you first: `mach = velocity / speed_of_sound` at the conditions the velocity was measured under.
+
+**Worked example:**
+
+```bash
+cat > deck.csv <<'EOF'
+mach,cd
+0.5,0.220
+0.8,0.230
+1.0,0.520
+1.2,0.480
+1.5,0.400
+2.0,0.330
+2.5,0.300
+EOF
+
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-table deck.csv --max-range 500
+```
+
+`-b/--bc` is still a required CLI argument, but its value is **ignored** once `--drag-table` is set — the deck supplies Cd directly. `-m/--mass` and `-d/--diameter` remain **required** (grains/inches under imperial, grams/mm under `--units metric`): the engine divides the deck's Cd by the projectile's sectional density (derived from mass and diameter) in place of the usual BC-based retardation denominator.
+
+**Precedence:** a custom drag table completely replaces the G1/G7 model and any BC. It also takes precedence over `--use-bc-segments` / `--bc-segment`; if both are supplied, the drag table wins and a warning is printed:
+
+```
+Warning: --drag-table and BC segments were both provided; the drag table takes precedence and BC segments are ignored.
+```
+
+**Out-of-range policy:** Mach numbers outside the table's measured domain **hold the nearest tabulated Cd** rather than extrapolating. On `trajectory`, if the shot's Mach range (muzzle to impact) extends beyond the table's domain, a coverage warning is printed:
+
+```
+Warning: shot Mach range [1.47, 2.42] extends beyond the drag table domain [0.80, 1.20]; the nearest tabulated Cd is held outside that range (approximate).
+```
+
+**Monte Carlo caveat:** when a custom drag table is active, `--bc-std` dispersion is a no-op — the table fixes Cd directly, so perturbing the (ignored) BC value has no effect on drag. Velocity, angle, and wind dispersion still vary normally.
+
 #### BC5D Correction Tables
 
 BC5D (5-Dimensional BC Correction) tables provide ML-derived, velocity-dependent BC corrections for specific calibers. These tables capture how BC changes throughout the flight envelope based on weight, BC, muzzle velocity, current velocity, and drag model.
