@@ -799,6 +799,11 @@ enum Commands {
         #[arg(long)]
         target_radius: Option<f64>,
 
+        /// Path to a custom drag deck: CSV `mach,cd` per line. Replaces the G-model + BC for drag;
+        /// bc_value is ignored when set. Mach-keyed; out-of-range Mach holds the nearest tabulated Cd.
+        #[arg(long, value_name = "FILE")]
+        drag_table: Option<std::path::PathBuf>,
+
         /// Output format
         #[arg(short = 'o', long, default_value = "summary")]
         output: MonteCarloOutput,
@@ -849,6 +854,11 @@ enum Commands {
         /// Altitude (feet or meters based on --units)
         #[arg(long, default_value = "0.0")]
         altitude: f64,
+
+        /// Path to a custom drag deck: CSV `mach,cd` per line. Replaces the G-model + BC for drag;
+        /// bc_value is ignored when set. Mach-keyed; out-of-range Mach holds the nearest tabulated Cd.
+        #[arg(long, value_name = "FILE")]
+        drag_table: Option<std::path::PathBuf>,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -3875,6 +3885,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_direction,
             target_distance,
             target_radius,
+            drag_table,
             output,
         } => {
             let bullet_mass = mass;
@@ -3893,6 +3904,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let target_radius_metric = target_radius
                 .map(|r| UnitConverter::distance_to_metric(r, cli.units))
                 .unwrap_or(ballistics_engine::DEFAULT_HIT_RADIUS_M);
+            // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
+            // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
+            let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
             run_monte_carlo(
                 velocity_metric,
                 angle,
@@ -3909,6 +3923,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_direction,
                 target_distance_metric,
                 target_radius_metric,
+                custom_drag_table,
                 output,
             )?;
         }
@@ -3925,6 +3940,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             pressure,
             humidity,
             altitude,
+            drag_table,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
@@ -3950,6 +3966,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
             let pressure_metric = UnitConverter::pressure_to_metric(pressure, cli.units);
             let altitude_metric = UnitConverter::altitude_to_metric(altitude, cli.units);
+            // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
+            // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
+            let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
 
             run_zero_calculation(
                 velocity_metric,
@@ -3963,6 +3982,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 pressure_metric,
                 humidity,
                 altitude_metric,
+                custom_drag_table,
                 output,
                 cli.units,
             )?;
@@ -6300,6 +6320,7 @@ fn run_monte_carlo(
     wind_direction: f64,
     target_distance: Option<f64>,
     target_radius: f64,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
     // Create base inputs. MBA-967: use the same bore-height/ground convention as the
@@ -6307,6 +6328,8 @@ fn run_monte_carlo(
     // simulation stops at a realistic ground impact instead of flying to the integrator's range
     // cap. Without this, "Mean Range" reports the ~1000 m cap rather than the ground-impact range.
     let bore_height_metric = 1.5_f64;
+    // The base inputs are what each Monte Carlo sample perturbs, so the drag table must be set
+    // here for the deck to apply to every simulated shot (MBA-1285).
     let base_inputs = BallisticInputs {
         muzzle_velocity: velocity,
         muzzle_angle: angle.to_radians(),
@@ -6315,6 +6338,7 @@ fn run_monte_carlo(
         bullet_diameter: diameter,
         muzzle_height: bore_height_metric,
         ground_threshold: 0.0,
+        custom_drag_table,
         ..Default::default()
     };
 
@@ -6461,6 +6485,7 @@ fn run_zero_calculation(
     pressure: f64,
     humidity: f64,
     altitude: f64,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
     output: OutputFormat,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
@@ -6475,6 +6500,7 @@ fn run_zero_calculation(
         pressure,
         humidity,
         altitude,
+        custom_drag_table,
         ..Default::default()
     };
 
