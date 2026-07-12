@@ -214,7 +214,10 @@ pub(crate) fn calculate_gravity_yaw_of_repose(
         / (axial_inertia * spin_rate_rad_s.abs() * velocity_mps)
 }
 
-/// Calculate yaw of repose with pitch damping effects
+/// Calculate yaw of repose with pitch damping effects.
+///
+/// Returns the equilibrium yaw and a signed convergence rate in `s^-1`: positive values
+/// converge toward equilibrium, while negative values identify a divergent pitch mode.
 pub fn calculate_damped_yaw_of_repose(
     stability_factor: f64,
     velocity_mps: f64,
@@ -269,15 +272,13 @@ pub fn calculate_damped_yaw_of_repose(
     // Angular acceleration from damping
     let angular_accel = calculate_angular_acceleration(damping_moment, i_transverse);
 
-    // Time constant for convergence
-    let time_constant = if angular_accel != 0.0 && pitch_rate_rad_s != 0.0 {
-        (pitch_rate_rad_s / angular_accel).abs()
+    // For q_dot = lambda*q, the convergence rate is -lambda: positive for damping and
+    // negative for a destabilizing moment. Preserve the legacy zero-signal fallback.
+    let convergence_rate = if angular_accel != 0.0 && pitch_rate_rad_s != 0.0 {
+        -angular_accel / pitch_rate_rad_s
     } else {
-        10.0 // Default large value
+        0.1
     };
-
-    // Convergence rate (how fast it approaches equilibrium)
-    let convergence_rate = 1.0 / time_constant;
 
     (equilibrium_yaw_rad, convergence_rate)
 }
@@ -486,6 +487,34 @@ mod tests {
         );
         assert_eq!(yaw_unstable, 0.0);
         assert_eq!(conv_unstable, 0.0);
+    }
+
+    #[test]
+    fn damped_yaw_convergence_rate_preserves_stability_sign() {
+        let rate = |mach, pitch_rate_rad_s| {
+            calculate_damped_yaw_of_repose(
+                2.5,
+                800.0,
+                19_000.0,
+                0.0,
+                pitch_rate_rad_s,
+                1.225,
+                0.308,
+                1.3,
+                175.0,
+                mach,
+                "fmj",
+            )
+            .1
+        };
+
+        // FMJ uses equal-and-opposite Cmq values at these regime boundaries.
+        let damped = rate(1.0, 0.01);
+        let divergent = rate(1.2, 0.01);
+
+        assert!(damped > 0.0);
+        assert!(divergent < 0.0);
+        assert_eq!(damped.to_bits(), (-divergent).to_bits());
     }
 
     #[test]
