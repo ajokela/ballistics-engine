@@ -24,6 +24,9 @@ use ballistics_engine::bc_table::BcCorrectionTable;
 use ballistics_engine::bc_table_5d::Bc5dTableManager;
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
+use ballistics_engine::constants::{
+    DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F,
+};
 use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel,
     MonteCarloParams, TrajectorySolver, WindConditions,
@@ -580,7 +583,7 @@ enum Commands {
         /// temperature the curve is interpolated at to resolve muzzle velocity (defaults
         /// to --temperature when omitted, i.e. powder assumed at air temperature). With
         /// --powder-temp-sensitivity (linear model), it is the reference temperature the
-        /// stated velocity was measured at (defaults to 70°F / 21°C).
+        /// stated velocity was measured at (defaults to the 70°F equivalent).
         #[arg(long)]
         powder_temp: Option<f64>,
 
@@ -2797,8 +2800,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             let powder_curve_temp_c: Option<f64> =
                 powder_temp.map(|t| UnitConverter::temperature_to_metric(t, cli.units));
             let powder_temp = powder_temp.unwrap_or(match cli.units {
-                UnitSystem::Imperial => 70.0,
-                UnitSystem::Metric => 21.111_111_111_111_11,
+                UnitSystem::Imperial => DEFAULT_POWDER_REFERENCE_TEMP_F,
+                UnitSystem::Metric => DEFAULT_POWDER_REFERENCE_TEMP_C,
             });
             let powder_temp_sensitivity = powder_temp_sensitivity.unwrap_or(match cli.units {
                 UnitSystem::Imperial => 1.0,

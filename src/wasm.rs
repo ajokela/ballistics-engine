@@ -250,9 +250,9 @@ impl WasmBallistics {
             0.3048 / (5.0 / 9.0)
         };
         let mut powder_temp = if units == UnitSystem::Imperial {
-            70.0
+            crate::constants::DEFAULT_POWDER_REFERENCE_TEMP_F
         } else {
-            21.0
+            crate::constants::DEFAULT_POWDER_REFERENCE_TEMP_C
         };
         // Optional measured powder-temperature -> velocity curve ("TEMP:VEL,..."),
         // parsed after unit resolution. Supersedes the linear sensitivity model.

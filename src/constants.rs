@@ -9,6 +9,13 @@ pub const MPS_TO_FPS: f64 = 3.28084;
 /// Conversion factor: feet per second to meters per second
 pub const FPS_TO_MPS: f64 = 0.3048;
 
+/// Default powder reference temperature in Fahrenheit.
+pub const DEFAULT_POWDER_REFERENCE_TEMP_F: f64 = 70.0;
+
+/// Default powder reference temperature in Celsius.
+pub const DEFAULT_POWDER_REFERENCE_TEMP_C: f64 =
+    (DEFAULT_POWDER_REFERENCE_TEMP_F - 32.0) * 5.0 / 9.0;
+
 /// Standard air density at sea level (kg/m³)
 pub const STANDARD_AIR_DENSITY: f64 = 1.225;
 
@@ -118,3 +125,18 @@ pub const BC_FALLBACK_LARGE_CALIBER: f64 = 0.404;
 /// Examples: .308 Winchester, .30-06, .300 Winchester Magnum
 /// Note: Lower than expected due to inclusion of older, less aerodynamic designs
 pub const BC_FALLBACK_XLARGE_CALIBER: f64 = 0.291;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn powder_reference_temperature_defaults_are_equivalent() {
+        let converted = (DEFAULT_POWDER_REFERENCE_TEMP_F - 32.0) * 5.0 / 9.0;
+
+        assert_eq!(
+            DEFAULT_POWDER_REFERENCE_TEMP_C.to_bits(),
+            converted.to_bits()
+        );
+    }
+}
