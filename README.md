@@ -539,14 +539,16 @@ FFIBallisticInputs inputs = {
     .altitude = 0.0
 };
 
-// Calculate trajectory
+// Calculate trajectory. The final argument is the integration step in milliseconds
+// (minimum 0.1 ms; smaller or non-finite values return NULL).
 FFITrajectoryResult* result = ballistics_calculate_trajectory(&inputs, NULL, NULL, 1000.0, 0.1);
 
-// Use results
-printf("Max range: %.2f meters\n", result->max_range);
-
-// Clean up
-ballistics_free_trajectory_result(result);
+// NULL also reports invalid inputs or the 250,000-point resource ceiling.
+// Increase the step, reduce the range, or use adaptive RK45 for an over-budget solve.
+if (result != NULL) {
+    printf("Max range: %.2f meters\n", result->max_range);
+    ballistics_free_trajectory_result(result);
+}
 ```
 
 ### Monte Carlo Simulation via FFI

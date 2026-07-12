@@ -8,6 +8,12 @@ use crate::{
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
 
+/// Minimum C-ABI trajectory `step_size`, in milliseconds (0.1 ms = 0.0001 s).
+///
+/// Smaller steps are rejected before integration because fixed-step solves retain one public
+/// trajectory point per step. All in-repository FFI examples use values in `[0.1, 1.0]` ms.
+pub const MIN_FFI_STEP_SIZE_MS: c_double = 0.1;
+
 // FFI-safe structures with C-compatible layouts
 
 #[repr(C)]
@@ -202,6 +208,12 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
 
 /// Calculate a trajectory through the C ABI.
 ///
+/// `step_size` is expressed in milliseconds and must be finite and at least
+/// [`MIN_FFI_STEP_SIZE_MS`]. This boundary contract is validated for every solver mode, although
+/// adaptive RK45 chooses its integration steps internally. Invalid values return null without
+/// starting a solve. A solve that would exceed [`crate::MAX_TRAJECTORY_POINTS`] also returns null;
+/// callers can increase `step_size`, reduce `max_range`, or select adaptive RK45.
+///
 /// # Safety
 ///
 /// `inputs` may be null, in which case this function returns null. When non-null,
@@ -220,6 +232,9 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
     step_size: c_double,
 ) -> *mut FFITrajectoryResult {
     if inputs.is_null() {
+        return ptr::null_mut();
+    }
+    if !step_size.is_finite() || step_size < MIN_FFI_STEP_SIZE_MS {
         return ptr::null_mut();
     }
 
@@ -267,7 +282,7 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
 
     // Set max range and time step
     solver.set_max_range(max_range);
-    solver.set_time_step(step_size / 1000.0); // Convert to time step
+    solver.set_time_step(step_size / 1000.0); // milliseconds -> seconds
 
     match solver.solve() {
         Ok(result) => {
@@ -784,6 +799,37 @@ pub extern "C" fn ballistics_get_version() -> *const c_char {
 mod tests {
     use super::*;
 
+    fn valid_trajectory_inputs() -> FFIBallisticInputs {
+        FFIBallisticInputs {
+            muzzle_velocity: 800.0,
+            muzzle_angle: 0.0,
+            bc_value: 0.5,
+            bullet_mass: 0.01,
+            bullet_diameter: 0.00762,
+            bc_type: 0,
+            sight_height: 0.05,
+            target_distance: 1.0,
+            temperature: 15.0,
+            twist_rate: 12.0,
+            is_twist_right: 1,
+            shooting_angle: 0.0,
+            altitude: 0.0,
+            latitude: f64::NAN,
+            azimuth_angle: 0.0,
+            use_rk4: 1,
+            use_adaptive_rk45: 0,
+            enable_wind_shear: 0,
+            enable_trajectory_sampling: 0,
+            sample_interval: 10.0,
+            enable_pitch_damping: 0,
+            enable_precession_nutation: 0,
+            enable_spin_drift: 0,
+            enable_magnus: 0,
+            enable_coriolis: 0,
+            shot_azimuth: 0.0,
+        }
+    }
+
     #[allow(dead_code)]
     #[repr(C)]
     struct LegacyFFIMonteCarloParams {
@@ -842,6 +888,61 @@ mod tests {
 
             ballistics_free_trajectory_result(std::ptr::null_mut());
             ballistics_free_monte_carlo_results(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn mba1283_ffi_enforces_step_floor_for_every_solver_mode() {
+        for (mode, use_rk4, use_adaptive_rk45) in [("Euler", 0, 0), ("RK4", 1, 0), ("RK45", 1, 1)] {
+            for step_size in [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -1.0,
+                -0.0,
+                0.0,
+                0.001,
+                MIN_FFI_STEP_SIZE_MS - 0.001,
+            ] {
+                let mut inputs = valid_trajectory_inputs();
+                inputs.use_rk4 = use_rk4;
+                inputs.use_adaptive_rk45 = use_adaptive_rk45;
+                let result = unsafe {
+                    ballistics_calculate_trajectory(
+                        &inputs,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0.01,
+                        step_size,
+                    )
+                };
+                assert!(
+                    result.is_null(),
+                    "{mode} step_size={step_size:?} bypassed the FFI floor"
+                );
+            }
+
+            let mut inputs = valid_trajectory_inputs();
+            inputs.use_rk4 = use_rk4;
+            inputs.use_adaptive_rk45 = use_adaptive_rk45;
+            let result = unsafe {
+                ballistics_calculate_trajectory(
+                    &inputs,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0.01,
+                    MIN_FFI_STEP_SIZE_MS,
+                )
+            };
+            assert!(
+                !result.is_null(),
+                "the documented minimum step must remain usable in {mode}"
+            );
+            unsafe {
+                assert!((*result).point_count >= 0);
+                assert!((*result).point_count as usize <= crate::MAX_TRAJECTORY_POINTS);
+                ballistics_free_trajectory_result(result);
+            }
         }
     }
 }
