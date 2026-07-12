@@ -570,9 +570,10 @@ enum Commands {
         #[arg(long)]
         use_powder_sensitivity: bool,
 
-        /// Powder temperature sensitivity (fps per degree)
-        #[arg(long, default_value = "1.0")]
-        powder_temp_sensitivity: f64,
+        /// Powder temperature sensitivity (fps/°F imperial, m/s/°C metric).
+        /// Defaults to 1.0 fps/°F (0.54864 m/s/°C).
+        #[arg(long)]
+        powder_temp_sensitivity: Option<f64>,
 
         /// Powder temperature (°F/°C). With --powder-temp-curve, this is the powder
         /// temperature the curve is interpolated at to resolve muzzle velocity (defaults
@@ -2797,14 +2798,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Imperial => 70.0,
                 UnitSystem::Metric => 21.111_111_111_111_11,
             });
-            let powder_temp_sensitivity = if use_powder_sensitivity
-                && matches!(cli.units, UnitSystem::Metric)
-                && (powder_temp_sensitivity - 1.0).abs() < f64::EPSILON
-            {
-                0.3048 / (5.0 / 9.0)
-            } else {
-                powder_temp_sensitivity
-            };
+            let powder_temp_sensitivity = powder_temp_sensitivity.unwrap_or(match cli.units {
+                UnitSystem::Imperial => 1.0,
+                UnitSystem::Metric => 0.3048 / (5.0 / 9.0),
+            });
 
             // Parse the optional measured powder-temperature -> velocity curve into
             // canonical SI points. When present it supersedes the linear sensitivity
