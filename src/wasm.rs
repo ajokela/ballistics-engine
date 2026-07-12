@@ -868,10 +868,11 @@ impl WasmBallistics {
                     UnitSystem::Imperial => zv * 0.3048, // fps to m/s
                     UnitSystem::Metric => zv,
                 };
-                // An explicit zero-day velocity takes precedence: disable the curve for
-                // the zero solve so it doesn't re-interpolate over the supplied velocity.
-                // (zero_inputs is a clone of inputs, which may carry the shot-day curve.)
+                // An explicit zero-day velocity takes precedence: disable both velocity
+                // adjustment models for the zero solve so neither changes the supplied value.
+                // (zero_inputs is a clone of inputs, which may carry the shot-day models.)
                 zero_inputs.powder_temp_curve = None;
+                zero_inputs.use_powder_sensitivity = false;
                 zero_day_overridden = true;
             }
             if let Some(zt) = zero_temperature {
