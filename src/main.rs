@@ -6495,13 +6495,18 @@ fn run_zero_calculation(
 
     match output {
         OutputFormat::Json => {
+            let units_label = match units {
+                UnitSystem::Metric => "metric",
+                UnitSystem::Imperial => "imperial",
+            };
             let result = serde_json::json!({
+                "units": units_label,
                 "zero_angle_degrees": zero_angle.to_degrees(),
                 "zero_angle_moa": zero_angle.to_degrees() * 60.0,
                 "zero_angle_mrad": zero_angle * 1000.0,
                 "sight_adjustment_moa": sight_adjustment_moa,
-                "max_ordinate": trajectory.max_height,
-                "point_blank_range": point_blank_range,
+                "max_ordinate": UnitConverter::distance_from_metric(trajectory.max_height, units),
+                "point_blank_range": UnitConverter::distance_from_metric(point_blank_range, units),
             });
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
