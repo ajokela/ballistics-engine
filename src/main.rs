@@ -1699,7 +1699,7 @@ struct TrajectoryConfig {
 
     // Wind (metric)
     wind_speed: f64,
-    wind_direction: f64,
+    wind_direction: f64, // degrees at the CLI boundary
     // Downrange-segmented wind (engine units: speed km/h, angle deg, distance m).
     // When non-empty, overrides the scalar wind above.
     wind_segments: Vec<ballistics_engine::wind::WindSegment>,
@@ -3596,6 +3596,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     DragModelArg::G1 => DragModel::G1,
                                     DragModelArg::G7 => DragModel::G7,
                                 };
+                                let local_wind_direction_rad = final_wind_direction.to_radians();
 
                                 let mut local_inputs = BallisticInputs {
                                     bc_value: trued_bc,
@@ -3624,7 +3625,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     humidity: final_humidity,
                                     latitude,
                                     wind_speed: wind_speed_metric,
-                                    wind_angle: final_wind_direction,
+                                    wind_angle: local_wind_direction_rad,
                                     // MBA-1135: caliber/weight-aware default twist (Miller-inverse)
                                     // instead of a fixed 1:12" when the shooter omits --twist-rate.
                                     twist_rate: twist_rate.unwrap_or_else(|| {
@@ -3676,7 +3677,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                                 let local_wind = WindConditions {
                                     speed: wind_speed_metric,
-                                    direction: final_wind_direction.to_radians(),
+                                    direction: local_wind_direction_rad,
                                     ..Default::default()
                                 };
                                 let local_atmo = AtmosphericConditions {
@@ -5263,6 +5264,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         DragModelArg::G1 => DragModel::G1,
         DragModelArg::G7 => DragModel::G7,
     };
+    let wind_direction_rad = wind_direction.to_radians();
 
     let inputs = BallisticInputs {
         // Core ballistics parameters
@@ -5297,7 +5299,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
         // Wind conditions
         wind_speed,
-        wind_angle: wind_direction,
+        wind_angle: wind_direction_rad,
 
         // Bullet characteristics
         // MBA-1135: caliber/weight-aware default twist (Miller-inverse) instead of a fixed 1:12"
@@ -5365,7 +5367,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // Set up wind conditions
     let wind = WindConditions {
         speed: wind_speed,
-        direction: wind_direction.to_radians(),
+        direction: wind_direction_rad,
         ..Default::default()
     };
 
@@ -7274,6 +7276,7 @@ fn build_trajectory_components(
         DragModelArg::G1 => DragModel::G1,
         DragModelArg::G7 => DragModel::G7,
     };
+    let wind_direction_rad = wind_direction.to_radians();
 
     let inputs = BallisticInputs {
         bc_value: bc,
@@ -7290,7 +7293,7 @@ fn build_trajectory_components(
         pressure,
         humidity,
         wind_speed,
-        wind_angle: wind_direction,
+        wind_angle: wind_direction_rad,
         use_rk4: true,           // Required for non-Euler solver
         use_adaptive_rk45: true, // Use RK45 adaptive (default solver)
         enable_trajectory_sampling: true,
@@ -7302,10 +7305,10 @@ fn build_trajectory_components(
         ..Default::default()
     };
 
-    // wind_direction is in degrees (matching BallisticInputs convention)
+    // wind_direction enters from the CLI in degrees; both engine structures use radians.
     let wind = WindConditions {
         speed: wind_speed,
-        direction: wind_direction.to_radians(), // WindConditions expects radians
+        direction: wind_direction_rad,
         ..Default::default()
     };
 
@@ -8894,5 +8897,33 @@ mod bc_segment_parse_tests {
         assert!(parse_bc_segment("abc:1400:0.2", UnitSystem::Imperial).is_err());
         assert!(parse_bc_segment("1000:xyz:0.2", UnitSystem::Imperial).is_err());
         assert!(parse_bc_segment("1000:1400:bc", UnitSystem::Imperial).is_err());
+    }
+}
+
+#[cfg(test)]
+mod wind_angle_unit_tests {
+    use super::*;
+
+    #[test]
+    fn trajectory_components_store_wind_direction_in_radians() {
+        let (inputs, wind, _) = build_trajectory_components(
+            800.0,
+            0.4,
+            0.01,
+            0.00762,
+            DragModelArg::G1,
+            0.05,
+            15.0,
+            1013.25,
+            50.0,
+            0.0,
+            10.0,
+            90.0,
+            1000.0,
+            100.0,
+        );
+
+        assert!((inputs.wind_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        assert_eq!(inputs.wind_angle.to_bits(), wind.direction.to_bits());
     }
 }

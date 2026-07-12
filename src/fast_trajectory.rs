@@ -201,7 +201,7 @@ pub struct FastIntegrationParams {
 /// engine's Miller Sg. The fast path receives a prebuilt initial velocity (no muzzle angle),
 /// so the caller rotates that velocity by this offset. Returns 0 when the feature is off or
 /// the inputs are degenerate. Crosswind is taken from `wind_speed`/`wind_angle`
-/// (BallisticInputs convention: 0 = headwind, +90deg = from the right). MBA-959, EXPERIMENTAL.
+/// (BallisticInputs convention: 0 = headwind, +PI/2 = from the right). MBA-959, EXPERIMENTAL.
 pub fn aerodynamic_jump_launch_offset_rad(
     inputs: &BallisticInputs,
     atmo_params: (f64, f64, f64, f64),

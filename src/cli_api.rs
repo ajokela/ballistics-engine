@@ -98,7 +98,7 @@ pub struct BallisticInputs {
 
     // Wind conditions
     pub wind_speed: f64, // m/s
-    pub wind_angle: f64, // radians (0=headwind, 90=from right)
+    pub wind_angle: f64, // radians (0=headwind, PI/2=from right)
 
     // Bullet characteristics
     pub twist_rate: f64,               // inches per turn
