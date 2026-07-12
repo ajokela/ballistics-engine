@@ -61,6 +61,14 @@ fn get_flow_regime(reynolds_number: f64) -> FlowRegime {
     }
 }
 
+/// Clift-Gauvin correlation for the drag coefficient of a sphere in continuum flow.
+///
+/// Used only as a bounded, relative low-Re shape for this opt-in projectile correction.
+fn clift_gauvin_sphere_cd(reynolds_number: f64) -> f64 {
+    24.0 / reynolds_number * (1.0 + 0.15 * reynolds_number.powf(0.687))
+        + 0.42 / (1.0 + 42_500.0 / reynolds_number.powf(1.16))
+}
+
 /// Calculate drag coefficient correction factor based on Reynolds number
 ///
 /// Standard G-model drag is returned unchanged at `Re >= 10,000`. Below that threshold, the
@@ -81,6 +89,10 @@ fn reynolds_drag_correction(reynolds_number: f64, mach: f64, _base_cd: f64) -> f
     const FULL_LOW_RE_CORRECTION: f64 = 1e3;
     const STANDARD_TABLE_RE: f64 = 1e4;
 
+    if !reynolds_number.is_finite() || reynolds_number <= 0.0 {
+        return 1.0;
+    }
+
     if reynolds_number >= STANDARD_TABLE_RE {
         return 1.0;
     }
@@ -90,20 +102,11 @@ fn reynolds_drag_correction(reynolds_number: f64, mach: f64, _base_cd: f64) -> f
         return 1.0;
     }
 
-    // Preserve the legacy low-Re power-law shape below the standard-table threshold. This is a
-    // normalization scale for that residual only, not a claim that G tables require Re=1e6.
-    const LOW_RE_POWER_SCALE: f64 = 1e6;
-
-    // Low Reynolds number correction
-    let correction = if reynolds_number < 1000.0 {
-        // Very low Re - Stokes flow region; Cd increases dramatically
-        24.0 / reynolds_number + 1.0
-    } else {
-        // Low Re - significant viscous effects (power law)
-        (reynolds_number / LOW_RE_POWER_SCALE).powf(-0.4)
-    };
-    // Retain the existing sanity cap for the specialized low-Re path.
-    let correction = correction.min(5.0);
+    // Normalize one continuous sphere-drag curve at the standard-table boundary instead of
+    // grafting an absolute Stokes Cd onto a multiplicative factor. The lower bound prevents this
+    // specialized helper from reducing the projectile's empirical base Cd.
+    let reference_cd = clift_gauvin_sphere_cd(STANDARD_TABLE_RE);
+    let correction = (clift_gauvin_sphere_cd(reynolds_number) / reference_cd).clamp(1.0, 5.0);
 
     // Fade the specialized low-Re correction into the standard-table regime, avoiding a new
     // discontinuity at Re=1e4. Also fade it through the upper subsonic band so the factor reaches
@@ -222,7 +225,7 @@ mod tests {
         assert_eq!(correction, 1.0);
 
         // Test correction for low Re
-        let correction = reynolds_drag_correction(5e3, 0.5, 0.5);
+        let correction = reynolds_drag_correction(500.0, 0.5, 0.5);
         assert!(correction > 1.0);
 
         // Test extreme low Re
@@ -230,6 +233,41 @@ mod tests {
         // Just check that there's significant correction
         assert!(correction > 1.0);
         assert!(correction <= 5.0); // Should be capped
+    }
+
+    #[test]
+    fn low_re_correction_uses_normalized_sphere_drag_curve() {
+        let cases = [
+            (10.0, 5.0),
+            (100.0, 2.624_751_023_486_579),
+            (1000.0, 1.118_623_125_825_208),
+        ];
+
+        for (reynolds_number, expected) in cases {
+            let actual = reynolds_drag_correction(reynolds_number, 0.5, 0.5);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "sphere-curve correction mismatch at Re={reynolds_number}: actual={actual} expected={expected}"
+            );
+        }
+
+        let mach_faded = reynolds_drag_correction(100.0, 0.9, 0.5);
+        assert!((mach_faded - 1.812_375_511_743_289).abs() < 1e-12);
+
+        for invalid_re in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(reynolds_drag_correction(invalid_re, 0.5, 0.5), 1.0);
+        }
+    }
+
+    #[test]
+    fn reynolds_correction_is_continuous_at_low_re_curve_seam() {
+        let below = reynolds_drag_correction(1000.0 - 1e-6, 0.5, 0.5);
+        let above = reynolds_drag_correction(1000.0 + 1e-6, 0.5, 0.5);
+
+        assert!(
+            (below - above).abs() < 1e-8,
+            "low-Re correction jumped at Re=1000: below={below}, above={above}"
+        );
     }
 
     #[test]
