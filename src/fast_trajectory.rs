@@ -415,6 +415,13 @@ pub fn fast_integrate(
     } else {
         None
     };
+    // Parse the string model once; the derivative kernel is called four times per RK4 step.
+    let wind_shear_model = if inputs.enable_wind_shear {
+        let model = crate::wind_shear::boundary_layer_model_from_name(&inputs.wind_shear_model);
+        (model != crate::wind_shear::WindShearModel::None).then_some(model)
+    } else {
+        None
+    };
 
     // Integration loop
     let mut hit_target = false;
@@ -460,6 +467,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            wind_shear_model,
             atmo_sock,
         );
 
@@ -478,6 +486,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            wind_shear_model,
             atmo_sock,
         );
 
@@ -496,6 +505,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            wind_shear_model,
             atmo_sock,
         );
 
@@ -514,6 +524,7 @@ pub fn fast_integrate(
             has_bc_segments,
             has_bc_segments_data,
             omega_vector,
+            wind_shear_model,
             atmo_sock,
         );
 
@@ -685,17 +696,25 @@ fn compute_derivatives(
     has_bc_segments: bool,
     has_bc_segments_data: bool,
     omega: Option<Vector3<f64>>,
+    wind_shear_model: Option<crate::wind_shear::WindShearModel>,
     // MBA-1137: optional downrange-segmented atmosphere (zone base swapped by pos.x before lapse).
     atmo_sock: Option<&AtmoSock>,
 ) -> [f64; 6] {
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
 
-    // Get wind in level axes, then project it into the inclined shot frame used by the state.
-    let wind_vector = crate::derivatives::level_vector_to_shot_frame(
-        wind_sock.vector_for_range_stateless(pos.x),
-        inputs.shooting_angle,
-    );
+    // Resolve the cached downrange wind in level axes, then apply boundary-layer shear using
+    // height gained above launch. Site elevation is MSL and intentionally does not enter shear.
+    let level_wind = wind_sock.vector_for_range_stateless(pos.x);
+    let level_wind = if let Some(model) = wind_shear_model {
+        let height_rel_launch =
+            crate::atmosphere::shot_frame_altitude(0.0, pos.x, pos.y, inputs.shooting_angle);
+        crate::wind_shear::apply_boundary_layer_shear(level_wind, height_rel_launch, model)
+    } else {
+        level_wind
+    };
+    let wind_vector =
+        crate::derivatives::level_vector_to_shot_frame(level_wind, inputs.shooting_angle);
 
     // Velocity relative to air
     let vel_adjusted = vel - wind_vector;
@@ -1056,6 +1075,7 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
             )
         };
 
@@ -1102,6 +1122,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         );
         let b = compute_derivatives(
             &state_across_slant,
@@ -1113,6 +1134,7 @@ mod tests {
             inputs.bc_value,
             false,
             false,
+            None,
             None,
             None,
         );
@@ -1153,6 +1175,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         );
         let expected = Vector3::new(
             -G_ACCEL_MPS2 * angle.sin(),
@@ -1163,6 +1186,115 @@ mod tests {
         assert!(
             (Vector3::new(actual[3], actual[4], actual[5]) - expected).norm() < 1e-12,
             "co-moving horizontal wind must leave only shot-frame gravity: {actual:?}"
+        );
+    }
+
+    #[test]
+    fn plain_fast_kernel_applies_power_law_wind_shear() {
+        let state = [500.0, 100.0, 0.0, 700.0, 0.0, 0.0];
+        let run = |enable_wind_shear: bool, model: &str, wind_speed_kmh: f64| {
+            let inputs = BallisticInputs {
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                enable_wind_shear,
+                wind_shear_model: model.to_string(),
+                ..BallisticInputs::default()
+            };
+            let wind_shear_model = enable_wind_shear
+                .then(|| crate::wind_shear::boundary_layer_model_from_name(model))
+                .filter(|model| *model != crate::wind_shear::WindShearModel::None);
+            compute_derivatives(
+                &state,
+                &inputs,
+                &WindSock::new(vec![(wind_speed_kmh, 90.0, 2_000.0)]),
+                FastAtmosphere::Direct {
+                    air_density: 1.225,
+                    speed_of_sound: 340.0,
+                },
+                &inputs.bc_type,
+                crate::transonic_drag::ProjectileShape::Spitzer,
+                inputs.bc_value,
+                false,
+                false,
+                None,
+                wind_shear_model,
+                None,
+            )
+        };
+
+        let uniform = run(false, "power_law", 36.0);
+        let model_none = run(true, "none", 36.0);
+        assert_eq!(model_none, uniform, "model=none must preserve uniform wind");
+
+        let sheared = run(true, "power_law", 36.0);
+        assert!(
+            sheared[5] < uniform[5],
+            "stronger aloft crosswind must increase leftward acceleration: uniform={}, shear={}",
+            uniform[5],
+            sheared[5]
+        );
+
+        let ratio = crate::wind_shear::boundary_layer_speed_ratio(
+            state[1],
+            crate::wind_shear::WindShearModel::PowerLaw,
+        );
+        let equivalent_uniform = run(false, "none", 36.0 * ratio);
+        for component in 3..6 {
+            assert!(
+                (sheared[component] - equivalent_uniform[component]).abs() < 1e-12,
+                "shear component {component} must equal base wind scaled by {ratio}: shear={}, expected={}",
+                sheared[component],
+                equivalent_uniform[component]
+            );
+        }
+    }
+
+    #[test]
+    fn plain_fast_path_wind_shear_changes_high_arc_drift() {
+        let run = |enable_wind_shear: bool, model: &str| {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 800.0,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                bullet_mass: 168.0 * 0.00006479891,
+                bullet_diameter: 0.308 * 0.0254,
+                enable_wind_shear,
+                wind_shear_model: model.to_string(),
+                ground_threshold: -100.0,
+                ..BallisticInputs::default()
+            };
+            let elevation = 0.12_f64;
+            let solution = fast_integrate(
+                &inputs,
+                &WindSock::new(vec![(36.0, 90.0, 2_000.0)]),
+                FastIntegrationParams {
+                    horiz: 1_000.0,
+                    vert: 0.0,
+                    initial_state: [
+                        0.0,
+                        0.0,
+                        0.0,
+                        inputs.muzzle_velocity * elevation.cos(),
+                        inputs.muzzle_velocity * elevation.sin(),
+                        0.0,
+                    ],
+                    t_span: (0.0, 5.0),
+                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmo_sock: None,
+                },
+            );
+            let last = solution.t.len() - 1;
+            assert_eq!(solution.y[0][last].to_bits(), 1_000.0_f64.to_bits());
+            solution.y[2][last]
+        };
+
+        let uniform = run(false, "power_law");
+        let model_none = run(true, "none");
+        assert_eq!(model_none.to_bits(), uniform.to_bits());
+        let sheared = run(true, "power_law");
+        assert!(
+            sheared.abs() > uniform.abs() + 0.01,
+            "aloft shear must increase drift magnitude: uniform={uniform}, shear={sheared}"
         );
     }
 
@@ -1191,6 +1323,7 @@ mod tests {
                 false,
                 false,
                 omega,
+                None,
                 None,
             )
         };

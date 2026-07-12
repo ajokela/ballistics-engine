@@ -376,6 +376,24 @@ pub fn boundary_layer_speed_ratio(height_rel_launch_m: f64, model: WindShearMode
     ratio.max(1.0)
 }
 
+pub(crate) fn boundary_layer_model_from_name(model: &str) -> WindShearModel {
+    match model {
+        "logarithmic" => WindShearModel::Logarithmic,
+        "power_law" | "powerlaw" => WindShearModel::PowerLaw,
+        "ekman_spiral" | "ekman" => WindShearModel::EkmanSpiral,
+        "custom_layers" | "custom" => WindShearModel::CustomLayers,
+        _ => WindShearModel::None,
+    }
+}
+
+pub(crate) fn apply_boundary_layer_shear(
+    base_wind: Vector3<f64>,
+    height_rel_launch_m: f64,
+    model: WindShearModel,
+) -> Vector3<f64> {
+    base_wind * boundary_layer_speed_ratio(height_rel_launch_m, model)
+}
+
 /// High-level API function to get wind at arbitrary position
 ///
 /// This is a convenience wrapper that handles wind segments, shear models,
@@ -432,25 +450,21 @@ pub fn get_wind_at_position(
     // bullet must experience ~full surface wind. The previous implementation treated this
     // height-relative-to-line-of-sight as a true above-ground altitude and clamped it to zero
     // below the roughness length, zeroing the crosswind for almost the whole flight.
-    let model = match wind_shear_model {
-        "logarithmic" => WindShearModel::Logarithmic,
-        "power_law" | "powerlaw" => WindShearModel::PowerLaw,
-        "ekman_spiral" | "ekman" => WindShearModel::EkmanSpiral,
-        "custom_layers" | "custom" => WindShearModel::CustomLayers,
-        _ => WindShearModel::None,
-    };
-
     // shooter_altitude_m is height above SEA LEVEL and is intentionally not used for the
     // boundary-layer height (see boundary_layer_speed_ratio); kept in the signature for API
     // stability and for callers that may pass it.
     let _ = shooter_altitude_m;
 
-    let speed_ratio = boundary_layer_speed_ratio(altitude_m, model);
     let ang = base_direction_deg.to_radians();
-    Vector3::new(
-        -base_speed_mps * ang.cos() * speed_ratio, // x (downrange head/tail)
-        0.0,                                       // y (vertical)
-        -base_speed_mps * ang.sin() * speed_ratio, // z (lateral crosswind)
+    let base_vector = Vector3::new(
+        -base_speed_mps * ang.cos(), // x (downrange head/tail)
+        0.0,                         // y (vertical)
+        -base_speed_mps * ang.sin(), // z (lateral crosswind)
+    );
+    apply_boundary_layer_shear(
+        base_vector,
+        altitude_m,
+        boundary_layer_model_from_name(wind_shear_model),
     )
 }
 
