@@ -652,7 +652,12 @@ impl TrajectorySolver {
 
         // These four quantities are required by every point-mass solve. In particular, validate
         // muzzle_velocity after `new` has applied a measured curve or linear powder correction.
-        require_positive("bc_value", self.inputs.bc_value)?;
+        // A custom drag table supplies the actual Cd and divides by sectional density, so bc_value
+        // is physically ignored (see custom_drag_denominator). Require it only in the no-table case;
+        // mass + diameter are always required (they drive the SD denominator when a table is set).
+        if self.inputs.custom_drag_table.is_none() {
+            require_positive("bc_value", self.inputs.bc_value)?;
+        }
         require_positive("bullet_mass", self.inputs.bullet_mass)?;
         require_positive("bullet_diameter", self.inputs.bullet_diameter)?;
         require_positive("muzzle_velocity", self.inputs.muzzle_velocity)?;
@@ -3789,6 +3794,38 @@ mod mach_bc_segment_tests {
             segmented_acceleration.x,
             expected_acceleration.x
         );
+    }
+}
+
+#[cfg(test)]
+mod custom_drag_table_validation_tests {
+    use super::*;
+
+    #[test]
+    fn solve_accepts_zero_bc_when_custom_table_present() {
+        let mut inputs = BallisticInputs::default();
+        inputs.bc_value = 0.0; // ignored when a table is set
+        inputs.bullet_mass = 0.0106;
+        inputs.bullet_diameter = 0.00782;
+        inputs.muzzle_velocity = 850.0;
+        inputs.custom_drag_table = Some(crate::drag::DragTable::new(
+            vec![0.5, 1.0, 2.0, 3.0],
+            vec![0.23, 0.40, 0.30, 0.26],
+        ));
+        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        // Must not error on the bc_value gate.
+        assert!(solver.solve().is_ok());
+    }
+
+    #[test]
+    fn solve_still_requires_bc_without_table() {
+        let mut inputs = BallisticInputs::default();
+        inputs.bc_value = 0.0;
+        inputs.bullet_mass = 0.0106;
+        inputs.bullet_diameter = 0.00782;
+        inputs.muzzle_velocity = 850.0;
+        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        assert!(solver.solve().is_err());
     }
 }
 
