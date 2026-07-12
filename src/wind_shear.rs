@@ -131,14 +131,17 @@ impl WindShearProfile {
         self.surface_wind.to_vector() * speed_ratio
     }
 
-    /// Ekman spiral - wind direction changes with altitude
+    /// Ekman spiral - wind direction changes with altitude.
+    ///
+    /// The implicit geostrophic layer assumes the Northern Hemisphere, where wind veers with
+    /// height. Callers can supply `geostrophic_wind` explicitly for a different turning sense.
     fn ekman_spiral_profile(&self, altitude_m: f64) -> Vector3<f64> {
         // Default geostrophic wind if not specified
         let geo_wind = self.geostrophic_wind.unwrap_or({
             WindLayer {
                 altitude_m: 1000.0,
                 speed_mps: self.surface_wind.speed_mps * 1.5,
-                direction_deg: self.surface_wind.direction_deg - 30.0, // 30° backing
+                direction_deg: self.surface_wind.direction_deg + 30.0, // 30° veering
             }
         });
 
@@ -583,6 +586,76 @@ mod tests {
         let v100 = profile.get_wind_at_altitude(100.0).norm();
         let expected = 10.0 * (100.0_f64 / 10.0).powf(1.0 / 7.0);
         assert!((v100 - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn default_ekman_profile_veers_with_height() {
+        let profile = |surface_direction| WindShearProfile {
+            model: WindShearModel::EkmanSpiral,
+            surface_wind: WindLayer {
+                altitude_m: 0.0,
+                speed_mps: 10.0,
+                direction_deg: surface_direction,
+            },
+            ..Default::default()
+        };
+
+        for (surface_direction, halfway_direction, top_direction) in
+            [(0.0, 15.0, 30.0), (350.0, 365.0, 380.0)]
+        {
+            let profile = profile(surface_direction);
+            let halfway = profile.get_wind_at_altitude(500.0);
+            let expected_halfway = WindLayer {
+                altitude_m: 500.0,
+                speed_mps: 12.5,
+                direction_deg: halfway_direction,
+            }
+            .to_vector();
+            let top = profile.get_wind_at_altitude(1000.0);
+            let expected_top = WindLayer {
+                altitude_m: 1000.0,
+                speed_mps: 15.0,
+                direction_deg: top_direction,
+            }
+            .to_vector();
+
+            assert!((halfway - expected_halfway).norm() < 1e-12);
+            assert!((top - expected_top).norm() < 1e-12);
+        }
+
+        let wrapped_geostrophic = WindLayer {
+            altitude_m: 1000.0,
+            speed_mps: 8.0,
+            direction_deg: 30.0,
+        };
+        let wrapped = WindShearProfile {
+            geostrophic_wind: Some(wrapped_geostrophic),
+            ..profile(350.0)
+        };
+        let wrapped_halfway = WindLayer {
+            altitude_m: 500.0,
+            speed_mps: 9.0,
+            direction_deg: 10.0,
+        }
+        .to_vector();
+
+        assert!((wrapped.get_wind_at_altitude(500.0) - wrapped_halfway).norm() < 1e-12);
+        assert!(
+            (wrapped.get_wind_at_altitude(1000.0) - wrapped_geostrophic.to_vector()).norm() < 1e-12
+        );
+
+        let backing_geostrophic = WindLayer {
+            altitude_m: 1000.0,
+            speed_mps: 18.0,
+            direction_deg: 320.0,
+        };
+        let backing = WindShearProfile {
+            geostrophic_wind: Some(backing_geostrophic),
+            ..profile(350.0)
+        };
+        assert!(
+            (backing.get_wind_at_altitude(1000.0) - backing_geostrophic.to_vector()).norm() < 1e-12
+        );
     }
 
     #[test]
