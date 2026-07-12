@@ -97,6 +97,7 @@ const COLOR_RED: (f32, f32, f32) = (0.78, 0.0, 0.0);
 const COLOR_GREEN: (f32, f32, f32) = (0.0, 0.5, 0.0);
 const COLOR_BLUE: (f32, f32, f32) = (0.0, 0.0, 0.78);
 const COLOR_STRIPE: (f32, f32, f32) = (0.94, 0.94, 0.94); // Light gray for alternating rows
+const INHG_TO_HPA: f64 = 33.863_886_666_667;
 
 // The angular conversion (drop_yd/range_yd -> MIL or MOA) and moving-target lead now
 // live in main.rs::drop_to_adjustment, so both card units share one code path; the
@@ -108,12 +109,16 @@ const COLOR_STRIPE: (f32, f32, f32) = (0.94, 0.94, 0.94); // Light gray for alte
 /// not altimeter setting (sea-level corrected). This matches how weather stations
 /// and most ballistic tools report pressure.
 ///
-/// Formula: PA = 145442 * (1 - (P/29.92)^0.190284)
+/// Pressure altitude follows the published NWS station-pressure equation:
+/// PA = 145366.45 * (1 - (P_hPa/1013.25)^0.190284)
+/// <https://www.weather.gov/media/epz/wxcalc/pressureAltitude.pdf>
+///
 ///          DA = PA + 66.7 * (OAT_F - ISA_temp_F)
 pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f: f64) -> f64 {
-    // Calculate pressure altitude from station pressure using barometric formula
-    // This is the altitude in standard atmosphere that has the given pressure
-    let pressure_alt = 145442.0 * (1.0 - (pressure_inhg / 29.92_f64).powf(0.190284));
+    // The NWS equation is defined in hPa (equivalently millibars), so convert before
+    // applying its matched coefficient, reference pressure, and exponent.
+    let pressure_hpa = pressure_inhg * INHG_TO_HPA;
+    let pressure_alt = 145_366.45 * (1.0 - (pressure_hpa / 1013.25).powf(0.190_284));
 
     // ISA temperature at pressure altitude (lapse rate: 3.57°F per 1000 ft)
     let isa_temp_f = 59.0 - (pressure_alt / 1000.0) * 3.57;
@@ -680,5 +685,20 @@ mod tests {
             "Standard conditions should give DA near 0, got {}",
             da_standard
         );
+    }
+
+    #[test]
+    fn density_altitude_uses_published_nws_pressure_altitude_equation() {
+        // 20.670988150011322 inHg is exactly 700 hPa under the standard conversion.
+        // Keep the public-unit fixture literal independent of the production conversion constant.
+        let pressure_inhg = 20.670_988_150_011_322;
+        let density_altitude = calculate_density_altitude(0.0, pressure_inhg, 55.0);
+
+        assert!((density_altitude - 11_962.774_017_764_264).abs() < 1e-6);
+
+        let standard_pressure_inhg = 29.921_255_347_141_39;
+        let standard_density_altitude =
+            calculate_density_altitude(0.0, standard_pressure_inhg, 59.0);
+        assert!(standard_density_altitude.abs() < 1e-9);
     }
 }
