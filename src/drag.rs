@@ -65,6 +65,55 @@ impl DragTable {
         Ok(Self { mach_values, cd_values })
     }
 
+    /// Parse a user drag deck from CSV text: two columns `mach,cd` per line. Blank lines and
+    /// lines starting with `#` are ignored; a single leading header row (a first data-bearing
+    /// row that does not parse as two floats) is skipped once. Any later unparseable row is a
+    /// hard error citing its 1-based line number. Values are validated via `try_new`.
+    pub fn from_csv_str(csv: &str) -> Result<Self, String> {
+        let mut mach_values = Vec::new();
+        let mut cd_values = Vec::new();
+        let mut header_skipped = false;
+        for (lineno, raw) in csv.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut cols = line.split(',');
+            let m = cols.next().map(str::trim);
+            let cd = cols.next().map(str::trim);
+            match (m.and_then(|s| s.parse::<f64>().ok()), cd.and_then(|s| s.parse::<f64>().ok())) {
+                (Some(m), Some(cd)) => {
+                    mach_values.push(m);
+                    cd_values.push(cd);
+                }
+                _ => {
+                    if !header_skipped && mach_values.is_empty() {
+                        // Tolerate one leading header row (e.g. "mach,cd").
+                        header_skipped = true;
+                        continue;
+                    }
+                    return Err(format!(
+                        "drag table CSV: could not parse two numbers from line {}: {:?}",
+                        lineno + 1,
+                        raw
+                    ));
+                }
+            }
+        }
+        if mach_values.is_empty() {
+            return Err("drag table CSV contained no data rows".to_string());
+        }
+        Self::try_new(mach_values, cd_values)
+    }
+
+    /// Load and validate a user drag deck from a CSV file path.
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("could not read drag table {}: {e}", path.display()))?;
+        Self::from_csv_str(&text)
+    }
+
     /// Interpolate drag coefficient for a Mach number, holding the nearest tabulated endpoint
     /// outside the table's measured domain.
     pub fn interpolate(&self, mach: f64) -> f64 {
@@ -1049,6 +1098,34 @@ mod tests {
         let _ = bad.interpolate(0.1);
         let _ = bad.interpolate(5.0);
         let _ = bad.interpolate(1.0);
+    }
+
+    #[test]
+    fn from_csv_str_parses_with_header_and_comments() {
+        let csv = "# my deck\nmach,cd\n0.5, 0.230\n1.0,0.400\n2.0 , 0.300\n";
+        let t = DragTable::from_csv_str(csv).unwrap();
+        assert_eq!(t.mach_values, vec![0.5, 1.0, 2.0]);
+        assert_eq!(t.cd_values, vec![0.230, 0.400, 0.300]);
+    }
+
+    #[test]
+    fn from_csv_str_rejects_malformed_data_row() {
+        // header skip is allowed once; a bad DATA row must error with a line number.
+        let e = DragTable::from_csv_str("0.5,0.23\n1.0,notanumber\n").unwrap_err();
+        assert!(e.contains("line 2"), "got: {e}");
+    }
+
+    #[test]
+    fn from_csv_str_rejects_empty() {
+        assert!(DragTable::from_csv_str("# only comments\n\n").is_err());
+    }
+
+    #[test]
+    fn from_csv_str_roundtrips_shipped_g7() {
+        // The embedded G7 deck must load and validate through the public loader.
+        let g7 = include_str!("../data/g7.csv");
+        let t = DragTable::from_csv_str(g7).unwrap();
+        assert!(t.mach_values.len() > 20);
     }
 }
 
