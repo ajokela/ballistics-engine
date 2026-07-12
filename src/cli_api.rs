@@ -428,6 +428,13 @@ const RK45_SAFETY_FACTOR: f64 = 0.9;
 const RK45_MAX_DT: f64 = 0.01;
 const RK45_MIN_DT: f64 = 1e-6;
 
+/// Hard ceiling for points retained by a single [`TrajectorySolver`] result.
+///
+/// The cap applies across Euler, fixed RK4, and adaptive RK45, including an interpolated
+/// max-range endpoint. Solves that would exceed it return [`BallisticsError`] instead of
+/// truncating or growing their point buffer without bound.
+pub const MAX_TRAJECTORY_POINTS: usize = 250_000;
+
 /// Pack the CLI solver's split position/velocity vectors into the shared six-component RK45 norm.
 fn cli_rk45_error_norm(
     position: &Vector3<f64>,
@@ -536,6 +543,7 @@ pub struct TrajectorySolver {
     atmosphere: AtmosphericConditions,
     max_range: f64,
     time_step: f64,
+    max_trajectory_points: usize,
     cluster_bc: Option<ClusterBCDegradation>,
     /// Geometry-derived `(longitudinal, transverse)` moments used by angular diagnostics.
     precession_nutation_inertias: (f64, f64),
@@ -603,6 +611,7 @@ impl TrajectorySolver {
             atmosphere,
             max_range: 1000.0,
             time_step: 0.001,
+            max_trajectory_points: MAX_TRAJECTORY_POINTS,
             cluster_bc,
             precession_nutation_inertias,
             wind_sock: None,
@@ -828,6 +837,22 @@ impl TrajectorySolver {
         }
     }
 
+    /// Store one public trajectory point without exceeding the per-solve resource budget.
+    fn push_trajectory_point(
+        &self,
+        points: &mut Vec<TrajectoryPoint>,
+        point: TrajectoryPoint,
+    ) -> Result<(), BallisticsError> {
+        if points.len() >= self.max_trajectory_points {
+            return Err(BallisticsError::from(format!(
+                "trajectory point limit of {} exceeded",
+                self.max_trajectory_points
+            )));
+        }
+        points.push(point);
+        Ok(())
+    }
+
     /// Supply downrange-segmented wind. Each segment is `(speed_kmh, angle_deg,
     /// until_distance_m)`; the wind for a given downrange distance is the first
     /// segment whose `until_distance_m` exceeds it (a step function), and wind is
@@ -1013,17 +1038,17 @@ impl TrajectorySolver {
         post_velocity: Vector3<f64>,
         post_time: f64,
         max_height: &mut f64,
-    ) {
+    ) -> Result<(), BallisticsError> {
         let Some(previous) = points.last().cloned() else {
-            return;
+            return Ok(());
         };
         if previous.position.x >= self.max_range || post_position.x < self.max_range {
-            return;
+            return Ok(());
         }
 
         let span = post_position.x - previous.position.x;
         if !span.is_finite() || span <= 1e-9 {
-            return;
+            return Ok(());
         }
 
         let fraction = (self.max_range - previous.position.x) / span;
@@ -1038,12 +1063,15 @@ impl TrajectorySolver {
         if position.y > *max_height {
             *max_height = position.y;
         }
-        points.push(TrajectoryPoint {
-            time,
-            position,
-            velocity_magnitude,
-            kinetic_energy,
-        });
+        self.push_trajectory_point(
+            points,
+            TrajectoryPoint {
+                time,
+                position,
+                velocity_magnitude,
+                kinetic_energy,
+            },
+        )
     }
 
     fn gravity_acceleration(&self) -> Vector3<f64> {
@@ -1244,12 +1272,15 @@ impl TrajectorySolver {
             let kinetic_energy =
                 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
 
-            points.push(TrajectoryPoint {
-                time,
-                position: position,
-                velocity_magnitude,
-                kinetic_energy,
-            });
+            self.push_trajectory_point(
+                &mut points,
+                TrajectoryPoint {
+                    time,
+                    position,
+                    velocity_magnitude,
+                    kinetic_energy,
+                },
+            )?;
 
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
             // transonic_mach tracking). Each threshold is recorded once, in descending order.
@@ -1347,7 +1378,7 @@ impl TrajectorySolver {
             Self::validate_integration_state(&position, &velocity, time)?;
         }
 
-        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
+        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
@@ -1507,12 +1538,15 @@ impl TrajectorySolver {
             let kinetic_energy =
                 0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
 
-            points.push(TrajectoryPoint {
-                time,
-                position: position,
-                velocity_magnitude,
-                kinetic_energy,
-            });
+            self.push_trajectory_point(
+                &mut points,
+                TrajectoryPoint {
+                    time,
+                    position,
+                    velocity_magnitude,
+                    kinetic_energy,
+                },
+            )?;
 
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
             // transonic_mach tracking). Each threshold is recorded once, in descending order.
@@ -1628,7 +1662,7 @@ impl TrajectorySolver {
             Self::validate_integration_state(&position, &velocity, time)?;
         }
 
-        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
+        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
@@ -1731,10 +1765,6 @@ impl TrajectorySolver {
         let mut max_height = position.y;
         let mut dt = 0.001; // Initial step size
 
-        // Add a point counter to debug
-        let mut iteration_count = 0;
-        const MAX_ITERATIONS: usize = 100000;
-
         // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
         // are immutable); compute once instead of every iteration (mirrors solve_rk4).
         let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
@@ -1784,22 +1814,19 @@ impl TrajectorySolver {
             && position.y > self.inputs.ground_threshold
             && time < 100.0
         {
-            // X is downrange
-            iteration_count += 1;
-            if iteration_count > MAX_ITERATIONS {
-                break; // Prevent infinite loop
-            }
-
             // Store current point
             let velocity_magnitude = velocity.magnitude();
             let kinetic_energy = 0.5 * self.inputs.bullet_mass * velocity_magnitude.powi(2);
 
-            points.push(TrajectoryPoint {
-                time,
-                position: position,
-                velocity_magnitude,
-                kinetic_energy,
-            });
+            self.push_trajectory_point(
+                &mut points,
+                TrajectoryPoint {
+                    time,
+                    position,
+                    velocity_magnitude,
+                    kinetic_energy,
+                },
+            )?;
 
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
             // transonic_mach tracking). Each threshold is recorded once, in descending order.
@@ -1889,7 +1916,7 @@ impl TrajectorySolver {
         }
 
         // Shared MBA-968/MBA-1218 range-crossing interpolation for all solver modes.
-        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height);
+        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         let last_point = points.last().unwrap();
 
@@ -3211,6 +3238,73 @@ pub fn estimate_bc_from_trajectory(
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod trajectory_point_budget_tests {
+    use super::*;
+
+    fn solver_with_budget(
+        use_rk4: bool,
+        use_adaptive_rk45: bool,
+        point_budget: usize,
+        max_range: f64,
+    ) -> TrajectorySolver {
+        let inputs = BallisticInputs {
+            use_rk4,
+            use_adaptive_rk45,
+            ground_threshold: f64::NEG_INFINITY,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.max_trajectory_points = point_budget;
+        solver.set_max_range(max_range);
+        solver.set_time_step(0.001);
+        solver
+    }
+
+    #[test]
+    fn mba1283_every_solver_errors_instead_of_exceeding_point_budget() {
+        for (mode, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let error = solver_with_budget(use_rk4, use_adaptive_rk45, 3, 10.0)
+                .solve()
+                .expect_err("a solve requiring more than three points must fail");
+            assert!(
+                error.to_string().contains("point limit of 3"),
+                "unexpected {mode} point-budget error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mba1283_interpolated_endpoint_counts_toward_point_budget() {
+        for (mode, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let result = solver_with_budget(use_rk4, use_adaptive_rk45, 2, 0.1)
+                .solve()
+                .expect("the initial point plus exact endpoint fit a two-point budget");
+            assert_eq!(result.points.len(), 2, "unexpected {mode} point count");
+
+            let error = solver_with_budget(use_rk4, use_adaptive_rk45, 1, 0.1)
+                .solve()
+                .expect_err("the exact endpoint must not exceed a one-point budget");
+            assert!(
+                error.to_string().contains("point limit of 1"),
+                "unexpected {mode} endpoint-budget error: {error}"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod monte_carlo_result_tests {

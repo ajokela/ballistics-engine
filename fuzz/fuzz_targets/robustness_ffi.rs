@@ -2,21 +2,44 @@
 use arbitrary::Unstructured;
 use ballistics_engine::ffi::{
     ballistics_calculate_trajectory, ballistics_free_trajectory_result, FFIAtmosphericConditions,
-    FFIBallisticInputs, FFIWindConditions,
+    FFIBallisticInputs, FFIWindConditions, MIN_FFI_STEP_SIZE_MS,
 };
-use ballistics_engine_fuzz::domain::{hostile_inputs, ranged};
+use ballistics_engine::MAX_TRAJECTORY_POINTS;
+use ballistics_engine_fuzz::domain::{hostile_inputs, ranged, valid_inputs};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
-    // Exercise hostile numeric values through the C conversion and alloc/free boundary. Invalid
-    // inputs must return null cleanly; successful results must remain safely releasable.
-    let Ok(vi) = hostile_inputs(&mut u) else {
+    // Keep half the cases physically valid so hostile step-size values reliably reach the FFI
+    // preflight; use hostile physics in the other half to retain conversion/validation coverage.
+    let Ok(use_valid_physics) = u.arbitrary::<bool>() else {
         return;
+    };
+    let vi = if use_valid_physics {
+        let Ok(inputs) = valid_inputs(&mut u) else {
+            return;
+        };
+        inputs
+    } else {
+        let Ok(inputs) = hostile_inputs(&mut u) else {
+            return;
+        };
+        inputs
     };
     let Ok(sight) = ranged(&mut u, -0.2, 0.2) else {
         return;
     }; // finite hostile sight height
+    let Ok(mode) = u.int_in_range(0u8..=2) else {
+        return;
+    };
+    let (use_rk4, use_adaptive_rk45) = match mode {
+        0 => (0, 0),
+        1 => (1, 0),
+        _ => (1, 1),
+    };
+    // Keep accepted minimum-step cases cheap enough for sustained sanitizer fuzzing. The exact
+    // 250,000-point exhaustion behavior is covered deterministically in the solver unit tests.
+    let max_range = vi.target_distance.min(300.0);
     let ffi_in = FFIBallisticInputs {
         muzzle_velocity: vi.muzzle_velocity,
         muzzle_angle: vi.muzzle_angle,
@@ -33,8 +56,8 @@ fuzz_target!(|data: &[u8]| {
         altitude: vi.altitude,
         latitude: f64::NAN, // NAN = "unset" per FFI contract
         azimuth_angle: 0.0,
-        use_rk4: 1,
-        use_adaptive_rk45: 0,
+        use_rk4,
+        use_adaptive_rk45,
         enable_wind_shear: 0,
         enable_trajectory_sampling: 0,
         sample_interval: 10.0,
@@ -45,12 +68,27 @@ fuzz_target!(|data: &[u8]| {
         enable_coriolis: 0,
         shot_azimuth: 0.0,
     };
-    // FFI step_size is internally divided by 1000 (dt = step_size/1000 s), so the
-    // README/tests use [0.1, 1.0] (dt 1e-4..1e-3 s). Fuzz within that sane band.
-    // Finding #2 (logged): a far smaller step_size drives unbounded trajectory-point
-    // allocation / OOM through this ABI — tracked separately, not re-triggered here.
-    let Ok(step) = ranged(&mut u, 0.1, 1.0) else {
+    // Mix the exact invalid boundary classes with the documented valid band. `step_size` is
+    // milliseconds; invalid/sub-minimum values must return null without starting integration.
+    let Ok(step_class) = u.int_in_range(0u8..=9) else {
         return;
+    };
+    let step = match step_class {
+        0 => f64::NAN,
+        1 => f64::INFINITY,
+        2 => f64::NEG_INFINITY,
+        3 => 0.0,
+        4 => -0.0,
+        5 => -1.0,
+        6 => MIN_FFI_STEP_SIZE_MS / 10.0,
+        7 => MIN_FFI_STEP_SIZE_MS - 0.001,
+        8 => MIN_FFI_STEP_SIZE_MS,
+        _ => {
+            let Ok(step) = ranged(&mut u, MIN_FFI_STEP_SIZE_MS, 1.0) else {
+                return;
+            };
+            step
+        }
     };
     // SAFETY: valid pointers to locals; result freed via the paired free fn.
     unsafe {
@@ -64,8 +102,16 @@ fuzz_target!(|data: &[u8]| {
             humidity: 50.0,
             altitude: 0.0,
         };
-        let res = ballistics_calculate_trajectory(&ffi_in, &wind, &atmo, 3000.0, step);
-        if !res.is_null() {
+        let res = ballistics_calculate_trajectory(&ffi_in, &wind, &atmo, max_range, step);
+        let invalid_step = !step.is_finite() || step < MIN_FFI_STEP_SIZE_MS;
+        if invalid_step {
+            assert!(res.is_null(), "invalid FFI step_size returned a result");
+        } else if !res.is_null() {
+            assert!((*res).point_count >= 0, "negative FFI point count");
+            assert!(
+                (*res).point_count as usize <= MAX_TRAJECTORY_POINTS,
+                "FFI result exceeded the trajectory-point budget"
+            );
             ballistics_free_trajectory_result(res);
         }
     }
