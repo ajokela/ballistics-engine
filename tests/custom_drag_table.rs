@@ -118,6 +118,51 @@ fn custom_drag_table_is_bc_invariant() {
     );
 }
 
+// MBA-1285: feeding the shipped G7 deck back in as a *custom* table for a projectile whose BC
+// is set equal to its own sectional density (form factor i == 1: BC = SD / i) should reproduce
+// the built-in G7 model's trajectory closely — Cd_own / SD == Cd_ref / BC when the two curves
+// and denominators coincide (see BallisticInputs::custom_drag_denominator). The custom-table
+// path skips the transonic shape correction the G-model path applies, so this is a
+// self-consistency check, not a bit-for-bit equality guarantee.
+#[test]
+fn g7_deck_matches_g7_model_for_unit_form_factor() {
+    use ballistics_engine::drag::DragTable;
+    let g7 = DragTable::from_csv_str(include_str!("../data/g7.csv")).unwrap();
+
+    let mut model = base();
+    model.bc_type = ballistics_engine::DragModel::G7;
+
+    // Choose mass/diameter (already set by base()) so sectional_density_lb_in2 == bc_value
+    // (i == 1).
+    let mut deck = model.clone();
+    let sd = model
+        .sectional_density_lb_in2()
+        .expect("base() sets mass+diameter");
+    model.bc_value = sd; // BC == SD => i == 1
+    deck.bc_value = sd;
+    deck.custom_drag_table = Some(g7);
+
+    let v_model = velocity_at(model, 900.0);
+    let v_deck = velocity_at(deck, 900.0);
+    let rel = (v_model - v_deck).abs() / v_model;
+    assert!(
+        rel < 0.02,
+        "G7 deck vs G7 model diverged {:.3}% at 900 m (model={v_model:.3} m/s, deck={v_deck:.3} m/s)",
+        rel * 100.0
+    );
+}
+
+// Integration-level guard on top of the unit tests in src/drag.rs: from_csv_str must reject
+// malformed decks via the *file-parsing* path (not just try_new's already-parsed-values path),
+// covering a negative Cd, a descending Mach axis, and an unparseable row.
+#[test]
+fn from_csv_str_rejects_bad_decks() {
+    use ballistics_engine::drag::DragTable;
+    assert!(DragTable::from_csv_str("0.5,0.2\n1.0,-0.1\n").is_err()); // negative Cd
+    assert!(DragTable::from_csv_str("1.0,0.3\n0.5,0.3\n").is_err()); // descending Mach
+    assert!(DragTable::from_csv_str("0.5,0.3\nbroken\n").is_err()); // malformed row
+}
+
 // The SD denominator itself: 168 gr / 7000 / 0.308^2 in² ≈ 0.25305 lb/in², derived from
 // either the imperial mirror fields or the SI mass/diameter fallback; None when both are
 // unusable (that case falls back to bc_value inside the solvers, with a warning).
