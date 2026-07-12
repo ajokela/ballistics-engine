@@ -6,7 +6,7 @@
 use crate::{
     atmosphere::{calculate_air_density_cimp, get_local_atmosphere_humid, AtmoSock},
     bc_estimation::velocity_segment_bc,
-    constants::{G_ACCEL_MPS2, MPS_TO_FPS},
+    constants::{G_ACCEL_MPS2, MPS_TO_FPS, STANDARD_AIR_DENSITY},
     drag::get_drag_coefficient,
     wind::WindSock,
     DragModel, InternalBallisticInputs as BallisticInputs,
@@ -128,6 +128,17 @@ fn direct_atmosphere_values(
         .then_some((a, b))
 }
 
+fn stability_atmosphere_params(atmo_params: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    if let Some((air_density, _)) = direct_atmosphere_values(atmo_params) {
+        // compute_stability_coefficient consumes standard-mode temperature/pressure, whose
+        // Miller correction is rho_ref/rho. At the 15 C reference temperature, scaling pressure
+        // by rho/rho_ref supplies that exact correction without misreading sound speed as temp.
+        (0.0, 15.0, 1013.25 * air_density / STANDARD_AIR_DENSITY, 1.0)
+    } else {
+        atmo_params
+    }
+}
+
 const MAX_STANDARD_DENSITY_RATIO: f64 = 2.0;
 
 /// True if `atmo_params` can yield a finite, positive air density. `atmo_params` has TWO
@@ -206,7 +217,8 @@ pub fn aerodynamic_jump_launch_offset_rad(
     {
         return 0.0;
     }
-    let sg = crate::stability::compute_stability_coefficient(inputs, atmo_params);
+    let stability_atmo = stability_atmosphere_params(atmo_params);
+    let sg = crate::stability::compute_stability_coefficient(inputs, stability_atmo);
     if !(sg.is_finite() && sg > 0.0) {
         return 0.0;
     }
