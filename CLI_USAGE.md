@@ -491,9 +491,10 @@ ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-ran
 - **VMIN/VMAX** follow `--units` (fps imperial, m/s metric); **BC** is dimensionless.
 - Segments are keyed to **velocity**, not distance — this is orthogonal to `--wind-segment`
   (which is distance-keyed). You can combine both; each applies on its own axis.
-- Passing any `--bc-segment` implies `--use-bc-segments` and **overrides** `--bc-table-dir`
-  (manual pairs are highest priority). A velocity outside every segment falls back to the
-  base `--bc`.
+- Passing any `--bc-segment` implies `--use-bc-segments` and **overrides** `--bc-table` and
+  `--bc-table-dir` (manual pairs are highest priority). An interior gap between segments falls
+  back to the manually adjusted base `--bc`; outside the global coverage, the nearest segment
+  is used.
 - To run BC5D-equivalent corrections on a device that cannot hold the tables (e.g. the
   WASM CLI), run once with `--bc-table-dir ... --use-bc-segments --print-bc-segments`:
   the generated ladder prints as ready-to-paste `--bc-segment` lines (velocities in the
