@@ -2284,7 +2284,8 @@ Trajectory Command:
     --latitude <LAT>             Latitude for Coriolis (degrees)
     --shot-direction <DEG>       Compass bearing of the shot for Coriolis (0=N, 90=E)
     --shooting-angle <ANGLE>     Uphill/downhill angle (degrees)
-    --cant <DEGREES>             Rifle cant angle (degrees)
+    --cant <DEGREES>             Rifle cant angle (degrees); positive = clockwise from the
+                                 shooter, moving point of impact right and low
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
     --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm)
     --target-height <HEIGHT>     Target height above ground (inches/mm)
