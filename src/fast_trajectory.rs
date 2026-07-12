@@ -683,6 +683,62 @@ fn fast_magnus_acceleration(
     })
 }
 
+fn interpolated_vertical_apex(
+    previous_time: f64,
+    previous: &[f64; 6],
+    current_time: f64,
+    current: &[f64; 6],
+) -> Option<(f64, [f64; 6])> {
+    let dt = current_time - previous_time;
+    let previous_vy = previous[4];
+    let current_vy = current[4];
+    if !dt.is_finite()
+        || dt <= 0.0
+        || !previous_vy.is_finite()
+        || !current_vy.is_finite()
+        || previous_vy <= 0.0
+        || current_vy > 0.0
+    {
+        return None;
+    }
+
+    let denominator = previous_vy - current_vy;
+    if !denominator.is_finite() || denominator <= 0.0 {
+        return None;
+    }
+    let alpha = previous_vy / denominator;
+    // An exact endpoint root is already retained as the current saved point. Only synthesize a
+    // strictly interior point so the solution remains ordered without duplicate event times.
+    if !alpha.is_finite() || !(0.0..1.0).contains(&alpha) {
+        return None;
+    }
+
+    let mut apex = [0.0; 6];
+    for component in 0..6 {
+        apex[component] = previous[component] + alpha * (current[component] - previous[component]);
+    }
+
+    // Cubic Hermite interpolation uses each endpoint's position and velocity, avoiding the
+    // chord-height bias that linear interpolation has around a stationary point.
+    let alpha2 = alpha * alpha;
+    let alpha3 = alpha2 * alpha;
+    let h00 = 2.0 * alpha3 - 3.0 * alpha2 + 1.0;
+    let h10 = alpha3 - 2.0 * alpha2 + alpha;
+    let h01 = -2.0 * alpha3 + 3.0 * alpha2;
+    let h11 = alpha3 - alpha2;
+    for axis in 0..3 {
+        apex[axis] = h00 * previous[axis]
+            + h10 * dt * previous[axis + 3]
+            + h01 * current[axis]
+            + h11 * dt * current[axis + 3];
+    }
+    apex[4] = 0.0;
+
+    apex.iter()
+        .all(|component| component.is_finite())
+        .then_some((previous_time + alpha * dt, apex))
+}
+
 /// Compute derivatives for the state vector
 #[allow(clippy::too_many_arguments)]
 fn compute_derivatives(
@@ -952,8 +1008,8 @@ pub fn fast_integrate_with_segments(
 
     // Convert trajectory to FastSolution format
     let n_points = trajectory.len();
-    let mut times = Vec::with_capacity(n_points);
-    let mut states = Vec::with_capacity(n_points);
+    let mut times = Vec::with_capacity(n_points + 1);
+    let mut states = Vec::with_capacity(n_points + 1);
 
     let mut target_hit_time: Option<f64> = None;
     let mut ground_hit_time: Option<f64> = None;
@@ -973,6 +1029,23 @@ pub fn fast_integrate_with_segments(
 
         // Check termination conditions
         // McCoy: state[0]=downrange, state[1]=vertical, state[2]=lateral
+
+        // The RK45 integrator intentionally returns only ~50 range-spaced states. Use vertical
+        // velocity to recover an apex between adjacent saves, and retain the synthetic point so
+        // FastSolution::sol(max_ord_time) returns its Hermite-interpolated height rather than the
+        // lower straight chord between coarse samples.
+        if let Some((&previous_time, &previous_state)) = times.last().zip(states.last()) {
+            if let Some((apex_time, apex_state)) =
+                interpolated_vertical_apex(previous_time, &previous_state, t, &state)
+            {
+                if apex_state[1] > max_ord_y {
+                    max_ord_y = apex_state[1];
+                    max_ord_time = Some(apex_time);
+                }
+                times.push(apex_time);
+                states.push(apex_state);
+            }
+        }
 
         // Record FIRST time target is hit
         if target_hit_time.is_none() && state[0] >= params.horiz {
@@ -1637,6 +1710,57 @@ mod tests {
         assert_eq!(solution.t_events[0], vec![2.0]); // Target hit
         assert_eq!(solution.t_events[1], vec![0.5]); // Max ordinate
         assert!(solution.t_events[2].is_empty()); // No ground hit
+    }
+
+    #[test]
+    fn segmented_fast_path_interpolates_max_ordinate_between_saved_points() {
+        let expected_apex_time = 5.105_f64;
+        let downrange_velocity = 100.0_f64;
+        let vertical_velocity = G_ACCEL_MPS2 * expected_apex_time;
+        let inputs = BallisticInputs {
+            muzzle_velocity: downrange_velocity.hypot(vertical_velocity),
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            use_enhanced_spin_drift: false,
+            ..BallisticInputs::default()
+        };
+        let solution = fast_integrate_with_segments(
+            &inputs,
+            vec![],
+            FastIntegrationParams {
+                horiz: 1_000.0,
+                vert: 0.0,
+                initial_state: [0.0, 0.0, 0.0, downrange_velocity, vertical_velocity, 0.0],
+                t_span: (0.0, 12.0),
+                // Negligible density makes this an analytic constant-gravity arc while retaining
+                // the valid direct-atmosphere sentinel.
+                atmo_params: (1e-12, 340.0, 0.0, 0.0),
+                atmo_sock: None,
+            },
+        );
+
+        assert!(solution.success);
+        assert_eq!(solution.t_events[1].len(), 1);
+        let reported_time = solution.t_events[1][0];
+        assert!(
+            (reported_time - expected_apex_time).abs() < 0.006,
+            "max-ordinate time must be interpolated between coarse saves: reported={reported_time} expected={expected_apex_time}"
+        );
+        let event_index = solution
+            .t
+            .iter()
+            .position(|time| time.to_bits() == reported_time.to_bits())
+            .expect("the interpolated apex must be retained in the solution");
+        assert_eq!(solution.y[4][event_index].to_bits(), 0.0_f64.to_bits());
+
+        let expected_height = vertical_velocity * expected_apex_time
+            - 0.5 * G_ACCEL_MPS2 * expected_apex_time.powi(2);
+        let event_state = solution.sol(&[reported_time]);
+        assert!(
+            (event_state[1][0] - expected_height).abs() < 2e-4,
+            "max-ordinate state must preserve the interpolated apex height: reported={} expected={expected_height}",
+            event_state[1][0]
+        );
     }
 
     #[test]
