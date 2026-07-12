@@ -47,6 +47,10 @@ pub struct FFIBallisticInputs {
     // along, radians, 0=North, PI/2=East. Drives the Coriolis Eötvös/drift azimuth.
     // Distinct from azimuth_angle (the small aiming offset). 0.0 if unset.
     pub shot_azimuth: c_double,
+    // Appended (keeps existing field offsets): rifle cant angle in RADIANS about the line
+    // of sight, positive = clockwise from the shooter. Rotates the sight-frame aim offsets
+    // and bore geometry ("zeroed level, fired canted" -> POI right and low). 0.0 if unset.
+    pub cant_angle: c_double,
 }
 
 #[repr(C)]
@@ -146,6 +150,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.muzzle_angle = inputs.muzzle_angle;
     ballistic_inputs.azimuth_angle = inputs.azimuth_angle;
     ballistic_inputs.shot_azimuth = inputs.shot_azimuth;
+    ballistic_inputs.cant_angle = inputs.cant_angle;
     ballistic_inputs.use_rk4 = inputs.use_rk4 != 0;
     ballistic_inputs.use_adaptive_rk45 = inputs.use_adaptive_rk45 != 0;
     ballistic_inputs.bc_value = inputs.bc_value;
@@ -960,6 +965,7 @@ mod tests {
             enable_magnus: 0,
             enable_coriolis: 0,
             shot_azimuth: 0.0,
+            cant_angle: 0.0,
         }
     }
 
@@ -1346,6 +1352,25 @@ mod tests {
                 inputs.sight_height
             );
             ballistics_free_trajectory_result(result);
+        }
+    }
+
+    #[test]
+    fn ffi_cant_angle_deflects_laterally() {
+        let mut level = valid_trajectory_inputs();
+        level.muzzle_angle = 0.003;
+        let mut canted = valid_trajectory_inputs();
+        canted.muzzle_angle = 0.003;
+        canted.cant_angle = 10f64.to_radians();
+        unsafe {
+            let a = ballistics_calculate_trajectory(&level, std::ptr::null(), std::ptr::null(), 400.0, 1.0);
+            let b = ballistics_calculate_trajectory(&canted, std::ptr::null(), std::ptr::null(), 400.0, 1.0);
+            assert!(!a.is_null() && !b.is_null());
+            let za = std::slice::from_raw_parts((*a).points, (*a).point_count as usize).last().unwrap().position_z;
+            let zb = std::slice::from_raw_parts((*b).points, (*b).point_count as usize).last().unwrap().position_z;
+            assert!(zb > za + 0.005, "FFI cant must deflect right: level={za} canted={zb}");
+            ballistics_free_trajectory_result(a);
+            ballistics_free_trajectory_result(b);
         }
     }
 }
