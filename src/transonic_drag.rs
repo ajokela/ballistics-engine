@@ -35,16 +35,19 @@ impl ProjectileShape {
 /// Note: This correction is only valid for subsonic flow (Mach < 1.0)
 #[allow(dead_code)]
 fn prandtl_glauert_correction(mach: f64) -> f64 {
-    if mach >= 0.99 {
-        // Near Mach 1, the theoretical correction approaches infinity (1/sqrt(1-1²) = 1/0)
-        // Cap at 10.0 to prevent numerical divergence while maintaining physical meaning
-        // This represents a practical limit where the linear theory breaks down
-        return 10.0;
-    }
+    const MAX_CORRECTION: f64 = 10.0;
+    const MIN_BETA_SQUARED: f64 = 1.0 / (MAX_CORRECTION * MAX_CORRECTION);
 
     // Classic Prandtl-Glauert compressibility correction factor
-    // Accounts for increased pressure coefficients due to compressibility
-    let beta = (1.0 - mach * mach).sqrt();
+    // Accounts for increased pressure coefficients due to compressibility. Follow the
+    // theoretical curve until it reaches the practical cap instead of jumping to the cap at an
+    // arbitrary Mach threshold.
+    let beta_squared = 1.0 - mach * mach;
+    if beta_squared <= MIN_BETA_SQUARED {
+        return MAX_CORRECTION;
+    }
+
+    let beta = beta_squared.sqrt();
     1.0 / beta
 }
 
@@ -344,9 +347,19 @@ mod tests {
         assert!((prandtl_glauert_correction(0.5) - 1.1547).abs() < 0.001);
         assert!((prandtl_glauert_correction(0.8) - 1.6667).abs() < 0.001);
         assert!((prandtl_glauert_correction(0.95) - 3.2026).abs() < 0.001);
+    }
 
-        // Test near Mach 1 capping
-        assert_eq!(prandtl_glauert_correction(0.99), 10.0);
+    #[test]
+    fn prandtl_glauert_follows_the_curve_until_the_cap() {
+        for mach in [0.99_f64, 0.994] {
+            let expected = 1.0 / (1.0 - mach * mach).sqrt();
+            let actual = prandtl_glauert_correction(mach);
+
+            assert!((actual - expected).abs() < 1e-12);
+            assert!(actual < 10.0);
+        }
+        assert_eq!(prandtl_glauert_correction(0.995), 10.0);
+        assert!(prandtl_glauert_correction(f64::NAN).is_nan());
     }
 
     #[test]
