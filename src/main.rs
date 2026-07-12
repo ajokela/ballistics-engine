@@ -843,15 +843,15 @@ enum Commands {
 
     /// Estimate BC from trajectory data (drop and/or velocity), for G1, G7, or both
     EstimateBC {
-        /// Initial velocity (m/s)
+        /// Initial velocity (fps for imperial, m/s for metric)
         #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
         velocity: f64,
 
-        /// Mass (kg)
+        /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
-        /// Diameter (meters)
+        /// Diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
@@ -922,11 +922,11 @@ enum Commands {
         #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
-        /// Projectile mass (kg)
+        /// Projectile mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
 
-        /// Projectile diameter (meters)
+        /// Projectile diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
@@ -1502,9 +1502,9 @@ enum ProfileAction {
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 enum UnitSystem {
-    /// Metric units (m/s, kg, meters, Celsius)
+    /// Metric units (velocity in m/s, mass in grams, distance in meters, diameter in mm, Celsius)
     Metric,
-    /// Imperial units (fps, grains, yards, Fahrenheit)
+    /// Imperial units (velocity in fps, mass in grains, distance in yards, diameter in inches, Fahrenheit)
     Imperial,
 }
 
