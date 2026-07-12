@@ -155,6 +155,66 @@ fn run_linear_powder_zero(extra: &[&str]) -> (Vec<(f64, f64)>, f64) {
     (points, muzzle_velocity)
 }
 
+/// Run a curve-resolved load with 32 F air and ammunition held at 68 F. The curve gives
+/// 2706 fps at the explicit powder temperature.
+fn run_curve_powder_zero(extra: &[&str]) -> (Vec<(f64, f64)>, f64) {
+    let mut args = vec![
+        "trajectory",
+        "-v",
+        "2650",
+        "-b",
+        "0.19",
+        "-m",
+        "77",
+        "-d",
+        "0.224",
+        "--drag-model",
+        "g7",
+        "--temperature",
+        "32",
+        "--powder-temp",
+        "68",
+        "--powder-temp-curve",
+        "32:2650,77:2720",
+        "--auto-zero",
+        "100",
+        "--max-range",
+        "300",
+        "--bore-height",
+        "5",
+        "--sight-height",
+        "2.48",
+        "--ignore-ground-impact",
+        "--full",
+        "-o",
+        "json",
+    ];
+    args.extend_from_slice(extra);
+
+    let output = Command::new(get_cli_binary())
+        .args(args)
+        .output()
+        .expect("run powder-curve auto-zero trajectory");
+    assert!(
+        output.status.success(),
+        "trajectory command should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid trajectory JSON");
+    let trajectory = json["trajectory"].as_array().expect("trajectory array");
+    let muzzle_velocity = trajectory[0]["velocity"].as_f64().expect("muzzle velocity");
+    let points = trajectory
+        .iter()
+        .map(|point| {
+            (
+                point["z"].as_f64().expect("downrange"),
+                point["y"].as_f64().expect("height"),
+            )
+        })
+        .collect();
+    (points, muzzle_velocity)
+}
+
 /// Supplying zero-day conditions equal to the shot-day conditions must reproduce the
 /// plain auto-zero result exactly — the override path is a no-op when nothing differs,
 /// so existing callers are unaffected.
@@ -274,4 +334,37 @@ fn linear_powder_zero_uses_zero_day_temperature() {
         (implicit_height - explicit_height).abs() < 1e-6,
         "linear zero must use the zero-day temperature: implicit={implicit_height} yd, explicit={explicit_height} yd"
     );
+}
+
+#[test]
+fn auto_zero_inherits_explicit_shot_day_powder_temperature() {
+    let (inherited, inherited_velocity) = run_curve_powder_zero(&[]);
+    let (explicit, explicit_velocity) = run_curve_powder_zero(&["--zero-powder-temp", "68"]);
+
+    assert!((inherited_velocity - 2706.0).abs() < 1e-6);
+    assert!((explicit_velocity - 2706.0).abs() < 1e-6);
+    for distance in [100.0, 200.0, 300.0] {
+        let inherited_height = height_at(&inherited, distance);
+        let explicit_height = height_at(&explicit, distance);
+        assert!(
+            (inherited_height - explicit_height).abs() < 1e-6,
+            "omitting --zero-powder-temp must inherit 68 F at {distance} yd: inherited={inherited_height}, explicit={explicit_height}"
+        );
+    }
+}
+
+#[test]
+fn explicit_zero_air_temperature_remains_the_curve_fallback() {
+    let (implicit, _) = run_curve_powder_zero(&["--zero-temperature", "77"]);
+    let (explicit, _) =
+        run_curve_powder_zero(&["--zero-temperature", "77", "--zero-powder-temp", "77"]);
+
+    for distance in [100.0, 200.0, 300.0] {
+        let implicit_height = height_at(&implicit, distance);
+        let explicit_height = height_at(&explicit, distance);
+        assert!(
+            (implicit_height - explicit_height).abs() < 1e-6,
+            "explicit zero air must remain the powder-curve fallback at {distance} yd: implicit={implicit_height}, explicit={explicit_height}"
+        );
+    }
 }
