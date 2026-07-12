@@ -8,6 +8,7 @@
 
 // Precession and nutation modeling - now integrated!
 
+use crate::constants::G_ACCEL_MPS2;
 use crate::pitch_damping::{calculate_pitch_damping_moment, PitchDampingCoefficients};
 
 /// Estimate the projectile's longitudinal and transverse moments of inertia from its geometry.
@@ -323,30 +324,61 @@ pub fn calculate_epicyclic_motion(
     (pitch, yaw)
 }
 
-/// Calculate the limit cycle yaw angle
+/// Calculate the first-order flat-fire yaw-of-repose magnitude from the projectile inertias.
+///
+/// This is the classical gravity/gyroscopic reduction
+/// `yaw = 4 * Iy * Sg * g / (Ix * |p| * V)`. `Sg = 1` returns its finite stable-side
+/// limit; `Sg < 1` returns `0.0` because no stable equilibrium exists. Crosswind is absent
+/// because it produces a damped transient, not persistent equilibrium yaw.
+pub fn calculate_limit_cycle_yaw_with_inertias(
+    velocity_mps: f64,
+    spin_rate_rad_s: f64,
+    stability_factor: f64,
+    spin_inertia: f64,
+    transverse_inertia: f64,
+) -> f64 {
+    if !velocity_mps.is_finite()
+        || velocity_mps <= 0.0
+        || !spin_rate_rad_s.is_finite()
+        || spin_rate_rad_s == 0.0
+        || !stability_factor.is_finite()
+        || stability_factor < 1.0
+        || !spin_inertia.is_finite()
+        || spin_inertia <= 0.0
+        || !transverse_inertia.is_finite()
+        || transverse_inertia <= 0.0
+    {
+        return 0.0;
+    }
+
+    4.0 * transverse_inertia * stability_factor * G_ACCEL_MPS2
+        / (spin_inertia * spin_rate_rad_s.abs() * velocity_mps)
+}
+
+/// Estimate flat-fire yaw of repose for the representative projectile in
+/// [`PrecessionNutationParams::default`].
+///
+/// Retained for source compatibility. The original signature has no projectile inertia, so it
+/// cannot produce a general yaw-of-repose value. `crosswind_mps` is ignored because crosswind yaw
+/// is transient; use [`calculate_limit_cycle_yaw_with_inertias`] for a projectile-specific result.
+#[deprecated(
+    since = "0.22.18",
+    note = "use calculate_limit_cycle_yaw_with_inertias for projectile-specific yaw of repose"
+)]
 pub fn calculate_limit_cycle_yaw(
     velocity_mps: f64,
-    _spin_rate_rad_s: f64,
+    spin_rate_rad_s: f64,
     stability_factor: f64,
-    crosswind_mps: f64,
+    _crosswind_mps: f64,
 ) -> f64 {
-    // Base yaw from crosswind
-    let wind_yaw = if crosswind_mps != 0.0 && velocity_mps > 0.0 {
-        (crosswind_mps / velocity_mps).atan()
-    } else {
-        0.0
-    };
-
-    // Yaw of repose (equilibrium)
-    let yaw_of_repose = if stability_factor > 1.0 {
-        // Typical value for spin-stabilized projectiles
-        let repose_factor = 1.0 / (1.0 + 0.5 * (stability_factor - 1.0));
-        0.002 * repose_factor // ~0.1 degrees nominal
-    } else {
-        0.01 // Larger for marginally stable
-    };
-
-    wind_yaw + yaw_of_repose
+    let reference = PrecessionNutationParams::default();
+    calculate_limit_cycle_yaw_with_inertias(
+        velocity_mps,
+        spin_rate_rad_s,
+        stability_factor,
+        reference.spin_inertia,
+        reference.transverse_inertia,
+    )
 }
 
 #[cfg(test)]
@@ -591,27 +623,74 @@ mod tests {
     }
 
     #[test]
-    fn test_limit_cycle_yaw() {
-        // Test with crosswind
-        let yaw_wind = calculate_limit_cycle_yaw(
-            850.0,   // velocity
-            17522.0, // spin rate
-            2.5,     // stability
-            10.0,    // crosswind
+    #[allow(deprecated)]
+    fn limit_cycle_yaw_excludes_crosswind_and_fabricated_instability_step() {
+        let calm = calculate_limit_cycle_yaw(850.0, 17522.0, 2.5, 0.0);
+        let crosswind = calculate_limit_cycle_yaw(850.0, 17522.0, 2.5, 10.0);
+        assert_eq!(crosswind.to_bits(), calm.to_bits());
+        assert!(calm > 0.0);
+
+        // Preserve the finite stable-side limit at Sg=1; below it no equilibrium exists.
+        let at_boundary = calculate_limit_cycle_yaw(850.0, 17522.0, 1.0, 0.0);
+        let above_boundary = calculate_limit_cycle_yaw(850.0, 17522.0, 1.0_f64.next_up(), 0.0);
+        assert!(at_boundary > 0.0);
+        assert!(((above_boundary - at_boundary) / at_boundary).abs() < 1e-12);
+        assert_eq!(
+            calculate_limit_cycle_yaw(850.0, 17522.0, 1.0_f64.next_down(), 0.0),
+            0.0
         );
 
-        // Should be small but non-zero
-        assert!(yaw_wind > 0.0);
-        assert!(yaw_wind < 0.1);
+        // For physically coupled states Sg scales with spin squared, so the gravity/gyroscopic
+        // balance makes yaw grow with spin rather than shrink with Sg.
+        let low_sg: f64 = 1.1;
+        let high_sg: f64 = 4.0;
+        let low_spin = 10_000.0;
+        let high_spin = low_spin * (high_sg / low_sg).sqrt();
+        let low = calculate_limit_cycle_yaw(850.0, low_spin, low_sg, 0.0);
+        let high = calculate_limit_cycle_yaw(850.0, high_spin, high_sg, 0.0);
+        assert!(high > low);
+        let expected_ratio = (high_sg / low_sg).sqrt();
+        assert!((high / low - expected_ratio).abs() < expected_ratio * 1e-12);
+    }
 
-        // Test without crosswind
-        let yaw_no_wind = calculate_limit_cycle_yaw(850.0, 17522.0, 2.5, 0.0);
-        assert!(yaw_no_wind > 0.0);
-        assert!(yaw_no_wind < yaw_wind);
+    #[test]
+    fn inertia_aware_limit_cycle_yaw_matches_gravity_gyroscopic_balance() {
+        let velocity_mps = 850.0;
+        let spin_rate_rad_s = 17522.0;
+        let stability_factor = 2.5;
+        let spin_inertia = 6.94e-8;
+        let transverse_inertia = 9.13e-7;
+        let actual = calculate_limit_cycle_yaw_with_inertias(
+            velocity_mps,
+            spin_rate_rad_s,
+            stability_factor,
+            spin_inertia,
+            transverse_inertia,
+        );
+        let expected = 4.0 * transverse_inertia * stability_factor * 9.80665
+            / (spin_inertia * spin_rate_rad_s * velocity_mps);
 
-        // Test unstable projectile
-        let yaw_unstable = calculate_limit_cycle_yaw(850.0, 17522.0, 0.9, 0.0);
-        assert_eq!(yaw_unstable, 0.01); // Fixed value for unstable
+        assert!((actual - expected).abs() < 1e-15);
+        assert_eq!(
+            calculate_limit_cycle_yaw_with_inertias(
+                velocity_mps,
+                spin_rate_rad_s,
+                0.9,
+                spin_inertia,
+                transverse_inertia,
+            ),
+            0.0
+        );
+        assert_eq!(
+            calculate_limit_cycle_yaw_with_inertias(
+                velocity_mps,
+                spin_rate_rad_s,
+                stability_factor,
+                0.0,
+                transverse_inertia,
+            ),
+            0.0
+        );
     }
 
     #[test]
