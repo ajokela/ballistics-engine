@@ -421,6 +421,28 @@ fn compute_derivatives_vec(
     )
 }
 
+/// Linearly localize a target crossing within an accepted forward integration step.
+///
+/// Callers provide a bracket with `start[0] <= target_x <= end[0]` and increasing downrange X.
+/// The same crossing fraction is applied to time and every phase-space component; X is then set
+/// exactly to the public target value to remove interpolation roundoff.
+fn interpolate_target_crossing(
+    start_time: f64,
+    start: &Vector6<f64>,
+    step_dt: f64,
+    end: &Vector6<f64>,
+    target_x: f64,
+) -> (f64, Vector6<f64>) {
+    debug_assert!(start[0] <= target_x && target_x <= end[0] && end[0] > start[0]);
+
+    let alpha = (target_x - start[0]) / (end[0] - start[0]);
+    let crossing_time = start_time + alpha * step_dt;
+    let mut crossing_state = start + alpha * (end - start);
+    crossing_state[0] = target_x;
+
+    (crossing_time, crossing_state)
+}
+
 /// Main trajectory integration function
 pub fn integrate_trajectory(
     initial_state: [f64; 6],
@@ -449,6 +471,9 @@ pub fn integrate_trajectory(
 
     let mut trajectory = Vec::with_capacity(10000);
     trajectory.push((t, state));
+    if state[0] >= params.target_distance_m {
+        return trajectory;
+    }
 
     // Build the (loop-invariant) derivative inputs once for the whole integration, instead of
     // rebuilding the struct on every derivative evaluation.
@@ -470,20 +495,13 @@ pub fn integrate_trajectory(
 
                 // Check if we're about to pass the target (X is downrange, McCoy)
                 if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
-                    // Interpolate to find exact target crossing
-                    let alpha = (params.target_distance_m - state[0]) / (new_state[0] - state[0]);
-                    let dt_to_target = dt * alpha;
-
-                    // Take a smaller step to reach target exactly
-                    let final_state = rk4_step(&state, t, dt_to_target, &params, &inputs);
-
-                    // Ensure we don't overshoot
-                    let mut corrected_state = final_state;
-                    if corrected_state[0] > params.target_distance_m {
-                        corrected_state[0] = params.target_distance_m;
-                    }
-
-                    trajectory.push((t + dt_to_target, corrected_state));
+                    trajectory.push(interpolate_target_crossing(
+                        t,
+                        &state,
+                        dt,
+                        &new_state,
+                        params.target_distance_m,
+                    ));
                     break; // Stop at target
                 }
 
@@ -493,11 +511,6 @@ pub fn integrate_trajectory(
 
                 // Check if we've reached or passed the target
                 if state[0] >= params.target_distance_m {
-                    // X is downrange (McCoy)
-                    // Add final point exactly at target
-                    let mut final_state = state;
-                    final_state[0] = params.target_distance_m; // X is downrange
-                    trajectory.push((t, final_state));
                     break;
                 }
 
@@ -559,17 +572,16 @@ pub fn integrate_trajectory(
                     max_step: effective_max_step,
                     max_trials: max_iterations - iteration_count,
                 };
-                let mut accepted =
-                    match adaptive_rk45_step(&state, t, dt, &params, &inputs, control) {
-                        Ok(accepted) => accepted,
-                        Err(trials) => {
-                            iteration_count += trials;
-                            if iteration_count < max_iterations {
-                                eprintln!("WARNING: RK45 minimum-step trial was non-finite");
-                            }
-                            break;
+                let accepted = match adaptive_rk45_step(&state, t, dt, &params, &inputs, control) {
+                    Ok(accepted) => accepted,
+                    Err(trials) => {
+                        iteration_count += trials;
+                        if iteration_count < max_iterations {
+                            eprintln!("WARNING: RK45 minimum-step trial was non-finite");
                         }
-                    };
+                        break;
+                    }
+                };
                 iteration_count += accepted.trials;
                 debug_assert!(accepted.error <= tolerance || accepted.used_dt <= min_step);
 
@@ -577,47 +589,14 @@ pub fn integrate_trajectory(
                 if state[0] < params.target_distance_m
                     && accepted.state[0] >= params.target_distance_m
                 {
-                    // Interpolate to find exact target crossing
-                    let alpha =
-                        (params.target_distance_m - state[0]) / (accepted.state[0] - state[0]);
-                    let dt_to_target = accepted.used_dt * alpha;
-
-                    // Take a smaller step to reach the target and enforce its error estimate too.
-                    if iteration_count >= max_iterations {
-                        break;
-                    }
-                    let target_control = Rk45Control {
-                        max_trials: max_iterations - iteration_count,
-                        ..control
-                    };
-                    accepted = match adaptive_rk45_step(
-                        &state,
+                    trajectory.push(interpolate_target_crossing(
                         t,
-                        dt_to_target,
-                        &params,
-                        &inputs,
-                        target_control,
-                    ) {
-                        Ok(accepted) => accepted,
-                        Err(trials) => {
-                            iteration_count += trials;
-                            eprintln!(
-                                "WARNING: RK45 could not produce a finite target-crossing step"
-                            );
-                            break;
-                        }
-                    };
-                    iteration_count += accepted.trials;
-                    debug_assert!(accepted.error <= tolerance || accepted.used_dt <= min_step);
-
-                    if accepted.state[0] >= params.target_distance_m {
-                        // Make sure we don't overshoot.
-                        state = accepted.state;
-                        state[0] = params.target_distance_m;
-                        t += accepted.used_dt;
-                        trajectory.push((t, state));
-                        break;
-                    }
+                        &state,
+                        accepted.used_dt,
+                        &accepted.state,
+                        params.target_distance_m,
+                    ));
+                    break;
                 }
 
                 // Update state and time using the interval that actually passed acceptance.
@@ -637,11 +616,6 @@ pub fn integrate_trajectory(
 
                 // Stop if we've reached the target
                 if state[0] >= params.target_distance_m {
-                    // X is downrange (McCoy)
-                    // Add final point at target distance
-                    let mut final_state = state;
-                    final_state[0] = params.target_distance_m; // X is downrange
-                    trajectory.push((t, final_state));
                     break;
                 }
 
@@ -903,6 +877,140 @@ mod tests {
                     sorted_state[component].to_bits(),
                     "wind segment order changed state component {component} at point {index}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn rk4_target_crossing_interpolates_complete_state_and_time() {
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 5.0, 2.0];
+        let target_distance_m = 100.0;
+        let trajectory = integrate_trajectory(
+            initial_state,
+            (0.0, 1.0),
+            create_test_params(target_distance_m),
+            "RK4",
+            1e-6,
+            0.001,
+        );
+
+        let (previous_t, previous_state) = &trajectory[trajectory.len() - 2];
+        let (terminal_t, terminal_state) = trajectory.last().expect("trajectory is empty");
+        let reference_params = create_test_params(target_distance_m);
+        let inputs = build_inputs(&reference_params, Vector3::new(800.0, 5.0, 2.0).norm());
+        let full_step_dt = 0.001;
+        let bracket_end = rk4_step(
+            previous_state,
+            *previous_t,
+            full_step_dt,
+            &reference_params,
+            &inputs,
+        );
+        assert!(previous_state[0] < target_distance_m);
+        assert!(bracket_end[0] >= target_distance_m);
+
+        let alpha = (target_distance_m - previous_state[0]) / (bracket_end[0] - previous_state[0]);
+        let expected_t = previous_t + alpha * full_step_dt;
+        let mut expected_state = previous_state + alpha * (bracket_end - previous_state);
+        expected_state[0] = target_distance_m;
+
+        assert_eq!(terminal_t.to_bits(), expected_t.to_bits());
+        for component in 0..6 {
+            assert_eq!(
+                terminal_state[component].to_bits(),
+                expected_state[component].to_bits(),
+                "terminal component {component} was not interpolated at the target crossing"
+            );
+        }
+    }
+
+    #[test]
+    fn rk45_target_crossing_uses_the_accepted_state_and_time() {
+        let initial_state = [0.0, 0.0, 0.0, 800.0, 5.0, 2.0];
+        let initial = Vector6::from_row_slice(&initial_state);
+        let target_distance_m = 0.5;
+        let reference_params = create_test_params(target_distance_m);
+        let inputs = build_inputs(&reference_params, Vector3::new(800.0, 5.0, 2.0).norm());
+        let initial_dt = 0.001;
+        let accepted = adaptive_rk45_step(
+            &initial,
+            0.0,
+            initial_dt,
+            &reference_params,
+            &inputs,
+            Rk45Control {
+                tolerance: 1e-6,
+                min_step: RK45_MIN_STEP,
+                max_step: 0.01,
+                max_trials: 100_000,
+            },
+        )
+        .expect("first RK45 target bracket should be accepted");
+        assert!(accepted.state[0] >= target_distance_m);
+        let expected = interpolate_target_crossing(
+            0.0,
+            &initial,
+            accepted.used_dt,
+            &accepted.state,
+            target_distance_m,
+        );
+
+        let trajectory = integrate_trajectory(
+            initial_state,
+            (0.0, 1.0),
+            create_test_params(target_distance_m),
+            "RK45",
+            1e-6,
+            0.01,
+        );
+        let actual = trajectory.last().expect("trajectory is empty");
+
+        assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+        for component in 0..6 {
+            assert_eq!(
+                actual.1[component].to_bits(),
+                expected.1[component].to_bits(),
+                "RK45 terminal component {component} was not interpolated from its accepted step"
+            );
+        }
+    }
+
+    #[test]
+    fn target_crossing_helper_interpolates_every_component() {
+        let start = Vector6::new(90.0, 10.0, -4.0, 700.0, -20.0, 5.0);
+        let end = Vector6::new(130.0, 6.0, 8.0, 660.0, -24.0, 9.0);
+        let (time, state) = interpolate_target_crossing(2.0, &start, 0.5, &end, 100.0);
+
+        assert_eq!(time.to_bits(), 2.125_f64.to_bits());
+        for (index, expected) in [100.0_f64, 9.0, -1.0, 690.0, -21.0, 6.0]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(state[index].to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn already_at_or_past_target_returns_initial_state_without_advancing() {
+        let initial = [150.0, 12.0, -3.0, 700.0, -4.0, 5.0];
+
+        for method in ["RK4", "RK45"] {
+            for target in [150.0, 100.0] {
+                let trajectory = integrate_trajectory(
+                    initial,
+                    (2.0, 3.0),
+                    create_test_params(target),
+                    method,
+                    1e-6,
+                    0.01,
+                );
+
+                assert_eq!(trajectory.len(), 1, "{method} advanced a terminal state");
+                let (time, state) = &trajectory[0];
+                assert_eq!(time.to_bits(), 2.0_f64.to_bits());
+                for index in 0..6 {
+                    assert_eq!(state[index].to_bits(), initial[index].to_bits());
+                }
             }
         }
     }
