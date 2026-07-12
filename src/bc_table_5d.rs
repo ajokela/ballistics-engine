@@ -73,6 +73,13 @@ pub struct Bc5dTable {
     timestamp: u64,
 }
 
+/// A velocity-keyed BC schedule and the scalar BC used for any interior coverage gap.
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) struct Bc5dSegmentSchedule {
+    pub(crate) segments: Vec<crate::BCSegmentData>,
+    pub(crate) fallback_bc: f64,
+}
+
 /// Manager for loading caliber-specific BC5D tables
 #[derive(Debug, Default)]
 pub struct Bc5dTableManager {
@@ -385,6 +392,31 @@ impl Bc5dTable {
         } else {
             None
         }
+    }
+
+    /// Generate the BC5D schedule consumed by the WASM frontend.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(crate) fn generate_segment_schedule(
+        &self,
+        base_bc: f64,
+        drag_type: &str,
+        weight_grains: f64,
+        muzzle_velocity_fps: f64,
+    ) -> Option<Bc5dSegmentSchedule> {
+        let segments =
+            self.generate_segments(base_bc, drag_type, weight_grains, Some(muzzle_velocity_fps))?;
+        let fallback_bc = self.get_effective_bc(
+            weight_grains,
+            base_bc,
+            muzzle_velocity_fps,
+            muzzle_velocity_fps,
+            drag_type,
+        );
+
+        Some(Bc5dSegmentSchedule {
+            segments,
+            fallback_bc,
+        })
     }
 
     /// Find interpolation index and weight for a value in bins
@@ -828,6 +860,20 @@ mod tests {
             assert!((s.bc_value - 0.4 * 0.9).abs() < 1e-6); // base_bc * correction
             assert!(s.velocity_max > s.velocity_min);
         }
+    }
+
+    #[test]
+    fn segment_schedule_carries_muzzle_corrected_fallback_bc() {
+        let table = create_single_cell_test_table();
+        let base_bc = 0.4;
+        let schedule = table
+            .generate_segment_schedule(base_bc, "G1", 168.0, 2500.0)
+            .expect("uniform non-neutral correction should produce a schedule");
+        let expected_fallback = table.get_effective_bc(168.0, base_bc, 2500.0, 2500.0, "G1");
+
+        assert!(!schedule.segments.is_empty());
+        assert_eq!(expected_fallback.to_bits(), (base_bc * 0.875).to_bits());
+        assert_eq!(schedule.fallback_bc.to_bits(), expected_fallback.to_bits());
     }
 
     #[test]
