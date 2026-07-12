@@ -1,6 +1,7 @@
 // Advanced stability calculations using refined Miller formula and modern corrections
 // Based on:
 // - Don Miller's refined stability formula (2005)
+// - Courtney-Miller's plastic-tip stability correction (2012)
 // - Bryan Litz's stability refinements
 // - Geoffrey Kolbe's Bowman-Howell stability improvements
 //
@@ -14,15 +15,16 @@ pub struct StabilityParameters {
     pub nose_shape_factor: f64,
     /// Boat tail effectiveness factor
     pub boat_tail_factor: f64,
-    /// Plastic tip correction
+    /// Legacy plastic-tip multiplier, retained at a neutral value for source compatibility.
+    /// Use [`apply_courtney_miller_plastic_tip_correction`] with measured tip geometry.
     pub plastic_tip_factor: f64,
     /// Center of pressure adjustment
     pub cop_adjustment: f64,
 }
 
 impl StabilityParameters {
-    pub fn for_bullet_type(bullet_type: &str, has_boat_tail: bool, has_plastic_tip: bool) -> Self {
-        let mut params = match bullet_type.to_lowercase().as_str() {
+    pub fn for_bullet_type(bullet_type: &str, has_boat_tail: bool, _has_plastic_tip: bool) -> Self {
+        match bullet_type.to_lowercase().as_str() {
             "match" | "bthp" => Self {
                 nose_shape_factor: 0.95,
                 boat_tail_factor: if has_boat_tail { 0.94 } else { 1.0 },
@@ -44,17 +46,11 @@ impl StabilityParameters {
             "hunting" => Self {
                 nose_shape_factor: 0.98,
                 boat_tail_factor: if has_boat_tail { 0.95 } else { 1.0 },
-                plastic_tip_factor: if has_plastic_tip { 0.92 } else { 1.0 },
+                plastic_tip_factor: 1.0,
                 cop_adjustment: 0.99,
             },
             _ => Self::default(),
-        };
-
-        if has_plastic_tip && params.plastic_tip_factor == 1.0 {
-            params.plastic_tip_factor = 0.95;
         }
-
-        params
     }
 
     pub fn default() -> Self {
@@ -67,7 +63,11 @@ impl StabilityParameters {
     }
 }
 
-/// Calculate advanced Miller stability with modern corrections
+/// Calculate advanced Miller stability with modern corrections.
+///
+/// `has_plastic_tip` is retained for source compatibility, but a Boolean cannot provide the tip
+/// length required by the Courtney-Miller correction. No plastic-tip scalar is applied here; use
+/// [`apply_courtney_miller_plastic_tip_correction`] on this result when tip length is known.
 pub fn calculate_advanced_stability(
     mass_grains: f64,
     velocity_fps: f64,
@@ -105,11 +105,8 @@ pub fn calculate_advanced_stability(
     // Apply boat tail correction if applicable
     let sg_boat_tail = sg_atmosphere_corrected * params.boat_tail_factor;
 
-    // Apply plastic tip correction if applicable
-    let sg_plastic_tip = sg_boat_tail * params.plastic_tip_factor;
-
     // Apply center of pressure adjustment
-    let sg_final = sg_plastic_tip * params.cop_adjustment;
+    let sg_final = sg_boat_tail * params.cop_adjustment;
 
     // Apply Bowman-Howell dynamic stability correction for very high velocities
     if velocity_fps > 3000.0 {
@@ -117,6 +114,42 @@ pub fn calculate_advanced_stability(
     } else {
         sg_final
     }
+}
+
+/// Apply the [Courtney-Miller correction] for a plastic-tipped bullet to a Miller stability value.
+///
+/// The original Miller denominator uses total length `L` in both `L * (1 + L^2)`. For a
+/// plastic-tipped bullet, Courtney and Miller retain total length in the leading aerodynamic term
+/// and use metal length only in the inertia term: `L * (1 + L_m^2)`. Therefore this multiplies the
+/// uncorrected full-length stability by `(1 + L^2) / (1 + L_m^2)`, where lengths are in calibers and
+/// `L_m = (total_length_inches - tip_length_inches) / caliber_inches`.
+///
+/// Returns `uncorrected_sg` unchanged when the geometry is non-finite or when
+/// `0 < tip_length_inches < total_length_inches` is not satisfied.
+///
+/// [Courtney-Miller correction]: https://arxiv.org/abs/1410.5340
+pub fn apply_courtney_miller_plastic_tip_correction(
+    uncorrected_sg: f64,
+    caliber_inches: f64,
+    total_length_inches: f64,
+    tip_length_inches: f64,
+) -> f64 {
+    if !caliber_inches.is_finite()
+        || !total_length_inches.is_finite()
+        || !tip_length_inches.is_finite()
+        || caliber_inches <= 0.0
+        || total_length_inches <= 0.0
+        || tip_length_inches <= 0.0
+        || tip_length_inches >= total_length_inches
+    {
+        return uncorrected_sg;
+    }
+
+    let total_length_calibers = total_length_inches / caliber_inches;
+    let metal_length_calibers = (total_length_inches - tip_length_inches) / caliber_inches;
+    let correction = (1.0 + total_length_calibers.powi(2)) / (1.0 + metal_length_calibers.powi(2));
+
+    uncorrected_sg * correction
 }
 
 /// Miller's refined stability formula (2005 version)
@@ -351,12 +384,88 @@ mod tests {
         // VLD should have lower nose_shape_factor (more streamlined)
         assert!(vld_params.nose_shape_factor < match_params.nose_shape_factor);
 
-        // Hunting with plastic tip should have plastic_tip_factor < 1.0
-        assert!(hunting_params.plastic_tip_factor < 1.0);
+        // A Boolean cannot determine the metal length needed by Courtney-Miller, so the legacy
+        // scalar stays neutral and callers use the geometry-aware correction helper.
+        assert_eq!(hunting_params.plastic_tip_factor, 1.0);
 
         // Default should have all factors at 1.0
         assert_eq!(default_params.nose_shape_factor, 1.0);
         assert_eq!(default_params.boat_tail_factor, 1.0);
+    }
+
+    #[test]
+    fn plastic_tip_flag_never_reduces_advanced_stability() {
+        let calculate = |has_plastic_tip| {
+            calculate_advanced_stability(
+                178.0,
+                2800.0,
+                10.0,
+                0.308,
+                1.420,
+                1.225,
+                288.15,
+                "hunting",
+                false,
+                has_plastic_tip,
+            )
+        };
+
+        let untipped = calculate(false);
+        let tipped = calculate(true);
+        assert_eq!(
+            tipped.to_bits(),
+            untipped.to_bits(),
+            "a Boolean-only plastic-tip flag must not apply an invented correction"
+        );
+    }
+
+    #[test]
+    fn courtney_miller_correction_uses_metal_length_only_in_inertia_term() {
+        // Published 60 gr V-MAX measurements: total length 0.868", metal length 0.738".
+        let caliber_inches = 0.224_f64;
+        let total_length_inches = 0.868_f64;
+        let tip_length_inches = total_length_inches - 0.738;
+        let uncorrected_sg = 1.0_f64;
+
+        let total_length_calibers = total_length_inches / caliber_inches;
+        let metal_length_calibers = (total_length_inches - tip_length_inches) / caliber_inches;
+        let expected = uncorrected_sg * (1.0 + total_length_calibers.powi(2))
+            / (1.0 + metal_length_calibers.powi(2));
+        let corrected = apply_courtney_miller_plastic_tip_correction(
+            uncorrected_sg,
+            caliber_inches,
+            total_length_inches,
+            tip_length_inches,
+        );
+
+        assert!((corrected - expected).abs() < 1e-12);
+        assert!((corrected - 1.351).abs() < 0.001);
+        assert!(corrected > uncorrected_sg);
+    }
+
+    #[test]
+    fn courtney_miller_correction_requires_physical_tip_geometry() {
+        let uncorrected_sg = 1.5_f64;
+        for (caliber_inches, total_length_inches, tip_length_inches) in [
+            (0.0, 0.868, 0.130),
+            (-0.224, 0.868, 0.130),
+            (f64::NAN, 0.868, 0.130),
+            (0.224, 0.0, 0.130),
+            (0.224, f64::INFINITY, 0.130),
+            (0.224, 0.868, 0.0),
+            (0.224, 0.868, -0.130),
+            (0.224, 0.868, 0.868),
+            (0.224, 0.868, 0.900),
+            (0.224, 0.868, f64::NAN),
+        ] {
+            let corrected = apply_courtney_miller_plastic_tip_correction(
+                uncorrected_sg,
+                caliber_inches,
+                total_length_inches,
+                tip_length_inches,
+            );
+            assert_eq!(corrected.to_bits(), uncorrected_sg.to_bits());
+        }
     }
 
     #[test]
