@@ -47,6 +47,48 @@ fn muzzle_velocity(temp_f: &str, extra: &[&str]) -> f64 {
     json["trajectory"][0]["velocity"].as_f64().expect("v0")
 }
 
+fn metric_linear_muzzle_velocity(sensitivity: Option<&str>) -> f64 {
+    let mut args = vec![
+        "--units",
+        "metric",
+        "trajectory",
+        "-v",
+        "800",
+        "-b",
+        "0.5",
+        "-m",
+        "10",
+        "-d",
+        "7.62",
+        "--max-range",
+        "5",
+        "--temperature",
+        "40",
+        "--pressure",
+        "1013.25",
+        "--powder-temp",
+        "20",
+        "--use-powder-sensitivity",
+        "--full",
+        "-o",
+        "json",
+    ];
+    if let Some(sensitivity) = sensitivity {
+        args.extend(["--powder-temp-sensitivity", sensitivity]);
+    }
+    let out = Command::new(get_cli_binary())
+        .args(args)
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("json");
+    json["trajectory"][0]["velocity"].as_f64().expect("v0")
+}
+
 /// The curve reproduces its measured points exactly.
 #[test]
 fn curve_hits_measured_points() {
@@ -80,6 +122,36 @@ fn curve_clamps_outside_range() {
 fn no_curve_uses_velocity_verbatim() {
     let v = muzzle_velocity("100", &[]);
     assert!((v - 2700.0).abs() < 0.5, "no curve should keep -v 2700, got {v}");
+}
+
+#[test]
+fn explicit_metric_linear_sensitivity_is_distinct_from_omitted_default() {
+    let omitted = metric_linear_muzzle_velocity(None);
+    let explicit_one = metric_linear_muzzle_velocity(Some("1.0"));
+
+    assert!(
+        (omitted - 810.9728).abs() < 1e-6,
+        "the omitted metric value must retain the 1 fps/degree-F default: {omitted}"
+    );
+    assert!(
+        (explicit_one - 820.0).abs() < 1e-6,
+        "an explicit 1.0 m/s/degree-C sensitivity over 20 C must add 20 m/s: {explicit_one}"
+    );
+
+    let imperial_omitted =
+        muzzle_velocity("68", &["--use-powder-sensitivity", "--powder-temp", "32"]);
+    let imperial_explicit = muzzle_velocity(
+        "68",
+        &[
+            "--use-powder-sensitivity",
+            "--powder-temp",
+            "32",
+            "--powder-temp-sensitivity",
+            "1.0",
+        ],
+    );
+    assert!((imperial_omitted - 2736.0).abs() < 1e-6);
+    assert_eq!(imperial_explicit.to_bits(), imperial_omitted.to_bits());
 }
 
 /// A curve with fewer than two points is rejected.
