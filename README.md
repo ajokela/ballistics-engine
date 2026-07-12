@@ -9,6 +9,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Full 3D Trajectory Integration** - Six-state ballistic modeling with adaptive RK45 and fixed-step RK4 integration methods
 - **Advanced Drag Models** - Support for G1 and G7 reference curves (with automatic transonic corrections) plus user-supplied custom Cd(Mach) drag tables (`--drag-table`, used as-is with endpoint hold outside their measured domain, no transonic correction applied — see [CLI_USAGE.md](CLI_USAGE.md#custom-drag-tables); `bc_value` is ignored while a custom table is active)
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
+- **Canted-Rifle Modeling** - Model a rifle zeroed level but fired canted (`--cant <DEGREES>`, alias `--cant-angle`, on `trajectory`/`monte-carlo`); clockwise cant moves point of impact right and low — see [CLI_USAGE.md](CLI_USAGE.md#canted-shooting)
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation
 - **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere
