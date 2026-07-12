@@ -25,9 +25,11 @@ pub use cli_api::{
 };
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;
+pub use moving_target::{calculate_lead, lead_from_tof, LeadComponents, LeadError, LeadSolution};
 
 // Module declarations
 pub mod cli_api;
+pub mod moving_target;
 mod drag_model;
 pub mod ffi;
 #[cfg(target_arch = "wasm32")]
