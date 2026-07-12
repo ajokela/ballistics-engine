@@ -789,7 +789,10 @@ fn compute_derivatives(
         let mach = v_mag / speed_of_sound;
 
         // Get BC value (potentially from segments)
-        let bc_current = if has_bc_segments_data && inputs.bc_segments_data.is_some() {
+        let bc_current = if inputs.use_bc_segments
+            && has_bc_segments_data
+            && inputs.bc_segments_data.is_some()
+        {
             velocity_segment_bc(v_fps, inputs.bc_segments_data.as_ref().unwrap(), bc)
         } else if has_bc_segments && inputs.bc_segments.is_some() {
             crate::derivatives::interpolated_bc(
@@ -1091,6 +1094,80 @@ mod tests {
                 flagged[component]
             );
         }
+    }
+
+    #[test]
+    fn velocity_bc_data_requires_opt_in_in_plain_fast_kernel() {
+        let acceleration = |inputs: &BallisticInputs| {
+            let has_mach_segments = inputs
+                .bc_segments
+                .as_ref()
+                .is_some_and(|segments| !segments.is_empty());
+            let has_velocity_segments = inputs
+                .bc_segments_data
+                .as_ref()
+                .is_some_and(|segments| !segments.is_empty());
+            compute_derivatives(
+                &[0.0, 0.0, 0.0, 600.0, 0.0, 0.0],
+                inputs,
+                &WindSock::new(vec![]),
+                FastAtmosphere::Standard {
+                    base_density: 1.225,
+                },
+                &inputs.bc_type,
+                crate::transonic_drag::ProjectileShape::Spitzer,
+                inputs.bc_value,
+                has_mach_segments,
+                has_velocity_segments,
+                None,
+                None,
+                None,
+            )
+        };
+
+        let scalar_inputs = BallisticInputs {
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            temperature: 15.0,
+            pressure: 1013.25,
+            ..BallisticInputs::default()
+        };
+        let mut disabled_inputs = scalar_inputs.clone();
+        disabled_inputs.bc_segments_data = Some(vec![BCSegmentData {
+            velocity_min: 0.0,
+            velocity_max: 4_000.0,
+            bc_value: 0.46,
+        }]);
+        disabled_inputs.use_bc_segments = false;
+        let mut enabled_inputs = disabled_inputs.clone();
+        enabled_inputs.use_bc_segments = true;
+        let mut mach_only_inputs = scalar_inputs.clone();
+        mach_only_inputs.bc_segments = Some(vec![(0.0, 0.4), (3.0, 0.4)]);
+        let mut disabled_with_both = mach_only_inputs.clone();
+        disabled_with_both.bc_segments_data = disabled_inputs.bc_segments_data.clone();
+
+        let scalar = acceleration(&scalar_inputs);
+        let disabled = acceleration(&disabled_inputs);
+        let enabled = acceleration(&enabled_inputs);
+        let mach_only = acceleration(&mach_only_inputs);
+        let disabled_with_both = acceleration(&disabled_with_both);
+
+        assert_eq!(
+            disabled[3].to_bits(),
+            scalar[3].to_bits(),
+            "a populated velocity table must not change drag while use_bc_segments is false"
+        );
+        assert!(
+            enabled[3] < disabled[3] - 1.0,
+            "enabling the lower BC table must increase drag: disabled ax={} enabled ax={}",
+            disabled[3],
+            enabled[3]
+        );
+        assert_eq!(
+            disabled_with_both[3].to_bits(),
+            mach_only[3].to_bits(),
+            "disabling velocity data must fall through to an explicit Mach table"
+        );
     }
 
     #[test]
