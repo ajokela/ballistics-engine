@@ -5494,6 +5494,33 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // Solve trajectory
     let result = solver.solve()?;
 
+    // MBA-1285: when a custom drag table is in play, warn (best-effort, stderr) if the
+    // shot's Mach range runs outside the table's measured domain. The engine already
+    // holds the nearest endpoint Cd out there; this just flags that as approximate.
+    if let Some(table) = custom_drag_table.as_ref() {
+        let (_, sos) = ballistics_engine::atmosphere::calculate_atmosphere(
+            altitude,
+            Some(temperature),
+            Some(pressure),
+            humidity,
+        );
+        if sos.is_finite() && sos > 0.0 {
+            let muzzle_mach = velocity / sos;
+            let impact_mach = result.impact_velocity / sos;
+            if let (Some(&lo), Some(&hi)) =
+                (table.mach_values.first(), table.mach_values.last())
+            {
+                if muzzle_mach > hi || impact_mach < lo {
+                    eprintln!(
+                        "Warning: shot Mach range [{impact_mach:.2}, {muzzle_mach:.2}] extends beyond \
+                         the drag table domain [{lo:.2}, {hi:.2}]; the nearest tabulated Cd is held \
+                         outside that range (approximate)."
+                    );
+                }
+            }
+        }
+    }
+
     // Report the summary using the SAME twist the integration path actually
     // used (MBA-964). The path builds BallisticInputs with
     // `twist_rate.unwrap_or(12.0)`, so it always flies with a real twist; the
