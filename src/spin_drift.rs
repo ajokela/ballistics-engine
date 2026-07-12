@@ -6,6 +6,8 @@ use crate::spin_decay::{update_spin_rate, SpinDecayParameters};
 use crate::BallisticInputs;
 use std::f64::consts::PI;
 
+const LITZ_TIME_EXPONENT: f64 = 1.83;
+
 /// Components of enhanced spin drift calculation
 #[derive(Debug, Clone)]
 pub struct SpinDriftComponents {
@@ -53,7 +55,7 @@ pub(crate) fn miller_stability(
 /// and the fast / Monte-Carlo path both go through this so the three solver families stay
 /// bit-identical on the drift math.
 pub fn litz_drift_inches(sg: f64, t_s: f64) -> f64 {
-    1.25 * (sg + 1.2) * t_s.powf(1.83)
+    1.25 * (sg + 1.2) * t_s.powf(LITZ_TIME_EXPONENT)
 }
 
 /// Signed Litz spin drift in METERS along McCoy Z (lateral / windage). A right-hand twist
@@ -451,9 +453,11 @@ pub fn apply_enhanced_spin_drift(
     _is_right_twist: bool,
 ) {
     if time_s > 0.1 {
-        // Calculate acceleration from drift
-        // Using second derivative of position
-        let spin_accel_z = 2.0 * spin_components.drift_rate_mps / time_s;
+        // Back out acceleration from the public average drift-rate field while preserving its
+        // legacy authority. For displacement proportional to t^n, a = n*(n-1)*drift/t^2;
+        // drift_rate_mps stores drift/t, so divide it by time once more.
+        let gyroscopic_factor = LITZ_TIME_EXPONENT * (LITZ_TIME_EXPONENT - 1.0);
+        let spin_accel_z = gyroscopic_factor * spin_components.drift_rate_mps / time_s;
 
         // drift_rate_mps already carries the twist-direction sign (set in
         // calculate_enhanced_spin_drift), so apply it directly. Multiplying by the twist
@@ -889,5 +893,37 @@ mod tests {
             d_right[5],
             d_left[5]
         );
+    }
+
+    #[test]
+    fn applied_spin_drift_uses_litz_power_law_acceleration() {
+        let time_s: f64 = 2.0;
+        let average_drift_rate_mps = 0.5;
+        let expected_magnitude = 1.83 * 0.83 * average_drift_rate_mps / time_s;
+
+        for (is_right_twist, sign) in [(true, 1.0), (false, -1.0)] {
+            let components = SpinDriftComponents {
+                spin_rate_rps: 0.0,
+                spin_rate_rad_s: 0.0,
+                stability_factor: 0.0,
+                yaw_of_repose_rad: 0.0,
+                drift_rate_mps: sign * average_drift_rate_mps,
+                total_drift_m: 0.0,
+                magnus_component_m: 0.0,
+                gyroscopic_component_m: 0.0,
+                pitch_damping_moment: 0.0,
+                yaw_convergence_rate: 0.0,
+                pitch_rate_rad_s: 0.0,
+            };
+            let mut derivatives = [0.0; 6];
+
+            apply_enhanced_spin_drift(&mut derivatives, &components, time_s, is_right_twist);
+
+            assert!(
+                (derivatives[5] - sign * expected_magnitude).abs() < 1e-12,
+                "wrong Litz acceleration for sign {sign}: {}",
+                derivatives[5]
+            );
+        }
     }
 }
