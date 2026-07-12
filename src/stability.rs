@@ -71,8 +71,9 @@ pub fn compute_stability_coefficient(
 pub const BULLET_LENGTH_RHO_EFF_KG_M3: f64 = 7600.0;
 
 /// Lower / upper bound on the estimated length-to-diameter ratio (calibers). Keeps degenerate
-/// mass/diameter combinations inside the range of real small-arms projectiles.
-const MIN_LENGTH_CALIBERS: f64 = 2.5;
+/// mass/diameter combinations inside the range of real small-arms projectiles, including short
+/// handgun bullets.
+const MIN_LENGTH_CALIBERS: f64 = 1.2;
 const MAX_LENGTH_CALIBERS: f64 = 6.5;
 
 /// Gyroscopic-stability target used to synthesize a default twist when the shooter does not
@@ -105,7 +106,8 @@ pub(crate) fn miller_velocity_correction(muzzle_velocity_mps: f64) -> f64 {
 /// the enhanced spin-drift / Magnus models actually need.
 ///
 /// Model: `L = mass / (rho_eff * (pi/4) * d^2)` with `rho_eff = 7600 kg/m^3`, then the length/diameter
-/// ratio is clamped to `[2.5, 6.5]` calibers so pathological inputs stay physical.
+/// ratio is clamped to `[1.2, 6.5]` calibers so pathological inputs stay physical without stretching
+/// common handgun bullets to rifle-like proportions.
 ///
 /// Returns `0.0` for non-physical inputs (`mass_kg <= 0` or `diameter_m <= 0`); callers that need a
 /// non-zero length should fall back to their historical literal in that case.
@@ -407,6 +409,26 @@ mod tests {
     }
 
     #[test]
+    fn test_estimate_bullet_length_preserves_handgun_geometry() {
+        // These common handgun bullets are shorter than the old 2.5-caliber rifle-oriented floor.
+        // The safety clamp must preserve the effective-density model for all of them.
+        for (diameter_in, mass_gr, expected_ratio) in [
+            (0.355, 115.0, 1.702_847_900_515), // 9 mm
+            (0.451, 230.0, 1.660_968_083_966), // .45 ACP
+            (0.355, 90.0, 1.332_663_574_316),  // .380 ACP
+        ] {
+            let diameter_m = diameter_in * IN_TO_M;
+            let mass_kg = mass_gr * GR_TO_KG;
+            let frontal_area = std::f64::consts::FRAC_PI_4 * diameter_m * diameter_m;
+            let model_ratio = mass_kg / (BULLET_LENGTH_RHO_EFF_KG_M3 * frontal_area) / diameter_m;
+            let estimated_ratio = estimate_bullet_length_m(diameter_m, mass_kg) / diameter_m;
+
+            assert!((estimated_ratio - model_ratio).abs() < 1e-12);
+            assert!((estimated_ratio - expected_ratio).abs() < 1e-12);
+        }
+    }
+
+    #[test]
     fn test_estimate_bullet_length_degenerate_inputs() {
         assert_eq!(estimate_bullet_length_m(0.00782, 0.0), 0.0);
         assert_eq!(estimate_bullet_length_m(0.00782, -1.0), 0.0);
@@ -417,17 +439,23 @@ mod tests {
 
     #[test]
     fn test_estimate_bullet_length_clamps_ld_ratio() {
-        // Absurdly heavy for a tiny caliber -> clamp at 6.5 calibers.
-        let d = 0.172 * IN_TO_M;
-        let long = estimate_bullet_length_m(d, 0.05); // way too heavy
-        assert!((long / d - 6.5).abs() < 1e-9, "expected clamp at 6.5 cal, got {}", long / d);
-        // Absurdly light -> clamp at 2.5 calibers.
-        let short = estimate_bullet_length_m(0.510 * IN_TO_M, 0.001);
-        assert!(
-            (short / (0.510 * IN_TO_M) - 2.5).abs() < 1e-9,
-            "expected clamp at 2.5 cal, got {}",
-            short / (0.510 * IN_TO_M)
-        );
+        const EXPECTED_MIN: f64 = 1.2;
+        const EXPECTED_MAX: f64 = 6.5;
+
+        let diameter_m = 0.355 * IN_TO_M;
+        for raw_ratio in [1.19_f64, 1.20, 1.21, 6.49, 6.50, 6.51] {
+            let mass_kg = raw_ratio
+                * BULLET_LENGTH_RHO_EFF_KG_M3
+                * std::f64::consts::FRAC_PI_4
+                * diameter_m.powi(3);
+            let actual_ratio = estimate_bullet_length_m(diameter_m, mass_kg) / diameter_m;
+            let expected_ratio = raw_ratio.clamp(EXPECTED_MIN, EXPECTED_MAX);
+
+            assert!(
+                (actual_ratio - expected_ratio).abs() < 1e-12,
+                "raw L/d {raw_ratio}: expected {expected_ratio}, got {actual_ratio}"
+            );
+        }
     }
 
     #[test]
