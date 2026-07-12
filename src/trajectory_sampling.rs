@@ -78,15 +78,11 @@ pub fn sample_trajectory(
     let y_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.y).collect();
     let lateral_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.z).collect();
 
-    // Calculate speeds and energies
+    // Calculate speed at each integration knot.
     let speeds: Vec<f64> = trajectory_data
         .velocities
         .iter()
         .map(|v| v.norm())
-        .collect();
-    let energies: Vec<f64> = speeds
-        .iter()
-        .map(|&speed| 0.5 * mass_kg * speed * speed)
         .collect();
 
     // Generate sampling distances
@@ -107,7 +103,7 @@ pub fn sample_trajectory(
         let wind_drift = interpolate(&downrange_vals, &lateral_vals, distance); // lateral drift at downrange distance
         let velocity = interpolate(&downrange_vals, &speeds, distance); // velocity at downrange distance
         let time = interpolate(&downrange_vals, &trajectory_data.times, distance); // time at downrange distance
-        let energy = interpolate(&downrange_vals, &energies, distance); // energy at downrange distance
+        let energy = 0.5 * mass_kg * velocity * velocity;
 
         // Calculate line-of-sight y-coordinate and drop
         // The LOS is a straight line from the SIGHT to the target
@@ -484,5 +480,32 @@ mod tests {
         // Check flags
         assert!(samples[2].flags.contains(&TrajectoryFlag::Apex)); // At apex distance
         assert!(samples[3].flags.contains(&TrajectoryFlag::MachTransition)); // At transonic distance
+    }
+
+    #[test]
+    fn sampled_energy_is_derived_from_interpolated_speed() {
+        let mass_kg = 0.01;
+        let trajectory_data = TrajectoryData {
+            times: vec![0.0, 1.0],
+            positions: vec![Vector3::zeros(), Vector3::new(100.0, 0.0, 0.0)],
+            velocities: vec![Vector3::new(800.0, 0.0, 0.0), Vector3::new(700.0, 0.0, 0.0)],
+            transonic_distances: vec![],
+        };
+        let outputs = TrajectoryOutputs {
+            target_distance_horiz_m: 100.0,
+            target_vertical_height_m: 0.0,
+            time_of_flight_s: 1.0,
+            max_ord_dist_horiz_m: 0.0,
+            sight_height_m: 0.0,
+        };
+
+        let samples = sample_trajectory(&trajectory_data, &outputs, 50.0, mass_kg);
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[1].velocity_mps.to_bits(), 750.0_f64.to_bits());
+        assert_eq!(samples[1].energy_j.to_bits(), 2812.5_f64.to_bits());
+        for sample in samples {
+            let expected_energy = 0.5 * mass_kg * sample.velocity_mps * sample.velocity_mps;
+            assert_eq!(sample.energy_j.to_bits(), expected_energy.to_bits());
+        }
     }
 }
