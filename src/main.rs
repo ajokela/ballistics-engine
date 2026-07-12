@@ -464,7 +464,7 @@ enum Commands {
         #[arg(long)]
         use_rk4_fixed: bool,
 
-        /// Enable enhanced spin drift calculations
+        /// Enable empirical Litz spin drift calculations
         #[arg(long)]
         enable_spin_drift: bool,
 
@@ -5456,38 +5456,14 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         0.0
     };
 
-    // Calculate spin drift if enabled and twist rate is provided
+    // Report the same canonical Litz spin drift applied to the trajectory points. The
+    // empirical t^1.83 fit already reflects real spin history, so layering a retained-spin
+    // multiplier on top would double-count decay and diverge from every solver path.
     let spin_drift = if enable_spin_drift && effective_twist_rate > 0.0 && stability > 0.0 {
-        // Calculate spin decay factor based on time of flight
-        use ballistics_engine::spin_decay::{
-            calculate_spin_decay_correction_factor, SpinDecayParameters,
-        };
-        let decay_params = SpinDecayParameters::new();
-        let avg_velocity = (velocity + result.impact_velocity) / 2.0;
-
-        // Convert units for spin decay calculation
-        let mass_grains = mass / 0.00006479891;
-        let caliber_inches = diameter / 0.0254;
-        let length_inches = inputs.bullet_length / 0.0254;
-        let air_density = 1.225; // Standard air density at sea level
-
-        let decay_factor = calculate_spin_decay_correction_factor(
-            result.time_of_flight,
-            avg_velocity,
-            air_density,
-            mass_grains,
-            caliber_inches,
-            length_inches,
-            Some(&decay_params),
-        );
-
-        // Calculate spin drift with decay
-        ballistics_engine::stability::compute_spin_drift_with_decay(
-            result.time_of_flight,
+        ballistics_engine::spin_drift::litz_drift_meters(
             stability,
-            effective_twist_rate,
+            result.time_of_flight,
             twist_right,
-            Some(decay_factor),
         )
     } else {
         0.0

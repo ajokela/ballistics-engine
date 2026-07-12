@@ -227,7 +227,11 @@ pub fn compute_spin_drift(
     compute_spin_drift_with_decay(time_s, stability, twist_rate, is_twist_right, None)
 }
 
-/// Calculate spin drift with optional spin decay modeling
+/// Calculate Litz spin drift with an optional extra retained-spin multiplier.
+///
+/// Canonical solver paths pass no multiplier because the empirical Litz time exponent already
+/// reflects real spin history. `Some` remains for source compatibility and experimental callers
+/// intentionally applying an extra scalar; canonical solvers must not use it for spin decay.
 pub fn compute_spin_drift_with_decay(
     time_s: f64,
     stability: f64,

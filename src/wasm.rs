@@ -633,7 +633,7 @@ impl WasmBallistics {
         }
         // MBA-1135: mass-based length estimate (mirrors CLI/FFI), replacing the mass-blind
         // 4.5-caliber heuristic. WASM otherwise left it at the struct default regardless of the
-        // supplied caliber/weight, skewing the Miller Sg / enhanced spin drift / Magnus.
+        // supplied caliber/weight, skewing the Miller Sg / Litz spin drift / Magnus.
         inputs.bullet_length =
             crate::stability::estimate_bullet_length_m(inputs.bullet_diameter, inputs.bullet_mass);
         if inputs.bullet_length <= 0.0 {
@@ -2251,7 +2251,7 @@ Trajectory Command:
   Advanced Physics:
     --enable-magnus              Enable Magnus effect
     --enable-coriolis            Enable Coriolis effect
-    --enable-spin-drift          Enable enhanced spin drift
+    --enable-spin-drift          Enable empirical Litz spin drift
     --enable-wind-shear          Enable altitude-dependent wind
     --enable-pitch-damping       Enable transonic stability
     --enable-precession          Enable angular motion physics
