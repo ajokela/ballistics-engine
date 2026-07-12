@@ -80,6 +80,15 @@ pub struct BallisticInputs {
     /// small horizontal *aiming* offset and rotates the launch velocity.
     pub shot_azimuth: f64,
     pub shooting_angle: f64,   // uphill/downhill angle in radians
+    /// Rifle cant angle in radians about the line of sight — positive = clockwise from the
+    /// shooter's view (top of the scope tips right). Rotates the sight-frame aim offsets
+    /// (`muzzle_angle`, `azimuth_angle`) about the LOS and swings the bore's sight-height
+    /// offset laterally, producing the classic canted-rifle POI error (right-and-low for
+    /// clockwise cant with an upward zero). Zeroing always solves un-canted ("zero level,
+    /// fire canted"). NOTE: treats `muzzle_angle` as a sight-frame offset — the standard
+    /// zero-then-fire usage; a raw gravity-frame launch angle would not rotate physically.
+    /// 0.0 = level rifle (bit-identical to pre-cant behavior). (MBA-1286)
+    pub cant_angle: f64,
     pub sight_height: f64,     // meters above bore
     pub muzzle_height: f64,    // meters above ground
     pub target_height: f64,    // meters above ground for zeroing
@@ -247,6 +256,7 @@ impl Default for BallisticInputs {
             azimuth_angle: 0.0,
             shot_azimuth: 0.0,
             shooting_angle: 0.0,
+            cant_angle: 0.0,
             sight_height: 0.05,
             muzzle_height: 0.0,       // Default 0 - height is in sight_height
             target_height: 0.0,       // Target at ground level by default
@@ -665,6 +675,7 @@ impl TrajectorySolver {
         require_finite("muzzle_angle", self.inputs.muzzle_angle)?;
         require_finite("azimuth_angle", self.inputs.azimuth_angle)?;
         require_finite("shooting_angle", self.inputs.shooting_angle)?;
+        require_finite("cant_angle", self.inputs.cant_angle)?;
         require_finite("muzzle_height", self.inputs.muzzle_height)?;
 
         // Negative infinity is the documented ignore-ground sentinel. NaN and positive infinity
@@ -900,8 +911,19 @@ impl TrajectorySolver {
         &self,
         aj: Option<&crate::aerodynamic_jump::AerodynamicJumpComponents>,
     ) -> (f64, f64) {
-        let elev = self.inputs.muzzle_angle;
-        let azim = self.inputs.azimuth_angle;
+        let (mut elev, mut azim) = (self.inputs.muzzle_angle, self.inputs.azimuth_angle);
+        // MBA-1286: cant rotates the sight-frame aim offsets about the line of sight.
+        // Positive = clockwise from the shooter: the upward zero correction leaks right
+        // (+z) and shrinks by cos(cant) -> POI right and low. Exactly-0.0 skips all float
+        // ops so un-canted solves stay bit-identical. Aerodynamic jump is added AFTER the
+        // rotation: it arises at bore exit from crosswind/spin in the ground frame, not
+        // from the rifle's sight geometry.
+        if self.inputs.cant_angle != 0.0 {
+            let (sin_c, cos_c) = self.inputs.cant_angle.sin_cos();
+            let (e0, a0) = (elev, azim);
+            elev = e0 * cos_c - a0 * sin_c;
+            azim = a0 * cos_c + e0 * sin_c;
+        }
         match aj {
             Some(c) => {
                 // vertical_/horizontal_jump_moa ARE the jump angles expressed in MOA.
@@ -1193,16 +1215,31 @@ impl TrajectorySolver {
         crate::spin_drift::effective_sg_from_inputs(&self.inputs, temp_c, press_hpa)
     }
 
+    /// Bore muzzle position at t=0 (bore-origin frame, `muzzle_height` above ground).
+    /// With cant the rifle rotates about the LINE OF SIGHT, so the bore — sight_height
+    /// below the sight — swings laterally by `-sight_height*sin(cant)` (left of the aim
+    /// plane for clockwise cant) and rises by `sight_height*(1-cos(cant))` toward the
+    /// pivot. Exactly-0.0 cant returns the historical position (bit-identical). (MBA-1286)
+    fn initial_position(&self) -> Vector3<f64> {
+        if self.inputs.cant_angle == 0.0 {
+            return Vector3::new(0.0, self.inputs.muzzle_height, 0.0);
+        }
+        let (sin_c, cos_c) = self.inputs.cant_angle.sin_cos();
+        let sh = self.inputs.sight_height;
+        Vector3::new(
+            0.0,
+            self.inputs.muzzle_height + sh * (1.0 - cos_c),
+            -sh * sin_c,
+        )
+    }
+
     fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
         // Simple trajectory integration using Euler method
         let mut time = 0.0;
         // Bullet starts at the BORE position, which is muzzle_height above ground
         // The sight is sight_height ABOVE the bore, so we don't add sight_height here
-        let mut position = Vector3::new(
-            0.0,
-            self.inputs.muzzle_height, // Bore position above ground (NOT + sight_height)
-            0.0,
-        );
+        // cant-adjusted via initial_position (MBA-1286)
+        let mut position = self.initial_position();
         // Calculate initial velocity components with both elevation and azimuth
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
         // Launch direction includes the aerodynamic-jump muzzle perturbation when enabled
@@ -1463,11 +1500,8 @@ impl TrajectorySolver {
         // Bullet starts at the BORE position, which is muzzle_height above ground
         // The sight is sight_height ABOVE the bore, so we don't add sight_height here
         // The sight_height affects the LOS calculation and zero angle, not the starting position
-        let mut position = Vector3::new(
-            0.0,
-            self.inputs.muzzle_height, // Bore position above ground (NOT + sight_height)
-            0.0,
-        );
+        // cant-adjusted via initial_position (MBA-1286)
+        let mut position = self.initial_position();
 
         // Calculate initial velocity components with both elevation and azimuth
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
@@ -1746,11 +1780,8 @@ impl TrajectorySolver {
         let mut time = 0.0;
         // Bullet starts at the BORE position, which is muzzle_height above ground
         // The sight is sight_height ABOVE the bore, so we don't add sight_height here
-        let mut position = Vector3::new(
-            0.0,
-            self.inputs.muzzle_height, // Bore position above ground (NOT + sight_height)
-            0.0,
-        );
+        // cant-adjusted via initial_position (MBA-1286)
+        let mut position = self.initial_position();
 
         // Calculate initial velocity components
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral (right)
@@ -2838,6 +2869,10 @@ pub fn calculate_zero_angle_with_conditions(
         // vertical jump. Disabling it makes AJ an additive POI shift relative to the
         // no-jump zero, regardless of the conditions the caller zeroes in.
         test_inputs.enable_aerodynamic_jump = false;
+        // MBA-1286: zero on a LEVEL rifle. The zero angle is a property of the sight
+        // geometry; canting is applied at fire time, so the classic "zero level, fire
+        // canted" POI error emerges from the flight, not the zero.
+        test_inputs.cant_angle = 0.0;
 
         let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
         solver.set_max_range(target_distance * 2.0);
@@ -2934,6 +2969,10 @@ pub fn calculate_zero_angle_with_conditions(
         test_inputs.muzzle_angle = mid_angle;
         // MBA-959: zero on the bare bore so aerodynamic jump is not absorbed (see above).
         test_inputs.enable_aerodynamic_jump = false;
+        // MBA-1286: zero on a LEVEL rifle. The zero angle is a property of the sight
+        // geometry; canting is applied at fire time, so the classic "zero level, fire
+        // canted" POI error emerges from the flight, not the zero.
+        test_inputs.cant_angle = 0.0;
 
         let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
         // Make sure we calculate far enough to reach the target
@@ -4685,5 +4724,116 @@ mod coriolis_direction_tests {
             "E-W vertical separation ({:.6} m) should be physically meaningful, not FP noise",
             east - west
         );
+    }
+}
+
+#[cfg(test)]
+mod cant_tests {
+    use super::*;
+
+    fn base_inputs() -> BallisticInputs {
+        let mut i = BallisticInputs::default();
+        i.muzzle_velocity = 800.0;
+        i.bc_value = 0.5;
+        i.bc_type = DragModel::G7;
+        i.bullet_mass = 0.0109;
+        i.bullet_diameter = 0.00782;
+        i.bullet_length = 0.0309;
+        i.sight_height = 0.05;
+        i.twist_rate = 10.0;
+        i.use_rk4 = true;
+        i
+    }
+
+    fn solve_with(inputs: BallisticInputs, max_range: f64) -> TrajectoryResult {
+        let mut s = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        s.set_max_range(max_range);
+        s.solve().expect("solve")
+    }
+
+    /// Interpolate (y, z) at downrange x.
+    fn yz_at(result: &TrajectoryResult, x: f64) -> (f64, f64) {
+        let pts = &result.points;
+        for i in 1..pts.len() {
+            if pts[i].position.x >= x {
+                let (p1, p2) = (&pts[i - 1], &pts[i]);
+                let dx = p2.position.x - p1.position.x;
+                let t = if dx.abs() < 1e-12 { 0.0 } else { (x - p1.position.x) / dx };
+                return (
+                    p1.position.y + t * (p2.position.y - p1.position.y),
+                    p1.position.z + t * (p2.position.z - p1.position.z),
+                );
+            }
+        }
+        panic!("trajectory never reached {x} m");
+    }
+
+    #[test]
+    fn cant_sign_clockwise_up_offset_goes_right_and_low() {
+        // Upward zero offset + clockwise cant => POI right (+z) and low vs un-canted.
+        let mut level = base_inputs();
+        level.muzzle_angle = 0.003; // ~10 MOA up
+        let mut canted = level.clone();
+        canted.cant_angle = 10f64.to_radians();
+
+        let (y0, z0) = yz_at(&solve_with(level, 400.0), 300.0);
+        let (y1, z1) = yz_at(&solve_with(canted, 400.0), 300.0);
+        assert!(z1 > z0 + 0.01, "clockwise cant must move POI right: z0={z0} z1={z1}");
+        assert!(y1 < y0 - 0.001, "clockwise cant must move POI low: y0={y0} y1={y1}");
+    }
+
+    #[test]
+    fn pure_cant_shows_bore_offset_near_range() {
+        // No aim offset: the only lateral source near the muzzle is the swung bore,
+        // z0 = -sight_height*sin(cant) (left of the aim plane for clockwise cant).
+        let mut i = base_inputs();
+        i.muzzle_angle = 0.0;
+        i.cant_angle = 10f64.to_radians();
+        let sh = i.sight_height;
+        let r = solve_with(i, 60.0);
+        let first = &r.points[1]; // just past the muzzle
+        let expected = -sh * 10f64.to_radians().sin();
+        assert!(
+            (first.position.z - expected).abs() < 0.005,
+            "near-muzzle lateral {} should be ~bore offset {expected}",
+            first.position.z
+        );
+    }
+
+    #[test]
+    fn zero_angle_is_independent_of_cant() {
+        let mut a = base_inputs();
+        let mut b = base_inputs();
+        b.cant_angle = 15f64.to_radians();
+        let za = calculate_zero_angle(a.clone(), 100.0, 0.0).expect("zero a");
+        let zb = calculate_zero_angle(b.clone(), 100.0, 0.0).expect("zero b");
+        assert_eq!(za.to_bits(), zb.to_bits(), "zeroing must ignore cant: {za} vs {zb}");
+        // silence unused warnings
+        let _ = (a.cant_angle, b.cant_angle);
+    }
+
+    #[test]
+    fn nonfinite_cant_is_rejected() {
+        let mut i = base_inputs();
+        i.cant_angle = f64::NAN;
+        let s = TrajectorySolver::new(i, WindConditions::default(), AtmosphericConditions::default());
+        assert!(s.solve().is_err());
+    }
+
+    #[test]
+    fn incline_and_cant_compose_without_breaking() {
+        // 15-degree incline + 10-degree cant: finite result, cant still pushes right.
+        let mut flat = base_inputs();
+        flat.muzzle_angle = 0.003;
+        flat.shooting_angle = 15f64.to_radians();
+        let mut canted = flat.clone();
+        canted.cant_angle = 10f64.to_radians();
+        let (_, z_flat) = yz_at(&solve_with(flat, 400.0), 300.0);
+        let (_, z_cant) = yz_at(&solve_with(canted, 400.0), 300.0);
+        assert!(z_cant > z_flat, "cant must still deflect right on an incline");
     }
 }

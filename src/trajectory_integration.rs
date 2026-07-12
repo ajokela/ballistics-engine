@@ -315,6 +315,7 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         },
         latitude: None,
         shooting_angle: params.shooting_angle,
+        cant_angle: 0.0,
         azimuth_angle: 0.0,
         shot_azimuth: 0.0, // this fast path doesn't plumb latitude/bearing (no directional Coriolis here)
         use_powder_sensitivity: false,

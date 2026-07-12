@@ -3666,6 +3666,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     azimuth_angle: 0.0,
                                     shot_azimuth: shot_direction.map(|d| d.to_radians()).unwrap_or(0.0),
                                     shooting_angle: shooting_angle.to_radians(),
+                                    cant_angle: 0.0,
                                     sight_height: sight_height_metric,
                                     muzzle_height: bore_height_metric,
                                     target_height: 0.0,
@@ -5352,6 +5353,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         azimuth_angle: 0.0,
         shot_azimuth: shot_direction.map(|d| d.to_radians()).unwrap_or(0.0),
         shooting_angle: shooting_angle.to_radians(),
+        cant_angle: 0.0,
         sight_height,
         muzzle_height: bore_height, // Bore height above ground from --bore-height CLI option
         target_height: 0.0,
