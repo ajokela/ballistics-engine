@@ -667,7 +667,7 @@ Example:
 **Manual velocity-keyed BC segments** — supply your own `VMIN:VMAX:BC` pairs (repeatable,
 velocities in `--units`) instead of the auto-estimated/table ones. Keyed to velocity, so it
 composes with distance-keyed `--wind-segment`; implies `--use-bc-segments` and overrides
-`--bc-table-dir`:
+`--bc-table` and `--bc-table-dir`:
 ```bash
 ./ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-range 1000 \
   --bc-segment 1800:4000:0.243 --bc-segment 1500:1800:0.228 --bc-segment 1200:1500:0.205

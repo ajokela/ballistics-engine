@@ -392,7 +392,8 @@ enum Commands {
         /// Manual velocity-dependent BC segment(s): "VMIN:VMAX:BC" (repeatable). VMIN/VMAX are
         /// velocities in --units (fps imperial, m/s metric); the given BC applies while the
         /// bullet's speed is in [VMIN, VMAX). Segments are keyed to VELOCITY (independent of
-        /// distance/wind). Overrides --bc-table-dir and implies --use-bc-segments.
+        /// distance/wind). Overrides --bc-table and --bc-table-dir, and implies
+        /// --use-bc-segments.
         #[arg(long = "bc-segment", value_name = "VMIN:VMAX:BC", action = clap::ArgAction::Append)]
         bc_segment: Vec<String>,
 
@@ -2814,7 +2815,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Apply truing adjustments
             let trued_velocity = final_velocity + final_velocity_adj;
-            let mut trued_bc = final_bc * final_bc_adj;
+            let pre_table_bc = final_bc * final_bc_adj;
+            let mut trued_bc = pre_table_bc;
             let trued_velocity_fps = match cli.units {
                 UnitSystem::Imperial => trued_velocity,
                 UnitSystem::Metric => trued_velocity / 0.3048,
@@ -3287,15 +3289,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .collect::<Result<Vec<_>, String>>()?;
             if !manual_bc_segments.is_empty() {
                 bc_table_segments = Some(manual_bc_segments.clone());
-                // Manual segments fully override a --bc-table-dir table. If that table
-                // scaled the base BC via a muzzle correction, undo it here so the
-                // out-of-segment fallback uses the raw --bc (not the table-corrected
-                // value), keeping the "override" contract and parity with WASM.
-                if let Some(corr) = bc_table_5d_correction {
-                    if corr.abs() > f64::EPSILON {
-                        trued_bc /= corr;
-                    }
-                }
+                // Manual segments fully override either correction-table format. Restore
+                // the manually adjusted, pre-table BC directly so interior gaps use the
+                // same scalar fallback with or without a table, keeping parity with WASM.
+                trued_bc = pre_table_bc;
             }
 
             // Resolve the final velocity-keyed BC schedule before auto-zero. This is the single
