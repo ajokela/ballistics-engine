@@ -291,23 +291,34 @@ pub fn calculate_epicyclic_motion(
     }
 
     // Fast (nutation) and slow (precession) angular frequencies, both rad/s (MBA-941).
-    let (omega_fast, omega_slow) =
-        epicyclic_frequencies(spin_inertia, transverse_inertia, spin_rate_rad_s, stability_factor);
+    let (omega_fast, omega_slow) = epicyclic_frequencies(
+        spin_inertia,
+        transverse_inertia,
+        spin_rate_rad_s,
+        stability_factor,
+    );
 
-    // Amplitude ratio (fast/slow) — the nutation arm shrinks as stability grows.
-    let amplitude_ratio = 1.0 / stability_factor;
+    // Choose the two modal amplitudes so yaw(0) reproduces the supplied disturbance and the
+    // undamped initial transverse rate is zero:
+    //   Kslow + Kfast = yaw0,  Kslow*wslow + Kfast*wfast = 0.
+    let frequency_split = omega_fast - omega_slow;
+    if frequency_split == 0.0 {
+        return (0.0, initial_yaw_rad);
+    }
+    let slow_amplitude = initial_yaw_rad * omega_fast / frequency_split;
+    let initial_fast_amplitude = initial_yaw_rad - slow_amplitude;
 
     // Damping (exponential decay of fast mode)
     let damping_factor = 0.1; // Typical value
-    let fast_amplitude = amplitude_ratio * (-damping_factor * omega_fast * time_s).exp();
+    let fast_amplitude = initial_fast_amplitude * (-damping_factor * omega_fast * time_s).exp();
 
     // Combined motion
     let slow_phase = omega_slow * time_s;
     let fast_phase = omega_fast * time_s;
 
     // Epicyclic coordinates
-    let yaw = initial_yaw_rad * (slow_phase.cos() + fast_amplitude * fast_phase.cos());
-    let pitch = initial_yaw_rad * (slow_phase.sin() + fast_amplitude * fast_phase.sin());
+    let yaw = slow_amplitude * slow_phase.cos() + fast_amplitude * fast_phase.cos();
+    let pitch = slow_amplitude * slow_phase.sin() + fast_amplitude * fast_phase.sin();
 
     (pitch, yaw)
 }
@@ -529,8 +540,12 @@ mod tests {
             0.01,    // initial yaw
         );
 
-        // Bounded by |initial_yaw| * (1 + 1/Sg) (slow arm amplitude 1 + fast arm amplitude 1/Sg).
-        let bound = 0.01 * (1.0 + 1.0 / 2.5) + 1e-9;
+        // Bounded by the sum of the initial modal arm magnitudes (the fast arm only decays).
+        let (omega_fast, omega_slow) = epicyclic_frequencies(6.94e-8, 9.13e-7, 17522.0, 2.5);
+        let frequency_split = omega_fast - omega_slow;
+        let slow_amplitude = 0.01 * omega_fast / frequency_split;
+        let fast_amplitude = 0.01 - slow_amplitude;
+        let bound = slow_amplitude.abs() + fast_amplitude.abs() + 1e-9;
         assert!(pitch.abs() <= bound, "pitch {pitch} exceeds bound {bound}");
         assert!(yaw.abs() <= bound, "yaw {yaw} exceeds bound {bound}");
 
@@ -539,6 +554,40 @@ mod tests {
             calculate_epicyclic_motion(6.94e-8, 9.13e-7, 17522.0, 0.9, 0.1, 0.01);
         assert_eq!(pitch_unstable, 0.01);
         assert_eq!(yaw_unstable, 0.01);
+    }
+
+    #[test]
+    fn epicyclic_motion_satisfies_supplied_initial_conditions() {
+        let calculate = |time_s| {
+            calculate_epicyclic_motion(
+                6.94e-8, // spin inertia
+                9.13e-7, // transverse inertia
+                17522.0, // spin rate
+                2.5,     // stability factor
+                time_s, 0.01, // initial yaw
+            )
+        };
+
+        let (initial_pitch, initial_yaw) = calculate(0.0);
+        assert!(initial_pitch.abs() < 1e-15);
+        assert!((initial_yaw - 0.01).abs() < 1e-14);
+
+        // Second-order forward difference for the initial transverse/pitch rate. The modal
+        // coefficients must cancel this rate, not merely be normalized to the initial yaw.
+        let h = 1e-7;
+        let pitch_h = calculate(h).0;
+        let pitch_2h = calculate(2.0 * h).0;
+        let initial_pitch_rate = (4.0 * pitch_h - pitch_2h) / (2.0 * h);
+        assert!(initial_pitch_rate.abs() < 1e-6);
+
+        assert_eq!(
+            calculate_epicyclic_motion(0.0, 9.13e-7, 17522.0, 2.5, 0.1, 0.01),
+            (0.0, 0.01)
+        );
+        assert_eq!(
+            calculate_epicyclic_motion(6.94e-8, 0.0, 17522.0, 2.5, 0.1, 0.01),
+            (0.0, 0.01)
+        );
     }
 
     #[test]
