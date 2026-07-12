@@ -523,6 +523,21 @@ pub fn fast_integrate(
             new_state[j] = state[j] + dt * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]) / 6.0;
         }
 
+        if state[0] < params.horiz && new_state[0] >= params.horiz {
+            // Keep every terminal metric on the requested target plane. The former top-of-loop
+            // check retained this full-step endpoint, biasing time, drop, and velocity past it.
+            let alpha = (params.horiz - state[0]) / (new_state[0] - state[0]);
+            let mut target_state = state;
+            for j in 0..6 {
+                target_state[j] = state[j] + alpha * (new_state[j] - state[j]);
+            }
+            target_state[0] = params.horiz;
+            times.push(t + alpha * dt);
+            states.push(target_state);
+            hit_target = true;
+            break;
+        }
+
         times.push(t + dt);
         states.push(new_state);
     }
@@ -1324,6 +1339,62 @@ mod tests {
         assert_eq!(solution.t_events[0], vec![2.0]); // Target hit
         assert_eq!(solution.t_events[1], vec![0.5]); // Max ordinate
         assert!(solution.t_events[2].is_empty()); // No ground hit
+    }
+
+    #[test]
+    fn plain_fast_path_interpolates_the_target_crossing() {
+        let target = 500.123456789;
+        let initial_state = [0.0, 0.0, 0.25, 800.0, 12.0, -2.5];
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            ground_threshold: -100.0,
+            use_enhanced_spin_drift: false,
+            ..BallisticInputs::default()
+        };
+        let run = |horiz| {
+            fast_integrate(
+                &inputs,
+                &WindSock::new(vec![]),
+                FastIntegrationParams {
+                    horiz,
+                    vert: 0.0,
+                    initial_state,
+                    t_span: (0.0, 2.0),
+                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmo_sock: None,
+                },
+            )
+        };
+
+        // A longer run retains the two full RK4 samples bracketing the requested target.
+        let reference = run(target + 2.0);
+        let left = reference.y[0]
+            .windows(2)
+            .position(|x| x[0] < target && x[1] > target)
+            .expect("reference trajectory must bracket target");
+        let right = left + 1;
+        let alpha =
+            (target - reference.y[0][left]) / (reference.y[0][right] - reference.y[0][left]);
+
+        let solution = run(target);
+        let last = solution.t.len() - 1;
+        assert_eq!(solution.y[0][last].to_bits(), target.to_bits());
+        let expected_time = reference.t[left] + alpha * (reference.t[right] - reference.t[left]);
+        assert!((solution.t[last] - expected_time).abs() < 1e-12);
+        assert_eq!(solution.t_events[0], vec![solution.t[last]]);
+
+        for component in 0..6 {
+            assert_eq!(solution.y[component].len(), solution.t.len());
+            let expected = reference.y[component][left]
+                + alpha * (reference.y[component][right] - reference.y[component][left]);
+            assert!(
+                (solution.y[component][last] - expected).abs() < 1e-9,
+                "component {component} is not at the crossing: actual={}, expected={expected}",
+                solution.y[component][last]
+            );
+        }
     }
 
     #[test]

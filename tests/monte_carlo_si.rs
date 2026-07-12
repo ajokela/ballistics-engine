@@ -41,11 +41,13 @@ fn monte_carlo_agrees_with_cli_api_on_si_inputs() {
     let r = solver.solve().expect("cli_api solve");
     let last = r.points.last().unwrap();
 
-    // monte_carlo must reach the target (not collapse at ~33 m) with physical energy.
+    // monte_carlo must terminate on the requested target plane (not collapse at ~33 m or retain
+    // the first fixed-step sample beyond the target) with physical energy.
     assert!(
-        mc.distance > 450.0,
-        "monte_carlo should reach ~457 m, got {} m",
-        mc.distance
+        (mc.distance - i.target_distance).abs() < 1e-10,
+        "monte_carlo should stop at {} m, got {} m",
+        i.target_distance,
+        mc.distance,
     );
     assert!(
         mc.energy > 1000.0 && mc.energy < 4000.0,
