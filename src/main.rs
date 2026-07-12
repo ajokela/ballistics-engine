@@ -598,11 +598,12 @@ enum Commands {
         // while the trajectory runs under the current shot-day conditions. Any flag left
         // unset falls back to the corresponding shot-day value (backward compatible).
         /// Zero-day muzzle velocity for --auto-zero (fps imperial / m·s⁻¹ metric). Use when the
-        /// rifle was zeroed at a different velocity than this shot (e.g. a powder-temp/velocity table).
+        /// rifle was zeroed at a different velocity than this shot. Overrides both powder models.
         #[arg(long, value_parser = f64_range(0.0, 6000.0))]
         zero_velocity: Option<f64>,
 
-        /// Zero-day air temperature for --auto-zero (°F imperial / °C metric)
+        /// Zero-day air temperature for --auto-zero (°F imperial / °C metric). Also resolves
+        /// zero-day velocity for the linear powder-sensitivity model unless --zero-velocity is set.
         #[arg(long, allow_hyphen_values = true)]
         zero_temperature: Option<f64>,
 
@@ -3347,6 +3348,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
+                // An explicit zero velocity is absolute. Otherwise let the solver apply the
+                // linear powder model at the zero-day air temperature; a curve, when present,
+                // retains precedence inside TrajectorySolver::new.
+                let apply_zero_linear = zero_velocity.is_none() && use_powder_sensitivity;
+
                 // Create inputs for zero calculation
                 let zero_inputs = BallisticInputs {
                     muzzle_velocity: zero_velocity_metric,
@@ -3372,6 +3378,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     temperature: zero_temperature_metric,
                     pressure: zero_pressure_metric,
                     humidity: zero_humidity_value,
+                    use_powder_sensitivity: apply_zero_linear,
+                    powder_temp_sensitivity: if apply_zero_linear {
+                        UnitConverter::velocity_to_metric(powder_temp_sensitivity, cli.units)
+                            / UnitConverter::temperature_delta_to_metric(1.0, cli.units)
+                    } else {
+                        0.0
+                    },
+                    // For the linear model this is the reference temperature at which the
+                    // stated velocity was measured; --zero-powder-temp remains curve-only.
+                    powder_temp: UnitConverter::temperature_to_metric(powder_temp, cli.units),
                     // Let a powder curve set the zero-day velocity at the zero-day
                     // temperature — UNLESS an explicit --zero-velocity was given, which
                     // takes precedence (the constructor would otherwise override it).
