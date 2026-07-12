@@ -226,6 +226,81 @@ Home_Range,500,29.92,70
   -m 140 -d 0.264
 ```
 
+### Canted Shooting
+
+Model a rifle that is zeroed level but *fired* with the scope/receiver rotated about the
+line of sight — the classic "canted rifle" error. Available via `--cant <DEGREES>`
+(alias `--cant-angle`) on the `trajectory` and `monte-carlo` subcommands. Default `0` =
+level (bit-identical to a solve without the flag).
+
+**Not available on `zero`.** Zeroing always solves the un-canted trajectory — cant is
+applied only at fire time. This models "zero the rifle level, then shoot it canted," not
+"the rifle was canted while zeroing," which would (mostly) cancel out.
+
+**Sign convention:** positive degrees = clockwise cant as seen from behind the rifle (the
+top of the scope tips to the right). For a rifle with an upward zero elevation
+correction — the normal case — that rotates the correction partly into windage, so point
+of impact moves **right and low** relative to the un-canted zero.
+
+**Error model:** cant rotates the sight-frame aim offsets (elevation and windage) about
+the line of sight, and swings the bore's sight-height offset laterally with it. For small
+cant angles the combined lateral error at a given range is approximately
+
+```
+lateral_error ≈ (D − sight_height) · sin(cant)
+```
+
+where `D` is the height the zero's elevation correction adds at that range (i.e. how much
+higher the zeroed, un-canted trajectory sits than a flat 0°-elevation shot would). Since
+`D` grows with range (and with how much the load has dropped), **cant error grows with
+range** — a small cant is barely noticeable at zero range and increasingly costly beyond
+it. This is validated in `tests/canted_fire.rs` to within 5% (windage) / 10% (elevation)
+of the analytic prediction at 300 m and 600 m.
+
+**Worked example** (build first with `cargo build`; `--sample-interval` is always meters
+regardless of `--units`, so `91.44` below is exactly 100 yd):
+
+```bash
+# Level (no cant)
+./target/debug/ballistics trajectory -v 2700 -m 168 -d 0.308 --bc 0.5 \
+  --auto-zero 100 --max-range 600 \
+  --sample-trajectory --sample-interval 91.44 -o csv --full
+
+# Same load, 10 degrees of clockwise cant
+./target/debug/ballistics trajectory -v 2700 -m 168 -d 0.308 --bc 0.5 \
+  --auto-zero 100 --max-range 600 --cant 10 \
+  --sample-trajectory --sample-interval 91.44 -o csv --full
+```
+
+Level output — `drift_in` is exactly zero at every range:
+
+```
+distance_yd,drop_in,drift_in,velocity_fps,energy_ft-lb,time_s
+0.00,2.00,0.00,2700.00,2718.96,0.0000
+100.00,0.00,0.00,2519.55,2367.68,0.1150
+200.00,3.48,0.00,2346.19,2053.06,0.2384
+300.00,13.29,0.00,2179.61,1771.88,0.3711
+400.00,30.43,0.00,2019.83,1521.62,0.5141
+500.00,56.11,0.00,1867.27,1300.44,0.6686
+```
+
+10-degree canted output — `drift_in` grows steadily with range, and `drop_in` runs
+slightly higher than the level case (the "low" half of "right and low"):
+
+```
+distance_yd,drop_in,drift_in,velocity_fps,energy_ft-lb,time_s
+0.00,1.97,-0.35,2700.00,2718.96,0.0000
+100.00,0.04,0.43,2519.55,2367.68,0.1150
+200.00,3.59,1.22,2346.19,2053.06,0.2384
+300.00,13.46,2.00,2179.61,1771.88,0.3711
+400.00,30.67,2.78,2019.83,1521.62,0.5141
+500.00,56.42,3.56,1867.27,1300.44,0.6686
+```
+
+The small offset already present at the muzzle (`drift_in = -0.35` at 0 yd) is the bore
+itself swinging laterally below the canted sight; windage then climbs through positive
+(rightward) values as the zero's elevation correction leaks into windage with range.
+
 ### Zero Calculation
 
 Calculate sight adjustments for specific distances:
@@ -510,6 +585,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --longitude | Longitude for weather zones | None | degrees | degrees |
 | --shot-direction | Shot azimuth (0=N, 90=E) | None | degrees | degrees |
 | --shooting-angle | Incline angle (up/down) | 0 | degrees | degrees |
+| --cant | Rifle cant about the line of sight (alias `--cant-angle`); positive = clockwise, POI right and low. Also on `monte-carlo`, not `zero` | 0 | degrees | degrees |
 | --enable-wind-shear | Wind shear with altitude | false | - | - |
 | --sample-trajectory | Sample at regular intervals | false | - | - |
 | --sample-interval | Sampling interval (always meters, not unit-system dependent) | 10 | meters | meters |
