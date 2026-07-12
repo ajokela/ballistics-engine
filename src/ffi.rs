@@ -489,28 +489,25 @@ pub unsafe extern "C" fn ballistics_free_trajectory_result(result: *mut FFITraje
     }
 }
 
-/// Calculate the zero angle for a target distance through the C ABI.
-///
-/// # Safety
-///
-/// `inputs` may be null, in which case this function returns NaN. When non-null,
-/// it must point to a valid, properly aligned [`FFIBallisticInputs`] that remains
-/// readable and is not mutated for the duration of this call. `wind` and
-/// `atmosphere` may also be null; each non-null pointer has the same requirements
-/// for its corresponding type.
-#[no_mangle]
-pub unsafe extern "C" fn ballistics_calculate_zero_angle(
+/// Shared implementation for the zero-angle exports. `custom_drag_table`, when
+/// present, replaces the G-model + BC drag (the deck's Cd is divided by sectional
+/// density — see `BallisticInputs::custom_drag_denominator`), matching the deck
+/// semantics of [`calculate_trajectory_impl`] so a zero solved with a deck and a
+/// trajectory flown with the same deck agree.
+unsafe fn calculate_zero_angle_impl(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,
     atmosphere: *const FFIAtmosphericConditions,
     zero_distance: c_double,
+    custom_drag_table: Option<crate::drag::DragTable>,
 ) -> c_double {
     if inputs.is_null() {
         return f64::NAN;
     }
 
     let inputs = unsafe { &*inputs };
-    let ballistic_inputs = convert_inputs(inputs);
+    let mut ballistic_inputs = convert_inputs(inputs);
+    ballistic_inputs.custom_drag_table = custom_drag_table;
 
     let wind_conditions = if wind.is_null() {
         WindConditions::default()
@@ -548,6 +545,62 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
         Ok(angle) => angle,
         Err(_) => f64::NAN,
     }
+}
+
+/// Calculate the zero angle for a target distance through the C ABI.
+///
+/// # Safety
+///
+/// `inputs` may be null, in which case this function returns NaN. When non-null,
+/// it must point to a valid, properly aligned [`FFIBallisticInputs`] that remains
+/// readable and is not mutated for the duration of this call. `wind` and
+/// `atmosphere` may also be null; each non-null pointer has the same requirements
+/// for its corresponding type.
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_calculate_zero_angle(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    zero_distance: c_double,
+) -> c_double {
+    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, None) }
+}
+
+/// [`ballistics_calculate_zero_angle`] with a caller-supplied custom drag deck
+/// (Cd vs Mach, e.g. Hornady CDM / Doppler-radar data). The deck REPLACES the
+/// G-model + BC for drag: `bc_type`/`bc_value` are ignored, and the retardation
+/// denominator becomes the projectile's sectional density (mass and diameter in
+/// `inputs` must therefore be positive). Mach values must be strictly ascending
+/// with at least 2 points and finite positive Cd; outside the deck's Mach domain
+/// the nearest endpoint Cd is held. Pair this with
+/// [`ballistics_calculate_trajectory_with_drag_table`] using the same deck to fly
+/// the solved angle — the two exports share identical deck semantics.
+///
+/// Returns NaN for an invalid deck (null arrays, `drag_table_len < 2`, or failed
+/// validation), in addition to every failure mode of the base function.
+///
+/// # Safety
+///
+/// Same contract as [`ballistics_calculate_zero_angle`] for `inputs`, `wind`, and
+/// `atmosphere`. Additionally, when non-null, `drag_mach` and `drag_cd` must each
+/// point to `drag_table_len` readable `f64` values, borrowed only for the duration
+/// of this call (the deck is copied; the caller retains ownership — no new free
+/// function is required).
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    zero_distance: c_double,
+    drag_mach: *const c_double,
+    drag_cd: *const c_double,
+    drag_table_len: c_int,
+) -> c_double {
+    let table = match unsafe { drag_table_from_raw(drag_mach, drag_cd, drag_table_len) } {
+        Ok(t) => t,
+        Err(()) => return f64::NAN,
+    };
+    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, Some(table)) }
 }
 
 // Simple trajectory calculation for quick results
@@ -952,6 +1005,27 @@ mod tests {
                 100.0,
             )
             .is_nan());
+            assert!(ballistics_calculate_trajectory_with_drag_table(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1_000.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            )
+            .is_null());
+            assert!(ballistics_calculate_zero_angle_with_drag_table(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            )
+            .is_nan());
             assert!(
                 ballistics_monte_carlo(std::ptr::null(), std::ptr::null(), std::ptr::null(),)
                     .is_null()
@@ -1088,6 +1162,85 @@ mod tests {
                 std::ptr::null(), std::ptr::null(), std::ptr::null(), 300.0, 1.0,
                 DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
             ).is_null());
+        }
+    }
+
+    #[test]
+    fn zero_angle_with_drag_table_applies_the_deck() {
+        // A realistic zeroing setup: 100 m zero.
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let plain = ballistics_calculate_zero_angle(
+                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
+            );
+            let decked = ballistics_calculate_zero_angle_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+            );
+            assert!(plain.is_finite() && decked.is_finite());
+            // A much lower-drag deck needs a flatter (smaller) zero angle; at minimum it
+            // must differ measurably from the G-model zero.
+            assert!(
+                (plain - decked).abs() > 1e-6,
+                "deck did not change the zero: plain={plain} decked={decked}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_angle_with_drag_table_rejects_invalid_decks() {
+        let inputs = valid_trajectory_inputs();
+        let descending = [3.0, 2.0, 1.0, 0.5];
+        unsafe {
+            assert!(ballistics_calculate_zero_angle_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
+                std::ptr::null(), DECK_CD_LOW.as_ptr(), 4,
+            ).is_nan());
+            assert!(ballistics_calculate_zero_angle_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 0,
+            ).is_nan());
+            assert!(ballistics_calculate_zero_angle_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
+                descending.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
+            ).is_nan());
+            // null inputs still rejected
+            assert!(ballistics_calculate_zero_angle_with_drag_table(
+                std::ptr::null(), std::ptr::null(), std::ptr::null(), 100.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), 4,
+            ).is_nan());
+        }
+    }
+
+    #[test]
+    fn zero_then_fly_with_same_deck_is_consistent() {
+        // The pair-use case the two exports exist for: zero with the deck, fly with the
+        // deck at the solved angle; the trajectory must cross near sight height at the
+        // zero distance (i.e. the two functions share identical deck semantics).
+        let mut inputs = valid_trajectory_inputs();
+        unsafe {
+            let angle = ballistics_calculate_zero_angle_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 100.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+            );
+            assert!(angle.is_finite());
+            inputs.muzzle_angle = angle;
+            let result = ballistics_calculate_trajectory_with_drag_table(
+                &inputs, std::ptr::null(), std::ptr::null(), 150.0, 1.0,
+                DECK_MACH.as_ptr(), DECK_CD_LOW.as_ptr(), DECK_MACH.len() as c_int,
+            );
+            assert!(!result.is_null());
+            // find the point nearest 100 m downrange and check |y - sight_height| small
+            let pts = std::slice::from_raw_parts((*result).points, (*result).point_count as usize);
+            let near = pts.iter().min_by(|a, b| {
+                (a.position_x - 100.0).abs().partial_cmp(&(b.position_x - 100.0).abs()).unwrap()
+            }).expect("trajectory has points");
+            assert!(
+                (near.position_y - inputs.sight_height).abs() < 0.05,
+                "zeroed flight missed the line of sight at 100 m: y={} (sight_height={})",
+                near.position_y, inputs.sight_height
+            );
+            ballistics_free_trajectory_result(result);
         }
     }
 }
