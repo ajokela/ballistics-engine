@@ -128,18 +128,20 @@ fn direct_atmosphere_values(
         .then_some((a, b))
 }
 
+const MAX_STANDARD_DENSITY_RATIO: f64 = 2.0;
+
 /// True if `atmo_params` can yield a finite, positive air density. `atmo_params` has TWO
 /// modes that `compute_derivatives` distinguishes:
 ///   * **Standard**: `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` —
-///     positive station pressure. (Slot 3 is a density RATIO, not humidity, despite the
-///     `humidity` field it lands in via `build_inputs`.)
+///     positive station pressure. Slot 3 is a density RATIO, not humidity, despite the
+///     `humidity` field it lands in via `build_inputs`. A nonpositive ratio means "not supplied"
+///     and falls back to `1.0`; a supplied ratio must be below `2.0`.
 ///   * **Direct**: `(air_density, speed_of_sound, 0.0, 0.0)` — slots 2 and 3 are `0.0`
 ///     sentinels, with a real density (< 2.0 kg/m³) and speed of sound (> 200 m/s).
 ///
-/// A pressure <= 0 that ISN'T the direct-mode sentinel (or any non-finite value) — often a
-/// unit mistake like inHg where hPa is expected — gives zero/NaN density and would silently
-/// truncate the integration to a single point, so it's rejected. (Earlier this guard also
-/// rejected legitimate direct-mode input; the direct-mode allowance below fixes that.)
+/// A pressure <= 0 that ISN'T the direct-mode sentinel, an overlarge supplied density ratio, or
+/// any non-finite value would yield a non-physical atmosphere, so it is rejected. (Earlier this
+/// guard also rejected legitimate direct-mode input; the direct-mode allowance below fixes that.)
 fn atmo_is_physical(atmo_params: (f64, f64, f64, f64)) -> bool {
     let (a, b, c, d) = atmo_params;
     if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
@@ -147,8 +149,9 @@ fn atmo_is_physical(atmo_params: (f64, f64, f64, f64)) -> bool {
     }
     // Direct-atmosphere mode: (density, speed_of_sound, 0, 0). Constants mirror
     // derivatives.rs (MAX_REALISTIC_DENSITY = 2.0 kg/m³, MIN_REALISTIC_SPEED_OF_SOUND = 200 m/s).
-    // Standard mode: positive station pressure (hPa).
-    direct_atmosphere_values(atmo_params).is_some() || c > 0.0
+    // Standard mode: positive station pressure (hPa), plus either the documented missing-ratio
+    // sentinel or a supplied ratio below the physical ceiling.
+    direct_atmosphere_values(atmo_params).is_some() || (c > 0.0 && d < MAX_STANDARD_DENSITY_RATIO)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -170,7 +173,9 @@ pub struct FastIntegrationParams {
     pub t_span: (f64, f64),
     /// Dual-mode atmosphere tuple — see [`atmo_is_physical`]. Standard mode is
     /// `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` (slot 3 is a density
-    /// RATIO, not humidity); direct mode is `(air_density, speed_of_sound, 0.0, 0.0)`.
+    /// RATIO, not humidity; nonpositive means "not supplied" and falls back to `1.0`, while a
+    /// supplied ratio must be below `2.0`). Direct mode is
+    /// `(air_density, speed_of_sound, 0.0, 0.0)`.
     pub atmo_params: (f64, f64, f64, f64),
     /// MBA-1137: optional downrange-segmented atmosphere. When `Some`, the per-substep drag
     /// density samples the base (station-referenced) T/P/H for the zone at the current downrange
@@ -1430,6 +1435,20 @@ mod tests {
         // non-finite pressure -> also rejected.
         let nan_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, f64::NAN, 1.0)));
         assert!(!nan_p.success, "NaN pressure must yield success=false");
+        // A supplied density ratio must imply a physically plausible density in both wrappers.
+        let segmented_too_dense =
+            fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 50.0)));
+        let plain_too_dense = fast_integrate(
+            &inputs,
+            &WindSock::new(vec![]),
+            mk((0.0, 15.0, 1013.25, 50.0)),
+        );
+        assert!(
+            !segmented_too_dense.success && !plain_too_dense.success,
+            "ratio=50 atmosphere must fail in both wrappers: segmented={}, plain={}",
+            segmented_too_dense.success,
+            plain_too_dense.success
+        );
         // realistic atmosphere -> success.
         let good = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 1.0)));
         assert!(good.success, "realistic atmosphere must yield success=true");
@@ -1489,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn segmented_fast_path_zero_density_ratio_uses_standard_fallback() {
+    fn segmented_fast_path_nonpositive_density_ratio_uses_standard_fallback() {
         fn terminal_velocity(base_ratio: f64) -> f64 {
             let mut inputs = BallisticInputs::default();
             inputs.muzzle_velocity = 800.0;
@@ -1515,13 +1534,15 @@ mod tests {
             solution.y[3][last]
         }
 
-        let missing_ratio = terminal_velocity(0.0);
         let explicit_sea_level = terminal_velocity(1.0);
-        assert!(
-            missing_ratio < 800.0,
-            "missing density ratio must not create a vacuum trajectory: {missing_ratio}"
-        );
-        assert!((missing_ratio - explicit_sea_level).abs() < 1e-9);
+        for base_ratio in [0.0, -1.0] {
+            let missing_ratio = terminal_velocity(base_ratio);
+            assert!(
+                missing_ratio < 800.0,
+                "missing density ratio must not create a vacuum trajectory: {missing_ratio}"
+            );
+            assert!((missing_ratio - explicit_sea_level).abs() < 1e-9);
+        }
     }
 
     #[test]
