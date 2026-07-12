@@ -7,7 +7,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 ## Features
 
 - **Full 3D Trajectory Integration** - Six-state ballistic modeling with adaptive RK45 and fixed-step RK4 integration methods
-- **Advanced Drag Models** - Support for G1, G7, and custom drag curves with automatic transonic corrections
+- **Advanced Drag Models** - Support for G1 and G7 reference curves (with automatic transonic corrections) plus user-supplied custom Cd(Mach) drag tables (`--drag-table`, used as-is with endpoint hold outside their measured domain, no transonic correction applied — see [CLI_USAGE.md](CLI_USAGE.md#custom-drag-tables); `bc_value` is ignored while a custom table is active)
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation
