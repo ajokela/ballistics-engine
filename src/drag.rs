@@ -66,9 +66,11 @@ impl DragTable {
     }
 
     /// Parse a user drag deck from CSV text: two columns `mach,cd` per line. Blank lines and
-    /// lines starting with `#` are ignored; a single leading header row (a first data-bearing
-    /// row that does not parse as two floats) is skipped once. Any later unparseable row is a
-    /// hard error citing its 1-based line number. Values are validated via `try_new`.
+    /// lines starting with `#` are ignored; a single leading header row is skipped once, but only
+    /// when its first column is not itself a valid number (e.g. `mach,cd`) — a first row whose
+    /// first column does parse as a float (e.g. `0.5` or `0.5,O.2`) is data, not a header, so a
+    /// missing/invalid second column there is a hard error, not a silent skip. Any unparseable
+    /// row is a hard error citing its 1-based line number. Values are validated via `try_new`.
     pub fn from_csv_str(csv: &str) -> Result<Self, String> {
         let mut mach_values = Vec::new();
         let mut cd_values = Vec::new();
@@ -81,14 +83,18 @@ impl DragTable {
             let mut cols = line.split(',');
             let m = cols.next().map(str::trim);
             let cd = cols.next().map(str::trim);
-            match (m.and_then(|s| s.parse::<f64>().ok()), cd.and_then(|s| s.parse::<f64>().ok())) {
+            let m_parsed = m.and_then(|s| s.parse::<f64>().ok());
+            match (m_parsed, cd.and_then(|s| s.parse::<f64>().ok())) {
                 (Some(m), Some(cd)) => {
                     mach_values.push(m);
                     cd_values.push(cd);
                 }
                 _ => {
-                    if !header_skipped && mach_values.is_empty() {
-                        // Tolerate one leading header row (e.g. "mach,cd").
+                    if !header_skipped && mach_values.is_empty() && m_parsed.is_none() {
+                        // Tolerate one leading header row (e.g. "mach,cd") — but only when its
+                        // first column gives no numeric evidence of being a data row. A row whose
+                        // first column *does* parse (e.g. "0.5" or "0.5,O.2") is malformed data,
+                        // not a header, and must error rather than be silently discarded.
                         header_skipped = true;
                         continue;
                     }
@@ -107,7 +113,7 @@ impl DragTable {
     }
 
     /// Load and validate a user drag deck from a CSV file path.
-    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("could not read drag table {}: {e}", path.display()))?;
@@ -1118,6 +1124,20 @@ mod tests {
     #[test]
     fn from_csv_str_rejects_empty() {
         assert!(DragTable::from_csv_str("# only comments\n\n").is_err());
+    }
+
+    #[test]
+    fn from_csv_str_rejects_malformed_first_data_row() {
+        // first column is a valid number => it's data, not a header => must error, not vanish
+        assert!(DragTable::from_csv_str("0.5\n1.0,0.4\n2.0,0.3\n").is_err());
+        assert!(DragTable::from_csv_str("0.5,O.2\n1.0,0.4\n2.0,0.3\n").is_err());
+    }
+
+    #[test]
+    fn from_csv_str_still_skips_textual_header() {
+        // genuine header (first column non-numeric) is still tolerated
+        let t = DragTable::from_csv_str("mach,cd\n0.5,0.2\n1.0,0.4\n").unwrap();
+        assert_eq!(t.mach_values, vec![0.5, 1.0]);
     }
 
     #[test]
