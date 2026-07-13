@@ -719,6 +719,56 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn apply_boundary_layer_shear_scales_horizontal_preserves_vertical() {
+        // Height comfortably above the 10 m boundary-layer reference height, so the speed
+        // ratio is meaningfully > 1.0 for both closed-form models (MBA-728 pass-through
+        // contract: shear scales horizontal wind only; vertical passes through unscaled).
+        let height_rel_launch_m = 100.0;
+        let base = Vector3::new(-3.0, 5.0, -4.0);
+
+        for model in [WindShearModel::Logarithmic, WindShearModel::PowerLaw] {
+            let ratio = boundary_layer_speed_ratio(height_rel_launch_m, model);
+            assert!(
+                ratio > 1.02,
+                "{model:?} ratio at {height_rel_launch_m} m should be meaningfully > 1.0, got {ratio}"
+            );
+
+            let sheared = apply_boundary_layer_shear(base, height_rel_launch_m, model);
+
+            assert!(
+                sheared.x != base.x && sheared.z != base.z,
+                "{model:?}: horizontal x/z must be scaled, got sheared={sheared:?} base={base:?}"
+            );
+            assert!(
+                (sheared.x / base.x - ratio).abs() < 1e-9,
+                "{model:?}: x should scale by the boundary-layer ratio {ratio}, got {sheared:?}"
+            );
+            assert!(
+                (sheared.z / base.z - ratio).abs() < 1e-9,
+                "{model:?}: z should scale by the boundary-layer ratio {ratio}, got {sheared:?}"
+            );
+
+            // Vertical passes through EXACTLY unscaled (bit-equal), per the MBA-728 contract.
+            assert_eq!(
+                sheared.y.to_bits(),
+                base.y.to_bits(),
+                "{model:?}: vertical must pass through unscaled bit-for-bit, got {sheared:?}"
+            );
+            assert_eq!(sheared.y, 5.0);
+        }
+    }
+
+    #[test]
+    fn apply_boundary_layer_shear_zero_vertical_stays_zero() {
+        // Legacy behavior: a zero vertical component must remain exactly zero after shear.
+        let base = Vector3::new(-3.0, 0.0, -4.0);
+        for model in [WindShearModel::Logarithmic, WindShearModel::PowerLaw] {
+            let sheared = apply_boundary_layer_shear(base, 100.0, model);
+            assert_eq!(sheared.y, 0.0);
+        }
+    }
 }
 
 #[cfg(test)]

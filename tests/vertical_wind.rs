@@ -1,7 +1,8 @@
 // MBA-728 analytic acceptance gate for vertical wind. Drag is direction-agnostic, so a pure
 // updraft `w` must deflect the shot VERTICALLY by the same amount (within 5%) that an equal
 // pure crosswind `w` deflects it LATERALLY, at the same ranges.
-use ballistics_engine::wind::WindSegment;
+use ballistics_engine::fast_trajectory::{fast_integrate, FastIntegrationParams};
+use ballistics_engine::wind::{WindSegment, WindSock};
 use ballistics_engine::{
     AtmosphericConditions, BallisticInputs, DragModel, TrajectoryResult, TrajectorySolver,
     WindConditions,
@@ -190,4 +191,109 @@ fn updraft_still_raises_poi_on_an_incline() {
 #[test]
 fn wind_conditions_default_has_zero_vertical_speed() {
     assert_eq!(WindConditions::default().vertical_speed, 0.0);
+}
+
+// MBA-728 coverage gap: `wind_shear::apply_boundary_layer_shear` preserves the vertical (Y)
+// wind component unscaled while scaling horizontal (X/Z) wind. `TrajectorySolver::solve()`
+// (used by every other test in this file) never actually calls that function -- its
+// `enable_wind_shear` path applies an independent, hand-rolled equivalent inline in
+// cli_api.rs's `get_wind_at_altitude`. The only public entry point that exercises
+// `apply_boundary_layer_shear` itself is the fast-integration kernel
+// (`fast_trajectory::fast_integrate`, via `compute_derivatives`), so this integration test
+// drives that path directly instead.
+fn fast_base_inputs(enable_wind_shear: bool, wind_shear_model: &str) -> BallisticInputs {
+    BallisticInputs {
+        muzzle_velocity: 800.0,
+        bc_value: 0.5,
+        bc_type: DragModel::G7,
+        bullet_mass: 0.0109,
+        bullet_diameter: 0.00782,
+        bullet_length: 0.0309,
+        enable_wind_shear,
+        wind_shear_model: wind_shear_model.to_string(),
+        ground_threshold: -1000.0,
+        ..BallisticInputs::default()
+    }
+}
+
+/// (y, z) at range 400 m for a fast-kernel run. The launch is a high-arc shot (~6.9 deg
+/// elevation) so the trajectory climbs well above the ~10 m boundary-layer reference height
+/// where shear actually departs from ratio == 1.0 -- a flat-fire shot never leaves the
+/// near-ground "full wind" band, so shear would be a silent no-op and could not discriminate
+/// the pass-through contract either way.
+fn fast_yz_at_400(
+    enable_wind_shear: bool,
+    wind_shear_model: &str,
+    wind_segments: Vec<WindSegment>,
+) -> (f64, f64) {
+    let inputs = fast_base_inputs(enable_wind_shear, wind_shear_model);
+    let elevation = 0.12_f64;
+    let solution = fast_integrate(
+        &inputs,
+        &WindSock::new(wind_segments),
+        FastIntegrationParams {
+            horiz: 400.0,
+            vert: 0.0,
+            initial_state: [
+                0.0,
+                0.0,
+                0.0,
+                inputs.muzzle_velocity * elevation.cos(),
+                inputs.muzzle_velocity * elevation.sin(),
+                0.0,
+            ],
+            t_span: (0.0, 5.0),
+            atmo_params: (0.0, 15.0, 1013.25, 1.0),
+            atmo_sock: None,
+        },
+    );
+    let last = solution.t.len() - 1;
+    assert_eq!(
+        solution.y[0][last].to_bits(),
+        400.0_f64.to_bits(),
+        "fast_integrate should land exactly on the 400 m target plane"
+    );
+    (solution.y[1][last], solution.y[2][last])
+}
+
+#[test]
+fn updraft_deflection_is_unaffected_by_shear() {
+    // Same base wind as the vertical/lateral symmetry test above: a 5 m/s updraft. A modest
+    // 3 m/s crosswind from the right is added so shear -- which only scales horizontal wind --
+    // has something to act on; the two runs otherwise differ ONLY in enable_wind_shear.
+    let wind_segments = vec![WindSegment {
+        speed_kmh: 3.0 * 3.6,
+        angle_deg: 90.0,
+        until_m: 10_000.0,
+        vertical_mps: 5.0,
+    }];
+
+    let (y_calm, z_calm) = fast_yz_at_400(false, "none", vec![]);
+    let (y_no_shear, z_no_shear) = fast_yz_at_400(false, "none", wind_segments.clone());
+    let (y_shear, z_shear) = fast_yz_at_400(true, "power_law", wind_segments);
+
+    let dy_no_shear = y_no_shear - y_calm;
+    let dy_shear = y_shear - y_calm;
+    let dz_no_shear = z_no_shear - z_calm;
+    let dz_shear = z_shear - z_calm;
+    println!(
+        "dy_no_shear={dy_no_shear:.6} dy_shear={dy_shear:.6} dz_no_shear={dz_no_shear:.6} dz_shear={dz_shear:.6}"
+    );
+
+    // Shear must not touch vertical: the updraft-caused vertical deflection at 400 m must
+    // agree within 2% whether shear is on or off.
+    let dy_err = (dy_shear - dy_no_shear).abs();
+    let dy_bound = 0.02 * dy_no_shear.abs();
+    assert!(
+        dy_err <= dy_bound,
+        "shear must not affect vertical deflection: dy_no_shear={dy_no_shear:.6}, dy_shear={dy_shear:.6}, err={dy_err:.6} > 2% bound {dy_bound:.6}"
+    );
+
+    // But shear DID scale the horizontal crosswind aloft, so the lateral deflection must
+    // differ well beyond float noise -- proving shear was actually active in this run.
+    let dz_diff = (dz_shear - dz_no_shear).abs();
+    assert!(
+        dz_diff > 1e-3,
+        "shear should have changed the lateral drift (was it actually active?): dz_no_shear={dz_no_shear:.6}, dz_shear={dz_shear:.6}, diff={dz_diff:.6}"
+    );
 }
