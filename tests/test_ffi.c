@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 
 // FFI structure definitions (normally these would be in a header file)
@@ -29,11 +30,13 @@ typedef struct {
     int enable_magnus;
     int enable_coriolis;
     double shot_azimuth;
+    double cant_angle;      // appended (must match FFIBallisticInputs field order): rifle cant angle, radians
 } FFIBallisticInputs;
 
 typedef struct {
     double speed;
     double direction;
+    double vertical_speed;  // appended (must match FFIWindConditions field order): vertical wind m/s, + = updraft
 } FFIWindConditions;
 
 typedef struct {
@@ -114,12 +117,14 @@ int main() {
         .enable_spin_drift = 1,         // Enable spin drift
         .enable_magnus = 1,             // Enable Magnus effect
         .enable_coriolis = 0,           // Disable Coriolis for now
-        .shot_azimuth = 0.0             // North; appended ABI field
+        .shot_azimuth = 0.0,            // North; appended ABI field
+        .cant_angle = 0.0               // No cant; appended ABI field
     };
-    
+
     FFIWindConditions wind = {
         .speed = 5.0,                   // 5 m/s wind
-        .direction = 1.5708             // 90 degrees (from right)
+        .direction = 1.5708,            // 90 degrees (from right)
+        .vertical_speed = 0.0           // No updraft/downdraft; appended ABI field
     };
     
     FFIAtmosphericConditions atmosphere = {
@@ -138,7 +143,20 @@ int main() {
         printf("Error: Failed to calculate trajectory\n");
         return 1;
     }
-    
+
+    // Sanity gate: with struct mirrors out of sync with src/ffi.rs, the C caller and
+    // the Rust callee disagree on field layout/struct size, which is undefined
+    // behavior. That UB has previously manifested as a wildly wrong-but-still-"valid"
+    // -looking max_height (e.g. 890 m collapsing to 73 m under -fstack-protector-all)
+    // rather than a crash, letting a silently broken fixture "pass". Fail loudly
+    // instead of printing garbage as if it were a real result.
+    if (!isfinite(result->max_height) || result->max_height <= 0.0 || result->max_height >= 10000.0) {
+        printf("FATAL: implausible Max Height %.2f m (expected 0 < h < 10000) -- likely FFI struct/ABI mismatch\n",
+               result->max_height);
+        ballistics_free_trajectory_result(result);
+        exit(1);
+    }
+
     printf("Basic Trajectory Results:\n");
     printf("-------------------------\n");
     printf("Max Range: %.2f m\n", result->max_range);
