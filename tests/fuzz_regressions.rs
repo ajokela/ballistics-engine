@@ -171,7 +171,9 @@ fn mba1282_non_finite_segment_state_is_returned_as_an_error() {
             WindConditions::default(),
             AtmosphericConditions::default(),
         );
-        solver.set_wind_segments(vec![(f64::NAN, 90.0, 100.0)]);
+        solver.set_wind_segments(vec![ballistics_engine::wind::WindSegment::new(
+            f64::NAN, 90.0, 100.0,
+        )]);
 
         let error = solver
             .solve()

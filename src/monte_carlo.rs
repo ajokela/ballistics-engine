@@ -67,7 +67,7 @@ pub fn solve_trajectory_for_monte_carlo(
 
     // Create wind segments. WindSock expects (speed_kmh, angle_deg, until_distance_m);
     // convert from the SI fields (m/s, radians) at this boundary.
-    let wind_segments = vec![(
+    let wind_segments = vec![crate::wind::WindSegment::new(
         inputs.wind_speed * 3.6,        // m/s -> km/h
         inputs.wind_angle.to_degrees(), // radians -> degrees
         target_distance_m * 2.0,        // wind extends beyond target

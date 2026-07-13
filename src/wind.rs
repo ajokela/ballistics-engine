@@ -5,21 +5,43 @@ use std::f64::consts::PI;
 /// Conversion constant from KMH to MPS
 const KMH_TO_MPS: f64 = 1000.0 / 3600.0;
 
-/// Wind segment: (speed_kmh, angle_deg, until_distance_m)
-/// This matches the Python WindSock interface
-pub type WindSegment = (f64, f64, f64);
+/// One downrange wind segment. `vertical_mps` (m/s, positive = updraft) is
+/// carried but stays 0.0 until MBA-728's physics task wires it through.
+///
+/// This matches the Python WindSock interface.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WindSegment {
+    pub speed_kmh: f64,
+    pub angle_deg: f64,
+    pub until_m: f64,
+    pub vertical_mps: f64,
+}
+
+impl WindSegment {
+    /// The historical 3-field constructor (vertical 0.0) — used by every
+    /// pre-existing call site.
+    pub fn new(speed_kmh: f64, angle_deg: f64, until_m: f64) -> Self {
+        Self {
+            speed_kmh,
+            angle_deg,
+            until_m,
+            vertical_mps: 0.0,
+        }
+    }
+}
 
 /// Sort wind segments by their `until_distance_m` threshold.
 ///
 /// Shared by [`WindSock`] and the low-level trajectory integrator so every segmented-wind path
 /// applies the same interval ordering.
 pub(crate) fn sort_wind_segments_by_distance(segments: &mut [WindSegment]) {
-    segments.sort_by(|a, b| match (a.2.is_nan(), b.2.is_nan()) {
+    segments.sort_by(|a, b| match (a.until_m.is_nan(), b.until_m.is_nan()) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,
         (false, true) => Ordering::Less,
         (false, false) => {
-            a.2.partial_cmp(&b.2)
+            a.until_m
+                .partial_cmp(&b.until_m)
                 .expect("non-NaN distances are ordered")
         }
     });
@@ -56,7 +78,7 @@ impl WindSock {
         let (current, next_range, current_vec) = if segments.is_empty() {
             (0, f64::INFINITY, Vector3::zeros())
         } else {
-            (0, segments[0].2, wind_vecs[0])
+            (0, segments[0].until_m, wind_vecs[0])
         };
 
         WindSock {
@@ -70,11 +92,9 @@ impl WindSock {
 
     /// Calculate wind vector from wind segment
     fn calc_vec(seg: &WindSegment) -> Vector3<f64> {
-        let (speed_kmh, angle_deg, _) = *seg;
-
         // Convert kmh to m/s
-        let speed_mps = speed_kmh * KMH_TO_MPS;
-        let angle_rad = angle_deg * PI / 180.0;
+        let speed_mps = seg.speed_kmh * KMH_TO_MPS;
+        let angle_rad = seg.angle_deg * PI / 180.0;
 
         // Wind convention (matching trajectory coordinates):
         // 0° = headwind (from front, affects -x downrange)
@@ -109,7 +129,7 @@ impl WindSock {
                 self.next_range = f64::INFINITY;
             } else {
                 self.current_vec = self.wind_vecs[self.current];
-                self.next_range = self.winds[self.current].2;
+                self.next_range = self.winds[self.current].until_m;
             }
         }
 
@@ -128,7 +148,7 @@ impl WindSock {
 
         // Find the appropriate segment (precomputed vector — no per-call trig).
         for (i, segment) in self.winds.iter().enumerate() {
-            if range_m < segment.2 {
+            if range_m < segment.until_m {
                 return self.wind_vecs[i];
             }
         }
@@ -176,7 +196,7 @@ pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, St
     } else {
         (speed * 3.6, until) // m/s -> km/h, meters -> meters
     };
-    Ok((speed_kmh, angle, until_m))
+    Ok(WindSegment::new(speed_kmh, angle, until_m))
 }
 
 #[cfg(test)]
@@ -186,23 +206,23 @@ mod tests {
     #[test]
     fn segment_sort_is_stable_and_places_nan_endpoints_last() {
         let mut segments = vec![
-            (10.0, 0.0, f64::NAN),
-            (20.0, 0.0, 100.0),
-            (30.0, 0.0, 100.0),
-            (40.0, 0.0, f64::INFINITY),
-            (50.0, 0.0, f64::NEG_INFINITY),
-            (60.0, 0.0, f64::NAN),
+            WindSegment::new(10.0, 0.0, f64::NAN),
+            WindSegment::new(20.0, 0.0, 100.0),
+            WindSegment::new(30.0, 0.0, 100.0),
+            WindSegment::new(40.0, 0.0, f64::INFINITY),
+            WindSegment::new(50.0, 0.0, f64::NEG_INFINITY),
+            WindSegment::new(60.0, 0.0, f64::NAN),
         ];
 
         sort_wind_segments_by_distance(&mut segments);
 
-        assert_eq!(segments[0].0, 50.0); // -inf first
-        assert_eq!(segments[1].0, 20.0); // equal endpoints retain input order
-        assert_eq!(segments[2].0, 30.0);
-        assert_eq!(segments[3].0, 40.0); // +inf after finite endpoints
-        assert_eq!(segments[4].0, 10.0); // NaNs last and stable
-        assert_eq!(segments[5].0, 60.0);
-        assert!(segments[4].2.is_nan() && segments[5].2.is_nan());
+        assert_eq!(segments[0].speed_kmh, 50.0); // -inf first
+        assert_eq!(segments[1].speed_kmh, 20.0); // equal endpoints retain input order
+        assert_eq!(segments[2].speed_kmh, 30.0);
+        assert_eq!(segments[3].speed_kmh, 40.0); // +inf after finite endpoints
+        assert_eq!(segments[4].speed_kmh, 10.0); // NaNs last and stable
+        assert_eq!(segments[5].speed_kmh, 60.0);
+        assert!(segments[4].until_m.is_nan() && segments[5].until_m.is_nan());
     }
 
     #[test]
@@ -214,7 +234,7 @@ mod tests {
     #[test]
     fn test_wind_sock_single_segment() {
         // 16.0934 kmh (10 mph) @ 90° until 100m
-        let sock = WindSock::new(vec![(16.0934, 90.0, 100.0)]);
+        let sock = WindSock::new(vec![WindSegment::new(16.0934, 90.0, 100.0)]);
 
         // Should have wind before 100m
         let vec_50 = sock.vector_for_range_stateless(50.0);
@@ -242,9 +262,9 @@ mod tests {
     fn test_wind_sock_multiple_segments() {
         // Multiple wind segments (in kmh)
         let sock = WindSock::new(vec![
-            (16.0934, 90.0, 50.0),  // 10 mph @ 90° until 50m
-            (24.1401, 45.0, 100.0), // 15 mph @ 45° until 100m
-            (8.0467, 180.0, 200.0), // 5 mph @ 180° until 200m
+            WindSegment::new(16.0934, 90.0, 50.0),  // 10 mph @ 90° until 50m
+            WindSegment::new(24.1401, 45.0, 100.0), // 15 mph @ 45° until 100m
+            WindSegment::new(8.0467, 180.0, 200.0), // 5 mph @ 180° until 200m
         ]);
 
         // Test each segment
@@ -280,7 +300,7 @@ mod tests {
     #[test]
     fn test_wind_conversion() {
         // Test conversion: 16.0934 km/h = 4.47 m/s
-        let sock = WindSock::new(vec![(16.0934, 0.0, 100.0)]);
+        let sock = WindSock::new(vec![WindSegment::new(16.0934, 0.0, 100.0)]);
         let vec = sock.vector_for_range_stateless(50.0);
 
         let expected_speed = 16.0934 * KMH_TO_MPS;
@@ -291,7 +311,10 @@ mod tests {
     fn test_wind_sock_boundary_is_upper_exclusive() {
         // A segment's `until_distance_m` is exclusive: a query exactly at the
         // boundary rolls to the next segment.
-        let sock = WindSock::new(vec![(16.0934, 90.0, 100.0), (32.1868, 270.0, 200.0)]);
+        let sock = WindSock::new(vec![
+            WindSegment::new(16.0934, 90.0, 100.0),
+            WindSegment::new(32.1868, 270.0, 200.0),
+        ]);
         // Just below 100 m -> first segment (90deg, negative Z).
         assert!(sock.vector_for_range_stateless(99.999)[2] < 0.0);
         // Exactly 100 m -> second segment (270deg, positive Z).
@@ -303,16 +326,16 @@ mod tests {
     #[test]
     fn test_parse_wind_segment_str_units() {
         // Imperial: 10 mph -> 16.0934 km/h, 100 yd -> 91.44 m.
-        let (kmh, ang, until) = parse_wind_segment_str("10:90:100", true).unwrap();
-        assert!((kmh - 16.09344).abs() < 1e-4);
-        assert_eq!(ang, 90.0);
-        assert!((until - 91.44).abs() < 1e-4);
+        let seg = parse_wind_segment_str("10:90:100", true).unwrap();
+        assert!((seg.speed_kmh - 16.09344).abs() < 1e-4);
+        assert_eq!(seg.angle_deg, 90.0);
+        assert!((seg.until_m - 91.44).abs() < 1e-4);
 
         // Metric: 5 m/s -> 18 km/h, 200 m stays 200 m.
-        let (kmh, ang, until) = parse_wind_segment_str("5:270:200", false).unwrap();
-        assert!((kmh - 18.0).abs() < 1e-9);
-        assert_eq!(ang, 270.0);
-        assert!((until - 200.0).abs() < 1e-9);
+        let seg = parse_wind_segment_str("5:270:200", false).unwrap();
+        assert!((seg.speed_kmh - 18.0).abs() < 1e-9);
+        assert_eq!(seg.angle_deg, 270.0);
+        assert!((seg.until_m - 200.0).abs() < 1e-9);
 
         // Malformed inputs are rejected.
         assert!(parse_wind_segment_str("10:90", true).is_err()); // too few fields

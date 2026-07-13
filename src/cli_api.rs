@@ -4295,8 +4295,8 @@ mod rk45_adaptivity_tests {
             AtmosphericConditions::default(),
         );
         solver.set_wind_segments(vec![
-            (0.0, 90.0, 4.0),
-            (1_000.0, 90.0, 10_000.0),
+            crate::wind::WindSegment::new(0.0, 90.0, 4.0),
+            crate::wind::WindSegment::new(1_000.0, 90.0, 10_000.0),
         ]);
         solver
     }

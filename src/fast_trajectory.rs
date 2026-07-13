@@ -1313,7 +1313,7 @@ mod tests {
         let actual = compute_derivatives(
             &state,
             &inputs,
-            &WindSock::new(vec![(360.0, 0.0, 1000.0)]),
+            &WindSock::new(vec![crate::wind::WindSegment::new(360.0, 0.0, 1000.0)]),
             FastAtmosphere::Direct {
                 air_density: 1.225,
                 speed_of_sound: 340.0,
@@ -1356,7 +1356,7 @@ mod tests {
             compute_derivatives(
                 &state,
                 &inputs,
-                &WindSock::new(vec![(wind_speed_kmh, 90.0, 2_000.0)]),
+                &WindSock::new(vec![crate::wind::WindSegment::new(wind_speed_kmh, 90.0, 2_000.0)]),
                 FastAtmosphere::Direct {
                     air_density: 1.225,
                     speed_of_sound: 340.0,
@@ -1416,7 +1416,7 @@ mod tests {
             let elevation = 0.12_f64;
             let solution = fast_integrate(
                 &inputs,
-                &WindSock::new(vec![(36.0, 90.0, 2_000.0)]),
+                &WindSock::new(vec![crate::wind::WindSegment::new(36.0, 90.0, 2_000.0)]),
                 FastIntegrationParams {
                     horiz: 1_000.0,
                     vert: 0.0,
