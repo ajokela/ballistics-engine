@@ -67,6 +67,7 @@ fuzz_target!(|data: &[u8]| {
         enable_magnus: 0,
         enable_coriolis: 0,
         shot_azimuth: 0.0,
+        cant_angle: 0.0,
     };
     // Mix the exact invalid boundary classes with the documented valid band. `step_size` is
     // milliseconds; invalid/sub-minimum values must return null without starting integration.
@@ -95,6 +96,7 @@ fuzz_target!(|data: &[u8]| {
         let wind = FFIWindConditions {
             speed: 0.0,
             direction: 0.0,
+            vertical_speed: 0.0,
         };
         let atmo = FFIAtmosphericConditions {
             temperature: 15.0,
