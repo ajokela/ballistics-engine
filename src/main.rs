@@ -1179,7 +1179,7 @@ enum Commands {
         end: f64,
 
         /// Range step (yards or meters)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.001, 100000.0))]
         step: f64,
 
         /// Adjustment unit (mil or moa)
@@ -1296,7 +1296,7 @@ enum Commands {
         end: f64,
 
         /// Range step (yards or meters)
-        #[arg(long, default_value = "100.0")]
+        #[arg(long, default_value = "100.0", value_parser = f64_range(0.001, 100000.0))]
         step: f64,
 
         /// Adjustment unit (mil or moa)
@@ -1351,7 +1351,7 @@ enum Commands {
         end: f64,
 
         /// Range step (yards or meters)
-        #[arg(long, default_value = "100.0")]
+        #[arg(long, default_value = "100.0", value_parser = f64_range(0.001, 100000.0))]
         step: f64,
 
         /// Adjustment unit (mil or moa)
@@ -1465,7 +1465,7 @@ enum Commands {
         end: f64,
 
         /// Range step (yards or meters)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.001, 100000.0))]
         step: f64,
 
         /// Wind speed (mph or m/s based on --units)
