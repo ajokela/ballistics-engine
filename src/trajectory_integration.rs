@@ -44,11 +44,7 @@ fn wind_vector_for_range(range_m: f64, wind_segments: &[WindSegment]) -> Vector3
         if range_m < seg.until_m {
             let wind_speed_mps = seg.speed_kmh * 0.2777778; // km/h to m/s
             let wind_angle_rad = seg.angle_deg.to_radians();
-            return Vector3::new(
-                -wind_speed_mps * wind_angle_rad.cos(),
-                0.0,
-                -wind_speed_mps * wind_angle_rad.sin(),
-            );
+            return crate::wind::wind_vector(wind_speed_mps, wind_angle_rad, 0.0);
         }
     }
     Vector3::zeros()

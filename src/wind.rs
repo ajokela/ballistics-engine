@@ -5,6 +5,18 @@ use std::f64::consts::PI;
 /// Conversion constant from KMH to MPS
 const KMH_TO_MPS: f64 = 1000.0 / 3600.0;
 
+/// THE wind-vector builder (McCoy frame: x downrange, y up, z right).
+/// Horizontal wind uses the wind-FROM convention (0 = headwind, PI/2 = from
+/// the right); `vertical_mps` is positive-updraft and lands on y UNSCALED —
+/// boundary-layer shear models scale horizontal flow only (MBA-728 decision).
+pub fn wind_vector(speed_mps: f64, direction_rad: f64, vertical_mps: f64) -> Vector3<f64> {
+    Vector3::new(
+        -speed_mps * direction_rad.cos(),
+        vertical_mps,
+        -speed_mps * direction_rad.sin(),
+    )
+}
+
 /// One downrange wind segment. `vertical_mps` (m/s, positive = updraft) is
 /// carried but stays 0.0 until MBA-728's physics task wires it through.
 ///
@@ -103,11 +115,7 @@ impl WindSock {
         // 270° = wind from left (affects +z lateral)
         //
         // McCoy convention: x=downrange, y=vertical, z=lateral
-        Vector3::new(
-            -speed_mps * angle_rad.cos(), // x (downrange - head/tail component)
-            0.0,                          // y (vertical)
-            -speed_mps * angle_rad.sin(), // z (lateral - crosswind component)
-        )
+        wind_vector(speed_mps, angle_rad, 0.0)
     }
 
     /// Get wind vector for a given range
