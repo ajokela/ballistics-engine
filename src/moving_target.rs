@@ -75,6 +75,10 @@ pub enum LeadError {
     /// `MAX_ITERATIONS` (physically requires a radial speed comparable to the
     /// projectile's remaining velocity).
     Convergence { iterations: u32, residual_m: f64 },
+    /// The intercept range moved beyond the distance the trajectory solve covered
+    /// (an outbound target outrunning the solve's headroom, or a solve that
+    /// terminated early — e.g. ground impact — before reaching it).
+    BeyondSolvedSpan { corrected_range_m: f64, solved_span_m: f64 },
     /// The underlying trajectory solve failed (invalid ballistic inputs, etc.).
     Solver(BallisticsError),
 }
@@ -90,6 +94,10 @@ impl fmt::Display for LeadError {
             LeadError::Convergence { iterations, residual_m } => write!(
                 f,
                 "intercept range failed to converge after {iterations} iterations (residual {residual_m:.2} m)"
+            ),
+            LeadError::BeyondSolvedSpan { corrected_range_m, solved_span_m } => write!(
+                f,
+                "intercept range {corrected_range_m:.1} m lies beyond the solved trajectory span ({solved_span_m:.1} m)"
             ),
             LeadError::Solver(e) => write!(f, "trajectory solve failed: {e}"),
         }
@@ -186,9 +194,12 @@ pub fn calculate_lead(
     let result = solver.solve()?;
     let points = &result.points;
 
-    let beyond_solved = |r: f64| LeadError::Convergence {
-        iterations: MAX_ITERATIONS,
-        residual_m: r - max_range,
+    // The solve can end short of max_range (e.g. ground impact), so report the span
+    // the points actually cover, not the span that was requested.
+    let solved_span_m = points.last().map(|p| p.position.x).unwrap_or(0.0);
+    let beyond_solved = move |r: f64| LeadError::BeyondSolvedSpan {
+        corrected_range_m: r,
+        solved_span_m,
     };
 
     // Fixed-point iteration on the intercept range (no-op for pure crossing motion).
