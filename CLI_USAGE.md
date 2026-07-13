@@ -268,7 +268,7 @@ Two scenarios that are easy to conflate:
 - **Dialed (or held over) for the engagement range, then canted** — the realistic
   long-range case: model it by zeroing at the engagement distance
   (`--auto-zero 1000 --cant 5`). The *entire* come-up rotates, reproducing the classic
-  field rule `lateral ≈ come_up · sin(cant)`. Example: a .224 77 gr at 2650 fps dialed
+  field rule `lateral ≈ come_up · sin(cant)`. Example: a .224 77 gr at 2650 fps (G7 BC 0.372) dialed
   from 100 yd to 1000 yd carries ≈ 9.7 mil of total launch elevation; at 5° of cant the
   engine puts the shot 0.86 mil right — `9.7 · sin(5°) ≈ 0.85 mil`. The two rules agree;
   they just answer different questions.
