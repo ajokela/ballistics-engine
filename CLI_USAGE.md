@@ -462,6 +462,97 @@ an over-closing (`TargetOvertakesShooter`) target, iteration `Convergence` failu
 corrected range that runs `BeyondSolvedSpan`, and an underlying trajectory-solve failure
 (`Solver`).
 
+### Wind Card
+
+Generate a wind-drift dope card: deflection at a sweep of ranges, one column per wind
+speed. Available via the `wind-card` subcommand.
+
+```bash
+./ballistics wind-card -v 2700 -m 168 -d 0.308 -b 0.5 --zero-distance 100
+```
+
+Besides the usual load/atmosphere arguments shared with `trajectory` (`-v -b -m -d
+--drag-model --sight-height --temperature --pressure --humidity --altitude`, plus
+`--profile`), `wind-card` adds:
+
+- **`--zero-distance <DIST>`** (required) — zero distance, yards imperial / meters metric.
+- **`--wind-speeds <CSV>`** — comma-separated wind speeds, one column per value (default
+  `5,10,15,20`, mph imperial / m/s metric).
+- **`--wind-angle <DEG>`** — a single wind angle in degrees, wind-FROM convention (same as
+  `--wind-direction` on `trajectory`): **`0` = headwind, `90` = from the right (full
+  value), `180` = tailwind, `270` = from the left.** Mutually exclusive with
+  `--wind-angles`.
+- **`--wind-angles <CSV>`** — comma-separated wind angles; emits one *complete* card per
+  angle (e.g. `--wind-angles 30,60,90`). Mutually exclusive with `--wind-angle`.
+- **`--start` / `--end` / `--step`** — range sweep, like the other sweep tables; defaults
+  `100`/`1000`/`100`.
+- **`--adjustment-unit <mil|moa>`** — angular unit for the drift columns (default `mil`).
+- **`-o, --output <table|json|csv|pdf>`** — output format (`pdf` renders the same as
+  `table` on this subcommand).
+
+**Default (no flags) is the classic full-value 90° card, unchanged.** With neither
+`--wind-angle` nor `--wind-angles`, the card is computed at a fixed 90° (full-value
+crosswind from the right) and the output is byte-identical to the pre-oblique-angle CLI:
+table title says "full-value crosswind" with no angle suffix, and JSON carries
+`"crosswind": "full-value (90°)"` instead of a `wind_angle` key.
+
+**Sign convention:** drift values are signed the same way as `drift_in`/`x_yd` elsewhere in
+this CLI — positive = rightward (dial right), negative = leftward (dial left). Because the
+default card is wind *from the right*, its values run negative; `--wind-angle 270` (wind
+from the left) produces the exact mirror image — equal magnitude, opposite sign. `0°`
+(headwind) and `180°` (tailwind) both drift to `0.0` (no crosswind component).
+
+**Each angle's cells are a real solve, not a scaled copy.** `wind-card` doesn't take the
+90° column and multiply by `sin`/`cos` of the requested angle — every `(speed, angle)`
+pair runs its own full trajectory solve. The result tracks `sin(angle)` of the full-value
+column closely (within ~1% for the pairs checked) but is not an exact match, because drag
+and time-of-flight differ slightly between a purely crosswind solve and an oblique one.
+
+**CSV/JSON self-identify when non-default.** A card produced by `--wind-angle` or
+`--wind-angles` prints a `# wind_angle=<DEG>` comment line above its CSV header (one per
+card, blank-line separated for multi-angle output) and carries a `"wind_angle"` key in its
+JSON object. The legacy no-flag card has neither — it keeps the original `"crosswind"` key
+and no CSV comment line, so existing parsers of the default card don't need to change.
+Requesting more than one angle (`--wind-angles`) changes the JSON shape from a single
+object to an array of one object per angle, in the order given.
+
+**Worked example** (build first with `cargo build`):
+
+```bash
+# Default: full-value 90° crosswind card
+./target/debug/ballistics wind-card -v 2700 -m 168 -d 0.308 -b 0.5 --zero-distance 100 --end 300
+
+# Same load, a single oblique 45° card
+./target/debug/ballistics wind-card -v 2700 -m 168 -d 0.308 -b 0.5 --zero-distance 100 --end 300 --wind-angle 45
+```
+
+Default card:
+
+```
+Wind Card (zero: 100 yd, MIL, full-value crosswind)
+┌──────────┬──────────┬──────────┬──────────┬──────────┐
+│Range (yd)│       5 mph │      10 mph │      15 mph │      20 mph │
+├──────────┼──────────┼──────────┼──────────┼──────────┤
+│      100 │     -0.1 │     -0.2 │     -0.3 │     -0.4 │
+│      200 │     -0.2 │     -0.4 │     -0.6 │     -0.8 │
+│      300 │     -0.3 │     -0.6 │     -0.9 │     -1.2 │
+└──────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
+45° card — smaller-magnitude drift than the full-value 90° card, at every speed and range,
+because only part of the wind is perpendicular to the shot:
+
+```
+Wind Card (zero: 100 yd, MIL) — wind angle 45° (wind-FROM: 0=head, 90=right, 180=tail, 270=left)
+┌──────────┬──────────┬──────────┬──────────┬──────────┐
+│Range (yd)│       5 mph │      10 mph │      15 mph │      20 mph │
+├──────────┼──────────┼──────────┼──────────┼──────────┤
+│      100 │     -0.1 │     -0.1 │     -0.2 │     -0.3 │
+│      200 │     -0.1 │     -0.3 │     -0.4 │     -0.6 │
+│      300 │     -0.2 │     -0.4 │     -0.7 │     -0.9 │
+└──────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
 ### Zero Calculation
 
 Calculate sight adjustments for specific distances:
