@@ -3,9 +3,33 @@
 // steps walked the sweep backward forever while solving a trajectory per
 // iteration); `come-ups`/`range-table` only escaped via accidental downstream
 // guards with inconsistent errors. All four now share a parse-time floor.
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
+
+/// Run with a hard deadline: if the step guard ever regresses, the pre-fix
+/// behavior is an INFINITE LOOP — a plain `Command::output()` would hang the
+/// whole test suite instead of failing. Kills the child and panics on timeout.
+fn output_with_deadline(mut cmd: Command, deadline: Duration) -> Output {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ballistics");
+    let start = Instant::now();
+    loop {
+        match child.try_wait().expect("poll child") {
+            Some(_) => return child.wait_with_output().expect("collect output"),
+            None if start.elapsed() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("ballistics did not exit within {deadline:?} — step guard regressed to an infinite loop?");
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
 
 /// Common ballistic args each subcommand needs to get past required-arg checks.
 fn base_args(subcommand: &'static str) -> Vec<&'static str> {
@@ -18,12 +42,12 @@ fn base_args(subcommand: &'static str) -> Vec<&'static str> {
     v
 }
 
-fn run_with_step(subcommand: &'static str, step: &str) -> std::process::Output {
-    Command::new(BIN)
-        .args(base_args(subcommand))
-        .arg(format!("--step={step}"))
-        .output()
-        .expect("spawn ballistics")
+fn run_with_step(subcommand: &'static str, step: &str) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.args(base_args(subcommand)).arg(format!("--step={step}"));
+    // Rejections are parse-time (instant); 30 s comfortably covers the slowest
+    // legitimate sweep (the positive control) on a loaded machine.
+    output_with_deadline(cmd, Duration::from_secs(30))
 }
 
 #[test]
