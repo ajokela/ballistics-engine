@@ -9,6 +9,7 @@ use crate::cli_api::{
     TrajectorySolver, WindConditions,
 };
 use crate::drag_model::DragModel;
+use crate::moving_target::calculate_lead;
 use std::cell::RefCell;
 
 #[wasm_bindgen]
@@ -162,6 +163,7 @@ impl WasmBallistics {
             "zero" => self.handle_zero_command(&args[1..], units),
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
             "estimate-bc" => self.handle_estimate_bc_command(&args[1..], units),
+            "lead" => self.handle_lead_command(&args[1..], units),
             _ => Ok(format!(
                 "Error: Unknown command '{}'\n\n{}",
                 args[0],
@@ -1194,6 +1196,241 @@ impl WasmBallistics {
                 ))
             }
             Err(e) => Ok(format!("Error calculating zero: {}", e)),
+        }
+    }
+
+    fn handle_lead_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
+        // Default values
+        let (default_velocity, default_mass, default_diameter) = match units {
+            UnitSystem::Imperial => (2700.0, 168.0, 0.308),
+            UnitSystem::Metric => (823.0, 10.9, 7.82),
+        };
+
+        let mut velocity = default_velocity;
+        let mut bc = 0.475;
+        let mut mass = default_mass;
+        let mut diameter = default_diameter;
+        let mut drag_model = "G1";
+        let mut sight_height = if units == UnitSystem::Imperial {
+            2.0
+        } else {
+            50.0
+        };
+        let mut target_speed: Option<f64> = None;
+        let mut target_angle = 90.0;
+        let mut range = 500.0;
+        let mut adjustment_unit = "mil";
+
+        // Parse arguments
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-v" | "--velocity" => {
+                    if i + 1 < args.len() {
+                        velocity = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid velocity"))?;
+                        i += 1;
+                    }
+                }
+                "-b" | "--bc" => {
+                    if i + 1 < args.len() {
+                        bc = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid BC"))?;
+                        i += 1;
+                    }
+                }
+                "-m" | "--mass" => {
+                    if i + 1 < args.len() {
+                        mass = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid mass"))?;
+                        i += 1;
+                    }
+                }
+                "-d" | "--diameter" => {
+                    if i + 1 < args.len() {
+                        diameter = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid diameter"))?;
+                        i += 1;
+                    }
+                }
+                "--drag-model" => {
+                    if i + 1 < args.len() {
+                        drag_model = args[i + 1];
+                        i += 1;
+                    }
+                }
+                "--sight-height" => {
+                    if i + 1 < args.len() {
+                        sight_height = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid sight height"))?;
+                        i += 1;
+                    }
+                }
+                "--target-speed" => {
+                    if i + 1 < args.len() {
+                        target_speed = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid target speed"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--target-angle" => {
+                    if i + 1 < args.len() {
+                        target_angle = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid target angle"))?;
+                        i += 1;
+                    }
+                }
+                "--range" => {
+                    if i + 1 < args.len() {
+                        range = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid range"))?;
+                        i += 1;
+                    }
+                }
+                "--adjustment-unit" => {
+                    if i + 1 < args.len() {
+                        adjustment_unit = args[i + 1];
+                        i += 1;
+                    }
+                }
+                // --units/-u (+ its value) is consumed globally in run_command, which
+                // pre-scans it to set the unit system before dispatch. Skip it here so
+                // it isn't rejected as an unknown flag (this is what blocked metric input).
+                "--units" | "-u" => {
+                    i += 1;
+                }
+                // Reject unrecognized flags instead of silently ignoring them, so a
+                // typo or a flag that isn't wired into this WASM surface is caught
+                // immediately rather than looking like a no-op. (The native CLI's clap
+                // parser already does this; the hand-rolled WASM parser did not.)
+                other if other.starts_with('-') => {
+                    return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        let target_speed = target_speed
+            .ok_or_else(|| JsValue::from_str("--target-speed is required"))?;
+
+        let adjustment_unit_lower = adjustment_unit.to_lowercase();
+        if adjustment_unit_lower != "mil" && adjustment_unit_lower != "moa" {
+            return Err(JsValue::from_str(&format!(
+                "Invalid --adjustment-unit '{}' (expected mil or moa)",
+                adjustment_unit
+            )));
+        }
+
+        // Build inputs (mirrors handle_zero_command's unit conversions)
+        let mut inputs = InternalBallisticInputs::default();
+        match units {
+            UnitSystem::Imperial => {
+                inputs.muzzle_velocity = velocity * 0.3048;
+                inputs.bullet_mass = mass * 0.00006479891;
+                inputs.bullet_diameter = diameter * 0.0254;
+                inputs.sight_height = sight_height * 0.0254;
+            }
+            UnitSystem::Metric => {
+                inputs.muzzle_velocity = velocity;
+                inputs.bullet_mass = mass * 0.001;
+                inputs.bullet_diameter = diameter * 0.001;
+                inputs.sight_height = sight_height * 0.001;
+            }
+        }
+        // MBA-1135: mass-based length estimate (mirrors CLI/FFI); replaces the mass-blind
+        // 4.5-caliber heuristic. WASM otherwise left it at the struct default.
+        inputs.bullet_length =
+            crate::stability::estimate_bullet_length_m(inputs.bullet_diameter, inputs.bullet_mass);
+        if inputs.bullet_length <= 0.0 {
+            inputs.bullet_length = inputs.bullet_diameter * 4.5;
+        }
+
+        inputs.bc_value = bc;
+        inputs.bc_type = DragModel::from_str(drag_model)
+            .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
+
+        // --target-speed uses the same mph (imperial) / m/s (metric) convention as
+        // --wind-speed in handle_trajectory_command.
+        let target_speed_mps = match units {
+            UnitSystem::Imperial => target_speed * 0.44704, // mph to m/s
+            UnitSystem::Metric => target_speed,
+        };
+        let range_m = match units {
+            UnitSystem::Imperial => range * 0.9144, // yards to meters
+            UnitSystem::Metric => range,
+        };
+
+        match calculate_lead(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+            target_speed_mps,
+            target_angle,
+            range_m,
+        ) {
+            Ok(sol) => {
+                let (dist_unit, speed_unit) = match units {
+                    UnitSystem::Imperial => ("yd", "mph"),
+                    UnitSystem::Metric => ("m", "m/s"),
+                };
+                let lead_disp = match units {
+                    UnitSystem::Imperial => sol.lead_m * 1.09361, // m to yards
+                    UnitSystem::Metric => sol.lead_m,
+                };
+                let intercept_disp = match units {
+                    UnitSystem::Imperial => sol.corrected_range_m * 1.09361,
+                    UnitSystem::Metric => sol.corrected_range_m,
+                };
+                // Requested --adjustment-unit is listed first; both MIL and MOA are always shown.
+                let lead_adj_line = if adjustment_unit_lower == "moa" {
+                    format!(
+                        "{:.2} MOA / {:.2} MIL",
+                        sol.lead_moa, sol.lead_mil
+                    )
+                } else {
+                    format!(
+                        "{:.2} MIL / {:.2} MOA",
+                        sol.lead_mil, sol.lead_moa
+                    )
+                };
+
+                Ok(format!(
+                    "Moving-Target Lead\n\
+                     ===================\n\
+                     Target: {:.1} {} at {:.0}\u{b0} \
+                     (0=away, 90=left-to-right, 180=toward, 270=right-to-left;\n\
+                     positive lead = hold in direction of travel)\n\n\
+                     Range: {:.0} {}\n\
+                     Time of Flight: {:.3} s\n\
+                     Lead: {:.2} {} ({})\n\
+                     Intercept Range: {:.1} {}\n\
+                     Iterations: {}\n",
+                    target_speed,
+                    speed_unit,
+                    target_angle,
+                    range,
+                    dist_unit,
+                    sol.time_of_flight_s,
+                    lead_disp,
+                    dist_unit,
+                    lead_adj_line,
+                    intercept_disp,
+                    dist_unit,
+                    sol.iterations
+                ))
+            }
+            Err(e) => Err(JsValue::from_str(&format!("Error calculating lead: {}", e))),
         }
     }
 
@@ -2233,6 +2470,7 @@ Commands:
   zero           Calculate sight adjustment for zero
   monte-carlo    Run Monte Carlo simulation
   estimate-bc    Estimate BC from trajectory data
+  lead           Calculate moving-target lead (hold)
   help           Show this help message
 
 Global Options:
@@ -2343,6 +2581,23 @@ Estimate BC Command:
   Without --zero-range, drop is treated as bore-referenced (flat-fire). --velocity-data
   gives a velocity-retention fit (immune to zero/angle). A fit that can't be pinned
   down is flagged UNRELIABLE.
+
+Lead Command:
+  ballistics lead --target-speed <SPEED> [OPTIONS]
+
+  Options:
+    -v, --velocity <VEL>          Muzzle velocity (fps/m/s)
+    -b, --bc <BC>                 Ballistic coefficient
+    -m, --mass <MASS>             Mass (grains/grams)
+    -d, --diameter <DIA>          Diameter (inches/mm)
+    --drag-model <MODEL>          Drag model (G1/G7)
+    --sight-height <HEIGHT>       Sight height above bore (inches/mm)
+    --target-speed <SPEED>        Target speed (mph/m/s) [required]
+    --target-angle <DEG>          Direction of target travel, degrees [default: 90]
+                                  0=away, 90=left-to-right, 180=toward, 270=right-to-left;
+                                  positive lead = hold in direction of travel
+    --range <DIST>                Range to target (yards/meters) [default: 500]
+    --adjustment-unit <UNIT>      mil or moa [default: mil]
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
