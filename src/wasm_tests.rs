@@ -498,6 +498,82 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn ignore_ground_impact_reaches_full_range_where_default_truncates() {
+        // Reads the number out of the table's trailing "Max Range: <N> yards" line —
+        // more robust than the table's own "Bullet struck ground" heuristic, which only
+        // fires when the last recorded point lands within 0.01m of the ground and can
+        // miss a truncation that stopped a hair above that (as it does for these inputs).
+        fn parse_max_range_yards(output: &str) -> f64 {
+            output
+                .lines()
+                .find_map(|l| l.strip_prefix("Max Range: "))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|n| n.parse::<f64>().ok())
+                .expect("Max Range line present in trajectory output")
+        }
+
+        let wasm = WasmBallistics::new();
+        // Flat-fire (no auto-zero) drop at 1000 yd far exceeds the default 60in bore
+        // height, so the default run truncates at ground impact well short of --max-range.
+        let default_result = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1000")
+            .unwrap();
+        let default_max_range = parse_max_range_yards(&default_result);
+        assert!(
+            default_max_range < 900.0,
+            "expected the default run to truncate well short of 1000 yd, got {default_max_range}"
+        );
+
+        // --ignore-ground-impact (bero-feedback 0.23.0) disables that early termination,
+        // so the same run reaches the full requested range instead.
+        let ignore_result = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1000 \
+                 --ignore-ground-impact",
+            )
+            .unwrap();
+        let ignore_max_range = parse_max_range_yards(&ignore_result);
+        assert!(
+            ignore_max_range >= 999.0,
+            "expected --ignore-ground-impact to reach ~1000 yd, got {ignore_max_range}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn muzzle_height_warning_appears_only_above_the_1000m_threshold() {
+        let wasm = WasmBallistics::new();
+        // ~25 km "muzzle height" (defeating ground truncation the wrong way) must warn.
+        let warned = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --muzzle-height 1000000")
+            .unwrap();
+        assert!(warned.starts_with("WARNING"));
+        assert!(warned.contains("--altitude"));
+        assert!(warned.contains("--ignore-ground-impact"));
+
+        // An ordinary elevated stand (2400 in ~= 61 m) must not trigger the warning.
+        let unwarned = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --muzzle-height 2400")
+            .unwrap();
+        assert!(!unwarned.contains("WARNING"));
+    }
+
+    #[wasm_bindgen_test]
+    fn lead_output_json_parses_with_sane_intercept_range() {
+        let wasm = WasmBallistics::new();
+        let output = wasm
+            .run_command("lead --target-speed 10 --target-angle 0 --range 500 -o json")
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let range = json["range"].as_f64().unwrap();
+        let intercept_range = json["intercept_range"].as_f64().unwrap();
+        // angle 0 = directly away (outbound): the target recedes during the time of
+        // flight, so the corrected intercept range must be at or beyond the initial range.
+        assert!(intercept_range >= range);
+        assert_eq!(json["distance_unit"], "yd");
+        assert_eq!(json["adjustment_unit"], "mil");
+    }
+
+    #[wasm_bindgen_test]
     fn test_all_physics_flags_combined() {
         let wasm = WasmBallistics::new();
 
