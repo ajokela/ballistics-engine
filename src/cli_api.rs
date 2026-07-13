@@ -373,7 +373,10 @@ pub struct WindConditions {
     /// Vertical wind component, m/s. POSITIVE = UPDRAFT (raises POI downrange); negative =
     /// downdraft. Default 0.0. Enters the wind vector via [`crate::wind::wind_vector`]'s third
     /// argument (MBA-728). Boundary-layer shear scales horizontal wind only — vertical passes
-    /// through unscaled wherever shear is applied on top of this.
+    /// through unscaled wherever shear is applied on top of this. This scalar field (like
+    /// [`WindConditions::speed`]/[`WindConditions::direction`]) is ignored once downrange wind
+    /// segments are set on the solver — each [`crate::wind::WindSegment`] carries its own
+    /// `vertical_mps` instead.
     pub vertical_speed: f64,
 }
 

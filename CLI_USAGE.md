@@ -553,6 +553,113 @@ Wind Card (zero: 100 yd, MIL) — wind angle 45° (wind-FROM: 0=head, 90=right, 
 └──────────┴──────────┴──────────┴──────────┴──────────┘
 ```
 
+### Vertical Wind
+
+Model wind with a vertical component — a thermal updraft, a downdraft off the lee side of
+a ridge, orographic lift along a slope — as a direct shift in point of impact, on top of
+the horizontal drift `--wind-speed`/`--wind-direction` already model. Available via
+`--wind-vertical <SPEED>` on both the `trajectory` and `monte-carlo` subcommands, and as an
+optional 4th field on `--wind-segment`.
+
+**Sign convention:** positive = updraft, negative = downdraft. An updraft raises point of
+impact; a downdraft lowers it. Units follow `--units` the same way `--wind-speed` does: mph
+under imperial, m/s under metric. Default `0` (no vertical wind, bit-identical to a solve
+without the flag).
+
+```bash
+--wind-vertical 5     # metric: 5 m/s updraft, raises POI
+--wind-vertical -8    # imperial: 8 mph downdraft, lowers POI
+```
+
+**Downrange segments — the optional 4th field.** `--wind-segment` accepts an optional 4th
+colon-separated field: `SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL]`, letting each segment carry
+its own vertical wind:
+
+```bash
+ballistics trajectory -v 2700 -m 168 -d 0.308 --bc 0.5 --max-range 1000 \
+  --wind-segment 8:90:300:5 \
+  --wind-segment 12:90:1000:10
+```
+
+- **VERTICAL is always m/s, positive = updraft — regardless of `--units`.** This is a
+  deliberate asymmetry with SPEED (and UNTIL_DISTANCE), which *do* follow `--units`: SPEED
+  matches the display system so a wind-meter reading in mph can be pasted directly, but
+  there's no comparably universal display convention for vertical wind, so it's pinned to
+  the engine's native m/s to keep the field unambiguous no matter what `--units` is active.
+- Omitting the 4th field is unchanged from before — that segment's vertical wind is `0.0`.
+  Every existing 3-field `--wind-segment SPEED:ANGLE:UNTIL_DISTANCE` string keeps working
+  exactly as it did.
+
+**Shear pass-through.** `--enable-wind-shear`'s boundary-layer models (logarithmic /
+power-law / Ekman spiral) scale **horizontal** wind speed with altitude only. Vertical wind
+passes through unscaled wherever shear is layered on top of it — a 5 m/s updraft is a
+5 m/s updraft at every altitude the shot climbs through, shear on or off. (`--wind-segment`
+itself is not compatible with `--enable-wind-shear` — see below — so in practice this rule
+matters for the scalar `--wind-speed`/`--wind-vertical` + `--enable-wind-shear`
+combination.)
+
+**Precedence.** `--wind-segment`, when given, overrides the scalar wind entirely —
+including `--wind-vertical`. Once segments are set, each segment's own 4th field is the
+only source of vertical wind; the scalar `--wind-vertical` value is ignored (a note is
+printed to stderr, the same override behavior `--wind-speed`/`--wind-direction` already have
+against `--wind-segment`).
+
+**Drag-symmetry fact.** Aerodynamic drag doesn't distinguish "up" from "sideways" — a
+projectile flying into a 5 m/s updraft is deflected vertically by essentially the same
+mechanism that deflects it laterally in a 5 m/s crosswind. `tests/vertical_wind.rs` locks
+this as a regression gate: a 5 m/s updraft's vertical deflection and a 5 m/s crosswind's
+lateral deflection must agree within 5% at 300 m and 600 m. The two solves in fact agree
+far more tightly than the bound requires — about 0.001% at 600 m in the current build.
+
+**Monte Carlo caveat:** `--wind-vertical` on `monte-carlo` sets the *base* (mean) vertical
+wind shared by every simulated shot — it is a systematic input, not a dispersion source.
+There is no `--wind-vertical-std`; each sampled wind draw carries the same vertical
+component through un-dispersed, while horizontal wind speed/direction still vary per
+`--wind-std`/`--wind-direction-std`. Expect `--wind-vertical` to shift the whole impact
+cloud's mean point of impact without changing its reported spread — the same pattern as
+`--cant` (see the Canted Shooting Monte Carlo caveat above).
+
+**Worked example** (build first with `cargo build`):
+
+```bash
+# Calm baseline
+./target/debug/ballistics trajectory --units metric -v 823 -m 10.9 -d 7.82 --bc 0.5 \
+  --drag-model g7 --auto-zero 500 --max-range 600 \
+  --sample-trajectory --sample-interval 100 -o csv --full
+
+# Same load, 5 m/s updraft
+./target/debug/ballistics trajectory --units metric -v 823 -m 10.9 -d 7.82 --bc 0.5 \
+  --drag-model g7 --auto-zero 500 --max-range 600 --wind-vertical 5 \
+  --sample-trajectory --sample-interval 100 -o csv --full
+```
+
+Calm baseline:
+
+```
+distance_m,drop_m,drift_m,velocity_m/s,energy_J,time_s
+0.00,0.05,0.00,823.00,3691.44,0.0000
+100.00,-0.30,0.00,792.49,3422.84,0.1238
+200.00,-0.49,0.00,762.61,3169.54,0.2525
+300.00,-0.51,0.00,733.35,2931.05,0.3862
+400.00,-0.36,0.00,704.75,2706.89,0.5253
+500.00,0.00,0.00,676.82,2496.58,0.6701
+600.00,0.57,0.00,649.57,2299.59,0.8209
+```
+
+5 m/s updraft — `drop_m` runs smaller at every range past the zero, and by 600 m point of
+impact sits about 8 cm higher than the calm run (`0.49` vs `0.57`):
+
+```
+distance_m,drop_m,drift_m,velocity_m/s,energy_J,time_s
+0.00,0.05,0.00,823.00,3691.44,0.0000
+100.00,-0.25,0.00,792.49,3422.85,0.1238
+200.00,-0.41,0.00,762.61,3169.55,0.2525
+300.00,-0.44,0.00,733.35,2931.06,0.3862
+400.00,-0.30,0.00,704.75,2706.89,0.5253
+500.00,-0.00,0.00,676.82,2496.56,0.6701
+600.00,0.49,0.00,649.57,2299.55,0.8209
+```
+
 ### Zero Calculation
 
 Calculate sight adjustments for specific distances:
@@ -819,7 +926,8 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --time-step | Integration time step — RK4/Euler only (the adaptive RK45 default steps adaptively and ignores this) | 0.001 | seconds | seconds |
 | --wind-speed | Wind speed | 0 | mph | m/s |
 | --wind-direction | Wind direction (0=headwind, 90=from right, 180=tailwind, 270=from left) | 0° | degrees | degrees |
-| --wind-segment | Downrange wind segment `SPEED:ANGLE:UNTIL_DISTANCE` (repeatable) | — | mph & yd | m/s & m |
+| --wind-vertical | Vertical wind; positive = updraft (raises POI), negative = downdraft. Also on `monte-carlo` | 0 | mph | m/s |
+| --wind-segment | Downrange wind segment `SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL]` (repeatable); VERTICAL is always m/s regardless of `--units` | — | mph & yd | m/s & m |
 | --temperature | Temperature | 59 | °F | °C |
 | --pressure | Barometric pressure | 29.92 | inHg | hPa |
 | --humidity | Relative humidity | 50 | % | % |
@@ -877,9 +985,11 @@ ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-ran
 
 ### Downrange Wind Segments (`--wind-segment`)
 
-Real wind varies along the bullet's path. `--wind-segment SPEED:ANGLE:UNTIL_DISTANCE`
+Real wind varies along the bullet's path. `--wind-segment SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL]`
 (repeatable) lets you describe wind that changes with downrange distance — for example a
-muzzle reading plus downrange sensor stations:
+muzzle reading plus downrange sensor stations. The optional 4th field adds a per-segment
+vertical wind component — see [Vertical Wind](#vertical-wind) for the sign convention, its
+m/s-regardless-of-`--units` field, and the shear/precedence rules:
 
 ```bash
 # 8 mph at the muzzle, 12 mph past 300 yd, 18 mph past 600 yd (all from the right)
