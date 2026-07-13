@@ -335,8 +335,8 @@ Besides the usual load/atmosphere/wind arguments shared with `trajectory` (`-v -
 - **`--target-length <LENGTH>`** — target body length (inches imperial, mm metric). When
   given, an extra `Bodies` column reports lead as a multiple of the target's length
   (`lead ÷ target_length`) — a common visual hold reference ("hold one body-length ahead").
-- **`--start` / `--end` / `--step`** — range sweep, same units and defaults (`100`/`600`/`100`,
-  yards or meters) as the other sweep tables.
+- **`--start` / `--end` / `--step`** — range sweep in yards (imperial) or meters (metric),
+  like the other sweep tables; defaults `100`/`600`/`100`.
 - **`--adjustment-unit <mil|moa>`** — angular unit for the `Lead (MIL/MOA)` column
   (default `mil`).
 - **`-o, --output <table|json|csv|pdf>`** — output format (`pdf` renders the same as `table`
@@ -458,8 +458,9 @@ atmo, target_speed_mps, target_angle_deg, range_m) -> Result<LeadSolution, LeadE
 the same wind-aware solve and intercept-range iteration directly, without going through the
 CLI. `LeadSolution` carries `time_of_flight_s`, `lead_m`, `lead_mil`, `lead_moa`,
 `corrected_range_m`, and `iterations`; `LeadError` is a typed enum covering invalid input,
-an over-closing (`TargetOvertakesShooter`) target, iteration `Convergence` failure, and a
-corrected range that runs `BeyondSolvedSpan`.
+an over-closing (`TargetOvertakesShooter`) target, iteration `Convergence` failure, a
+corrected range that runs `BeyondSolvedSpan`, and an underlying trajectory-solve failure
+(`Solver`).
 
 ### Zero Calculation
 
