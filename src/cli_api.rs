@@ -2633,18 +2633,26 @@ impl MonteCarloResults {
     }
 }
 
-fn wind_from_signed_speed_sample(signed_speed: f64, sampled_direction: f64) -> WindConditions {
+fn wind_from_signed_speed_sample(
+    signed_speed: f64,
+    sampled_direction: f64,
+    vertical_speed: f64,
+) -> WindConditions {
+    // The base wind's vertical component rides along un-dispersed: vertical wind is a
+    // systematic input (MBA-728), not a sampled dispersion source. Dropping it here
+    // would make every per-sample solve disagree with the baseline solve by the whole
+    // vertical deflection — a phantom bias in the MC statistics.
     if signed_speed < 0.0 {
         WindConditions {
             speed: -signed_speed,
             direction: sampled_direction + std::f64::consts::PI,
-            vertical_speed: 0.0,
+            vertical_speed,
         }
     } else {
         WindConditions {
             speed: signed_speed,
             direction: sampled_direction,
-            vertical_speed: 0.0,
+            vertical_speed,
         }
     }
 }
@@ -2652,6 +2660,8 @@ fn wind_from_signed_speed_sample(signed_speed: f64, sampled_direction: f64) -> W
 struct MonteCarloWindSampler {
     speed: rand_distr::Normal<f64>,
     direction: rand_distr::Normal<f64>,
+    /// Base wind's vertical component, carried into every sample un-dispersed.
+    vertical_speed: f64,
 }
 
 impl MonteCarloWindSampler {
@@ -2670,13 +2680,17 @@ impl MonteCarloWindSampler {
             .map_err(|e| format!("Invalid wind speed distribution: {e}"))?;
         let direction = Normal::new(base_wind.direction, wind_direction_std_dev)
             .map_err(|e| format!("Invalid wind direction distribution: {e}"))?;
-        Ok(Self { speed, direction })
+        Ok(Self { speed, direction, vertical_speed: base_wind.vertical_speed })
     }
 
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> WindConditions {
         use rand_distr::Distribution;
 
-        wind_from_signed_speed_sample(self.speed.sample(rng), self.direction.sample(rng))
+        wind_from_signed_speed_sample(
+            self.speed.sample(rng),
+            self.direction.sample(rng),
+            self.vertical_speed,
+        )
     }
 }
 
@@ -3546,11 +3560,26 @@ mod monte_carlo_wind_sampling_tests {
     }
 
     #[test]
+    fn base_vertical_wind_rides_into_every_mc_sample() {
+        // MBA-728: vertical wind is a systematic input, not a dispersion source —
+        // every sampled wind must carry the base vertical un-dispersed. (Before
+        // this fix, samples dropped it, biasing the whole MC cloud vs the baseline.)
+        use rand::SeedableRng;
+        let base_wind = WindConditions { vertical_speed: 4.2, ..Default::default() };
+        let sampler = MonteCarloWindSampler::new(&base_wind, 1.0, 0.2).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        for _ in 0..32 {
+            let w = sampler.sample(&mut rng);
+            assert_eq!(w.vertical_speed, 4.2);
+        }
+    }
+
+    #[test]
     fn negative_speed_sample_reverses_wind_direction() {
         let direction = 0.25;
         let signed_speed = -2.5;
-        let wind = wind_from_signed_speed_sample(signed_speed, direction);
-        let positive_wind = wind_from_signed_speed_sample(2.5, direction);
+        let wind = wind_from_signed_speed_sample(signed_speed, direction, 0.0);
+        let positive_wind = wind_from_signed_speed_sample(2.5, direction, 0.0);
 
         assert_eq!(wind.speed, 2.5);
         assert!(
