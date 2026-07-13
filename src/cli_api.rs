@@ -370,6 +370,11 @@ pub struct WindConditions {
     // radians, wind-FROM convention: 0 = headwind, PI/2 = from the right,
     // PI = tailwind, 3*PI/2 = from the left (matches WindSock / the bindings).
     pub direction: f64,
+    /// Vertical wind component, m/s. POSITIVE = UPDRAFT (raises POI downrange); negative =
+    /// downdraft. Default 0.0. Enters the wind vector via [`crate::wind::wind_vector`]'s third
+    /// argument (MBA-728). Boundary-layer shear scales horizontal wind only — vertical passes
+    /// through unscaled wherever shear is applied on top of this.
+    pub vertical_speed: f64,
 }
 
 impl Default for WindConditions {
@@ -377,6 +382,7 @@ impl Default for WindConditions {
         Self {
             speed: 0.0,
             direction: 0.0,
+            vertical_speed: 0.0,
         }
     }
 }
@@ -691,6 +697,7 @@ impl TrajectorySolver {
         if self.wind_sock.is_none() {
             require_finite("wind.speed", self.wind.speed)?;
             require_finite("wind.direction", self.wind.direction)?;
+            require_finite("wind.vertical_speed", self.wind.vertical_speed)?;
         }
 
         require_finite("atmosphere.temperature", self.atmosphere.temperature)?;
@@ -1136,7 +1143,12 @@ impl TrajectorySolver {
 
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindConditions / WindSock); wind enters drag via velocity - wind.
+        //
+        // MBA-728: the horizontal vector is built with vertical=0.0 and scaled by speed_ratio,
+        // then wind.vertical_speed is added back UNSCALED — boundary-layer shear scales
+        // horizontal wind only, vertical passes through as-is.
         crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0) * speed_ratio
+            + Vector3::new(0.0, self.wind.vertical_speed, 0.0)
     }
 
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
@@ -1288,8 +1300,10 @@ impl TrajectorySolver {
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
+        // MBA-728: no shear/no segments here, so vertical_speed passes straight through
+        // (there is no horizontal-only scaling step on this path).
         let wind_vector =
-            crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0);
+            crate::wind::wind_vector(self.wind.speed, self.wind.direction, self.wind.vertical_speed);
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
         // instead of re-deriving them (with a to_lowercase alloc) every integration step.
@@ -1548,8 +1562,10 @@ impl TrajectorySolver {
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
+        // MBA-728: no shear/no segments here, so vertical_speed passes straight through
+        // (there is no horizontal-only scaling step on this path).
         let wind_vector =
-            crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0);
+            crate::wind::wind_vector(self.wind.speed, self.wind.direction, self.wind.vertical_speed);
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
         // instead of re-deriving them (with a to_lowercase alloc) every integration step.
@@ -1802,8 +1818,10 @@ impl TrajectorySolver {
         let base_ratio = air_density / 1.225;
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
+        // MBA-728: no shear/no segments here, so vertical_speed passes straight through
+        // (there is no horizontal-only scaling step on this path).
         let wind_vector =
-            crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0);
+            crate::wind::wind_vector(self.wind.speed, self.wind.direction, self.wind.vertical_speed);
 
         // Mach-transition distances for the sampled-output flags (see solve_euler/solve_rk4).
         let mut transonic_distances: Vec<f64> = Vec::new();
@@ -2620,11 +2638,13 @@ fn wind_from_signed_speed_sample(signed_speed: f64, sampled_direction: f64) -> W
         WindConditions {
             speed: -signed_speed,
             direction: sampled_direction + std::f64::consts::PI,
+            vertical_speed: 0.0,
         }
     } else {
         WindConditions {
             speed: signed_speed,
             direction: sampled_direction,
+            vertical_speed: 0.0,
         }
     }
 }
@@ -2680,6 +2700,7 @@ pub fn run_monte_carlo_with_direction_std_dev(
     let base_wind = WindConditions {
         speed: params.base_wind_speed,
         direction: params.base_wind_direction,
+        vertical_speed: 0.0,
     };
     run_monte_carlo_with_wind_and_direction_std_dev(
         base_inputs,
@@ -3447,6 +3468,7 @@ mod monte_carlo_wind_sampling_tests {
         let base_wind = WindConditions {
             speed: 100.0,
             direction: 0.37,
+            vertical_speed: 0.0,
         };
         let narrow_speed = MonteCarloWindSampler::new(&base_wind, 0.5, 0.2).unwrap();
         let wide_speed = MonteCarloWindSampler::new(&base_wind, 4.0, 0.2).unwrap();
@@ -3472,6 +3494,7 @@ mod monte_carlo_wind_sampling_tests {
         let base_wind = WindConditions {
             speed: 100.0,
             direction: 0.37,
+            vertical_speed: 0.0,
         };
         let sampler = MonteCarloWindSampler::new(&base_wind, 4.0, 0.0).unwrap();
         let mut rng = StdRng::seed_from_u64(0x5EED_1223);
@@ -3490,6 +3513,7 @@ mod monte_carlo_wind_sampling_tests {
         let base_wind = WindConditions {
             speed: 100.0,
             direction: 0.37,
+            vertical_speed: 0.0,
         };
         let narrow = MonteCarloWindSampler::new(&base_wind, 4.0, 0.1).unwrap();
         let wide = MonteCarloWindSampler::new(&base_wind, 4.0, 0.2).unwrap();
@@ -4822,5 +4846,82 @@ mod cant_tests {
         let (_, z_flat) = yz_at(&solve_with(flat, 400.0), 300.0);
         let (_, z_cant) = yz_at(&solve_with(canted, 400.0), 300.0);
         assert!(z_cant > z_flat, "cant must still deflect right on an incline");
+    }
+}
+
+#[cfg(test)]
+mod vertical_wind_tests {
+    use super::*;
+
+    fn base_inputs() -> BallisticInputs {
+        let mut i = BallisticInputs::default();
+        i.muzzle_velocity = 800.0;
+        i.bc_value = 0.5;
+        i.bc_type = DragModel::G7;
+        i.bullet_mass = 0.0109;
+        i.bullet_diameter = 0.00782;
+        i.bullet_length = 0.0309;
+        i.sight_height = 0.05;
+        i.twist_rate = 10.0;
+        i.use_rk4 = true;
+        i
+    }
+
+    /// Interpolate trajectory height (McCoy Y) at downrange distance `x`.
+    fn y_at(result: &TrajectoryResult, x: f64) -> f64 {
+        let pts = &result.points;
+        for i in 1..pts.len() {
+            if pts[i].position.x >= x {
+                let (p1, p2) = (&pts[i - 1], &pts[i]);
+                let dx = p2.position.x - p1.position.x;
+                let t = if dx.abs() < 1e-12 { 0.0 } else { (x - p1.position.x) / dx };
+                return p1.position.y + t * (p2.position.y - p1.position.y);
+            }
+        }
+        panic!("trajectory never reached {x} m");
+    }
+
+    fn solve_with(inputs: BallisticInputs, wind: WindConditions, max_range: f64) -> TrajectoryResult {
+        let mut s = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
+        s.set_max_range(max_range);
+        s.solve().expect("solve")
+    }
+
+    #[test]
+    fn updraft_raises_poi_downrange() {
+        // No shear, no segments: this exercises the constant-wind sites in
+        // solve_euler/solve_rk4/solve_rk45 directly (MBA-728).
+        let calm_inputs = base_inputs();
+        let calm_wind = WindConditions::default();
+        let updraft = WindConditions {
+            vertical_speed: 5.0,
+            ..Default::default()
+        };
+
+        let calm = solve_with(calm_inputs.clone(), calm_wind, 500.0);
+        let updraft_result = solve_with(calm_inputs, updraft, 500.0);
+
+        let y_calm = y_at(&calm, 400.0);
+        let y_updraft = y_at(&updraft_result, 400.0);
+        assert!(
+            y_updraft > y_calm,
+            "5 m/s updraft must raise POI at 400m: calm={y_calm}, updraft={y_updraft}"
+        );
+    }
+
+    #[test]
+    fn zero_vertical_is_default_and_finite_required() {
+        assert_eq!(WindConditions::default().vertical_speed, 0.0);
+
+        let inputs = base_inputs();
+        let wind = WindConditions {
+            vertical_speed: f64::NAN,
+            ..Default::default()
+        };
+        let s = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
+        assert!(
+            s.solve().is_err(),
+            "NaN wind.vertical_speed must be rejected by validate_for_solve"
+        );
     }
 }

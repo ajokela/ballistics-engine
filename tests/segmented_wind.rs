@@ -39,6 +39,7 @@ fn single_full_range_segment_matches_scalar_wind() {
         WindConditions {
             speed: 4.4704,
             direction: PI / 2.0,
+            vertical_speed: 0.0,
         },
         vec![],
     );
@@ -104,6 +105,7 @@ fn empty_segments_revert_to_scalar() {
         WindConditions {
             speed: 4.4704,
             direction: PI / 2.0,
+            vertical_speed: 0.0,
         },
         AtmosphericConditions::default(),
     );
@@ -115,6 +117,7 @@ fn empty_segments_revert_to_scalar() {
         WindConditions {
             speed: 4.4704,
             direction: PI / 2.0,
+            vertical_speed: 0.0,
         },
         vec![],
     );

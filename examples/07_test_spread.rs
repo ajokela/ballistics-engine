@@ -18,6 +18,7 @@ fn main() {
     let base_wind = WindConditions {
         speed: 0.0,
         direction: 0.0,
+        vertical_speed: 0.0,
     };
 
     // Set up Monte Carlo parameters with both elevation and azimuth variation

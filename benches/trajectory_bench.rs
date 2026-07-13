@@ -15,7 +15,7 @@ fn bench_trajectory_g7(c: &mut Criterion) {
             inputs.sight_height = 0.0508; // 2 inches
             inputs.use_adaptive_rk45 = true;
             inputs.use_rk4 = true;
-            let wind = WindConditions { speed: 0.0, direction: 0.0 };
+            let wind = WindConditions { speed: 0.0, direction: 0.0, vertical_speed: 0.0 };
             let atmo = AtmosphericConditions {
                 temperature: 15.0, pressure: 1013.25, humidity: 50.0, altitude: 0.0,
             };

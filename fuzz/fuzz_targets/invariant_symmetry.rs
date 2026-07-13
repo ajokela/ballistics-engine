@@ -33,8 +33,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Property C: mirrored crosswind => mirrored drift.
     let Ok(speed) = ranged(&mut u, 1.0, 15.0) else { return };
-    let from_right = WindConditions { speed, direction: std::f64::consts::FRAC_PI_2 };      // PI/2
-    let from_left = WindConditions { speed, direction: 3.0 * std::f64::consts::FRAC_PI_2 }; // 3PI/2
+    let from_right = WindConditions { speed, direction: std::f64::consts::FRAC_PI_2, vertical_speed: 0.0 };      // PI/2
+    let from_left = WindConditions { speed, direction: 3.0 * std::f64::consts::FRAC_PI_2, vertical_speed: 0.0 }; // 3PI/2
     if let (Some(zr), Some(zl)) = (lateral_at_impact(&base, from_right), lateral_at_impact(&base, from_left)) {
         // Opposite crosswinds => opposite-sign, equal-magnitude drift.
         let tol = 1e-2 + 0.02 * zr.abs();

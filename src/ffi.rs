@@ -267,6 +267,8 @@ unsafe fn calculate_trajectory_impl(
         WindConditions {
             speed: wind.speed,
             direction: wind.direction,
+            // FFIWindConditions has no vertical field yet; MBA-728 scope is core physics only.
+            vertical_speed: 0.0,
         }
     };
 
@@ -523,6 +525,8 @@ unsafe fn calculate_zero_angle_impl(
         WindConditions {
             speed: wind.speed,
             direction: wind.direction,
+            // FFIWindConditions has no vertical field yet; MBA-728 scope is core physics only.
+            vertical_speed: 0.0,
         }
     };
 

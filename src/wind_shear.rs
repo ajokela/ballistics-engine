@@ -382,7 +382,15 @@ pub(crate) fn apply_boundary_layer_shear(
     height_rel_launch_m: f64,
     model: WindShearModel,
 ) -> Vector3<f64> {
-    base_wind * boundary_layer_speed_ratio(height_rel_launch_m, model)
+    // MBA-728 pass-through decision: boundary-layer shear scales HORIZONTAL wind only;
+    // vertical wind (WindConditions::vertical_speed / WindSegment::vertical_mps, already
+    // carried on `base_wind.y` by the caller) passes through unscaled. Save/restore Y
+    // around the uniform scale rather than special-casing the multiply itself, since this
+    // helper is shared by both the cli_api and fast-integrate shear paths.
+    let vertical = base_wind.y;
+    let mut sheared = base_wind * boundary_layer_speed_ratio(height_rel_launch_m, model);
+    sheared.y = vertical;
+    sheared
 }
 
 /// High-level API function to get wind at arbitrary position
@@ -410,25 +418,27 @@ pub fn get_wind_at_position(
     let range_m = position[0];
     let altitude_m = position[1]; // Y is vertical, relative to shooter
 
-    // Find appropriate wind segment based on range
+    // Find appropriate wind segment based on range. MBA-728: carry the segment's vertical_mps
+    // through alongside speed/angle so it survives into the wind vector below.
     let base_wind = if wind_segments.is_empty() {
-        (0.0, 0.0)
+        (0.0, 0.0, 0.0)
     } else {
         wind_segments
             .iter()
             .find(|seg| range_m < seg.until_m)
-            .map(|seg| (seg.speed_kmh, seg.angle_deg))
-            .unwrap_or((0.0, 0.0))
+            .map(|seg| (seg.speed_kmh, seg.angle_deg, seg.vertical_mps))
+            .unwrap_or((0.0, 0.0, 0.0))
     };
 
     // Convert base wind from km/h to m/s
     let base_speed_mps = base_wind.0 * 0.2777778; // km/h to m/s
     let base_direction_deg = base_wind.1;
+    let base_vertical_mps = base_wind.2;
 
     if !enable_wind_shear || wind_shear_model == "none" {
         // No shear - return constant wind
         let ang = base_direction_deg.to_radians();
-        return crate::wind::wind_vector(base_speed_mps, ang, 0.0);
+        return crate::wind::wind_vector(base_speed_mps, ang, base_vertical_mps);
     }
 
     // Wind shear enabled: scale the operative (input) wind by a boundary-layer profile keyed off
@@ -443,7 +453,8 @@ pub fn get_wind_at_position(
     let _ = shooter_altitude_m;
 
     let ang = base_direction_deg.to_radians();
-    let base_vector = crate::wind::wind_vector(base_speed_mps, ang, 0.0);
+    let base_vector = crate::wind::wind_vector(base_speed_mps, ang, base_vertical_mps);
+    // apply_boundary_layer_shear preserves base_vector.y (vertical) unscaled (MBA-728).
     apply_boundary_layer_shear(
         base_vector,
         altitude_m,
