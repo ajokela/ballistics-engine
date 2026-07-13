@@ -1219,6 +1219,95 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Moving-target lead table (hold in the direction of target travel)
+    Lead {
+        /// Load parameters from saved profile
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Initial velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
+        velocity: Option<f64>,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
+        bc: Option<f64>,
+
+        /// Mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
+        mass: Option<f64>,
+
+        /// Diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
+        diameter: Option<f64>,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
+
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Wind speed (mph or m/s based on --units)
+        #[arg(long, default_value = "0.0")]
+        wind_speed: f64,
+
+        /// Wind direction (degrees, 0=headwind, 90=from right)
+        #[arg(long, default_value = "0.0")]
+        wind_direction: f64,
+
+        /// Target speed (mph for imperial, m/s for metric)
+        #[arg(long, value_parser = f64_range(0.0, 300.0))]
+        target_speed: f64,
+
+        /// Direction of target travel relative to the line of sight, degrees:
+        /// 0 = directly away, 90 = crossing left-to-right, 180 = directly toward,
+        /// 270 = crossing right-to-left
+        #[arg(long, default_value = "90.0")]
+        target_angle: f64,
+
+        /// Target length for body-length holds (inches for imperial, mm for metric)
+        #[arg(long)]
+        target_length: Option<f64>,
+
+        /// Start range (yards or meters)
+        #[arg(long, default_value = "100.0")]
+        start: f64,
+
+        /// End range (yards or meters)
+        #[arg(long, default_value = "600.0")]
+        end: f64,
+
+        /// Range step (yards or meters)
+        #[arg(long, default_value = "100.0")]
+        step: f64,
+
+        /// Adjustment unit (mil or moa)
+        #[arg(long, default_value = "mil")]
+        adjustment_unit: AdjustmentUnit,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Generate wind drift card (wind deflection at multiple speeds)
     WindCard {
         /// Load parameters from saved profile
@@ -4660,6 +4749,92 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
         }
 
+        Commands::Lead {
+            profile,
+            velocity,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            wind_speed,
+            wind_direction,
+            target_speed,
+            target_angle,
+            target_length,
+            start,
+            end,
+            step,
+            adjustment_unit,
+            output,
+        } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            let profile_data = profile.as_ref().map(|name| {
+                load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                })
+            });
+
+            let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
+                .unwrap_or_else(|| {
+                    eprintln!("Error: --velocity is required (or use --profile)");
+                    std::process::exit(1);
+                });
+            let final_bc = resolve_param(bc, &profile_data, |p| p.bc).unwrap_or_else(|| {
+                eprintln!("Error: --bc is required (or use --profile)");
+                std::process::exit(1);
+            });
+            let final_mass = resolve_param(mass, &profile_data, |p| p.mass).unwrap_or_else(|| {
+                eprintln!("Error: --mass is required (or use --profile)");
+                std::process::exit(1);
+            });
+            let final_diameter = resolve_param(diameter, &profile_data, |p| p.diameter)
+                .unwrap_or_else(|| {
+                    eprintln!("Error: --diameter is required (or use --profile)");
+                    std::process::exit(1);
+                });
+            let final_sight_height = sight_height
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_height))
+                .unwrap_or(match cli.units {
+                    UnitSystem::Imperial => 2.0,
+                    UnitSystem::Metric => 50.0,
+                });
+            let final_drag_model = match (&profile_data, velocity) {
+                (Some(p), None) => parse_drag_model_arg(&p.drag_model),
+                _ => drag_model,
+            };
+
+            handle_lead(
+                final_velocity,
+                final_bc,
+                final_mass,
+                final_diameter,
+                final_drag_model,
+                final_sight_height,
+                temperature,
+                pressure,
+                humidity,
+                altitude,
+                wind_speed,
+                wind_direction,
+                target_speed,
+                target_angle,
+                target_length,
+                start,
+                end,
+                step,
+                adjustment_unit,
+                cli.units,
+                output,
+            )?;
+        }
+
         Commands::WindCard {
             profile,
             velocity,
@@ -8063,6 +8238,298 @@ fn handle_come_ups(
                 );
             }
             println!("└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘");
+        }
+    }
+
+    Ok(())
+}
+
+/// Moving-target lead table handler (MBA-1287).
+///
+/// Runs `ballistics_engine::calculate_lead` once per range in the sweep. A single
+/// out-of-domain range (e.g. an inbound target that overtakes the shooter) must not
+/// abort the whole table: the error is captured per-row and rendered as a dashed row
+/// (table) or an `"error"` field (JSON), and the sweep continues.
+#[allow(clippy::too_many_arguments)]
+fn handle_lead(
+    velocity: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    drag_model: DragModelArg,
+    sight_height: f64,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    target_speed: f64,
+    target_angle: f64,
+    target_length: Option<f64>,
+    start: f64,
+    end: f64,
+    step: f64,
+    adjustment_unit: AdjustmentUnit,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Convert to metric
+    let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
+    let mass_kg = UnitConverter::mass_to_metric(mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
+    let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
+    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
+    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
+    let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
+    let target_speed_mps = UnitConverter::wind_to_metric(target_speed, units);
+    let target_length_m = target_length.map(|l| match units {
+        UnitSystem::Imperial => l * 0.0254, // inches to meters
+        UnitSystem::Metric => l / 1000.0,   // mm to meters
+    });
+    let end_m = UnitConverter::distance_to_metric(end, units);
+    let step_m = UnitConverter::distance_to_metric(step, units);
+
+    let (inputs, wind, atmosphere) = build_trajectory_components(
+        velocity_m,
+        bc,
+        mass_kg,
+        diameter_m,
+        drag_model,
+        sight_height_m,
+        temperature_c,
+        pressure_hpa,
+        humidity,
+        altitude_m,
+        wind_speed_m,
+        wind_direction,
+        end_m,
+        step_m,
+    );
+
+    let adj_label = match adjustment_unit {
+        AdjustmentUnit::Mil => "MIL",
+        AdjustmentUnit::Moa => "MOA",
+    };
+    let (dist_unit, speed_unit) = match units {
+        UnitSystem::Imperial => ("yd", "mph"),
+        UnitSystem::Metric => ("m", "m/s"),
+    };
+    let has_bodies = target_length_m.is_some();
+
+    struct LeadRow {
+        range: f64,
+        result: Result<ballistics_engine::LeadSolution, ballistics_engine::LeadError>,
+        bodies: Option<f64>,
+    }
+
+    let mut rows: Vec<LeadRow> = Vec::new();
+    let mut current_range = start;
+    while current_range <= end + 0.1 {
+        let range_m = UnitConverter::distance_to_metric(current_range, units);
+
+        let result = ballistics_engine::calculate_lead(
+            inputs.clone(),
+            wind.clone(),
+            atmosphere.clone(),
+            target_speed_mps,
+            target_angle,
+            range_m,
+        );
+
+        let bodies = match (&result, target_length_m) {
+            (Ok(sol), Some(len_m)) if len_m > 0.0 => Some(sol.lead_m / len_m),
+            _ => None,
+        };
+
+        rows.push(LeadRow {
+            range: current_range,
+            result,
+            bodies,
+        });
+
+        current_range += step;
+    }
+
+    match output {
+        OutputFormat::Json => {
+            let json_rows: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| match &r.result {
+                    Ok(sol) => {
+                        let mut row = serde_json::json!({
+                            "range": r.range,
+                            "tof_s": sol.time_of_flight_s,
+                            "lead": UnitConverter::distance_from_metric(sol.lead_m, units),
+                            "lead_mil": sol.lead_mil,
+                            "lead_moa": sol.lead_moa,
+                            "intercept_range": UnitConverter::distance_from_metric(
+                                sol.corrected_range_m,
+                                units
+                            ),
+                            "iterations": sol.iterations,
+                        });
+                        if let Some(bodies) = r.bodies {
+                            row["bodies"] = serde_json::json!(bodies);
+                        }
+                        row
+                    }
+                    Err(e) => serde_json::json!({
+                        "range": r.range,
+                        "error": e.to_string(),
+                    }),
+                })
+                .collect();
+
+            let json = serde_json::json!({
+                "target_speed": target_speed,
+                "target_speed_unit": speed_unit,
+                "target_angle": target_angle,
+                "units": match units {
+                    UnitSystem::Imperial => "imperial",
+                    UnitSystem::Metric => "metric",
+                },
+                "distance_unit": dist_unit,
+                "adjustment_unit": adj_label,
+                "rows": json_rows,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        OutputFormat::Csv => {
+            if has_bodies {
+                println!(
+                    "range_{dist_unit},tof_s,lead_{dist_unit},lead_{unit},intercept_{dist_unit},iterations,bodies,error",
+                    dist_unit = dist_unit,
+                    unit = adj_label.to_lowercase()
+                );
+            } else {
+                println!(
+                    "range_{dist_unit},tof_s,lead_{dist_unit},lead_{unit},intercept_{dist_unit},iterations,error",
+                    dist_unit = dist_unit,
+                    unit = adj_label.to_lowercase()
+                );
+            }
+            for r in &rows {
+                match &r.result {
+                    Ok(sol) => {
+                        let lead_disp = UnitConverter::distance_from_metric(sol.lead_m, units);
+                        let lead_adj = match adjustment_unit {
+                            AdjustmentUnit::Mil => sol.lead_mil,
+                            AdjustmentUnit::Moa => sol.lead_moa,
+                        };
+                        let intercept_disp =
+                            UnitConverter::distance_from_metric(sol.corrected_range_m, units);
+                        if has_bodies {
+                            println!(
+                                "{:.0},{:.3},{:.2},{:.3},{:.1},{},{},",
+                                r.range,
+                                sol.time_of_flight_s,
+                                lead_disp,
+                                lead_adj,
+                                intercept_disp,
+                                sol.iterations,
+                                r.bodies.map(|b| format!("{:.2}", b)).unwrap_or_default()
+                            );
+                        } else {
+                            println!(
+                                "{:.0},{:.3},{:.2},{:.3},{:.1},{},",
+                                r.range,
+                                sol.time_of_flight_s,
+                                lead_disp,
+                                lead_adj,
+                                intercept_disp,
+                                sol.iterations
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if has_bodies {
+                            println!("{:.0},,,,,,,{}", r.range, e);
+                        } else {
+                            println!("{:.0},,,,,,{}", r.range, e);
+                        }
+                    }
+                }
+            }
+        }
+        OutputFormat::Table | OutputFormat::Pdf => {
+            println!();
+            println!(
+                "Moving-Target Lead Table (target speed: {:.1} {}, angle: {:.0}\u{b0}, {})",
+                target_speed, speed_unit, target_angle, adj_label
+            );
+            println!("Positive lead = hold in the direction of target travel.");
+            println!();
+
+            if has_bodies {
+                println!("┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐");
+                println!(
+                    "│Range ({:>2})│TOF (s)   │Lead ({:>3})│Lead ({:>3})│Intercept │Bodies    │",
+                    dist_unit, dist_unit, adj_label
+                );
+                println!("├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤");
+                for r in &rows {
+                    match &r.result {
+                        Ok(sol) => {
+                            let lead_disp = UnitConverter::distance_from_metric(sol.lead_m, units);
+                            let lead_adj = match adjustment_unit {
+                                AdjustmentUnit::Mil => sol.lead_mil,
+                                AdjustmentUnit::Moa => sol.lead_moa,
+                            };
+                            let intercept_disp =
+                                UnitConverter::distance_from_metric(sol.corrected_range_m, units);
+                            println!(
+                                "│{:>9.0} │{:>9.3} │{:>9.2} │{:>9.3} │{:>9.1} │{:>9.2} │",
+                                r.range,
+                                sol.time_of_flight_s,
+                                lead_disp,
+                                lead_adj,
+                                intercept_disp,
+                                r.bodies.unwrap_or(0.0)
+                            );
+                        }
+                        Err(e) => {
+                            println!(
+                                "│{:>9.0} │{:>9} │{:>9} │{:>9} │{:>9} │{:>9} │  {}",
+                                r.range, "--", "--", "--", "--", "--", e
+                            );
+                        }
+                    }
+                }
+                println!("└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘");
+            } else {
+                println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                println!(
+                    "│Range ({:>2})│TOF (s)   │Lead ({:>3})│Lead ({:>3})│Intercept │",
+                    dist_unit, dist_unit, adj_label
+                );
+                println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+                for r in &rows {
+                    match &r.result {
+                        Ok(sol) => {
+                            let lead_disp = UnitConverter::distance_from_metric(sol.lead_m, units);
+                            let lead_adj = match adjustment_unit {
+                                AdjustmentUnit::Mil => sol.lead_mil,
+                                AdjustmentUnit::Moa => sol.lead_moa,
+                            };
+                            let intercept_disp =
+                                UnitConverter::distance_from_metric(sol.corrected_range_m, units);
+                            println!(
+                                "│{:>9.0} │{:>9.3} │{:>9.2} │{:>9.3} │{:>9.1} │",
+                                r.range, sol.time_of_flight_s, lead_disp, lead_adj, intercept_disp
+                            );
+                        }
+                        Err(e) => {
+                            println!(
+                                "│{:>9.0} │{:>9} │{:>9} │{:>9} │{:>9} │  {}",
+                                r.range, "--", "--", "--", "--", e
+                            );
+                        }
+                    }
+                }
+                println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+            }
         }
     }
 
