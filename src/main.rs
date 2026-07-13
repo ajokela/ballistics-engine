@@ -1342,6 +1342,17 @@ enum Commands {
         #[arg(long, default_value = "5,10,15,20")]
         wind_speeds: String,
 
+        /// Wind angle in DEGREES, wind-FROM convention (matches --wind-direction):
+        /// 0 = headwind, 90 = from the right (full value), 180 = tailwind,
+        /// 270 = from the left. Positive drift = dial right. Default 90.
+        #[arg(long, value_parser = f64_range(0.0, 360.0), conflicts_with = "wind_angles")]
+        wind_angle: Option<f64>,
+
+        /// Comma-separated wind angles (degrees, wind-FROM) — emits one complete
+        /// card per angle. Example: --wind-angles 30,60,90
+        #[arg(long, conflicts_with = "wind_angle")]
+        wind_angles: Option<String>,
+
         /// Start range (yards or meters)
         #[arg(long, default_value = "100.0")]
         start: f64,
@@ -4844,6 +4855,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             drag_model,
             zero_distance,
             wind_speeds,
+            wind_angle,
+            wind_angles,
             start,
             end,
             step,
@@ -4904,6 +4917,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                 std::process::exit(1);
             }
 
+            // Resolve wind angle(s): neither flag → legacy full-value 90° card
+            // (byte-identical to pre-MBA-727 output); --wind-angle → single
+            // angle-aware card; --wind-angles → one card per angle.
+            let (wind_angle_vec, legacy_labels): (Vec<f64>, bool) =
+                if let Some(angle) = wind_angle {
+                    (vec![angle], false)
+                } else if let Some(csv) = wind_angles.as_ref() {
+                    let mut angles = Vec::new();
+                    for tok in csv.split(',') {
+                        let tok = tok.trim();
+                        let angle: f64 = tok.parse().map_err(|_| {
+                            format!(
+                                "Error: --wind-angles contains an invalid number: '{}'",
+                                tok
+                            )
+                        })?;
+                        if angle.is_nan() || !(0.0..=360.0).contains(&angle) {
+                            return Err(format!(
+                                "Error: --wind-angles value '{}' must be in [0, 360]",
+                                tok
+                            )
+                            .into());
+                        }
+                        angles.push(angle);
+                    }
+                    if angles.is_empty() {
+                        eprintln!("Error: --wind-angles must contain at least one valid number (e.g., '30,60,90')");
+                        std::process::exit(1);
+                    }
+                    (angles, false)
+                } else {
+                    (vec![90.0], true)
+                };
+
             handle_wind_card(
                 final_velocity,
                 final_bc,
@@ -4912,6 +4959,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 final_drag_model,
                 zero_distance,
                 &ws_vec,
+                &wind_angle_vec,
+                legacy_labels,
                 start,
                 end,
                 step,
@@ -8555,6 +8604,8 @@ fn handle_wind_card(
     drag_model: DragModelArg,
     zero_distance: f64,
     wind_speeds: &[f64],
+    wind_angles: &[f64],
+    legacy_labels: bool,
     start: f64,
     end: f64,
     step: f64,
@@ -8623,10 +8674,10 @@ fn handle_wind_card(
         UnitSystem::Metric => ("m", "m/s"),
     };
 
-    // For each wind speed, run trajectory with 90° crosswind and collect drift
-    // wind_direction = 90° means full value crosswind from the right
-    let crosswind_deg = 90.0; // degrees (converted to radians internally)
-
+    // For each wind angle (wind-FROM degrees, matches --wind-direction), run
+    // trajectory at each wind speed and collect drift. Legacy default is a
+    // single 90° (full-value crosswind from the right) angle.
+    //
     // Collect data: rows = ranges, columns = wind speeds
     struct WindRow {
         range: f64,
@@ -8640,145 +8691,177 @@ fn handle_wind_card(
         current += step;
     }
 
-    let mut all_drifts: Vec<Vec<f64>> = vec![Vec::new(); ranges.len()];
+    let multi_angle = wind_angles.len() > 1;
+    let mut json_cards: Vec<serde_json::Value> = Vec::new();
 
-    for &ws in wind_speeds {
-        let ws_m = UnitConverter::wind_to_metric(ws, units);
+    for (angle_idx, &angle_deg) in wind_angles.iter().enumerate() {
+        let mut all_drifts: Vec<Vec<f64>> = vec![Vec::new(); ranges.len()];
 
-        let samples = run_sampled_trajectory(
-            velocity_m,
-            bc,
-            mass_kg,
-            diameter_m,
-            drag_model,
-            sight_height_m,
-            temperature_c,
-            pressure_hpa,
-            humidity,
-            altitude_m,
-            ws_m,
-            crosswind_deg,
-            end_m * 1.1,
-            sample_m,
-            zero_angle,
-        )?;
+        for &ws in wind_speeds {
+            let ws_m = UnitConverter::wind_to_metric(ws, units);
 
-        for (ri, &range_display) in ranges.iter().enumerate() {
-            let range_m = UnitConverter::distance_to_metric(range_display, units);
+            let samples = run_sampled_trajectory(
+                velocity_m,
+                bc,
+                mass_kg,
+                diameter_m,
+                drag_model,
+                sight_height_m,
+                temperature_c,
+                pressure_hpa,
+                humidity,
+                altitude_m,
+                ws_m,
+                angle_deg,
+                end_m * 1.1,
+                sample_m,
+                zero_angle,
+            )?;
 
-            let closest = samples.iter().min_by(|a, b| {
-                (a.distance_m - range_m)
-                    .abs()
-                    .partial_cmp(&(b.distance_m - range_m).abs())
-                    .unwrap()
-            });
+            for (ri, &range_display) in ranges.iter().enumerate() {
+                let range_m = UnitConverter::distance_to_metric(range_display, units);
 
-            let drift_adj = if let Some(sample) = closest {
-                if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
-                    let drift_yd = UnitConverter::distance_from_metric(sample.wind_drift_m, units);
-                    drop_to_adjustment(drift_yd, range_display, adjustment_unit)
+                let closest = samples.iter().min_by(|a, b| {
+                    (a.distance_m - range_m)
+                        .abs()
+                        .partial_cmp(&(b.distance_m - range_m).abs())
+                        .unwrap()
+                });
+
+                let drift_adj = if let Some(sample) = closest {
+                    if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
+                        let drift_yd =
+                            UnitConverter::distance_from_metric(sample.wind_drift_m, units);
+                        drop_to_adjustment(drift_yd, range_display, adjustment_unit)
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
-                }
-            } else {
-                0.0
-            };
+                };
 
-            all_drifts[ri].push(drift_adj);
+                all_drifts[ri].push(drift_adj);
+            }
+        }
+
+        let wind_rows: Vec<WindRow> = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, &range)| WindRow {
+                range,
+                drifts: all_drifts[i].clone(),
+            })
+            .collect();
+
+        match output {
+            OutputFormat::Json => {
+                let json_rows: Vec<serde_json::Value> = wind_rows
+                    .iter()
+                    .map(|r| {
+                        let mut row = serde_json::json!({ "range": r.range });
+                        for (j, &ws) in wind_speeds.iter().enumerate() {
+                            row[format!("wind_{}", ws)] =
+                                serde_json::json!(r.drifts.get(j).unwrap_or(&0.0));
+                        }
+                        row
+                    })
+                    .collect();
+                let mut card = serde_json::json!({
+                    "zero_distance": zero_distance,
+                    "adjustment_unit": adj_label,
+                    "distance_unit": dist_unit,
+                    "wind_unit": wind_unit,
+                    "wind_speeds": wind_speeds,
+                    "data": json_rows,
+                });
+                if legacy_labels {
+                    card["crosswind"] = serde_json::json!("full-value (90°)");
+                } else {
+                    card["wind_angle"] = serde_json::json!(angle_deg);
+                }
+                json_cards.push(card);
+            }
+            OutputFormat::Csv => {
+                if multi_angle {
+                    if angle_idx > 0 {
+                        println!();
+                    }
+                    println!("# wind_angle={}", angle_deg);
+                }
+                let ws_headers: Vec<String> = wind_speeds
+                    .iter()
+                    .map(|ws| format!("wind_{}_{}", ws, wind_unit))
+                    .collect();
+                println!("range_{},{}", dist_unit, ws_headers.join(","));
+                for r in &wind_rows {
+                    let drift_strs: Vec<String> =
+                        r.drifts.iter().map(|d| format!("{:.1}", d)).collect();
+                    println!("{:.0},{}", r.range, drift_strs.join(","));
+                }
+            }
+            OutputFormat::Table | OutputFormat::Pdf => {
+                println!();
+                if legacy_labels {
+                    println!(
+                        "Wind Card (zero: {:.0} {}, {}, full-value crosswind)",
+                        zero_distance, dist_unit, adj_label
+                    );
+                } else {
+                    println!(
+                        "Wind Card (zero: {:.0} {}, {}) — wind angle {}° (wind-FROM: 0=head, 90=right, 180=tail, 270=left)",
+                        zero_distance, dist_unit, adj_label, angle_deg
+                    );
+                }
+
+                // Header
+                let col_width = 10;
+                let range_header = format!("Range ({:>2})", dist_unit);
+                let mut header = format!("┌{:─>w$}", "", w = col_width);
+                for _ in wind_speeds {
+                    header += &format!("┬{:─>w$}", "", w = col_width);
+                }
+                header += "┐";
+                println!("{}", header);
+
+                let mut label_row = format!("│{:<w$}", range_header, w = col_width);
+                for ws in wind_speeds {
+                    label_row += &format!("│{:>8} {} ", ws, wind_unit);
+                }
+                label_row += "│";
+                println!("{}", label_row);
+
+                let mut sep = format!("├{:─>w$}", "", w = col_width);
+                for _ in wind_speeds {
+                    sep += &format!("┼{:─>w$}", "", w = col_width);
+                }
+                sep += "┤";
+                println!("{}", sep);
+
+                for r in &wind_rows {
+                    let mut row_str = format!("│{:>9.0} ", r.range);
+                    for d in &r.drifts {
+                        row_str += &format!("│{:>9.1} ", d);
+                    }
+                    row_str += "│";
+                    println!("{}", row_str);
+                }
+
+                let mut footer = format!("└{:─>w$}", "", w = col_width);
+                for _ in wind_speeds {
+                    footer += &format!("┴{:─>w$}", "", w = col_width);
+                }
+                footer += "┘";
+                println!("{}", footer);
+            }
         }
     }
 
-    let wind_rows: Vec<WindRow> = ranges
-        .iter()
-        .enumerate()
-        .map(|(i, &range)| WindRow {
-            range,
-            drifts: all_drifts[i].clone(),
-        })
-        .collect();
-
-    match output {
-        OutputFormat::Json => {
-            let json_rows: Vec<serde_json::Value> = wind_rows
-                .iter()
-                .map(|r| {
-                    let mut row = serde_json::json!({ "range": r.range });
-                    for (j, &ws) in wind_speeds.iter().enumerate() {
-                        row[format!("wind_{}", ws)] =
-                            serde_json::json!(r.drifts.get(j).unwrap_or(&0.0));
-                    }
-                    row
-                })
-                .collect();
-            let json = serde_json::json!({
-                "zero_distance": zero_distance,
-                "adjustment_unit": adj_label,
-                "distance_unit": dist_unit,
-                "wind_unit": wind_unit,
-                "wind_speeds": wind_speeds,
-                "crosswind": "full-value (90°)",
-                "data": json_rows,
-            });
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        }
-        OutputFormat::Csv => {
-            let ws_headers: Vec<String> = wind_speeds
-                .iter()
-                .map(|ws| format!("wind_{}_{}", ws, wind_unit))
-                .collect();
-            println!("range_{},{}", dist_unit, ws_headers.join(","));
-            for r in &wind_rows {
-                let drift_strs: Vec<String> =
-                    r.drifts.iter().map(|d| format!("{:.1}", d)).collect();
-                println!("{:.0},{}", r.range, drift_strs.join(","));
-            }
-        }
-        OutputFormat::Table | OutputFormat::Pdf => {
-            println!();
-            println!(
-                "Wind Card (zero: {:.0} {}, {}, full-value crosswind)",
-                zero_distance, dist_unit, adj_label
-            );
-
-            // Header
-            let col_width = 10;
-            let range_header = format!("Range ({:>2})", dist_unit);
-            let mut header = format!("┌{:─>w$}", "", w = col_width);
-            for _ in wind_speeds {
-                header += &format!("┬{:─>w$}", "", w = col_width);
-            }
-            header += "┐";
-            println!("{}", header);
-
-            let mut label_row = format!("│{:<w$}", range_header, w = col_width);
-            for ws in wind_speeds {
-                label_row += &format!("│{:>8} {} ", ws, wind_unit);
-            }
-            label_row += "│";
-            println!("{}", label_row);
-
-            let mut sep = format!("├{:─>w$}", "", w = col_width);
-            for _ in wind_speeds {
-                sep += &format!("┼{:─>w$}", "", w = col_width);
-            }
-            sep += "┤";
-            println!("{}", sep);
-
-            for r in &wind_rows {
-                let mut row_str = format!("│{:>9.0} ", r.range);
-                for d in &r.drifts {
-                    row_str += &format!("│{:>9.1} ", d);
-                }
-                row_str += "│";
-                println!("{}", row_str);
-            }
-
-            let mut footer = format!("└{:─>w$}", "", w = col_width);
-            for _ in wind_speeds {
-                footer += &format!("┴{:─>w$}", "", w = col_width);
-            }
-            footer += "┘";
-            println!("{}", footer);
+    if let OutputFormat::Json = output {
+        if json_cards.len() == 1 {
+            println!("{}", serde_json::to_string_pretty(&json_cards[0])?);
+        } else {
+            let array = serde_json::Value::Array(json_cards);
+            println!("{}", serde_json::to_string_pretty(&array)?);
         }
     }
 
