@@ -257,6 +257,22 @@ range** — a small cant is barely noticeable at zero range and increasingly cos
 it. This is validated in `tests/canted_fire.rs` to within 5% (windage) / 10% (elevation)
 of the analytic prediction at 300 m and 600 m.
 
+**Which elevation rotates — matching the field rule of thumb.** `--cant` rotates the
+elevation that is *in the gun* (`muzzle_angle`, i.e. whatever the zero/dial put there).
+Two scenarios that are easy to conflate:
+
+- **Zeroed at a near distance, never re-dialed** (e.g. `--auto-zero 100`, then read
+  windage at long range): only the small 100 yd zero elevation rotates, so the lateral
+  error is nearly **constant in mils** across range (≈ `zero_elevation · sin(cant)` —
+  roughly 0.1 mil for 5° of cant on a typical rifle zero).
+- **Dialed (or held over) for the engagement range, then canted** — the realistic
+  long-range case: model it by zeroing at the engagement distance
+  (`--auto-zero 1000 --cant 5`). The *entire* come-up rotates, reproducing the classic
+  field rule `lateral ≈ come_up · sin(cant)`. Example: a .224 77 gr at 2650 fps dialed
+  from 100 yd to 1000 yd carries ≈ 9.7 mil of total launch elevation; at 5° of cant the
+  engine puts the shot 0.86 mil right — `9.7 · sin(5°) ≈ 0.85 mil`. The two rules agree;
+  they just answer different questions.
+
 **Worked example** (build first with `cargo build`; `--sample-interval` is always meters
 regardless of `--units`, so `91.44` below is exactly 100 yd):
 
