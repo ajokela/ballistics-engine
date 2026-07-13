@@ -393,7 +393,8 @@ enum Commands {
         )]
         wind_vertical: f64,
 
-        /// Downrange wind segment "SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL]" (repeatable).
+        /// Downrange wind segment "SPEED:ANGLE:UNTIL_DISTANCE" with an optional 4th
+        /// ":VERTICAL" field (repeatable).
         /// SPEED/UNTIL_DISTANCE follow --units (mph & yd imperial, m/s & m metric); ANGLE is
         /// degrees, same convention as --wind-direction. The optional 4th field, VERTICAL, is
         /// ALWAYS m/s (positive = updraft, raises POI) regardless of --units — unlike SPEED it
