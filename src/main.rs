@@ -3577,6 +3577,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let zero_wind = WindConditions {
                     speed: wind_speed_metric,
                     direction: final_wind_direction.to_radians(),
+                    vertical_speed: 0.0,
                 };
                 let zero_atmosphere = AtmosphericConditions {
                     temperature: zero_temperature_metric,
@@ -6623,6 +6624,7 @@ fn run_monte_carlo(
     let base_wind = WindConditions {
         speed: wind_speed,
         direction: wind_direction.to_radians(),
+        vertical_speed: 0.0,
     };
 
     // Set up Monte Carlo parameters

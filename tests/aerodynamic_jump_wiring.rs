@@ -21,6 +21,7 @@ fn solve(enable_aj: bool, crosswind_mps: f64) -> ballistics_engine::TrajectoryRe
     let wind = WindConditions {
         speed: crosswind_mps,
         direction: PI / 2.0,
+        vertical_speed: 0.0,
     };
     let atmo = AtmosphericConditions::default();
     let mut solver = TrajectorySolver::new(inputs, wind, atmo);
@@ -90,6 +91,7 @@ fn litz_magnitude_matches_engine_sg_exactly() {
     let wind = WindConditions {
         speed: cw_mps,
         direction: PI / 2.0, // from the right (0=headwind, +90deg=from right)
+        vertical_speed: 0.0,
     };
 
     let sg = compute_stability_coefficient(
@@ -141,6 +143,7 @@ fn segmented_muzzle_wind_matches_scalar_aerodynamic_jump() {
         WindConditions {
             speed: 4.4704,
             direction: PI / 2.0,
+            vertical_speed: 0.0,
         },
         atmosphere.clone(),
     );
@@ -158,6 +161,7 @@ fn segmented_muzzle_wind_matches_scalar_aerodynamic_jump() {
         WindConditions {
             speed: 8.9408,
             direction: -PI / 2.0,
+            vertical_speed: 0.0,
         },
         atmosphere,
     );
@@ -195,6 +199,7 @@ fn aj_direction_flips_with_wind_side_and_twist() {
         let wind = WindConditions {
             speed: 4.4704,
             direction: dir,
+            vertical_speed: 0.0,
         };
         let mut s = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
         s.set_max_range(600.0);
@@ -237,6 +242,7 @@ fn zeroing_ignores_aerodynamic_jump() {
     let wind = WindConditions {
         speed: 4.4704, // 10 mph crosswind present during zeroing
         direction: PI / 2.0,
+        vertical_speed: 0.0,
     };
     let atmo = AtmosphericConditions::default();
     let z_off =
@@ -264,6 +270,7 @@ fn aj_affects_only_vertical_not_windage() {
         let wind = WindConditions {
             speed: 4.4704,
             direction: PI / 2.0,
+            vertical_speed: 0.0,
         };
         let mut s = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
         s.set_max_range(600.0);
@@ -487,6 +494,7 @@ fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     let wind = WindConditions {
         speed: 10.0,
         direction: PI / 2.0,
+        vertical_speed: 0.0,
     };
     let mut solver = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
     solver.set_max_range(600.0);

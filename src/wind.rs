@@ -17,8 +17,10 @@ pub fn wind_vector(speed_mps: f64, direction_rad: f64, vertical_mps: f64) -> Vec
     )
 }
 
-/// One downrange wind segment. `vertical_mps` (m/s, positive = updraft) is
-/// carried but stays 0.0 until MBA-728's physics task wires it through.
+/// One downrange wind segment. `vertical_mps` (m/s, positive = updraft) feeds
+/// straight into the segment's wind vector via [`wind_vector`] (MBA-728);
+/// boundary-layer shear scales horizontal wind only, so vertical passes
+/// through unscaled wherever shear is applied on top of a segment.
 ///
 /// This matches the Python WindSock interface.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -114,8 +116,9 @@ impl WindSock {
         // 180° = tailwind (from back, affects +x downrange)
         // 270° = wind from left (affects +z lateral)
         //
-        // McCoy convention: x=downrange, y=vertical, z=lateral
-        wind_vector(speed_mps, angle_rad, 0.0)
+        // McCoy convention: x=downrange, y=vertical, z=lateral. Vertical (MBA-728) passes
+        // straight through per-segment; it is not derived from speed_kmh/angle_deg.
+        wind_vector(speed_mps, angle_rad, seg.vertical_mps)
     }
 
     /// Get wind vector for a given range
@@ -254,7 +257,7 @@ mod tests {
             "Z (lateral) should be negative for 90° wind, got {}",
             vec_50[2]
         );
-        assert_eq!(vec_50[1], 0.0); // Zero Y component
+        assert_eq!(vec_50[1], 0.0); // Zero Y component (vertical_mps defaults to 0.0, MBA-728)
         assert!(
             vec_50[0].abs() < 0.01,
             "X (downrange) should be nearly zero for 90° wind, got {}",
@@ -329,6 +332,30 @@ mod tests {
         assert!(sock.vector_for_range_stateless(100.0)[2] > 0.0);
         // Beyond the last boundary -> zero.
         assert_eq!(sock.vector_for_range_stateless(200.0), Vector3::zeros());
+    }
+
+    #[test]
+    fn calc_vec_passes_through_segment_vertical_unscaled() {
+        // MBA-728: a segment's vertical_mps must land unchanged on the wind vector's Y
+        // component, independent of speed/angle.
+        let seg = WindSegment {
+            speed_kmh: 16.0934,
+            angle_deg: 90.0,
+            until_m: 100.0,
+            vertical_mps: 3.0,
+        };
+        let vec = WindSock::calc_vec(&seg);
+        assert_eq!(vec[1], 3.0);
+    }
+
+    #[test]
+    fn calc_vec_zero_vertical_segment_keeps_zero_y() {
+        // Upgrades (does not replace) the zero-Y assertions above: the historical
+        // 3-field constructor still yields vertical_mps == 0.0 -> Y == 0.0.
+        let seg = WindSegment::new(16.0934, 90.0, 100.0);
+        assert_eq!(seg.vertical_mps, 0.0);
+        let vec = WindSock::calc_vec(&seg);
+        assert_eq!(vec[1], 0.0);
     }
 
     #[test]
