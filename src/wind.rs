@@ -169,18 +169,26 @@ impl WindSock {
     }
 }
 
-/// Parse a `"SPEED:ANGLE:UNTIL_DISTANCE"` string into a [`WindSegment`]
-/// `(speed_kmh, angle_deg, until_distance_m)`.
+/// Parse a `"SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL]"` string into a [`WindSegment`]
+/// `(speed_kmh, angle_deg, until_distance_m, vertical_mps)`.
 ///
 /// `imperial`: when true, SPEED is mph and UNTIL_DISTANCE is yards; otherwise
 /// SPEED is m/s and UNTIL_DISTANCE is meters. ANGLE is always degrees in the
-/// wind-FROM convention (0 = headwind, 90 = from the right). Shared by the CLI
-/// (`--wind-segment`) and the WASM front-ends so they parse identically.
+/// wind-FROM convention (0 = headwind, 90 = from the right). The optional 4th
+/// field, VERTICAL, is ALWAYS m/s (positive = updraft, raises POI) regardless of
+/// `imperial` — it does not follow --units, matching how [`WindSegment::vertical_mps`]
+/// stores it. This speed-in-display-units-but-vertical-always-m/s asymmetry is
+/// unit-honest (it mirrors the struct field name) even though it reads oddly next
+/// to SPEED. Omitting the 4th field keeps the historical 3-field behavior
+/// (vertical wind 0.0). Shared by the CLI (`--wind-segment`) and the WASM
+/// front-ends so they parse identically.
 pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, String> {
     let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 3 {
+    if parts.len() != 3 && parts.len() != 4 {
         return Err(format!(
-            "invalid wind segment '{s}': expected SPEED:ANGLE:UNTIL_DISTANCE (three colon-separated numbers)"
+            "invalid wind segment '{s}': expected SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL] \
+             (three or four colon-separated numbers; the optional 4th field VERTICAL is always \
+             m/s, positive = updraft, regardless of --units)"
         ));
     }
     let num = |i: usize, name: &str| -> Result<f64, String> {
@@ -191,9 +199,15 @@ pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, St
     let speed = num(0, "speed")?;
     let angle = num(1, "angle")?;
     let until = num(2, "until-distance")?;
-    if !speed.is_finite() || !angle.is_finite() || !until.is_finite() {
+    let vertical = if parts.len() == 4 {
+        num(3, "vertical")?
+    } else {
+        0.0
+    };
+    if !speed.is_finite() || !angle.is_finite() || !until.is_finite() || !vertical.is_finite() {
         return Err(format!(
-            "invalid wind segment '{s}': speed, angle, and until-distance must be finite numbers"
+            "invalid wind segment '{s}': speed, angle, until-distance, and vertical (m/s, \
+             positive = updraft) must be finite numbers"
         ));
     }
     if speed < 0.0 {
@@ -207,7 +221,9 @@ pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, St
     } else {
         (speed * 3.6, until) // m/s -> km/h, meters -> meters
     };
-    Ok(WindSegment::new(speed_kmh, angle, until_m))
+    let mut segment = WindSegment::new(speed_kmh, angle, until_m);
+    segment.vertical_mps = vertical;
+    Ok(segment)
 }
 
 #[cfg(test)]
@@ -381,5 +397,38 @@ mod tests {
         assert!(parse_wind_segment_str("10:nan:5000", true).is_err());
         assert!(parse_wind_segment_str("10:90:nan", true).is_err());
         assert!(parse_wind_segment_str("inf:90:100", true).is_err());
+    }
+
+    #[test]
+    fn test_parse_wind_segment_str_vertical_field() {
+        // MBA-728: 3-field input is unchanged (backward compat) -> vertical_mps == 0.0.
+        let seg = parse_wind_segment_str("10:90:100", true).unwrap();
+        assert_eq!(seg.vertical_mps, 0.0);
+        let seg = parse_wind_segment_str("5:270:200", false).unwrap();
+        assert_eq!(seg.vertical_mps, 0.0);
+
+        // 4-field input parses the vertical component, m/s, regardless of --units.
+        let seg = parse_wind_segment_str("10:90:100:5", true).unwrap();
+        assert_eq!(seg.vertical_mps, 5.0);
+        // The rest of the fields still go through the imperial conversion.
+        assert!((seg.speed_kmh - 16.09344).abs() < 1e-4);
+        assert!((seg.until_m - 91.44).abs() < 1e-4);
+
+        // Vertical is NOT converted by --units (always m/s): metric and imperial parses of the
+        // same "...:5" 4th field land on the identical vertical_mps.
+        let seg_metric = parse_wind_segment_str("5:270:200:5", false).unwrap();
+        assert_eq!(seg_metric.vertical_mps, 5.0);
+
+        // Negative vertical (downdraft) is valid.
+        let seg_neg = parse_wind_segment_str("10:90:100:-3.5", true).unwrap();
+        assert_eq!(seg_neg.vertical_mps, -3.5);
+
+        // A non-numeric or non-finite 4th field is rejected.
+        assert!(parse_wind_segment_str("10:90:100:bad", true).is_err());
+        assert!(parse_wind_segment_str("10:90:100:nan", true).is_err());
+        assert!(parse_wind_segment_str("10:90:100:inf", true).is_err());
+
+        // Too many fields is still rejected.
+        assert!(parse_wind_segment_str("10:90:100:5:1", true).is_err());
     }
 }

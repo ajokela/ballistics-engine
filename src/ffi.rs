@@ -59,6 +59,9 @@ pub struct FFIWindConditions {
     // radians, wind-FROM convention: 0 = headwind, PI/2 = from the right,
     // PI = tailwind, 3*PI/2 = from the left (matches WindConditions / WindSock).
     pub direction: c_double,
+    // Appended (keeps existing field offsets): vertical wind m/s, positive = updraft;
+    // 0.0 if unset.
+    pub vertical_speed: c_double,
 }
 
 #[repr(C)]
@@ -267,8 +270,7 @@ unsafe fn calculate_trajectory_impl(
         WindConditions {
             speed: wind.speed,
             direction: wind.direction,
-            // FFIWindConditions has no vertical field yet; MBA-728 scope is core physics only.
-            vertical_speed: 0.0,
+            vertical_speed: wind.vertical_speed,
         }
     };
 
@@ -525,8 +527,7 @@ unsafe fn calculate_zero_angle_impl(
         WindConditions {
             speed: wind.speed,
             direction: wind.direction,
-            // FFIWindConditions has no vertical field yet; MBA-728 scope is core physics only.
-            vertical_speed: 0.0,
+            vertical_speed: wind.vertical_speed,
         }
     };
 
@@ -1373,6 +1374,31 @@ mod tests {
             let za = std::slice::from_raw_parts((*a).points, (*a).point_count as usize).last().unwrap().position_z;
             let zb = std::slice::from_raw_parts((*b).points, (*b).point_count as usize).last().unwrap().position_z;
             assert!(zb > za + 0.005, "FFI cant must deflect right: level={za} canted={zb}");
+            ballistics_free_trajectory_result(a);
+            ballistics_free_trajectory_result(b);
+        }
+    }
+
+    #[test]
+    fn ffi_vertical_wind_raises_trajectory() {
+        let inputs = valid_trajectory_inputs();
+        let no_wind = FFIWindConditions {
+            speed: 0.0,
+            direction: 0.0,
+            vertical_speed: 0.0,
+        };
+        let updraft = FFIWindConditions {
+            speed: 0.0,
+            direction: 0.0,
+            vertical_speed: 5.0,
+        };
+        unsafe {
+            let a = ballistics_calculate_trajectory(&inputs, &no_wind, std::ptr::null(), 400.0, 1.0);
+            let b = ballistics_calculate_trajectory(&inputs, &updraft, std::ptr::null(), 400.0, 1.0);
+            assert!(!a.is_null() && !b.is_null());
+            let ya = std::slice::from_raw_parts((*a).points, (*a).point_count as usize).last().unwrap().position_y;
+            let yb = std::slice::from_raw_parts((*b).points, (*b).point_count as usize).last().unwrap().position_y;
+            assert!(yb > ya + 0.01, "FFI updraft must raise the trajectory: no_wind={ya} updraft={yb}");
             ballistics_free_trajectory_result(a);
             ballistics_free_trajectory_result(b);
         }

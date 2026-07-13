@@ -384,12 +384,24 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_direction: f64,
 
-        /// Downrange wind segment "SPEED:ANGLE:UNTIL_DISTANCE" (repeatable). SPEED/UNTIL_DISTANCE
-        /// follow --units (mph & yd imperial, m/s & m metric); ANGLE is degrees, same convention
-        /// as --wind-direction. Each segment applies from the previous boundary out to
-        /// UNTIL_DISTANCE; wind is zero beyond the last segment. Overrides --wind-speed/-direction.
-        /// Not compatible with --enable-wind-shear.
-        #[arg(long = "wind-segment", value_name = "SPEED:ANGLE:DIST", action = clap::ArgAction::Append)]
+        /// Vertical wind, mph (imperial) or m/s (metric); positive = updraft (raises POI)
+        #[arg(
+            long,
+            value_parser = f64_range(-100.0, 100.0),
+            default_value_t = 0.0,
+            allow_hyphen_values = true
+        )]
+        wind_vertical: f64,
+
+        /// Downrange wind segment "SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL]" (repeatable).
+        /// SPEED/UNTIL_DISTANCE follow --units (mph & yd imperial, m/s & m metric); ANGLE is
+        /// degrees, same convention as --wind-direction. The optional 4th field, VERTICAL, is
+        /// ALWAYS m/s (positive = updraft, raises POI) regardless of --units — unlike SPEED it
+        /// does not follow --units; omit it for the pre-existing 3-field form (vertical wind
+        /// 0). Each segment applies from the previous boundary out to UNTIL_DISTANCE; wind is
+        /// zero beyond the last segment. Overrides --wind-speed/-direction/-vertical. Not
+        /// compatible with --enable-wind-shear.
+        #[arg(long = "wind-segment", value_name = "SPEED:ANGLE:DIST[:VERTICAL]", action = clap::ArgAction::Append)]
         wind_segment: Vec<String>,
 
         /// Manual velocity-dependent BC segment(s): "VMIN:VMAX:BC" (repeatable). VMIN/VMAX are
@@ -794,6 +806,15 @@ enum Commands {
         /// Base wind direction (degrees; wind-FROM: 0=headwind, 90=from right, 180=tailwind)
         #[arg(long, default_value = "0.0")]
         wind_direction: f64,
+
+        /// Base vertical wind, mph (imperial) or m/s (metric); positive = updraft (raises POI)
+        #[arg(
+            long,
+            value_parser = f64_range(-100.0, 100.0),
+            default_value_t = 0.0,
+            allow_hyphen_values = true
+        )]
+        wind_vertical: f64,
 
         /// Target distance (yards for imperial, meters for metric)
         #[arg(long)]
@@ -1831,6 +1852,7 @@ struct TrajectoryConfig {
     // Wind (metric)
     wind_speed: f64,
     wind_direction: f64, // degrees at the CLI boundary
+    wind_vertical: f64,  // m/s, positive = updraft
     // Downrange-segmented wind (engine units: speed km/h, angle deg, distance m).
     // When non-empty, overrides the scalar wind above.
     wind_segments: Vec<ballistics_engine::wind::WindSegment>,
@@ -2657,6 +2679,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             time_step,
             wind_speed,
             wind_direction,
+            wind_vertical,
             wind_segment,
             bc_segment,
             temperature,
@@ -3327,6 +3350,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
             let max_range_metric = UnitConverter::distance_to_metric(final_max_range, cli.units);
             let wind_speed_metric = UnitConverter::wind_to_metric(final_wind_speed, cli.units);
+            let wind_vertical_metric = UnitConverter::wind_to_metric(wind_vertical, cli.units);
             let temperature_metric =
                 UnitConverter::temperature_to_metric(final_temperature, cli.units);
             let pressure_metric = UnitConverter::pressure_to_metric(final_pressure, cli.units);
@@ -3577,7 +3601,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let zero_wind = WindConditions {
                     speed: wind_speed_metric,
                     direction: final_wind_direction.to_radians(),
-                    vertical_speed: 0.0,
+                    vertical_speed: wind_vertical_metric,
                 };
                 let zero_atmosphere = AtmosphericConditions {
                     temperature: zero_temperature_metric,
@@ -3630,6 +3654,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 altitude: altitude_metric,
                 wind_speed: wind_speed_metric,
                 wind_direction: final_wind_direction,
+                wind_vertical: wind_vertical_metric,
                 wind_segments,
                 output,
                 full,
@@ -3845,7 +3870,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 let local_wind = WindConditions {
                                     speed: wind_speed_metric,
                                     direction: local_wind_direction_rad,
-                                    ..Default::default()
+                                    vertical_speed: wind_vertical_metric,
                                 };
                                 let local_atmo = AtmosphericConditions {
                                     temperature: temperature_metric,
@@ -3999,6 +4024,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_direction_std,
             wind_speed,
             wind_direction,
+            wind_vertical,
             target_distance,
             target_radius,
             drag_table,
@@ -4014,6 +4040,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let velocity_std_metric = UnitConverter::velocity_to_metric(velocity_std, cli.units);
             let wind_std_metric = UnitConverter::wind_to_metric(wind_std, cli.units);
             let wind_speed_metric = UnitConverter::wind_to_metric(wind_speed, cli.units);
+            let wind_vertical_metric = UnitConverter::wind_to_metric(wind_vertical, cli.units);
             let target_distance_metric =
                 target_distance.map(|d| UnitConverter::distance_to_metric(d, cli.units));
             // Hit-zone radius in meters: default 0.3 m, or the user's --target-radius (in the
@@ -4038,6 +4065,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_direction_std,
                 wind_speed_metric,
                 wind_direction,
+                wind_vertical_metric,
                 target_distance_metric,
                 target_radius_metric,
                 custom_drag_table,
@@ -5526,6 +5554,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         altitude,
         wind_speed,
         wind_direction,
+        wind_vertical,
         ref wind_segments,
         output,
         full,
@@ -5678,7 +5707,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     let wind = WindConditions {
         speed: wind_speed,
         direction: wind_direction_rad,
-        ..Default::default()
+        vertical_speed: wind_vertical,
     };
 
     // Set up atmospheric conditions
@@ -5705,9 +5734,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             );
         }
         // Note when a non-zero scalar wind is also set, since segments take precedence.
-        if wind_speed != 0.0 {
+        if wind_speed != 0.0 || wind_vertical != 0.0 {
             eprintln!(
-                "note: --wind-segment overrides --wind-speed/--wind-direction (scalar wind ignored)"
+                "note: --wind-segment overrides --wind-speed/--wind-direction/--wind-vertical \
+                 (scalar wind ignored)"
             );
         }
         // Warn if the segments don't cover the whole trajectory (wind is zero beyond
@@ -6594,6 +6624,7 @@ fn run_monte_carlo(
     wind_direction_std: f64,
     wind_speed: f64,
     wind_direction: f64,
+    wind_vertical: f64,
     target_distance: Option<f64>,
     target_radius: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
@@ -6624,7 +6655,7 @@ fn run_monte_carlo(
     let base_wind = WindConditions {
         speed: wind_speed,
         direction: wind_direction.to_radians(),
-        vertical_speed: 0.0,
+        vertical_speed: wind_vertical,
     };
 
     // Set up Monte Carlo parameters

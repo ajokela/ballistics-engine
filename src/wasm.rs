@@ -220,6 +220,8 @@ impl WasmBallistics {
         // f64 is required: `wind_direction.to_radians()` below needs a known receiver
         // type (method resolution can't infer it from the field assignment alone).
         let mut wind_direction: f64 = 0.0;
+        // Vertical wind (mph imperial / m/s metric); positive = updraft (raises POI).
+        let mut wind_vertical: f64 = 0.0;
         // Raw "SPEED:ANGLE:UNTIL" strings; every --wind-segment occurrence is collected
         // (the parse loop visits all args, so repeats accumulate here).
         let mut wind_segment_strs: Vec<String> = Vec::new();
@@ -376,6 +378,14 @@ impl WasmBallistics {
                         wind_direction = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid wind direction"))?;
+                        i += 1;
+                    }
+                }
+                "--wind-vertical" => {
+                    if i + 1 < args.len() {
+                        wind_vertical = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid wind vertical"))?;
                         i += 1;
                     }
                 }
@@ -848,9 +858,11 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 wind.speed = wind_speed * 0.44704; // mph to m/s
+                wind.vertical_speed = wind_vertical * 0.44704; // mph to m/s
             }
             UnitSystem::Metric => {
                 wind.speed = wind_speed; // already m/s
+                wind.vertical_speed = wind_vertical; // already m/s
             }
         }
         // WindConditions.direction is RADIANS (0=North, PI/2=East); --wind-direction is degrees.
@@ -2513,7 +2525,10 @@ Trajectory Command:
   Environmental:
     --wind-speed <SPEED>         Wind speed (mph/m/s)
     --wind-direction <DIR>       Wind direction (deg; 0=headwind, 90=from right)
-    --wind-segment <S:A:D>       Downrange wind seg speed:angle:until-dist (repeatable)
+    --wind-vertical <SPEED>      Vertical wind (mph/m/s); positive = updraft (raises POI)
+    --wind-segment <S:A:D[:V]>   Downrange wind seg speed:angle:until-dist[:vertical] (repeatable).
+                                 Optional 4th field is ALWAYS m/s updraft-positive, unlike
+                                 speed which follows --units
     --temperature <TEMP>         Temperature (F/C)
     --pressure <PRESSURE>        Pressure (inHg/hPa)
     --humidity <HUMIDITY>        Humidity (0-100%)
