@@ -3375,6 +3375,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Imperial => bore_height_value * 0.3048, // feet to meters
                 UnitSystem::Metric => bore_height_value,
             };
+            // Trajectory altitude feeds local air density, so an absurd bore height
+            // silently thins the air over the whole flight (a 25 km "muzzle" flies in
+            // ~2% density) or blows up the integrator. Warn — never clamp.
+            if bore_height_metric > 1000.0 {
+                eprintln!(
+                    "warning: --bore-height puts the bore {bore_height_metric:.0} m above ground; \
+                     air density is computed at trajectory altitude, so this thins the air for \
+                     the entire flight. If you meant site elevation use --altitude; to disable \
+                     ground-impact truncation use --ignore-ground-impact."
+                );
+            }
 
             // Construct PDF metadata if PDF output is requested
             let pdf_metadata = if matches!(output, OutputFormat::Pdf) {

@@ -1077,11 +1077,15 @@ impl WasmBallistics {
                     }
                 };
                 let mut combined = format!("{}{}", zero_info, output);
-                if print_bc_segments {
+                // Human-readable append only for the table view: tacking text after a
+                // JSON/CSV payload would break any downstream parser of those formats.
+                if print_bc_segments && matches!(output_format, OutputFormat::Table) {
                     combined.push_str(&self.format_bc_segments_report(&inputs, units));
                 }
                 if let Some(warning) = &muzzle_height_warning {
-                    combined = format!("{}{}", warning, combined);
+                    if matches!(output_format, OutputFormat::Table) {
+                        combined = format!("{}{}", warning, combined);
+                    }
                 }
                 Ok(combined)
             }
