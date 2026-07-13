@@ -92,3 +92,25 @@ fn conflicting_angle_flags_are_rejected() {
     let out = run(&["--wind-angle", "45", "--wind-angles", "30,60"]);
     assert!(!out.status.success());
 }
+
+#[test]
+fn mirrored_angles_have_opposite_signed_drift() {
+    // Sign-convention lock: wind from the right (90°) and from the left (270°)
+    // must produce equal-magnitude, OPPOSITE-signed drift. A wind-FROM/wind-TO
+    // convention flip or a lost sign would slip past every magnitude-only test
+    // above; this one reads the signed, unrounded JSON values.
+    let signed_drift = |angle: &str| -> f64 {
+        let out = run(&["--wind-angle", angle, "-o", "json"]);
+        assert!(out.status.success());
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        v["data"].as_array().expect("rows").last().expect("row")["wind_10"]
+            .as_f64()
+            .expect("wind_10 drift")
+    };
+    let (right, left) = (signed_drift("90"), signed_drift("270"));
+    assert!(right.abs() > 0.1, "sanity: real drift expected, got {right}");
+    assert!(
+        (right + left).abs() < 1e-9,
+        "90° and 270° must be antisymmetric: {right} vs {left}"
+    );
+}
