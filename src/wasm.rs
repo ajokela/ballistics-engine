@@ -153,6 +153,25 @@ impl WasmBallistics {
             }
         }
 
+        // MBA-1289: `--units <system>` may appear anywhere — including BEFORE the command
+        // word, the order the help text advertises. Units were already parsed from the
+        // full list above, so strip the flag and its value here; otherwise the dispatch
+        // below would read `--units` as the command and fail with "Unknown command".
+        let mut stripped: Vec<&str> = Vec::with_capacity(args.len());
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--units" || args[i] == "-u" {
+                i += 2; // skip the flag and its value (a dangling flag skips harmlessly)
+            } else {
+                stripped.push(args[i]);
+                i += 1;
+            }
+        }
+        let args = stripped;
+        if args.is_empty() {
+            return Ok(self.show_help());
+        }
+
         // Route to appropriate command handler
         match args[0] {
             "version" => Ok(format!(
