@@ -4939,10 +4939,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         angles.push(angle);
                     }
-                    if angles.is_empty() {
-                        eprintln!("Error: --wind-angles must contain at least one valid number (e.g., '30,60,90')");
-                        std::process::exit(1);
-                    }
+                    // (no empty-check needed: split(',') yields >=1 token and every
+                    // token either pushes or errors via `?`)
                     (angles, false)
                 } else {
                     (vec![90.0], true)
