@@ -297,3 +297,47 @@ fn updraft_deflection_is_unaffected_by_shear() {
         "shear should have changed the lateral drift (was it actually active?): dz_no_shear={dz_no_shear:.6}, dz_shear={dz_shear:.6}, diff={dz_diff:.6}"
     );
 }
+
+#[test]
+fn updraft_deflection_is_unaffected_by_shear_in_the_main_solver() {
+    // Sibling of updraft_deflection_is_unaffected_by_shear: the MAIN solver's
+    // scalar+shear path composes vertical separately (cli_api::get_wind_at_altitude
+    // adds it after the shear ratio), a different implementation from
+    // apply_boundary_layer_shear's save/restore that the fast-path test guards.
+    // Both pass-through sites need their own regression net.
+    let wind = WindConditions {
+        speed: 3.0,
+        direction: std::f64::consts::FRAC_PI_2,
+        vertical_speed: 5.0,
+        ..Default::default()
+    };
+    // Loft the arc well above the boundary-layer reference height: near the ground
+    // the shear ratio clamps to 1.0 and the "shear was active" control below can't
+    // distinguish the runs (the fast-path sibling test lofts for the same reason).
+    let lofted = || {
+        let mut i = base();
+        i.muzzle_angle = 0.12;
+        i
+    };
+    let calm = solve(lofted(), WindConditions::default(), 500.0);
+    let no_shear = solve(lofted(), wind.clone(), 500.0);
+    let mut shear_inputs = lofted();
+    shear_inputs.enable_wind_shear = true;
+    shear_inputs.wind_shear_model = "power_law".to_string();
+    let with_shear = solve(shear_inputs, wind, 500.0);
+
+    let (y_calm, z_calm) = yz_at(&calm, 400.0);
+    let (y_ns, z_ns) = yz_at(&no_shear, 400.0);
+    let (y_sh, z_sh) = yz_at(&with_shear, 400.0);
+    let (dy_ns, dy_sh) = (y_ns - y_calm, y_sh - y_calm);
+    let (dz_ns, dz_sh) = (z_ns - z_calm, z_sh - z_calm);
+
+    assert!(
+        (dy_sh - dy_ns).abs() <= 0.02 * dy_ns.abs(),
+        "main-solver shear must not touch vertical: dy_no_shear={dy_ns:.6} dy_shear={dy_sh:.6}"
+    );
+    assert!(
+        (dz_sh - dz_ns).abs() > 1e-4,
+        "shear should have altered horizontal drift (was it active?): dz_no_shear={dz_ns:.6} dz_shear={dz_sh:.6}"
+    );
+}
