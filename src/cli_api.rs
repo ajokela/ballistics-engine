@@ -1136,11 +1136,7 @@ impl TrajectorySolver {
 
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindConditions / WindSock); wind enters drag via velocity - wind.
-        Vector3::new(
-            -self.wind.speed * self.wind.direction.cos() * speed_ratio, // X: downrange head/tail
-            0.0,
-            -self.wind.speed * self.wind.direction.sin() * speed_ratio, // Z: lateral crosswind
-        )
+        crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0) * speed_ratio
     }
 
     pub fn solve(&self) -> Result<TrajectoryResult, BallisticsError> {
@@ -1292,11 +1288,8 @@ impl TrajectorySolver {
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
-        let wind_vector = Vector3::new(
-            -self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
-            0.0,
-            -self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
-        );
+        let wind_vector =
+            crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0);
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
         // instead of re-deriving them (with a to_lowercase alloc) every integration step.
@@ -1555,11 +1548,8 @@ impl TrajectorySolver {
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
-        let wind_vector = Vector3::new(
-            -self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
-            0.0,
-            -self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
-        );
+        let wind_vector =
+            crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0);
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
         // instead of re-deriving them (with a to_lowercase alloc) every integration step.
@@ -1812,11 +1802,8 @@ impl TrajectorySolver {
         let base_ratio = air_density / 1.225;
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
-        let wind_vector = Vector3::new(
-            -self.wind.speed * self.wind.direction.cos(), // X: downrange (head/tail wind)
-            0.0,
-            -self.wind.speed * self.wind.direction.sin(), // Z: lateral (crosswind)
-        );
+        let wind_vector =
+            crate::wind::wind_vector(self.wind.speed, self.wind.direction, 0.0);
 
         // Mach-transition distances for the sampled-output flags (see solve_euler/solve_rk4).
         let mut transonic_distances: Vec<f64> = Vec::new();

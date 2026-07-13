@@ -34,11 +34,7 @@ impl WindLayer {
     /// STANDARD BALLISTICS CONVENTION: X=downrange, Y=vertical, Z=lateral
     pub fn to_vector(&self) -> Vector3<f64> {
         let ang = self.direction_deg.to_radians();
-        Vector3::new(
-            -self.speed_mps * ang.cos(), // X (downrange - head/tail component)
-            0.0,                         // Y (vertical)
-            -self.speed_mps * ang.sin(), // Z (lateral - crosswind component)
-        )
+        crate::wind::wind_vector(self.speed_mps, ang, 0.0)
     }
 }
 
@@ -174,11 +170,7 @@ impl WindShearProfile {
         let direction_rad = dir1 * (1.0 - ratio) + dir2 * ratio;
 
         // Convert to vector (X=downrange, Y=vertical, Z=lateral)
-        Vector3::new(
-            -speed * direction_rad.cos(), // X (downrange - head/tail)
-            0.0,
-            -speed * direction_rad.sin(), // Z (lateral - crosswind)
-        )
+        crate::wind::wind_vector(speed, direction_rad, 0.0)
     }
 
     /// Interpolate wind from custom altitude layers
@@ -322,11 +314,7 @@ impl WindShearWindSock {
         for &(speed_mps, angle_deg, until_dist) in &self.segments {
             if range_m <= until_dist {
                 let ang = angle_deg.to_radians();
-                return Vector3::new(
-                    -speed_mps * ang.cos(), // X (downrange - head/tail)
-                    0.0,
-                    -speed_mps * ang.sin(), // Z (lateral - crosswind)
-                );
+                return crate::wind::wind_vector(speed_mps, ang, 0.0);
             }
         }
 
@@ -440,11 +428,7 @@ pub fn get_wind_at_position(
     if !enable_wind_shear || wind_shear_model == "none" {
         // No shear - return constant wind
         let ang = base_direction_deg.to_radians();
-        return Vector3::new(
-            -base_speed_mps * ang.cos(), // x (downrange)
-            0.0,                         // y (vertical)
-            -base_speed_mps * ang.sin(), // z (lateral)
-        );
+        return crate::wind::wind_vector(base_speed_mps, ang, 0.0);
     }
 
     // Wind shear enabled: scale the operative (input) wind by a boundary-layer profile keyed off
@@ -459,11 +443,7 @@ pub fn get_wind_at_position(
     let _ = shooter_altitude_m;
 
     let ang = base_direction_deg.to_radians();
-    let base_vector = Vector3::new(
-        -base_speed_mps * ang.cos(), // x (downrange head/tail)
-        0.0,                         // y (vertical)
-        -base_speed_mps * ang.sin(), // z (lateral crosswind)
-    );
+    let base_vector = crate::wind::wind_vector(base_speed_mps, ang, 0.0);
     apply_boundary_layer_shear(
         base_vector,
         altitude_m,
