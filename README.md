@@ -15,6 +15,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation
 - **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere
 - **Wind Effects** - 3D wind calculations with altitude-dependent wind shear modeling and **downrange-segmented wind** (`--wind-segment SPEED:ANGLE:DIST`, repeatable — model wind that varies along the path, e.g. muzzle plus downrange sensor readings)
+- **Oblique Wind-Drift Cards** - Wind dope cards at any wind-FROM angle, not just full-value 90° crosswind (`wind-card --wind-angle <DEG>` or `--wind-angles <CSV>` for one card per angle); each cell is a real trajectory solve, default (no flags) unchanged from the classic full-value 90° card — see [CLI_USAGE.md](CLI_USAGE.md#wind-card)
 - **Monte Carlo Simulations** - Statistical analysis with parameter uncertainties
 - **BC Estimation** - Estimate ballistic coefficients from trajectory data
 - **Advanced Physics**:
