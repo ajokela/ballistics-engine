@@ -4928,14 +4928,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     for tok in csv.split(',') {
                         let tok = tok.trim();
                         let angle: f64 = tok.parse().map_err(|_| {
-                            format!(
-                                "Error: --wind-angles contains an invalid number: '{}'",
-                                tok
-                            )
+                            format!("--wind-angles contains an invalid number: '{}'", tok)
                         })?;
                         if angle.is_nan() || !(0.0..=360.0).contains(&angle) {
                             return Err(format!(
-                                "Error: --wind-angles value '{}' must be in [0, 360]",
+                                "--wind-angles value '{}' must be in [0, 360]",
                                 tok
                             )
                             .into());
@@ -8691,7 +8688,6 @@ fn handle_wind_card(
         current += step;
     }
 
-    let multi_angle = wind_angles.len() > 1;
     let mut json_cards: Vec<serde_json::Value> = Vec::new();
 
     for (angle_idx, &angle_deg) in wind_angles.iter().enumerate() {
@@ -8782,7 +8778,7 @@ fn handle_wind_card(
                 json_cards.push(card);
             }
             OutputFormat::Csv => {
-                if multi_angle {
+                if !legacy_labels {
                     if angle_idx > 0 {
                         println!();
                     }
@@ -8794,8 +8790,14 @@ fn handle_wind_card(
                     .collect();
                 println!("range_{},{}", dist_unit, ws_headers.join(","));
                 for r in &wind_rows {
-                    let drift_strs: Vec<String> =
-                        r.drifts.iter().map(|d| format!("{:.1}", d)).collect();
+                    let drift_strs: Vec<String> = r
+                        .drifts
+                        .iter()
+                        .map(|d| {
+                            let d = if d.abs() < 1e-9 { 0.0 } else { *d };
+                            format!("{:.1}", d)
+                        })
+                        .collect();
                     println!("{:.0},{}", r.range, drift_strs.join(","));
                 }
             }
@@ -8840,6 +8842,7 @@ fn handle_wind_card(
                 for r in &wind_rows {
                     let mut row_str = format!("│{:>9.0} ", r.range);
                     for d in &r.drifts {
+                        let d = if d.abs() < 1e-9 { 0.0 } else { *d };
                         row_str += &format!("│{:>9.1} ", d);
                     }
                     row_str += "│";
