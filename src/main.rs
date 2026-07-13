@@ -1284,7 +1284,7 @@ enum Commands {
         target_angle: f64,
 
         /// Target length for body-length holds (inches for imperial, mm for metric)
-        #[arg(long)]
+        #[arg(long, value_parser = f64_range(0.001, 10000.0))]
         target_length: Option<f64>,
 
         /// Start range (yards or meters)

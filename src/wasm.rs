@@ -2599,6 +2599,9 @@ Lead Command:
     --range <DIST>                Range to target (yards/meters) [default: 500]
     --adjustment-unit <UNIT>      mil or moa [default: mil]
 
+  Note: this command assumes calm air and standard atmosphere; for a wind-aware
+  lead (time of flight under wind), use the native CLI's lead subcommand.
+
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
   ballistics trajectory --auto-zero 200 --enable-spin-drift
