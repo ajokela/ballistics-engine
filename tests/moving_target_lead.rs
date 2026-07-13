@@ -76,14 +76,41 @@ fn outbound_45_converges_under_10_iterations_with_small_residual() {
     .expect("outbound");
     assert!(sol.iterations < 10, "iterations {}", sol.iterations);
     // Residual: re-applying the fixed-point map moves the range by < 0.1 m.
-    let tof = independent_tof(base(), WindConditions::default(), sol.corrected_range_m, 800.0);
-    let reapplied = 600.0 + 15.0 * 45f64.to_radians().cos() * tof;
+    let tof_at_corrected =
+        independent_tof(base(), WindConditions::default(), sol.corrected_range_m, 800.0);
+    let reapplied = 600.0 + 15.0 * 45f64.to_radians().cos() * tof_at_corrected;
     assert!(
         (reapplied - sol.corrected_range_m).abs() < 0.1,
         "residual {} m",
         (reapplied - sol.corrected_range_m).abs()
     );
     assert!(sol.corrected_range_m > 600.0);
+
+    // The reported solution must be evaluated AT the corrected intercept range,
+    // not the original 600 m — this is the whole point of the range correction.
+    assert!(
+        (sol.time_of_flight_s - tof_at_corrected).abs() < 1e-9,
+        "sol.time_of_flight_s {} vs independent TOF at corrected range {tof_at_corrected}",
+        sol.time_of_flight_s
+    );
+    // Discriminating-power precondition: TOF at the corrected range must actually
+    // differ from TOF at the original range, or the assertion above can't tell
+    // them apart. If this ever fails, the scenario needs a faster/more radial
+    // target, not a looser bound.
+    let tof_at_original = independent_tof(base(), WindConditions::default(), 600.0, 800.0);
+    assert!(
+        (tof_at_corrected - tof_at_original).abs() > 1e-4,
+        "test precondition: corrected vs original TOF must be distinguishable ({tof_at_corrected} vs {tof_at_original})"
+    );
+
+    // Pure recomputation pin: lead_m must equal v_lateral * reported TOF.
+    let v_lateral = 15.0 * 45f64.to_radians().sin();
+    assert!(
+        (sol.lead_m - v_lateral * sol.time_of_flight_s).abs() < 1e-9,
+        "lead_m {} vs v_lateral*TOF {}",
+        sol.lead_m,
+        v_lateral * sol.time_of_flight_s
+    );
 }
 
 #[test]
@@ -99,6 +126,16 @@ fn inbound_target_shortens_corrected_range() {
     .expect("inbound");
     assert!(sol.corrected_range_m < 600.0);
     assert!(sol.lead_m > 0.0, "sin(135°) > 0: still leads right");
+
+    // The reported solution must be evaluated AT the corrected (shortened) intercept
+    // range, not the original 600 m.
+    let tof_at_corrected =
+        independent_tof(base(), WindConditions::default(), sol.corrected_range_m, 700.0);
+    assert!(
+        (sol.time_of_flight_s - tof_at_corrected).abs() < 1e-9,
+        "sol.time_of_flight_s {} vs independent TOF at corrected range {tof_at_corrected}",
+        sol.time_of_flight_s
+    );
 }
 
 #[test]
