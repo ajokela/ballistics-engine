@@ -221,3 +221,18 @@ fn tof_is_wind_aware_so_lead_follows() {
     );
     assert!(windy.lead_mil > calm.lead_mil, "longer TOF must increase lead");
 }
+
+#[test]
+fn pdf_lead_refactor_is_identical_to_printed_precision() {
+    // The dope-card lead column used lead_yd = mph·1760/3600·tof. The refactor routes
+    // through lead_from_tof (mph·0.44704 m/s, ÷0.9144 to yd). Identical to ≤1 ulp —
+    // far inside the card's 2-decimal print.
+    for (mph, tof) in [(3.0_f64, 0.4_f64), (10.0, 1.2), (25.0, 0.75)] {
+        let old_yd = (mph * 1760.0 / 3600.0) * tof;
+        let new_yd = ballistics_engine::lead_from_tof(mph * 0.44704, 90.0, tof, 500.0).lead_m / 0.9144;
+        assert!(
+            (old_yd - new_yd).abs() < 1e-9,
+            "PDF lead shifted: {old_yd} vs {new_yd}"
+        );
+    }
+}

@@ -6274,7 +6274,17 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     let drift_yd = s.wind_drift_m / 0.9144;
                     // Lead: how far the target moves during the bullet's flight, as an
                     // angular hold. Movement (yd) = speed (yd/s) * time; 1760/3600 = mph->yd/s.
-                    let lead_yd = (pdf_meta.target_speed_mph * 1760.0 / 3600.0) * s.time_s;
+                    // Shared moving-target math (MBA-1287): mph → m/s, perpendicular
+                    // (90°) crossing — lead_m = speed·TOF exactly, as before; the yd
+                    // conversion chain differs from the old 1760/3600 factor by ≤1 ulp.
+                    let lead_m = ballistics_engine::lead_from_tof(
+                        pdf_meta.target_speed_mph * 0.44704,
+                        90.0,
+                        s.time_s,
+                        s.distance_m,
+                    )
+                    .lead_m;
+                    let lead_yd = lead_m / 0.9144;
                     let unit = pdf_meta.adjustment_unit;
 
                     DopeCardRow {
