@@ -404,7 +404,7 @@ pub(crate) fn apply_boundary_layer_shear(
 ///
 /// # Arguments
 /// * `position` - 3D position vector [x_downrange, y_vertical, z_lateral]
-/// * `wind_segments` - Wind segments as (speed_kmh, angle_deg, until_distance_m)
+/// * `wind_segments` - Wind segments as [`crate::wind::WindSegment`] (speed_kmh, angle_deg, until_distance_m)
 /// * `enable_wind_shear` - Whether to apply wind shear modeling
 /// * `wind_shear_model` - Model type: "none", "logarithmic", "power_law", "ekman_spiral"
 /// * `shooter_altitude_m` - Shooter's altitude above sea level
@@ -413,7 +413,7 @@ pub(crate) fn apply_boundary_layer_shear(
 /// Wind vector in m/s [x_downrange, y_vertical, z_lateral]
 pub fn get_wind_at_position(
     position: &Vector3<f64>,
-    wind_segments: &[(f64, f64, f64)], // (speed_kmh, angle_deg, until_distance_m)
+    wind_segments: &[crate::wind::WindSegment],
     enable_wind_shear: bool,
     wind_shear_model: &str,
     shooter_altitude_m: f64,
@@ -428,8 +428,8 @@ pub fn get_wind_at_position(
     } else {
         wind_segments
             .iter()
-            .find(|seg| range_m < seg.2)
-            .map(|seg| (seg.0, seg.1))
+            .find(|seg| range_m < seg.until_m)
+            .map(|seg| (seg.speed_kmh, seg.angle_deg))
             .unwrap_or((0.0, 0.0))
     };
 
@@ -740,7 +740,7 @@ mod fix_validation_tests {
         // Flat-fire: bullet ~1 m below line of sight, mid-range, 90deg full-value crosswind.
         // 16.09344 km/h = 4.4704 m/s (10 mph). With the fix, lateral (Z) wind must be ~full.
         let pos = Vector3::new(457.0, -1.0, 0.0); // [downrange, vertical(rel LOS), lateral]
-        let segs = [(16.09344_f64, 90.0_f64, 1000.0_f64)];
+        let segs = [crate::wind::WindSegment::new(16.09344, 90.0, 1000.0)];
         let w = get_wind_at_position(&pos, &segs, true, "logarithmic", 0.0);
         let expected = 16.09344 * 0.2777778; // m/s
         println!("flat-fire wind vec = {:?}, |Z| = {}", w, w.z.abs());

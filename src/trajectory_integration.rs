@@ -41,9 +41,9 @@ fn wind_vector_for_range(range_m: f64, wind_segments: &[WindSegment]) -> Vector3
         return Vector3::zeros();
     }
     for seg in wind_segments {
-        if range_m < seg.2 {
-            let wind_speed_mps = seg.0 * 0.2777778; // km/h to m/s
-            let wind_angle_rad = seg.1.to_radians();
+        if range_m < seg.until_m {
+            let wind_speed_mps = seg.speed_kmh * 0.2777778; // km/h to m/s
+            let wind_angle_rad = seg.angle_deg.to_radians();
             return Vector3::new(
                 -wind_speed_mps * wind_angle_rad.cos(),
                 0.0,
@@ -304,12 +304,12 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         target_distance: 1000.0, // default
         muzzle_angle: 0.0,
         wind_speed: if !params.wind_segments.is_empty() {
-            params.wind_segments[0].0 * 0.2777778 // km/h -> m/s
+            params.wind_segments[0].speed_kmh * 0.2777778 // km/h -> m/s
         } else {
             0.0
         },
         wind_angle: if !params.wind_segments.is_empty() {
-            params.wind_segments[0].1.to_radians() // degrees -> radians
+            params.wind_segments[0].angle_deg.to_radians() // degrees -> radians
         } else {
             0.0
         },
@@ -798,7 +798,10 @@ mod tests {
     fn rk45_retries_rejected_wind_boundary_step() {
         let initial_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
         let mut params = create_test_params(100.0);
-        params.wind_segments = vec![(0.0, 90.0, 4.0), (1_000.0, 90.0, 10_000.0)];
+        params.wind_segments = vec![
+            WindSegment::new(0.0, 90.0, 4.0),
+            WindSegment::new(1_000.0, 90.0, 10_000.0),
+        ];
 
         let state = Vector6::from_row_slice(&initial_state);
         let launch_speed =
@@ -849,7 +852,10 @@ mod tests {
     #[test]
     fn integration_normalizes_wind_segments_by_distance() {
         let initial_state = [0.0, 0.0, 0.0, 800.0, 0.0, 0.0];
-        let sorted_segments = vec![(40.0, 270.0, 300.0), (20.0, 90.0, 600.0)];
+        let sorted_segments = vec![
+            WindSegment::new(40.0, 270.0, 300.0),
+            WindSegment::new(20.0, 90.0, 600.0),
+        ];
 
         let mut sorted_params = create_test_params(100.0);
         sorted_params.wind_segments = sorted_segments.clone();
@@ -1070,7 +1076,7 @@ mod tests {
             bullet_length: 0.031496,    // 1.24 in
             twist_rate: 10.0,
             drag_model: DragModel::G7,
-            wind_segments: vec![(0.0, 90.0, 914.4)],
+            wind_segments: vec![WindSegment::new(0.0, 90.0, 914.4)],
             atmos_params: (0.0, 15.0, 1013.25, 1.0),
             omega_vector: None,
             enable_spin_drift: false,
@@ -1217,7 +1223,7 @@ mod tests {
 
         // Strong headwind (0 degrees = headwind)
         let mut params_headwind = create_test_params(target_distance);
-        params_headwind.wind_segments = vec![(72.0, 0.0, 500.0)]; // 72 km/h = 20 m/s headwind
+        params_headwind.wind_segments = vec![WindSegment::new(72.0, 0.0, 500.0)]; // 72 km/h = 20 m/s headwind
 
         let trajectory_no_wind = integrate_trajectory(
             initial_state,

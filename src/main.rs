@@ -5714,7 +5714,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         // when a segment is set right at max_range.
         let coverage_m = wind_segments
             .iter()
-            .map(|(_, _, until)| *until)
+            .map(|seg| seg.until_m)
             .fold(0.0_f64, f64::max);
         if coverage_m < max_range - 1.0 {
             let (cov_disp, max_disp, unit) = match units {

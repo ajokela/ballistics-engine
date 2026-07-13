@@ -162,7 +162,10 @@ fn segmented_muzzle_wind_matches_scalar_aerodynamic_jump() {
         atmosphere,
     );
     segmented_solver.set_max_range(600.0);
-    segmented_solver.set_wind_segments(vec![(16.09344, 90.0, 100.0), (32.18688, 270.0, 5000.0)]);
+    segmented_solver.set_wind_segments(vec![
+        ballistics_engine::wind::WindSegment::new(16.09344, 90.0, 100.0),
+        ballistics_engine::wind::WindSegment::new(32.18688, 270.0, 5000.0),
+    ]);
     let segmented_jump = segmented_solver
         .solve()
         .unwrap()

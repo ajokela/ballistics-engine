@@ -6,6 +6,7 @@
 use ballistics_engine::{
     AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions,
 };
+use ballistics_engine::wind::WindSegment;
 use std::f64::consts::PI;
 
 fn base_inputs() -> BallisticInputs {
@@ -20,7 +21,7 @@ fn base_inputs() -> BallisticInputs {
 }
 
 /// Final lateral drift (McCoy Z) at ~700 m for the given wind setup.
-fn drift_z(wind: WindConditions, segments: Vec<ballistics_engine::wind::WindSegment>) -> f64 {
+fn drift_z(wind: WindConditions, segments: Vec<WindSegment>) -> f64 {
     let mut solver = TrajectorySolver::new(base_inputs(), wind, AtmosphericConditions::default());
     solver.set_max_range(800.0);
     if !segments.is_empty() {
@@ -43,7 +44,7 @@ fn single_full_range_segment_matches_scalar_wind() {
     );
     let segmented = drift_z(
         WindConditions::default(),
-        vec![(16.09344, 90.0, 5000.0)],
+        vec![WindSegment::new(16.09344, 90.0, 5000.0)],
     );
     assert!(
         (scalar - segmented).abs() < 1e-6,
@@ -57,9 +58,15 @@ fn single_full_range_segment_matches_scalar_wind() {
 fn segmented_wind_varies_along_path() {
     // Wind only over the first ~half of the flight produces drift strictly
     // between the no-wind (zero) and full-wind cases.
-    let full = drift_z(WindConditions::default(), vec![(16.09344, 90.0, 5000.0)]);
+    let full = drift_z(
+        WindConditions::default(),
+        vec![WindSegment::new(16.09344, 90.0, 5000.0)],
+    );
     let none = drift_z(WindConditions::default(), vec![]);
-    let half = drift_z(WindConditions::default(), vec![(16.09344, 90.0, 400.0)]);
+    let half = drift_z(
+        WindConditions::default(),
+        vec![WindSegment::new(16.09344, 90.0, 400.0)],
+    );
 
     assert!(none.abs() < 1e-9, "no segments -> no wind, got {none}");
     // full and half are negative (drift left); half is smaller in magnitude.
@@ -73,8 +80,14 @@ fn segmented_wind_varies_along_path() {
 #[test]
 fn segment_angle_convention_matches_scalar() {
     // From the right (+90) drifts left (z<0); from the left (270) drifts right (z>0).
-    let from_right = drift_z(WindConditions::default(), vec![(16.09344, 90.0, 5000.0)]);
-    let from_left = drift_z(WindConditions::default(), vec![(16.09344, 270.0, 5000.0)]);
+    let from_right = drift_z(
+        WindConditions::default(),
+        vec![WindSegment::new(16.09344, 90.0, 5000.0)],
+    );
+    let from_left = drift_z(
+        WindConditions::default(),
+        vec![WindSegment::new(16.09344, 270.0, 5000.0)],
+    );
     assert!(from_right < 0.0, "90deg (from right) -> drift left, got {from_right}");
     assert!(from_left > 0.0, "270deg (from left) -> drift right, got {from_left}");
     assert!(
@@ -95,7 +108,7 @@ fn empty_segments_revert_to_scalar() {
         AtmosphericConditions::default(),
     );
     solver.set_max_range(800.0);
-    solver.set_wind_segments(vec![(99.0, 90.0, 5000.0)]);
+    solver.set_wind_segments(vec![WindSegment::new(99.0, 90.0, 5000.0)]);
     solver.set_wind_segments(vec![]); // clear
     let z = solver.solve().unwrap().position_at_range(700.0).unwrap().z;
     let scalar = drift_z(
