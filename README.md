@@ -10,6 +10,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Advanced Drag Models** - Support for G1 and G7 reference curves (with automatic transonic corrections) plus user-supplied custom Cd(Mach) drag tables (`--drag-table`, used as-is with endpoint hold outside their measured domain, no transonic correction applied — see [CLI_USAGE.md](CLI_USAGE.md#custom-drag-tables); `bc_value` is ignored while a custom table is active)
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Canted-Rifle Modeling** - Model a rifle zeroed level but fired canted (`--cant <DEGREES>`, alias `--cant-angle`, on `trajectory`/`monte-carlo`); clockwise cant shifts point of impact right and low downrange for a rifle with an upward zero correction — see [CLI_USAGE.md](CLI_USAGE.md#canted-shooting)
+- **Moving-Target Lead** - Wind-aware hold tables for targets moving at a constant speed/angle, with iterative intercept-range correction for non-perpendicular motion (`lead` subcommand; public `ballistics_engine::calculate_lead` API) — see [CLI_USAGE.md](CLI_USAGE.md#moving-target-lead)
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation
 - **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere

@@ -310,6 +310,157 @@ the whole cloud together and has almost no effect on the reported spread — exp
 dispersion numbers to look essentially the same as a level run. Use `trajectory --cant` to
 see the point-of-impact shift itself.
 
+### Moving-Target Lead
+
+Calculate the hold needed to hit a target moving at a constant ground speed across (or
+along) the line of sight, swept over a range of distances. Available via the `lead`
+subcommand.
+
+```bash
+./ballistics lead -v 2700 -m 168 -d 0.308 -b 0.5 --target-speed 3
+```
+
+Besides the usual load/atmosphere/wind arguments shared with `trajectory` (`-v -b -m -d
+--drag-model --sight-height --temperature --pressure --humidity --altitude --wind-speed
+--wind-direction`, plus `--profile`), `lead` adds:
+
+- **`--target-speed <SPEED>`** (required) — target ground speed, mph under imperial units,
+  m/s under metric.
+- **`--target-angle <DEGREES>`** — direction of target *travel* relative to the line of
+  sight (default `90`):
+  - `0` = directly away (outbound)
+  - `90` = crossing left-to-right (full broadside)
+  - `180` = directly toward (inbound)
+  - `270` = crossing right-to-left
+- **`--target-length <LENGTH>`** — target body length (inches imperial, mm metric). When
+  given, an extra `Bodies` column reports lead as a multiple of the target's length
+  (`lead ÷ target_length`) — a common visual hold reference ("hold one body-length ahead").
+- **`--start` / `--end` / `--step`** — range sweep, same units and defaults (`100`/`600`/`100`,
+  yards or meters) as the other sweep tables.
+- **`--adjustment-unit <mil|moa>`** — angular unit for the `Lead (MIL/MOA)` column
+  (default `mil`).
+- **`-o, --output <table|json|csv|pdf>`** — output format (`pdf` renders the same as `table`
+  on this subcommand).
+
+**Locked conventions:**
+
+- **Positive lead = hold in the target's direction of travel.** For a 90° (left-to-right)
+  crosser, positive lead is a hold to the right.
+- **`lead_mil = (lead/range)·1000`; `lead_moa = (lead/range)·3438`** — the same dial
+  convention used by every other hold table in this CLI (MBA-724): MOA is exactly 3.438×
+  MIL, not the geometrically exact 3437.7467×.
+- **Lead is pure target motion, additive to your wind-corrected hold.** Time of flight
+  comes from the engine's wind-aware trajectory solve, but wind deflection itself is *not*
+  folded into the lead number — it stays in the separate wind column of your dope; add the
+  two holds together.
+- **Time of flight is wind-aware** — the underlying solve accounts for wind drag effects on
+  TOF even though the lead figure itself reports only target-motion offset.
+- **Non-perpendicular motion (angle ≠ 90°/270°) shifts the intercept range.** An outbound
+  or inbound target has moved farther or closer by the time the bullet arrives, so
+  `calculate_lead` fixed-point iterates `R = R₀ + v_radial·TOF(R)` until the correction is
+  below 0.1 m, and reports TOF/lead at that corrected range — the table's `Intercept`
+  column shows the range actually used, which differs from the requested `Range` for any
+  non-perpendicular angle. A target closing faster than the geometry allows (or one whose
+  corrected range runs past the solved trajectory span) produces a typed error printed
+  inline in place of that row's data instead of a bogus number.
+
+**Worked example** (build first with `cargo build`):
+
+```bash
+./target/debug/ballistics lead -v 2700 -m 168 -d 0.308 -b 0.5 --target-speed 3
+```
+
+```
+Moving-Target Lead Table (target speed: 3.0 mph, angle: 90°, MIL)
+Positive lead = hold in the direction of target travel.
+
+┌──────────┬──────────┬──────────┬──────────┬──────────┐
+│Range (yd)│TOF (s)   │Lead ( yd)│Lead (MIL)│Intercept │
+├──────────┼──────────┼──────────┼──────────┼──────────┤
+│      100 │    0.115 │     0.17 │    1.687 │    100.0 │
+│      200 │    0.238 │     0.35 │    1.748 │    200.0 │
+│      300 │    0.371 │     0.54 │    1.814 │    300.0 │
+│      400 │    0.514 │     0.75 │    1.885 │    400.0 │
+│      500 │    0.669 │     0.98 │    1.961 │    500.0 │
+│      600 │    0.836 │     1.23 │    2.043 │    600.0 │
+└──────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
+For a pure 90° crosser the `Intercept` column always equals `Range` (no radial motion to
+correct for). The MIL figure climbs slowly with range because the bullet slows down, so
+each added yard of range costs more time of flight — and more lateral target travel per
+yard — than the last.
+
+`-o json` (trimmed to the first two rows):
+
+```json
+{
+  "adjustment_unit": "MIL",
+  "distance_unit": "yd",
+  "rows": [
+    {
+      "intercept_range": 100.0,
+      "iterations": 0,
+      "lead": 0.16871387472963065,
+      "lead_mil": 1.6871387472963066,
+      "lead_moa": 5.800383013204702,
+      "range": 100.0,
+      "tof_s": 0.11503218731565724
+    },
+    {
+      "intercept_range": 200.0,
+      "iterations": 0,
+      "lead": 0.34969310252646174,
+      "lead_mil": 1.7484655126323088,
+      "lead_moa": 6.011224432429878,
+      "range": 200.0,
+      "tof_s": 0.2384271153589512
+    }
+  ],
+  "target_angle": 90.0,
+  "target_speed": 3.0,
+  "target_speed_unit": "mph",
+  "units": "imperial"
+}
+```
+
+`lead_moa / lead_mil` is 3.438 on every row, confirming the dial convention above.
+`iterations: 0` on a perpendicular crosser — there's no radial motion to fixed-point
+iterate on.
+
+Non-perpendicular motion with body-length holds:
+
+```bash
+./target/debug/ballistics lead -v 2700 -m 168 -d 0.308 -b 0.5 --target-speed 15 \
+  --target-angle 45 --target-length 40 --start 200 --end 400 --step 100
+```
+
+```
+Moving-Target Lead Table (target speed: 15.0 mph, angle: 45°, MIL)
+Positive lead = hold in the direction of target travel.
+
+┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+│Range (yd)│TOF (s)   │Lead ( yd)│Lead (MIL)│Intercept │Bodies    │
+├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤
+│      200 │    0.240 │     1.24 │    6.184 │    201.2 │     1.12 │
+│      300 │    0.374 │     1.94 │    6.419 │    301.9 │     1.74 │
+│      400 │    0.518 │     2.69 │    6.671 │    402.7 │     2.42 │
+└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
+At 45° the target has an outbound (receding) component, so `Intercept` runs a yard or two
+past the requested `Range` — the iteration converges on the slightly longer range the
+bullet actually has to cover by the time it arrives. `Bodies` reports lead as a multiple of
+the 40" target length (e.g. "hold 1.1 body-lengths ahead" at 200 yd).
+
+**Library API:** for programmatic use, `ballistics_engine::calculate_lead(inputs, wind,
+atmo, target_speed_mps, target_angle_deg, range_m) -> Result<LeadSolution, LeadError>` runs
+the same wind-aware solve and intercept-range iteration directly, without going through the
+CLI. `LeadSolution` carries `time_of_flight_s`, `lead_m`, `lead_mil`, `lead_moa`,
+`corrected_range_m`, and `iterations`; `LeadError` is a typed enum covering invalid input,
+an over-closing (`TargetOvertakesShooter`) target, iteration `Convergence` failure, and a
+corrected range that runs `BeyondSolvedSpan`.
+
 ### Zero Calculation
 
 Calculate sight adjustments for specific distances:
