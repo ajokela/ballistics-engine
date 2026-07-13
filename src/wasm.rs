@@ -260,6 +260,14 @@ impl WasmBallistics {
         let mut enable_precession = false;
         let mut use_bc_segments = false;
         let mut use_powder_sensitivity = false;
+        // Bero-feedback (0.23.0): let a tester keep a full-range trajectory without abusing
+        // --muzzle-height to defeat ground truncation (see the muzzle-height sanity warning
+        // below — that abuse silently thins the density the whole flight sees).
+        let mut ignore_ground_impact = false;
+        // Bero-feedback (0.23.0): surface the velocity-keyed BC ladder actually applied
+        // (manual --bc-segment or BC5D-synthesized), since the WASM has no stderr the way
+        // the native CLI's --print-bc-segments does.
+        let mut print_bc_segments = false;
 
         // Additional parameters
         let mut twist_rate: Option<f64> = None;
@@ -493,6 +501,8 @@ impl WasmBallistics {
                 "--enable-precession" => enable_precession = true,
                 "--use-bc-segments" => use_bc_segments = true,
                 "--use-powder-sensitivity" => use_powder_sensitivity = true,
+                "--ignore-ground-impact" => ignore_ground_impact = true,
+                "--print-bc-segments" => print_bc_segments = true,
                 "--twist-rate" => {
                     if i + 1 < args.len() {
                         twist_rate = Some(
@@ -685,7 +695,32 @@ impl WasmBallistics {
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
         inputs.cant_angle = cant_angle_deg * std::f64::consts::PI / 180.0;
-        inputs.ground_threshold = 0.0;
+        inputs.ground_threshold = if ignore_ground_impact {
+            f64::NEG_INFINITY
+        } else {
+            0.0
+        };
+
+        // Bero-feedback (0.23.0): trajectory altitude feeds air density (thinning it over a
+        // long flight), so a tester using --muzzle-height to defeat ground truncation instead
+        // of --ignore-ground-impact silently flies through unrealistically thin air. Warn
+        // (don't clamp) once the bore sits implausibly high — matches the native CLI threshold.
+        let muzzle_height_warning = if inputs.muzzle_height > 1000.0 {
+            let muzzle_unit_label = match units {
+                UnitSystem::Imperial => "in",
+                UnitSystem::Metric => "mm",
+            };
+            Some(format!(
+                "WARNING: --muzzle-height {muzzle_height}{muzzle_unit_label} puts the bore \
+                 {:.0} m above ground. Trajectory altitude feeds air density, so this thins \
+                 the air over the whole flight (a 25 km 'muzzle height' flies in ~2% density). \
+                 If you meant site elevation use --altitude; to defeat ground truncation use \
+                 --ignore-ground-impact.\n\n",
+                inputs.muzzle_height
+            ))
+        } else {
+            None
+        };
 
         // Set advanced physics flags. enable_advanced_effects remains the umbrella
         // flag, but Magnus and Coriolis are now gated independently so enabling one
@@ -1041,9 +1076,61 @@ impl WasmBallistics {
                         self.format_trajectory_csv(&result, units, full, inputs.sight_height)
                     }
                 };
-                Ok(format!("{}{}", zero_info, output))
+                let mut combined = format!("{}{}", zero_info, output);
+                if print_bc_segments {
+                    combined.push_str(&self.format_bc_segments_report(&inputs, units));
+                }
+                if let Some(warning) = &muzzle_height_warning {
+                    combined = format!("{}{}", warning, combined);
+                }
+                Ok(combined)
             }
-            Err(e) => Ok(format!("Error: {}", e)),
+            Err(e) => {
+                let mut combined = format!("Error: {}", e);
+                if let Some(warning) = &muzzle_height_warning {
+                    combined = format!("{}{}", warning, combined);
+                }
+                Ok(combined)
+            }
+        }
+    }
+
+    /// Bero-feedback (0.23.0) `--print-bc-segments`: report the velocity-keyed BC ladder
+    /// actually applied to this run (manual `--bc-segment` entries or a BC5D-synthesized
+    /// schedule), or a one-line note when none are active. `BCSegmentData` velocities are
+    /// always stored in fps (see the parse-time conversion in `handle_trajectory_command`),
+    /// so this converts to the command's display units and derives a standard-atmosphere
+    /// Mach span alongside them.
+    fn format_bc_segments_report(
+        &self,
+        inputs: &InternalBallisticInputs,
+        units: UnitSystem,
+    ) -> String {
+        match inputs.bc_segments_data.as_ref().filter(|s| !s.is_empty()) {
+            Some(segments) => {
+                let (fps_to_display, unit_label) = match units {
+                    UnitSystem::Imperial => (1.0, "fps"),
+                    UnitSystem::Metric => (0.3048, "m/s"),
+                };
+                let mut block = String::from("\nBC Segments (active)\n=====================\n");
+                for seg in segments {
+                    let mach_min =
+                        seg.velocity_min * 0.3048 / crate::constants::SPEED_OF_SOUND_MPS;
+                    let mach_max =
+                        seg.velocity_max * 0.3048 / crate::constants::SPEED_OF_SOUND_MPS;
+                    block.push_str(&format!(
+                        "  {:.1}-{:.1} {} (Mach {:.2}-{:.2}): BC {:.5}\n",
+                        seg.velocity_min * fps_to_display,
+                        seg.velocity_max * fps_to_display,
+                        unit_label,
+                        mach_min,
+                        mach_max,
+                        seg.bc_value,
+                    ));
+                }
+                block
+            }
+            None => "\nNo BC segments active for this run.\n".to_string(),
         }
     }
 
@@ -1251,6 +1338,7 @@ impl WasmBallistics {
         let mut target_angle = 90.0;
         let mut range = 500.0;
         let mut adjustment_unit = "mil";
+        let mut lead_output = "table";
 
         // Parse arguments
         let mut i = 0;
@@ -1334,6 +1422,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "-o" | "--output" => {
+                    if i + 1 < args.len() {
+                        lead_output = args[i + 1];
+                        i += 1;
+                    }
+                }
                 // --units/-u (+ its value) is consumed globally in run_command, which
                 // pre-scans it to set the unit system before dispatch. Skip it here so
                 // it isn't rejected as an unknown flag (this is what blocked metric input).
@@ -1360,6 +1454,14 @@ impl WasmBallistics {
             return Err(JsValue::from_str(&format!(
                 "Invalid --adjustment-unit '{}' (expected mil or moa)",
                 adjustment_unit
+            )));
+        }
+
+        let lead_output_lower = lead_output.to_lowercase();
+        if lead_output_lower != "table" && lead_output_lower != "json" {
+            return Err(JsValue::from_str(&format!(
+                "Invalid --output '{}' (expected table or json)",
+                lead_output
             )));
         }
 
@@ -1435,6 +1537,25 @@ impl WasmBallistics {
                         sol.lead_mil, sol.lead_moa
                     )
                 };
+
+                if lead_output_lower == "json" {
+                    let payload = serde_json::json!({
+                        "target_speed": target_speed,
+                        "target_speed_unit": speed_unit,
+                        "target_angle_deg": target_angle,
+                        "range": range,
+                        "distance_unit": dist_unit,
+                        "tof_s": sol.time_of_flight_s,
+                        "lead": lead_disp,
+                        "lead_mil": sol.lead_mil,
+                        "lead_moa": sol.lead_moa,
+                        "intercept_range": intercept_disp,
+                        "iterations": sol.iterations,
+                        "adjustment_unit": adjustment_unit_lower,
+                    });
+                    return Ok(serde_json::to_string_pretty(&payload)
+                        .unwrap_or_else(|_| "Error formatting JSON".to_string()));
+                }
 
                 Ok(format!(
                     "Moving-Target Lead\n\
@@ -2548,8 +2669,12 @@ Trajectory Command:
     --sample-interval <DIST>     Trajectory sampling interval (yards/meters) [default: 10]
     --use-bc-segments            Use velocity-based BC (from a loaded BC5D table)
     --bc-segment <VMIN:VMAX:BC>  Manual velocity-keyed BC segment (repeatable; fps/m/s per --units)
+    --print-bc-segments          Print the active BC segment ladder (velocity/Mach span + BC)
+                                 applied to this run, or a note when none are active
     --use-powder-sensitivity     Enable powder temp sensitivity
-    
+    --ignore-ground-impact       Disable ground-impact truncation; trajectory runs to
+                                 --max-range regardless of drop below the muzzle
+
   Additional Parameters:
     --twist-rate <RATE>          Barrel twist (inches/turn imperial, mm/turn metric)
     --twist-right <BOOL>         Right-hand twist (true/false)
@@ -2559,7 +2684,11 @@ Trajectory Command:
     --cant <DEGREES>             Rifle cant angle (degrees); positive = clockwise from the
                                  shooter, moving point of impact right and low
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
-    --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm)
+    --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm). A value above
+                                 ~39,370in/1,000,000mm (1000m) triggers a warning: it feeds
+                                 air density, thinning it over the whole flight — use
+                                 --altitude for site elevation, --ignore-ground-impact to
+                                 defeat ground truncation
     --target-height <HEIGHT>     Target height above ground (inches/mm)
     --powder-temp <TEMP>         Powder temperature
     --powder-temp-sensitivity <SENS>  Velocity change per degree
@@ -2632,6 +2761,7 @@ Lead Command:
                                   positive lead = hold in direction of travel
     --range <DIST>                Range to target (yards/meters) [default: 500]
     --adjustment-unit <UNIT>      mil or moa [default: mil]
+    -o, --output <FORMAT>         Output format (table/json) [default: table]
 
   Note: this command assumes calm air and standard atmosphere; for a wind-aware
   lead (time of flight under wind), use the native CLI's lead subcommand.
@@ -3115,3 +3245,4 @@ impl Calculator {
         }
     }
 }
+
