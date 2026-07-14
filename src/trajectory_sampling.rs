@@ -1,6 +1,68 @@
+use crate::cli_api::BallisticsError;
 use nalgebra::Vector3;
 use std::collections::HashSet;
 use std::fmt;
+
+/// Hard ceiling for observations produced by one regular trajectory-sampling request.
+///
+/// This is initially aligned with [`crate::MAX_TRAJECTORY_POINTS`]. The limit is checked before
+/// the sampler allocates its interpolation buffers or output vector.
+pub const MAX_TRAJECTORY_SAMPLES: usize = 250_000;
+
+/// Compute the candidate distance-grid size without performing an unchecked float-to-integer
+/// conversion or addition.
+///
+/// The count intentionally matches the historical grid generator: positive intervals below
+/// 0.1 m are clamped to 0.1 m, and the grid includes distance zero plus enough candidates to
+/// reach the requested range. The historical endpoint-tolerance filter can remove the final
+/// candidate; this function mirrors that decision so every grid with exactly the public limit is
+/// accepted.
+pub(crate) fn projected_sample_count(
+    max_dist: f64,
+    step_m: f64,
+) -> Result<usize, BallisticsError> {
+    if !max_dist.is_finite() || !step_m.is_finite() {
+        return Err(BallisticsError::from(
+            "trajectory sampling range and interval must be finite",
+        ));
+    }
+
+    if step_m <= 0.0 || max_dist < 1e-9 {
+        return Ok(0);
+    }
+
+    let step_size = step_m.max(0.1);
+    let intervals = (max_dist / step_size).ceil();
+    // The historical generator has `intervals + 1` candidates, and its filter can discard at
+    // most the final candidate because `step_size >= 0.1`. If there are more than MAX intervals,
+    // even discarding that candidate cannot bring the retained grid within the limit.
+    if !intervals.is_finite() || intervals > MAX_TRAJECTORY_SAMPLES as f64 {
+        return Err(BallisticsError::from(format!(
+            "trajectory sample limit of {MAX_TRAJECTORY_SAMPLES} exceeded"
+        )));
+    }
+
+    let intervals = intervals as usize;
+    let candidate_count = intervals.checked_add(1).ok_or_else(|| {
+        BallisticsError::from(format!(
+            "trajectory sample limit of {MAX_TRAJECTORY_SAMPLES} exceeded"
+        ))
+    })?;
+    let final_candidate_m = intervals as f64 * step_size;
+    let retained_count = if final_candidate_m > max_dist + 0.1 {
+        candidate_count - 1
+    } else {
+        candidate_count
+    };
+
+    if retained_count > MAX_TRAJECTORY_SAMPLES {
+        Err(BallisticsError::from(format!(
+            "trajectory sample limit of {MAX_TRAJECTORY_SAMPLES} exceeded"
+        )))
+    } else {
+        Ok(retained_count)
+    }
+}
 
 /// Trajectory flags for notable events
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -68,26 +130,25 @@ pub struct TrajectoryOutputs {
     pub sight_height_m: f64,
 }
 
-/// Sample trajectory at regular distance intervals with vectorized operations
+/// Sample trajectory at regular distance intervals with vectorized operations.
+///
+/// # Errors
+///
+/// Returns [`BallisticsError`] when the requested range or interval is non-finite, or when the
+/// retained distance grid would exceed [`MAX_TRAJECTORY_SAMPLES`].
 pub fn sample_trajectory(
     trajectory_data: &TrajectoryData,
     outputs: &TrajectoryOutputs,
     step_m: f64,
     mass_kg: f64,
-) -> Vec<TrajectorySample> {
-    let step_size = if step_m <= 0.0 {
-        return Vec::new();
-    } else if step_m < 0.1 {
-        0.1
-    } else {
-        step_m
-    };
-
+) -> Result<Vec<TrajectorySample>, BallisticsError> {
     // Use the input target distance as the limit for sampling
     let max_dist = outputs.target_distance_horiz_m;
-    if max_dist < 1e-9 {
-        return Vec::new();
+    let num_steps = projected_sample_count(max_dist, step_m)?;
+    if num_steps == 0 {
+        return Ok(Vec::new());
     }
+    let step_size = step_m.max(0.1);
 
     // Extract trajectory arrays for vectorized operations (McCoy: X=downrange, Z=lateral)
     let downrange_vals: Vec<f64> = trajectory_data.positions.iter().map(|p| p.x).collect();
@@ -101,9 +162,7 @@ pub fn sample_trajectory(
         .map(|v| v.norm())
         .collect();
 
-    // Generate sampling distances
-    // Calculate number of steps to reach target without exceeding it
-    let num_steps = (max_dist / step_size).ceil() as usize + 1;
+    // Generate sampling distances. `num_steps` was checked before any sampler allocation.
     let distances: Vec<f64> = (0..num_steps)
         .map(|i| i as f64 * step_size)
         .filter(|&d| d <= max_dist + 0.1) // Stop exactly at target (with tiny tolerance for rounding)
@@ -153,7 +212,7 @@ pub fn sample_trajectory(
     // Add flags using vectorized detection
     add_trajectory_flags(&mut samples, &trajectory_data.transonic_distances, max_dist);
 
-    samples
+    Ok(samples)
 }
 
 /// Linear interpolation function optimized for trajectory data
@@ -362,6 +421,98 @@ pub struct TrajectoryDict {
 mod tests {
     use super::*;
 
+    fn linear_fixture(max_dist: f64) -> (TrajectoryData, TrajectoryOutputs) {
+        (
+            TrajectoryData {
+                times: vec![0.0, 1.0],
+                positions: vec![
+                    Vector3::new(0.0, -1.0, 0.0),
+                    Vector3::new(max_dist, -1.0, 0.0),
+                ],
+                velocities: vec![
+                    Vector3::new(800.0, 0.0, 0.0),
+                    Vector3::new(700.0, 0.0, 0.0),
+                ],
+                transonic_distances: vec![],
+            },
+            TrajectoryOutputs {
+                target_distance_horiz_m: max_dist,
+                target_vertical_height_m: 0.0,
+                time_of_flight_s: 1.0,
+                max_ord_dist_horiz_m: 0.0,
+                sight_height_m: 0.0,
+            },
+        )
+    }
+
+    #[test]
+    fn mba1299_projected_sample_count_checks_exact_limit_and_overflow() {
+        assert_eq!(MAX_TRAJECTORY_SAMPLES, crate::MAX_TRAJECTORY_POINTS);
+        assert_eq!(
+            projected_sample_count((MAX_TRAJECTORY_SAMPLES - 1) as f64, 1.0)
+                .expect("the exact sample cap should be accepted"),
+            MAX_TRAJECTORY_SAMPLES
+        );
+        assert_eq!(
+            projected_sample_count(MAX_TRAJECTORY_SAMPLES as f64 - 0.5, 1.0)
+                .expect("a filtered final candidate must not reject an exact-cap grid"),
+            MAX_TRAJECTORY_SAMPLES
+        );
+        assert_eq!(
+            projected_sample_count(0.2, 0.01)
+                .expect("the historical 0.1 meter interval floor should remain valid"),
+            3
+        );
+
+        for (range, interval) in [
+            (MAX_TRAJECTORY_SAMPLES as f64, 1.0),
+            (f64::MAX, 0.1),
+        ] {
+            let error = projected_sample_count(range, interval)
+                .expect_err("a grid above the sample cap must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("trajectory sample limit of 250000 exceeded"),
+                "unexpected sampling limit error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mba1299_public_sampler_accepts_the_exact_cap() {
+        for max_dist in [
+            (MAX_TRAJECTORY_SAMPLES - 1) as f64,
+            MAX_TRAJECTORY_SAMPLES as f64 - 0.5,
+        ] {
+            let (trajectory_data, outputs) = linear_fixture(max_dist);
+            let samples = sample_trajectory(&trajectory_data, &outputs, 1.0, 0.01)
+                .expect("an exact-cap sample grid should succeed");
+
+            assert_eq!(samples.len(), MAX_TRAJECTORY_SAMPLES);
+            assert_eq!(samples.first().expect("muzzle sample").distance_m, 0.0);
+            assert_eq!(
+                samples.last().expect("terminal sample").distance_m,
+                (MAX_TRAJECTORY_SAMPLES - 1) as f64
+            );
+        }
+    }
+
+    #[test]
+    fn mba1299_public_sampler_rejects_oversized_grids_before_allocation() {
+        for max_dist in [MAX_TRAJECTORY_SAMPLES as f64, f64::MAX] {
+            let (trajectory_data, outputs) = linear_fixture(max_dist);
+            let error = sample_trajectory(&trajectory_data, &outputs, 1.0, 0.01)
+                .expect_err("an oversized public sampling request must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("trajectory sample limit of 250000 exceeded"),
+                "unexpected sampling limit error: {error}"
+            );
+        }
+    }
+
     #[test]
     fn test_interpolate() {
         let x_vals = vec![0.0, 1.0, 2.0, 3.0];
@@ -480,7 +631,8 @@ mod tests {
             sight_height_m: 0.0, // For test: assume bore-referenced coordinates
         };
 
-        let samples = sample_trajectory(&trajectory_data, &outputs, 50.0, 0.1);
+        let samples = sample_trajectory(&trajectory_data, &outputs, 50.0, 0.1)
+            .expect("normal sampling should succeed");
 
         // Should have samples at 0, 50, 100, 150, 200 meters
         assert_eq!(samples.len(), 5);
@@ -515,7 +667,8 @@ mod tests {
             sight_height_m: 0.0,
         };
 
-        let samples = sample_trajectory(&trajectory_data, &outputs, 50.0, mass_kg);
+        let samples = sample_trajectory(&trajectory_data, &outputs, 50.0, mass_kg)
+            .expect("normal sampling should succeed");
         assert_eq!(samples.len(), 3);
         assert_eq!(samples[1].velocity_mps.to_bits(), 750.0_f64.to_bits());
         assert_eq!(samples[1].energy_j.to_bits(), 2812.5_f64.to_bits());

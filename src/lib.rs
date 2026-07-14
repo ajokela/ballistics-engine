@@ -30,6 +30,7 @@ pub use solve_json::{
     decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
     SolveRequestV1, SolveSuccessV1, SOLVE_JSON_SCHEMA_VERSION_V1,
 };
+pub use trajectory_sampling::MAX_TRAJECTORY_SAMPLES;
 
 // Module declarations
 pub mod cli_api;
