@@ -15,6 +15,12 @@ use std::{fmt, num::NonZeroUsize};
 /// The only solve-json schema version understood by this module.
 pub const SOLVE_JSON_SCHEMA_VERSION_V1: u32 = 1;
 
+/// Maximum number of trajectory observations in one solve-json v1 success response.
+///
+/// Service implementations must reject a response above this limit with
+/// [`SolveSuccessV1::validate_for_serialization`] instead of truncating it.
+pub const MAX_SOLVE_JSON_SAMPLES_V1: usize = 10_000;
+
 /// Deserialize a request member that may be omitted but may not be JSON `null`.
 ///
 /// Serde supplies [`Option::None`] from the field's `default` only when the member is absent.
@@ -539,8 +545,48 @@ pub struct SolveSuccessV1 {
     #[serde(default)]
     pub warnings: Vec<SolveNoticeV1>,
     pub summary: SolveSummaryV1,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_solve_samples_v1")]
     pub samples: Vec<TrajectorySampleV1>,
+}
+
+fn serialize_solve_samples_v1<S>(
+    samples: &[TrajectorySampleV1],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if samples.len() > MAX_SOLVE_JSON_SAMPLES_V1 {
+        return Err(serde::ser::Error::custom(format_args!(
+            "solve-json v1 response sample limit of {MAX_SOLVE_JSON_SAMPLES_V1} exceeded: response has {} samples",
+            samples.len()
+        )));
+    }
+    samples.serialize(serializer)
+}
+
+impl SolveSuccessV1 {
+    /// Validate service-level response limits immediately before serialization.
+    ///
+    /// The exact limit is accepted. A response with more samples returns a structured
+    /// [`SolveErrorCodeV1::ResourceLimit`] error at the sampling interval that requested the
+    /// oversized result. The response is never silently truncated.
+    pub fn validate_for_serialization(&self) -> Result<(), SolveErrorEnvelopeV1> {
+        if self.samples.len() <= MAX_SOLVE_JSON_SAMPLES_V1 {
+            return Ok(());
+        }
+
+        Err(SolveErrorEnvelopeV1::new(
+            SolveErrorV1::new(
+                SolveErrorCodeV1::ResourceLimit,
+                format!(
+                    "solve-json v1 response sample limit of {MAX_SOLVE_JSON_SAMPLES_V1} exceeded: response has {} samples",
+                    self.samples.len()
+                ),
+            )
+            .at_path("$.sampling.interval_m"),
+        ))
+    }
 }
 
 /// The success discriminator serialized in a response envelope.

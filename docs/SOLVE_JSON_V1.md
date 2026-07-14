@@ -234,6 +234,11 @@ zero.
 | `effects.enhanced_spin_drift` | `false` | Enable enhanced spin-drift modeling. |
 | `sampling.interval_m` | `10` | Regular downrange result interval. |
 
+A v1 success response contains at most 10,000 trajectory samples. Exactly 10,000 is valid;
+10,001 is not. A request whose resolved interval would produce more than this limit fails with
+`resource_limit` at `$.sampling.interval_m` before the success response is serialized. The service
+must not truncate or thin the requested sample sequence to fit the limit.
+
 Effects remain opt-in. The service may require projectile length, twist data, latitude, or other
 documented prerequisites when a corresponding effect is enabled.
 
@@ -302,7 +307,15 @@ by the engine. It must not infer a reason heuristically from the last distance, 
 Regular interval sampling never drops the terminal observation. `samples` includes the terminal
 sample exactly once even when its distance is not an interval boundary, and that sample carries
 the `terminal` flag. Sample flags are `transonic`, `subsonic`, `terminal`, and
-`ground_threshold`.
+`ground_threshold`. `transonic` denotes the inclusive Mach 0.8–1.2 band and `subsonic` denotes
+Mach below 1.0, so both flags intentionally appear from Mach 0.8 through values just below 1.0.
+
+Rust service implementations must call `SolveSuccessV1::validate_for_serialization` immediately
+before encoding a success envelope. The corresponding public ceiling is
+`MAX_SOLVE_JSON_SAMPLES_V1` (`10_000`). This explicit check lets the service return the structured
+`resource_limit` error envelope. The DTO serializer also rejects an oversized `samples` array as a
+fail-closed backstop, but that serializer error is intentionally not a substitute for the protocol
+error envelope.
 
 ## Error envelope
 

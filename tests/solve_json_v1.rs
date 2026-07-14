@@ -4,7 +4,8 @@ use ballistics_engine::solve_json::{
     ResolvedSolveRequestV1, ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, SampleFlagV1,
     SchemaVersionV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveErrorLocationErrorV1,
     SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SuccessStatusV1,
-    TerminationReasonV1, TrajectorySampleV1, SOLVE_JSON_SCHEMA_VERSION_V1,
+    TerminationReasonV1, TrajectorySampleV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    SOLVE_JSON_SCHEMA_VERSION_V1,
 };
 use serde_json::{json, Value};
 
@@ -477,6 +478,48 @@ fn success_and_error_dtos_round_trip() {
     let failure_again: SolveErrorEnvelopeV1 =
         serde_json::from_str(&failure_json).expect("deserialize failure");
     assert_eq!(failure_again, failure);
+}
+
+#[test]
+fn success_response_sample_limit_accepts_exactly_ten_thousand() {
+    assert_eq!(MAX_SOLVE_JSON_SAMPLES_V1, 10_000);
+
+    let request = decode(&request_value()).expect("valid request");
+    let mut success = success_for(request);
+    let sample = success.samples[0].clone();
+    success.samples.resize(MAX_SOLVE_JSON_SAMPLES_V1, sample);
+
+    success
+        .validate_for_serialization()
+        .expect("the exact response sample limit must be accepted");
+    serde_json::to_vec(&success).expect("an at-limit response remains serializable");
+}
+
+#[test]
+fn success_response_sample_limit_rejects_ten_thousand_and_one() {
+    let request = decode(&request_value()).expect("valid request");
+    let mut success = success_for(request);
+    let sample = success.samples[0].clone();
+    success
+        .samples
+        .resize(MAX_SOLVE_JSON_SAMPLES_V1 + 1, sample);
+
+    let error = success
+        .validate_for_serialization()
+        .expect_err("an oversized response must fail before serialization");
+    assert_eq!(error.error.code, SolveErrorCodeV1::ResourceLimit);
+    assert_eq!(error.error.path(), Some("$.sampling.interval_m"));
+    assert!(error.error.message.contains("10000"));
+    assert!(error.error.message.contains("10001"));
+
+    let serializer_error = serde_json::to_vec(&success)
+        .expect_err("the wire type must fail closed if a caller skips explicit validation");
+    assert!(serializer_error.to_string().contains("10000"));
+    assert!(serializer_error.to_string().contains("10001"));
+
+    let wire = serde_json::to_value(error).expect("serialize structured limit error");
+    assert_eq!(wire["status"], json!("error"));
+    assert_eq!(wire["error"]["code"], json!("resource_limit"));
 }
 
 #[test]
