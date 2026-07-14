@@ -964,10 +964,13 @@ impl TrajectorySolver {
         // A bare `<= 0.0` test lets NaN through (NaN comparisons are always false), and a
         // NaN/Inf here would poison the muzzle angle and collapse the whole trajectory.
         let diameter_m = self.inputs.bullet_diameter;
-        if !(self.inputs.twist_rate.is_finite() && self.inputs.twist_rate != 0.0)
-            || !(diameter_m.is_finite() && diameter_m > 0.0)
-            || !(self.inputs.bullet_length.is_finite() && self.inputs.bullet_length > 0.0)
-            || !self.inputs.muzzle_velocity.is_finite()
+        if !(self.inputs.twist_rate.is_finite()
+            && self.inputs.twist_rate != 0.0
+            && diameter_m.is_finite()
+            && diameter_m > 0.0
+            && self.inputs.bullet_length.is_finite()
+            && self.inputs.bullet_length > 0.0
+            && self.inputs.muzzle_velocity.is_finite())
         {
             return None;
         }
@@ -2746,9 +2749,25 @@ pub fn run_monte_carlo_with_wind_and_direction_std_dev(
     params: MonteCarloParams,
     wind_direction_std_dev: f64,
 ) -> Result<MonteCarloResults, BallisticsError> {
+    let mut rng = rand::rng();
+    run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
+        base_inputs,
+        base_wind,
+        params,
+        wind_direction_std_dev,
+        &mut rng,
+    )
+}
+
+fn run_monte_carlo_with_wind_and_direction_std_dev_using_rng<R: rand::Rng + ?Sized>(
+    base_inputs: BallisticInputs,
+    base_wind: WindConditions,
+    params: MonteCarloParams,
+    wind_direction_std_dev: f64,
+    rng: &mut R,
+) -> Result<MonteCarloResults, BallisticsError> {
     use rand_distr::{Distribution, Normal};
 
-    let mut rng = rand::rng();
     let mut ranges = Vec::new();
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
@@ -2801,13 +2820,13 @@ pub fn run_monte_carlo_with_wind_and_direction_std_dev(
     for _ in 0..params.num_simulations {
         // Create varied inputs
         let mut inputs = base_inputs.clone();
-        let muzzle_velocity_delta = velocity_delta_dist.sample(&mut rng);
-        inputs.muzzle_angle = angle_dist.sample(&mut rng);
-        inputs.bc_value = bc_dist.sample(&mut rng).max(0.01);
-        inputs.azimuth_angle = azimuth_dist.sample(&mut rng); // Add horizontal variation
+        let muzzle_velocity_delta = velocity_delta_dist.sample(&mut *rng);
+        inputs.muzzle_angle = angle_dist.sample(&mut *rng);
+        inputs.bc_value = bc_dist.sample(&mut *rng).max(0.01);
+        inputs.azimuth_angle = azimuth_dist.sample(&mut *rng); // Add horizontal variation
 
         // Create varied wind (now based on base wind conditions)
-        let wind = wind_sampler.sample(&mut rng);
+        let wind = wind_sampler.sample(&mut *rng);
 
         // Run trajectory
         let mut solver = TrajectorySolver::new(inputs, wind, atmosphere.clone());
@@ -3168,6 +3187,7 @@ fn fit_residual_sse(
 /// - `Some(range_m)` → **sight/dope-card-referenced**: the trajectory is zeroed at
 ///   `range_m` (using `sight_height`), and drop is measured below the horizontal line of
 ///   sight — i.e. exactly what a dope card zeroed at that range prints.
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn estimate_bc_fit(
     velocity: f64,
     mass: f64,
@@ -3435,6 +3455,7 @@ mod monte_carlo_result_tests {
 #[cfg(test)]
 mod monte_carlo_powder_curve_tests {
     use super::*;
+    use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn powder_curve_preserves_sampled_muzzle_velocity_dispersion() {
@@ -3455,7 +3476,15 @@ mod monte_carlo_powder_curve_tests {
             ..MonteCarloParams::default()
         };
 
-        let results = run_monte_carlo(inputs, params).expect("Monte Carlo solve");
+        let mut rng = StdRng::seed_from_u64(0x5EED_1176);
+        let results = run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
+            inputs,
+            WindConditions::default(),
+            params,
+            0.0,
+            &mut rng,
+        )
+        .expect("Monte Carlo solve");
         let min_velocity = results
             .impact_velocities
             .iter()
@@ -3661,12 +3690,14 @@ mod cluster_bc_reference_space_tests {
 
     #[test]
     fn solver_passes_g7_reference_model_to_cluster_classifier() {
-        let mut inputs = BallisticInputs::default();
-        inputs.bc_value = 0.190;
-        inputs.bc_type = DragModel::G7;
-        inputs.bullet_mass = 77.0 * 0.00006479891;
-        inputs.bullet_diameter = 0.224 * 0.0254;
-        inputs.use_cluster_bc = true;
+        let inputs = BallisticInputs {
+            bc_value: 0.190,
+            bc_type: DragModel::G7,
+            bullet_mass: 77.0 * 0.00006479891,
+            bullet_diameter: 0.224 * 0.0254,
+            use_cluster_bc: true,
+            ..BallisticInputs::default()
+        };
 
         let solver = TrajectorySolver::new(
             inputs,
@@ -3885,15 +3916,17 @@ mod custom_drag_table_validation_tests {
 
     #[test]
     fn solve_accepts_zero_bc_when_custom_table_present() {
-        let mut inputs = BallisticInputs::default();
-        inputs.bc_value = 0.0; // ignored when a table is set
-        inputs.bullet_mass = 0.0106;
-        inputs.bullet_diameter = 0.00782;
-        inputs.muzzle_velocity = 850.0;
-        inputs.custom_drag_table = Some(crate::drag::DragTable::new(
-            vec![0.5, 1.0, 2.0, 3.0],
-            vec![0.23, 0.40, 0.30, 0.26],
-        ));
+        let inputs = BallisticInputs {
+            bc_value: 0.0, // ignored when a table is set
+            bullet_mass: 0.0106,
+            bullet_diameter: 0.00782,
+            muzzle_velocity: 850.0,
+            custom_drag_table: Some(crate::drag::DragTable::new(
+                vec![0.5, 1.0, 2.0, 3.0],
+                vec![0.23, 0.40, 0.30, 0.26],
+            )),
+            ..BallisticInputs::default()
+        };
         let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
         // Must not error on the bc_value gate.
         assert!(solver.solve().is_ok());
@@ -3901,11 +3934,13 @@ mod custom_drag_table_validation_tests {
 
     #[test]
     fn solve_still_requires_bc_without_table() {
-        let mut inputs = BallisticInputs::default();
-        inputs.bc_value = 0.0;
-        inputs.bullet_mass = 0.0106;
-        inputs.bullet_diameter = 0.00782;
-        inputs.muzzle_velocity = 850.0;
+        let inputs = BallisticInputs {
+            bc_value: 0.0,
+            bullet_mass: 0.0106,
+            bullet_diameter: 0.00782,
+            muzzle_velocity: 850.0,
+            ..BallisticInputs::default()
+        };
         let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
         assert!(solver.solve().is_err());
     }
@@ -4407,10 +4442,12 @@ mod ground_termination_tests {
     #[test]
     fn rk4_and_rk45_descend_to_ground_threshold() {
         for adaptive in [false, true] {
-            let mut inputs = BallisticInputs::default();
-            inputs.muzzle_angle = 0.1; // ~5.7 deg: arcs up, then descends past launch level
-            inputs.use_rk4 = true;
-            inputs.use_adaptive_rk45 = adaptive;
+            let inputs = BallisticInputs {
+                muzzle_angle: 0.1, // ~5.7 deg: arcs up, then descends past launch level
+                use_rk4: true,
+                use_adaptive_rk45: adaptive,
+                ..BallisticInputs::default()
+            };
             assert_eq!(
                 inputs.ground_threshold, -100.0,
                 "default ground_threshold is -100 m"
@@ -4702,8 +4739,10 @@ mod coriolis_direction_tests {
     #[test]
     fn humidity_percent_converts_and_clamps() {
         // MBA-722: BallisticInputs.humidity is a 0-1 fraction; the helper yields 0-100 percent.
-        let mut i = BallisticInputs::default();
-        i.humidity = 0.5;
+        let mut i = BallisticInputs {
+            humidity: 0.5,
+            ..BallisticInputs::default()
+        };
         assert!((i.humidity_percent() - 50.0).abs() < 1e-9, "0.5 -> 50%");
         i.humidity = 0.0;
         assert_eq!(i.humidity_percent(), 0.0);
@@ -4716,15 +4755,17 @@ mod coriolis_direction_tests {
     /// Vertical position (m) at a given downrange `range_m`, for a shot fired along
     /// compass bearing `shot_azimuth` (radians, 0=N) with Coriolis enabled.
     fn vertical_at(shot_azimuth: f64, range_m: f64) -> f64 {
-        let mut inputs = BallisticInputs::default();
-        inputs.muzzle_velocity = 800.0;
-        inputs.bc_value = 0.5;
-        inputs.bc_type = DragModel::G7;
-        inputs.muzzle_angle = 0.02; // ~20 mrad so it carries well past range_m
-        inputs.enable_coriolis = true;
-        inputs.latitude = Some(45.0);
-        inputs.shot_azimuth = shot_azimuth;
-        inputs.ground_threshold = f64::NEG_INFINITY; // never terminate early
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            muzzle_angle: 0.02, // ~20 mrad so it carries well past range_m
+            enable_coriolis: true,
+            latitude: Some(45.0),
+            shot_azimuth,
+            ground_threshold: f64::NEG_INFINITY, // never terminate early
+            ..BallisticInputs::default()
+        };
         let mut solver = TrajectorySolver::new(
             inputs,
             WindConditions::default(),
@@ -4775,17 +4816,18 @@ mod cant_tests {
     use super::*;
 
     fn base_inputs() -> BallisticInputs {
-        let mut i = BallisticInputs::default();
-        i.muzzle_velocity = 800.0;
-        i.bc_value = 0.5;
-        i.bc_type = DragModel::G7;
-        i.bullet_mass = 0.0109;
-        i.bullet_diameter = 0.00782;
-        i.bullet_length = 0.0309;
-        i.sight_height = 0.05;
-        i.twist_rate = 10.0;
-        i.use_rk4 = true;
-        i
+        BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            bullet_length: 0.0309,
+            sight_height: 0.05,
+            twist_rate: 10.0,
+            use_rk4: true,
+            ..BallisticInputs::default()
+        }
     }
 
     fn solve_with(inputs: BallisticInputs, max_range: f64) -> TrajectoryResult {
@@ -4886,17 +4928,18 @@ mod vertical_wind_tests {
     use super::*;
 
     fn base_inputs() -> BallisticInputs {
-        let mut i = BallisticInputs::default();
-        i.muzzle_velocity = 800.0;
-        i.bc_value = 0.5;
-        i.bc_type = DragModel::G7;
-        i.bullet_mass = 0.0109;
-        i.bullet_diameter = 0.00782;
-        i.bullet_length = 0.0309;
-        i.sight_height = 0.05;
-        i.twist_rate = 10.0;
-        i.use_rk4 = true;
-        i
+        BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            bullet_length: 0.0309,
+            sight_height: 0.05,
+            twist_rate: 10.0,
+            use_rk4: true,
+            ..BallisticInputs::default()
+        }
     }
 
     /// Interpolate trajectory height (McCoy Y) at downrange distance `x`.

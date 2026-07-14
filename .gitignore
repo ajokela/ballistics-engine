@@ -2,7 +2,6 @@
 /target
 **/*.rs.bk
 *.pdb
-Cargo.lock
 
 # Python artifacts (if building with Python feature)
 *.so
