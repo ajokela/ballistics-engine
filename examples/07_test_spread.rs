@@ -4,15 +4,17 @@ use ballistics_engine::{
 
 fn main() {
     // Set up base inputs
-    let mut base_inputs = BallisticInputs::default();
-    base_inputs.muzzle_velocity = 800.0;
-    base_inputs.muzzle_angle = std::f64::consts::FRAC_PI_4; // 45 degrees
-    base_inputs.bc_value = 0.5;
-    base_inputs.bullet_mass = 0.01;
-    base_inputs.bullet_diameter = 0.008;
-    base_inputs.bullet_length = 0.008 * 4.5; // Approximate length/diameter ratio
-    base_inputs.bc_type = DragModel::G1;
-    base_inputs.azimuth_angle = 0.0; // Shooting straight ahead
+    let base_inputs = BallisticInputs {
+        muzzle_velocity: 800.0,
+        muzzle_angle: std::f64::consts::FRAC_PI_4, // 45 degrees
+        bc_value: 0.5,
+        bullet_mass: 0.01,
+        bullet_diameter: 0.008,
+        bullet_length: 0.008 * 4.5, // Approximate length/diameter ratio
+        bc_type: DragModel::G1,
+        azimuth_angle: 0.0, // Shooting straight ahead
+        ..BallisticInputs::default()
+    };
 
     // Set up wind
     let base_wind = WindConditions {
@@ -102,7 +104,7 @@ fn main() {
                 }
 
                 // Print grid with border
-                println!("{}", format!("{}{}{}", "+", "-".repeat(grid_width), "+"));
+                println!("+{}+", "-".repeat(grid_width));
                 for row in grid {
                     print!("|");
                     for ch in row {
@@ -110,7 +112,7 @@ fn main() {
                     }
                     println!("|");
                 }
-                println!("{}", format!("{}{}{}", "+", "-".repeat(grid_width), "+"));
+                println!("+{}+", "-".repeat(grid_width));
             } else if z_range < 0.001 {
                 println!("WARNING: No horizontal spread detected!");
                 println!("All shots landed in a vertical line.");

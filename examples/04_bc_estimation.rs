@@ -160,6 +160,7 @@ fn estimate_bc_iterative(
     best_bc
 }
 
+#[allow(clippy::manual_clamp)] // max/min intentionally recovers a NaN iteration to the BC floor.
 fn estimate_bc_least_squares(
     observed_data: &[(f64, f64)],
     velocity: f64,

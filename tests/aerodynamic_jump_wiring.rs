@@ -9,13 +9,15 @@ use std::f64::consts::PI;
 /// Build a solver for a representative .308-class load. `crosswind_mps` is applied
 /// as a pure lateral (McCoy Z) wind so it drives aerodynamic jump.
 fn solve(enable_aj: bool, crosswind_mps: f64) -> ballistics_engine::TrajectoryResult {
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = 800.0; // m/s
-    inputs.muzzle_angle = 0.01; // small positive elevation so it carries downrange
-    inputs.target_distance = 500.0;
-    inputs.twist_rate = 11.0; // 1:11"
-    inputs.is_twist_right = true;
-    inputs.enable_aerodynamic_jump = enable_aj;
+    let inputs = BallisticInputs {
+        muzzle_velocity: 800.0, // m/s
+        muzzle_angle: 0.01, // small positive elevation so it carries downrange
+        target_distance: 500.0,
+        twist_rate: 11.0, // 1:11"
+        is_twist_right: true,
+        enable_aerodynamic_jump: enable_aj,
+        ..BallisticInputs::default()
+    };
 
     // direction = PI/2 -> wind is purely lateral (crosswind), no head/tail component.
     let wind = WindConditions {
@@ -76,15 +78,17 @@ fn litz_magnitude_matches_engine_sg_exactly() {
     use ballistics_engine::aerodynamic_jump::litz_crosswind_jump_moa;
     use ballistics_engine::stability::compute_stability_coefficient;
 
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = 790.0;
-    inputs.bullet_diameter = 0.00782; // ~.308"
-    inputs.bullet_length = 0.0312; // ~4.0 cal
-    inputs.bullet_mass = 0.01134; // ~175 gr
-    inputs.twist_rate = 11.0;
-    inputs.is_twist_right = true;
-    inputs.enable_aerodynamic_jump = true;
-    inputs.muzzle_angle = 0.01;
+    let inputs = BallisticInputs {
+        muzzle_velocity: 790.0,
+        bullet_diameter: 0.00782, // ~.308"
+        bullet_length: 0.0312, // ~4.0 cal
+        bullet_mass: 0.01134, // ~175 gr
+        twist_rate: 11.0,
+        is_twist_right: true,
+        enable_aerodynamic_jump: true,
+        muzzle_angle: 0.01,
+        ..BallisticInputs::default()
+    };
 
     let atmo = AtmosphericConditions::default();
     let cw_mps = 4.4704_f64; // 10 mph
@@ -190,12 +194,14 @@ fn segmented_muzzle_wind_matches_scalar_aerodynamic_jump() {
 #[test]
 fn aj_direction_flips_with_wind_side_and_twist() {
     let v = |dir: f64, right_twist: bool| -> f64 {
-        let mut inputs = BallisticInputs::default();
-        inputs.muzzle_velocity = 790.0;
-        inputs.twist_rate = 11.0;
-        inputs.is_twist_right = right_twist;
-        inputs.enable_aerodynamic_jump = true;
-        inputs.muzzle_angle = 0.01;
+        let inputs = BallisticInputs {
+            muzzle_velocity: 790.0,
+            twist_rate: 11.0,
+            is_twist_right: right_twist,
+            enable_aerodynamic_jump: true,
+            muzzle_angle: 0.01,
+            ..BallisticInputs::default()
+        };
         let wind = WindConditions {
             speed: 4.4704,
             direction: dir,
@@ -232,12 +238,11 @@ fn zeroing_ignores_aerodynamic_jump() {
     // The zero must be found on the bare bore so AJ is an additive POI shift, never
     // absorbed by the zero search — even when zeroing with a crosswind present.
     use ballistics_engine::calculate_zero_angle_with_conditions;
-    let make = |aj: bool| {
-        let mut inputs = BallisticInputs::default();
-        inputs.muzzle_velocity = 790.0;
-        inputs.twist_rate = 11.0;
-        inputs.enable_aerodynamic_jump = aj;
-        inputs
+    let make = |aj: bool| BallisticInputs {
+        muzzle_velocity: 790.0,
+        twist_rate: 11.0,
+        enable_aerodynamic_jump: aj,
+        ..BallisticInputs::default()
     };
     let wind = WindConditions {
         speed: 4.4704, // 10 mph crosswind present during zeroing
@@ -262,11 +267,13 @@ fn aj_affects_only_vertical_not_windage() {
     // doesn't double-count with the integrator's crosswind response (which is purely
     // lateral for a point-mass solve): AJ adds the missing vertical, leaving windage intact.
     let solve_xyz = |aj: bool| {
-        let mut inputs = BallisticInputs::default();
-        inputs.muzzle_velocity = 790.0;
-        inputs.twist_rate = 11.0;
-        inputs.enable_aerodynamic_jump = aj;
-        inputs.muzzle_angle = 0.01;
+        let inputs = BallisticInputs {
+            muzzle_velocity: 790.0,
+            twist_rate: 11.0,
+            enable_aerodynamic_jump: aj,
+            muzzle_angle: 0.01,
+            ..BallisticInputs::default()
+        };
         let wind = WindConditions {
             speed: 4.4704,
             direction: PI / 2.0,
@@ -296,15 +303,17 @@ fn aj_affects_only_vertical_not_windage() {
 fn fast_path_launch_offset_sign_disabled_and_flips() {
     // MBA-959: the engine fast-integrate path (used by the binding's fast_integrate + MC).
     use ballistics_engine::fast_trajectory::aerodynamic_jump_launch_offset_rad;
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = 800.0;
-    inputs.bullet_diameter = 0.00782;
-    inputs.bullet_length = 0.0312;
-    inputs.bullet_mass = 0.01134;
-    inputs.twist_rate = 11.0;
-    inputs.is_twist_right = true;
-    inputs.wind_speed = 4.4704; // m/s (~10 mph)
-    inputs.wind_angle = PI / 2.0; // BallisticInputs convention: 90deg = from the right
+    let mut inputs = BallisticInputs {
+        muzzle_velocity: 800.0,
+        bullet_diameter: 0.00782,
+        bullet_length: 0.0312,
+        bullet_mass: 0.01134,
+        twist_rate: 11.0,
+        is_twist_right: true,
+        wind_speed: 4.4704, // m/s (~10 mph)
+        wind_angle: PI / 2.0, // BallisticInputs convention: 90deg = from the right
+        ..BallisticInputs::default()
+    };
     let atmo = (0.0, 15.0, 1013.25, 1.0);
 
     inputs.enable_aerodynamic_jump = false;
@@ -370,16 +379,18 @@ fn fast_paths_apply_aerodynamic_jump() {
     use ballistics_engine::wind::WindSock;
 
     fn y_at_500(enable_aj: bool, with_segments: bool, atmo_params: (f64, f64, f64, f64)) -> f64 {
-        let mut inputs = BallisticInputs::default();
-        inputs.muzzle_velocity = 800.0;
-        inputs.bullet_diameter = 0.00782;
-        inputs.bullet_length = 0.0312;
-        inputs.bullet_mass = 0.01134;
-        inputs.twist_rate = 11.0;
-        inputs.is_twist_right = true;
-        inputs.wind_speed = 4.4704;
-        inputs.wind_angle = PI / 2.0; // from the right
-        inputs.enable_aerodynamic_jump = enable_aj;
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            bullet_diameter: 0.00782,
+            bullet_length: 0.0312,
+            bullet_mass: 0.01134,
+            twist_rate: 11.0,
+            is_twist_right: true,
+            wind_speed: 4.4704,
+            wind_angle: PI / 2.0, // from the right
+            enable_aerodynamic_jump: enable_aj,
+            ..BallisticInputs::default()
+        };
         let v = inputs.muzzle_velocity;
         let elev = 0.02_f64;
         let initial_state = [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0];
@@ -485,12 +496,14 @@ fn segmented_fast_path_records_the_same_aj_launch_state_as_plain_fast() {
 fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     // A NaN twist must not slip past the guard (NaN <= 0.0 is false) and NaN-out
     // the launch angle. AJ must be suppressed and the trajectory stay finite.
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = 800.0;
-    inputs.muzzle_angle = 0.01;
-    inputs.target_distance = 500.0;
-    inputs.enable_aerodynamic_jump = true;
-    inputs.twist_rate = f64::NAN;
+    let inputs = BallisticInputs {
+        muzzle_velocity: 800.0,
+        muzzle_angle: 0.01,
+        target_distance: 500.0,
+        enable_aerodynamic_jump: true,
+        twist_rate: f64::NAN,
+        ..BallisticInputs::default()
+    };
     let wind = WindConditions {
         speed: 10.0,
         direction: PI / 2.0,

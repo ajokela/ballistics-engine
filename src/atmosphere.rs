@@ -214,12 +214,10 @@ pub fn calculate_atmosphere(
     humidity_percent: f64,
 ) -> (f64, f64) {
     // Get standard atmosphere conditions or use overrides
-    let (temp_k, pressure_pa) = if temp_override_c.is_some() && press_override_hpa.is_some() {
+    let combined_overrides = temp_override_c.zip(press_override_hpa);
+    let (temp_k, pressure_pa) = if let Some((temp_c, pressure_hpa)) = combined_overrides {
         // Both overrides provided
-        (
-            temp_override_c.unwrap() + 273.15,
-            press_override_hpa.unwrap() * 100.0,
-        )
+        (temp_c + 273.15, pressure_hpa * 100.0)
     } else {
         // Get ICAO standard conditions
         let (std_temp_k, std_pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);

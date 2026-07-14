@@ -26,24 +26,25 @@ const IN_TO_M: f64 = 0.0254;
 
 /// Reference .308, 175 gr projectile (G7 BC 0.243), SI-canonical.
 fn ref_308_175gr(muzzle_angle_rad: f64) -> BallisticInputs {
-    let mut i = BallisticInputs::default();
-    i.muzzle_velocity = 792.5; // m/s (~2600 fps)
-    i.bullet_mass = 175.0 * GRAINS_TO_KG;
-    i.bullet_diameter = 0.308 * IN_TO_M;
-    i.bullet_length = 1.24 * IN_TO_M;
-    i.caliber_inches = 0.308;
-    i.weight_grains = 175.0;
-    i.bc_value = 0.243;
-    i.bc_type = DragModel::G7;
-    i.twist_rate = 10.0;
-    i.muzzle_angle = muzzle_angle_rad;
-    i.sight_height = 0.0;
-    i.muzzle_height = 0.0;
-    // Keep advanced lateral effects OFF so byte-identity comparisons are clean (drag-only).
-    i.use_enhanced_spin_drift = false;
-    i.enable_magnus = false;
-    i.enable_coriolis = false;
-    i
+    BallisticInputs {
+        muzzle_velocity: 792.5, // m/s (~2600 fps)
+        bullet_mass: 175.0 * GRAINS_TO_KG,
+        bullet_diameter: 0.308 * IN_TO_M,
+        bullet_length: 1.24 * IN_TO_M,
+        caliber_inches: 0.308,
+        weight_grains: 175.0,
+        bc_value: 0.243,
+        bc_type: DragModel::G7,
+        twist_rate: 10.0,
+        muzzle_angle: muzzle_angle_rad,
+        sight_height: 0.0,
+        muzzle_height: 0.0,
+        // Keep advanced lateral effects OFF so byte-identity comparisons are clean (drag-only).
+        use_enhanced_spin_drift: false,
+        enable_magnus: false,
+        enable_coriolis: false,
+        ..BallisticInputs::default()
+    }
 }
 
 /// Non-default explicit station atmosphere so `resolve_station_conditions` returns it unchanged

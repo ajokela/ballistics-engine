@@ -147,6 +147,7 @@ pub fn calculate_moment_of_inertia(
 }
 
 /// Calculate the rate of spin decay in rad/s²
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn calculate_spin_decay_rate(
     spin_rate_rad_s: f64,
     velocity_mps: f64,
@@ -187,6 +188,7 @@ pub fn calculate_spin_decay_rate(
 ///
 /// Uses an empirical model based on published ballistics data.
 /// Real bullets typically lose 5-15% of spin over a 3-second flight.
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn update_spin_rate(
     initial_spin_rad_s: f64,
     time_elapsed_s: f64,

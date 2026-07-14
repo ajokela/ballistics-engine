@@ -9,22 +9,23 @@ use ballistics_engine::{
 };
 
 fn si_bullet() -> BallisticInputs {
-    let mut i = BallisticInputs::default();
-    i.target_distance = 457.2; // meters (500 yd)
-    i.muzzle_velocity = 823.0; // m/s
-    i.bullet_mass = 168.0 * 0.00006479891; // kg
-    i.bullet_diameter = 0.308 * 0.0254; // meters
-    i.bullet_length = 1.215 * 0.0254;
-    i.caliber_inches = 0.308;
-    i.weight_grains = 168.0;
-    i.bc_value = 0.475;
-    i.bc_type = DragModel::G1;
-    i.muzzle_angle = 0.006; // radians
-    i.sight_height = 0.05; // meters
-    i.muzzle_height = 0.0;
-    i.temperature = 15.0; // Celsius
-    i.pressure = 1013.25; // hPa
-    i
+    BallisticInputs {
+        target_distance: 457.2,                 // meters (500 yd)
+        muzzle_velocity: 823.0,                 // m/s
+        bullet_mass: 168.0 * 0.00006479891,     // kg
+        bullet_diameter: 0.308 * 0.0254,         // meters
+        bullet_length: 1.215 * 0.0254,
+        caliber_inches: 0.308,
+        weight_grains: 168.0,
+        bc_value: 0.475,
+        bc_type: DragModel::G1,
+        muzzle_angle: 0.006, // radians
+        sight_height: 0.05,  // meters
+        muzzle_height: 0.0,
+        temperature: 15.0,  // Celsius
+        pressure: 1013.25,  // hPa
+        ..BallisticInputs::default()
+    }
 }
 
 #[test]

@@ -30,12 +30,14 @@ fn bore(data: &[(f64, f64)], model: DragModel, mode: BcFitMode) -> BcEstimate {
 
 /// Forward model: solve a flat-fire trajectory for a known BC and drag model.
 fn solve_ref(bc: f64, model: DragModel) -> Vec<TrajectoryPoint> {
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = V;
-    inputs.bc_value = bc;
-    inputs.bc_type = model;
-    inputs.bullet_mass = M;
-    inputs.bullet_diameter = D;
+    let inputs = BallisticInputs {
+        muzzle_velocity: V,
+        bc_value: bc,
+        bc_type: model,
+        bullet_mass: M,
+        bullet_diameter: D,
+        ..BallisticInputs::default()
+    };
     let mut solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
     solver.set_max_range(RANGES_M[2] * 1.5);
     solver.solve().expect("reference solve").points

@@ -22,28 +22,29 @@ const TOL_M: f64 = 0.00762; // 0.3 in
 /// Fixed parity bullet: .308, 175 gr, 1:10 right-hand twist, ~2625 fps, G7 BC, sea-level
 /// standard atmosphere, no wind. Spin drift + advanced effects on.
 fn parity_inputs() -> BallisticInputs {
-    let mut i = BallisticInputs::default();
-    i.muzzle_velocity = 800.0; // m/s (~2625 fps)
-    i.bullet_mass = 175.0 * 0.00006479891; // kg
-    i.bullet_diameter = 0.308 * 0.0254; // m
-    i.bullet_length = 1.24 * 0.0254; // m (175 SMK-class)
-    i.caliber_inches = 0.308;
-    i.weight_grains = 175.0;
-    i.bc_value = 0.243;
-    i.bc_type = DragModel::G7;
-    i.twist_rate = 10.0; // 1:10"
-    i.is_twist_right = true;
-    i.muzzle_angle = 0.0; // flat launch; identical for all three paths
-    i.target_distance = TARGET_M;
-    // Sea-level standard atmosphere (matches AtmosphericConditions::default()).
-    i.altitude = 0.0;
-    i.temperature = 15.0;
-    i.pressure = 1013.25;
-    i.humidity = 0.5;
-    // Canonical spin-drift + advanced effects.
-    i.use_enhanced_spin_drift = true;
-    i.enable_advanced_effects = true;
-    i
+    BallisticInputs {
+        muzzle_velocity: 800.0,                 // m/s (~2625 fps)
+        bullet_mass: 175.0 * 0.00006479891,     // kg
+        bullet_diameter: 0.308 * 0.0254,         // m
+        bullet_length: 1.24 * 0.0254,            // m (175 SMK-class)
+        caliber_inches: 0.308,
+        weight_grains: 175.0,
+        bc_value: 0.243,
+        bc_type: DragModel::G7,
+        twist_rate: 10.0,                        // 1:10"
+        is_twist_right: true,
+        muzzle_angle: 0.0, // flat launch; identical for all three paths
+        target_distance: TARGET_M,
+        // Sea-level standard atmosphere (matches AtmosphericConditions::default()).
+        altitude: 0.0,
+        temperature: 15.0,
+        pressure: 1013.25,
+        humidity: 0.5,
+        // Canonical spin-drift + advanced effects.
+        use_enhanced_spin_drift: true,
+        enable_advanced_effects: true,
+        ..BallisticInputs::default()
+    }
 }
 
 /// (a) The validated cli_api solver: final lateral is the last trajectory point's McCoy Z.

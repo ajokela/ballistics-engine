@@ -11,25 +11,26 @@ use ballistics_engine::{
 const TARGET_M: f64 = 731.5; // ~800 yd — long enough that Coriolis deflection is well-resolved
 
 fn shot(latitude: f64, enable_coriolis: bool) -> BallisticInputs {
-    let mut i = BallisticInputs::default();
-    i.target_distance = TARGET_M;
-    i.muzzle_velocity = 823.0; // m/s
-    i.bullet_mass = 168.0 * 0.00006479891; // kg
-    i.bullet_diameter = 0.308 * 0.0254; // m
-    i.bullet_length = 1.215 * 0.0254;
-    i.caliber_inches = 0.308;
-    i.weight_grains = 168.0;
-    i.bc_value = 0.475;
-    i.bc_type = DragModel::G1;
-    i.muzzle_angle = 0.012; // radians — enough elevation to carry to ~731 m
-    i.sight_height = 0.05;
-    i.muzzle_height = 0.0;
-    i.temperature = 15.0;
-    i.pressure = 1013.25;
-    i.enable_coriolis = enable_coriolis;
-    i.latitude = Some(latitude);
-    i.azimuth_angle = 0.0; // 0 = North shot
-    i
+    BallisticInputs {
+        target_distance: TARGET_M,
+        muzzle_velocity: 823.0,                 // m/s
+        bullet_mass: 168.0 * 0.00006479891,     // kg
+        bullet_diameter: 0.308 * 0.0254,         // m
+        bullet_length: 1.215 * 0.0254,
+        caliber_inches: 0.308,
+        weight_grains: 168.0,
+        bc_value: 0.475,
+        bc_type: DragModel::G1,
+        muzzle_angle: 0.012, // radians — enough elevation to carry to ~731 m
+        sight_height: 0.05,
+        muzzle_height: 0.0,
+        temperature: 15.0,
+        pressure: 1013.25,
+        enable_coriolis,
+        latitude: Some(latitude),
+        azimuth_angle: 0.0, // 0 = North shot
+        ..BallisticInputs::default()
+    }
 }
 
 /// Lateral (Z) drift at the target from the fast/MC integrator.

@@ -667,6 +667,7 @@ pub fn get_drag_coefficient_with_transonic(
 /// a second time. Likewise, the Reynolds option only affects genuinely low-Re
 /// (`Re < 10,000`) inputs; ordinary ballistic Reynolds numbers use the standard
 /// table coefficient unchanged.
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn get_drag_coefficient_full(
     mach: f64,
     drag_model: &DragModel,
@@ -704,6 +705,7 @@ pub fn get_drag_coefficient_full(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Keep the legacy public helper below in place.
 mod tests {
     use super::*;
 

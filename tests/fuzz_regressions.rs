@@ -14,16 +14,18 @@ use ballistics_engine::{AtmosphericConditions, BallisticInputs, TrajectorySolver
 fn baseline_solve_is_finite() {
     // A plain, valid shot must always produce a finite trajectory — the invariant
     // every fuzz finding is a specialization of.
-    let mut b = BallisticInputs::default();
-    b.bc_value = 0.5;
-    b.bullet_mass = 0.01;
-    b.bullet_diameter = 0.0077;
-    b.bullet_length = 0.03;
-    b.muzzle_velocity = 800.0;
-    b.muzzle_angle = 0.02;
-    b.target_distance = 500.0;
-    b.twist_rate = 10.0;
-    b.use_rk4 = true;
+    let b = BallisticInputs {
+        bc_value: 0.5,
+        bullet_mass: 0.01,
+        bullet_diameter: 0.0077,
+        bullet_length: 0.03,
+        muzzle_velocity: 800.0,
+        muzzle_angle: 0.02,
+        target_distance: 500.0,
+        twist_rate: 10.0,
+        use_rk4: true,
+        ..Default::default()
+    };
 
     let r = TrajectorySolver::new(b, WindConditions::default(), AtmosphericConditions::default())
         .solve()

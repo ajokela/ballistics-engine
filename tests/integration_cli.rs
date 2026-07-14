@@ -159,7 +159,7 @@ fn compare_uses_api_drop_frame_and_same_default_zero() {
 #[test]
 fn test_cli_trajectory_basic() {
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "trajectory",
             "--velocity",
             "2700",
@@ -188,7 +188,7 @@ fn test_cli_monte_carlo_command() {
     // Pin the target so this remains a simple command/output smoke test rather than depending on
     // the omitted-target baseline convention.
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "monte-carlo",
             "--velocity",
             "2700",
@@ -258,7 +258,7 @@ fn test_cli_monte_carlo_all_shortfalls_have_null_cep() {
 #[test]
 fn test_cli_help() {
     let output = Command::new(get_cli_binary())
-        .args(&["--help"])
+        .args(["--help"])
         .output()
         .expect("Failed to execute command");
 
@@ -330,7 +330,7 @@ fn bc_tool_help_matches_selected_unit_convention() {
 #[test]
 fn test_cli_invalid_command() {
     let output = Command::new(get_cli_binary())
-        .args(&["invalid-command"])
+        .args(["invalid-command"])
         .output()
         .expect("Failed to execute command");
 
@@ -341,7 +341,7 @@ fn test_cli_invalid_command() {
 #[test]
 fn test_cli_missing_required_args() {
     let output = Command::new(get_cli_binary())
-        .args(&["trajectory"])
+        .args(["trajectory"])
         .output()
         .expect("Failed to execute command");
 
@@ -352,7 +352,7 @@ fn test_cli_missing_required_args() {
 #[test]
 fn test_cli_output_format_json() {
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "trajectory",
             "--velocity",
             "2700",
@@ -382,7 +382,7 @@ fn test_cli_output_format_json() {
 #[test]
 fn test_cli_output_format_csv() {
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "trajectory",
             "--velocity",
             "2700",
@@ -608,7 +608,7 @@ fn saved_metric_profile_preserves_physical_values_when_recalled_as_imperial() {
 #[test]
 fn test_true_velocity_offline_basic() {
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -662,7 +662,7 @@ fn test_true_velocity_offline_basic() {
 #[test]
 fn test_true_velocity_offline_converges_accurately() {
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -704,7 +704,7 @@ fn test_true_velocity_offline_converges_accurately() {
 fn test_true_velocity_offline_308_caliber() {
     // Test with .308 Win 175gr SMK
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "8.5",
@@ -742,7 +742,7 @@ fn test_true_velocity_offline_308_caliber() {
 fn test_true_velocity_offline_224_caliber() {
     // Test with .224 77gr
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "3.2",
@@ -780,7 +780,7 @@ fn test_true_velocity_offline_224_caliber() {
 fn test_true_velocity_offline_with_chrono() {
     // Test with chronograph velocity for adjustment calculation
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -822,7 +822,7 @@ fn test_true_velocity_offline_with_chrono() {
 fn test_true_velocity_offline_g1_drag_model() {
     // Test with G1 drag model
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "6.0",
@@ -859,7 +859,7 @@ fn test_true_velocity_offline_g1_drag_model() {
 fn test_true_velocity_offline_output_formats() {
     // Test table output
     let table_output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -893,7 +893,7 @@ fn test_true_velocity_offline_output_formats() {
 
     // Test CSV output
     let csv_output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -927,7 +927,7 @@ fn test_true_velocity_offline_output_formats() {
 fn test_true_velocity_offline_metric_units() {
     // Test with metric units
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -1025,7 +1025,7 @@ fn true_velocity_metric_default_sight_height_matches_explicit_50_mm() {
 fn test_true_velocity_offline_extreme_drop() {
     // Test with high drop value (long range)
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "15.0", // Very high drop
@@ -1063,7 +1063,7 @@ fn test_true_velocity_offline_extreme_drop() {
 fn test_true_velocity_offline_low_drop() {
     // Test with low drop value (short range or high velocity)
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "1.5",
@@ -1101,7 +1101,7 @@ fn test_true_velocity_offline_low_drop() {
 fn test_true_velocity_offline_custom_zero() {
     // Test with custom zero distance
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -1140,7 +1140,7 @@ fn test_true_velocity_offline_custom_zero() {
 fn test_true_velocity_offline_custom_atmosphere() {
     // Test with custom atmospheric conditions
     let output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -1192,7 +1192,7 @@ fn test_true_velocity_offline_custom_atmosphere() {
 fn test_true_velocity_offline_vs_online_consistency() {
     // Run offline calculation
     let offline_output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -1221,7 +1221,7 @@ fn test_true_velocity_offline_vs_online_consistency() {
 
     // Run online calculation
     let online_output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.1",
@@ -1320,7 +1320,7 @@ fn test_true_velocity_offline_deterministic() {
 fn test_true_velocity_offline_inverse_verification() {
     // First, find the velocity for a known drop
     let tv_output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "true-velocity",
             "--measured-drop",
             "5.0",
@@ -1349,7 +1349,7 @@ fn test_true_velocity_offline_inverse_verification() {
 
     // Now run a trajectory at that velocity and check the drop at 600 yards
     let traj_output = Command::new(get_cli_binary())
-        .args(&[
+        .args([
             "trajectory",
             "--velocity",
             &format!("{:.0}", found_velocity),
@@ -1387,7 +1387,7 @@ fn test_true_velocity_offline_inverse_verification() {
         let fields: Vec<&str> = line.split(',').collect();
         if fields.len() >= 4 {
             if let Ok(range) = fields[3].parse::<f64>() {
-                if range >= 595.0 && range <= 605.0 {
+                if (595.0..=605.0).contains(&range) {
                     // Found a point near 600 yards
                     // The trajectory ran successfully at the found velocity
                     return;

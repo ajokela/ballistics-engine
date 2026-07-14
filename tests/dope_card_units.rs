@@ -4,7 +4,7 @@
 //! main.rs (adjustment_unit_tests). These tests confirm both units produce a valid,
 //! non-trivial PDF via the CLI (the flag is accepted and the dope-card path runs).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn get_cli_binary() -> PathBuf {
@@ -21,7 +21,7 @@ fn get_cli_binary() -> PathBuf {
     path
 }
 
-fn generate_card(unit: Option<&str>, out: &PathBuf) {
+fn generate_card(unit: Option<&str>, out: &Path) {
     let out_str = out.to_str().unwrap();
     let mut args: Vec<&str> = vec![
         "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308", "--drag-model", "g7",
@@ -33,7 +33,7 @@ fn generate_card(unit: Option<&str>, out: &PathBuf) {
         args.push(u);
     }
     let output = Command::new(get_cli_binary())
-        .args(&args)
+        .args(args)
         .output()
         .expect("run");
     assert!(
@@ -44,7 +44,7 @@ fn generate_card(unit: Option<&str>, out: &PathBuf) {
     );
 }
 
-fn assert_valid_pdf(path: &PathBuf, label: &str) {
+fn assert_valid_pdf(path: &Path, label: &str) {
     let bytes = std::fs::read(path).unwrap_or_else(|_| panic!("{label}: no PDF written"));
     assert!(
         bytes.len() > 10_000,

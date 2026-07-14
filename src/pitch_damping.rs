@@ -218,6 +218,7 @@ pub(crate) fn calculate_gravity_yaw_of_repose(
 ///
 /// Returns the equilibrium yaw and a signed convergence rate in `s^-1`: positive values
 /// converge toward equilibrium, while negative values identify a divergent pitch mode.
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn calculate_damped_yaw_of_repose(
     stability_factor: f64,
     velocity_mps: f64,

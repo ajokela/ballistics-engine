@@ -12,6 +12,7 @@ pub enum DragModel {
 }
 
 impl DragModel {
+    #[allow(clippy::should_implement_trait)] // Returns Option for the established public API.
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "G1" => Some(DragModel::G1),
@@ -103,7 +104,7 @@ mod tests {
     fn test_drag_model_clone() {
         // Test Clone implementation
         let original = DragModel::G7;
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
 
         // Both should be independent

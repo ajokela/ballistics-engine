@@ -9,14 +9,15 @@ use ballistics_engine::{
 };
 
 fn zero_inputs() -> BallisticInputs {
-    let mut i = BallisticInputs::default();
-    i.muzzle_velocity = 800.0; // m/s
-    i.bc_value = 0.475;
-    i.bc_type = DragModel::G1;
-    i.bullet_mass = 168.0 * 0.00006479891; // kg
-    i.bullet_diameter = 0.308 * 0.0254; // m
-    i.sight_height = 0.05; // 50 mm above the bore
-    i
+    BallisticInputs {
+        muzzle_velocity: 800.0,                 // m/s
+        bc_value: 0.475,
+        bc_type: DragModel::G1,
+        bullet_mass: 168.0 * 0.00006479891,     // kg
+        bullet_diameter: 0.308 * 0.0254,         // m
+        sight_height: 0.05,                      // 50 mm above the bore
+        ..BallisticInputs::default()
+    }
 }
 
 #[test]
