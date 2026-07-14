@@ -206,7 +206,7 @@ fn find_in_directory(dir: &str, filename: &str) -> Option<std::path::PathBuf> {
     }
     for entry in std::fs::read_dir(dir_path).ok()?.flatten() {
         let path = entry.path();
-        if path.is_file() && path.file_name().map_or(false, |n| n == filename) {
+        if path.is_file() && path.file_name().is_some_and(|n| n == filename) {
             return Some(path);
         }
         if path.is_dir() {
