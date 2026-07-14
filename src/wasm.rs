@@ -1067,13 +1067,13 @@ impl WasmBallistics {
                         auto_zero,
                         units,
                         full,
-                        inputs.sight_height,
+                        inputs.muzzle_height + inputs.sight_height,
                     ),
                     OutputFormat::Json => {
-                        self.format_trajectory_json(&result, units, inputs.sight_height)
+                        self.format_trajectory_json(&result, units, inputs.muzzle_height + inputs.sight_height)
                     }
                     OutputFormat::Csv => {
-                        self.format_trajectory_csv(&result, units, full, inputs.sight_height)
+                        self.format_trajectory_csv(&result, units, full, inputs.muzzle_height + inputs.sight_height)
                     }
                 };
                 let mut combined = format!("{}{}", zero_info, output);
@@ -2271,7 +2271,7 @@ impl WasmBallistics {
         zero_distance: Option<f64>,
         units: UnitSystem,
         full: bool,
-        sight_height_above_bore_m: f64,
+        los_height_m: f64,
     ) -> String {
         let mut output = String::new();
         output.push_str("Trajectory Calculation Results\n");
@@ -2301,12 +2301,12 @@ impl WasmBallistics {
 
         let mut current_range = 0.0;
 
-        // Get initial height for reference (sight height)
-        let los_height = if !result.points.is_empty() {
-            result.points[0].position.y + sight_height_above_bore_m
-        } else {
-            0.05 // Default 2 inches
-        };
+        // The line of sight sits muzzle_height + sight_height above ground at EVERY
+        // cant angle (the scope stays on the fixed LOS; the bore rotates around it).
+        // Deriving it from points[0].y + sight_height double-counted the canted
+        // bore's vertical rise sh*(1-cos c) — Bero's 90-degree report (MBA-1297):
+        // reported drop was true miss + one full sight height.
+        let los_height = los_height_m;
 
         for (idx, point) in result.points.iter().enumerate() {
             // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral
@@ -2456,13 +2456,10 @@ impl WasmBallistics {
         &self,
         result: &crate::cli_api::TrajectoryResult,
         units: UnitSystem,
-        sight_height_above_bore_m: f64,
+        los_height_m: f64,
     ) -> String {
-        let los_height = result
-            .points
-            .first()
-            .map(|p| p.position.y + sight_height_above_bore_m)
-            .unwrap_or(0.05);
+        // LOS height is cant-invariant (see format_trajectory_table).
+        let los_height = los_height_m;
         // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral
         let points: Vec<serde_json::Value> = result
             .points
@@ -2526,7 +2523,7 @@ impl WasmBallistics {
         result: &crate::cli_api::TrajectoryResult,
         units: UnitSystem,
         full: bool,
-        sight_height_above_bore_m: f64,
+        los_height_m: f64,
     ) -> String {
         let mut output = String::new();
 
@@ -2563,11 +2560,8 @@ impl WasmBallistics {
         };
 
         let mut current_range = 0.0;
-        let los_height = if !result.points.is_empty() {
-            result.points[0].position.y + sight_height_above_bore_m
-        } else {
-            0.05
-        };
+        // LOS height is cant-invariant (see format_trajectory_table).
+        let los_height = los_height_m;
 
         for (idx, point) in result.points.iter().enumerate() {
             // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral

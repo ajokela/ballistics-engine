@@ -588,5 +588,60 @@ mod tests {
             )
             .unwrap();
         assert!(result.contains("Trajectory Calculation Results"));
+    
+    /// MBA-1297 (field report, Bero): at 90 degrees of cant the vertical and
+    /// lateral misses at the zero distance MUST be equal — the same rotation
+    /// moves both the bore offset and the zero tilt. The WASM formatters used
+    /// points[0].y + sight_height as the LOS, double-counting the canted
+    /// bore's vertical rise (reported drop = true miss + one sight height).
+    #[wasm_bindgen_test]
+    fn canted_90_vertical_and_lateral_misses_are_symmetric() {
+        let wasm = WasmBallistics::new();
+        let out = wasm
+            .run_command(
+                "trajectory -b 0.19 -m 77 -d 0.224 --drag-model g7 --max-range 200 \
+                 --sight-height 2.48 --ignore-ground-impact -v 2650 --auto-zero 100 \
+                 --cant 90 --full -o csv",
+            )
+            .unwrap();
+        // CSV rows: distance,drop_in,drift_in,... — find the row nearest 100 yd
+        // and the first (muzzle) row.
+        let mut muzzle_drop: Option<f64> = None;
+        let mut drop100: Option<f64> = None;
+        let mut drift100: Option<f64> = None;
+        for line in out.lines() {
+            let cols: Vec<&str> = line.split(',').collect();
+            if cols.len() < 3 {
+                continue;
+            }
+            if let (Ok(dist), Ok(drop), Ok(drift)) = (
+                cols[0].trim().parse::<f64>(),
+                cols[1].trim().parse::<f64>(),
+                cols[2].trim().parse::<f64>(),
+            ) {
+                if dist.abs() < 1.0 && muzzle_drop.is_none() {
+                    muzzle_drop = Some(drop);
+                }
+                if (dist - 100.0).abs() < 6.0 && drop100.is_none() {
+                    drop100 = Some(drop);
+                    drift100 = Some(drift);
+                }
+            }
+        }
+        let muzzle_drop = muzzle_drop.expect("muzzle row");
+        let (d, w) = (drop100.expect("100yd drop"), drift100.expect("100yd drift"));
+        // At 90 degrees the bore is BESIDE the scope: t=0 vertical offset from the
+        // LOS is sh*cos(90) = 0, not the full sight height.
+        assert!(
+            muzzle_drop.abs() < 0.3,
+            "muzzle drop must be ~0 at 90 deg cant (bore beside scope), got {muzzle_drop}"
+        );
+        // Symmetry: |vertical miss| == |lateral miss| within 5%.
+        let ratio = d.abs() / w.abs();
+        assert!(
+            (0.95..=1.05).contains(&ratio),
+            "90-deg cant symmetry broken: drop {d} vs drift {w} (ratio {ratio})"
+        );
     }
+}
 }
