@@ -157,6 +157,76 @@ fn mba1282_finite_overflow_is_returned_as_an_error() {
 }
 
 #[test]
+fn mba1293_stiff_drag_explosion_is_an_error_not_a_negative_range() {
+    // Decoded from the minimized robustness-inputs artifact (fuzz/tests/crash-mba-1293.bin):
+    // every field passes the positivity/finiteness gate, but the drag time constant is
+    // astronomically shorter than the minimum integration step. The accepted minimum-dt RK45
+    // step multiplied speed 13x AND reversed it, and the solve returned
+    // Ok(max_range = -50.588...) — the bullet reported 50 m behind the shooter.
+    for (mode, use_rk4, use_adaptive_rk45) in [
+        ("Euler", false, false),
+        ("RK4", true, false),
+        ("RK45", true, true),
+    ] {
+        let inputs = BallisticInputs {
+            bc_value: 6.821210274138984e-2,
+            bullet_mass: 3.320973714192708e8,      // kg
+            bullet_diameter: 3.333333333333333e8,  // m
+            muzzle_velocity: 3.333435058584939e8,  // m/s
+            muzzle_angle: 0.0,
+            target_distance: 10.0,
+            use_rk4,
+            use_adaptive_rk45,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(10.0);
+
+        match solver.solve() {
+            Err(_) => {} // clean rejection is the required outcome
+            Ok(result) => panic!(
+                "{mode}: stiff-input explosion must be an Err, got Ok with max_range {}",
+                result.max_range
+            ),
+        }
+    }
+}
+
+#[test]
+fn mba1293_sane_solves_stay_within_the_speed_budget() {
+    // The divergence guard must never fire on legitimate trajectories, including
+    // a strong segmented wind (the budget accounts for the strongest segment).
+    let inputs = BallisticInputs {
+        bc_value: 0.5,
+        bullet_mass: 0.01,
+        bullet_diameter: 0.0077,
+        bullet_length: 0.03,
+        muzzle_velocity: 900.0,
+        muzzle_angle: 0.03,
+        target_distance: 1000.0,
+        twist_rate: 10.0,
+        use_rk4: true,
+        use_adaptive_rk45: true,
+        ..Default::default()
+    };
+    let mut solver = TrajectorySolver::new(
+        inputs,
+        WindConditions::default(),
+        AtmosphericConditions::default(),
+    );
+    solver.set_wind_segments(vec![
+        ballistics_engine::wind::WindSegment::new(40.0, 90.0, 400.0),
+        ballistics_engine::wind::WindSegment::new(60.0, 270.0, 1000.0),
+    ]);
+    let result = solver.solve().expect("windy 1000 m solve must succeed");
+    assert!(result.max_range > 990.0 && result.time_of_flight > 0.5);
+}
+
+#[test]
 fn mba1282_non_finite_segment_state_is_returned_as_an_error() {
     for (mode, use_rk4, use_adaptive_rk45) in [
         ("Euler", false, false),
