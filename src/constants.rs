@@ -1,4 +1,4 @@
-/// Physical constants used in ballistics calculations
+//! Physical constants used in ballistics calculations.
 
 /// Gravitational acceleration in m/s²
 pub const G_ACCEL_MPS2: f64 = 9.80665;
@@ -79,10 +79,9 @@ pub const MIN_MACH_THRESHOLD: f64 = 1e-3;
 /// Methodology: Statistical analysis of measured BC values across all categories
 pub const BC_FALLBACK_CONSERVATIVE: f64 = 0.31;
 
-/// BC fallback values by projectile weight category (grains)
-///
-/// Values based on statistical analysis of ballistic coefficient vs mass relationships.
-/// Each constant represents 25th percentile BC for that weight category.
+// BC fallback values by projectile weight category (grains).
+// Values are based on statistical analysis of ballistic coefficient vs mass relationships.
+// Each constant represents the 25th-percentile BC for that weight category.
 
 /// Ultra-light projectiles (0-50 grains)
 /// Typical: .17 caliber varmint bullets, .22 caliber target bullets
@@ -104,10 +103,9 @@ pub const BC_FALLBACK_HEAVY: f64 = 0.393;
 /// Typical: .338 Lapua Magnum, .50 BMG bullets
 pub const BC_FALLBACK_VERY_HEAVY: f64 = 0.441;
 
-/// BC fallback values by caliber category (inches)
-///
-/// Values account for diameter limitations on achievable ballistic coefficient.
-/// Larger calibers generally allow higher BC but with diminishing returns.
+// BC fallback values by caliber category (inches).
+// Values account for diameter limitations on achievable ballistic coefficient.
+// Larger calibers generally allow higher BC but with diminishing returns.
 
 /// Small calibers (.224" and smaller)
 /// Examples: .17 Remington, .22-250, .223 Remington

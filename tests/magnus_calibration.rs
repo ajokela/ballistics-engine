@@ -4,16 +4,18 @@ use ballistics_engine::{
 };
 
 fn endpoint_m(enable_magnus: bool, enable_spin: bool) -> nalgebra::Vector3<f64> {
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = 823.0; // m/s (~2700 fps)
-    inputs.bullet_mass = 168.0 * 0.00006479891; // kg
-    inputs.bullet_diameter = 0.308 * 0.0254; // m
-    inputs.bullet_length = 1.215 * 0.0254; // m
-    inputs.bc_value = 0.475;
-    inputs.twist_rate = 12.0;
-    inputs.is_twist_right = true;
-    inputs.enable_magnus = enable_magnus;
-    inputs.use_enhanced_spin_drift = enable_spin;
+    let inputs = BallisticInputs {
+        muzzle_velocity: 823.0,                 // m/s (~2700 fps)
+        bullet_mass: 168.0 * 0.00006479891,     // kg
+        bullet_diameter: 0.308 * 0.0254,         // m
+        bullet_length: 1.215 * 0.0254,           // m
+        bc_value: 0.475,
+        twist_rate: 12.0,
+        is_twist_right: true,
+        enable_magnus,
+        use_enhanced_spin_drift: enable_spin,
+        ..BallisticInputs::default()
+    };
     // McCoy frame: Z is lateral
     let mut solver = TrajectorySolver::new(
         inputs,

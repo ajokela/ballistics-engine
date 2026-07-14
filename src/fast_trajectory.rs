@@ -44,13 +44,13 @@ impl FastSolution {
 
             if idx == 0 {
                 // Before first point
-                for j in 0..6 {
-                    result[j][i] = self.y[j][0];
+                for (result_component, source_component) in result.iter_mut().zip(&self.y) {
+                    result_component[i] = source_component[0];
                 }
             } else if idx >= self.t.len() {
                 // After last point
-                for j in 0..6 {
-                    result[j][i] = self.y[j][self.t.len() - 1];
+                for (result_component, source_component) in result.iter_mut().zip(&self.y) {
+                    result_component[i] = source_component[self.t.len() - 1];
                 }
             } else {
                 // Linear interpolation
@@ -58,10 +58,10 @@ impl FastSolution {
                 let t1 = self.t[idx];
                 let span = t1 - t0;
 
-                for j in 0..6 {
-                    let y0 = self.y[j][idx - 1];
-                    let y1 = self.y[j][idx];
-                    result[j][i] = if span.abs() < f64::EPSILON {
+                for (result_component, source_component) in result.iter_mut().zip(&self.y) {
+                    let y0 = source_component[idx - 1];
+                    let y1 = source_component[idx];
+                    result_component[i] = if span.abs() < f64::EPSILON {
                         y1
                     } else {
                         let frac = (tq - t0) / span;
@@ -210,10 +210,13 @@ pub fn aerodynamic_jump_launch_offset_rad(
         return 0.0;
     }
     let diameter = inputs.bullet_diameter;
-    if !(inputs.twist_rate.is_finite() && inputs.twist_rate != 0.0)
-        || !(diameter.is_finite() && diameter > 0.0)
-        || !(inputs.bullet_length.is_finite() && inputs.bullet_length > 0.0)
-        || !inputs.muzzle_velocity.is_finite()
+    if !(inputs.twist_rate.is_finite()
+        && inputs.twist_rate != 0.0
+        && diameter.is_finite()
+        && diameter > 0.0
+        && inputs.bullet_length.is_finite()
+        && inputs.bullet_length > 0.0
+        && inputs.muzzle_velocity.is_finite())
     {
         return 0.0;
     }
@@ -1828,14 +1831,16 @@ mod tests {
         use std::f64::consts::FRAC_PI_2;
         // Returns (final_downrange, final_vertical) for a shot fired along `shot_az`.
         fn final_xy(shot_az: f64) -> (f64, f64) {
-            let mut inputs = BallisticInputs::default();
-            inputs.muzzle_velocity = 800.0;
-            inputs.bc_value = 0.5;
-            inputs.bc_type = DragModel::G7;
-            inputs.enable_advanced_effects = true; // gates the omega vector
-            inputs.enable_coriolis = true;
-            inputs.latitude = Some(45.0);
-            inputs.shot_azimuth = shot_az;
+            let inputs = BallisticInputs {
+                muzzle_velocity: 800.0,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                enable_advanced_effects: true, // gates the omega vector
+                enable_coriolis: true,
+                latitude: Some(45.0),
+                shot_azimuth: shot_az,
+                ..BallisticInputs::default()
+            };
             let v = 800.0_f64;
             let elev = 0.02_f64;
             let params = FastIntegrationParams {
@@ -1877,14 +1882,16 @@ mod tests {
         // So a caller can request Coriolis-only without being forced to enable spin/Magnus.
         use std::f64::consts::FRAC_PI_2;
         fn final_y(coriolis: bool, shot_az: f64) -> f64 {
-            let mut inputs = BallisticInputs::default();
-            inputs.muzzle_velocity = 800.0;
-            inputs.bc_value = 0.5;
-            inputs.bc_type = DragModel::G7;
-            inputs.enable_coriolis = coriolis;
-            inputs.enable_advanced_effects = false; // explicitly OFF — Coriolis must still work
-            inputs.latitude = Some(45.0);
-            inputs.shot_azimuth = shot_az;
+            let inputs = BallisticInputs {
+                muzzle_velocity: 800.0,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                enable_coriolis: coriolis,
+                enable_advanced_effects: false, // explicitly OFF — Coriolis must still work
+                latitude: Some(45.0),
+                shot_azimuth: shot_az,
+                ..BallisticInputs::default()
+            };
             let v = 800.0_f64;
             let elev = 0.02_f64;
             let params = FastIntegrationParams {
@@ -1917,10 +1924,12 @@ mod tests {
 
     #[test]
     fn fast_path_rejects_degenerate_atmosphere() {
-        let mut inputs = BallisticInputs::default();
-        inputs.muzzle_velocity = 800.0;
-        inputs.bc_value = 0.5;
-        inputs.bc_type = DragModel::G7;
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            ..BallisticInputs::default()
+        };
         let v = 800.0_f64;
         let e = 0.02_f64;
         let mk = |atmo: (f64, f64, f64, f64)| FastIntegrationParams {
@@ -1969,11 +1978,13 @@ mod tests {
     #[test]
     fn plain_fast_path_honors_direct_atmosphere_values() {
         fn final_speed(muzzle_velocity: f64, atmo_params: (f64, f64, f64, f64)) -> f64 {
-            let mut inputs = BallisticInputs::default();
-            inputs.muzzle_velocity = muzzle_velocity;
-            inputs.bc_value = 0.5;
-            inputs.bc_type = DragModel::G7;
-            inputs.ground_threshold = -100.0;
+            let inputs = BallisticInputs {
+                muzzle_velocity,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                ground_threshold: -100.0,
+                ..BallisticInputs::default()
+            };
 
             let wind_sock = WindSock::new(vec![]);
             let solution = fast_integrate(
@@ -2015,11 +2026,13 @@ mod tests {
     #[test]
     fn segmented_fast_path_nonpositive_density_ratio_uses_standard_fallback() {
         fn terminal_velocity(base_ratio: f64) -> f64 {
-            let mut inputs = BallisticInputs::default();
-            inputs.muzzle_velocity = 800.0;
-            inputs.bc_value = 0.5;
-            inputs.bc_type = DragModel::G7;
-            inputs.ground_threshold = -100.0;
+            let inputs = BallisticInputs {
+                muzzle_velocity: 800.0,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                ground_threshold: -100.0,
+                ..BallisticInputs::default()
+            };
 
             let solution = fast_integrate_with_segments(
                 &inputs,
@@ -2060,15 +2073,17 @@ mod tests {
         // old code would have forced .308 regardless. We assert the run still completes and the
         // two geometries don't crash — the data path is exercised end-to-end.
         let run = |diameter: f64, twist: f64| {
-            let mut inputs = BallisticInputs::default();
-            inputs.muzzle_velocity = 800.0;
-            inputs.bc_value = 0.5;
-            inputs.bc_type = DragModel::G7;
-            inputs.bullet_diameter = diameter;
-            inputs.bullet_length = 0.0318;
-            inputs.twist_rate = twist;
-            inputs.enable_advanced_effects = true;
-            inputs.enable_magnus = true;
+            let inputs = BallisticInputs {
+                muzzle_velocity: 800.0,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                bullet_diameter: diameter,
+                bullet_length: 0.0318,
+                twist_rate: twist,
+                enable_advanced_effects: true,
+                enable_magnus: true,
+                ..BallisticInputs::default()
+            };
             let v = 800.0_f64;
             let elev = 0.02_f64;
             let params = FastIntegrationParams {

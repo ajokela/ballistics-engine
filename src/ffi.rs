@@ -146,6 +146,7 @@ pub struct FFIMonteCarloResults {
 }
 
 // Helper function to convert FFI inputs to internal types
+#[allow(clippy::field_reassign_with_default)] // Keep the C-to-Rust field mapping sequential/auditable.
 fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     let mut ballistic_inputs = BallisticInputs::default();
 
@@ -367,11 +368,11 @@ unsafe fn calculate_trajectory_impl(
                     (
                         angular.pitch_angle,
                         angular.yaw_angle,
-                        result.max_yaw_angle.unwrap_or(std::f64::NAN),
-                        result.max_precession_angle.unwrap_or(std::f64::NAN),
+                        result.max_yaw_angle.unwrap_or(f64::NAN),
+                        result.max_precession_angle.unwrap_or(f64::NAN),
                     )
                 } else {
-                    (std::f64::NAN, std::f64::NAN, std::f64::NAN, std::f64::NAN)
+                    (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
                 };
 
             // Create result on heap
@@ -385,8 +386,8 @@ unsafe fn calculate_trajectory_impl(
                 point_count: point_count as c_int,
                 sampled_points,
                 sampled_point_count,
-                min_pitch_damping: result.min_pitch_damping.unwrap_or(std::f64::NAN),
-                transonic_mach: result.transonic_mach.unwrap_or(std::f64::NAN),
+                min_pitch_damping: result.min_pitch_damping.unwrap_or(f64::NAN),
+                transonic_mach: result.transonic_mach.unwrap_or(f64::NAN),
                 final_pitch_angle: final_pitch,
                 final_yaw_angle: final_yaw,
                 max_yaw_angle: max_yaw,
@@ -617,6 +618,7 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table(
 
 // Simple trajectory calculation for quick results
 #[no_mangle]
+#[allow(clippy::field_reassign_with_default)] // Preserve the staged zero-angle workflow below.
 pub extern "C" fn ballistics_quick_trajectory(
     muzzle_velocity: c_double,
     bc: c_double,

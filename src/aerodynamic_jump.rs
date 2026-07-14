@@ -48,6 +48,7 @@ pub fn litz_crosswind_jump_moa(
 ///
 /// Aerodynamic jump is the displacement of the projectile's trajectory
 /// as it transitions from constrained motion in the barrel to free flight.
+#[allow(clippy::too_many_arguments)] // Public compatibility API; callers already supply scalars.
 pub fn calculate_aerodynamic_jump(
     muzzle_velocity_mps: f64,
     spin_rate_rad_s: f64,

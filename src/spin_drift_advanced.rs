@@ -52,7 +52,18 @@ impl SpinDriftCoefficients {
         }
     }
 
+    /// Return the legacy default coefficient set.
+    ///
+    /// This inherent constructor is retained in addition to [`Default`] for source compatibility
+    /// with callers that invoke it through a fully qualified inherent-method path.
+    #[allow(clippy::should_implement_trait)] // The trait is implemented below; this preserves API.
     pub fn default() -> Self {
+        <Self as Default>::default()
+    }
+}
+
+impl Default for SpinDriftCoefficients {
+    fn default() -> Self {
         Self {
             litz_coefficient: 1.25,
             mccoy_jump_factor: 0.85,
@@ -70,6 +81,7 @@ impl SpinDriftCoefficients {
 /// multipliers. Atmospheric effects belong in the supplied `stability_factor` and time of flight.
 /// Muzzle velocity and density must remain finite and positive solely to preserve the legacy
 /// invalid-input contract; within that valid domain they do not rescale the result.
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn calculate_advanced_spin_drift(
     stability_factor: f64,
     time_of_flight_s: f64,

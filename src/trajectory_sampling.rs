@@ -1,5 +1,6 @@
 use nalgebra::Vector3;
 use std::collections::HashSet;
+use std::fmt;
 
 /// Trajectory flags for notable events
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -9,12 +10,27 @@ pub enum TrajectoryFlag {
     Apex,
 }
 
+impl fmt::Display for TrajectoryFlag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            TrajectoryFlag::ZeroCrossing => "zero_crossing",
+            TrajectoryFlag::MachTransition => "mach_transition",
+            TrajectoryFlag::Apex => "apex",
+        })
+    }
+}
+
 impl TrajectoryFlag {
+    /// Return the stable wire-style name used by existing callers.
+    ///
+    /// Keep the inherent method alongside [`fmt::Display`] so fully qualified calls to the
+    /// historical API continue to compile.
+    #[allow(clippy::inherent_to_string_shadow_display)] // Preserve the established public method.
     pub fn to_string(&self) -> String {
         match self {
-            TrajectoryFlag::ZeroCrossing => "zero_crossing".to_string(),
-            TrajectoryFlag::MachTransition => "mach_transition".to_string(),
-            TrajectoryFlag::Apex => "apex".to_string(),
+            TrajectoryFlag::ZeroCrossing => "zero_crossing".to_owned(),
+            TrajectoryFlag::MachTransition => "mach_transition".to_owned(),
+            TrajectoryFlag::Apex => "apex".to_owned(),
         }
     }
 }
@@ -216,14 +232,14 @@ fn add_trajectory_flags(
         let mut apex_idx: Option<usize> = None;
 
         // Search from index 1, but stop at target distance
-        for i in 1..samples.len() {
+        for (i, sample) in samples.iter().enumerate().skip(1) {
             // Only consider points up to target distance
-            if samples[i].distance_m > target_distance_m {
+            if sample.distance_m > target_distance_m {
                 break;
             }
 
-            if samples[i].drop_m < min_drop {
-                min_drop = samples[i].drop_m;
+            if sample.drop_m < min_drop {
+                min_drop = sample.drop_m;
                 apex_idx = Some(i);
             }
         }

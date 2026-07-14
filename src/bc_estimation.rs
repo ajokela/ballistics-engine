@@ -256,6 +256,7 @@ impl BCSegmentEstimator {
     }
 
     /// Estimate BC segments based on bullet characteristics
+    #[allow(clippy::manual_clamp)] // max/min intentionally maps a NaN SD to the lower fallback.
     pub fn estimate_bc_segments(
         base_bc: f64,
         caliber: f64,

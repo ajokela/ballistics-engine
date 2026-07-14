@@ -52,7 +52,18 @@ impl StabilityParameters {
         }
     }
 
+    /// Return the legacy default stability parameters.
+    ///
+    /// This inherent constructor is retained in addition to [`Default`] for source compatibility
+    /// with callers that invoke it through a fully qualified inherent-method path.
+    #[allow(clippy::should_implement_trait)] // The trait is implemented below; this preserves API.
     pub fn default() -> Self {
+        <Self as Default>::default()
+    }
+}
+
+impl Default for StabilityParameters {
+    fn default() -> Self {
         Self {
             nose_shape_factor: 1.0,
             boat_tail_factor: 1.0,
@@ -71,6 +82,7 @@ impl StabilityParameters {
 /// `air_density_kg_m3` is the resolved density for the complete atmospheric state. The
 /// `temperature_k` argument is retained for source compatibility but is not applied separately;
 /// callers changing temperature must supply the corresponding density.
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn calculate_advanced_stability(
     mass_grains: f64,
     velocity_fps: f64,

@@ -520,7 +520,7 @@ pub fn integrate_trajectory(
                 }
             }
         }
-        "RK45" | _ => {
+        _ => {
             // Adaptive RK45 with better sampling
             let mut last_save_x = 0.0; // X is downrange (McCoy)
             let save_interval_m = params.target_distance_m / 50.0; // Save ~50 points minimum
@@ -648,6 +648,7 @@ pub fn integrate_trajectory(
 }
 
 /// Python-exposed function for complete trajectory integration
+#[allow(clippy::too_many_arguments)] // Binding compatibility API; grouping would be breaking.
 pub fn solve_trajectory_rust(
     initial_state: [f64; 6],
     t_span: (f64, f64),

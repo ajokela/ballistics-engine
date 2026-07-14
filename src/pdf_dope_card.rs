@@ -253,7 +253,7 @@ pub fn generate_dope_card_pdf(
     rows: &[DopeCardRow],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let (doc, page1, layer1) = PdfDocument::new(
-        &format!("{} Dope Card", config.rifle_name),
+        format!("{} Dope Card", config.rifle_name),
         Mm(PAGE_WIDTH),
         Mm(PAGE_HEIGHT),
         "Layer 1",
@@ -279,7 +279,7 @@ pub fn generate_dope_card_pdf(
     let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 36.0; // Leave space for header/footer + separators
     let visual_rows_per_page = ((usable_height / row_height) as usize).min(52);
     let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
-    let total_pages = (rows.len() + data_rows_per_page - 1) / data_rows_per_page;
+    let total_pages = rows.len().div_ceil(data_rows_per_page);
 
     for page_num in 0..total_pages {
         let start_idx = page_num * data_rows_per_page;
@@ -292,7 +292,7 @@ pub fn generate_dope_card_pdf(
             doc.add_page(
                 Mm(PAGE_WIDTH),
                 Mm(PAGE_HEIGHT),
-                &format!("Page {}", page_num + 1),
+                format!("Page {}", page_num + 1),
             )
         };
 
@@ -320,6 +320,7 @@ pub fn generate_dope_card_pdf(
     Ok(buffer)
 }
 
+#[allow(clippy::too_many_arguments)] // Fixed-layout renderer keeps its page metrics explicit.
 fn render_page(
     layer: &PdfLayerReference,
     font: &IndirectFontRef,
@@ -383,15 +384,14 @@ fn render_page(
     y -= row_height;
 
     // Split rows into left and right columns
-    let mid = (rows.len() + 1) / 2;
+    let mid = rows.len().div_ceil(2);
     let (left_rows, right_rows) = rows.split_at(mid);
 
     // Select font for data rows (bold or regular)
     let data_font = if bold_data { font_bold } else { font };
 
     // Draw data rows with striping
-    for i in 0..left_rows.len() {
-        let left = &left_rows[i];
+    for (i, left) in left_rows.iter().enumerate() {
         let right = right_rows.get(i);
 
         // Draw stripe background for alternating rows
@@ -508,6 +508,7 @@ fn draw_table_header(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Drawing primitive mirrors the PDF text/layout parameters.
 fn draw_data_row(
     layer: &PdfLayerReference,
     font: &IndirectFontRef,
@@ -540,6 +541,7 @@ fn draw_data_row(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Drawing primitive mirrors the PDF text/layout parameters.
 fn draw_text(
     layer: &PdfLayerReference,
     font: &IndirectFontRef,

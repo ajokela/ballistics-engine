@@ -164,6 +164,7 @@ fn calculate_with_wind(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Keep the example's shot and wind inputs explicit.
 fn calculate_drift_at_distance(
     velocity: f64,
     angle_deg: f64,

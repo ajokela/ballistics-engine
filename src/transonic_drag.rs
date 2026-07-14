@@ -13,6 +13,7 @@ pub enum ProjectileShape {
 
 impl ProjectileShape {
     /// Parse from string representation
+    #[allow(clippy::should_implement_trait)] // Legacy parser defaults instead of returning Result.
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "spitzer" => Self::Spitzer,

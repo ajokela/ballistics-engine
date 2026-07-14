@@ -7,20 +7,24 @@ use ballistics_engine::{
 };
 
 fn magnus_vertical_delta(pressure_hpa: f64, temp_c: f64) -> f64 {
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = 800.0; // m/s
-    inputs.bc_value = 0.5;
-    inputs.bc_type = DragModel::G7;
-    inputs.bullet_mass = 168.0 * 0.00006479891; // kg
-    inputs.bullet_diameter = 0.308 * 0.0254; // m
-    inputs.bullet_length = 1.24 * 0.0254;
-    inputs.caliber_inches = 0.308;
-    inputs.weight_grains = 168.0;
-    inputs.twist_rate = 12.0;
-    inputs.is_twist_right = true;
-    let mut a = AtmosphericConditions::default();
-    a.pressure = pressure_hpa;
-    a.temperature = temp_c;
+    let inputs = BallisticInputs {
+        muzzle_velocity: 800.0,                 // m/s
+        bc_value: 0.5,
+        bc_type: DragModel::G7,
+        bullet_mass: 168.0 * 0.00006479891,     // kg
+        bullet_diameter: 0.308 * 0.0254,         // m
+        bullet_length: 1.24 * 0.0254,
+        caliber_inches: 0.308,
+        weight_grains: 168.0,
+        twist_rate: 12.0,
+        is_twist_right: true,
+        ..BallisticInputs::default()
+    };
+    let a = AtmosphericConditions {
+        pressure: pressure_hpa,
+        temperature: temp_c,
+        ..AtmosphericConditions::default()
+    };
     let endpoint_y = |enable_magnus| {
         let mut run_inputs = inputs.clone();
         run_inputs.enable_magnus = enable_magnus;

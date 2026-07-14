@@ -93,6 +93,7 @@ struct MonteCarloResults {
     r95: f64,
 }
 
+#[allow(clippy::too_many_arguments)] // Keep the example's independent uncertainty inputs explicit.
 fn run_monte_carlo(
     base_velocity: f64,
     base_angle: f64,
@@ -265,15 +266,15 @@ fn show_histogram(data: &[f64], bins: usize) {
     let max_count = *histogram.iter().max().unwrap();
     let scale = 40.0 / max_count as f64;
 
-    for i in 0..bins {
+    for (i, &count) in histogram.iter().enumerate() {
         let range_start = min + i as f64 * bin_width;
         let range_end = range_start + bin_width;
-        let bar_length = (histogram[i] as f64 * scale) as usize;
+        let bar_length = (count as f64 * scale) as usize;
         let bar = "█".repeat(bar_length);
 
         println!(
             "  {:6.0}-{:6.0} m: {} ({})",
-            range_start, range_end, bar, histogram[i]
+            range_start, range_end, bar, count
         );
     }
 }

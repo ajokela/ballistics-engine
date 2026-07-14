@@ -234,6 +234,7 @@ pub fn compute_spin_drift(
 /// Canonical solver paths pass no multiplier because the empirical Litz time exponent already
 /// reflects real spin history. `Some` remains for source compatibility and experimental callers
 /// intentionally applying an extra scalar; canonical solvers must not use it for spin decay.
+#[allow(clippy::manual_clamp)] // max/min intentionally maps a NaN decay factor to zero.
 pub fn compute_spin_drift_with_decay(
     time_s: f64,
     stability: f64,

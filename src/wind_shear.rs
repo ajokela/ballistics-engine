@@ -510,12 +510,14 @@ mod tests {
 
     #[test]
     fn test_logarithmic_profile() {
-        let mut profile = WindShearProfile::default();
-        profile.model = WindShearModel::Logarithmic;
-        profile.surface_wind = WindLayer {
-            altitude_m: 0.0,
-            speed_mps: 10.0,
-            direction_deg: 0.0,
+        let profile = WindShearProfile {
+            model: WindShearModel::Logarithmic,
+            surface_wind: WindLayer {
+                altitude_m: 0.0,
+                speed_mps: 10.0,
+                direction_deg: 0.0,
+            },
+            ..Default::default()
         };
 
         // Wind should increase with altitude
@@ -565,12 +567,14 @@ mod tests {
 
     #[test]
     fn test_power_law_profile() {
-        let mut profile = WindShearProfile::default();
-        profile.model = WindShearModel::PowerLaw;
-        profile.surface_wind = WindLayer {
-            altitude_m: 0.0,
-            speed_mps: 10.0,
-            direction_deg: 0.0,
+        let profile = WindShearProfile {
+            model: WindShearModel::PowerLaw,
+            surface_wind: WindLayer {
+                altitude_m: 0.0,
+                speed_mps: 10.0,
+                direction_deg: 0.0,
+            },
+            ..Default::default()
         };
 
         // Check power law relationship

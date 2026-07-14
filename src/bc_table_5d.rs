@@ -359,7 +359,7 @@ impl Bc5dTable {
 
         let mut velocities: Vec<f64> = breakpoints
             .into_iter()
-            .filter(|&v| v >= 500.0 && muzzle_velocity_fps.map_or(true, |mv| v <= mv))
+            .filter(|&v| v >= 500.0 && muzzle_velocity_fps.is_none_or(|mv| v <= mv))
             .collect();
         velocities.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         velocities.dedup();
@@ -602,9 +602,9 @@ impl Bc5dTableManager {
                         if ext == "bin" {
                             if let Some(stem) = path.file_stem() {
                                 let name = stem.to_string_lossy();
-                                if name.starts_with("bc5d_") {
+                                if let Some(caliber) = name.strip_prefix("bc5d_") {
                                     // Parse caliber from filename (e.g., bc5d_308.bin -> 0.308)
-                                    if let Ok(cal_int) = name[5..].parse::<i32>() {
+                                    if let Ok(cal_int) = caliber.parse::<i32>() {
                                         calibers.push(cal_int as f64 / 1000.0);
                                     }
                                 }
@@ -954,10 +954,10 @@ mod tests {
         let table = create_test_table();
 
         let correction = table.lookup(150.0, 0.4, 2750.0, 2000.0, "G1");
-        assert!(correction >= 0.5 && correction <= 1.5);
+        assert!((0.5..=1.5).contains(&correction));
 
         let correction = table.lookup(150.0, 0.4, 2750.0, 2000.0, "G7");
-        assert!(correction >= 0.5 && correction <= 1.5);
+        assert!((0.5..=1.5).contains(&correction));
     }
 
     #[test]

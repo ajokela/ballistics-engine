@@ -9,18 +9,19 @@ use ballistics_engine::{
 };
 
 fn base() -> BallisticInputs {
-    let mut i = BallisticInputs::default();
-    i.muzzle_velocity = 800.0; // m/s
-    i.bc_value = 0.5;
-    i.bc_type = DragModel::G7;
-    i.bullet_mass = 168.0 * 0.00006479891; // kg
-    i.bullet_diameter = 0.308 * 0.0254; // m
-    i.bullet_length = 1.215 * 0.0254;
-    i.caliber_inches = 0.308;
-    i.weight_grains = 168.0;
-    i.temperature = 15.0;
-    i.pressure = 1013.25;
-    i
+    BallisticInputs {
+        muzzle_velocity: 800.0,                 // m/s
+        bc_value: 0.5,
+        bc_type: DragModel::G7,
+        bullet_mass: 168.0 * 0.00006479891,     // kg
+        bullet_diameter: 0.308 * 0.0254,         // m
+        bullet_length: 1.215 * 0.0254,
+        caliber_inches: 0.308,
+        weight_grains: 168.0,
+        temperature: 15.0,
+        pressure: 1013.25,
+        ..BallisticInputs::default()
+    }
 }
 
 fn velocity_at(inputs: BallisticInputs, range_m: f64) -> f64 {

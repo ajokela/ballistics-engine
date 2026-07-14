@@ -312,6 +312,10 @@ struct Cli {
     command: Commands,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "variants intentionally mirror the stable flat Clap command shape"
+)]
 #[derive(Subcommand)]
 enum Commands {
     /// Calculate a single trajectory
@@ -1552,6 +1556,10 @@ enum Commands {
     },
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "variants intentionally mirror the stable flat Clap command shape"
+)]
 #[derive(Subcommand)]
 enum ProfileAction {
     /// Save a new profile
@@ -2534,7 +2542,7 @@ fn parse_powder_temp_curve(s: &str, units: UnitSystem) -> Result<Vec<(f64, f64)>
             .trim()
             .parse()
             .map_err(|_| format!("invalid velocity '{}' in --powder-temp-curve", v_str.trim()))?;
-        if !(v > 0.0) {
+        if v.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return Err(format!(
                 "--powder-temp-curve velocity must be positive (got {})",
                 v
@@ -2596,7 +2604,7 @@ fn parse_bc_segment(s: &str, units: UnitSystem) -> Result<BCSegmentData, String>
         .trim()
         .parse()
         .map_err(|_| format!("--bc-segment: invalid BC in '{}'", s))?;
-    if !(vmin < vmax) {
+    if vmin.partial_cmp(&vmax) != Some(std::cmp::Ordering::Less) {
         return Err(format!("--bc-segment: VMIN must be < VMAX in '{}'", s));
     }
     if bc <= 0.0 {
@@ -3620,7 +3628,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                     pressure: zero_pressure_metric,
                     humidity: zero_humidity_value,
                     altitude: zero_altitude_metric,
-                    ..Default::default()
                 };
 
                 // Target height is the line of sight's ground-referenced height.
@@ -3889,7 +3896,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     pressure: pressure_metric,
                                     humidity: final_humidity,
                                     altitude: altitude_metric,
-                                    ..Default::default()
                                 };
 
                                 // The API always zeroes the shot at `zero_range_metric`. If the
@@ -4509,13 +4515,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 #[cfg(feature = "online")]
                 {
                     // Check TOS acceptance first
-                    if !check_tos_accepted() {
-                        if !prompt_tos_acceptance()? {
-                            eprintln!(
-                                "Cannot use online features without accepting Terms of Service."
-                            );
-                            std::process::exit(1);
-                        }
+                    if !check_tos_accepted() && !prompt_tos_acceptance()? {
+                        eprintln!(
+                            "Cannot use online features without accepting Terms of Service."
+                        );
+                        std::process::exit(1);
                     }
 
                     let request = TrueVelocityRequest {
@@ -4695,10 +4699,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     UnitSystem::Imperial => 2.0,
                     UnitSystem::Metric => 50.0,
                 });
-            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
-                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
-            } else {
-                drag_model
+            let final_drag_model = match (profile_data.as_ref(), velocity) {
+                (Some(profile), None) => parse_drag_model_arg(&profile.drag_model),
+                _ => drag_model,
             };
 
             handle_mpbr(
@@ -4772,10 +4775,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     UnitSystem::Imperial => 2.0,
                     UnitSystem::Metric => 50.0,
                 });
-            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
-                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
-            } else {
-                drag_model
+            let final_drag_model = match (profile_data.as_ref(), velocity) {
+                (Some(profile), None) => parse_drag_model_arg(&profile.drag_model),
+                _ => drag_model,
             };
 
             handle_come_ups(
@@ -4942,10 +4944,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     UnitSystem::Imperial => 2.0,
                     UnitSystem::Metric => 50.0,
                 });
-            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
-                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
-            } else {
-                drag_model
+            let final_drag_model = match (profile_data.as_ref(), velocity) {
+                (Some(profile), None) => parse_drag_model_arg(&profile.drag_model),
+                _ => drag_model,
             };
 
             // Parse wind speeds
@@ -5114,10 +5115,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     UnitSystem::Imperial => 2.0,
                     UnitSystem::Metric => 50.0,
                 });
-            let final_drag_model = if profile_data.is_some() && velocity.is_none() {
-                parse_drag_model_arg(&profile_data.as_ref().unwrap().drag_model)
-            } else {
-                drag_model
+            let final_drag_model = match (profile_data.as_ref(), velocity) {
+                (Some(profile), None) => parse_drag_model_arg(&profile.drag_model),
+                _ => drag_model,
             };
 
             handle_range_table(
@@ -5398,6 +5398,10 @@ struct PdfMetadata {
 // ============================================================================
 
 /// Generate velocity-dependent BC segments from a Bc5dTableManager.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing BC5D compatibility helper"
+)]
 fn generate_bc5d_segments(
     manager: &mut Bc5dTableManager,
     caliber: f64,
@@ -5421,7 +5425,7 @@ fn generate_bc5d_segments(
 
     let mut valid_velocities: Vec<f64> = velocity_breakpoints
         .into_iter()
-        .filter(|&v| v >= 500.0 && muzzle_velocity_fps.map_or(true, |mv| v <= mv))
+        .filter(|&v| v >= 500.0 && muzzle_velocity_fps.is_none_or(|mv| v <= mv))
         .collect();
     valid_velocities.sort_by(|a, b| b.partial_cmp(a).unwrap());
     valid_velocities.dedup();
@@ -5728,7 +5732,6 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         pressure,
         humidity,
         altitude,
-        ..Default::default()
     };
 
     // Create solver
@@ -6622,6 +6625,10 @@ fn display_api_trajectory_result(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable Monte Carlo CLI command shape"
+)]
 fn run_monte_carlo(
     velocity: f64,
     angle: f64,
@@ -6795,6 +6802,10 @@ fn run_monte_carlo(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable zero-calculation CLI command shape"
+)]
 fn run_zero_calculation(
     velocity: f64,
     bc: f64,
@@ -6832,7 +6843,6 @@ fn run_zero_calculation(
         pressure,
         humidity,
         altitude,
-        ..Default::default()
     };
 
     // The bullet starts at bore height. A same-elevation zero crosses the horizontal line of
@@ -7112,8 +7122,10 @@ fn parse_drag_models(s: &str) -> Result<Vec<DragModel>, Box<dyn Error>> {
 
 /// Estimate BC for every (drag model × available data basis) combination and print the
 /// results. `drop_points` are `(m, m)`, `vel_points` are `(m, m/s)`.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing BC-estimation compatibility helper"
+)]
 fn run_bc_estimation_multi(
     velocity: f64,
     mass: f64,
@@ -7253,8 +7265,8 @@ fn run_bc_estimation_multi(
         OutputFormat::Table => {
             println!("BC Estimation");
             println!(
-                "  {:<6} {:<20} {:>12}   {:<10} {}",
-                "Model", "Fit basis", "Estimated BC", "Fit RMS", ""
+                "  {:<6} {:<20} {:>12}   {:<10} ",
+                "Model", "Fit basis", "Estimated BC", "Fit RMS"
             );
             println!("  {:-<6} {:-<20} {:->12}   {:-<10}", "", "", "", "");
             for v in &variants {
@@ -7286,6 +7298,10 @@ fn run_bc_estimation_multi(
 }
 
 /// Display velocity truing results in the specified format
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing velocity-truing display helper"
+)]
 fn display_true_velocity_result(
     effective_vel: f64,
     vel_unit: &str,
@@ -7414,6 +7430,10 @@ fn display_true_velocity_result(
 
 /// Calculate drop at a given muzzle velocity using trajectory solver
 /// Returns drop in MILs at the target range
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing velocity-truing compatibility helper"
+)]
 fn calculate_drop_at_velocity(
     velocity_fps: f64,
     bc: f64,
@@ -7469,7 +7489,6 @@ fn calculate_drop_at_velocity(
         pressure: pressure_hpa,
         humidity, // Already 0-100 from input
         altitude: altitude_m,
-        ..Default::default()
     };
 
     let wind = WindConditions::default();
@@ -7529,6 +7548,10 @@ struct TrueVelocityLocalResult {
 
 /// Calculate true velocity using local binary search
 /// Returns (effective_velocity_fps, iterations, final_error_mil, calculated_drop_mil)
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable true-velocity CLI command shape"
+)]
 fn calculate_true_velocity_local(
     measured_drop_mil: f64,
     range_yd: f64,
@@ -7636,6 +7659,10 @@ fn calculate_true_velocity_local(
 // ============================================================================
 
 /// Shared: build BallisticInputs + atmosphere + wind from common parameters (all in metric)
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the shared CLI trajectory compatibility helper"
+)]
 fn build_trajectory_components(
     velocity: f64,
     bc: f64,
@@ -7697,13 +7724,16 @@ fn build_trajectory_components(
         pressure,
         humidity,
         altitude,
-        ..Default::default()
     };
 
     (inputs, wind, atmosphere)
 }
 
 /// Run a trajectory and return sampled points at the given zero angle
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the shared sampled-trajectory compatibility helper"
+)]
 fn run_sampled_trajectory(
     velocity: f64,
     bc: f64,
@@ -7757,6 +7787,10 @@ fn resolve_param(
 }
 
 /// MPBR handler
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable MPBR CLI command shape"
+)]
 fn handle_mpbr(
     velocity: f64,
     bc: f64,
@@ -7824,7 +7858,6 @@ fn handle_mpbr(
             pressure: pressure_hpa,
             humidity,
             altitude: altitude_m,
-            ..Default::default()
         };
 
         let zero_angle = match ballistics_engine::calculate_zero_angle_with_conditions(
@@ -7939,7 +7972,6 @@ fn handle_mpbr(
         pressure: pressure_hpa,
         humidity,
         altitude: altitude_m,
-        ..Default::default()
     };
 
     let final_zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
@@ -8127,6 +8159,10 @@ fn handle_mpbr(
 }
 
 /// Come-ups handler
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable come-ups CLI command shape"
+)]
 fn handle_come_ups(
     velocity: f64,
     bc: f64,
@@ -8184,7 +8220,6 @@ fn handle_come_ups(
         pressure: pressure_hpa,
         humidity,
         altitude: altitude_m,
-        ..Default::default()
     };
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
@@ -8636,6 +8671,10 @@ fn handle_lead(
 }
 
 /// Wind card handler
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable wind-card CLI command shape"
+)]
 fn handle_wind_card(
     velocity: f64,
     bc: f64,
@@ -8693,7 +8732,6 @@ fn handle_wind_card(
         pressure: pressure_hpa,
         humidity,
         altitude: altitude_m,
-        ..Default::default()
     };
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
@@ -8919,6 +8957,10 @@ fn handle_wind_card(
 // ============================================================================
 
 /// Calculate the Miller stability factor and minimum twist rates
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable stability CLI command shape"
+)]
 fn handle_stability(
     mass: f64,
     diameter: f64,
@@ -9082,6 +9124,10 @@ fn handle_stability(
 // ============================================================================
 
 /// Generate a comprehensive range table combining drop, wind, velocity, energy, and ToF
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable range-table CLI command shape"
+)]
 fn handle_range_table(
     velocity: f64,
     bc: f64,
@@ -9139,7 +9185,6 @@ fn handle_range_table(
         pressure: pressure_hpa,
         humidity,
         altitude: altitude_m,
-        ..Default::default()
     };
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(

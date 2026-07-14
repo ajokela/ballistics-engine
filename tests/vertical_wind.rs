@@ -10,16 +10,17 @@ use ballistics_engine::{
 use std::f64::consts::FRAC_PI_2;
 
 fn base() -> BallisticInputs {
-    let mut i = BallisticInputs::default();
-    i.muzzle_velocity = 800.0;
-    i.bc_value = 0.5;
-    i.bc_type = DragModel::G7;
-    i.bullet_mass = 0.0109;
-    i.bullet_diameter = 0.00782;
-    i.bullet_length = 0.0309;
-    i.sight_height = 0.05;
-    i.use_rk4 = true;
-    i
+    BallisticInputs {
+        muzzle_velocity: 800.0,
+        bc_value: 0.5,
+        bc_type: DragModel::G7,
+        bullet_mass: 0.0109,
+        bullet_diameter: 0.00782,
+        bullet_length: 0.0309,
+        sight_height: 0.05,
+        use_rk4: true,
+        ..BallisticInputs::default()
+    }
 }
 
 fn solve(inputs: BallisticInputs, wind: WindConditions, max_range: f64) -> TrajectoryResult {
@@ -309,7 +310,6 @@ fn updraft_deflection_is_unaffected_by_shear_in_the_main_solver() {
         speed: 3.0,
         direction: std::f64::consts::FRAC_PI_2,
         vertical_speed: 5.0,
-        ..Default::default()
     };
     // Loft the arc well above the boundary-layer reference height: near the ground
     // the shear ratio clamps to 1.0 and the "shear was active" control below can't

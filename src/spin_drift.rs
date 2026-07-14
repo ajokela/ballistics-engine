@@ -180,6 +180,7 @@ pub fn calculate_dynamic_stability(
 }
 
 /// Calculate the yaw of repose (equilibrium yaw angle)
+#[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn calculate_yaw_of_repose(
     stability_factor: f64,
     velocity_mps: f64,
@@ -316,6 +317,7 @@ pub fn calculate_gyroscopic_drift(
 /// ([`litz_drift_meters`], via [`effective_sg_from_inputs`]). Retained for backward compatibility
 /// and unit tests only. Do NOT reintroduce it into an integration loop alongside the Litz model,
 /// or lateral drift will be double-counted.
+#[allow(clippy::too_many_arguments)] // Deprecated compatibility API; preserve its signature.
 pub fn calculate_enhanced_spin_drift(
     bullet_mass: f64,
     velocity_mps: f64,

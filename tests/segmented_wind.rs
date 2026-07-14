@@ -10,14 +10,15 @@ use ballistics_engine::wind::WindSegment;
 use std::f64::consts::PI;
 
 fn base_inputs() -> BallisticInputs {
-    let mut inputs = BallisticInputs::default();
-    inputs.muzzle_velocity = 792.48; // 2600 fps
-    inputs.bc_value = 0.243;
-    inputs.bc_type = ballistics_engine::DragModel::G7;
-    inputs.bullet_mass = 0.01134; // ~175 gr
-    inputs.bullet_diameter = 0.007823; // .308"
-    inputs.muzzle_angle = 0.005; // slight elevation so it flies a while
-    inputs
+    BallisticInputs {
+        muzzle_velocity: 792.48, // 2600 fps
+        bc_value: 0.243,
+        bc_type: ballistics_engine::DragModel::G7,
+        bullet_mass: 0.01134,     // ~175 gr
+        bullet_diameter: 0.007823, // .308"
+        muzzle_angle: 0.005,      // slight elevation so it flies a while
+        ..Default::default()
+    }
 }
 
 /// Final lateral drift (McCoy Z) at ~700 m for the given wind setup.
