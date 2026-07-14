@@ -6,7 +6,8 @@ use crate::precession_nutation::{
     PrecessionNutationParams,
 };
 use crate::trajectory_sampling::{
-    sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample,
+    projected_sample_count, sample_trajectory, TrajectoryData, TrajectoryOutputs,
+    TrajectorySample,
 };
 use crate::wind_shear::WindShearModel;
 use crate::DragModel;
@@ -718,6 +719,7 @@ impl TrajectorySolver {
         if self.inputs.enable_trajectory_sampling {
             require_finite("sight_height", self.inputs.sight_height)?;
             require_positive("sample_interval", self.inputs.sample_interval)?;
+            projected_sample_count(self.max_range, self.inputs.sample_interval)?;
         }
 
         if self.inputs.enable_coriolis {
@@ -1472,7 +1474,7 @@ impl TrajectorySolver {
                 &outputs,
                 self.inputs.sample_interval,
                 self.inputs.bullet_mass,
-            );
+            )?;
             Some(samples)
         } else {
             None
@@ -1752,7 +1754,7 @@ impl TrajectorySolver {
                 &outputs,
                 self.inputs.sample_interval,
                 self.inputs.bullet_mass,
-            );
+            )?;
             Some(samples)
         } else {
             None
@@ -2001,7 +2003,7 @@ impl TrajectorySolver {
                 &outputs,
                 self.inputs.sample_interval,
                 self.inputs.bullet_mass,
-            );
+            )?;
             Some(samples)
         } else {
             None
@@ -3331,6 +3333,7 @@ use rand_distr;
 #[cfg(test)]
 mod trajectory_point_budget_tests {
     use super::*;
+    use crate::MAX_TRAJECTORY_SAMPLES;
 
     fn solver_with_budget(
         use_rk4: bool,
@@ -3390,6 +3393,134 @@ mod trajectory_point_budget_tests {
             assert!(
                 error.to_string().contains("point limit of 1"),
                 "unexpected {mode} endpoint-budget error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mba1299_every_solver_preflights_the_sample_budget() {
+        for (mode, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let inputs = BallisticInputs {
+                use_rk4,
+                use_adaptive_rk45,
+                enable_trajectory_sampling: true,
+                sample_interval: 1.0,
+                ground_threshold: f64::NEG_INFINITY,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(MAX_TRAJECTORY_SAMPLES as f64);
+            // If validation does not reject the sample grid before dispatch, the first attempted
+            // integration point produces a distinct point-budget error.
+            solver.max_trajectory_points = 0;
+
+            let error = solver
+                .solve()
+                .expect_err("an over-limit sample grid must fail before integration");
+            assert!(
+                error
+                    .to_string()
+                    .contains("trajectory sample limit of 250000 exceeded"),
+                "unexpected {mode} sample-budget error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mba1299_normal_sampling_does_not_change_solver_results() {
+        for (mode, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let solve = |enable_trajectory_sampling| {
+                let inputs = BallisticInputs {
+                    use_rk4,
+                    use_adaptive_rk45,
+                    enable_trajectory_sampling,
+                    sample_interval: 0.5,
+                    ground_threshold: f64::NEG_INFINITY,
+                    ..BallisticInputs::default()
+                };
+                let mut solver = TrajectorySolver::new(
+                    inputs,
+                    WindConditions::default(),
+                    AtmosphericConditions::default(),
+                );
+                solver.set_max_range(2.0);
+                solver.solve().expect("normal short-range solve")
+            };
+
+            let baseline = solve(false);
+            let sampled = solve(true);
+            for (field, left, right) in [
+                ("max_range", baseline.max_range, sampled.max_range),
+                ("max_height", baseline.max_height, sampled.max_height),
+                (
+                    "time_of_flight",
+                    baseline.time_of_flight,
+                    sampled.time_of_flight,
+                ),
+                (
+                    "impact_velocity",
+                    baseline.impact_velocity,
+                    sampled.impact_velocity,
+                ),
+                (
+                    "impact_energy",
+                    baseline.impact_energy,
+                    sampled.impact_energy,
+                ),
+            ] {
+                assert_eq!(
+                    left.to_bits(),
+                    right.to_bits(),
+                    "{mode} sampling changed {field}"
+                );
+            }
+            assert_eq!(baseline.points.len(), sampled.points.len());
+            for (index, (left, right)) in baseline
+                .points
+                .iter()
+                .zip(&sampled.points)
+                .enumerate()
+            {
+                assert_eq!(left.time.to_bits(), right.time.to_bits(), "{mode} point {index}");
+                assert_eq!(
+                    left.position.map(f64::to_bits),
+                    right.position.map(f64::to_bits),
+                    "{mode} point {index} position"
+                );
+                assert_eq!(
+                    left.velocity_magnitude.to_bits(),
+                    right.velocity_magnitude.to_bits(),
+                    "{mode} point {index} velocity"
+                );
+                assert_eq!(
+                    left.kinetic_energy.to_bits(),
+                    right.kinetic_energy.to_bits(),
+                    "{mode} point {index} energy"
+                );
+            }
+            assert!(baseline.sampled_points.is_none());
+            let samples = sampled
+                .sampled_points
+                .expect("sampling-enabled solve should return observations");
+            assert_eq!(
+                samples
+                    .iter()
+                    .map(|sample| sample.distance_m)
+                    .collect::<Vec<_>>(),
+                vec![0.0, 0.5, 1.0, 1.5, 2.0],
+                "{mode} normal sampling grid changed"
             );
         }
     }

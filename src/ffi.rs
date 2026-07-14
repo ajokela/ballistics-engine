@@ -406,7 +406,8 @@ unsafe fn calculate_trajectory_impl(
 /// [`MIN_FFI_STEP_SIZE_MS`]. This boundary contract is validated for every solver mode, although
 /// adaptive RK45 chooses its integration steps internally. Invalid values return null without
 /// starting a solve. A solve that would exceed [`crate::MAX_TRAJECTORY_POINTS`] also returns null;
-/// callers can increase `step_size`, reduce `max_range`, or select adaptive RK45.
+/// an enabled sampling grid above [`crate::MAX_TRAJECTORY_SAMPLES`] does likewise. Callers can
+/// increase `step_size`, reduce `max_range`, or select adaptive RK45.
 ///
 /// # Safety
 ///
