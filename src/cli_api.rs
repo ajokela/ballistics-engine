@@ -732,16 +732,28 @@ impl TrajectorySolver {
         Ok(())
     }
 
-    /// Public solve results must never report success with NaN or infinity. The input gate catches
-    /// malformed scalar state; this postcondition also covers overflow and malformed optional
-    /// tables/segments without imposing arbitrary upper bounds on otherwise finite inputs.
-    fn validate_result_finiteness(&self, result: &TrajectoryResult) -> Result<(), BallisticsError> {
+    /// Public solve results must never report success with NaN or infinity, nor with values a
+    /// physical trajectory cannot produce: a negative terminal downrange distance, time of
+    /// flight, speed, or energy (MBA-1293 — a stiff-input integration explosion reported
+    /// `Ok(max_range: -50.59)`). The input gate catches malformed scalar state; this
+    /// postcondition also covers overflow and malformed optional tables/segments without
+    /// imposing arbitrary upper bounds on otherwise finite inputs.
+    fn validate_result_sanity(&self, result: &TrajectoryResult) -> Result<(), BallisticsError> {
         let require_finite = |name: &str, value: f64| {
             if value.is_finite() {
                 Ok(())
             } else {
                 Err(BallisticsError::from(format!(
                     "trajectory result contains non-finite {name}"
+                )))
+            }
+        };
+        let require_non_negative = |name: &str, value: f64| {
+            if value >= 0.0 {
+                Ok(())
+            } else {
+                Err(BallisticsError::from(format!(
+                    "trajectory result contains non-physical negative {name} ({value})"
                 )))
             }
         };
@@ -754,12 +766,30 @@ impl TrajectorySolver {
                 )))
             }
         };
+        let require_indexed_non_negative =
+            |collection: &str, index: usize, field: &str, value: f64| {
+                if value >= 0.0 {
+                    Ok(())
+                } else {
+                    Err(BallisticsError::from(format!(
+                        "trajectory result contains non-physical negative {collection}[{index}].{field} ({value})"
+                    )))
+                }
+            };
 
         require_finite("max_range", result.max_range)?;
         require_finite("max_height", result.max_height)?;
         require_finite("time_of_flight", result.time_of_flight)?;
         require_finite("impact_velocity", result.impact_velocity)?;
         require_finite("impact_energy", result.impact_energy)?;
+
+        // The solve starts at x = 0 and only ever fires downrange, so these scalars are
+        // non-negative for every physically meaningful trajectory. (max_height is exempt:
+        // points can legitimately sit below y = 0 with an elevated muzzle.)
+        require_non_negative("max_range", result.max_range)?;
+        require_non_negative("time_of_flight", result.time_of_flight)?;
+        require_non_negative("impact_velocity", result.impact_velocity)?;
+        require_non_negative("impact_energy", result.impact_energy)?;
 
         for (index, point) in result.points.iter().enumerate() {
             require_indexed_finite("points", index, "time", point.time)?;
@@ -773,6 +803,14 @@ impl TrajectorySolver {
                 point.velocity_magnitude,
             )?;
             require_indexed_finite("points", index, "kinetic_energy", point.kinetic_energy)?;
+            require_indexed_non_negative("points", index, "time", point.time)?;
+            require_indexed_non_negative(
+                "points",
+                index,
+                "velocity_magnitude",
+                point.velocity_magnitude,
+            )?;
+            require_indexed_non_negative("points", index, "kinetic_energy", point.kinetic_energy)?;
         }
 
         if let Some(samples) = &result.sampled_points {
@@ -848,21 +886,53 @@ impl TrajectorySolver {
     /// Integration methods store the pre-step state in `points`. Validate each newly accepted
     /// state as well, otherwise a poisoned final step could terminate the loop and leave only the
     /// previous finite point in an apparently successful result.
+    ///
+    /// Beyond finiteness, an accepted state must respect the physical speed budget: drag is
+    /// dissipative (it drives the projectile toward the wind frame, never past it), Magnus and
+    /// Coriolis act perpendicular to the velocity and do no work, and gravity adds at most g*t.
+    /// Ground-frame speed therefore cannot legitimately exceed muzzle speed + strongest wind +
+    /// g*t. Exceeding that budget means the integrator itself diverged — for stiff inputs the
+    /// minimum-step RK45 acceptance can multiply speed by orders of magnitude in one step
+    /// (MBA-1293: 13x and a sign reversal in a single 1 microsecond step) — so the solve must
+    /// fail rather than report the garbage as `Ok`.
     fn validate_integration_state(
+        &self,
         position: &Vector3<f64>,
         velocity: &Vector3<f64>,
         time: f64,
     ) -> Result<(), BallisticsError> {
-        if position.iter().all(|value| value.is_finite())
+        if !(position.iter().all(|value| value.is_finite())
             && velocity.iter().all(|value| value.is_finite())
-            && time.is_finite()
+            && time.is_finite())
         {
-            Ok(())
-        } else {
-            Err(BallisticsError::from(
+            return Err(BallisticsError::from(
                 "trajectory integration produced a non-finite state",
-            ))
+            ));
         }
+
+        let speed = velocity.magnitude();
+        let budget = self.speed_budget(time);
+        if speed > budget {
+            return Err(BallisticsError::from(format!(
+                "trajectory integration diverged: speed {speed:.3e} m/s at t={time:.6}s exceeds \
+                 the physical budget of {budget:.3e} m/s"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Ceiling on ground-frame speed a physical trajectory can reach by time `t` (see
+    /// [`Self::validate_integration_state`]). The factor-2 slack absorbs boundary-layer
+    /// wind-shear amplification and integrator transients; genuine divergence clears the
+    /// budget by orders of magnitude.
+    fn speed_budget(&self, time: f64) -> f64 {
+        let scalar_wind = self.wind.speed.abs() + self.wind.vertical_speed.abs();
+        let wind_bound = match &self.wind_sock {
+            Some(sock) => scalar_wind.max(sock.max_speed_mps()),
+            None => scalar_wind,
+        };
+        2.0 * (self.inputs.muzzle_velocity + wind_bound + 10.0)
+            + crate::constants::G_ACCEL_MPS2 * time
     }
 
     /// Store one public trajectory point without exceeding the per-solve resource budget.
@@ -1171,7 +1241,7 @@ impl TrajectorySolver {
             self.solve_euler()?
         };
         self.apply_spin_drift(&mut result);
-        self.validate_result_finiteness(&result)?;
+        self.validate_result_sanity(&result)?;
         Ok(result)
     }
 
@@ -1432,7 +1502,7 @@ impl TrajectorySolver {
             velocity += acceleration * self.time_step;
             position += velocity * self.time_step;
             time += self.time_step;
-            Self::validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)?;
         }
 
         self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
@@ -1712,7 +1782,7 @@ impl TrajectorySolver {
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
             velocity += (acc1 + acc2 * 2.0 + acc3 * 2.0 + acc4) * (dt / 6.0);
             time += dt;
-            Self::validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)?;
         }
 
         self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
@@ -1953,7 +2023,7 @@ impl TrajectorySolver {
             position = accepted_step.position;
             velocity = accepted_step.velocity;
             time += accepted_step.used_dt;
-            Self::validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)?;
 
             // Adapt the step size for the NEXT iteration.
             dt = accepted_step.next_dt;
@@ -3329,6 +3399,86 @@ pub fn estimate_bc_from_trajectory(
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod result_sanity_tests {
+    use super::*;
+
+    fn default_solver() -> TrajectorySolver {
+        TrajectorySolver::new(
+            BallisticInputs::default(),
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        )
+    }
+
+    fn minimal_result() -> TrajectoryResult {
+        TrajectoryResult {
+            max_range: 100.0,
+            max_height: 1.0,
+            time_of_flight: 0.5,
+            impact_velocity: 700.0,
+            impact_energy: 2450.0,
+            points: vec![],
+            sampled_points: None,
+            min_pitch_damping: None,
+            transonic_mach: None,
+            angular_state: None,
+            max_yaw_angle: None,
+            max_precession_angle: None,
+            aerodynamic_jump: None,
+        }
+    }
+
+    #[test]
+    fn mba1293_negative_scalars_fail_the_result_postcondition() {
+        let solver = default_solver();
+        solver
+            .validate_result_sanity(&minimal_result())
+            .expect("a sane result must pass");
+
+        for (name, mutate) in [
+            ("max_range", (|r| r.max_range = -50.588) as fn(&mut TrajectoryResult)),
+            ("time_of_flight", |r| r.time_of_flight = -1.0),
+            ("impact_velocity", |r| r.impact_velocity = -700.0),
+            ("impact_energy", |r| r.impact_energy = -1.0),
+        ] {
+            let mut result = minimal_result();
+            mutate(&mut result);
+            let error = solver
+                .validate_result_sanity(&result)
+                .expect_err("negative scalar must fail");
+            assert!(
+                error.to_string().contains(name),
+                "error for {name} did not name the field: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn mba1293_speed_budget_bounds_legitimate_states_and_rejects_divergence() {
+        let solver = default_solver();
+        let mv = solver.inputs.muzzle_velocity;
+
+        // A state at muzzle speed is always inside the budget.
+        let position = Vector3::new(10.0, 0.0, 0.0);
+        solver
+            .validate_integration_state(&position, &Vector3::new(mv, 0.0, 0.0), 0.01)
+            .expect("muzzle-speed state must pass");
+
+        // The MBA-1293 explosion (13x the muzzle speed) must be rejected as divergence.
+        let error = solver
+            .validate_integration_state(&position, &Vector3::new(-13.0 * mv, 0.0, 0.0), 0.01)
+            .expect_err("13x muzzle speed must fail the budget");
+        assert!(error.to_string().contains("diverged"), "{error}");
+
+        // The budget grows with gravity's g*t so long lobbed arcs never trip it.
+        let after_fall = mv + crate::constants::G_ACCEL_MPS2 * 60.0;
+        solver
+            .validate_integration_state(&position, &Vector3::new(0.0, -after_fall, 0.0), 60.0)
+            .expect("gravity-accelerated speed within g*t must pass");
+    }
+}
 
 #[cfg(test)]
 mod trajectory_point_budget_tests {

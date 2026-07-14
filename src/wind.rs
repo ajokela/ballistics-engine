@@ -121,6 +121,15 @@ impl WindSock {
         wind_vector(speed_mps, angle_rad, seg.vertical_mps)
     }
 
+    /// Upper bound (m/s) on the wind speed any segment can contribute, horizontal
+    /// plus vertical. Feeds the solver's integration divergence guard (MBA-1293).
+    pub fn max_speed_mps(&self) -> f64 {
+        self.winds
+            .iter()
+            .map(|seg| seg.speed_kmh.abs() * KMH_TO_MPS + seg.vertical_mps.abs())
+            .fold(0.0, f64::max)
+    }
+
     /// Get wind vector for a given range
     ///
     /// Note: This modifies internal state and expects monotonically increasing ranges
