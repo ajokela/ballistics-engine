@@ -9,6 +9,7 @@ use crate::trajectory_sampling::{
     projected_sample_count, sample_trajectory, TrajectoryData, TrajectoryOutputs,
     TrajectorySample,
 };
+use crate::trajectory_observation::TrajectoryTermination;
 use crate::wind_shear::WindShearModel;
 use crate::DragModel;
 use nalgebra::{Vector3, Vector6};
@@ -431,6 +432,14 @@ pub struct TrajectoryResult {
     pub time_of_flight: f64,
     pub impact_velocity: f64,
     pub impact_energy: f64,
+    /// Projectile mass used to derive full-state observation energy.
+    pub projectile_mass_kg: f64,
+    /// Height of the horizontal line of sight in the solver's ground-referenced frame.
+    pub line_of_sight_height_m: f64,
+    /// Station speed of sound used for Mach observations and transition flags.
+    pub station_speed_of_sound_mps: f64,
+    /// Explicit reason the integration stopped; consumers must not infer this from the endpoint.
+    pub termination: TrajectoryTermination,
     pub points: Vec<TrajectoryPoint>,
     pub sampled_points: Option<Vec<TrajectorySample>>, // Trajectory samples at regular intervals
     pub min_pitch_damping: Option<f64>, // Minimum pitch damping coefficient (for stability warning)
@@ -447,11 +456,12 @@ const RK45_TOLERANCE: f64 = 1e-6;
 const RK45_SAFETY_FACTOR: f64 = 0.9;
 const RK45_MAX_DT: f64 = 0.01;
 const RK45_MIN_DT: f64 = 1e-6;
+const TRAJECTORY_TIME_LIMIT_S: f64 = 100.0;
 
 /// Hard ceiling for points retained by a single [`TrajectorySolver`] result.
 ///
-/// The cap applies across Euler, fixed RK4, and adaptive RK45, including an interpolated
-/// max-range endpoint. Solves that would exceed it return [`BallisticsError`] instead of
+/// The cap applies across Euler, fixed RK4, and adaptive RK45, including the exact terminal
+/// endpoint. Solves that would exceed it return [`BallisticsError`] instead of
 /// truncating or growing their point buffer without bound.
 pub const MAX_TRAJECTORY_POINTS: usize = 250_000;
 
@@ -782,6 +792,15 @@ impl TrajectorySolver {
         require_finite("time_of_flight", result.time_of_flight)?;
         require_finite("impact_velocity", result.impact_velocity)?;
         require_finite("impact_energy", result.impact_energy)?;
+        require_finite("projectile_mass_kg", result.projectile_mass_kg)?;
+        require_finite(
+            "line_of_sight_height_m",
+            result.line_of_sight_height_m,
+        )?;
+        require_finite(
+            "station_speed_of_sound_mps",
+            result.station_speed_of_sound_mps,
+        )?;
 
         // The solve starts at x = 0 and only ever fires downrange, so these scalars are
         // non-negative for every physically meaningful trajectory. (max_height is exempt:
@@ -790,6 +809,11 @@ impl TrajectorySolver {
         require_non_negative("time_of_flight", result.time_of_flight)?;
         require_non_negative("impact_velocity", result.impact_velocity)?;
         require_non_negative("impact_energy", result.impact_energy)?;
+        require_non_negative("projectile_mass_kg", result.projectile_mass_kg)?;
+        require_non_negative(
+            "station_speed_of_sound_mps",
+            result.station_speed_of_sound_mps,
+        )?;
 
         for (index, point) in result.points.iter().enumerate() {
             require_indexed_finite("points", index, "time", point.time)?;
@@ -1138,52 +1162,121 @@ impl TrajectorySolver {
         }
     }
 
-    /// Append the state where the final integration step crossed `max_range`.
+    /// Append the exact state at the earliest boundary crossed by the final integration step.
     ///
-    /// Each solver stores its pre-step state, so a range crossing otherwise leaves the reported
-    /// endpoint one step short. Ground- and time-limit exits that do not bracket `max_range` are
-    /// intentionally left unchanged.
-    fn append_max_range_endpoint(
+    /// Each solver stores its pre-step state. Keeping only that point makes early ground and time
+    /// exits indistinguishable from ordinary integration knots, and historically left the
+    /// reported endpoint one step short. Interpolating all supported boundaries here gives every
+    /// solver one explicit terminal point and one authoritative termination reason.
+    fn append_terminal_endpoint(
         &self,
         points: &mut Vec<TrajectoryPoint>,
         post_position: Vector3<f64>,
         post_velocity: Vector3<f64>,
         post_time: f64,
         max_height: &mut f64,
-    ) -> Result<(), BallisticsError> {
-        let Some(previous) = points.last().cloned() else {
-            return Ok(());
-        };
-        if previous.position.x >= self.max_range || post_position.x < self.max_range {
-            return Ok(());
+    ) -> Result<TrajectoryTermination, BallisticsError> {
+        let previous = points
+            .last()
+            .cloned()
+            .ok_or_else(|| BallisticsError::from("No trajectory points generated"))?;
+
+        let mut crossings = Vec::with_capacity(3);
+        if previous.position.x < self.max_range && post_position.x >= self.max_range {
+            let span = post_position.x - previous.position.x;
+            if span.is_finite() && span > 0.0 {
+                crossings.push((
+                    (self.max_range - previous.position.x) / span,
+                    TrajectoryTermination::MaxRange,
+                ));
+            }
+        }
+        if self.inputs.ground_threshold.is_finite()
+            && previous.position.y > self.inputs.ground_threshold
+            && post_position.y <= self.inputs.ground_threshold
+        {
+            let span = post_position.y - previous.position.y;
+            if span.is_finite() && span < 0.0 {
+                crossings.push((
+                    (self.inputs.ground_threshold - previous.position.y) / span,
+                    TrajectoryTermination::GroundThreshold,
+                ));
+            }
+        }
+        if previous.time < TRAJECTORY_TIME_LIMIT_S && post_time >= TRAJECTORY_TIME_LIMIT_S {
+            let span = post_time - previous.time;
+            if span.is_finite() && span > 0.0 {
+                crossings.push((
+                    (TRAJECTORY_TIME_LIMIT_S - previous.time) / span,
+                    TrajectoryTermination::TimeLimit,
+                ));
+            }
         }
 
-        let span = post_position.x - previous.position.x;
-        if !span.is_finite() || span <= 1e-9 {
-            return Ok(());
-        }
+        let (fraction, termination) = crossings
+            .into_iter()
+            .filter(|(fraction, _)| fraction.is_finite() && (0.0..=1.0).contains(fraction))
+            .min_by(|left, right| {
+                let priority = |termination: TrajectoryTermination| match termination {
+                    TrajectoryTermination::GroundThreshold => 0,
+                    TrajectoryTermination::MaxRange => 1,
+                    TrajectoryTermination::TimeLimit => 2,
+                    TrajectoryTermination::VelocityFloor => 3,
+                };
+                left.0
+                    .total_cmp(&right.0)
+                    .then_with(|| priority(left.1).cmp(&priority(right.1)))
+            })
+            .ok_or_else(|| {
+                BallisticsError::from(
+                    "trajectory integration stopped without crossing a supported boundary",
+                )
+            })?;
 
-        let fraction = (self.max_range - previous.position.x) / span;
         let mut position = previous.position + (post_position - previous.position) * fraction;
-        position.x = self.max_range;
+        match termination {
+            TrajectoryTermination::MaxRange => position.x = self.max_range,
+            TrajectoryTermination::GroundThreshold => {
+                position.y = self.inputs.ground_threshold;
+            }
+            TrajectoryTermination::TimeLimit | TrajectoryTermination::VelocityFloor => {}
+        }
         let velocity_magnitude = previous.velocity_magnitude
             + (post_velocity.magnitude() - previous.velocity_magnitude) * fraction;
-        let time = previous.time + (post_time - previous.time) * fraction;
+        let mut time = previous.time + (post_time - previous.time) * fraction;
+        if termination == TrajectoryTermination::TimeLimit {
+            time = TRAJECTORY_TIME_LIMIT_S;
+        }
         let kinetic_energy =
             0.5 * self.inputs.bullet_mass * velocity_magnitude * velocity_magnitude;
 
         if position.y > *max_height {
             *max_height = position.y;
         }
-        self.push_trajectory_point(
-            points,
-            TrajectoryPoint {
-                time,
-                position,
-                velocity_magnitude,
-                kinetic_energy,
-            },
-        )
+        let terminal_point = TrajectoryPoint {
+            time,
+            position,
+            velocity_magnitude,
+            kinetic_energy,
+        };
+        if terminal_point.position.x < previous.position.x {
+            return Err(BallisticsError::from(
+                "trajectory terminal state reversed downrange before the crossed boundary",
+            ));
+        }
+        if terminal_point.position.x == previous.position.x {
+            // A very early ground/time crossing can be distinct in time but less than one ULP
+            // downrange. There is no representable range at which to retain both states, so make
+            // the terminal state authoritative instead of creating a duplicate-X trajectory that
+            // the checked observation API must reject.
+            let last = points.last_mut().ok_or_else(|| {
+                BallisticsError::from("trajectory points disappeared during terminal finalization")
+            })?;
+            *last = terminal_point;
+        } else {
+            self.push_trajectory_point(points, terminal_point)?;
+        }
+        Ok(termination)
     }
 
     fn gravity_acceleration(&self) -> Vector3<f64> {
@@ -1392,7 +1485,7 @@ impl TrajectorySolver {
         // Main integration loop (X is downrange)
         while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
-            && time < 100.0
+            && time < TRAJECTORY_TIME_LIMIT_S
         {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
@@ -1505,7 +1598,8 @@ impl TrajectorySolver {
             self.validate_integration_state(&position, &velocity, time)?;
         }
 
-        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
+        let termination =
+            self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
@@ -1556,6 +1650,10 @@ impl TrajectorySolver {
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
+            projectile_mass_kg: self.inputs.bullet_mass,
+            line_of_sight_height_m: self.inputs.muzzle_height + self.inputs.sight_height,
+            station_speed_of_sound_mps: speed_of_sound,
+            termination,
             points,
             sampled_points,
             min_pitch_damping: if self.inputs.enable_pitch_damping {
@@ -1654,7 +1752,7 @@ impl TrajectorySolver {
         // Main RK4 integration loop (X is downrange)
         while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
-            && time < 100.0
+            && time < TRAJECTORY_TIME_LIMIT_S
         {
             // Store trajectory point
             let velocity_magnitude = velocity.magnitude();
@@ -1785,7 +1883,8 @@ impl TrajectorySolver {
             self.validate_integration_state(&position, &velocity, time)?;
         }
 
-        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
+        let termination =
+            self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         // Get final values
         let last_point = points.last().ok_or("No trajectory points generated")?;
@@ -1836,6 +1935,10 @@ impl TrajectorySolver {
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
+            projectile_mass_kg: self.inputs.bullet_mass,
+            line_of_sight_height_m: self.inputs.muzzle_height + self.inputs.sight_height,
+            station_speed_of_sound_mps: speed_of_sound,
+            termination,
             points,
             sampled_points,
             min_pitch_damping: if self.inputs.enable_pitch_damping {
@@ -1931,7 +2034,7 @@ impl TrajectorySolver {
 
         while position.x < self.max_range
             && position.y > self.inputs.ground_threshold
-            && time < 100.0
+            && time < TRAJECTORY_TIME_LIMIT_S
         {
             // Store current point
             let velocity_magnitude = velocity.magnitude();
@@ -2035,7 +2138,8 @@ impl TrajectorySolver {
         }
 
         // Shared MBA-968/MBA-1218 range-crossing interpolation for all solver modes.
-        self.append_max_range_endpoint(&mut points, position, velocity, time, &mut max_height)?;
+        let termination =
+            self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         let last_point = points.last().unwrap();
 
@@ -2085,6 +2189,10 @@ impl TrajectorySolver {
             time_of_flight: last_point.time,
             impact_velocity: last_point.velocity_magnitude,
             impact_energy: last_point.kinetic_energy,
+            projectile_mass_kg: self.inputs.bullet_mass,
+            line_of_sight_height_m: self.inputs.muzzle_height + self.inputs.sight_height,
+            station_speed_of_sound_mps: speed_of_sound,
+            termination,
             points,
             sampled_points,
             min_pitch_damping: if self.inputs.enable_pitch_damping {
@@ -3419,6 +3527,10 @@ mod result_sanity_tests {
             time_of_flight: 0.5,
             impact_velocity: 700.0,
             impact_energy: 2450.0,
+            projectile_mass_kg: 0.01,
+            line_of_sight_height_m: 1.5,
+            station_speed_of_sound_mps: 340.0,
+            termination: TrajectoryTermination::MaxRange,
             points: vec![],
             sampled_points: None,
             min_pitch_damping: None,
@@ -4418,6 +4530,104 @@ mod terminal_range_interpolation_tests {
     use super::*;
 
     #[test]
+    fn terminal_finalizer_selects_the_earliest_crossed_boundary() {
+        let inputs = BallisticInputs {
+            ground_threshold: 0.0,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(120.0);
+
+        let previous_speed = 700.0;
+        let mut points = vec![TrajectoryPoint {
+            time: 99.0,
+            position: Vector3::new(90.0, 1.0, -1.0),
+            velocity_magnitude: previous_speed,
+            kinetic_energy: 0.5 * solver.inputs.bullet_mass * previous_speed.powi(2),
+        }];
+        let mut max_height = 1.0;
+        let termination = solver
+            .append_terminal_endpoint(
+                &mut points,
+                Vector3::new(130.0, -3.0, 3.0),
+                Vector3::new(600.0, 0.0, 0.0),
+                101.0,
+                &mut max_height,
+            )
+            .expect("the final step brackets supported boundaries");
+
+        assert_eq!(termination, TrajectoryTermination::GroundThreshold);
+        assert_eq!(points.len(), 2);
+        let terminal = points.last().expect("terminal point");
+        assert_eq!(terminal.time, 99.5);
+        assert_eq!(terminal.position, Vector3::new(100.0, 0.0, 0.0));
+        assert_eq!(terminal.velocity_magnitude, 675.0);
+        assert_eq!(
+            terminal.kinetic_energy,
+            0.5 * solver.inputs.bullet_mass * 675.0_f64.powi(2)
+        );
+
+        // At x=100 the range and ground crossings tie; physical ground impact wins explicitly.
+        solver.set_max_range(100.0);
+        let mut tied_points = vec![points[0].clone()];
+        assert_eq!(
+            solver
+                .append_terminal_endpoint(
+                    &mut tied_points,
+                    Vector3::new(130.0, -3.0, 3.0),
+                    Vector3::new(600.0, 0.0, 0.0),
+                    101.0,
+                    &mut max_height,
+                )
+                .expect("tied boundaries remain a valid terminal"),
+            TrajectoryTermination::GroundThreshold
+        );
+    }
+
+    #[test]
+    fn sub_ulp_terminal_crossing_replaces_instead_of_duplicating_range() {
+        let ground_threshold = f64::from_bits(1.0_f64.to_bits() - 1);
+        let inputs = BallisticInputs {
+            ground_threshold,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(1_000.0);
+
+        let speed = 700.0;
+        let mut points = vec![TrajectoryPoint {
+            time: 0.0,
+            position: Vector3::new(100.0, 1.0, 0.0),
+            velocity_magnitude: speed,
+            kinetic_energy: 0.5 * solver.inputs.bullet_mass * speed.powi(2),
+        }];
+        let mut max_height = 1.0;
+        let termination = solver
+            .append_terminal_endpoint(
+                &mut points,
+                Vector3::new(101.0, 0.0, 0.0),
+                Vector3::new(699.0, 0.0, 0.0),
+                1.0,
+                &mut max_height,
+            )
+            .expect("sub-ULP ground crossing remains representable as one terminal state");
+
+        assert_eq!(termination, TrajectoryTermination::GroundThreshold);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].position.x, 100.0);
+        assert_eq!(points[0].position.y.to_bits(), ground_threshold.to_bits());
+        assert!(points[0].time > 0.0);
+    }
+
+    #[test]
     fn every_solver_appends_an_exact_max_range_endpoint() {
         let target_range = 0.1;
         let modes = [
@@ -4446,6 +4656,7 @@ mod terminal_range_interpolation_tests {
             let terminal = result.points.last().expect("terminal point is missing");
             let muzzle = result.points.first().expect("muzzle point is missing");
 
+            assert_eq!(result.termination, TrajectoryTermination::MaxRange);
             assert_eq!(
                 terminal.position.x.to_bits(),
                 target_range.to_bits(),
@@ -4715,6 +4926,79 @@ mod rk45_adaptivity_tests {
 #[cfg(test)]
 mod ground_termination_tests {
     use super::*;
+    use crate::trajectory_observation::TrajectoryObservationFlag;
+
+    #[test]
+    fn every_solver_reports_one_exact_early_ground_endpoint() {
+        for (name, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let inputs = BallisticInputs {
+                muzzle_height: 1.0,
+                muzzle_angle: -0.2,
+                ground_threshold: 0.0,
+                use_rk4,
+                use_adaptive_rk45,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(1_000.0);
+
+            let result = solver.solve().expect("early-ground solve should succeed");
+            let terminal = result.points.last().expect("terminal point is missing");
+
+            assert_eq!(result.termination, TrajectoryTermination::GroundThreshold);
+            assert_eq!(terminal.position.y.to_bits(), 0.0_f64.to_bits());
+            assert!(
+                terminal.position.x < 1_000.0,
+                "{name} incorrectly reached max range"
+            );
+            assert_eq!(result.max_range.to_bits(), terminal.position.x.to_bits());
+            assert_eq!(
+                result
+                    .points
+                    .iter()
+                    .filter(|point| point.position.y == 0.0)
+                    .count(),
+                1,
+                "{name} did not retain exactly one ground endpoint"
+            );
+
+            let observations = result
+                .sample_observations(1.0, 100)
+                .expect("checked early-ground sampling should succeed");
+            assert!(observations[..observations.len() - 1]
+                .iter()
+                .all(|observation| observation.distance_m < terminal.position.x));
+            let terminal_observation = observations.last().expect("terminal observation");
+            assert_eq!(
+                terminal_observation.distance_m.to_bits(),
+                terminal.position.x.to_bits()
+            );
+            assert!(terminal_observation
+                .flags
+                .contains(&TrajectoryObservationFlag::Terminal));
+            assert!(terminal_observation
+                .flags
+                .contains(&TrajectoryObservationFlag::GroundThreshold));
+            assert_eq!(
+                observations
+                    .iter()
+                    .filter(|observation| observation
+                        .flags
+                        .contains(&TrajectoryObservationFlag::Terminal))
+                    .count(),
+                1,
+                "{name} repeated the terminal observation"
+            );
+        }
+    }
 
     // Regression lock for the unified ground termination: solve_euler/solve_rk4/solve_rk45 all
     // loop while `position.y > ground_threshold` (default -100.0), so they agree with RK45. A
