@@ -275,6 +275,29 @@ a profile with multi-BC/CUSTOM data still works there, but only via its
 scalar `bc`/`drag_model` fallback. `profile show` prints a summary line
 (row/point count and range) for whichever of the two is present.
 
+**Reading a v2 profile with an older tool: one-way forward-incompatibility.**
+`bc_segments` and `drag_curve` are additive JSON keys (unknown-key-tolerant,
+default-on-absence), so a profile saved by this version always deserializes
+cleanly in an older `ballistics` build, an un-updated WASM build, or a
+binding that hasn't been regenerated against this schema. For a `CUSTOM`
+(full drag-curve) profile that's safe: the older reader still sees
+`drag_model: "CUSTOM"` and the inert `bc: 0.0` sentinel, so it refuses to
+solve rather than guessing (`bc_value must be finite and greater than
+zero`). For a **multi-BC** profile it is *not* safe: the older reader has no
+way to know `bc_segments` exists, silently ignores it, and solves using only
+the scalar `bc` (the fastest row) for the entire trajectory. This produces a
+materially different, unwarned answer whenever the slower bands matter — for
+example, a profile whose bands span a wide velocity range showed a ~639 m/s
+impact velocity under the scalar-only fallback versus ~411 m/s with the full
+schedule applied, for the identical saved profile. There is no equivalent
+sentinel guard available for `bc_segments` (a real, plausible BC value is
+required there for single-BC tools to keep working at all), so this
+particular skew — new profile, old reader, multi-BC case — degrades
+silently by design. Do not exchange saved profile JSON across
+`ballistics`/WASM/binding versions that straddle this feature (MBA-1323
+Phase 2) unless the older side only ever reads single-BC, non-`CUSTOM`
+profiles.
+
 The `.a7p` wire format is implemented independently for interoperability;
 no third-party code is bundled.
 

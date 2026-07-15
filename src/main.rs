@@ -1874,12 +1874,29 @@ struct ProfileData {
     /// the highest-velocity row for tools that only understand a single BC; this list is the
     /// authoritative full schedule once present. `None` (the pre-Phase-2 shape) means "no
     /// velocity-banded schedule was captured" and callers fall back to the scalar `bc`.
+    ///
+    /// FORWARD-COMPAT WARNING (one-way): `#[serde(default)]` means this field round-trips
+    /// safely through readers that predate Phase 2, but "safely" only means *deserialization*
+    /// doesn't error — a pre-Phase-2 (or otherwise un-updated, e.g. stale WASM/bindings) reader
+    /// silently drops this key and solves with only the scalar `bc` above. That is a materially
+    /// different, unwarned answer whenever the schedule's non-fastest bands matter (empirically
+    /// confirmed: ~639 m/s vs. ~411 m/s impact velocity for the same imported profile — see
+    /// CLI_USAGE.md's "Multi-BC and CUSTOM drag curves" section). There is no sentinel trick
+    /// available here the way there is for `drag_curve`/CUSTOM below (a real, plausible-looking
+    /// `bc` value is unavoidable for back-compat with single-BC tools), so this direction of
+    /// version skew degrades silently by design and must stay documented rather than "fixed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bc_segments: Option<Vec<ProfileBcSegment>>,
     /// Full Mach/Cd drag curve (MBA-1323 Phase 2: `.a7p` `bc_type == CUSTOM` import). When
     /// present, the scalar `bc`/`drag_model` fields are not physically meaningful for the
     /// solve (`drag_model` reads "CUSTOM"; see `map_a7p_to_profile`'s CUSTOM handling for why
     /// `bc` is an inert `0.0` sentinel rather than a real coefficient).
+    ///
+    /// FORWARD-COMPAT NOTE: unlike `bc_segments` above, a reader that predates Phase 2 (or
+    /// otherwise doesn't consume this field) is safe by construction, not just by omission: it
+    /// still sees `bc == 0.0` and `drag_model == "CUSTOM"`, so `BallisticInputs::validate_for_solve`
+    /// rejects the solve loudly ("bc_value must be finite and greater than zero") instead of
+    /// silently running physics under a fabricated coefficient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     drag_curve: Option<Vec<ProfileDragPoint>>,
 }
