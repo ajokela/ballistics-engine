@@ -33,7 +33,7 @@
 //!   invalid input data, business logic errors).
 //!
 //! Concretely: anything [`ballistics_engine::solve_json::decode_solve_request_v1`] rejects is
-//! `-32602`; anything [`ballistics_engine::solve_v1`] rejects after that is `isError: true`.
+//! `-32602`; anything [`ballistics_engine::solve_v1()`] rejects after that is `isError: true`.
 
 use ballistics_engine::solve_json::decode_solve_request_v1;
 use serde_json::{json, Value};
