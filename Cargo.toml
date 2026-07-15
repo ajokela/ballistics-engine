@@ -86,7 +86,7 @@ dirs = "6.0"
 strsim = "0.11"
 
 # PDF generation for dope cards (optional, not WASM compatible)
-printpdf = { version = "0.7", optional = true }
+printpdf = { version = "0.10", optional = true }
 
 # Optional: HTTP client for online mode
 ureq = { version = "3.1", optional = true, features = ["json"] }
