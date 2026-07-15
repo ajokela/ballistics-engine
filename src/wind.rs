@@ -61,6 +61,33 @@ pub(crate) fn sort_wind_segments_by_distance(segments: &mut [WindSegment]) {
     });
 }
 
+pub(crate) fn validate_wind_segments(segments: &[WindSegment]) -> Result<(), String> {
+    for (index, segment) in segments.iter().enumerate() {
+        let field = |name: &str| format!("wind.segments[{index}].{name}");
+
+        if !segment.speed_kmh.is_finite() || segment.speed_kmh < 0.0 {
+            return Err(format!(
+                "{} must be finite and non-negative",
+                field("speed_kmh")
+            ));
+        }
+        if !segment.angle_deg.is_finite() {
+            return Err(format!("{} must be finite", field("angle_deg")));
+        }
+        if !segment.until_m.is_finite() || segment.until_m <= 0.0 {
+            return Err(format!(
+                "{} must be finite and greater than zero",
+                field("until_m")
+            ));
+        }
+        if !segment.vertical_mps.is_finite() {
+            return Err(format!("{} must be finite", field("vertical_mps")));
+        }
+    }
+
+    Ok(())
+}
+
 /// Wind condition handler for trajectory calculations
 #[derive(Debug, Clone)]
 pub struct WindSock {
@@ -75,6 +102,8 @@ pub struct WindSock {
     next_range: f64,
     /// Current wind vector
     current_vec: Vector3<f64>,
+    /// Validation result captured before sorting, preserving the caller's segment index.
+    validation_error: Option<String>,
 }
 
 impl WindSock {
@@ -83,6 +112,11 @@ impl WindSock {
     /// Args:
     ///     segments: List of (speed_kmh, angle_deg, until_distance_m) tuples
     pub fn new(mut segments: Vec<WindSegment>) -> Self {
+        // Keep this infallible for API compatibility, but validate before sorting so an error can
+        // identify the segment index supplied by the caller. The solver consumes this deferred
+        // error at its common pre-integration validation boundary.
+        let validation_error = validate_wind_segments(&segments).err();
+
         // Sort segments by distance, handling NaN safely by treating it as greater than any value
         sort_wind_segments_by_distance(&mut segments);
 
@@ -101,14 +135,26 @@ impl WindSock {
             current,
             next_range,
             current_vec,
+            validation_error,
         }
+    }
+
+    /// Return any malformed-segment error captured before normalization.
+    pub(crate) fn validate_segments(&self) -> Result<(), String> {
+        self.validation_error.clone().map_or(Ok(()), Err)
     }
 
     /// Calculate wind vector from wind segment
     fn calc_vec(seg: &WindSegment) -> Vector3<f64> {
         // Convert kmh to m/s
         let speed_mps = seg.speed_kmh * KMH_TO_MPS;
-        let angle_rad = seg.angle_deg * PI / 180.0;
+        // Preserve the historical multiply-then-divide result for ordinary angles, while
+        // avoiding intermediate overflow for otherwise-valid finite values near f64::MAX.
+        let angle_rad = if seg.angle_deg.abs() <= f64::MAX / PI {
+            seg.angle_deg * PI / 180.0
+        } else {
+            seg.angle_deg / 180.0 * PI
+        };
 
         // Wind convention (matching trajectory coordinates):
         // 0° = headwind (from front, affects -x downrange)
