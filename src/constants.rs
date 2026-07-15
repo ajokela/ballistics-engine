@@ -35,9 +35,11 @@ pub const GRAINS_TO_KG: f64 = 0.00006479891;
 
 /// Grams per grain — exact by definition.
 ///
-/// The international avoirdupois pound is defined as exactly 0.45359237 kg,
-/// and one pound is exactly 7000 grains, so this value is exact (not a
-/// measured or rounded conversion): 0.45359237 / 7000 = 0.06479891.
+/// The international avoirdupois pound is defined as exactly 0.45359237 kg
+/// (i.e. 453.59237 g), and one pound is exactly 7000 grains, so this value
+/// is exact (not a measured or rounded conversion):
+/// 453.59237 g / 7000 = 0.06479891 g/grain (equivalently,
+/// 0.45359237 kg / 7000 = 0.00006479891 kg/grain, then x1000 to get grams).
 ///
 /// This is the single source of truth for the grain<->gram conversion; do
 /// not re-derive or re-round it elsewhere (see `tests/constants_guard.rs`).
@@ -149,5 +151,29 @@ mod tests {
             DEFAULT_POWDER_REFERENCE_TEMP_C.to_bits(),
             converted.to_bits()
         );
+    }
+
+    /// Independent ground-truth check for the grain<->gram constants: this
+    /// test does *not* reference `GRAMS_PER_GRAIN`/`GRAINS_PER_GRAM` in its
+    /// expected values, so it fails if either constant is ever silently
+    /// corrupted (re-truncated, re-rounded, or swapped for a sibling value),
+    /// even if the corrupted value doesn't match one of the specific banned
+    /// literals `tests/constants_guard.rs` greps for.
+    #[test]
+    fn grams_per_grain_matches_independent_ground_truth() {
+        // 1 lb = exactly 0.45359237 kg = 453.59237 g (avoirdupois pound,
+        // international definition); 1 lb = exactly 7000 grains.
+        let independent_grams_per_grain: f64 = 453.59237 / 7000.0;
+        assert_eq!(
+            GRAMS_PER_GRAIN.to_bits(),
+            independent_grams_per_grain.to_bits()
+        );
+
+        // Cross-check against the pre-existing kilogram-scale constant:
+        // GRAMS_PER_GRAIN must equal GRAINS_TO_KG scaled from kg to g.
+        assert!((GRAMS_PER_GRAIN - GRAINS_TO_KG * 1000.0).abs() < 1e-15);
+
+        // GRAINS_PER_GRAM must be the exact reciprocal used in production.
+        assert_eq!(GRAINS_PER_GRAM.to_bits(), (1.0 / GRAMS_PER_GRAIN).to_bits());
     }
 }
