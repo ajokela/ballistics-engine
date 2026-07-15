@@ -164,6 +164,12 @@ mod tests {
     }
 
     fn parse_output(output: &[u8]) -> serde_json::Value {
+        assert!(output.ends_with(b"\n"), "envelope needs one terminator");
+        assert_eq!(
+            output.iter().filter(|&&byte| byte == b'\n').count(),
+            1,
+            "transport must write exactly one compact envelope"
+        );
         serde_json::from_slice(output).expect("transport output must be one JSON envelope")
     }
 

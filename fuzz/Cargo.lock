@@ -148,6 +148,7 @@ dependencies = [
  "ballistics-engine 0.21.5",
  "ballistics-engine 0.24.1",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]

@@ -80,6 +80,19 @@ cargo run --example 05_drag_comparison
 cargo run --example 06_data_export
 ```
 
+### solve_json_v1_lattice.lat
+**Minimal Lattice Process Consumer**
+
+- Sends the checked explicit-SI request fixture to `ballistics solve-json`
+- Parses the single success/error envelope in Lattice
+- Demonstrates stable status, summary, and error access without a native extension
+- Uses only fixed trusted paths until Lattice's shell-free argv/stdin API is available
+
+```bash
+cargo build
+/path/to/clat examples/solve_json_v1_lattice.lat
+```
+
 ## Running Examples
 
 To run any example:

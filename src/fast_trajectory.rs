@@ -182,7 +182,7 @@ pub struct FastIntegrationParams {
     pub vert: f64,
     pub initial_state: [f64; 6],
     pub t_span: (f64, f64),
-    /// Dual-mode atmosphere tuple — see [`atmo_is_physical`]. Standard mode is
+    /// Dual-mode atmosphere tuple. Standard mode is
     /// `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` (slot 3 is a density
     /// RATIO, not humidity; nonpositive means "not supplied" and falls back to `1.0`, while a
     /// supplied ratio must be below `2.0`). Direct mode is

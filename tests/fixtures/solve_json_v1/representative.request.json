@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "projectile": {
+    "mass_kg": 0.01134,
+    "diameter_m": 0.00782,
+    "length_m": 0.031,
+    "drag_model": "G7",
+    "ballistic_coefficient": 0.243
+  },
+  "rifle": {
+    "muzzle_velocity_mps": 823.0,
+    "sight_height_m": 0.05,
+    "muzzle_height_m": 1.2,
+    "twist_rate_m_per_turn": 0.2032,
+    "twist_direction": "right"
+  },
+  "shot": {
+    "max_range_m": 50.0,
+    "muzzle_angle_rad": 0.001,
+    "aim_azimuth_rad": 0.0,
+    "shot_azimuth_rad": 0.0,
+    "shooting_angle_rad": 0.0,
+    "cant_angle_rad": 0.0,
+    "target_height_m": 1.25,
+    "ground_threshold_m": -100.0
+  },
+  "atmosphere": {
+    "altitude_m": 0.0,
+    "temperature_k": 293.15,
+    "pressure_pa": 100000.0,
+    "relative_humidity": 0.4
+  },
+  "wind": {
+    "speed_mps": 4.0,
+    "direction_from_rad": 1.5707963267948966
+  },
+  "solver": {
+    "method": "rk45",
+    "time_step_s": 0.001
+  },
+  "effects": {
+    "magnus": false,
+    "coriolis": false,
+    "enhanced_spin_drift": false
+  },
+  "sampling": {
+    "interval_m": 10.0
+  }
+}

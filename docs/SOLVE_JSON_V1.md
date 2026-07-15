@@ -55,6 +55,26 @@ All objects reject unknown fields. A producer must therefore emit only fields do
 and a consumer must not silently reinterpret a v1 field. Removing a field, changing a unit or
 sign, renaming an enum value, or changing a field's meaning requires a new schema version.
 
+The complete v1 wire surface is immutable: field names, JSON types, requiredness, omission and
+default behavior, units, sign/frame conventions, enum values, error and notice codes, and request
+and response object shapes cannot change under `schema_version: 1`. Because the response DTOs also
+reject unknown fields, even an additive wire-field change requires a v2 schema rather than a
+silent v1 extension.
+
+Object member order, indentation, insignificant whitespace, human-readable diagnostic messages,
+the engine version string, and the exact decimal spelling of floating-point values are not wire
+contracts. Checked regression fixtures use
+`abs(actual - expected) <= 1e-10 + 1e-9 * max(abs(actual), abs(expected))` to detect accidental
+numeric drift. An intentional physics correction may update those expected values with its
+regression evidence without requiring v2, provided the documented field meaning is unchanged.
+
+Representative request, success, error, resource-limit, and early-termination documents live in
+[`tests/fixtures/solve_json_v1`](../tests/fixtures/solve_json_v1/). Tests compare parsed object
+shapes and tolerant numeric values rather than serialized bytes. A minimal Lattice process
+consumer is checked in as
+[`examples/solve_json_v1_lattice.lat`](../examples/solve_json_v1_lattice.lat); it intentionally
+uses only a fixed trusted fixture until Lattice provides its shell-free argv/stdin process API.
+
 Fields documented with defaults may be omitted inside their section. The request DTO preserves
 that omission: serializing a decoded request does not insert defaults, and an explicitly supplied
 value remains present even when it equals the documented default. This lets the solve service
