@@ -30,8 +30,8 @@ use ballistics_engine::constants::{
     DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN,
 };
 use ballistics_engine::{
-    trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel,
-    MonteCarloParams, TrajectorySolver, WindConditions,
+    trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, BallisticsError,
+    DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use nalgebra::Vector3;
@@ -7654,29 +7654,36 @@ impl WezVarianceShares {
 /// `--wez`) never sets `powder_temp_curve` on its `BallisticInputs`, so there is no curve for
 /// `TrajectorySolver::new` to resolve and a plain pre-construction velocity assignment is
 /// equivalent to the sampler's post-construction delta.
+///
+/// Propagates `solve()`'s error instead of unwrapping it: neither the baseline solve (whose
+/// inputs are the CLI's raw, not-yet-validated `-v`/`-a`/etc. values -- clap's own range checks
+/// permit e.g. `-v 0`, which `solve()` rejects) nor a perturbed one-sigma solve (MV/BC/angle/wind
+/// nudged off a valid baseline) is guaranteed to stay within `solve()`'s validity gate (MBA-1317).
 fn wez_solve_target_plane(
     inputs: BallisticInputs,
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
     solver_max_range: f64,
     target_distance_m: f64,
-) -> Vector3<f64> {
+) -> Result<Vector3<f64>, BallisticsError> {
     let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
     solver.set_max_range(solver_max_range);
-    // `solve()` only errors on malformed inputs (already validated upstream) or a truly empty
-    // trajectory; `position_at_range` never returns `None` for a non-empty one (it clamps to the
-    // last point beyond the trajectory's reach) -- see cli_api::TrajectoryResult::position_at_range.
-    let result = solver
-        .solve()
-        .expect("WEZ attribution solve: inputs were already validated by the caller");
-    result
+    let result = solver.solve()?;
+    // A successful `solve()` always produces a non-empty trajectory (every solve path errors
+    // out on an empty point list before returning `Ok`), so `position_at_range` -- which only
+    // returns `None` for an empty trajectory, clamping to the last point otherwise -- cannot
+    // fail here. See cli_api::TrajectoryResult::position_at_range.
+    Ok(result
         .position_at_range(target_distance_m)
-        .expect("WEZ attribution solve: non-empty trajectory always has a last point")
+        .expect("WEZ attribution solve: non-empty trajectory always has a last point"))
 }
 
 /// One source's target-plane variance contribution: `sigma`'s one-standard-deviation
 /// displacement from `baseline`, or `0.0` when `sigma` is non-positive (that source is disabled).
 /// `inputs` and `wind` must already have that one sigma applied by the caller.
+///
+/// Propagates a failed perturbed solve rather than unwrapping it (MBA-1317) -- a one-sigma nudge
+/// off a valid baseline is not itself guaranteed to stay within `solve()`'s validity gate.
 fn wez_source_variance(
     sigma: f64,
     inputs: BallisticInputs,
@@ -7685,9 +7692,9 @@ fn wez_source_variance(
     solver_max_range: f64,
     target_distance_m: f64,
     baseline: &Vector3<f64>,
-) -> f64 {
+) -> Result<f64, BallisticsError> {
     if sigma.is_nan() || sigma <= 0.0 {
-        return 0.0;
+        return Ok(0.0);
     }
     let perturbed = wez_solve_target_plane(
         inputs,
@@ -7695,10 +7702,10 @@ fn wez_source_variance(
         atmosphere.clone(),
         solver_max_range,
         target_distance_m,
-    );
+    )?;
     let dy = perturbed.y - baseline.y;
     let dz = perturbed.z - baseline.z;
-    dy * dy + dz * dz
+    Ok(dy * dy + dz * dz)
 }
 
 /// Linearized (one-sigma finite-difference) WEZ miss-variance attribution at a single range.
@@ -7719,6 +7726,10 @@ fn wez_source_variance(
 /// caller rather than solving it again -- the caller needs that same baseline to compute `p_hit`
 /// (see `run_monte_carlo_wez`) and to decide whether attribution is meaningful at all when the
 /// baseline doesn't reach this range.
+///
+/// Errors if any one-sigma perturbed solve fails validation (MBA-1317); the caller only invokes
+/// this once the *un*perturbed baseline solve has already succeeded, but a sigma nudge can still
+/// push an input (e.g. muzzle velocity, BC) out of `solve()`'s valid range.
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the Monte Carlo sampler's own parameter set (MBA-1317)"
@@ -7737,7 +7748,7 @@ fn wez_variance_shares(
     wind_speed_std_dev: f64,
     wind_call_error_std_dev: f64,
     wind_direction_std_dev_rad: f64,
-) -> WezVarianceShares {
+) -> Result<WezVarianceShares, BallisticsError> {
     // MV SD bucket: muzzle-velocity dispersion.
     let mv_sd_var = {
         let mut inputs = base_inputs.clone();
@@ -7750,7 +7761,7 @@ fn wez_variance_shares(
             solver_max_range,
             target_distance_m,
             baseline,
-        )
+        )?
     };
 
     // Other/group bucket: elevation, azimuth, and BC dispersion (mechanical/ammo "group"), plus
@@ -7767,7 +7778,7 @@ fn wez_variance_shares(
             solver_max_range,
             target_distance_m,
             baseline,
-        );
+        )?;
     }
     {
         let mut inputs = base_inputs.clone();
@@ -7780,7 +7791,7 @@ fn wez_variance_shares(
             solver_max_range,
             target_distance_m,
             baseline,
-        );
+        )?;
     }
     {
         let mut inputs = base_inputs.clone();
@@ -7793,7 +7804,7 @@ fn wez_variance_shares(
             solver_max_range,
             target_distance_m,
             baseline,
-        );
+        )?;
     }
     {
         let mut wind = base_wind.clone();
@@ -7806,7 +7817,7 @@ fn wez_variance_shares(
             solver_max_range,
             target_distance_m,
             baseline,
-        );
+        )?;
     }
     {
         let mut wind = base_wind.clone();
@@ -7819,7 +7830,7 @@ fn wez_variance_shares(
             solver_max_range,
             target_distance_m,
             baseline,
-        );
+        )?;
     }
 
     // Wind-call bucket: the shooter's own wind-speed estimation error, kept separate from the
@@ -7835,18 +7846,18 @@ fn wez_variance_shares(
             solver_max_range,
             target_distance_m,
             baseline,
-        )
+        )?
     };
 
     let total = wind_call_var + mv_sd_var + other_var;
     if total.is_nan() || total <= 0.0 {
-        return WezVarianceShares::default();
+        return Ok(WezVarianceShares::default());
     }
-    WezVarianceShares {
+    Ok(WezVarianceShares {
         wind_call: wind_call_var / total,
         mv_sd: mv_sd_var / total,
         other: other_var / total,
-    }
+    })
 }
 
 /// WEZ hit probability: the fraction of `results`' samples whose ABSOLUTE target-plane position
@@ -8035,7 +8046,7 @@ fn run_monte_carlo_wez(
             atmosphere.clone(),
             solver_max_range,
             range_m,
-        );
+        )?;
         let baseline_reached = baseline.x >= range_m - 1e-6;
 
         let mc_params = MonteCarloParams {
@@ -8084,7 +8095,7 @@ fn run_monte_carlo_wez(
                     wind_std,
                     wind_call_error,
                     wind_direction_std_rad,
-                ),
+                )?,
                 false,
             )
         } else {
@@ -8309,7 +8320,8 @@ mod wez_tests {
                 atmosphere.clone(),
                 solver_max_range,
                 range_m,
-            );
+            )
+            .expect("valid test baseline solve");
             let mut params = mc_params.clone();
             params.target_distance = Some(range_m);
             let results = ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev_seeded(
@@ -8387,7 +8399,8 @@ mod wez_tests {
                 atmosphere.clone(),
                 solver_max_range,
                 range_m,
-            );
+            )
+            .expect("valid test baseline solve");
             let mut params = mc_params.clone();
             params.target_distance = Some(range_m);
             let seed = 0x57_45_5A_00_u64 ^ (step_index as u64);
@@ -8435,7 +8448,8 @@ mod wez_tests {
             atmosphere.clone(),
             solver_max_range,
             range_m,
-        );
+        )
+        .expect("valid test baseline solve");
 
         let shares = wez_variance_shares(
             &inputs,
@@ -8451,7 +8465,8 @@ mod wez_tests {
             /* wind_speed_std_dev */ 0.4,
             /* wind_call_error_std_dev */ 1.2,
             /* wind_direction_std_dev_rad */ 0.02,
-        );
+        )
+        .expect("valid test attribution solve");
 
         let sum = shares.wind_call + shares.mv_sd + shares.other;
         assert!(
@@ -8477,7 +8492,8 @@ mod wez_tests {
             atmosphere.clone(),
             solver_max_range,
             range_m,
-        );
+        )
+        .expect("valid test baseline solve");
 
         let shares = wez_variance_shares(
             &inputs,
@@ -8493,7 +8509,8 @@ mod wez_tests {
             0.0,
             0.0,
             0.0,
-        );
+        )
+        .expect("valid test attribution solve");
 
         assert_eq!(shares.wind_call, 0.0);
         assert_eq!(shares.mv_sd, 0.0);
@@ -8514,7 +8531,8 @@ mod wez_tests {
             atmosphere.clone(),
             solver_max_range,
             range_m,
-        );
+        )
+        .expect("valid test baseline solve");
 
         let shares = wez_variance_shares(
             &inputs,
@@ -8530,12 +8548,57 @@ mod wez_tests {
             0.0,
             /* wind_call_error_std_dev */ 3.0,
             0.0,
-        );
+        )
+        .expect("valid test attribution solve");
 
         assert!((shares.wind_call - 1.0).abs() < 1e-9);
         assert_eq!(shares.mv_sd, 0.0);
         assert_eq!(shares.other, 0.0);
         assert_eq!(shares.dominant(), Some(WezErrorBucket::WindCall));
+    }
+
+    // ---- Solver-invalid input is a clean error, not a panic (MBA-1317) ---------------------
+
+    /// `-v 0` passes clap's own `0.0..=6000` velocity range check (clap permits the lower bound)
+    /// but fails `TrajectorySolver::solve()`'s stricter "> 0" gate. Before the fix,
+    /// `wez_solve_target_plane`'s `.expect(...)` on that failure turned this into a panic
+    /// (exit 101 with a backtrace) instead of the clean `Err` the base (non-WEZ) `monte-carlo`
+    /// command already returns for the identical input. This must return `Err`, never panic.
+    #[test]
+    fn zero_muzzle_velocity_is_a_clean_error_not_a_panic() {
+        let result = run_monte_carlo_wez(
+            /* velocity */ 0.0,
+            /* angle */ 0.0,
+            /* bc */ 0.475,
+            /* mass */ 0.010_886,
+            /* diameter */ 0.007_82,
+            /* num_sims */ 10,
+            /* velocity_std */ 0.0,
+            /* angle_std */ 0.0,
+            /* bc_std */ 0.0,
+            /* wind_std */ 0.0,
+            /* wind_direction_std */ 0.0,
+            /* wind_speed */ 0.0,
+            /* wind_direction */ 0.0,
+            /* wind_vertical */ 0.0,
+            /* wind_call_error */ 0.0,
+            TargetSizeMetric::Rect {
+                width_m: 0.4572,
+                height_m: 0.762,
+            },
+            /* wez_start */ 200.0,
+            /* wez_end */ 300.0,
+            /* wez_step */ 100.0,
+            /* custom_drag_table */ None,
+            /* cant */ 0.0,
+            MonteCarloOutput::Summary,
+            UnitSystem::Metric,
+        );
+        let err = result.expect_err("a zero muzzle velocity must not solve successfully");
+        assert!(
+            err.to_string().contains("muzzle_velocity"),
+            "expected a muzzle_velocity validation error, got: {err}"
+        );
     }
 }
 
