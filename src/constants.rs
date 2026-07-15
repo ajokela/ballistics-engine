@@ -33,6 +33,19 @@ pub const CD_TO_RETARD: f64 = 2.08551e-4;
 /// Conversion factor: grains to kilograms
 pub const GRAINS_TO_KG: f64 = 0.00006479891;
 
+/// Grams per grain — exact by definition.
+///
+/// The international avoirdupois pound is defined as exactly 0.45359237 kg,
+/// and one pound is exactly 7000 grains, so this value is exact (not a
+/// measured or rounded conversion): 0.45359237 / 7000 = 0.06479891.
+///
+/// This is the single source of truth for the grain<->gram conversion; do
+/// not re-derive or re-round it elsewhere (see `tests/constants_guard.rs`).
+pub const GRAMS_PER_GRAIN: f64 = 0.06479891;
+
+/// Grains per gram — the exact reciprocal of [`GRAMS_PER_GRAIN`].
+pub const GRAINS_PER_GRAM: f64 = 1.0 / GRAMS_PER_GRAIN;
+
 /// Air density at sea level (kg/m³)
 pub const AIR_DENSITY_SEA_LEVEL: f64 = 1.225;
 
