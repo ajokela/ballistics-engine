@@ -1,0 +1,34 @@
+{
+  "id": "analytic_vacuum_uphill",
+  "description": "Zero-drag vacuum shot up a 20 deg incline (level bore, shot frame tilted). Validates the shot-frame gravity decomposition (a_x = -g sin phi along-bore deceleration, a_y = -g cos phi perpendicular) used for inclined fire, against the closed-form.",
+  "source": {
+    "kind": "analytic",
+    "citation": "Closed-form inclined-fire kinematics in the shot frame, g = 9.80665 m/s^2, no drag. Incline phi = +20 deg, v0 = 600 m/s along bore. x(t) = v0 t - 0.5 g sin(phi) t^2, perpendicular drop y(t) = -0.5 g cos(phi) t^2. Matches cli_api::TrajectorySolver::gravity_acceleration.",
+    "retrieved": "2026-07-15"
+  },
+  "inputs": {
+    "muzzle_velocity_mps": 600.0,
+    "bullet_mass_kg": 0.010886,
+    "bullet_diameter_m": 0.0078232,
+    "bullet_length_m": 0.03048,
+    "bc_value": 0.5,
+    "bc_type": "G1",
+    "muzzle_angle_rad": 0.0,
+    "shooting_angle_rad": 0.3490658503988659,
+    "twist_rate_in": 0.0,
+    "temperature_c": 15.0,
+    "pressure_hpa": 1013.25,
+    "humidity_frac": 0.0,
+    "zero_drag": true
+  },
+  "expectations": [
+    {"observable": "drop_m", "range_m": 598.3229640807, "value": -4.6076183198, "tol_abs": 0.005,
+     "tolerance_justification": "Perpendicular drop at t=1.0 s. Quadratic integrated exactly; residual is parabola interpolation over ~6 m spacing (sub-mm). 5 mm ceiling."},
+    {"observable": "tof_s", "range_m": 598.3229640807, "value": 1.0, "tol_abs": 0.001,
+     "tolerance_justification": "Along-bore position is quadratic in t; interpolation of t vs x over ~6 m spacing is sub-ms. 1 ms guard."},
+    {"observable": "drop_m", "range_m": 1193.2918563229, "value": -18.4304732793, "tol_abs": 0.005,
+     "tolerance_justification": "Perpendicular drop at t=2.0 s; same basis as t=1.0 s."},
+    {"observable": "tof_s", "range_m": 1193.2918563229, "value": 2.0, "tol_abs": 0.001,
+     "tolerance_justification": "As above."}
+  ]
+}
