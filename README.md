@@ -517,6 +517,55 @@ Official language bindings are maintained as separate projects:
 
 These bindings depend on the `ballistics-engine` crate published on [crates.io](https://crates.io/crates/ballistics-engine).
 
+### WASM / npm Package
+
+The engine also compiles to WebAssembly (`src/wasm.rs`, `wasm-bindgen`) and already powers
+[ballistics.sh](https://ballistics.sh) and [ballistics.rs](https://ballistics.rs) in the browser.
+It is not yet published to npm for third-party use — `scripts/build-npm.sh` builds and prepares a
+publish-ready package; publishing itself is a manual step (see below).
+
+```bash
+scripts/build-npm.sh
+```
+
+This builds two `wasm-bindgen` targets, both with `--no-default-features` (the default
+`pdf`/`online` features pull in `printpdf`/`ureq`+`ring`, which do not compile for
+`wasm32-unknown-unknown` — see "Updating the WASM Module" in `CLAUDE.md`):
+
+- **`pkg/`** — `--target bundler`, the package meant for `npm publish`. Consumed via a native
+  `.wasm` ES import by bundlers that understand it (webpack with `experiments.asyncWebAssembly`,
+  Vite, Rollup + `@rollup/plugin-wasm`, Parcel).
+- **`pkg-web/`** — `--target web`, a no-bundler build for direct `<script type="module">` browser
+  use or manual Node usage without a bundler — the same `--target` already used to build
+  ballistics.sh/ballistics.rs's WASM. Documented and built for completeness; not published under
+  the primary package name in this initial pass.
+
+`wasm-pack` has no built-in dual-target/"publish both" mode, and stitching bundler- and web-target
+output into one package.json via manual `exports` conditions isn't something `wasm-pack` generates
+or tests for you — see the comment header of `scripts/build-npm.sh` for the full reasoning. A
+single bundler-target package as the published npm artifact, with the web build documented
+separately, is the ecosystem-standard shape for `wasm-bindgen` crates on npm.
+
+The script also post-processes each `package.json` (name, description, license, repository,
+keywords, and the `files` list — including an `LICENSE-APACHE` entry `wasm-pack` itself omits even
+though it copies the file) and installs `README-npm.md` as the package's `README.md`.
+
+**Before publishing**, edit `pkg/package.json`'s `"name"` — it ships as the placeholder
+`"@SCOPE/ballistics-engine"`. Replace `SCOPE` with the maintainer's real npm org/user scope (a
+scope decision, plus an npm account with publish rights to it, are both needed and don't exist yet
+as of this writing). Then:
+
+```bash
+scripts/build-npm.sh
+cd pkg
+npm pack --dry-run   # sanity-check the tarball contents first
+npm publish --access public
+```
+
+(`--access public` is required the first time a scoped package is published, since scoped packages
+default to private on free npm accounts; `pkg/package.json` also sets `publishConfig.access` to
+`public` so a plain `npm publish` works too.)
+
 ## FFI Layer
 
 The library includes a Foreign Function Interface (FFI) layer for integration with iOS, Android, and other platforms. The FFI provides C-compatible bindings for all major functionality.
