@@ -11,6 +11,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Automatic Zeroing** - Calculate sight adjustments and apply zero angles automatically
 - **Canted-Rifle Modeling** - Model a rifle zeroed level but fired canted (`--cant <DEGREES>`, alias `--cant-angle`, on `trajectory`/`monte-carlo`); clockwise cant shifts point of impact right and low downrange for a rifle with an upward zero correction — see [CLI_USAGE.md](CLI_USAGE.md#canted-shooting)
 - **Moving-Target Lead** - Wind-aware hold tables for targets moving at a constant speed/angle, with iterative intercept-range correction for non-perpendicular motion (`lead` subcommand; public `ballistics_engine::calculate_lead` API) — see [CLI_USAGE.md](CLI_USAGE.md#moving-target-lead)
+- **Mover Ring** - Field-tested alternative for engaging movers: a per-point ring radius (`target_speed × time-of-flight`) falls out of an already-solved trajectory with no second command or re-entered ballistic data (`trajectory --target-speed`, additive across table/JSON/CSV output); `lead` also gained `trajectory`'s powder-temperature flags for muzzle-velocity parity between the two — see [CLI_USAGE.md](CLI_USAGE.md#mover-ring---target-speed)
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation
 - **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere
