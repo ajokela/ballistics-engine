@@ -16,6 +16,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(feature = "pdf")]
 mod pdf_dope_card;
 mod solve_json_command;
+mod terminal_plot;
 #[cfg(feature = "pdf")]
 use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
 
@@ -444,6 +445,16 @@ enum Commands {
         /// Show all trajectory points
         #[arg(long)]
         full: bool,
+
+        /// Render an inline terminal chart (drop vs. range, then lateral drift vs. range)
+        /// after the normal output. Only applies to `-o table` (the default); other
+        /// `--output` formats stay machine-readable and unchanged. Bare `--plot` uses the
+        /// Unicode braille-dot canvas; `--plot ascii` uses a '*'-per-cell fallback for
+        /// terminals/fonts without braille glyph coverage. Monochrome (no ANSI colors —
+        /// see src/terminal_plot.rs for why); fixed 72x12-cell canvas per chart, no
+        /// terminal-size detection.
+        #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "braille")]
+        plot: Option<PlotStyle>,
 
         /// Automatically zero to target distance (overrides --angle)
         #[arg(long)]
@@ -1793,6 +1804,27 @@ enum AdjustmentUnit {
     Moa,
 }
 
+/// Terminal chart renderer for `trajectory --plot` (MBA-1320). Bare `--plot` (no value)
+/// resolves to `Braille` via clap's `default_missing_value`; see the `plot` field on
+/// `Commands::Trajectory`.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum PlotStyle {
+    /// Unicode braille-dot canvas (2x4 dots per character cell). The default terminal
+    /// chart renderer.
+    Braille,
+    /// ASCII '*'-per-cell canvas, for terminals/fonts without braille glyph coverage.
+    Ascii,
+}
+
+impl PlotStyle {
+    fn as_canvas_style(self) -> terminal_plot::CanvasStyle {
+        match self {
+            PlotStyle::Braille => terminal_plot::CanvasStyle::Braille,
+            PlotStyle::Ascii => terminal_plot::CanvasStyle::Ascii,
+        }
+    }
+}
+
 /// Saved ballistic profile for quick recall
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileData {
@@ -1935,6 +1967,9 @@ struct TrajectoryConfig {
     // Output
     output: OutputFormat,
     full: bool,
+    // Inline terminal chart (MBA-1320); None = no chart (the default). Only rendered for
+    // OutputFormat::Table — see run_trajectory's OutputFormat::Table arm.
+    plot: Option<PlotStyle>,
     units: UnitSystem,
 
     // Sight / bore geometry (metric)
@@ -3112,6 +3147,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             output,
             full,
+            plot,
             auto_zero,
             sight_height,
             bore_height,
@@ -4101,6 +4137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_segments,
                 output,
                 full,
+                plot,
                 units: cli.units,
                 sight_height: sight_height_metric,
                 bore_height: bore_height_metric,
@@ -6078,6 +6115,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         ref wind_segments,
         output,
         full,
+        plot,
         units,
         sight_height,
         bore_height,
@@ -6894,6 +6932,71 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     }
 
                     println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+                }
+            }
+
+            // Inline terminal chart (MBA-1320): two stacked charts, drop vs. range then
+            // lateral drift vs. range, from the SAME per-point data the "Trajectory
+            // Points:" table above prints — result.points, McCoy frame (x=downrange,
+            // y=vertical, z=lateral) — converted through the same UnitConverter calls and
+            // the same range_unit as that table's X/Y columns. This intentionally reuses
+            // the raw, non-LOS-adjusted vertical/lateral values (the table's "Y" column),
+            // NOT the sight-line-relative "drop"/"wind_drift" computed by
+            // --sample-trajectory (TrajectorySample::drop_m/wind_drift_m, which needs
+            // sight-height/target-height geometry this code path doesn't have and displays
+            // in inches/mm rather than the range unit) — the two are different, deliberate
+            // vertical conventions; don't conflate them.
+            //
+            // Independent of --full: result.points already holds every raw integration
+            // point regardless of whether the table above printed them, so --plot works
+            // standalone without needing --full too.
+            if let Some(plot_style) = plot {
+                if !result.points.is_empty() {
+                    let drop_label = format!("drop ({})", range_unit);
+                    let drop_points: Vec<(f64, f64)> = result
+                        .points
+                        .iter()
+                        .map(|p| {
+                            (
+                                UnitConverter::distance_from_metric(p.position.x, units),
+                                UnitConverter::distance_from_metric(p.position.y, units),
+                            )
+                        })
+                        .collect();
+                    println!();
+                    println!("Drop vs Range:");
+                    println!(
+                        "{}",
+                        terminal_plot::render_chart(
+                            &[(drop_label.as_str(), drop_points.as_slice())],
+                            72,
+                            12,
+                            plot_style.as_canvas_style(),
+                        )
+                    );
+
+                    let drift_label = format!("drift ({})", range_unit);
+                    let drift_points: Vec<(f64, f64)> = result
+                        .points
+                        .iter()
+                        .map(|p| {
+                            (
+                                UnitConverter::distance_from_metric(p.position.x, units),
+                                UnitConverter::distance_from_metric(p.position.z, units),
+                            )
+                        })
+                        .collect();
+                    println!();
+                    println!("Lateral Drift vs Range:");
+                    println!(
+                        "{}",
+                        terminal_plot::render_chart(
+                            &[(drift_label.as_str(), drift_points.as_slice())],
+                            72,
+                            12,
+                            plot_style.as_canvas_style(),
+                        )
+                    );
                 }
             }
         }
