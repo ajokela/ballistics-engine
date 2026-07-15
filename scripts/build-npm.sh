@@ -58,10 +58,10 @@ echo "==> building web target -> ${web_dir}/"
 wasm-pack build --target web --no-default-features --out-dir "$web_dir"
 
 echo "==> post-processing ${bundler_dir}/package.json"
-node "$script_dir/build-npm-postprocess.mjs" "$repo_root/$bundler_dir/package.json" "@SCOPE/ballistics-engine"
+node "$script_dir/build-npm-postprocess.mjs" "$repo_root/$bundler_dir/package.json" "ballistics-engine"
 
 echo "==> post-processing ${web_dir}/package.json"
-node "$script_dir/build-npm-postprocess.mjs" "$repo_root/$web_dir/package.json" "@SCOPE/ballistics-engine-web"
+node "$script_dir/build-npm-postprocess.mjs" "$repo_root/$web_dir/package.json" "ballistics-engine-web"
 
 echo "==> installing README-npm.md as the package README"
 cp "$repo_root/README-npm.md" "$repo_root/$bundler_dir/README.md"
@@ -75,9 +75,9 @@ cat <<EOF
   ${web_dir}/  (web target -- no-bundler / direct-browser build; documented, not
              published under the primary package name)
 
-TODO before publishing: ${bundler_dir}/package.json's "name" is the placeholder
-"@SCOPE/ballistics-engine" -- replace SCOPE with the maintainer's real npm org/user
-scope. See README.md's "WASM / npm Package" section for the publish command.
+Package name: "ballistics-engine" -- resumes the existing npm package
+(published through 0.13.4 in 2025); versions now track the crate. Publish:
+cd ${bundler_dir} && npm publish   (requires the maintainer's npm login).
 
 Verify the tarball contents before publishing:
   cd ${bundler_dir} && npm pack --dry-run
