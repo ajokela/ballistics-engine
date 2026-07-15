@@ -226,6 +226,35 @@ Home_Range,500,29.92,70
   -m 140 -d 0.264
 ```
 
+### Importing profiles (.a7p)
+
+Import an ArcherBC2 `.a7p` profile into the local profile store:
+
+```bash
+# Preview what would be imported (nothing is written)
+ballistics profile import my-rifle.a7p --dry-run
+
+# Import under the file's own profile name (sanitized)
+ballistics profile import my-rifle.a7p
+
+# Import under a chosen name; fail hard on checksum mismatch
+ballistics profile import my-rifle.a7p --name match-338 --strict
+```
+
+The import prints a full mapping report: every field it imported (source
+value, converted value, destination), every field it could NOT map (for
+example powder temperature sensitivity, scope click offsets, and the
+device's range-card list), and any warnings (checksum mismatch, extra BC
+rows). Imported profiles are stored in metric units and can be recalled by
+name with `--profile <name>` (on `mpbr`, `come-ups`, `lead`, `wind-card`,
+`stability`, and `range-table`) or `--saved-profile <name>` on `trajectory`,
+which reserves `--profile` for CSV gun-profile files.
+
+Current limitations (MBA-1323 Phase 1): multi-BC velocity bands import only
+the muzzle-regime row, and `bc_type CUSTOM` (full drag curve) files are
+rejected — both land in Phase 2. The `.a7p` wire format is implemented
+independently for interoperability; no third-party code is bundled.
+
 ### Canted Shooting
 
 Model a rifle that is zeroed level but *fired* with the scope/receiver rotated about the
