@@ -98,7 +98,7 @@ const ICAO_LAYERS: &[AtmosphereLayer] = &[
 ///
 /// # Returns
 /// Tuple of (temperature_k, pressure_pa)
-fn calculate_icao_standard_atmosphere(altitude_m: f64) -> (f64, f64) {
+pub(crate) fn calculate_icao_standard_atmosphere(altitude_m: f64) -> (f64, f64) {
     let geometric_altitude = altitude_m.clamp(MIN_GEOMETRIC_ALTITUDE_M, MAX_GEOMETRIC_ALTITUDE_M);
     let geopotential_height = geometric_to_geopotential_height_m(geometric_altitude).clamp(
         MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M,

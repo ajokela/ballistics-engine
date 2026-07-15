@@ -5,8 +5,10 @@ solve. It is separate from `BallisticInputs`, command-line profile JSON, FFI str
 language binding. Those implementation APIs may change without changing this contract.
 
 The Rust DTOs and the envelope-producing decoder are public in
-`ballistics_engine::solve_json`. Transport and conversion into engine inputs are outside this
-contract.
+`ballistics_engine::solve_json`. The transport-free Rust service is
+`ballistics_engine::solve_v1`; it resolves defaults, validates physical and cross-field rules,
+runs the engine, and constructs either a success value or a structured error envelope. Input and
+output transport remain outside this contract.
 
 ## Versioning and compatibility
 
@@ -163,6 +165,12 @@ the response. In `resolved_request`, `muzzle_angle_rad` is always the effective 
 engine. If the caller requested a zero distance, the resolved shot contains both the original
 `zero_distance_m` intent and the muzzle angle calculated for it.
 
+The zero search uses the request's resolved projectile, atmosphere, wind (including downrange
+segments), effects, and integration method. It follows the engine's level-rifle convention by
+solving with zero cant; the requested `cant_angle_rad` is applied only to the subsequent trajectory.
+`target_height_m` remains an absolute world-vertical height above the local ground datum, as named
+above; inclined zeroing projects the shot-frame trajectory back into that world frame.
+
 ### `atmosphere`
 
 | Field | Required | Default | Meaning |
@@ -212,9 +220,12 @@ Downrange wind uses `segments` instead:
 }
 ```
 
-Segment boundaries must increase strictly and cover the requested range. `segments` conflicts
-with all three constant-wind fields. A partial constant wind, overlapping segment boundaries, or
-an uncovered range is reported as `conflicting_fields` or `invalid_value` by the service.
+Segment boundaries must increase strictly. `segments` conflicts with all three constant-wind
+fields. A partial constant wind or overlapping segment boundaries are reported as
+`conflicting_fields` or `invalid_value` by the service. Segments may end before the requested
+range; the engine uses still air beyond the final boundary and the response includes a
+`partial_wind_coverage` warning. Coverage is checked through the farther of `max_range_m` and an
+applicable `zero_distance_m`, because the zero trial uses the same segmented wind.
 
 Input presence is preserved for wind too: an omitted `segments` member is distinct from an
 explicit array, and an omitted segment `vertical_speed_mps` remains absent until resolution.
@@ -234,13 +245,22 @@ zero.
 | `effects.enhanced_spin_drift` | `false` | Enable enhanced spin-drift modeling. |
 | `sampling.interval_m` | `10` | Regular downrange result interval. |
 
+Supplying `solver.time_step_s` with `rk45` is valid, but RK45 owns its adaptive step size. The
+resolved request retains the supplied value and the response includes an
+`rk45_time_step_ignored` warning.
+
 A v1 success response contains at most 10,000 trajectory samples. Exactly 10,000 is valid;
-10,001 is not. A request whose resolved interval would produce more than this limit fails with
-`resource_limit` at `$.sampling.interval_m` before the success response is serialized. The service
-must not truncate or thin the requested sample sequence to fit the limit.
+10,001 is not. Sampling is evaluated against the trajectory's actual reached range, so an early
+ground or time termination can keep a fine-grid response within the limit. If the completed
+trajectory would produce more than 10,000 observations, the service fails with `resource_limit` at
+`$.sampling.interval_m` before allocating or serializing the response. The service must not
+truncate or thin the requested sample sequence to fit the limit.
 
 Effects remain opt-in. The service may require projectile length, twist data, latitude, or other
 documented prerequisites when a corresponding effect is enabled.
+
+Magnus and enhanced spin drift are experimental engine models. Enabling either produces an
+`experimental_effect` warning at the corresponding request path.
 
 `effects.magnus` and `effects.enhanced_spin_drift` cannot both be true in v1. The engine's legacy
 solver silently suppresses Magnus in that combination; the request decoder instead reports
@@ -254,6 +274,13 @@ presence-aware input DTO: all rifle, shot, atmosphere, wind, solver, effects, an
 defaults are materialized so the calculation is reproducible. `assumptions` and `warnings` are
 arrays of objects with a stable `code`, a human-readable `message`, and an optional request
 `path`.
+
+The service emits notices in deterministic request-field order. Stable v1 assumption codes are
+`default_applied` for literal defaults, `icao_standard_temperature` and
+`icao_standard_pressure` for omitted station values resolved from the requested altitude, and
+`estimated_projectile_length` when the engine needs inferred projectile geometry. Stable v1
+warning codes are `partial_wind_coverage`, `experimental_effect`, and
+`rk45_time_step_ignored`. Messages are descriptive text rather than a compatibility surface.
 
 ```json
 {
@@ -357,6 +384,9 @@ The v1 error codes are:
 
 Human-readable messages are diagnostic and are not a compatibility surface. Consumers branch on
 `code` and may use `path`, `line`, and `column` to highlight the input.
+
+`solve_v1` is deterministic and transport-free: it performs no filesystem or network access,
+does not load profiles, and does not write to stdout or stderr.
 
 ## Deliberate v1 exclusions
 
