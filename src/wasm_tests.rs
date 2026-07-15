@@ -776,6 +776,127 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------------
+    // MBA-1325 env-flags addendum: `lead` gains --temperature/--pressure/--humidity/
+    // --altitude/--wind-speed/--wind-direction (native parity).
+    // -----------------------------------------------------------------------------
+
+    /// With NO environmental flags, `lead` output must be byte-identical to the build
+    /// from before the flags existed. These literals were captured VERBATIM from the
+    /// pre-env-flags build (commit c805229) via a temporary probe test run under
+    /// `wasm-pack test --safari --headless` — a true golden-compare, not a
+    /// same-code-both-sides tautology. JSON strings have no trailing newline
+    /// (serde_json::to_string_pretty); the table format string ends with exactly one.
+    #[wasm_bindgen_test]
+    fn lead_no_env_flags_output_is_byte_identical_to_pre_env_build() {
+        const GOLDEN_IMPERIAL_JSON: &str = r#"{
+  "adjustment_unit": "mil",
+  "distance_unit": "yd",
+  "intercept_range": 399.9987936,
+  "iterations": 0,
+  "lead": 1.267051911310233,
+  "lead_mil": 3.1676393318758076,
+  "lead_moa": 10.890344022989026,
+  "range": 400.0,
+  "target_angle_deg": 90.0,
+  "target_speed": 5.0,
+  "target_speed_unit": "mph",
+  "tof_s": 0.5183409815796777
+}"#;
+        const GOLDEN_METRIC_JSON: &str = r#"{
+  "adjustment_unit": "mil",
+  "distance_unit": "m",
+  "intercept_range": 350.0,
+  "iterations": 0,
+  "lead": 1.4774105669002737,
+  "lead_mil": 4.221173048286496,
+  "lead_moa": 14.512392940008974,
+  "range": 350.0,
+  "target_angle_deg": 90.0,
+  "target_speed": 3.0,
+  "target_speed_unit": "m/s",
+  "tof_s": 0.49247018896675787
+}"#;
+        const GOLDEN_IMPERIAL_TABLE: &str = "Moving-Target Lead\n\
+===================\n\
+Target: 5.0 mph at 90\u{b0} (0=away, 90=left-to-right, 180=toward, 270=right-to-left;\n\
+positive lead = hold in direction of travel)\n\
+\n\
+Range: 400 yd\n\
+Time of Flight: 0.518 s\n\
+Lead: 1.27 yd (3.17 MIL / 10.89 MOA)\n\
+Intercept Range: 400.0 yd\n\
+Iterations: 0\n";
+
+        let wasm = WasmBallistics::new();
+        let g1 = wasm
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json",
+            )
+            .unwrap();
+        assert_eq!(g1, GOLDEN_IMPERIAL_JSON, "imperial JSON drifted from pre-env-flags build");
+        let g2 = wasm
+            .run_command(
+                "--units metric lead -v 823 -b 0.475 -m 10.9 -d 7.82 --target-speed 3 \
+                 --range 350 -o json",
+            )
+            .unwrap();
+        assert_eq!(g2, GOLDEN_METRIC_JSON, "metric JSON drifted from pre-env-flags build");
+        let g3 = wasm
+            .run_command("lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400")
+            .unwrap();
+        assert_eq!(g3, GOLDEN_IMPERIAL_TABLE, "imperial table drifted from pre-env-flags build");
+    }
+
+    /// Hot air (100F) vs the standard default (59F) must change the lead solution —
+    /// lower density, less drag, shorter TOF, smaller hold — proving --temperature is
+    /// actually plumbed into the solve, not just parsed. (Fails on the pre-addendum
+    /// build with "Unknown flag: --temperature".)
+    #[wasm_bindgen_test]
+    fn lead_temperature_is_live_hot_air_shortens_lead() {
+        let wasm = WasmBallistics::new();
+        let base = "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json";
+        let std_out = wasm.run_command(base).unwrap();
+        let hot_out = wasm
+            .run_command(&format!("{base} --temperature 100"))
+            .unwrap();
+        let std_json: serde_json::Value = serde_json::from_str(&std_out).unwrap();
+        let hot_json: serde_json::Value = serde_json::from_str(&hot_out).unwrap();
+        let std_tof = std_json["tof_s"].as_f64().unwrap();
+        let hot_tof = hot_json["tof_s"].as_f64().unwrap();
+        let std_mil = std_json["lead_mil"].as_f64().unwrap();
+        let hot_mil = hot_json["lead_mil"].as_f64().unwrap();
+        assert!(
+            hot_tof < std_tof,
+            "hot air must shorten TOF: hot {hot_tof} vs standard {std_tof}"
+        );
+        assert!(
+            hot_mil < std_mil && (std_mil - hot_mil) / std_mil > 1e-4,
+            "hot air must shrink the hold by more than float noise: hot {hot_mil} vs standard {std_mil}"
+        );
+    }
+
+    /// A 20 mph headwind (--wind-direction 0 = wind-FROM dead ahead) adds drag along
+    /// the flight path, lengthening TOF and growing the hold vs calm air — proving the
+    /// wind flags reach the WindConditions the solve actually uses.
+    #[wasm_bindgen_test]
+    fn lead_headwind_is_live_and_lengthens_tof() {
+        let wasm = WasmBallistics::new();
+        let base = "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json";
+        let calm_out = wasm.run_command(base).unwrap();
+        let wind_out = wasm
+            .run_command(&format!("{base} --wind-speed 20 --wind-direction 0"))
+            .unwrap();
+        let calm_json: serde_json::Value = serde_json::from_str(&calm_out).unwrap();
+        let wind_json: serde_json::Value = serde_json::from_str(&wind_out).unwrap();
+        let calm_tof = calm_json["tof_s"].as_f64().unwrap();
+        let wind_tof = wind_json["tof_s"].as_f64().unwrap();
+        assert!(
+            wind_tof > calm_tof && (wind_tof - calm_tof) / calm_tof > 1e-4,
+            "a 20 mph headwind must lengthen TOF beyond float noise: wind {wind_tof} vs calm {calm_tof}"
+        );
+    }
+
     #[wasm_bindgen_test]
     fn lead_without_powder_flags_uses_velocity_verbatim() {
         let wasm = WasmBallistics::new();
