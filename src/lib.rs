@@ -25,7 +25,9 @@ pub use cli_api::{
 };
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;
-pub use moving_target::{calculate_lead, lead_from_tof, LeadComponents, LeadError, LeadSolution};
+pub use moving_target::{
+    calculate_lead, lead_from_tof, mover_ring, LeadComponents, LeadError, LeadSolution,
+};
 
 // Module declarations
 pub mod cli_api;
