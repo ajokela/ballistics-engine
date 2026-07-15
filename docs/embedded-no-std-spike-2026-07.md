@@ -25,17 +25,29 @@ orthogonal deployment models that happen to share the word "ESP32."
 
 ## Executive summary
 
-The dependency chain and the engine's own code are both **far more no_std-friendly than
-expected**. Every core numeric dependency (nalgebra, ndarray, rand, rand_distr, serde,
-serde_json, thiserror) already ships an `alloc`-based no_std configuration, and I verified all
-seven compile cleanly together under `#![no_std]` + `extern crate alloc` on
-`thumbv7em-none-eabihf` (a real Cortex-M4F target). Grepping the actual solve path (`cli_api.rs`,
-`trajectory_integration.rs`, `drag.rs`, `atmosphere.rs`, `wind.rs`, `wind_shear.rs`,
+The dependency chain and the engine's own code are both **more no_std-friendly than expected,
+though less cleanly isolated than an earlier draft of this report claimed** — corrected below and
+in §2/§2a after a review pass caught the overclaim. Every core numeric dependency (nalgebra,
+ndarray, rand, rand_distr, serde, serde_json, thiserror) already ships an `alloc`-based no_std
+configuration, and in an *isolated probe crate* that explicitly sets `default-features = false`
+on each of them, all seven compile cleanly together under `#![no_std]` + `extern crate alloc` on
+`thumbv7em-none-eabihf` (a real Cortex-M4F target) — see §2a. **That isolation does not currently
+hold inside `ballistics-engine` itself.** This crate's own `Cargo.toml` never sets
+`default-features = false` on nalgebra/ndarray/serde (or rand/thiserror), so
+`cargo check --target thumbv7em-none-eabihf --no-default-features` run against the real crate
+fails today on *two* independent chains, not one: the un-gated `clap` chain, **and** the un-gated
+numeric/serialization chain — `matrixmultiply` (pulled in by both nalgebra and ndarray) and
+`serde_core` (pulled in by serde) each independently emit `error[E0463]: can't find crate for
+std` in that exact run. A third, separate chain also fails: the unconditional `ndarray-npy`
+dependency pulls in `zip` → `flate2`/`crc32fast` → `zlib-rs`, which likewise can't find `std`.
+See §2/§2a for the corrected transcript and root cause. Grepping the actual solve path
+(`cli_api.rs`, `trajectory_integration.rs`, `drag.rs`, `atmosphere.rs`, `wind.rs`, `wind_shear.rs`,
 `moving_target.rs`, and the rest of the physics modules — spin drift, precession/nutation,
 pitch damping, stability, transonic drag, form factor, Reynolds, aerodynamic jump) turned up
 **zero** `std::fs`/`std::io`/`std::thread` usage and only a small, enumerable list of std-only
-touchpoints (two synchronization primitives, one trait impl, a handful of `eprintln!` warning
-sites, and two `HashMap`s). None of the CPU-heavy numerical hot path is std-coupled.
+touchpoints (synchronization primitives — corrected count in §3, more than the "two" an earlier
+draft claimed — one trait impl, a handful of `eprintln!` warning sites, and two `HashMap`s). None
+of the CPU-heavy numerical hot path is std-coupled.
 
 **Recommendation: qualified GO** — getting `cargo check --target thumbv7em-none-eabihf` green
 for a "core" feature slice looks like roughly a one-week mechanical effort, not a rewrite. But
@@ -67,10 +79,18 @@ a standalone probe crate compiled against the real target — see §2.
 | **strsim** | 0.11.1 | (irrelevant) | Only used in `main.rs` for CLI "did you mean" suggestions. Not a library concern either way. |
 | **ureq** | 3.3.0 | ❌ std-only (networking) | Already correctly `optional = true` behind the `online` feature (`ureq = { ..., optional = true }`, `online = ["dep:ureq"]`). Not a blocker — already opt-out. |
 | **printpdf** | 0.7.0 | ❌ std-only (files/fonts) | Already correctly `optional = true` behind the `pdf` feature. Not a blocker — already opt-out. Its only caller, `pdf_dope_card.rs`, isn't even part of the library (see §1a). |
-| **ndarray-npy** | 0.10.0 | ❌ std-only | Wraps `zip`/file I/O internally; no std/no_std toggle. Unconditional dependency, but used only inside `drag.rs`'s peripheral `.npy`-file loader (same function as the `csv` fallback above). |
+| **ndarray-npy** | 0.10.0 | ❌ std-only | Wraps `zip`/file I/O internally; no std/no_std toggle. Unconditional dependency, but used only inside `drag.rs`'s peripheral `.npy`-file loader (same function as the `csv` fallback above). **Confirmed second, independent thumbv7em build failure today**, not just a theoretical concern: `cargo tree -i zlib-rs` shows `ndarray-npy → zip 6.0.0 → flate2 1.1.9 → zlib-rs 0.6.3`, and both `zlib_rs` and `crc32fast` emit `error[E0463]: can't find crate for std` in the exact `cargo check --target thumbv7em-none-eabihf --no-default-features` run in §2. This crate was missing from the Phase 0 gating list in an earlier draft — corrected in §4. |
 | **rayon** | 1.11.0 | ❌ std-only (OS threads) | Unconditional dependency in `Cargo.toml` — **but is not referenced anywhere in `src/` today** (`grep -rn "rayon" src/` returns nothing). This is dead weight independent of the no_std question; worth dropping regardless. |
 | **tikv-jemallocator** / **mimalloc** | — | N/A | `optional = true`, target-gated (`cfg(not(target_env = "msvc"))`), used only for allocator benchmarking. Irrelevant to embedded — a real device build would supply its own `#[global_allocator]` (e.g. a static-arena allocator), which is downstream-application responsibility, not this crate's. |
 | **wasm-bindgen** / **web-sys** / **js-sys** / **wasm-bindgen-futures** / **serde-wasm-bindgen** / **getrandom** (wasm target) | — | N/A | Already gated under `[target.'cfg(target_arch = "wasm32")'.dependencies]`; irrelevant to a `thumbv7em` build. |
+
+**What "Compile-verified" means in the table above:** verified in the isolated `/tmp/nostd-dep-probe`
+crate (§2a) with `default-features = false` set explicitly on each crate — **not** verified as
+part of `ballistics-engine`'s own `cargo check --target thumbv7em-none-eabihf
+--no-default-features`, which fails today for two of these seven (`nalgebra`/`ndarray`'s shared
+`matrixmultiply` dependency and `serde`'s `serde_core` dependency) because this crate's own
+`Cargo.toml` doesn't yet apply that same `default-features = false` treatment. See the correction
+in §2/§2a.
 
 ### 1a. "clap/ureq/printpdf are bin-or-gated" — confirmed, with one important caveat
 
@@ -120,18 +140,56 @@ error[E0463]: can't find crate for `std`
 198 | extern crate std;
 error[E0463]: can't find crate for `std`
   = note: `std` is required by `anstyle` because it does not declare `#![no_std]`
+error[E0463]: can't find crate for `std`
+  = note: `std` is required by `matrixmultiply` because it does not declare `#![no_std]`
+error[E0463]: can't find crate for `std`
+  = note: `std` is required by `serde_core` because it does not declare `#![no_std]`
+error[E0463]: can't find crate for `std`
+  = note: `std` is required by `zlib_rs` because it does not declare `#![no_std]`
+error[E0463]: can't find crate for `std`
+  = note: `std` is required by `crc32fast` because it does not declare `#![no_std]`
 ... (cascading errors: `derive`, `concat!` etc. "not found" once `core`'s prelude
-    substitutes for `std`'s prelude — these are downstream symptoms of the same
-    missing-std root cause, not independent bugs)
+    substitutes for `std`'s prelude — these are downstream symptoms of missing-std roots, not
+    independent bugs; the full run produces 25 top-level `E0463`s naming 11 distinct crates)
 ```
 
 Same result with `--lib` only (`cargo check --lib --target thumbv7em-none-eabihf
---no-default-features`) — as explained in §1a, `clap`'s dependency chain is pulled into every
-target of the package regardless of which target you ask Cargo to build, because it isn't
-feature-gated. **Every single compile error in this run traces back to the `clap` → `anstyle` /
-`anstyle-query` / `is_terminal_polyfill` / `clap_lex` chain wanting `std`** — none of them
-originate in our own code or in the numeric dependency chain. That's a real result, but it's
-gated entirely on the Cargo.toml issue in §1a, not on any physics/solver code.
+--no-default-features`).
+
+**Correction (flagged by review, 2026-07-15):** an earlier draft of this section claimed "every
+single compile error in this run traces back to the `clap` chain... none of them originate in...
+the numeric dependency chain." **That claim is false**, and is disprovable by grepping this exact
+transcript: `matrixmultiply` (a direct dependency of *both* nalgebra and ndarray — confirmed via
+`cargo tree -i matrixmultiply`) and `serde_core` (a direct dependency of serde — confirmed via
+`cargo tree -i serde_core`) each independently emit `error[E0463]: can't find crate for std` in
+this run, squarely inside the "numeric/serialization dependency chain" §2a calls
+"compile-verified." A third, independent chain also fails: `ndarray-npy` (an unconditional
+dependency, flagged in §1's table) pulls in `zip → flate2 → zlib-rs` and `crc32fast`, both of
+which likewise emit `E0463` (confirmed via `cargo tree -i zlib-rs` / `cargo tree -i crc32fast`,
+and reproduced deterministically across two independent runs of the command above).
+
+**Root cause is the same shape of bug, but at two different levels — that's the important
+distinction, not "only clap":**
+- The `clap`/`ndarray-npy` chains fail because `clap`, `clap_complete`, `csv`, `dirs`, `strsim`,
+  and `ndarray-npy` are plain, non-optional dependencies with **no feature gate at all** — Cargo
+  always resolves their std-requiring defaults, and `ndarray-npy` doesn't even expose a
+  `[features]` section to opt out of even if we wanted to.
+- The `matrixmultiply`/`serde_core` failures happen for a *different* reason: nalgebra, ndarray,
+  and serde **are** no_std-capable — §2a proves that, in isolation — but `ballistics-engine`'s
+  own `Cargo.toml` never sets `default-features = false` on them, so Cargo resolves their
+  *default* (std-requiring) feature sets when building this crate. The isolated
+  `/tmp/nostd-dep-probe` crate in §2a explicitly sets `default-features = false` on all seven
+  numeric/serialization crates and therefore doesn't hit this. The narrower §2a claim ("the
+  numeric/serialization crates are themselves no_std-capable") still holds; the broader claim
+  this section originally made ("therefore this crate's build of them is clean today") does not.
+
+Corrected summary: **two** root causes, not one — (a) un-gated CLI-only dependencies (`clap`,
+`clap_complete`, `csv`, `dirs`, `strsim`, `ndarray-npy`), and (b) numeric/serialization
+dependencies resolving to their default (std) feature sets because this crate's `Cargo.toml`
+hasn't yet opted them into their `alloc`/no_std configurations. Both are Cargo.toml-level,
+mechanical fixes — neither implicates the engine's own physics code — but Phase 0 (§4) needs to
+address both; `ndarray-npy`'s gating was missing from that list in an earlier draft and is added
+below.
 
 ### 2a. Isolating the real question: does the numeric/serialization chain compile no_std?
 
@@ -164,10 +222,18 @@ warning: struct `Foo` is never constructed
 ```
 
 **Clean compile, zero errors**, on the real target, with the real (locked) versions this repo
-uses. This is strong, concrete evidence that the numeric/serialization core of the dependency
-graph is not the obstacle — the obstacle is entirely the un-gated CLI dependency chain
-(Cargo.toml, mechanical fix) plus the small list of std touchpoints in our own code cataloged
-in §3.
+uses — **when each crate is explicitly configured with `default-features = false` plus its
+documented `alloc`/no_std feature flags**, exactly as the `Cargo.toml` snippet above shows. This
+is strong evidence that the numeric/serialization crates are *themselves* no_std-capable. It is
+**not** evidence that `ballistics-engine`'s current build of them is clean — see the correction
+in §2: because this crate's own `Cargo.toml` doesn't yet set `default-features = false` on
+nalgebra/ndarray/serde (etc.), `matrixmultiply` and `serde_core` fail in the real crate today
+with the exact same `E0463` class shown here, and `ndarray-npy` (which has no `[features]` to
+even turn off) fails for the same "no gate at all" reason as `clap`. The gap between "this
+dependency graph *can* compile no_std" (proven here) and "this crate's dependency graph *does*
+compile no_std today" (false, per §2) is precisely the `default-features = false` +
+feature-list work scoped into Phase 0 below — mechanical, not a discovery risk, but real work
+that an earlier draft of this report undercounted by treating it as already done.
 
 ---
 
@@ -190,7 +256,7 @@ gated, or an auxiliary loader not reachable from the default `TrajectorySolver` 
 |---|---|---|---|
 | `std::fs`, `std::io`, `std::time`, `std::thread`, `std::env`, `std::process`, `std::net` | `drag.rs`, `bc_table.rs`, `bc_table_5d.rs` | `drag.rs`: 1 fs-based loader (`load_drag_table`, G6/G8 only — G1/G7 are baked in via `include_str!` and never touch `std::fs`); 1 `std::time::Instant` (inside a `#[test]` fn, not compiled for the target). `bc_table.rs`: `File`/`BufReader` in `load()`, called only from `main.rs` (CLI). `bc_table_5d.rs`: `File`/`BufReader` in a disk `load()` + `std::fs::read_dir` for auto-discovery, called only from `main.rs` and (notably) **not** from `wasm.rs`, which already routes through a byte-based `from_reader`/`from_bytes` constructor with an explicit code comment: *"there is no `std::fs`... the host JS/Node layer fetches the `.bin`."* | **Peripheral.** None of this is reachable from `cli_api.rs`'s core solve routines — confirmed by grepping for `bc_table::`/`bc_table_5d::` callers, which are only `main.rs` and `wasm.rs`. `wasm.rs` already demonstrates the exact pattern an embedded port would reuse (bytes in, no fs). |
 | `std::sync::Once` | `cli_api.rs` (1 call site: `custom_drag_denominator`'s one-time stderr warning guard) | 1 | **Core-blocking, but tiny.** Needs a no_std-safe once-guard (hand-rolled `AtomicBool`/`critical-section`, or drop the warning). |
-| `std::sync::LazyLock` | `drag.rs`, `drag_tables.rs` | 2 (one each) | **Core-blocking, but tiny.** Used to lazily materialize the G1/G7 `DragTable` from the embedded CSV string on first access. Needs a no_std lazy-init substitute. |
+| `std::sync::LazyLock` | `drag.rs` (4 live statics: `G1_DRAG_TABLE`, `G7_DRAG_TABLE`, `G6_DRAG_TABLE`, `G8_DRAG_TABLE`) + `drag_tables.rs` (8 more: `G1`/`G7`/`G2`/`G5`/`G6`/`G8`/`GI`/`GS`, all `#[allow(dead_code)]` and, per `grep -rn "drag_tables::" src/`, never referenced anywhere in `src/`) | **12** — an earlier draft of this table claimed "2 (one each)", which undercounted `drag.rs` alone by 4x and missed `drag_tables.rs` entirely | **Core-blocking, but tiny, for the 4 live sites in `drag.rs`.** Needs a no_std lazy-init substitute (e.g. a `critical-section`-backed lazy cell). **The 8 in `drag_tables.rs` are dead code end-to-end** — the same category as the unused `rayon` dependency flagged in §1 — so the cheaper Phase-0 move is to delete `drag_tables.rs` outright rather than port 8 statics nothing calls. Either way they'd break a `#![no_std]` build today: `#[allow(dead_code)]` only silences the lint, it doesn't stop the compiler from type-checking and compiling the item. |
 | `std::error::Error` | `cli_api.rs` (`impl Error for BallisticsError {}`) | 1 | **Core-blocking, trivial fix.** `core::error::Error` is stable since Rust 1.81 (repo's toolchain: 1.91.1) — this is a one-line swap. |
 | `std::f64::consts::*`, `std::cmp::Ordering`, `std::fmt` | `cli_api.rs` (9+ sites), `monte_carlo.rs` (2 sites) | ~11 | **Core-blocking, but mechanical.** `core::f64::consts`, `core::cmp::Ordering`, `core::fmt` are byte-for-byte equivalent; this is a find/replace, no logic change. |
 | `println!` | `wind.rs`, `stability.rs`, `stability_advanced.rs`, `trajectory_integration.rs` | **0** (all sites are inside `#[cfg(test)] mod tests { ... }`, confirmed by comparing line numbers against each file's `mod tests` boundary) | **Not blocking.** Test code isn't compiled into the library artifact for a downstream target unless someone runs `cargo test` there, which is not the deployment model. |
@@ -202,33 +268,45 @@ gated, or an auxiliary loader not reachable from the default `TrajectorySolver` 
 
 **Bottom line:** across roughly 24,000 lines spanning the entire physics/solver module set
 (cli_api.rs's solver internals down through spin drift, precession/nutation, stability, drag,
-atmosphere, wind, and moving-target lead), the *only* code that would need to change to compile
-under `#![no_std]` is: two synchronization-primitive call sites, one trait impl, about a dozen
-mechanically-portable `std::`→`core::` path swaps, seven diagnostic `eprintln!`s, and two
-`HashMap`s in already-peripheral subsystems. Everything else — the actual physics — is
-already written in ordinary, allocation-only Rust.
+atmosphere, wind, and moving-target lead), the code that would need to change to compile under
+`#![no_std]` is: 5 live synchronization-primitive call sites (1 `Once` + 4 `LazyLock`, all in
+`cli_api.rs`/`drag.rs`), 8 more `LazyLock` statics in the entirely-dead-code `drag_tables.rs`
+(cheaper to delete than port), one trait impl, about a dozen mechanically-portable
+`std::`→`core::` path swaps, seven diagnostic `eprintln!`s, and two `HashMap`s in
+already-peripheral subsystems. Everything else — the actual physics — is already written in
+ordinary, allocation-only Rust. (An earlier draft undercounted the `LazyLock` sites as "two"; the
+corrected count doesn't change the mechanical, no-discovery-risk character of the list — see
+§4 — but is recorded here for accuracy, per review.)
 
 ---
 
 ## 4. Phased plan (if pursued)
 
 **Phase 0 — Cargo.toml surgery (0.5–1 day).**
-Gate `clap`, `clap_complete`, `csv`, `dirs`, `strsim` behind a new opt-in-by-default `cli`
-feature, mirroring the existing `online`/`pdf` pattern (`optional = true` + `cli =
-["dep:clap", "dep:clap_complete", "dep:csv", "dep:dirs", "dep:strsim"]`). Introduce a `std`
-feature (on by default) that forwards to each numeric dependency's own `std` feature
-(`nalgebra/std`, `ndarray/std`, `rand/std`, `rand_distr/std`, `serde/std`, `serde_json/std`,
-`thiserror/std`), with those dependencies switched to `default-features = false` plus explicit
-`alloc`/`libm` feature lists so the "no `std` feature" configuration resolves to the no_std
-variant validated in §2a. Verify `cargo check --lib --no-default-features` (i.e. no `std`, no
-`cli`) now produces a *clean dependency graph* — not yet `no_std`-annotated, just no longer
-pulling in `clap`.
+Gate `clap`, `clap_complete`, `csv`, `dirs`, `strsim`, **and `ndarray-npy`** behind a new
+opt-in-by-default `cli` feature, mirroring the existing `online`/`pdf` pattern (`optional = true`
++ `cli = ["dep:clap", "dep:clap_complete", "dep:csv", "dep:dirs", "dep:strsim",
+"dep:ndarray-npy"]`). **`ndarray-npy` was missing from this list in an earlier draft**, even
+though it's the source of a second, independent thumbv7em failure today (§1, §2:
+`ndarray-npy` → `zip` → `flate2`/`crc32fast` → `zlib-rs`, all std-only with no feature toggle of
+their own to fall back on). Introduce a `std` feature (on by default) that forwards to each
+numeric dependency's own `std` feature (`nalgebra/std`, `ndarray/std`, `rand/std`,
+`rand_distr/std`, `serde/std`, `serde_json/std`, `thiserror/std`), with those dependencies
+switched to `default-features = false` plus explicit `alloc`/`libm` feature lists **directly in
+this crate's own `Cargo.toml`** so the "no `std` feature" configuration resolves to the no_std
+variant validated in isolation in §2a — this is the specific step that's currently missing and
+that makes `matrixmultiply`/`serde_core` fail in the real crate today (§2). Verify
+`cargo check --lib --no-default-features` (i.e. no `std`, no `cli`) now produces a *clean
+dependency graph* — no longer pulling in `clap`, `ndarray-npy`'s zip chain, or any numeric
+crate's default std-requiring feature set.
 
 **Phase 1 — fix the enumerated blockers (2–4 days).**
 Add `#![cfg_attr(not(feature = "std"), no_std)]` + `extern crate alloc;` to `lib.rs`. Apply the
-fixes cataloged in §3, all of which are now fully known in advance (no discovery risk left):
-swap `std::sync::Once`/`LazyLock` for a no_std-safe lazy-init in `cli_api.rs`/`drag.rs`/
-`drag_tables.rs`; swap `impl std::error::Error` → `impl core::error::Error`; mechanical
+fixes cataloged in §3, all of which are now fully known in advance (no discovery risk left, per
+the corrected counts there): swap `std::sync::Once` (1 site) and `std::sync::LazyLock` (4 live
+sites) for a no_std-safe lazy-init in `cli_api.rs`/`drag.rs`, and delete `drag_tables.rs`'s 8
+dead-code `LazyLock` statics outright rather than port them; swap
+`impl std::error::Error` → `impl core::error::Error`; mechanical
 `std::f64`/`std::cmp`/`std::fmt` → `core::` path swaps; feature-gate the ~7 `eprintln!`
 diagnostics behind `cfg(feature = "std")` (or route through a minimal logging trait); bake G6/G8
 drag tables into the binary via `include_str!` the same way G1/G7 already are, and
@@ -305,12 +383,17 @@ ticket with its own hardware budget before any commitment to ship.
 
 **Qualified GO — for Phases 0–2 only.**
 
-The compile-time feasibility question this spike was scoped to answer comes back clearly
-positive: the numeric/serialization dependency chain is compile-verified no_std-capable on a
-real Cortex-M4F target, and our own code's std surface on the actual solve path is small,
-fully enumerated, and mechanical to fix (no discovery risk remains — every blocker in §3 is a
-known, bounded change). This is not a "rewrite the physics" problem; it's a "restructure some
-Cargo features and swap a dozen call sites" problem, estimated at about one engineer-week.
+The compile-time feasibility question this spike was scoped to answer comes back positive, with
+one correction from a review pass: the numeric/serialization dependency chain is
+compile-verified no_std-capable **in isolation** (§2a) on a real Cortex-M4F target — it does not
+yet compile that way *inside this crate*, because `Cargo.toml` hasn't been given the same
+`default-features = false` treatment the probe crate got (§2). Our own code's std surface on the
+actual solve path is still small, fully enumerated, and mechanical to fix (no discovery risk
+remains — every blocker in §3, including the corrected `LazyLock` count, is a known, bounded
+change), and Phase 0's scope now explicitly includes `ndarray-npy` alongside the CLI-only
+crates. This is not a "rewrite the physics" problem; it's a "restructure some Cargo features and
+swap about two dozen call sites" problem, still estimated at about one engineer-week — the
+correction changes what Phase 0 needs to gate, not the size of Phase 1's mechanical work.
 
 **This is explicitly not a GO to ship an embedded target.** Whether the result is fast enough
 (f64-on-single-FPU performance), small enough (RAM for table storage), and safe enough
@@ -330,10 +413,24 @@ cargo test                                                      # baseline: all 
 cargo clippy --all-targets                                      # baseline: 0 warnings
 cargo check --target wasm32-unknown-unknown --no-default-features   # baseline: succeeds (pre-existing warnings only)
 rustup target add thumbv7em-none-eabihf
-cargo check --target thumbv7em-none-eabihf --no-default-features        # fails: clap chain wants std
-cargo check --lib --target thumbv7em-none-eabihf --no-default-features  # same failure, same root cause
+cargo check --target thumbv7em-none-eabihf --no-default-features        # fails: clap AND numeric/serde chains want std
+cargo check --lib --target thumbv7em-none-eabihf --no-default-features  # same failures, same root causes
 # standalone probe crate at /tmp/nostd-dep-probe (outside the worktree, no repo files touched):
 cargo check --target thumbv7em-none-eabihf   # nalgebra+ndarray+rand+rand_distr+serde+serde_json+thiserror: clean
+                                              # (only with default-features=false set explicitly — see §2a)
+
+# post-review correction (fix pass, 2026-07-15) — isolating exactly which crates emit E0463
+# in the REAL crate's --no-default-features build, not just the clap chain an earlier draft
+# blamed exclusively:
+cargo tree -i matrixmultiply      # confirms: nalgebra AND ndarray both pull it in
+cargo tree -i serde_core          # confirms: serde pulls it in
+cargo tree -i zlib-rs             # confirms: ndarray-npy -> zip -> flate2 -> zlib-rs
+cargo tree -i crc32fast           # confirms: ndarray-npy -> zip -> flate2 -> crc32fast
+cargo check --target thumbv7em-none-eabihf --no-default-features 2>&1 | grep -B2 "E0463"
+  # confirms matrixmultiply, serde_core, zlib_rs, crc32fast, anstyle, anstyle_query, clap_lex,
+  # is_terminal_polyfill, strsim, ucd_trie all independently emit E0463 in this one run
+  # (25 top-level E0463s naming 11 distinct crates); reproduced deterministically twice
+grep -rn "drag_tables::" src/         # confirms drag_tables.rs's 8 LazyLock statics are dead code
 ```
 
 Full command transcripts and outputs are in the accompanying execution log,
