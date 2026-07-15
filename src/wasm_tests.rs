@@ -657,7 +657,8 @@ mod tests {
             )
             .unwrap();
         assert!(result.contains("Trajectory Calculation Results"));
-    
+    }
+
     /// MBA-1297 (field report, Bero): at 90 degrees of cant the vertical and
     /// lateral misses at the zero distance MUST be equal — the same rotation
     /// moves both the bore offset and the zero tilt. The WASM formatters used
@@ -1284,5 +1285,4 @@ Impact Velocity: 2510 fps\n";
             .unwrap();
         assert!(monte_carlo.contains("Monte Carlo Simulation Results"));
     }
-}
 }
