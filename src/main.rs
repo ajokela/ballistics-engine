@@ -26,7 +26,7 @@ use ballistics_engine::bc_table_5d::Bc5dTableManager;
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::constants::{
-    DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F,
+    DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN,
 };
 use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel,
@@ -2592,8 +2592,10 @@ struct A7pImportOutcome {
     report: ImportReport,
 }
 
+// Re-export of the shared constant under the name this module's a7p-mapping
+// call sites already use (MBA-1327: single source of truth for grain<->gram).
 #[cfg(feature = "profile-import")]
-const GRAIN_TO_GRAM: f64 = 0.06479891;
+use ballistics_engine::constants::GRAMS_PER_GRAIN as GRAIN_TO_GRAM;
 #[cfg(feature = "profile-import")]
 const IN_TO_MM: f64 = 25.4;
 
@@ -4779,7 +4781,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             let weight_gr = match units {
                 UnitSystem::Imperial => mass,
-                UnitSystem::Metric => mass / 0.0647989, // grams to grains
+                UnitSystem::Metric => mass / GRAMS_PER_GRAIN, // grams to grains
             };
             let caliber_in = match units {
                 UnitSystem::Imperial => diameter,
@@ -10236,7 +10238,7 @@ mod a7p_import_mapping_tests {
         assert_eq!(p.drag_model, "G1");
         assert!((p.velocity - 792.0).abs() < 1e-9);
         assert!((p.bc - 0.716).abs() < 1e-9); // highest-velocity row wins
-        assert!((p.mass - 300.0 * 0.06479891).abs() < 1e-9); // grams
+        assert!((p.mass - 300.0 * GRAIN_TO_GRAM).abs() < 1e-9); // grams
         assert!((p.diameter - 0.338 * 25.4).abs() < 1e-9); // mm
         assert!((p.bullet_length.unwrap() - 1.8 * 25.4).abs() < 1e-9); // mm
         assert!((p.twist_rate.unwrap() - 254.0).abs() < 1e-9); // mm/turn

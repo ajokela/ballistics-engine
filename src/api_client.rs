@@ -4,6 +4,8 @@
 //! through the Flask API instead of local computation, giving CLI users
 //! access to ML-enhanced predictions.
 
+#[cfg(feature = "online")]
+use crate::constants::GRAMS_PER_GRAIN;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -257,7 +259,7 @@ impl ApiClient {
 
         // Convert metric values to imperial for API
         let velocity_fps = request.muzzle_velocity / 0.3048; // m/s to fps
-        let mass_grains = request.bullet_mass / 0.0647989; // grams to grains
+        let mass_grains = request.bullet_mass / GRAMS_PER_GRAIN; // grams to grains
         let distance_yards = request.target_distance / 0.9144; // meters to yards
 
         let mut req = ureq::get(&url)

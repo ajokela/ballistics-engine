@@ -8,6 +8,7 @@ use crate::cli_api::{
     AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcFitMode, MonteCarloParams,
     TrajectorySolver, WindConditions,
 };
+use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
 use crate::moving_target::{calculate_lead, mover_ring};
 use std::cell::RefCell;
@@ -891,7 +892,7 @@ impl WasmBallistics {
             if let Some(table) = self.bc5d_table.borrow().as_ref() {
                 let (weight_grains, muzzle_fps) = match units {
                     UnitSystem::Imperial => (mass, velocity),
-                    UnitSystem::Metric => (mass * 15.4323584, velocity * 3.280839895),
+                    UnitSystem::Metric => (mass * GRAINS_PER_GRAM, velocity * 3.280839895),
                 };
                 if let Some(schedule) =
                     table.generate_segment_schedule(bc, drag_model, weight_grains, muzzle_fps)
