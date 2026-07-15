@@ -20,6 +20,7 @@ exclude = [
     "examples/",
     "ios.png",
     "pkg/",
+    "pkg-web/",
     "pkg-nodejs/",
     "test_ffi.c",
     "test_monte_carlo.py",
