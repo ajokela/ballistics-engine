@@ -1,0 +1,67 @@
+{
+  "id": "xref_g7_spin_drift_on",
+  "description": "G7 .308 175 gr flat-fire, 1:10 right twist, no wind, enhanced spin drift ON. Validates the engine's Litz+Miller spin drift (positive McCoy Z) against py-ballisticcalc's identical model.",
+  "source": {
+    "kind": "cross-implementation",
+    "citation": "py-ballisticcalc 2.2.10 (open-source point-mass solver; default RK4 engine; standard G1/G7 drag tables). Flat-fire, horizontal-LOS geometry maps py-bc height/windage/velocity/time onto engine McCoy drop/drift/speed/tof; wind direction_from = engine wind_angle + 180 deg.",
+    "retrieved": "2026-07-15",
+    "generator_version": "py-ballisticcalc==2.2.10 via data/validation/generators/gen_pybc_refs.py"
+  },
+  "inputs": {
+    "muzzle_angle_rad": 0.0,
+    "shooting_angle_rad": 0.0,
+    "twist_rate_in": 10.0,
+    "is_twist_right": true,
+    "sight_height_m": 0.0,
+    "muzzle_height_m": 0.0,
+    "altitude_m": 0.0,
+    "temperature_c": 15.0,
+    "pressure_hpa": 1013.25,
+    "humidity_frac": 0.0,
+    "wind_speed_mps": 0.0,
+    "wind_angle_rad": 0.0,
+    "vertical_wind_mps": 0.0,
+    "use_enhanced_spin_drift": true,
+    "enable_advanced_effects": false,
+    "muzzle_velocity_mps": 800.0,
+    "bullet_mass_kg": 0.01134,
+    "bullet_diameter_m": 0.0078232,
+    "bullet_length_m": 0.031496,
+    "bc_value": 0.243,
+    "bc_type": "G7"
+  },
+  "expectations": [
+    {
+      "observable": "drift_m",
+      "range_m": 500.0,
+      "value": 0.071906,
+      "tolerance_justification": "Spin drift: both use the identical Litz 1.25*(Sg+1.2)*t^1.83 with a Miller Sg that matches at sea-level standard (the T/P corrections are ~1 on both sides), so the only residual is the RK4-vs-RK45 time-of-flight feeding t^1.83; observed difference ~0.05%. 1 cm floor + 2%.",
+      "tol_abs": 0.01,
+      "tol_rel": 0.02
+    },
+    {
+      "observable": "drift_m",
+      "range_m": 900.0,
+      "value": 0.311466,
+      "tolerance_justification": "Spin drift: both use the identical Litz 1.25*(Sg+1.2)*t^1.83 with a Miller Sg that matches at sea-level standard (the T/P corrections are ~1 on both sides), so the only residual is the RK4-vs-RK45 time-of-flight feeding t^1.83; observed difference ~0.05%. 1 cm floor + 2%.",
+      "tol_abs": 0.01,
+      "tol_rel": 0.02
+    },
+    {
+      "observable": "drop_m",
+      "range_m": 900.0,
+      "value": -11.23038,
+      "tolerance_justification": "Drop: bounded by RK45(engine, adaptive) vs RK4(py-bc, fixed-step) integration and the two distinct G1/G7 table resolutions/interpolants. 1 cm floor + 0.8% brackets the observed ~0.04% cross-solver difference with ~20x head-room while failing a >~1% (field-noticeable, ~1 MOA at long range) drop regression.",
+      "tol_abs": 0.01,
+      "tol_rel": 0.008
+    },
+    {
+      "observable": "velocity_mps",
+      "range_m": 900.0,
+      "value": 340.173795,
+      "tolerance_justification": "Velocity: the most drag-sensitive observable; bounded by the G1/G7 table-resolution difference. Observed cross-solver difference ~0.06%; 0.6 m/s floor + 0.6% keeps ~10x head-room while failing a >~0.7% velocity regression.",
+      "tol_abs": 0.6,
+      "tol_rel": 0.006
+    }
+  ]
+}

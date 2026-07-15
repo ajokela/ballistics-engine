@@ -58,6 +58,12 @@ jobs:
       - name: Verify the offline minimal-feature process protocol
         run: cargo test --locked --no-default-features --test solve_json_cli
 
+      # MBA-1318: the golden-reference physics validation harness. The all-features test step above
+      # already exercises it (the `validation` feature is on under --all-features), but run it
+      # explicitly so a physics regression is reported as its own named, obvious check.
+      - name: Golden-reference physics validation
+        run: cargo test --locked --features validation --test golden_physics
+
   fuzz-smoke:
     name: Build and smoke-run every fuzz target
     runs-on: ubuntu-latest

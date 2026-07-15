@@ -1,0 +1,83 @@
+{
+  "id": "xref_g7_crosswind",
+  "description": "G7 .308 175 gr flat-fire, 8 m/s wind FROM THE LEFT (engine wind_angle = 3pi/2), no twist. Crosswind drift with the opposite sign.",
+  "source": {
+    "kind": "cross-implementation",
+    "citation": "py-ballisticcalc 2.2.10 (open-source point-mass solver; default RK4 engine; standard G1/G7 drag tables). Flat-fire, horizontal-LOS geometry maps py-bc height/windage/velocity/time onto engine McCoy drop/drift/speed/tof; wind direction_from = engine wind_angle + 180 deg.",
+    "retrieved": "2026-07-15",
+    "generator_version": "py-ballisticcalc==2.2.10 via data/validation/generators/gen_pybc_refs.py"
+  },
+  "inputs": {
+    "muzzle_angle_rad": 0.0,
+    "shooting_angle_rad": 0.0,
+    "twist_rate_in": 0.0,
+    "is_twist_right": true,
+    "sight_height_m": 0.0,
+    "muzzle_height_m": 0.0,
+    "altitude_m": 0.0,
+    "temperature_c": 15.0,
+    "pressure_hpa": 1013.25,
+    "humidity_frac": 0.0,
+    "wind_speed_mps": 8.0,
+    "wind_angle_rad": 4.71238898038469,
+    "vertical_wind_mps": 0.0,
+    "use_enhanced_spin_drift": false,
+    "enable_advanced_effects": false,
+    "muzzle_velocity_mps": 800.0,
+    "bullet_mass_kg": 0.01134,
+    "bullet_diameter_m": 0.0078232,
+    "bullet_length_m": 0.031496,
+    "bc_value": 0.243,
+    "bc_type": "G7"
+  },
+  "expectations": [
+    {
+      "observable": "drop_m",
+      "range_m": 400.0,
+      "value": -1.541119,
+      "tolerance_justification": "Drop: bounded by RK45(engine, adaptive) vs RK4(py-bc, fixed-step) integration and the two distinct G1/G7 table resolutions/interpolants. 1 cm floor + 0.8% brackets the observed ~0.04% cross-solver difference with ~20x head-room while failing a >~1% (field-noticeable, ~1 MOA at long range) drop regression.",
+      "tol_abs": 0.01,
+      "tol_rel": 0.008
+    },
+    {
+      "observable": "drift_m",
+      "range_m": 400.0,
+      "value": 0.73598,
+      "tolerance_justification": "Wind drift: a difference of larger integrated quantities, so it inherits both the drag-curve and time-of-flight gaps; observed cross-solver difference ~0.1%. 2 cm floor + 2% keeps ~20x head-room and fails a >~2.5 cm-per-metre-of-drift regression.",
+      "tol_abs": 0.02,
+      "tol_rel": 0.02
+    },
+    {
+      "observable": "tof_s",
+      "range_m": 400.0,
+      "value": 0.591997,
+      "tolerance_justification": "Time of flight: integrator + drag-curve differences accumulate in flight time; observed cross-solver difference ~0.03%. 3 ms floor + 0.6% keeps ~15x head-room.",
+      "tol_abs": 0.003,
+      "tol_rel": 0.006
+    },
+    {
+      "observable": "drop_m",
+      "range_m": 800.0,
+      "value": -8.171282,
+      "tolerance_justification": "Drop: bounded by RK45(engine, adaptive) vs RK4(py-bc, fixed-step) integration and the two distinct G1/G7 table resolutions/interpolants. 1 cm floor + 0.8% brackets the observed ~0.04% cross-solver difference with ~20x head-room while failing a >~1% (field-noticeable, ~1 MOA at long range) drop regression.",
+      "tol_abs": 0.01,
+      "tol_rel": 0.008
+    },
+    {
+      "observable": "drift_m",
+      "range_m": 800.0,
+      "value": 3.593676,
+      "tolerance_justification": "Wind drift: a difference of larger integrated quantities, so it inherits both the drag-curve and time-of-flight gaps; observed cross-solver difference ~0.1%. 2 cm floor + 2% keeps ~20x head-room and fails a >~2.5 cm-per-metre-of-drift regression.",
+      "tol_abs": 0.02,
+      "tol_rel": 0.02
+    },
+    {
+      "observable": "tof_s",
+      "range_m": 800.0,
+      "value": 1.44921,
+      "tolerance_justification": "Time of flight: integrator + drag-curve differences accumulate in flight time; observed cross-solver difference ~0.03%. 3 ms floor + 0.6% keeps ~15x head-room.",
+      "tol_abs": 0.003,
+      "tol_rel": 0.006
+    }
+  ]
+}
