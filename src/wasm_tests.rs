@@ -68,6 +68,75 @@ mod tests {
         assert!(result.contains("\"summary\""));
         assert!(result.contains("range_yards"));
         assert!(result.contains("drop_inches"));
+        // MBA-1315: self-describing units/axes metadata, additive third top-level key
+        // alongside the pre-existing "trajectory"/"summary" keys.
+        assert!(result.contains("\"legend\""));
+        assert!(result.contains("\"axes\""));
+        assert!(result.contains("\"drift\""));
+    }
+
+    /// MBA-1315 axis-doc-vs-behavior (WASM parity with the native CLI legacy JSON test of the
+    /// same name): `legend.axes.drift` must describe the SAME sign convention the formatter
+    /// actually produces, not an assumed one. Wind FROM the left (`--wind-direction 270`)
+    /// must drift `drift_inches` positive, and FROM the right (`90`) must drift it negative,
+    /// exactly as the legend states -- identical in sign and source (`position.z`) to the
+    /// native CLI legacy JSON's `x`.
+    #[wasm_bindgen_test]
+    fn json_legend_drift_axis_matches_observed_crosswind_sign() {
+        let wasm = WasmBallistics::new();
+        let out = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o json")
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let drift_text = doc["legend"]["axes"]["drift"]
+            .as_str()
+            .expect("legend.axes.drift string");
+        assert!(
+            drift_text.contains("shooter's") && drift_text.contains("right"),
+            "legend.axes.drift wording changed; update this test's sign assumptions: {drift_text}"
+        );
+        assert!(drift_text.contains("positive"));
+
+        fn last_drift_inches(json: &str) -> f64 {
+            let doc: serde_json::Value = serde_json::from_str(json).unwrap();
+            doc["trajectory"]
+                .as_array()
+                .expect("trajectory array")
+                .last()
+                .expect("at least one trajectory point")["drift_inches"]
+                .as_f64()
+                .expect("drift_inches is a number")
+        }
+
+        let baseline = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --full -o json")
+            .unwrap();
+        let from_left = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --wind-speed 10 \
+                 --wind-direction 270 --full -o json",
+            )
+            .unwrap();
+        let from_right = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --wind-speed 10 \
+                 --wind-direction 90 --full -o json",
+            )
+            .unwrap();
+
+        assert_eq!(
+            last_drift_inches(&baseline),
+            0.0,
+            "a no-wind run must have zero lateral drift"
+        );
+        assert!(
+            last_drift_inches(&from_left) > 0.0,
+            "wind FROM the left (--wind-direction 270) must drift right (positive) per legend.axes.drift"
+        );
+        assert!(
+            last_drift_inches(&from_right) < 0.0,
+            "wind FROM the right (--wind-direction 90) must drift left (negative) per legend.axes.drift"
+        );
     }
 
     #[wasm_bindgen_test]
