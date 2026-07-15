@@ -363,9 +363,18 @@ Calculate the effective muzzle velocity that produces a measured drop at a known
   --bc 0.27 --drag-model g7 \
   --mass 140 --diameter 0.264 \
   --bc-table-auto --offline
+
+# Joint MV + BC calibration from multiple observed impacts
+./ballistics true-velocity \
+  --range 300 --measured-drop 1.30 \
+  --observed 600:4.40 --observed 900:9.00 \
+  --bc 0.45 --drag-model g1 \
+  --mass 168 --diameter 0.308
 ```
 
 Use case: A shooter measures 5.1 MIL of drop at 600 yards. Their chronograph showed 2822 fps. The command calculates the effective velocity is actually ~2740 fps, suggesting a -82 fps adjustment for accurate ballistic predictions.
+
+**Joint velocity + BC truing.** With two or more `--observed RANGE:DROP` impacts spanning supersonic to transonic ranges, `true-velocity` fits *both* muzzle velocity and ballistic coefficient against the real trajectory solver. When the observation set is too short/closely-spaced to separate the two, it refuses the joint fit, trues velocity only, and says so — no false-precision BC. See [CLI_USAGE.md](CLI_USAGE.md#joint-mv--bc-calibration-multiple-observed-impacts) for details.
 
 ## Advanced Features
 
