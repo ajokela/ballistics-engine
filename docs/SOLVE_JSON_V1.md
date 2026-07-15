@@ -10,6 +10,33 @@ The Rust DTOs and the envelope-producing decoder are public in
 runs the engine, and constructs either a success value or a structured error envelope. Input and
 output transport remain outside this contract.
 
+## Process transport
+
+The additive CLI transport reads one v1 request from standard input and writes one compact JSON
+envelope followed by a newline to standard output:
+
+```text
+ballistics solve-json < request.json > response.json
+```
+
+Input is limited to 1 MiB (1,048,576 bytes); the exact limit is accepted. The command does not
+read profiles, files, or the network. All dimensional fields remain explicit SI even when the
+global `--units` option is supplied. Once command-line parsing has selected `solve-json`, stdout is
+reserved exclusively for the protocol envelope; handled failures use the same v1 error shape as
+the library service.
+
+| Exit status | Meaning |
+| --- | --- |
+| `0` | Success envelope. |
+| `1` | Standard-I/O or internal failure. |
+| `2` | Malformed JSON, schema, shape, or semantic validation failure. |
+| `3` | Resource limit or engine solve failure. |
+
+Malformed JSON includes one-based `line` and `column` coordinates. A contained panic becomes a
+generic `internal_error`; panic payloads and backtraces are never placed in the JSON envelope.
+Failures before successful command selection (for example, an unknown command-line option) remain
+ordinary command-line errors rather than protocol responses.
+
 ## Versioning and compatibility
 
 Every request and envelope contains the integer:
