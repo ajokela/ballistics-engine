@@ -6110,7 +6110,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // map_a7p_to_profile's CUSTOM handling. Printing the inert 0.0
                         // sentinel here would read as a real coefficient, so it is
                         // replaced by the "Drag curve:" summary line below instead.
-                        println!("║  BC:                    (see drag curve below)  ║");
+                        println!("║  BC:            {:<23}║", "not applicable (CUSTOM)");
                     } else {
                         println!("║  BC:            {:>10.4}             ║", profile.bc);
                     }
@@ -6212,10 +6212,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .map(|s| s.velocity_mps)
                             .fold(f64::NEG_INFINITY, f64::max);
                         println!(
-                            "║  BC bands:      {:>3} rows, {:>4.0}-{:<4.0} m/s     ║",
-                            segs.len(),
-                            vmin,
-                            vmax
+                            "║  BC bands:      {:<23}║",
+                            format!("{} rows, {:.0}-{:.0} m/s", segs.len(), vmin, vmax)
                         );
                     }
                     if let Some(ref curve) = profile.drag_curve {
@@ -6225,10 +6223,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .map(|p| p.mach)
                             .fold(f64::NEG_INFINITY, f64::max);
                         println!(
-                            "║  Drag curve:    {:>3} pts, Mach {:.2}-{:.2}       ║",
-                            curve.len(),
-                            mmin,
-                            mmax
+                            "║  Drag curve:    {:<23}║",
+                            format!("{} pts, Mach {:.2}-{:.2}", curve.len(), mmin, mmax)
                         );
                     }
                     println!(
