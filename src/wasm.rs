@@ -1389,6 +1389,21 @@ impl WasmBallistics {
         // when a curve is present it becomes the powder temperature the curve is interpolated
         // at (decoupled from the air temperature); when not given, the curve falls back to it.
         let mut powder_temp_provided = false;
+        // Environmental conditions (MBA-1325 env-flags addendum): native-lead parity for
+        // --temperature/--pressure/--humidity/--altitude/--wind-speed/--wind-direction.
+        // Parsed as Option — an ABSENT flag leaves the pre-existing default objects
+        // (WindConditions::default(), AtmosphericConditions::default(), BallisticInputs::
+        // default()'s env fields) completely untouched, so a no-env-flag run stays
+        // byte-identical to the pre-flag build by construction. (A display-unit default
+        // like trajectory's 29.92 inHg would NOT: 29.92 x 33.863886666667 = 1013.2075 hPa,
+        // whereas this command has always solved at AtmosphericConditions::default()'s
+        // 1013.25.) Explicit values convert exactly like handle_trajectory_command's.
+        let mut temperature: Option<f64> = None;
+        let mut pressure: Option<f64> = None;
+        let mut humidity: Option<f64> = None;
+        let mut altitude: Option<f64> = None;
+        let mut wind_speed: Option<f64> = None;
+        let mut wind_direction: Option<f64> = None;
 
         // Parse arguments
         let mut i = 0;
@@ -1437,6 +1452,66 @@ impl WasmBallistics {
                         sight_height = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid sight height"))?;
+                        i += 1;
+                    }
+                }
+                "--temperature" => {
+                    if i + 1 < args.len() {
+                        temperature = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid temperature"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--pressure" => {
+                    if i + 1 < args.len() {
+                        pressure = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid pressure"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--humidity" => {
+                    if i + 1 < args.len() {
+                        humidity = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid humidity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--altitude" => {
+                    if i + 1 < args.len() {
+                        altitude = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid altitude"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--wind-speed" => {
+                    if i + 1 < args.len() {
+                        wind_speed = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid wind speed"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--wind-direction" => {
+                    if i + 1 < args.len() {
+                        wind_direction = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid wind direction"))?,
+                        );
                         i += 1;
                     }
                 }
@@ -1628,6 +1703,62 @@ impl WasmBallistics {
             inputs.powder_temp_curve = Some(pts);
         }
 
+        // Environmental conditions (MBA-1325 env-flags addendum). Start from the exact
+        // objects this command has always solved with and override only what was
+        // explicitly flagged — absent flags are structurally byte-identical to the
+        // pre-flag build. Each override applies handle_trajectory_command's conversion
+        // and mirrors native handle_lead's plumbing: the value lands BOTH on the solver
+        // condition object (wind/atmosphere — what the solve consumes) and on the
+        // matching BallisticInputs field (native's build_trajectory_components sets
+        // both; inputs.humidity takes the documented 0-1 fraction per its field
+        // contract, while atmosphere.humidity takes percent — same split as
+        // handle_trajectory_command).
+        let mut wind = WindConditions::default();
+        let mut atmosphere = AtmosphericConditions::default();
+        if let Some(t) = temperature {
+            let t_c = match units {
+                UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0, // F to C
+                UnitSystem::Metric => t,
+            };
+            atmosphere.temperature = t_c;
+            inputs.temperature = t_c;
+        }
+        if let Some(p) = pressure {
+            let p_hpa = match units {
+                UnitSystem::Imperial => p * 33.863886666667, // inHg to hPa
+                UnitSystem::Metric => p,
+            };
+            atmosphere.pressure = p_hpa;
+            inputs.pressure = p_hpa;
+        }
+        if let Some(h) = humidity {
+            atmosphere.humidity = h; // percent
+            inputs.humidity = (h / 100.0).clamp(0.0, 1.0); // fraction
+        }
+        if let Some(a) = altitude {
+            let a_m = match units {
+                UnitSystem::Imperial => a * 0.3048, // feet to meters
+                UnitSystem::Metric => a,
+            };
+            atmosphere.altitude = a_m;
+            inputs.altitude = a_m;
+        }
+        if let Some(w) = wind_speed {
+            let w_ms = match units {
+                UnitSystem::Imperial => w * 0.44704, // mph to m/s
+                UnitSystem::Metric => w,
+            };
+            wind.speed = w_ms;
+            inputs.wind_speed = w_ms;
+        }
+        if let Some(d) = wind_direction {
+            // Degrees, wind-FROM (0=headwind, 90=from right) -> radians, matching
+            // handle_trajectory_command and WindConditions' documented convention.
+            let d_rad = d.to_radians();
+            wind.direction = d_rad;
+            inputs.wind_angle = d_rad;
+        }
+
         // --target-speed uses the same mph (imperial) / m/s (metric) convention as
         // --wind-speed in handle_trajectory_command.
         let target_speed_mps = match units {
@@ -1641,8 +1772,8 @@ impl WasmBallistics {
 
         match calculate_lead(
             inputs,
-            WindConditions::default(),
-            AtmosphericConditions::default(),
+            wind,
+            atmosphere,
             target_speed_mps,
             target_angle,
             range_m,
@@ -2943,6 +3074,19 @@ Lead Command:
     -d, --diameter <DIA>          Diameter (inches/mm)
     --drag-model <MODEL>          Drag model (G1/G7)
     --sight-height <HEIGHT>       Sight height above bore (inches/mm)
+    --temperature <T>             Air temperature (°F/°C) [default: 15°C standard]
+    --pressure <P>                Barometric pressure (inHg/hPa) [default: 1013.25 hPa]
+    --humidity <H>                Relative humidity (percent) [default: 50]
+    --altitude <A>                Altitude (ft/m) [default: 0]
+    --wind-speed <SPEED>          Wind speed (mph/m/s) [default: 0]
+    --wind-direction <DEG>        Wind direction, degrees, wind-FROM [default: 0]
+                                  0=headwind, 90=from right, 180=tailwind, 270=from left
+    --use-powder-sensitivity      Enable linear powder temperature sensitivity
+    --powder-temp-sensitivity <S> Sensitivity (fps/°F or m/s/°C) [default: 1.0 fps/°F]
+    --powder-temp <T>             Powder temperature (°F/°C); curve lookup temp, or
+                                  linear-model reference temp [default: 70°F/21°C]
+    --powder-temp-curve <T:V,...> Measured powder-temp->velocity curve (overrides
+                                  --powder-temp-sensitivity)
     --target-speed <SPEED>        Target speed (mph/m/s) [required]
     --target-angle <DEG>          Direction of target travel, degrees [default: 90]
                                   0=away, 90=left-to-right, 180=toward, 270=right-to-left;
@@ -2951,8 +3095,8 @@ Lead Command:
     --adjustment-unit <UNIT>      mil or moa [default: mil]
     -o, --output <FORMAT>         Output format (table/json) [default: table]
 
-  Note: this command assumes calm air and standard atmosphere; for a wind-aware
-  lead (time of flight under wind), use the native CLI's lead subcommand.
+  Time of flight is solved under the supplied wind/atmosphere (wind-aware lead);
+  the lead figure itself is pure target motion — wind hold stays separate.
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
