@@ -643,5 +643,393 @@ mod tests {
             "90-deg cant symmetry broken: drop {d} vs drift {w} (ratio {ratio})"
         );
     }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1325: mover ring (`trajectory --target-speed`) WASM parity.
+    // -----------------------------------------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn target_speed_adds_ring_column_to_trajectory_table() {
+        let wasm = WasmBallistics::new();
+        let without = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --full --max-range 500")
+            .unwrap();
+        assert!(!without.contains("Ring"), "Ring column must not appear without --target-speed");
+
+        let with_ring = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --full --max-range 500 \
+                 --target-speed 5",
+            )
+            .unwrap();
+        assert!(with_ring.contains("Ring"), "table should carry a Ring column:\n{with_ring}");
+        assert!(with_ring.contains("mil"), "ring values should be labeled mil");
+    }
+
+    #[wasm_bindgen_test]
+    fn target_speed_adds_mover_ring_m_to_trajectory_json() {
+        let wasm = WasmBallistics::new();
+        let without = wasm
+            .run_command(
+                "trajectory --units metric -v 823 -b 0.475 -m 10.9 -d 7.82 --full \
+                 --max-range 400 -o json",
+            )
+            .unwrap();
+        assert!(
+            !without.contains("mover_ring"),
+            "mover_ring fields must not appear without --target-speed"
+        );
+
+        let result = wasm
+            .run_command(
+                "trajectory --units metric -v 823 -b 0.475 -m 10.9 -d 7.82 --full \
+                 --max-range 400 --target-speed 3 -o json",
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let points = json["trajectory"].as_array().expect("trajectory array");
+        assert!(points.len() > 5);
+
+        // mover_ring_m is EXACTLY target_speed_mps * time at every point (metric run,
+        // so --target-speed 3 is already 3 m/s, matching the native CLI convention).
+        let mut checked = 0;
+        for p in points {
+            let time = p["time_seconds"].as_f64().expect("time_seconds");
+            let ring_m = p["mover_ring_m"].as_f64().expect("mover_ring_m present");
+            let expected = 3.0 * time;
+            assert!(
+                (ring_m - expected).abs() < 1e-9,
+                "ring_m {ring_m} != target_speed_mps*time {expected} at t={time}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 5);
+
+        // Muzzle point: mover_ring_m is 0 (present), mover_ring_mil is omitted (0/0
+        // is degenerate) — matches the native CLI contract exactly.
+        let muzzle = &points[0];
+        assert_eq!(muzzle["range_meters"].as_f64().unwrap(), 0.0);
+        assert_eq!(muzzle["mover_ring_m"].as_f64().unwrap(), 0.0);
+        assert!(muzzle.get("mover_ring_mil").is_none());
+    }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1325: `lead` powder-temperature parity with `trajectory`.
+    // -----------------------------------------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn lead_powder_curve_matches_manually_resolved_velocity() {
+        let wasm = WasmBallistics::new();
+        // WASM's `lead` has no --temperature flag (it always solves at the default
+        // atmosphere — a pre-existing gap unrelated to MBA-1325, which only adds the
+        // POWDER flags), so drive the curve lookup directly via --powder-temp rather
+        // than the ambient air temperature. 55F is the midpoint of the 40/70 curve
+        // points, so this is a genuine correction, not a no-op.
+        let resolved_json = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 --max-range 5 \
+                 --sight-height 2.48 --powder-temp-curve 40:2620,70:2700,100:2760 \
+                 --powder-temp 55 --full -o json",
+            )
+            .unwrap();
+        let resolved_json: serde_json::Value = serde_json::from_str(&resolved_json).unwrap();
+        let resolved_velocity = resolved_json["trajectory"][0]["velocity_fps"].as_f64().unwrap();
+        assert!(
+            (resolved_velocity - 2660.0).abs() < 0.5,
+            "sanity: 55F should interpolate to ~2660 fps, got {resolved_velocity}"
+        );
+
+        let with_curve = wasm
+            .run_command(
+                "lead -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 --sight-height 2.48 \
+                 --powder-temp-curve 40:2620,70:2700,100:2760 --powder-temp 55 \
+                 --target-speed 5 --range 300 -o json",
+            )
+            .unwrap();
+        let manual = wasm
+            .run_command(&format!(
+                "lead -v {resolved_velocity} -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+                 --sight-height 2.48 --target-speed 5 --range 300 -o json"
+            ))
+            .unwrap();
+
+        let with_curve: serde_json::Value = serde_json::from_str(&with_curve).unwrap();
+        let manual: serde_json::Value = serde_json::from_str(&manual).unwrap();
+        // `resolved_velocity` was already round-tripped once through WASM's imprecise
+        // fps<->m/s constants (m/s -> fps via *3.28084, not the exact reciprocal of
+        // the *0.3048 used on the way in — see lead_without_powder_flags_uses_
+        // velocity_verbatim above); feeding it back in via `-v` round-trips it AGAIN,
+        // so the two lead solutions agree to within float noise (~1e-7), not bit-for-
+        // bit. Compare numerically with a tolerance instead of assert_eq! on the raw
+        // JSON values (iterations is an integer count, compared exactly).
+        for field in ["lead_mil", "lead_moa", "lead", "tof_s", "intercept_range"] {
+            let a = with_curve[field].as_f64().unwrap_or_else(|| panic!("{field} missing"));
+            let b = manual[field].as_f64().unwrap_or_else(|| panic!("{field} missing"));
+            assert!(
+                (a - b).abs() < 1e-5,
+                "field '{field}' differs between curve-corrected and manually-resolved lead runs: {a} vs {b}"
+            );
+        }
+        assert_eq!(
+            with_curve["iterations"], manual["iterations"],
+            "iterations should match exactly (integer count)"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1325 env-flags addendum: `lead` gains --temperature/--pressure/--humidity/
+    // --altitude/--wind-speed/--wind-direction (native parity).
+    // -----------------------------------------------------------------------------
+
+    /// With NO environmental flags, `lead` output must be byte-identical to the build
+    /// from before the flags existed. These literals were captured VERBATIM from the
+    /// pre-env-flags build (commit c805229) via a temporary probe test run under
+    /// `wasm-pack test --safari --headless` — a true golden-compare, not a
+    /// same-code-both-sides tautology. JSON strings have no trailing newline
+    /// (serde_json::to_string_pretty); the table format string ends with exactly one.
+    #[wasm_bindgen_test]
+    fn lead_no_env_flags_output_is_byte_identical_to_pre_env_build() {
+        const GOLDEN_IMPERIAL_JSON: &str = r#"{
+  "adjustment_unit": "mil",
+  "distance_unit": "yd",
+  "intercept_range": 399.9987936,
+  "iterations": 0,
+  "lead": 1.267051911310233,
+  "lead_mil": 3.1676393318758076,
+  "lead_moa": 10.890344022989026,
+  "range": 400.0,
+  "target_angle_deg": 90.0,
+  "target_speed": 5.0,
+  "target_speed_unit": "mph",
+  "tof_s": 0.5183409815796777
+}"#;
+        const GOLDEN_METRIC_JSON: &str = r#"{
+  "adjustment_unit": "mil",
+  "distance_unit": "m",
+  "intercept_range": 350.0,
+  "iterations": 0,
+  "lead": 1.4774105669002737,
+  "lead_mil": 4.221173048286496,
+  "lead_moa": 14.512392940008974,
+  "range": 350.0,
+  "target_angle_deg": 90.0,
+  "target_speed": 3.0,
+  "target_speed_unit": "m/s",
+  "tof_s": 0.49247018896675787
+}"#;
+        const GOLDEN_IMPERIAL_TABLE: &str = "Moving-Target Lead\n\
+===================\n\
+Target: 5.0 mph at 90\u{b0} (0=away, 90=left-to-right, 180=toward, 270=right-to-left;\n\
+positive lead = hold in direction of travel)\n\
+\n\
+Range: 400 yd\n\
+Time of Flight: 0.518 s\n\
+Lead: 1.27 yd (3.17 MIL / 10.89 MOA)\n\
+Intercept Range: 400.0 yd\n\
+Iterations: 0\n";
+
+        let wasm = WasmBallistics::new();
+        let g1 = wasm
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json",
+            )
+            .unwrap();
+        assert_eq!(g1, GOLDEN_IMPERIAL_JSON, "imperial JSON drifted from pre-env-flags build");
+        let g2 = wasm
+            .run_command(
+                "--units metric lead -v 823 -b 0.475 -m 10.9 -d 7.82 --target-speed 3 \
+                 --range 350 -o json",
+            )
+            .unwrap();
+        assert_eq!(g2, GOLDEN_METRIC_JSON, "metric JSON drifted from pre-env-flags build");
+        let g3 = wasm
+            .run_command("lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400")
+            .unwrap();
+        assert_eq!(g3, GOLDEN_IMPERIAL_TABLE, "imperial table drifted from pre-env-flags build");
+    }
+
+    /// Hot air (100F) vs the standard default (59F) must change the lead solution —
+    /// lower density, less drag, shorter TOF, smaller hold — proving --temperature is
+    /// actually plumbed into the solve, not just parsed. (Fails on the pre-addendum
+    /// build with "Unknown flag: --temperature".)
+    #[wasm_bindgen_test]
+    fn lead_temperature_is_live_hot_air_shortens_lead() {
+        let wasm = WasmBallistics::new();
+        let base = "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json";
+        let std_out = wasm.run_command(base).unwrap();
+        let hot_out = wasm
+            .run_command(&format!("{base} --temperature 100"))
+            .unwrap();
+        let std_json: serde_json::Value = serde_json::from_str(&std_out).unwrap();
+        let hot_json: serde_json::Value = serde_json::from_str(&hot_out).unwrap();
+        let std_tof = std_json["tof_s"].as_f64().unwrap();
+        let hot_tof = hot_json["tof_s"].as_f64().unwrap();
+        let std_mil = std_json["lead_mil"].as_f64().unwrap();
+        let hot_mil = hot_json["lead_mil"].as_f64().unwrap();
+        assert!(
+            hot_tof < std_tof,
+            "hot air must shorten TOF: hot {hot_tof} vs standard {std_tof}"
+        );
+        assert!(
+            hot_mil < std_mil && (std_mil - hot_mil) / std_mil > 1e-4,
+            "hot air must shrink the hold by more than float noise: hot {hot_mil} vs standard {std_mil}"
+        );
+    }
+
+    /// A 20 mph headwind (--wind-direction 0 = wind-FROM dead ahead) adds drag along
+    /// the flight path, lengthening TOF and growing the hold vs calm air — proving the
+    /// wind flags reach the WindConditions the solve actually uses.
+    #[wasm_bindgen_test]
+    fn lead_headwind_is_live_and_lengthens_tof() {
+        let wasm = WasmBallistics::new();
+        let base = "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json";
+        let calm_out = wasm.run_command(base).unwrap();
+        let wind_out = wasm
+            .run_command(&format!("{base} --wind-speed 20 --wind-direction 0"))
+            .unwrap();
+        let calm_json: serde_json::Value = serde_json::from_str(&calm_out).unwrap();
+        let wind_json: serde_json::Value = serde_json::from_str(&wind_out).unwrap();
+        let calm_tof = calm_json["tof_s"].as_f64().unwrap();
+        let wind_tof = wind_json["tof_s"].as_f64().unwrap();
+        assert!(
+            wind_tof > calm_tof && (wind_tof - calm_tof) / calm_tof > 1e-4,
+            "a 20 mph headwind must lengthen TOF beyond float noise: wind {wind_tof} vs calm {calm_tof}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn lead_without_powder_flags_uses_velocity_verbatim() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 --max-range 5 \
+                 --sight-height 2.48 --temperature 100 --full -o json",
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let velocity = json["trajectory"][0]["velocity_fps"].as_f64().unwrap();
+        // Tolerance, not exact equality: the WASM imperial round-trip (m/s -> fps via
+        // a fixed *3.28084, not the exact reciprocal of the fps -> m/s *0.3048 used on
+        // the way in) carries an inherent ~3e-8 relative bias (~0.0001 fps at 2700),
+        // pre-existing and unrelated to MBA-1325. 1e-3 is >100x looser than that noise
+        // floor while still being >1000x tighter than any real powder correction
+        // (which is many fps), so this still catches a genuine verbatim-velocity
+        // regression.
+        assert!(
+            (velocity - 2700.0).abs() < 1e-3,
+            "no powder flags should keep -v 2700 verbatim regardless of --temperature, got {velocity}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1325 review fix pass: M1 (target-speed bound), M2 (curve parser parity),
+    // M3 (ring table --adjustment-unit).
+    // -----------------------------------------------------------------------------
+
+    /// M1: --target-speed enforces the same [0, 300] bound the native flags carry via
+    /// f64_range(0.0, 300.0), on BOTH WASM commands — rejected with a clear error, not
+    /// silently clamped or let through.
+    #[wasm_bindgen_test]
+    fn target_speed_out_of_range_is_rejected_on_both_commands() {
+        let wasm = WasmBallistics::new();
+        let err = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 301")
+            .unwrap_err();
+        assert!(
+            err.as_string().unwrap_or_default().contains("--target-speed must be between 0 and 300"),
+            "trajectory should reject 301: {err:?}"
+        );
+        let err = wasm
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 1000000000 --range 400",
+            )
+            .unwrap_err();
+        assert!(
+            err.as_string().unwrap_or_default().contains("--target-speed must be between 0 and 300"),
+            "lead should reject 1e9 mph: {err:?}"
+        );
+        // Boundary values stay legal (300 is lead's documented cap).
+        assert!(wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 300 --max-range 200")
+            .is_ok());
+    }
+
+    /// M2: duplicate temperatures in --powder-temp-curve are rejected on both WASM
+    /// commands with the native parser's message (they now share one parser, so this
+    /// also guards against the two copies drifting again).
+    #[wasm_bindgen_test]
+    fn powder_temp_curve_duplicate_temperatures_rejected() {
+        let wasm = WasmBallistics::new();
+        for cmd in [
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 5 \
+             --powder-temp-curve 40:2620,40:2700,100:2760",
+            "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+             --powder-temp-curve 40:2620,40:2700,100:2760",
+        ] {
+            let err = wasm.run_command(cmd).unwrap_err();
+            assert!(
+                err.as_string()
+                    .unwrap_or_default()
+                    .contains("--powder-temp-curve has duplicate temperatures"),
+                "duplicate curve temps must be rejected for `{cmd}`: {err:?}"
+            );
+        }
+    }
+
+    /// M3: the trajectory table's Ring cell honors --adjustment-unit, and the MOA
+    /// figure is exactly mil x 3.438 (the crate's MBA-724 printed-table dial constant,
+    /// shared with the native table). --target-speed 300 makes ring_mil large enough
+    /// (~190) that a wrong constant (exact-angle 3437.7467/1000) would shift the value
+    /// by > 0.012 — past the 0.01 print quantum, so the 2dp string match below pins
+    /// the constant, not just the ballpark.
+    #[wasm_bindgen_test]
+    fn ring_table_honors_moa_adjustment_unit() {
+        let wasm = WasmBallistics::new();
+        let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 400 \
+                    --target-speed 300 --full";
+
+        // Full-precision mil from JSON (adjustment-unit-invariant by contract).
+        let json_out = wasm.run_command(&format!("{base} -o json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json_out).unwrap();
+        let mil = json["trajectory"]
+            .as_array()
+            .expect("points")
+            .last()
+            .expect("last point")["mover_ring_mil"]
+            .as_f64()
+            .expect("mover_ring_mil");
+        assert!(mil > 160.0, "sensitivity precondition: ring_mil > 160, got {mil}");
+
+        // Last ring cell of a table, as the printed numeric string before " <unit>".
+        let last_ring_cell = |table: &str, unit: &str| -> String {
+            let suffix = format!(" {unit}");
+            table
+                .lines()
+                .filter_map(|line| {
+                    let cell = line.rsplit('|').next()?.trim();
+                    cell.strip_suffix(suffix.as_str()).map(str::to_string)
+                })
+                .last()
+                .unwrap_or_else(|| panic!("no ring cell ending in '{suffix}' found:\n{table}"))
+        };
+
+        let moa_table = wasm
+            .run_command(&format!("{base} --adjustment-unit moa"))
+            .unwrap();
+        assert!(moa_table.contains(" moa"), "moa run must label ring cells moa");
+        assert!(!moa_table.contains(" mil"), "moa run must not label ring cells mil");
+        assert_eq!(
+            last_ring_cell(&moa_table, "moa"),
+            format!("{:.2}", mil * 3.438),
+            "Ring moa cell must be exactly mil x 3.438, 2dp-rounded"
+        );
+
+        let mil_table = wasm.run_command(base).unwrap();
+        assert_eq!(
+            last_ring_cell(&mil_table, "mil"),
+            format!("{:.2}", mil),
+            "default (mil) Ring cell must match JSON mover_ring_mil, 2dp-rounded"
+        );
+    }
 }
 }

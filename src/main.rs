@@ -725,8 +725,13 @@ enum Commands {
         weather_zone_interpolation: String,
 
         // PDF Dope Card Parameters
-        /// Target speed in mph (for lead calculation in PDF output)
-        #[arg(long, default_value = "0.0")]
+        /// Target speed for moving-target holds (mph for imperial, m/s for metric — same
+        /// convention as `lead --target-speed`). Drives two independent outputs when > 0:
+        /// the PDF dope card's assumed-90-degree-crossing Lead column, and — for every
+        /// output format — a per-point mover Ring column/field (MBA-1325): ring radius =
+        /// target_speed x point ToF, the "fire when the mover enters the ring" technique.
+        /// See CLI_USAGE.md for the full mover-ring writeup. 0 (default) disables both.
+        #[arg(long, default_value = "0.0", value_parser = f64_range(0.0, 300.0))]
         target_speed: f64,
 
         /// Powder type/name (for PDF metadata)
@@ -757,7 +762,9 @@ enum Commands {
         #[arg(long)]
         bold_data: bool,
 
-        /// Angular unit for the PDF dope card's Drop/Wind/Lead columns (mil or moa)
+        /// Angular unit for the PDF dope card's Drop/Wind/Lead columns AND the
+        /// --target-speed mover Ring table column (mil or moa). CSV/JSON ring fields
+        /// stay mil/meters — their names carry the unit contract.
         #[arg(long, value_enum, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
     },
@@ -1303,6 +1310,32 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_direction: f64,
 
+        /// Enable powder temperature sensitivity
+        #[arg(long)]
+        use_powder_sensitivity: bool,
+
+        /// Powder temperature sensitivity (fps/°F imperial, m/s/°C metric).
+        /// Defaults to 1.0 fps/°F (0.54864 m/s/°C).
+        #[arg(long)]
+        powder_temp_sensitivity: Option<f64>,
+
+        /// Powder temperature (°F/°C). With --powder-temp-curve, this is the powder
+        /// temperature the curve is interpolated at to resolve muzzle velocity (defaults
+        /// to --temperature when omitted, i.e. powder assumed at air temperature). With
+        /// --powder-temp-sensitivity (linear model), it is the reference temperature the
+        /// stated velocity was measured at (defaults to the 70°F equivalent).
+        #[arg(long)]
+        powder_temp: Option<f64>,
+
+        /// Measured powder-temperature -> muzzle-velocity curve as comma-separated
+        /// TEMP:VELOCITY points, e.g. "40:2620,70:2700,100:2760" (temps in F/C,
+        /// velocities in fps / m·s⁻¹ per --units). The muzzle velocity is interpolated
+        /// from this table at the powder temperature (--powder-temp, or --temperature if
+        /// unset; clamped at the endpoints, no extrapolation). Data-driven, non-linear
+        /// alternative that OVERRIDES --powder-temp-sensitivity when supplied.
+        #[arg(long = "powder-temp-curve", value_name = "TEMP:VEL,...")]
+        powder_temp_curve: Option<String>,
+
         /// Target speed (mph for imperial, m/s for metric)
         #[arg(long, value_parser = f64_range(0.0, 300.0))]
         target_speed: f64,
@@ -1826,6 +1859,16 @@ struct TrajectoryPoint {
     z: f64,
     velocity: f64,
     energy: f64,
+    /// Mover-ring linear radius, meters (MBA-1325): `target_speed_mps * time`. Present
+    /// only when `--target-speed` was supplied (> 0); unit is fixed at meters regardless
+    /// of `--units` (units-in-the-name, see MBA-1315).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mover_ring_m: Option<f64>,
+    /// Mover-ring angular radius, milliradians: `mover_ring_m / downrange_m * 1000`.
+    /// Omitted at the muzzle (downrange = 0, ratio undefined) and whenever
+    /// `mover_ring_m` itself is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mover_ring_mil: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1941,6 +1984,16 @@ struct TrajectoryConfig {
     powder_temp_curve: Option<Vec<(f64, f64)>>,
     // Powder temperature (Celsius) to interpolate the curve at; None = ambient temp.
     powder_curve_temp_c: Option<f64>,
+
+    // Mover ring (MBA-1325): target speed in display units (mph imperial / m/s metric,
+    // same convention as `lead --target-speed`). 0.0 (default) disables the per-point
+    // Ring column/fields in every output format; also feeds the PDF Lead column.
+    target_speed: f64,
+    // Angular unit for the ring TABLE column (mil or moa) — from --adjustment-unit,
+    // which trajectory already exposes for the PDF dope card. CSV keeps ring_mil and
+    // JSON keeps mover_ring_m/mover_ring_mil regardless: those carry the unit in the
+    // name (the contract), the table is the human display surface.
+    adjustment_unit: AdjustmentUnit,
 
     // PDF metadata
     pdf_metadata: Option<PdfMetadata>,
@@ -3798,7 +3851,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     location_name: loc_name,
                     powder: powder_name,
                     bullet_name: bullet_display,
-                    target_speed_mph: target_speed,
+                    // MBA-1325: was a bare passthrough (always mph, ignoring --units — the
+                    // only field in this block that didn't follow the sibling unit-aware
+                    // conversions below). --target-speed follows the documented mph
+                    // imperial / m/s metric convention like every other speed flag, so
+                    // metric callers now get their m/s value converted here instead of it
+                    // being silently misread as mph.
+                    target_speed_mph: match cli.units {
+                        UnitSystem::Imperial => target_speed,
+                        UnitSystem::Metric => target_speed / 0.44704,
+                    },
                     output_file: output_file.clone(),
                     velocity_fps: match cli.units {
                         UnitSystem::Imperial => trued_velocity,
@@ -4070,6 +4132,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 powder_temp,
                 powder_temp_curve: powder_temp_curve_si.clone(),
                 powder_curve_temp_c,
+                target_speed,
+                adjustment_unit,
                 pdf_metadata: pdf_metadata.clone(),
             };
 
@@ -5179,6 +5243,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             altitude,
             wind_speed,
             wind_direction,
+            use_powder_sensitivity,
+            powder_temp_sensitivity,
+            powder_temp,
+            powder_temp_curve,
             target_speed,
             target_angle,
             target_length,
@@ -5226,6 +5294,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => drag_model,
             };
 
+            // Powder temperature plumbing (MBA-1325), identical resolution to the
+            // `trajectory` command: --powder-temp serves as either the curve's lookup
+            // temperature (defaults to --temperature) or the linear model's reference
+            // temperature (defaults to the 70F/21C equivalent); powder_curve_temp_c
+            // captures whether it was explicitly given (Some) so the curve can fall
+            // back to ambient temperature (None) rather than a synthesized default.
+            let powder_curve_temp_c: Option<f64> =
+                powder_temp.map(|t| UnitConverter::temperature_to_metric(t, cli.units));
+            let powder_temp = powder_temp.unwrap_or(match cli.units {
+                UnitSystem::Imperial => DEFAULT_POWDER_REFERENCE_TEMP_F,
+                UnitSystem::Metric => DEFAULT_POWDER_REFERENCE_TEMP_C,
+            });
+            let powder_temp_sensitivity = powder_temp_sensitivity.unwrap_or(match cli.units {
+                UnitSystem::Imperial => 1.0,
+                UnitSystem::Metric => 0.3048 / (5.0 / 9.0),
+            });
+            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref()
+            {
+                Some(s) => Some(parse_powder_temp_curve(s, cli.units)?),
+                None => None,
+            };
+
             handle_lead(
                 final_velocity,
                 final_bc,
@@ -5239,6 +5329,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 altitude,
                 wind_speed,
                 wind_direction,
+                use_powder_sensitivity,
+                powder_temp_sensitivity,
+                powder_temp,
+                powder_temp_curve_si,
+                powder_curve_temp_c,
                 target_speed,
                 target_angle,
                 target_length,
@@ -6014,8 +6109,29 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         powder_temp,
         ref powder_temp_curve,
         powder_curve_temp_c,
+        target_speed,
+        adjustment_unit,
         ref pdf_metadata,
     } = *config;
+
+    // Mover ring (MBA-1325): a per-point Ring column/field, additive across table/JSON/CSV,
+    // enabled only when --target-speed > 0 (same units convention as `lead --target-speed`:
+    // mph imperial / m/s metric). Resolved once here so every output branch below agrees.
+    let target_speed_mps = UnitConverter::wind_to_metric(target_speed, units);
+    let ring_enabled = target_speed_mps > 0.0;
+    // Ring TABLE column angular unit honors --adjustment-unit (review fix M3). The MOA
+    // conversion uses the crate's locked printed-table dial constant (MBA-724):
+    // MOA_PER_UNIT_RATIO / MIL_PER_UNIT_RATIO == exactly 3.438 — deliberately NOT the
+    // exact-angle 3437.7467/1000, so Ring(moa)/Ring(mil) keeps the same ratio as every
+    // other MIL/MOA column pair this CLI prints (see moving_target.rs module docs).
+    let (ring_hdr, ring_table_factor) = match adjustment_unit {
+        AdjustmentUnit::Mil => ("Ring(mil)", 1.0),
+        AdjustmentUnit::Moa => (
+            "Ring(moa)",
+            ballistics_engine::moving_target::MOA_PER_UNIT_RATIO
+                / ballistics_engine::moving_target::MIL_PER_UNIT_RATIO,
+        ),
+    };
 
     // MBA-1135: track whether the twist is a synthesized default (shooter omitted --twist-rate)
     // so the stability summary can be honest about it rather than presenting an assumed-twist Sg
@@ -6308,19 +6424,33 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     result
                         .points
                         .into_iter()
-                        .map(|p| TrajectoryPoint {
-                            time: p.time,
-                            // Output contract is unchanged: the `x` field is lateral
-                            // (drift), `z` is downrange. With McCoy internals these map
-                            // to position.z (lateral) and position.x (downrange).
-                            x: UnitConverter::distance_from_metric(p.position.z, units),
-                            y: UnitConverter::distance_from_metric(p.position.y, units),
-                            z: UnitConverter::distance_from_metric(p.position.x, units),
-                            velocity: UnitConverter::velocity_from_metric(
-                                p.velocity_magnitude,
-                                units,
-                            ),
-                            energy: UnitConverter::energy_from_metric(p.kinetic_energy, units),
+                        .map(|p| {
+                            // Mover ring (MBA-1325), additive: only populated when
+                            // --target-speed enabled it; None/None serialize to "absent"
+                            // (skip_serializing_if) so JSON without the flag is unchanged.
+                            let (mover_ring_m, mover_ring_mil) = if ring_enabled {
+                                let (ring_m, ring_mil) =
+                                    ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
+                                (Some(ring_m), ring_mil)
+                            } else {
+                                (None, None)
+                            };
+                            TrajectoryPoint {
+                                time: p.time,
+                                // Output contract is unchanged: the `x` field is lateral
+                                // (drift), `z` is downrange. With McCoy internals these map
+                                // to position.z (lateral) and position.x (downrange).
+                                x: UnitConverter::distance_from_metric(p.position.z, units),
+                                y: UnitConverter::distance_from_metric(p.position.y, units),
+                                z: UnitConverter::distance_from_metric(p.position.x, units),
+                                velocity: UnitConverter::velocity_from_metric(
+                                    p.velocity_magnitude,
+                                    units,
+                                ),
+                                energy: UnitConverter::energy_from_metric(p.kinetic_energy, units),
+                                mover_ring_m,
+                                mover_ring_mil,
+                            }
                         })
                         .collect()
                 } else {
@@ -6347,10 +6477,17 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         UnitSystem::Metric => "m",
                         UnitSystem::Imperial => "in",
                     };
-                    println!(
+                    let header = format!(
                         "distance_{},drop_{},drift_{},velocity_{},energy_{},time_s",
                         dist_unit, defl_unit, defl_unit, vel_unit, energy_unit
                     );
+                    // Mover ring (MBA-1325): extra column, header carries the unit; only
+                    // emitted when --target-speed enabled it (additive, matches JSON).
+                    if ring_enabled {
+                        println!("{},ring_mil", header);
+                    } else {
+                        println!("{}", header);
+                    }
                     for s in sampled {
                         let distance = UnitConverter::distance_from_metric(s.distance_m, units);
                         // Imperial drop/drift in inches (meters * 39.3701); Metric in meters.
@@ -6360,17 +6497,32 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         };
                         let vel = UnitConverter::velocity_from_metric(s.velocity_mps, units);
                         let energy = UnitConverter::energy_from_metric(s.energy_j, units);
-                        println!(
+                        let row = format!(
                             "{:.2},{:.2},{:.2},{:.2},{:.2},{:.4}",
                             distance, drop, drift, vel, energy, s.time_s
                         );
+                        if ring_enabled {
+                            let (_, ring_mil) =
+                                ballistics_engine::mover_ring(target_speed_mps, s.time_s, s.distance_m);
+                            match ring_mil {
+                                Some(mil) => println!("{},{:.3}", row, mil),
+                                None => println!("{},", row),
+                            }
+                        } else {
+                            println!("{}", row);
+                        }
                     }
                 } else {
                     // Output raw trajectory points (all integration steps)
-                    println!(
+                    let header = format!(
                         "time_s,x_{},y_{},z_{},velocity_{},energy_{}",
                         dist_unit, dist_unit, dist_unit, vel_unit, energy_unit
                     );
+                    if ring_enabled {
+                        println!("{},ring_mil", header);
+                    } else {
+                        println!("{}", header);
+                    }
                     for p in result.points {
                         // Output contract unchanged: x column is lateral, z is downrange.
                         // McCoy internals: lateral=position.z, downrange=position.x.
@@ -6379,10 +6531,21 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         let z = UnitConverter::distance_from_metric(p.position.x, units);
                         let vel = UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
                         let energy = UnitConverter::energy_from_metric(p.kinetic_energy, units);
-                        println!(
+                        let row = format!(
                             "{:.4},{:.2},{:.2},{:.2},{:.2},{:.2}",
                             p.time, x, y, z, vel, energy
                         );
+                        if ring_enabled {
+                            // Downrange is position.x (McCoy frame) regardless of the CSV's
+                            // lateral/downrange column swap above.
+                            let (_, ring_mil) = ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
+                            match ring_mil {
+                                Some(mil) => println!("{},{:.3}", row, mil),
+                                None => println!("{},", row),
+                            }
+                        } else {
+                            println!("{}", row);
+                        }
                     }
                 }
             } else {
@@ -6597,12 +6760,6 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     UnitSystem::Metric => ("(m)", "(m/s)", "(J)"),
                     UnitSystem::Imperial => ("(yd)", "(fps)", "(ft-lb)"),
                 };
-                println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
-                println!(
-                    "│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│",
-                    dist_hdr, dist_hdr, vel_hdr, energy_hdr
-                );
-                println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
 
                 let step = if result.points.len() > 20 {
                     result.points.len() / 20
@@ -6610,22 +6767,64 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     1
                 };
 
-                for (i, p) in result.points.iter().enumerate() {
-                    if i % step == 0 || i == result.points.len() - 1 {
-                        let x_display = UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
-                        let y_display = UnitConverter::distance_from_metric(p.position.y, units);
-                        let vel_display =
-                            UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
-                        let energy_display =
-                            UnitConverter::energy_from_metric(p.kinetic_energy, units);
+                // Mover ring (MBA-1325) is a whole extra column, so the table is rendered
+                // as two distinct layouts rather than splicing a conditional cell into a
+                // fixed format string — this keeps the ring_enabled == false path (the
+                // default) byte-identical to the pre-MBA-1325 table.
+                if ring_enabled {
+                    println!("┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐");
+                    println!(
+                        "│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│ {}│",
+                        dist_hdr, dist_hdr, vel_hdr, energy_hdr, ring_hdr
+                    );
+                    println!("├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤");
 
-                        println!(
-                            "│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
-                            p.time, x_display, y_display, vel_display, energy_display
-                        );
+                    for (i, p) in result.points.iter().enumerate() {
+                        if i % step == 0 || i == result.points.len() - 1 {
+                            let x_display = UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
+                            let y_display = UnitConverter::distance_from_metric(p.position.y, units);
+                            let vel_display =
+                                UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
+                            let energy_display =
+                                UnitConverter::energy_from_metric(p.kinetic_energy, units);
+                            let (_, ring_mil) = ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
+                            let ring_cell = match ring_mil {
+                                Some(mil) => format!("{:>8.2}", mil * ring_table_factor),
+                                None => format!("{:>8}", "-"),
+                            };
+
+                            println!(
+                                "│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {} │",
+                                p.time, x_display, y_display, vel_display, energy_display, ring_cell
+                            );
+                        }
                     }
+                    println!("└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘");
+                } else {
+                    println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                    println!(
+                        "│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│",
+                        dist_hdr, dist_hdr, vel_hdr, energy_hdr
+                    );
+                    println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+
+                    for (i, p) in result.points.iter().enumerate() {
+                        if i % step == 0 || i == result.points.len() - 1 {
+                            let x_display = UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
+                            let y_display = UnitConverter::distance_from_metric(p.position.y, units);
+                            let vel_display =
+                                UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
+                            let energy_display =
+                                UnitConverter::energy_from_metric(p.kinetic_energy, units);
+
+                            println!(
+                                "│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │",
+                                p.time, x_display, y_display, vel_display, energy_display
+                            );
+                        }
+                    }
+                    println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
                 }
-                println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
             }
 
             // Display sampled trajectory points if available
@@ -8807,6 +9006,11 @@ fn handle_lead(
     altitude: f64,
     wind_speed: f64,
     wind_direction: f64,
+    use_powder_sensitivity: bool,
+    powder_temp_sensitivity: f64,
+    powder_temp: f64,
+    powder_temp_curve: Option<Vec<(f64, f64)>>,
+    powder_curve_temp_c: Option<f64>,
     target_speed: f64,
     target_angle: f64,
     target_length: Option<f64>,
@@ -8834,7 +9038,7 @@ fn handle_lead(
     let end_m = UnitConverter::distance_to_metric(end, units);
     let step_m = UnitConverter::distance_to_metric(step, units);
 
-    let (inputs, wind, atmosphere) = build_trajectory_components(
+    let (mut inputs, wind, atmosphere) = build_trajectory_components(
         velocity_m,
         bc,
         mass_kg,
@@ -8850,6 +9054,21 @@ fn handle_lead(
         end_m,
         step_m,
     );
+
+    // Powder temperature (MBA-1325): identical resolution to `run_trajectory` so a
+    // powder-temp-curve/-sensitivity muzzle-velocity correction reproduces exactly —
+    // TrajectorySolver::new (invoked inside calculate_lead) resolves the correction from
+    // these BallisticInputs fields, so setting them here is the entire plumbing needed.
+    inputs.use_powder_sensitivity = use_powder_sensitivity;
+    inputs.powder_temp_sensitivity = if use_powder_sensitivity {
+        UnitConverter::velocity_to_metric(powder_temp_sensitivity, units)
+            / UnitConverter::temperature_delta_to_metric(1.0, units)
+    } else {
+        0.0
+    };
+    inputs.powder_temp = UnitConverter::temperature_to_metric(powder_temp, units);
+    inputs.powder_temp_curve = powder_temp_curve;
+    inputs.powder_curve_temp_c = powder_curve_temp_c;
 
     let adj_label = match adjustment_unit {
         AdjustmentUnit::Mil => "MIL",
