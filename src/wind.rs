@@ -130,6 +130,13 @@ impl WindSock {
             .fold(0.0, f64::max)
     }
 
+    /// Crosswind at the muzzle in the aerodynamic-jump convention: positive means wind from
+    /// the right. `None` means there are no segmented winds, while a real zero-crosswind
+    /// segment returns `Some(0.0)` so callers do not incorrectly fall back to scalar wind.
+    pub(crate) fn muzzle_crosswind_from_right_mps(&self) -> Option<f64> {
+        (!self.winds.is_empty()).then(|| -self.vector_for_range_stateless(0.0)[2])
+    }
+
     /// Get wind vector for a given range
     ///
     /// Note: This modifies internal state and expects monotonically increasing ranges
@@ -265,6 +272,27 @@ mod tests {
     fn test_wind_sock_empty() {
         let sock = WindSock::new(vec![]);
         assert_eq!(sock.vector_for_range_stateless(50.0), Vector3::zeros());
+        assert_eq!(sock.muzzle_crosswind_from_right_mps(), None);
+    }
+
+    #[test]
+    fn muzzle_crosswind_distinguishes_an_explicit_zero_segment() {
+        let sock = WindSock::new(vec![WindSegment::new(0.0, 90.0, 100.0)]);
+        assert_eq!(sock.muzzle_crosswind_from_right_mps(), Some(0.0));
+    }
+
+    #[test]
+    fn muzzle_crosswind_uses_the_sorted_muzzle_segment_and_wind_from_sign() {
+        let from_right = WindSock::new(vec![
+            WindSegment::new(32.18688, 270.0, 5000.0),
+            WindSegment::new(16.09344, 90.0, 100.0),
+        ]);
+        let right_mps = from_right.muzzle_crosswind_from_right_mps().unwrap();
+        assert!((right_mps - 4.4704).abs() < 1e-12);
+
+        let from_left = WindSock::new(vec![WindSegment::new(16.09344, 270.0, 100.0)]);
+        let left_mps = from_left.muzzle_crosswind_from_right_mps().unwrap();
+        assert!((left_mps + 4.4704).abs() < 1e-12);
     }
 
     #[test]
