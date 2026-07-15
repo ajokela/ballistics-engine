@@ -493,6 +493,124 @@ fn segmented_fast_path_records_the_same_aj_launch_state_as_plain_fast() {
 }
 
 #[test]
+fn fast_paths_use_muzzle_segment_wind_for_aerodynamic_jump() {
+    use ballistics_engine::fast_trajectory::{
+        fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
+    };
+    use ballistics_engine::wind::{WindSegment, WindSock};
+
+    let inputs = BallisticInputs {
+        muzzle_velocity: 800.0,
+        bullet_diameter: 0.00782,
+        bullet_length: 0.0312,
+        bullet_mass: 0.01134,
+        twist_rate: 11.0,
+        is_twist_right: true,
+        // Conflicting scalar wind: 20 mph from the left. Active segments must override it.
+        wind_speed: 8.9408,
+        wind_angle: -PI / 2.0,
+        enable_aerodynamic_jump: true,
+        ..BallisticInputs::default()
+    };
+    // Deliberately unsorted: the 10 mph muzzle segment from the right is second.
+    let segments = vec![
+        WindSegment::new(32.18688, 270.0, 5000.0),
+        WindSegment::new(16.09344, 90.0, 100.0),
+    ];
+
+    let mut main_solver = TrajectorySolver::new(
+        inputs.clone(),
+        WindConditions {
+            speed: inputs.wind_speed,
+            direction: inputs.wind_angle,
+            vertical_speed: 0.0,
+        },
+        AtmosphericConditions::default(),
+    );
+    main_solver.set_max_range(100.0);
+    main_solver.set_wind_segments(segments.clone());
+    let main_jump_rad = main_solver
+        .solve()
+        .expect("main solve should succeed")
+        .aerodynamic_jump
+        .expect("a muzzle crosswind must produce aerodynamic jump")
+        .vertical_jump_moa
+        / 3437.7467707849;
+    assert!(
+        main_jump_rad > 0.0,
+        "the muzzle wind from the right must produce upward jump"
+    );
+
+    let params = || FastIntegrationParams {
+        horiz: 20.0,
+        vert: 0.0,
+        initial_state: [0.0, 0.0, 0.0, inputs.muzzle_velocity, 0.0, 0.0],
+        t_span: (0.0, 0.1),
+        atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        atmo_sock: None,
+    };
+    let sock = WindSock::new(segments.clone());
+    let plain = fast_integrate(&inputs, &sock, params());
+    let segmented = fast_integrate_with_segments(&inputs, segments, params());
+
+    for (path, solution) in [("plain", plain), ("segmented", segmented)] {
+        let launch_elevation = solution.y[4][0].atan2(
+            (solution.y[3][0] * solution.y[3][0]
+                + solution.y[5][0] * solution.y[5][0])
+                .sqrt(),
+        );
+        assert!(
+            (launch_elevation - main_jump_rad).abs() < 1e-12,
+            "{path} fast path used the wrong AJ wind: fast={launch_elevation}, main={main_jump_rad}"
+        );
+    }
+}
+
+#[test]
+fn calm_muzzle_segment_suppresses_scalar_fast_path_jump() {
+    use ballistics_engine::fast_trajectory::{
+        fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
+    };
+    use ballistics_engine::wind::{WindSegment, WindSock};
+
+    let inputs = BallisticInputs {
+        muzzle_velocity: 800.0,
+        bullet_diameter: 0.00782,
+        bullet_length: 0.0312,
+        bullet_mass: 0.01134,
+        twist_rate: 11.0,
+        is_twist_right: true,
+        wind_speed: 4.4704,
+        wind_angle: PI / 2.0,
+        enable_aerodynamic_jump: true,
+        ..BallisticInputs::default()
+    };
+    let raw_state = [0.0, 0.0, 0.0, inputs.muzzle_velocity, 0.0, 0.0];
+    let params = || FastIntegrationParams {
+        horiz: 20.0,
+        vert: 0.0,
+        initial_state: raw_state,
+        t_span: (0.0, 0.1),
+        atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        atmo_sock: None,
+    };
+    let calm = vec![WindSegment::new(0.0, 90.0, 100.0)];
+    let sock = WindSock::new(calm.clone());
+    let plain = fast_integrate(&inputs, &sock, params());
+    let segmented = fast_integrate_with_segments(&inputs, calm, params());
+
+    for (path, solution) in [("plain", plain), ("segmented", segmented)] {
+        for (component, expected) in solution.y[3..6].iter().zip(&raw_state[3..6]) {
+            assert_eq!(
+                component[0].to_bits(),
+                expected.to_bits(),
+                "{path} fast path fell back to scalar wind despite an explicit calm muzzle segment"
+            );
+        }
+    }
+}
+
+#[test]
 fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     // A NaN twist must not slip past the guard (NaN <= 0.0 is false) and NaN-out
     // the launch angle. AJ must be suppressed and the trajectory stay finite.

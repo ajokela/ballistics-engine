@@ -206,6 +206,19 @@ pub fn aerodynamic_jump_launch_offset_rad(
     inputs: &BallisticInputs,
     atmo_params: (f64, f64, f64, f64),
 ) -> f64 {
+    let crosswind_from_right_mps = inputs.wind_speed * inputs.wind_angle.sin();
+    aerodynamic_jump_launch_offset_for_crosswind_rad(
+        inputs,
+        atmo_params,
+        crosswind_from_right_mps,
+    )
+}
+
+fn aerodynamic_jump_launch_offset_for_crosswind_rad(
+    inputs: &BallisticInputs,
+    atmo_params: (f64, f64, f64, f64),
+    crosswind_from_right_mps: f64,
+) -> f64 {
     if !inputs.enable_aerodynamic_jump {
         return 0.0;
     }
@@ -227,7 +240,7 @@ pub fn aerodynamic_jump_launch_offset_rad(
     }
     let length_cal = inputs.bullet_length / diameter;
     const MS_TO_MPH: f64 = 2.236_936_292_054_4;
-    let crosswind_from_right_mph = inputs.wind_speed * inputs.wind_angle.sin() * MS_TO_MPH;
+    let crosswind_from_right_mph = crosswind_from_right_mps * MS_TO_MPH;
     let vertical_moa = crate::aerodynamic_jump::litz_crosswind_jump_moa(
         sg,
         length_cal,
@@ -261,9 +274,17 @@ fn rotate_launch_velocity(state: &mut [f64; 6], theta_rad: f64) {
 fn launch_state_with_aerodynamic_jump(
     inputs: &BallisticInputs,
     atmo_params: (f64, f64, f64, f64),
+    segmented_crosswind_from_right_mps: Option<f64>,
     mut initial_state: [f64; 6],
 ) -> [f64; 6] {
-    let offset = aerodynamic_jump_launch_offset_rad(inputs, atmo_params);
+    let offset = match segmented_crosswind_from_right_mps {
+        Some(crosswind) => aerodynamic_jump_launch_offset_for_crosswind_rad(
+            inputs,
+            atmo_params,
+            crosswind,
+        ),
+        None => aerodynamic_jump_launch_offset_rad(inputs, atmo_params),
+    };
     if offset != 0.0 {
         rotate_launch_velocity(&mut initial_state, offset);
     }
@@ -310,8 +331,17 @@ pub fn fast_integrate(
 
     // MBA-959: aerodynamic jump perturbs the prebuilt launch velocity vertically (this path is
     // handed an initial_state, not a muzzle angle). A no-op returning the original when disabled.
-    let initial_state =
-        launch_state_with_aerodynamic_jump(inputs, params.atmo_params, params.initial_state);
+    let segmented_crosswind_from_right_mps = if inputs.enable_aerodynamic_jump {
+        wind_sock.muzzle_crosswind_from_right_mps()
+    } else {
+        None
+    };
+    let initial_state = launch_state_with_aerodynamic_jump(
+        inputs,
+        params.atmo_params,
+        segmented_crosswind_from_right_mps,
+        params.initial_state,
+    );
     let vx = initial_state[3]; // horizontal (downrange) velocity
 
     // MBA-1145: decouple the integration-loop ceiling from the pre-allocation heuristic.
@@ -938,8 +968,19 @@ pub fn fast_integrate_with_segments(
 
     // Match plain fast_integrate: this entry point also receives a prebuilt launch state, so
     // apply the experimental aerodynamic-jump angle exactly once before the low-level integrator.
-    let initial_state =
-        launch_state_with_aerodynamic_jump(inputs, params.atmo_params, params.initial_state);
+    let segmented_crosswind_from_right_mps = if inputs.enable_aerodynamic_jump
+        && !wind_segments.is_empty()
+    {
+        WindSock::new(wind_segments.clone()).muzzle_crosswind_from_right_mps()
+    } else {
+        None
+    };
+    let initial_state = launch_state_with_aerodynamic_jump(
+        inputs,
+        params.atmo_params,
+        segmented_crosswind_from_right_mps,
+        params.initial_state,
+    );
 
     // Extract parameters
     let mass_kg = inputs.bullet_mass; // SI (kg)
