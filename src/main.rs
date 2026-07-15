@@ -13,6 +13,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod mcp_command;
 #[cfg(feature = "pdf")]
 mod pdf_dope_card;
 mod solve_json_command;
@@ -322,6 +323,9 @@ struct Cli {
 enum Commands {
     /// Solve one explicit-SI v1 JSON request from stdin and write one JSON envelope to stdout
     SolveJson,
+
+    /// Run a Model Context Protocol (MCP) server over stdio, exposing solve and engine_info tools
+    Mcp,
 
     /// Calculate a single trajectory
     Trajectory {
@@ -3195,6 +3199,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::SolveJson => std::process::exit(solve_json_command::run_stdio()),
+
+        Commands::Mcp => std::process::exit(mcp_command::run_stdio()),
 
         Commands::Trajectory {
             profile,
