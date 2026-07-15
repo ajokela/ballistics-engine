@@ -1072,6 +1072,75 @@ Final Error:           0.001 MIL
 Calculated Drop:       5.10 MIL
 ```
 
+### MCP Server (`mcp`)
+
+`ballistics mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io/) server over
+the stdio transport, so an MCP-aware AI assistant can drive the engine directly instead of
+shelling out to the CLI. It speaks newline-delimited JSON-RPC 2.0: one JSON-RPC message per
+line on standard input, one JSON-RPC message per line on standard output, exactly as the MCP
+stdio transport specifies. Nothing else is ever written to stdout.
+
+```bash
+# Run directly (an MCP client normally launches this for you as a subprocess)
+./ballistics mcp
+```
+
+#### Claude Desktop configuration
+
+Add an entry to Claude Desktop's `claude_desktop_config.json` pointing at the built binary:
+
+```json
+{
+  "mcpServers": {
+    "ballistics-engine": {
+      "command": "/absolute/path/to/ballistics",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the config. The `command` must be an absolute path; the
+binary is discovered from a build (`cargo build --release`, binary at
+`target/release/ballistics`) or from an installed release.
+
+#### Implemented methods
+
+| Method | Behavior |
+| --- | --- |
+| `initialize` | Returns `serverInfo` (`name: "ballistics-engine"`, this crate's version), `capabilities: {"tools": {}}`, and echoes back whatever `protocolVersion` the client requested (falling back to a fixed recent version when the client omits it). |
+| `notifications/initialized` | Accepted as a no-op, per the MCP lifecycle. |
+| `tools/list` | Returns the two tools below with their JSON Schema `inputSchema`. |
+| `tools/call` | Invokes `solve` or `engine_info`; see below. |
+| `ping` | Returns an empty result. |
+
+Any other method returns JSON-RPC error `-32601` (Method not found). Malformed JSON returns
+`-32700` (Parse error); a structurally invalid JSON-RPC message (not an object, wrong
+`jsonrpc` version, missing `method`) returns `-32600` (Invalid Request). A single JSON-RPC
+message is capped at 1 MiB; an oversized line is rejected with `-32700` without buffering it in
+full, and the session keeps running. Malformed input never terminates the server — only closing
+stdin (EOF) does, which exits `0`.
+
+#### Tools
+
+**`solve`** — arguments *are* a [solve-json v1](docs/SOLVE_JSON_V1.md) request object
+(`schema_version`, `projectile`, `rifle`, `shot`, `atmosphere`, `wind`, `solver`, `effects`,
+`sampling`; explicit SI units throughout). The tool result's text content is the solve-json v1
+response JSON — either a success envelope with `resolved_request`/`summary`/`samples`, or a
+solve-json v1 error envelope. Arguments that are not even a structurally valid solve-json v1
+request (unknown or missing fields, wrong JSON types, an unsupported `schema_version`) are
+instead rejected as a JSON-RPC `-32602` (Invalid params) protocol error, with the solve-json v1
+error object attached as `error.data`. A well-formed request the engine cannot solve (an
+out-of-range value, a resource limit, a genuine solve failure) is reported as a normal
+`tools/call` result with `isError: true` instead — see the doc comment in
+[`src/mcp_command.rs`](src/mcp_command.rs) for the full rationale behind this split.
+
+**`engine_info`** — no arguments. Returns this crate's version, the drag models solve-json v1
+accepts (`G1`, `G6`, `G7`, `G8`), and the crate feature flags this binary was compiled with.
+
+Only these two tools are exposed in this pass; other CLI subcommands (Monte Carlo, BC
+estimation, true velocity, profile import, and so on) are not wrapped as MCP tools yet.
+
 ## Output Formats
 
 All commands support four output formats via `-o`:
