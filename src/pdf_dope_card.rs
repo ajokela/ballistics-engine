@@ -7,7 +7,6 @@
 //! Row striping for improved readability.
 
 use printpdf::*;
-use std::io::BufWriter;
 
 // Embed Liberation Sans fonts directly into the binary (SIL Open Font License)
 static FONT_REGULAR: &[u8] = include_bytes!("../fonts/LiberationSans-Regular.ttf");
@@ -234,17 +233,26 @@ fn truncate_for_header(s: &str, max_chars: usize) -> String {
 }
 
 /// Draw a light gray separator line across the page width
-fn draw_separator_line(layer: &PdfLayerReference, y: f32) {
-    let line = Line {
-        points: vec![
-            (Point::new(Mm(MARGIN), Mm(y)), false),
-            (Point::new(Mm(PAGE_WIDTH - MARGIN), Mm(y)), false),
-        ],
-        is_closed: false,
-    };
-    layer.set_outline_color(Color::Rgb(Rgb::new(0.7, 0.7, 0.7, None)));
-    layer.set_outline_thickness(0.3);
-    layer.add_line(line);
+fn draw_separator_line(ops: &mut Vec<Op>, y: f32) {
+    ops.push(Op::SetOutlineColor {
+        col: Color::Rgb(Rgb::new(0.7, 0.7, 0.7, None)),
+    });
+    ops.push(Op::SetOutlineThickness { pt: Pt(0.3) });
+    ops.push(Op::DrawLine {
+        line: Line {
+            points: vec![
+                LinePoint {
+                    p: Point::new(Mm(MARGIN), Mm(y)),
+                    bezier: false,
+                },
+                LinePoint {
+                    p: Point::new(Mm(PAGE_WIDTH - MARGIN), Mm(y)),
+                    bezier: false,
+                },
+            ],
+            is_closed: false,
+        },
+    });
 }
 
 /// Generate a dope card PDF matching Glenn's format with row striping
@@ -252,19 +260,20 @@ pub fn generate_dope_card_pdf(
     config: &DopeCardConfig,
     rows: &[DopeCardRow],
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let (doc, page1, layer1) = PdfDocument::new(
-        format!("{} Dope Card", config.rifle_name),
-        Mm(PAGE_WIDTH),
-        Mm(PAGE_HEIGHT),
-        "Layer 1",
-    );
+    let mut doc = PdfDocument::new(&format!("{} Dope Card", config.rifle_name));
 
-    // Load font
+    // Load and register fonts
     let font_data = find_font_file("LiberationSans-Regular")?;
-    let font = doc.add_external_font(&*font_data)?;
+    let mut font_warnings = Vec::new();
+    let parsed_font = ParsedFont::from_bytes(&font_data, 0, &mut font_warnings)
+        .ok_or("Failed to parse LiberationSans-Regular font")?;
+    let font = doc.add_font(&parsed_font);
 
     let font_bold_data = find_font_file("LiberationSans-Bold")?;
-    let font_bold = doc.add_external_font(&*font_bold_data)?;
+    let mut font_bold_warnings = Vec::new();
+    let parsed_font_bold = ParsedFont::from_bytes(&font_bold_data, 0, &mut font_bold_warnings)
+        .ok_or("Failed to parse LiberationSans-Bold font")?;
+    let font_bold = doc.add_font(&parsed_font_bold);
 
     // Only scale the data table — header/footer stay at base size
     // so they don't overflow or consume disproportionate page space
@@ -281,25 +290,17 @@ pub fn generate_dope_card_pdf(
     let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
     let total_pages = rows.len().div_ceil(data_rows_per_page);
 
+    let mut pages = Vec::with_capacity(total_pages);
+
     for page_num in 0..total_pages {
         let start_idx = page_num * data_rows_per_page;
         let end_idx = std::cmp::min(start_idx + data_rows_per_page, rows.len());
         let page_rows = &rows[start_idx..end_idx];
 
-        let (current_page, current_layer) = if page_num == 0 {
-            (page1, layer1)
-        } else {
-            doc.add_page(
-                Mm(PAGE_WIDTH),
-                Mm(PAGE_HEIGHT),
-                format!("Page {}", page_num + 1),
-            )
-        };
-
-        let layer = doc.get_page(current_page).get_layer(current_layer);
+        let mut ops = Vec::new();
 
         render_page(
-            &layer,
+            &mut ops,
             &font,
             &font_bold,
             config,
@@ -312,19 +313,23 @@ pub fn generate_dope_card_pdf(
             row_height,
             font_scale,
             config.bold_data,
-        )?;
+        );
+
+        pages.push(PdfPage::new(Mm(PAGE_WIDTH), Mm(PAGE_HEIGHT), ops));
     }
 
-    let mut buffer = Vec::new();
-    doc.save(&mut BufWriter::new(&mut buffer))?;
-    Ok(buffer)
+    let mut save_warnings = Vec::new();
+    let bytes = doc
+        .with_pages(pages)
+        .save(&PdfSaveOptions::default(), &mut save_warnings);
+    Ok(bytes)
 }
 
 #[allow(clippy::too_many_arguments)] // Fixed-layout renderer keeps its page metrics explicit.
 fn render_page(
-    layer: &PdfLayerReference,
-    font: &IndirectFontRef,
-    font_bold: &IndirectFontRef,
+    ops: &mut Vec<Op>,
+    font: &FontId,
+    font_bold: &FontId,
     config: &DopeCardConfig,
     rows: &[DopeCardRow],
     page: usize,
@@ -335,7 +340,7 @@ fn render_page(
     row_height: f32,
     font_scale: f32,
     bold_data: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     let mut y = PAGE_HEIGHT - MARGIN;
 
     // Header line 1 (auto-truncate long text)
@@ -353,7 +358,7 @@ fn render_page(
         ),
         77,
     );
-    draw_centered_text(layer, font, header_size, y, &header1, COLOR_BLACK);
+    draw_centered_text(ops, font, header_size, y, &header1, COLOR_BLACK);
     y -= 4.0;
 
     // Header line 2
@@ -361,11 +366,11 @@ fn render_page(
         "TargetSpeed:{:.0} Solver: {} - Pg {}",
         config.target_speed_mph, config.solver_mode, page
     );
-    draw_centered_text(layer, font, header_size, y, &header2, COLOR_BLACK);
+    draw_centered_text(ops, font, header_size, y, &header2, COLOR_BLACK);
     y -= 1.0;
 
     // Separator line after header
-    draw_separator_line(layer, y);
+    draw_separator_line(ops, y);
     y -= 5.0;
 
     // Table start position
@@ -373,7 +378,7 @@ fn render_page(
 
     // Draw table header
     draw_table_header(
-        layer,
+        ops,
         font_bold,
         table_x,
         y,
@@ -396,18 +401,18 @@ fn render_page(
 
         // Draw stripe background for alternating rows
         if i % 2 == 1 {
-            draw_row_stripe(layer, table_x, y, 8.0 * COL_WIDTH, row_height);
+            draw_row_stripe(ops, table_x, y, 8.0 * COL_WIDTH, row_height);
         }
 
         // Draw left side data
         draw_data_row(
-            layer, data_font, table_x, y, left, true, table_size, font_scale,
+            ops, data_font, table_x, y, left, true, table_size, font_scale,
         );
 
         // Draw right side data
         if let Some(r) = right {
             draw_data_row(
-                layer,
+                ops,
                 data_font,
                 table_x + 4.0 * COL_WIDTH,
                 y,
@@ -422,7 +427,7 @@ fn render_page(
     }
 
     // Separator line before footer
-    draw_separator_line(layer, y - 1.0);
+    draw_separator_line(ops, y - 1.0);
     y -= 5.0;
 
     // Footer line 1: load data
@@ -435,44 +440,54 @@ fn render_page(
         config.drag_model.to_lowercase(),
         config.velocity_fps,
     );
-    draw_centered_text(layer, font, footer_size, y, &footer1, COLOR_BLACK);
+    draw_centered_text(ops, font, footer_size, y, &footer1, COLOR_BLACK);
     y -= 4.0;
 
     // Footer line 2: timestamp
     let timestamp = get_timestamp();
-    draw_centered_text(layer, font, footer_size, y, &timestamp, COLOR_BLACK);
-
-    Ok(())
+    draw_centered_text(ops, font, footer_size, y, &timestamp, COLOR_BLACK);
 }
 
-fn draw_row_stripe(layer: &PdfLayerReference, x: f32, y: f32, width: f32, height: f32) {
-    use printpdf::path::PaintMode;
-
+fn draw_row_stripe(ops: &mut Vec<Op>, x: f32, y: f32, width: f32, height: f32) {
     let points = vec![
-        (Point::new(Mm(x), Mm(y)), false),
-        (Point::new(Mm(x + width), Mm(y)), false),
-        (Point::new(Mm(x + width), Mm(y - height)), false),
-        (Point::new(Mm(x), Mm(y - height)), false),
+        LinePoint {
+            p: Point::new(Mm(x), Mm(y)),
+            bezier: false,
+        },
+        LinePoint {
+            p: Point::new(Mm(x + width), Mm(y)),
+            bezier: false,
+        },
+        LinePoint {
+            p: Point::new(Mm(x + width), Mm(y - height)),
+            bezier: false,
+        },
+        LinePoint {
+            p: Point::new(Mm(x), Mm(y - height)),
+            bezier: false,
+        },
     ];
 
-    let rect = Polygon {
-        rings: vec![points],
-        mode: PaintMode::Fill,
-        winding_order: printpdf::path::WindingOrder::NonZero,
-    };
-
-    layer.set_fill_color(Color::Rgb(Rgb::new(
-        COLOR_STRIPE.0,
-        COLOR_STRIPE.1,
-        COLOR_STRIPE.2,
-        None,
-    )));
-    layer.add_polygon(rect);
+    ops.push(Op::SetFillColor {
+        col: Color::Rgb(Rgb::new(
+            COLOR_STRIPE.0,
+            COLOR_STRIPE.1,
+            COLOR_STRIPE.2,
+            None,
+        )),
+    });
+    ops.push(Op::DrawPolygon {
+        polygon: Polygon {
+            rings: vec![PolygonRing { points }],
+            mode: PaintMode::Fill,
+            winding_order: WindingOrder::NonZero,
+        },
+    });
 }
 
 fn draw_table_header(
-    layer: &PdfLayerReference,
-    font: &IndirectFontRef,
+    ops: &mut Vec<Op>,
+    font: &FontId,
     x: f32,
     y: f32,
     table_size: f32,
@@ -494,9 +509,9 @@ fn draw_table_header(
 
     for (i, ((header, color), sub)) in headers.iter().zip(sub_headers.iter()).enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
-        draw_text(layer, font, table_size, col_x, y, header, *color, true);
+        draw_text(ops, font, table_size, col_x, y, header, *color, true);
         draw_text(
-            layer,
+            ops,
             font,
             table_size - 1.0,
             col_x,
@@ -510,8 +525,8 @@ fn draw_table_header(
 
 #[allow(clippy::too_many_arguments)] // Drawing primitive mirrors the PDF text/layout parameters.
 fn draw_data_row(
-    layer: &PdfLayerReference,
-    font: &IndirectFontRef,
+    ops: &mut Vec<Op>,
+    font: &FontId,
     x: f32,
     y: f32,
     row: &DopeCardRow,
@@ -529,7 +544,7 @@ fn draw_data_row(
     for (i, (value, color)) in values.iter().enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
         draw_text(
-            layer,
+            ops,
             font,
             table_size,
             col_x,
@@ -541,10 +556,40 @@ fn draw_data_row(
     }
 }
 
+/// Push the PDF ops for a run of text, wrapped in its own text section.
+///
+/// `x`/`y` are the baseline origin in mm (matches printpdf 0.7's `use_text` convention).
+fn draw_text_ops(
+    ops: &mut Vec<Op>,
+    font: &FontId,
+    size: f32,
+    x: f32,
+    y: f32,
+    text: &str,
+    color: (f32, f32, f32),
+) {
+    ops.push(Op::StartTextSection);
+    ops.push(Op::SetFillColor {
+        col: Color::Rgb(Rgb::new(color.0, color.1, color.2, None)),
+    });
+    ops.push(Op::SetFont {
+        font: PdfFontHandle::External(font.clone()),
+        size: Pt(size),
+    });
+    ops.push(Op::SetLineHeight { lh: Pt(size) });
+    ops.push(Op::SetTextCursor {
+        pos: Point::new(Mm(x), Mm(y)),
+    });
+    ops.push(Op::ShowText {
+        items: vec![TextItem::Text(text.to_string())],
+    });
+    ops.push(Op::EndTextSection);
+}
+
 #[allow(clippy::too_many_arguments)] // Drawing primitive mirrors the PDF text/layout parameters.
 fn draw_text(
-    layer: &PdfLayerReference,
-    font: &IndirectFontRef,
+    ops: &mut Vec<Op>,
+    font: &FontId,
     size: f32,
     x: f32,
     y: f32,
@@ -552,33 +597,31 @@ fn draw_text(
     color: (f32, f32, f32),
     center: bool,
 ) {
-    layer.set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
-
-    // Approximate centering by estimating text width
+    // Approximate centering by estimating text width (printpdf 0.10 has no simple
+    // string-width lookup for an arbitrary font+size, so keep the same heuristic
+    // the 0.7-era code used rather than reaching for glyph-level metrics).
     let text_width = if center {
         text.len() as f32 * size * 0.3 // Rough approximation
     } else {
         0.0
     };
 
-    layer.use_text(text, size, Mm(x - text_width / 2.0), Mm(y), font);
+    draw_text_ops(ops, font, size, x - text_width / 2.0, y, text, color);
 }
 
 fn draw_centered_text(
-    layer: &PdfLayerReference,
-    font: &IndirectFontRef,
+    ops: &mut Vec<Op>,
+    font: &FontId,
     size: f32,
     y: f32,
     text: &str,
     color: (f32, f32, f32),
 ) {
-    layer.set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
-
-    // Center on page
+    // Center on page (same width approximation as draw_text)
     let text_width = text.len() as f32 * size * 0.28;
     let x = (PAGE_WIDTH - text_width) / 2.0;
 
-    layer.use_text(text, size, Mm(x), Mm(y), font);
+    draw_text_ops(ops, font, size, x, y, text, color);
 }
 
 fn get_timestamp() -> String {
