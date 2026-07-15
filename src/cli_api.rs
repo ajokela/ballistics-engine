@@ -906,10 +906,15 @@ impl TrajectorySolver {
             ));
         }
 
-        if self.wind_sock.is_none() {
-            require_finite("wind.speed", self.wind.speed)?;
-            require_finite("wind.direction", self.wind.direction)?;
-            require_finite("wind.vertical_speed", self.wind.vertical_speed)?;
+        match &self.wind_sock {
+            Some(wind_sock) => wind_sock
+                .validate_segments()
+                .map_err(BallisticsError::from)?,
+            None => {
+                require_finite("wind.speed", self.wind.speed)?;
+                require_finite("wind.direction", self.wind.direction)?;
+                require_finite("wind.vertical_speed", self.wind.vertical_speed)?;
+            }
         }
 
         require_finite("atmosphere.temperature", self.atmosphere.temperature)?;

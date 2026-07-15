@@ -297,8 +297,8 @@ pub fn fast_integrate(
     wind_sock: &WindSock,
     params: FastIntegrationParams,
 ) -> FastSolution {
-    // Degenerate atmosphere -> non-physical air density would silently stub the run.
-    if !atmo_is_physical(params.atmo_params) {
+    // Malformed wind or a degenerate atmosphere would otherwise silently stub or poison the run.
+    if wind_sock.validate_segments().is_err() || !atmo_is_physical(params.atmo_params) {
         return FastSolution::degenerate(&params.initial_state);
     }
     let mut effective_inputs = inputs.clone();
@@ -961,8 +961,10 @@ pub fn fast_integrate_with_segments(
     // Use the RK45 implementation from trajectory_integration module
     use crate::trajectory_integration::{integrate_trajectory, TrajectoryParams};
 
-    // Degenerate atmosphere -> non-physical air density would silently stub the run.
-    if !atmo_is_physical(params.atmo_params) {
+    // Malformed wind or a degenerate atmosphere would otherwise silently stub or poison the run.
+    if crate::wind::validate_wind_segments(&wind_segments).is_err()
+        || !atmo_is_physical(params.atmo_params)
+    {
         return FastSolution::degenerate(&params.initial_state);
     }
 
@@ -2012,6 +2014,35 @@ mod tests {
         assert!(
             direct.success,
             "direct-atmosphere mode (pressure=0 sentinel) must yield success=true"
+        );
+    }
+
+    #[test]
+    fn fast_paths_reject_invalid_wind_segments() {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            ..BallisticInputs::default()
+        };
+        let mk = || FastIntegrationParams {
+            horiz: 100.0,
+            vert: 0.0,
+            initial_state: [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+            t_span: (0.0, 5.0),
+            atmo_params: (0.0, 15.0, 1013.25, 1.0),
+            atmo_sock: None,
+        };
+        let invalid = crate::wind::WindSegment::new(10.0, 90.0, f64::NAN);
+
+        let plain = fast_integrate(&inputs, &WindSock::new(vec![invalid]), mk());
+        let segmented = fast_integrate_with_segments(&inputs, vec![invalid], mk());
+
+        assert!(
+            !plain.success && !segmented.success,
+            "invalid segmented wind must fail in both fast wrappers: plain={}, segmented={}",
+            plain.success,
+            segmented.success
         );
     }
 

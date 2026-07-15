@@ -227,7 +227,128 @@ fn mba1293_sane_solves_stay_within_the_speed_budget() {
 }
 
 #[test]
-fn mba1282_non_finite_segment_state_is_returned_as_an_error() {
+fn mba1292_invalid_wind_segments_are_rejected_before_every_solver() {
+    type Setter = fn(&mut ballistics_engine::wind::WindSegment, f64);
+    let cases: [(&str, f64, Setter, &str); 13] = [
+        (
+            "speed_kmh",
+            f64::NAN,
+            |segment, value| segment.speed_kmh = value,
+            "must be finite and non-negative",
+        ),
+        (
+            "speed_kmh",
+            f64::INFINITY,
+            |segment, value| segment.speed_kmh = value,
+            "must be finite and non-negative",
+        ),
+        (
+            "speed_kmh",
+            -1.0,
+            |segment, value| segment.speed_kmh = value,
+            "must be finite and non-negative",
+        ),
+        (
+            "angle_deg",
+            f64::NAN,
+            |segment, value| segment.angle_deg = value,
+            "must be finite",
+        ),
+        (
+            "angle_deg",
+            f64::INFINITY,
+            |segment, value| segment.angle_deg = value,
+            "must be finite",
+        ),
+        (
+            "angle_deg",
+            f64::NEG_INFINITY,
+            |segment, value| segment.angle_deg = value,
+            "must be finite",
+        ),
+        (
+            "until_m",
+            f64::NAN,
+            |segment, value| segment.until_m = value,
+            "must be finite and greater than zero",
+        ),
+        (
+            "until_m",
+            f64::INFINITY,
+            |segment, value| segment.until_m = value,
+            "must be finite and greater than zero",
+        ),
+        (
+            "until_m",
+            0.0,
+            |segment, value| segment.until_m = value,
+            "must be finite and greater than zero",
+        ),
+        (
+            "until_m",
+            -1.0,
+            |segment, value| segment.until_m = value,
+            "must be finite and greater than zero",
+        ),
+        (
+            "vertical_mps",
+            f64::NAN,
+            |segment, value| segment.vertical_mps = value,
+            "must be finite",
+        ),
+        (
+            "vertical_mps",
+            f64::INFINITY,
+            |segment, value| segment.vertical_mps = value,
+            "must be finite",
+        ),
+        (
+            "vertical_mps",
+            f64::NEG_INFINITY,
+            |segment, value| segment.vertical_mps = value,
+            "must be finite",
+        ),
+    ];
+
+    for (mode, use_rk4, use_adaptive_rk45) in [
+        ("Euler", false, false),
+        ("RK4", true, false),
+        ("RK45", true, true),
+    ] {
+        for (field, value, set, requirement) in cases {
+            let inputs = BallisticInputs {
+                use_rk4,
+                use_adaptive_rk45,
+                ..BallisticInputs::default()
+            };
+            let mut invalid = ballistics_engine::wind::WindSegment::new(10.0, 90.0, 200.0);
+            set(&mut invalid, value);
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            // The invalid segment's normal 200 m endpoint sorts ahead of the valid 300 m segment,
+            // proving validation reports the caller's index rather than the normalized index.
+            solver.set_wind_segments(vec![
+                ballistics_engine::wind::WindSegment::new(10.0, 90.0, 300.0),
+                invalid,
+            ]);
+
+            let error = solver
+                .solve()
+                .expect_err("an invalid wind segment must fail before integration");
+            assert_eq!(
+                error.to_string(),
+                format!("wind.segments[1].{field} {requirement}"),
+                "unexpected {mode} error for {field}={value:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mba1292_valid_unsorted_wind_segments_remain_supported() {
     for (mode, use_rk4, use_adaptive_rk45) in [
         ("Euler", false, false),
         ("RK4", true, false),
@@ -243,16 +364,43 @@ fn mba1282_non_finite_segment_state_is_returned_as_an_error() {
             WindConditions::default(),
             AtmosphericConditions::default(),
         );
+        solver.set_max_range(200.0);
+        solver.set_wind_segments(vec![
+            ballistics_engine::wind::WindSegment::new(20.0, 270.0, 500.0),
+            ballistics_engine::wind::WindSegment::new(10.0, 90.0, 100.0),
+        ]);
+        solver
+            .solve()
+            .unwrap_or_else(|error| panic!("valid unsorted segments failed in {mode}: {error}"));
+    }
+}
+
+#[test]
+fn mba1292_maximum_finite_wind_angle_does_not_overflow_conversion() {
+    for (mode, use_rk4, use_adaptive_rk45) in [
+        ("Euler", false, false),
+        ("RK4", true, false),
+        ("RK45", true, true),
+    ] {
+        let inputs = BallisticInputs {
+            use_rk4,
+            use_adaptive_rk45,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(10.0);
         solver.set_wind_segments(vec![ballistics_engine::wind::WindSegment::new(
-            f64::NAN, 90.0, 100.0,
+            10.0,
+            f64::MAX,
+            100.0,
         )]);
 
-        let error = solver
-            .solve()
-            .expect_err("a non-finite segmented wind must not leave a stale finite result");
-        assert!(
-            error.to_string().contains("non-finite state"),
-            "unexpected {mode} segmented-wind error: {error}"
-        );
+        solver.solve().unwrap_or_else(|error| {
+            panic!("finite maximum wind angle failed in {mode}: {error}")
+        });
     }
 }
