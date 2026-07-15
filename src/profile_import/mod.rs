@@ -5,11 +5,11 @@
 //! specification for interoperability; no upstream schema files or code are
 //! vendored (the a7p project is LGPL-3.0, this crate is MIT OR Apache-2.0).
 
-// Task 1 (MBA-1323) lands this module ahead of its consumer: the a7p parser
-// added in Task 2 is what calls md5_hex/parse_message/etc. Until then these
-// pub(crate) items have no caller, so silence dead_code rather than let the
-// lint gate flag intentionally-not-yet-wired scaffolding.
-#[allow(dead_code)]
+mod a7p;
 mod md5;
-#[allow(dead_code)]
 mod wire;
+
+pub use a7p::{
+    parse_a7p, wrap_payload, A7pBcType, A7pDocument, A7pError, A7pProfile, EnvelopeStatus,
+    UnknownField,
+};
