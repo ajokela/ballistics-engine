@@ -3298,15 +3298,23 @@ fn drag_table_from_profile(
 /// Convert a profile's stored velocity-BC breakpoints ([`ProfileData::bc_segments`]) into the
 /// engine's velocity-banded [`BCSegmentData`] schedule.
 ///
-/// Mirrors the ArcherBC2 "coefficient row" convention preserved by `A7pProfile::bc_rows()`:
-/// each row's velocity marks the point *below which* the row's BC stops applying and the next
-/// (lower-velocity) row's BC takes over. Concretely, after sorting descending by velocity, row
-/// `i`'s band is `[breakpoint(i+1), breakpoint(i-1))` — the fastest row's band is open-ended
-/// upward and the slowest row's band is open-ended down to zero. Velocities convert m/s -> fps
-/// (`BCSegmentData`'s unit, matching `parse_bc_segment`). The fastest row's upper bound uses
-/// the same 5000 fps top sentinel as `BCSegmentEstimator::estimate_bc_segments` (comfortably
-/// above any realistic muzzle velocity), floored against the row's own velocity so an
-/// unrealistically fast import still gets a valid (non-empty) top band.
+/// Mirrors the ArcherBC2 "coefficient row" convention preserved by `A7pProfile::bc_rows()`,
+/// which matches standard multi-BC velocity tables (Applied Ballistics/Kestrel-style): each
+/// row's OWN velocity is the point *at and above which* that row's BC applies, down to the
+/// next (lower-velocity) row's own velocity, which is where the next row's BC takes over.
+/// Concretely, after sorting descending by velocity, row `i`'s band is
+/// `[breakpoint(i), breakpoint(i-1))` — the fastest row's band is open-ended upward (its own
+/// velocity is a floor, not a ceiling: it still governs a muzzle velocity measured higher than
+/// its own characterization point) and the SLOWEST row's band is forced open-ended down to
+/// zero (overriding its own stated velocity as a lower bound) so the full velocity axis is
+/// covered with no gap. This is deliberately non-overlapping and gapless, unlike naively
+/// pairing each row with its neighbor's velocity on both sides.
+///
+/// Velocities convert m/s -> fps (`BCSegmentData`'s unit, matching `parse_bc_segment`). The
+/// fastest row's upper bound uses the same 5000 fps top sentinel as
+/// `BCSegmentEstimator::estimate_bc_segments` (comfortably above any realistic muzzle
+/// velocity), floored to strictly exceed the row's own velocity so an unrealistically fast
+/// import still gets a valid (non-empty) top band.
 fn bc_segments_from_profile(rows: &[ProfileBcSegment]) -> Vec<BCSegmentData> {
     const MPS_TO_FPS: f64 = 3.280_839_895;
     const TOP_SENTINEL_FPS: f64 = 5000.0;
@@ -3322,11 +3330,11 @@ fn bc_segments_from_profile(rows: &[ProfileBcSegment]) -> Vec<BCSegmentData> {
         .enumerate()
         .map(|(i, &(bc, v))| {
             let velocity_max = if i == 0 {
-                v.max(TOP_SENTINEL_FPS)
+                v.max(TOP_SENTINEL_FPS) + 1.0
             } else {
                 sorted[i - 1].1
             };
-            let velocity_min = if i + 1 == n { 0.0 } else { sorted[i + 1].1 };
+            let velocity_min = if i + 1 == n { 0.0 } else { v };
             BCSegmentData {
                 velocity_min,
                 velocity_max,
@@ -11073,6 +11081,103 @@ mod bc_segment_parse_tests {
         assert!(parse_bc_segment("abc:1400:0.2", UnitSystem::Imperial).is_err());
         assert!(parse_bc_segment("1000:xyz:0.2", UnitSystem::Imperial).is_err());
         assert!(parse_bc_segment("1000:1400:bc", UnitSystem::Imperial).is_err());
+    }
+}
+
+#[cfg(test)]
+mod profile_bc_segments_and_drag_curve_consumption_tests {
+    use super::*;
+
+    /// bc_segments_from_profile must produce a gapless, non-overlapping partition of
+    /// [0, +inf) — the failure mode of an earlier draft was an overlap between the fastest
+    /// and slowest bands (each half-open band's [min, max) must exactly abut its neighbors).
+    #[test]
+    fn bands_are_gapless_and_non_overlapping_for_two_rows() {
+        let rows = vec![
+            ProfileBcSegment {
+                bc: 0.5,
+                velocity_mps: 900.0,
+            },
+            ProfileBcSegment {
+                bc: 0.2,
+                velocity_mps: 300.0,
+            },
+        ];
+        let segs = bc_segments_from_profile(&rows);
+        assert_eq!(segs.len(), 2);
+
+        let fast = &segs[0];
+        let slow = &segs[1];
+        assert!((fast.bc_value - 0.5).abs() < 1e-9);
+        assert!((slow.bc_value - 0.2).abs() < 1e-9);
+
+        // Slowest band starts at absolute zero, not at its own stated velocity.
+        assert_eq!(slow.velocity_min, 0.0);
+        // The two bands share exactly one boundary (no gap, no overlap).
+        assert_eq!(slow.velocity_max, fast.velocity_min);
+        // Fastest band's own velocity is its floor (extends up to/above muzzle), not a
+        // midpoint or the other row's velocity.
+        let expected_floor_fps = 900.0 * 3.280_839_895;
+        assert!((fast.velocity_min - expected_floor_fps).abs() < 1e-6);
+        assert!(fast.velocity_max > expected_floor_fps);
+
+        // Sample a velocity from each band and confirm exactly one segment claims it.
+        for probe in [fast.velocity_min + 10.0, slow.velocity_max - 10.0] {
+            let hits = segs
+                .iter()
+                .filter(|s| probe >= s.velocity_min && probe < s.velocity_max)
+                .count();
+            assert_eq!(hits, 1, "velocity {probe} fps must be claimed by exactly one band");
+        }
+    }
+
+    #[test]
+    fn single_row_covers_the_entire_velocity_axis() {
+        let rows = vec![ProfileBcSegment {
+            bc: 0.3,
+            velocity_mps: 800.0,
+        }];
+        let segs = bc_segments_from_profile(&rows);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].velocity_min, 0.0);
+        assert!(segs[0].velocity_max > 800.0 * 3.280_839_895);
+    }
+
+    #[test]
+    fn unsorted_input_rows_are_sorted_by_velocity() {
+        // File order deliberately reversed (slowest first) — output must still be
+        // fastest-first with correct banding, independent of input order.
+        let rows = vec![
+            ProfileBcSegment {
+                bc: 0.2,
+                velocity_mps: 300.0,
+            },
+            ProfileBcSegment {
+                bc: 0.5,
+                velocity_mps: 900.0,
+            },
+        ];
+        let segs = bc_segments_from_profile(&rows);
+        assert!((segs[0].bc_value - 0.5).abs() < 1e-9);
+        assert!((segs[1].bc_value - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drag_table_from_profile_builds_a_valid_table() {
+        let points = vec![
+            ProfileDragPoint { mach: 0.5, cd: 0.23 },
+            ProfileDragPoint { mach: 1.2, cd: 0.45 },
+            ProfileDragPoint { mach: 3.0, cd: 0.28 },
+        ];
+        let table = drag_table_from_profile(&points).expect("valid table");
+        assert_eq!(table.mach_values, vec![0.5, 1.2, 3.0]);
+        assert_eq!(table.cd_values, vec![0.23, 0.45, 0.28]);
+    }
+
+    #[test]
+    fn drag_table_from_profile_rejects_degenerate_input() {
+        let points = vec![ProfileDragPoint { mach: 0.5, cd: 0.23 }];
+        assert!(drag_table_from_profile(&points).is_err());
     }
 }
 
