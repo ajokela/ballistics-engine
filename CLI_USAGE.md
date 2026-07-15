@@ -1034,9 +1034,11 @@ Find the effective muzzle velocity that produces a measured drop at a known rang
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| --measured-drop | Measured drop in MILs (positive = below LOS) | Required |
+| --measured-drop | Measured drop at `--range` (MIL by default; follows `--drop-unit` in multi-observation mode) | Required |
 | --range | Range where drop was measured | Required |
-| --bc | Ballistic coefficient | Required |
+| --observed | Additional observed impact `RANGE:DROP` (repeatable) — enables joint MV+BC calibration | None |
+| --drop-unit | Drop unit for `--measured-drop`/`--observed` in multi-observation mode (`mil`/`moa`/`in`) | mil |
+| --bc | Ballistic coefficient (starting value; fitted when observations allow) | Required |
 | --drag-model | Drag model (G1/G7) | g1 |
 | --mass | Bullet mass | Required |
 | --diameter | Bullet diameter | Required |
@@ -1140,6 +1142,86 @@ accepts (`G1`, `G6`, `G7`, `G8`), and the crate feature flags this binary was co
 
 Only these two tools are exposed in this pass; other CLI subcommands (Monte Carlo, BC
 estimation, true velocity, profile import, and so on) are not wrapped as MCP tools yet.
+#### Joint MV + BC Calibration (multiple observed impacts)
+
+A single observed drop cannot separate muzzle velocity from ballistic
+coefficient — mid-range (fully supersonic) drops are dominated by time of flight,
+which is set by muzzle velocity, while BC only bites once the bullet bleeds into
+the transonic region. Supply **two or more** observed impacts with the repeatable
+`--observed RANGE:DROP` flag and `true-velocity` fits **both** muzzle velocity and
+BC jointly against the real forward model (a full trajectory solve per candidate),
+using damped Gauss-Newton (Levenberg-Marquardt).
+
+The primary `--range`/`--measured-drop` pair is the first observation; each
+`--observed` adds another. `RANGE` follows `--units` (yd imperial / m metric) and
+`DROP` follows `--drop-unit` (`mil` default, or `moa` / `in`). This mode is always
+computed locally.
+
+```bash
+# .308 168gr — three drops spanning supersonic -> near-transonic
+./ballistics true-velocity \
+  --range 300 --measured-drop 1.30 \   # first observation (yd : mil)
+  --observed 600:4.40 \                # second observation
+  --observed 900:9.00 \                # third observation
+  --bc 0.45 --drag-model g1 \          # starting BC (fitted from here)
+  --mass 168 --diameter 0.308
+
+# MOA drops instead of MILs
+./ballistics true-velocity \
+  --range 300 --measured-drop 4.47 \
+  --observed 600:15.1 --observed 900:30.9 \
+  --drop-unit moa \
+  --bc 0.45 --mass 168 --diameter 0.308
+```
+
+Example output:
+```
+=== VELOCITY + BC TRUING (multi-observation) ===
+
+  Fitted muzzle velocity:    2676.2 fps
+  Fitted BC:                 0.4813  (input 0.4500)
+
+  Range (yd)  Observed (mil)  Predicted (mil)   Resid (mil)
+  --------------------------------------------------------
+       300.0           1.300           1.274        -0.026
+       600.0           4.400           4.415        +0.015
+       900.0           9.000           8.997        -0.003
+  --------------------------------------------------------
+  RMS residual: 0.018 mil   |   iterations: 4
+
+  Joint MV+BC fit, excellent: RMS residual 0.018 mil, conditioning 148
+  Diagnostics: BC sensitivity ratio 0.3013, conditioning 148
+```
+
+**Identifiability / honest refusal.** Before fitting BC, the command measures how
+strongly the observation set constrains it: a *BC sensitivity ratio* (relative
+influence of a fractional BC change vs a fractional MV change on the predicted
+drops) and a *condition number* (collinearity of the MV and BC effects). If the
+observations are all short and closely spaced — so a BC change is indistinguishable
+from an MV change — the command **refuses the joint fit**, fits muzzle velocity
+only, holds BC at the input value, and prints the reason. It never reports a
+BC pulled out of ill-conditioned data as if it were precise. To constrain BC, add
+a longer-range / transonic observation.
+
+```
+=== VELOCITY + BC TRUING (multi-observation) ===
+
+  Fitted muzzle velocity:    2675.6 fps
+  BC:                        0.4500  (held; not fitted)
+  ...
+  MV-only fit, excellent: RMS residual 0.005 mil (BC held fixed)
+  Note: observations do not constrain BC (BC sensitivity ratio 0.09 < 0.20
+        threshold); BC held at input 0.450. Add a longer-range / transonic
+        observation to fit BC.
+```
+
+`-o json` reports the fitted values, per-observation residuals, RMS, the
+identifiability diagnostics, and a self-describing `legend` with unit-labelled
+field names (`range_yd`, `observed_drop_mil`, `predicted_drop_mil`,
+`residual_mil`, `rms_residual_mil`, `fitted_muzzle_velocity` + `velocity_unit`).
+
+> With zero `--observed` flags the command behaves exactly as the classic
+> single-observation velocity truing described above.
 
 ## Output Formats
 
