@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "status": "error",
+  "error": {
+    "code": "unsupported_schema_version",
+    "message": "unsupported schema_version 2; expected 1",
+    "path": "$.schema_version",
+    "line": null,
+    "column": null
+  }
+}

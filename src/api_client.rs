@@ -227,7 +227,7 @@ impl ApiClient {
     /// Create a new API client
     ///
     /// # Arguments
-    /// * `base_url` - Base URL of the Flask API (e.g., "https://api.ballistics.7.62x51mm.sh")
+    /// * `base_url` - Base URL of the Flask API (e.g., <https://api.ballistics.7.62x51mm.sh>)
     /// * `timeout_secs` - Request timeout in seconds
     pub fn new(base_url: &str, timeout_secs: u64) -> Self {
         // Normalize URL by removing trailing slash

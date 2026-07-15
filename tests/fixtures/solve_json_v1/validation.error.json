@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "status": "error",
+  "error": {
+    "code": "invalid_value",
+    "message": "value must be finite and greater than zero",
+    "path": "$.projectile.mass_kg",
+    "line": null,
+    "column": null
+  }
+}

@@ -1,0 +1,1 @@
+{"schema_version":1,"projectile":{"mass_kg":0.01134,"diameter_m":0.00782,"drag_model":"G7","ballistic_coefficient":0.243},"rifle":{"muzzle_velocity_mps":823.0},"shot":{"max_range_m":100.0},"atmosphere":{},"wind":{},"solver":{},"effects":{},"sampling":{}}

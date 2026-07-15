@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "engine_version": "0.24.1",
+  "status": "ok",
+  "resolved_request": {
+    "schema_version": 1,
+    "projectile": {
+      "mass_kg": 0.01134,
+      "diameter_m": 0.00782,
+      "length_m": 0.031,
+      "drag_model": "G7",
+      "ballistic_coefficient": 0.243
+    },
+    "rifle": {
+      "muzzle_velocity_mps": 823.0,
+      "sight_height_m": 0.05,
+      "muzzle_height_m": 1.2,
+      "twist_rate_m_per_turn": 0.2032,
+      "twist_direction": "right"
+    },
+    "shot": {
+      "max_range_m": 50.0,
+      "muzzle_angle_rad": 0.001,
+      "aim_azimuth_rad": 0.0,
+      "shot_azimuth_rad": 0.0,
+      "shooting_angle_rad": 0.0,
+      "cant_angle_rad": 0.0,
+      "target_height_m": 1.25,
+      "ground_threshold_m": -100.0
+    },
+    "atmosphere": {
+      "altitude_m": 0.0,
+      "temperature_k": 293.15,
+      "pressure_pa": 100000.0,
+      "relative_humidity": 0.4
+    },
+    "wind": {
+      "speed_mps": 4.0,
+      "direction_from_rad": 1.5707963267948966,
+      "vertical_speed_mps": 0.0
+    },
+    "solver": {
+      "method": "rk45",
+      "time_step_s": 0.001
+    },
+    "effects": {
+      "magnus": false,
+      "coriolis": false,
+      "enhanced_spin_drift": false
+    },
+    "sampling": {
+      "interval_m": 10.0
+    }
+  },
+  "assumptions": [
+    {
+      "code": "default_applied",
+      "message": "Constant vertical wind speed defaulted to 0 m/s.",
+      "path": "$.wind.vertical_speed_mps"
+    }
+  ],
+  "warnings": [
+    {
+      "code": "rk45_time_step_ignored",
+      "message": "Adaptive RK45 owns its time step; the explicitly supplied fixed time step is retained in resolved_request but ignored by integration.",
+      "path": "$.solver.time_step_s"
+    }
+  ],
+  "summary": {
+    "actual_range_m": 50.0,
+    "maximum_height_m": 1.2314367365919499,
+    "time_of_flight_s": 0.06191400316677915,
+    "terminal_speed_mps": 792.4430484357767,
+    "terminal_energy_j": 3560.5671350304387,
+    "stability_factor": 4.095309067995591,
+    "termination": "max_range"
+  },
+  "samples": [
+    {
+      "distance_m": 0.0,
+      "time_s": 0.0,
+      "speed_mps": 823.0,
+      "energy_j": 3840.45543,
+      "drop_m": 0.050000000000000044,
+      "windage_m": 0.0,
+      "mach": 2.394233725500156,
+      "flags": []
+    },
+    {
+      "distance_m": 10.0,
+      "time_s": 0.012197377805682618,
+      "speed_mps": 816.8392329582448,
+      "energy_j": 3783.1733052739432,
+      "drop_m": 0.040742960729524214,
+      "windage_m": -0.0001868137743607008,
+      "mach": 2.376311105541079,
+      "flags": []
+    },
+    {
+      "distance_m": 20.0,
+      "time_s": 0.024490886649346125,
+      "speed_mps": 810.7044270019984,
+      "energy_j": 3726.56025733682,
+      "drop_m": 0.03301960051891939,
+      "windage_m": -0.0007581517006449226,
+      "mach": 2.358464010377234,
+      "flags": []
+    },
+    {
+      "distance_m": 30.0,
+      "time_s": 0.036874337229338305,
+      "speed_mps": 804.593589005882,
+      "energy_j": 3670.592682471306,
+      "drop_m": 0.02673698121022916,
+      "windage_m": -0.0016892565722438574,
+      "mach": 2.3406866416999925,
+      "flags": []
+    },
+    {
+      "distance_m": 40.0,
+      "time_s": 0.04934840082774317,
+      "speed_mps": 798.5064745026451,
+      "energy_j": 3615.263384294388,
+      "drop_m": 0.021911378886555033,
+      "windage_m": -0.002982813517493525,
+      "mach": 2.32297828831648,
+      "flags": []
+    },
+    {
+      "distance_m": 50.0,
+      "time_s": 0.06191400316677915,
+      "speed_mps": 792.4430484357767,
+      "energy_j": 3560.5671350304387,
+      "drop_m": 0.018563263408050146,
+      "windage_m": -0.004642525425267659,
+      "mach": 2.3053388482419077,
+      "flags": [
+        "terminal"
+      ]
+    }
+  ]
+}

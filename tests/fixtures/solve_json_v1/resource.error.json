@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "status": "error",
+  "error": {
+    "code": "resource_limit",
+    "message": "trajectory observation limit of 10000 exceeded (would produce 50001)",
+    "path": "$.sampling.interval_m",
+    "line": null,
+    "column": null
+  }
+}

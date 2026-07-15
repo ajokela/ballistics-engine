@@ -9,13 +9,14 @@ if [[ "$(uname)" == "Darwin" ]]; then
 fi
 cd "$(dirname "$0")/../fuzz"
 TARGETS=(robustness_inputs robustness_ffi robustness_montecarlo invariant_monotonic \
-         invariant_symmetry differential_prev analytic_vacuum solver_zero)
+         invariant_symmetry differential_prev analytic_vacuum solver_zero \
+         solve_json_parser solve_v1_hostile)
 for t in "${TARGETS[@]}"; do
   echo "==> building $t"
   cargo +nightly fuzz build --sanitizer none "$t"
 done
 for t in "${TARGETS[@]}"; do
   echo "==> smoke-running $t"
-  cargo +nightly fuzz run --sanitizer none "$t" -- -runs=20000 -max_total_time=20
+  cargo +nightly fuzz run --sanitizer none "$t" -- -runs=20000 -max_total_time=20 -timeout=5
 done
 echo "all fuzz targets built and smoke-ran clean"

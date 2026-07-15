@@ -1,0 +1,27 @@
+// Minimal Lattice consumer for the solve-json v1 process protocol.
+//
+// Run from the ballistics-engine repository root after `cargo build`:
+//   /path/to/clat examples/solve_json_v1_lattice.lat
+//
+// Lattice's current shell() API accepts one command string rather than separate argv/stdin
+// values. This example therefore redirects only a trusted, checked-in fixture at a fixed engine
+// path. A production adapter must use the planned shell-free exec_argv API for dynamic paths or
+// request bodies.
+
+fn main() {
+    let process = shell("./target/debug/ballistics solve-json < tests/fixtures/solve_json_v1/representative.request.json")
+    let exit_code = process.get("exit_code")
+    let envelope = json_parse(process.get("stdout"))
+
+    if exit_code == 0 && envelope.get("status") == "ok" {
+        let summary = envelope.get("summary")
+        print("range_m=" + to_string(summary.get("actual_range_m")))
+        print("time_s=" + to_string(summary.get("time_of_flight_s")))
+        print("terminal_speed_mps=" + to_string(summary.get("terminal_speed_mps")))
+        print("termination=" + summary.get("termination"))
+    } else {
+        let error = envelope.get("error")
+        print("solve-json failed (exit " + to_string(exit_code) + "): " + error.get("code"))
+        print(error.get("message"))
+    }
+}

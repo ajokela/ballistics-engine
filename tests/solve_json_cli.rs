@@ -174,6 +174,10 @@ fn schema_shape_and_semantic_failures_use_request_exit_status() {
     invalid["projectile"]["mass_kg"] = json!(-1.0);
     cases.push((invalid, "invalid_value", "$.projectile.mass_kg"));
 
+    let mut conflicting = request_value();
+    conflicting["shot"]["zero_distance_m"] = json!(25.0);
+    cases.push((conflicting, "conflicting_fields", "$.shot"));
+
     for (request, code, path) in cases {
         let output = run(&["solve-json"], &encode(&request));
         assert_exit(&output, 2);

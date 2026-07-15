@@ -13,6 +13,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
 ballistics-engine = { path = ".." }
 engine_prev = { package = "ballistics-engine", version = "=0.21.5" }
 
@@ -74,6 +75,20 @@ bench = false
 [[bin]]
 name = "solver_zero"
 path = "fuzz_targets/solver_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "solve_json_parser"
+path = "fuzz_targets/solve_json_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "solve_v1_hostile"
+path = "fuzz_targets/solve_v1_hostile.rs"
 test = false
 doc = false
 bench = false

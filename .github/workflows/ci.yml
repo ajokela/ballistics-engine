@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-quality:
+    name: Rust quality and protocol compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Check changed-file whitespace
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            git diff --check "${{ github.event.before }}...${{ github.sha }}"
+          else
+            git diff --check HEAD^ HEAD
+          fi
+
+      # Build the feature-complete named binary before integration tests. A few legacy PDF tests
+      # execute target/debug/ballistics directly instead of CARGO_BIN_EXE_ballistics.
+      - name: Build all targets and features
+        run: cargo build --locked --all-targets --all-features
+
+      - name: Test all targets and features
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Strict Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Strict Clippy for fuzz support code
+        run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --lib --tests -- -D warnings
+
+      - name: Build documentation
+        run: RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps --all-features
+
+      - name: Verify the offline minimal-feature process protocol
+        run: cargo test --locked --no-default-features --test solve_json_cli
+
+  fuzz-smoke:
+    name: Build and smoke-run every fuzz target
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Test fuzz support code and frozen reproducers
+        run: cargo +nightly test --locked --manifest-path fuzz/Cargo.toml --lib --tests
+
+      - name: Build and smoke-run fuzz targets
+        run: scripts/fuzz-smoke.sh

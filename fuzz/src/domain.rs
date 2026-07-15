@@ -41,22 +41,27 @@ fn hostile_launch_angle(u: &mut Unstructured) -> Result<f64> {
 /// envelope so invariant/differential/solver harnesses spend budget on meaningful
 /// solves rather than rejected garbage.
 pub fn valid_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
-    let mut b = BallisticInputs::default();
-    b.bc_value = ranged(u, 0.1, 1.2)?;
-    b.bc_type = if u.arbitrary()? { DragModel::G7 } else { DragModel::G1 };
-    b.bullet_mass = ranged(u, 0.001, 0.05)?;      // kg (~15..770 gr)
-    b.bullet_diameter = ranged(u, 0.004, 0.014)?; // m (.17...55 cal)
-    b.bullet_length = ranged(u, 0.010, 0.050)?;   // m
-    b.muzzle_velocity = ranged(u, 200.0, 1500.0)?;// m/s
-    b.muzzle_angle = ranged(u, -0.05, 0.30)?;     // rad
-    b.target_distance = ranged(u, 50.0, 2000.0)?; // m (loop-count bound)
-    b.twist_rate = ranged(u, 5.0, 20.0)?;         // in/turn, > 0
-    b.temperature = ranged(u, -40.0, 50.0)?;      // C
-    b.pressure = ranged(u, 800.0, 1100.0)?;       // hPa
-    b.altitude = ranged(u, 0.0, 4000.0)?;         // m
-    b.humidity = ranged(u, 0.0, 1.0)?;            // FRACTION
-    b.use_rk4 = true;
-    Ok(b)
+    Ok(BallisticInputs {
+        bc_value: ranged(u, 0.1, 1.2)?,
+        bc_type: if u.arbitrary()? {
+            DragModel::G7
+        } else {
+            DragModel::G1
+        },
+        bullet_mass: ranged(u, 0.001, 0.05)?, // kg (~15..770 gr)
+        bullet_diameter: ranged(u, 0.004, 0.014)?, // m (.17...55 cal)
+        bullet_length: ranged(u, 0.010, 0.050)?, // m
+        muzzle_velocity: ranged(u, 200.0, 1500.0)?, // m/s
+        muzzle_angle: ranged(u, -0.05, 0.30)?, // rad
+        target_distance: ranged(u, 50.0, 2000.0)?, // m (loop-count bound)
+        twist_rate: ranged(u, 5.0, 20.0)?,    // in/turn, > 0
+        temperature: ranged(u, -40.0, 50.0)?, // C
+        pressure: ranged(u, 800.0, 1100.0)?,  // hPa
+        altitude: ranged(u, 0.0, 4000.0)?,    // m
+        humidity: ranged(u, 0.0, 1.0)?,       // FRACTION
+        use_rk4: true,
+        ..Default::default()
+    })
 }
 
 /// Physics fields are `wild` (NaN/Inf/negative/extreme) to test clean rejection;
@@ -64,35 +69,63 @@ pub fn valid_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
 /// into a multi-minute solve. Runtime termination is covered by `solver_zero` +
 /// libFuzzer's own `-timeout`.
 pub fn hostile_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
-    let mut b = BallisticInputs::default();
-    b.bc_value = wild(u)?;
-    b.bullet_mass = wild(u)?;
-    b.bullet_diameter = wild(u)?;
-    b.bullet_length = wild(u)?;
-    b.muzzle_velocity = wild(u)?;
-    b.muzzle_angle = hostile_launch_angle(u)?;
-    b.twist_rate = wild(u)?;
-    b.temperature = wild(u)?;
-    b.pressure = wild(u)?;
-    b.altitude = wild(u)?;
-    b.humidity = wild(u)?;
-    b.target_distance = ranged(u, 10.0, 3000.0)?; // bounded on purpose
-    b.use_rk4 = true;
-    Ok(b)
+    Ok(BallisticInputs {
+        bc_value: wild(u)?,
+        bullet_mass: wild(u)?,
+        bullet_diameter: wild(u)?,
+        bullet_length: wild(u)?,
+        muzzle_velocity: wild(u)?,
+        muzzle_angle: hostile_launch_angle(u)?,
+        twist_rate: wild(u)?,
+        temperature: wild(u)?,
+        pressure: wild(u)?,
+        altitude: wild(u)?,
+        humidity: wild(u)?,
+        target_distance: ranged(u, 10.0, 3000.0)?, // bounded on purpose
+        use_rk4: true,
+        ..Default::default()
+    })
 }
 
 /// Every scalar output is finite and physically non-negative; every trajectory
 /// point is finite. Panics (= a libFuzzer crash) on violation.
 pub fn assert_finite_sane(r: &TrajectoryResult) {
-    assert!(r.max_range.is_finite() && r.max_range >= 0.0, "bad max_range {}", r.max_range);
+    assert!(
+        r.max_range.is_finite() && r.max_range >= 0.0,
+        "bad max_range {}",
+        r.max_range
+    );
     assert!(r.max_height.is_finite(), "max_height not finite");
-    assert!(r.time_of_flight.is_finite() && r.time_of_flight >= 0.0, "bad time_of_flight {}", r.time_of_flight);
-    assert!(r.impact_velocity.is_finite() && r.impact_velocity >= 0.0, "bad impact_velocity {}", r.impact_velocity);
-    assert!(r.impact_energy.is_finite() && r.impact_energy >= 0.0, "bad impact_energy {}", r.impact_energy);
+    assert!(
+        r.time_of_flight.is_finite() && r.time_of_flight >= 0.0,
+        "bad time_of_flight {}",
+        r.time_of_flight
+    );
+    assert!(
+        r.impact_velocity.is_finite() && r.impact_velocity >= 0.0,
+        "bad impact_velocity {}",
+        r.impact_velocity
+    );
+    assert!(
+        r.impact_energy.is_finite() && r.impact_energy >= 0.0,
+        "bad impact_energy {}",
+        r.impact_energy
+    );
     for (i, p) in r.points.iter().enumerate() {
-        assert!(p.position.x.is_finite() && p.position.y.is_finite() && p.position.z.is_finite(), "point {i} position not finite");
-        assert!(p.velocity_magnitude.is_finite() && p.velocity_magnitude >= 0.0, "point {i} bad velocity {}", p.velocity_magnitude);
-        assert!(p.time.is_finite() && p.time >= 0.0, "point {i} bad time {}", p.time);
+        assert!(
+            p.position.x.is_finite() && p.position.y.is_finite() && p.position.z.is_finite(),
+            "point {i} position not finite"
+        );
+        assert!(
+            p.velocity_magnitude.is_finite() && p.velocity_magnitude >= 0.0,
+            "point {i} bad velocity {}",
+            p.velocity_magnitude
+        );
+        assert!(
+            p.time.is_finite() && p.time >= 0.0,
+            "point {i} bad time {}",
+            p.time
+        );
     }
 }
 
