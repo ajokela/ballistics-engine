@@ -1,0 +1,36 @@
+{
+  "id": "analytic_vacuum_flat_drop",
+  "description": "Zero-drag, flat-fire vacuum parabola. Bullet drop, time-of-flight and speed at three downrange stations vs the closed-form kinematics for constant gravity. Anchors the integrator + frame with an unimpeachable exact reference.",
+  "source": {
+    "kind": "analytic",
+    "citation": "Closed-form projectile motion under constant gravity g = 9.80665 m/s^2 with no aerodynamic force. Flat launch (0 deg): tof = x/v0, drop y = -0.5*g*(x/v0)^2, speed = sqrt(v0^2 + (g*t)^2). g matches src/constants.rs G_ACCEL_MPS2.",
+    "retrieved": "2026-07-15"
+  },
+  "inputs": {
+    "muzzle_velocity_mps": 800.0,
+    "bullet_mass_kg": 0.010886,
+    "bullet_diameter_m": 0.0078232,
+    "bullet_length_m": 0.03048,
+    "bc_value": 0.5,
+    "bc_type": "G1",
+    "muzzle_angle_rad": 0.0,
+    "shooting_angle_rad": 0.0,
+    "twist_rate_in": 0.0,
+    "temperature_c": 15.0,
+    "pressure_hpa": 1013.25,
+    "humidity_frac": 0.0,
+    "zero_drag": true
+  },
+  "expectations": [
+    {"observable": "drop_m", "range_m": 300.0, "value": -0.6895300781, "tol_abs": 0.003,
+     "tolerance_justification": "RK4/RK45 integrate a quadratic (constant acceleration) exactly; the only residual is the harness's linear interpolation of a parabola between ~8 m-spaced stored points (~0.1 mm). 3 mm is a comfortable ceiling."},
+    {"observable": "drop_m", "range_m": 600.0, "value": -2.7581203125, "tol_abs": 0.003,
+     "tolerance_justification": "Same as 300 m; interpolation error scales with local curvature which is constant here."},
+    {"observable": "drop_m", "range_m": 900.0, "value": -6.2057707031, "tol_abs": 0.003,
+     "tolerance_justification": "Same as 300 m."},
+    {"observable": "tof_s", "range_m": 900.0, "value": 1.1250000000, "tol_abs": 0.0001,
+     "tolerance_justification": "With zero drag horizontal speed is constant, so t is exactly linear in x and the interpolation is exact to rounding; 0.1 ms guards step placement."},
+    {"observable": "velocity_mps", "range_m": 900.0, "value": 800.0760686601, "tol_abs": 0.01,
+     "tolerance_justification": "Speed grows only through the vertical component g*t; interpolation of the near-constant magnitude is sub-mm/s. 1 cm/s ceiling."}
+  ]
+}

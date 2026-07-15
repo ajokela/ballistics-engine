@@ -58,6 +58,10 @@ pdf = ["dep:printpdf"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 profile-import = []
+# MBA-1318: gate the golden-reference physics validation harness (tests/golden_physics.rs).
+# Non-default so the normal `cargo test` build stays fast and dependency-free; the harness
+# uses only serde/serde_json, which are already core dependencies.
+validation = []
 
 [dependencies]
 nalgebra = "0.35"
