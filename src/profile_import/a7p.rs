@@ -20,6 +20,10 @@ const SCALE_PRESSURE: f64 = 10.0; // c_zero_air_pressure -> hPa
 const SCALE_COEF: f64 = 10_000.0; // coef bc_cd -> BC or Cd
 const SCALE_TCOEFF: f64 = 1000.0; // c_t_coeff -> % per 15 C
 const SCALE_DISTANCE: f64 = 100.0; // distances -> meters
+// CUSTOM coef rows reuse the `bc_cd` field for Cd (same SCALE_COEF as BC/Cd) but the `mv`
+// field means Mach number, not m/s, and uses its own scale (empirically confirmed, same
+// footing as the other scale factors above — see the module doc).
+const SCALE_MACH: f64 = 10_000.0; // coef mv (CUSTOM only) -> Mach number
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum A7pBcType {
@@ -119,6 +123,16 @@ impl A7pProfile {
         self.coef_rows_raw
             .iter()
             .map(|&(bc, mv)| (f64::from(bc) / SCALE_COEF, f64::from(mv) / SCALE_VELOCITY))
+            .collect()
+    }
+
+    /// CUSTOM interpretation: (Cd, Mach), file order preserved. Only meaningful when
+    /// `bc_type == A7pBcType::Custom` — for G1/G7 files the same raw rows mean
+    /// (BC, velocity m/s), see `bc_rows()`.
+    pub fn custom_rows(&self) -> Vec<(f64, f64)> {
+        self.coef_rows_raw
+            .iter()
+            .map(|&(cd, mv)| (f64::from(cd) / SCALE_COEF, f64::from(mv) / SCALE_MACH))
             .collect()
     }
 }
@@ -440,6 +454,59 @@ mod tests {
         let mut junk = vec![b'z'; 32];
         junk.extend_from_slice(&[0xff, 0xff, 0xff]);
         assert!(parse_a7p(&junk).is_err());
+    }
+
+    /// A synthetic CUSTOM (bc_type=2) profile: two coef rows whose raw ints are chosen so
+    /// the G1/G7 scale (mv / 10) and the CUSTOM scale (mv / 10_000) would decode to visibly
+    /// different numbers — catching a copy-paste of `bc_rows()`'s scale factor into
+    /// `custom_rows()`.
+    fn synthetic_custom_profile_bytes() -> Vec<u8> {
+        let mut p = Vec::new();
+        enc_str(1, "CUSTOM CURVE", &mut p);
+        enc_i32(24, 2, &mut p); // CUSTOM
+        let mut row1 = Vec::new();
+        enc_i32(1, 5000, &mut row1); // Cd 0.5000
+        enc_i32(2, 5000, &mut row1); // Mach 0.5000
+        enc_bytes(27, &row1, &mut p);
+        let mut row2 = Vec::new();
+        enc_i32(1, 2300, &mut row2); // Cd 0.2300
+        enc_i32(2, 30000, &mut row2); // Mach 3.0000
+        enc_bytes(27, &row2, &mut p);
+        let mut payload = Vec::new();
+        enc_bytes(1, &p, &mut payload);
+        payload
+    }
+
+    #[test]
+    fn custom_rows_uses_the_mach_scale_not_the_velocity_scale() {
+        let file = wrap_payload(&synthetic_custom_profile_bytes());
+        let doc = parse_a7p(&file).expect("parse");
+        let p = &doc.profile;
+        assert!(matches!(p.bc_type, A7pBcType::Custom));
+        assert_eq!(p.coef_rows_raw, vec![(5000, 5000), (2300, 30000)]);
+
+        let rows = p.custom_rows();
+        assert_eq!(rows.len(), 2);
+        assert!((rows[0].0 - 0.5).abs() < 1e-9); // Cd
+        assert!((rows[0].1 - 0.5).abs() < 1e-9); // Mach 0.5, NOT 500.0 m/s
+        assert!((rows[1].0 - 0.23).abs() < 1e-9);
+        assert!((rows[1].1 - 3.0).abs() < 1e-9); // Mach 3.0, NOT 3000.0 m/s
+
+        // bc_rows() on the same raw data uses the OTHER scale (m/s /10, not Mach /10_000) —
+        // demonstrates the two interpretations are genuinely distinct, not aliases.
+        let bc_interpretation = p.bc_rows();
+        assert!((bc_interpretation[0].1 - 500.0).abs() < 1e-9);
+        assert!((bc_interpretation[1].1 - 3000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_rows_is_empty_when_no_coef_rows_present() {
+        let mut p = Vec::new();
+        enc_i32(24, 2, &mut p); // CUSTOM, no rows
+        let mut payload = Vec::new();
+        enc_bytes(1, &p, &mut payload);
+        let doc = parse_a7p(&wrap_payload(&payload)).expect("parse");
+        assert!(doc.profile.custom_rows().is_empty());
     }
 
     #[test]
