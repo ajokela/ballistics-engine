@@ -44,6 +44,9 @@ pub use trajectory_sampling::MAX_TRAJECTORY_SAMPLES;
 pub mod cli_api;
 pub mod moving_target;
 mod drag_model;
+// The C ABI. Gated behind the default-on `ffi` feature so a binary that links two versions of
+// this crate can disable it on one edge and avoid duplicate #[no_mangle] symbols.
+#[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod solve_json;
 pub mod solve_v1;

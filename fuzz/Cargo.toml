@@ -10,11 +10,21 @@ cargo-fuzz = true
 # Detach from the parent workspace so `cargo build` at the repo root ignores this crate.
 [workspace]
 
+[features]
+# Enable the current engine's C ABI (src/ffi.rs) so `robustness_ffi` can fuzz it. OFF by default:
+# `differential_prev` links BOTH this engine and the 0.21.5 reference engine, and the 0.21.5 crate
+# ships the same `ballistics_*` #[no_mangle] C symbols unconditionally. With the current engine's
+# ffi on, both copies would collide (duplicate-symbol link error). `robustness_ffi` does not link
+# the reference engine, so enabling ffi only for that target (via `required-features`) is safe.
+ffi = ["ballistics-engine/ffi"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 serde_json = "1"
-ballistics-engine = { path = ".." }
+# ffi is OFF here (default-features = false + explicit non-ffi defaults) to avoid the dual-engine
+# duplicate-symbol collision in differential_prev; robustness_ffi re-enables it via `ffi`.
+ballistics-engine = { path = "..", default-features = false, features = ["online", "pdf", "profile-import"] }
 engine_prev = { package = "ballistics-engine", version = "=0.21.5" }
 
 [lib]
@@ -36,6 +46,9 @@ path = "fuzz_targets/robustness_ffi.rs"
 test = false
 doc = false
 bench = false
+# Requires the current engine's C ABI. Gating it keeps `cargo test`/`cargo fuzz build` for the
+# other targets (esp. differential_prev) from turning ffi on and colliding with the 0.21.5 symbols.
+required-features = ["ffi"]
 
 [[bin]]
 name = "robustness_montecarlo"

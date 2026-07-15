@@ -53,12 +53,17 @@ exclude = [
 ]
 
 [features]
-default = ["online", "pdf", "profile-import"]
+default = ["online", "pdf", "profile-import", "ffi"]
 online = ["dep:ureq"]
 pdf = ["dep:printpdf"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 profile-import = []
+# The C ABI (src/ffi.rs). Default-on so iOS/xcframework/staticlib/cdylib consumers keep the
+# `ballistics_*` #[no_mangle] symbols. A downstream that links two versions of this crate into
+# one binary (e.g. the differential fuzz target) must turn it off on the extra edge, since the
+# no_mangle symbols would otherwise collide.
+ffi = []
 # MBA-1318: gate the golden-reference physics validation harness (tests/golden_physics.rs).
 # Non-default so the normal `cargo test` build stays fast and dependency-free; the harness
 # uses only serde/serde_json, which are already core dependencies.
