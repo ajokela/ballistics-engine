@@ -1,0 +1,107 @@
+{
+  "id": "xref_g7_transonic_reach",
+  "description": "G7 .308 175 gr flat-fire pushed past transonic. The bullet crosses Mach 1.2->1.0 around 700-950 m; the 1100/1250/1400 m stations are just subsonic (~Mach 0.8-0.9), so drop/TOF/speed there reflect having integrated correctly THROUGH the transonic drag rise. Tolerances relaxed vs the pure-supersonic cases.",
+  "source": {
+    "kind": "cross-implementation",
+    "citation": "py-ballisticcalc 2.2.10 (open-source point-mass solver; default RK4 engine; standard G1/G7 drag tables). Flat-fire, horizontal-LOS geometry maps py-bc height/windage/velocity/time onto engine McCoy drop/drift/speed/tof; wind direction_from = engine wind_angle + 180 deg.",
+    "retrieved": "2026-07-15",
+    "generator_version": "py-ballisticcalc==2.2.10 via data/validation/generators/gen_pybc_refs.py"
+  },
+  "inputs": {
+    "muzzle_angle_rad": 0.0,
+    "shooting_angle_rad": 0.0,
+    "twist_rate_in": 0.0,
+    "is_twist_right": true,
+    "sight_height_m": 0.0,
+    "muzzle_height_m": 0.0,
+    "altitude_m": 0.0,
+    "temperature_c": 15.0,
+    "pressure_hpa": 1013.25,
+    "humidity_frac": 0.0,
+    "wind_speed_mps": 0.0,
+    "wind_angle_rad": 0.0,
+    "vertical_wind_mps": 0.0,
+    "use_enhanced_spin_drift": false,
+    "enable_advanced_effects": false,
+    "muzzle_velocity_mps": 790.0,
+    "bullet_mass_kg": 0.01134,
+    "bullet_diameter_m": 0.0078232,
+    "bullet_length_m": 0.031496,
+    "bc_value": 0.243,
+    "bc_type": "G7"
+  },
+  "expectations": [
+    {
+      "observable": "drop_m",
+      "range_m": 1100.0,
+      "value": -20.614698,
+      "tolerance_justification": "Drop, transonic reach: the trajectory has integrated THROUGH the Mach 1.2->1.0 drag rise to reach these (now subsonic) stations, so drop accumulates any Mach-dependent G7-table interpolation difference between the solvers on top of the RK45-vs-RK4 integrator gap. 3 cm floor + 1.2% (~observed 0.04% x ~25) still fails a >~1.5% drop regression.",
+      "tol_abs": 0.03,
+      "tol_rel": 0.012
+    },
+    {
+      "observable": "tof_s",
+      "range_m": 1100.0,
+      "value": 2.389461,
+      "tolerance_justification": "Time of flight: integrator + drag-curve differences accumulate in flight time; observed cross-solver difference ~0.03%. 3 ms floor + 0.6% keeps ~15x head-room.",
+      "tol_abs": 0.003,
+      "tol_rel": 0.006
+    },
+    {
+      "observable": "velocity_mps",
+      "range_m": 1100.0,
+      "value": 301.757074,
+      "tolerance_justification": "Velocity, transonic reach: retained speed is the most drag-sensitive observable, carried through the transonic drag rise. 0.8 m/s floor + 1%.",
+      "tol_abs": 0.8,
+      "tol_rel": 0.01
+    },
+    {
+      "observable": "drop_m",
+      "range_m": 1250.0,
+      "value": -30.194037,
+      "tolerance_justification": "Drop, transonic reach: the trajectory has integrated THROUGH the Mach 1.2->1.0 drag rise to reach these (now subsonic) stations, so drop accumulates any Mach-dependent G7-table interpolation difference between the solvers on top of the RK45-vs-RK4 integrator gap. 3 cm floor + 1.2% (~observed 0.04% x ~25) still fails a >~1.5% drop regression.",
+      "tol_abs": 0.03,
+      "tol_rel": 0.012
+    },
+    {
+      "observable": "tof_s",
+      "range_m": 1250.0,
+      "value": 2.901914,
+      "tolerance_justification": "Time of flight: integrator + drag-curve differences accumulate in flight time; observed cross-solver difference ~0.03%. 3 ms floor + 0.6% keeps ~15x head-room.",
+      "tol_abs": 0.003,
+      "tol_rel": 0.006
+    },
+    {
+      "observable": "velocity_mps",
+      "range_m": 1250.0,
+      "value": 285.428922,
+      "tolerance_justification": "Velocity, transonic reach: retained speed is the most drag-sensitive observable, carried through the transonic drag rise. 0.8 m/s floor + 1%.",
+      "tol_abs": 0.8,
+      "tol_rel": 0.01
+    },
+    {
+      "observable": "drop_m",
+      "range_m": 1400.0,
+      "value": -42.497365,
+      "tolerance_justification": "Drop, transonic reach: the trajectory has integrated THROUGH the Mach 1.2->1.0 drag rise to reach these (now subsonic) stations, so drop accumulates any Mach-dependent G7-table interpolation difference between the solvers on top of the RK45-vs-RK4 integrator gap. 3 cm floor + 1.2% (~observed 0.04% x ~25) still fails a >~1.5% drop regression.",
+      "tol_abs": 0.03,
+      "tol_rel": 0.012
+    },
+    {
+      "observable": "tof_s",
+      "range_m": 1400.0,
+      "value": 3.443265,
+      "tolerance_justification": "Time of flight: integrator + drag-curve differences accumulate in flight time; observed cross-solver difference ~0.03%. 3 ms floor + 0.6% keeps ~15x head-room.",
+      "tol_abs": 0.003,
+      "tol_rel": 0.006
+    },
+    {
+      "observable": "velocity_mps",
+      "range_m": 1400.0,
+      "value": 270.971086,
+      "tolerance_justification": "Velocity, transonic reach: retained speed is the most drag-sensitive observable, carried through the transonic drag rise. 0.8 m/s floor + 1%.",
+      "tol_abs": 0.8,
+      "tol_rel": 0.01
+    }
+  ]
+}
