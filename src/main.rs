@@ -1027,13 +1027,29 @@ enum Commands {
 
     /// Calculate effective muzzle velocity from observed drop
     TrueVelocity {
-        /// Measured drop in MILs at the target range
+        /// Measured drop at the target range. Unit is MIL by default; in
+        /// multi-observation mode (see --observed) it follows --drop-unit and
+        /// counts as the first observation.
         #[arg(long)]
         measured_drop: f64,
 
         /// Range at which drop was measured (yards for imperial, meters for metric)
         #[arg(long)]
         range: f64,
+
+        /// Additional observed impact "RANGE:DROP" for joint MV+BC calibration
+        /// (MBA-1316). Repeatable. RANGE follows --units (yd/m); DROP follows
+        /// --drop-unit. With >=1 --observed the command fits muzzle velocity and
+        /// (when the observations constrain it) ballistic coefficient jointly via
+        /// the real forward model. With zero --observed it behaves exactly as the
+        /// classic single-observation velocity truing.
+        #[arg(long = "observed", value_name = "RANGE:DROP", action = clap::ArgAction::Append)]
+        observed: Vec<String>,
+
+        /// Unit for --measured-drop and every --observed drop in multi-observation
+        /// mode. Ignored in single-observation mode (which is always MIL).
+        #[arg(long = "drop-unit", default_value = "mil")]
+        drop_unit: DropUnit,
 
         /// Ballistic coefficient
         #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
@@ -1751,6 +1767,47 @@ enum OutputFormat {
     Csv,
     Table,
     Pdf,
+}
+
+/// Unit in which observed drops are supplied to (and residuals reported from)
+/// `true-velocity`'s multi-observation joint calibration (MBA-1316). The
+/// historical single-observation path is always MIL, so `mil` is the default and
+/// leaves that path byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DropUnit {
+    /// Milliradians (angular)
+    Mil,
+    /// Minutes of angle (angular, true 1/60°)
+    Moa,
+    /// Inches below line of sight (linear drop at the target)
+    In,
+}
+
+impl DropUnit {
+    /// Short label used in tables/JSON/CSV.
+    fn label(self) -> &'static str {
+        match self {
+            DropUnit::Mil => "mil",
+            DropUnit::Moa => "moa",
+            DropUnit::In => "in",
+        }
+    }
+
+    /// Express a linear vertical drop below the line of sight (`drop_m`, meters)
+    /// at horizontal distance `z_m` (meters) in this unit. Angular units use the
+    /// same small-angle convention the engine's MIL output has always used
+    /// (`drop/range`), so `mil` matches the legacy single-observation contract
+    /// exactly; `moa` is true minutes of angle and `in` is the linear drop itself.
+    fn express_drop_m(self, drop_m: f64, z_m: f64) -> f64 {
+        match self {
+            // (drop_m / z_m) radians * 1000 mrad/rad
+            DropUnit::Mil => (drop_m / z_m) * 1000.0,
+            // (drop_m / z_m) radians * (180/pi) deg/rad * 60 min/deg
+            DropUnit::Moa => (drop_m / z_m) * (180.0 / std::f64::consts::PI) * 60.0,
+            // linear drop, meters -> inches
+            DropUnit::In => drop_m / 0.0254,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -4856,6 +4913,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::TrueVelocity {
             measured_drop,
             range,
+            observed,
+            drop_unit,
             bc,
             drag_model,
             mass,
@@ -4993,7 +5052,32 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(not(feature = "online"))]
             let use_local = true; // Always use local when online feature not available
 
-            if use_local {
+            if !observed.is_empty() {
+                // MBA-1316: one or more --observed impacts -> joint MV+BC
+                // calibration via the real forward model (always computed
+                // locally; the online API only supports single-observation
+                // velocity truing).
+                run_multi_observation_truing(
+                    measured_drop,
+                    range_yd,
+                    &observed,
+                    drop_unit,
+                    bc,
+                    drag_model,
+                    weight_gr,
+                    caliber_in,
+                    zero_yd,
+                    sight_in,
+                    temp_f,
+                    press_inhg,
+                    humidity,
+                    alt_ft,
+                    &bc_segments,
+                    chrono_fps,
+                    units,
+                    output,
+                )?;
+            } else if use_local {
                 // Run local calculation
                 eprintln!("Calculating effective velocity locally...");
 
@@ -8237,6 +8321,69 @@ fn calculate_drop_at_velocity(
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
 ) -> Result<f64, Box<dyn Error>> {
+    // Preserve the historical MIL contract by delegating to the shared linear-drop
+    // core (MBA-1316). `interpolate = false` reproduces the original "first point
+    // at or past the range" sampling, so this path stays byte-identical.
+    let (drop_m, z) = solve_trajectory_drop(
+        velocity_fps,
+        bc,
+        drag_model,
+        mass_gr,
+        diameter_in,
+        zero_distance_yd,
+        range_yd,
+        sight_height_in,
+        temperature_f,
+        pressure_inhg,
+        humidity,
+        altitude_ft,
+        bc_segments,
+        false,
+    )?;
+
+    // Convert to MILs: mil = (drop_inches / 36 / range_yards) * 1000
+    // Or equivalently: mil = (drop_m / range_m) * 1000
+    let drop_mil = (drop_m / z) * 1000.0;
+
+    Ok(drop_mil)
+}
+
+/// Shared forward-model core for velocity/BC truing (MBA-1316).
+///
+/// Solves the real trajectory for the given `(velocity_fps, bc)` candidate under
+/// the supplied load/atmosphere and returns `(drop_m, z_m)` where `drop_m` is the
+/// linear vertical distance below the line of sight (positive = below LOS) at the
+/// target range and `z_m` is the horizontal distance actually reached (~range_m).
+/// Callers convert to MIL / MOA / inches as needed. This is the exact assembly
+/// the single-observation binary search has always used, factored out so the
+/// multi-observation joint fit reuses identical physics.
+///
+/// When `interpolate` is false the returned point is the first trajectory sample
+/// at or past the target range (the historical behaviour). When true, the drop
+/// and horizontal distance are linearly interpolated to land exactly on the
+/// target range, removing the ~v*dt spatial quantization that otherwise
+/// stair-steps the cost surface — essential for the multi-observation joint fit,
+/// whose finite-difference Jacobian would otherwise be dominated by that noise.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing velocity-truing compatibility helper"
+)]
+fn solve_trajectory_drop(
+    velocity_fps: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_distance_yd: f64,
+    range_yd: f64,
+    sight_height_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    interpolate: bool,
+) -> Result<(f64, f64), Box<dyn Error>> {
     // Convert to SI units
     let velocity_ms = velocity_fps * 0.3048;
     let mass_kg = mass_gr * 0.0000647989;
@@ -8303,26 +8450,40 @@ fn calculate_drop_at_velocity(
 
     let result = solver.solve()?;
 
-    // Find the point at target range
-    let target_point = result
+    // Find the first point at or past the target range.
+    let idx = result
         .points
         .iter()
-        .find(|p| p.position.x >= range_m)
+        .position(|p| p.position.x >= range_m)
         .ok_or("Trajectory didn't reach target range")?;
+
+    // Determine the horizontal distance z and bullet height at the target range.
+    let (z, bullet_y) = if interpolate && idx > 0 {
+        // Linearly interpolate between the bracketing samples to land exactly on
+        // range_m (removes ~v*dt spatial quantization).
+        let p0 = &result.points[idx - 1];
+        let p1 = &result.points[idx];
+        let x0 = p0.position.x;
+        let x1 = p1.position.x;
+        let denom = x1 - x0;
+        if denom.abs() < f64::EPSILON {
+            (p1.position.x, p1.position.y)
+        } else {
+            let frac = (range_m - x0) / denom;
+            let y = p0.position.y + frac * (p1.position.y - p0.position.y);
+            (range_m, y)
+        }
+    } else {
+        let p = &result.points[idx];
+        (p.position.x, p.position.y)
+    };
 
     // Calculate drop relative to the line of sight. The trajectory was already launched at the
     // solved zero angle, so the LOS for this zero solve is horizontal at sight_height_m.
-    let z = target_point.position.x;
-    let bullet_y = target_point.position.y;
-
     // Drop = LOS height - bullet position (positive = below LOS)
     let drop_m = sight_height_m - bullet_y;
 
-    // Convert to MILs: mil = (drop_inches / 36 / range_yards) * 1000
-    // Or equivalently: mil = (drop_m / range_m) * 1000
-    let drop_mil = (drop_m / z) * 1000.0;
-
-    Ok(drop_mil)
+    Ok((drop_m, z))
 }
 
 /// Result of local velocity truing calculation
@@ -8440,6 +8601,773 @@ fn calculate_true_velocity_local(
         calculated_drop_mil: last_calculated_drop,
         confidence: confidence.to_string(),
     })
+}
+
+// ============================================================================
+// MBA-1316: multi-observation joint MV + BC calibration (truing v2)
+// ============================================================================
+//
+// The classic `true-velocity` path fits muzzle velocity from a single observed
+// drop while BC is held fixed. Mid-range (fully supersonic) drops are dominated
+// by time of flight and therefore constrain muzzle velocity; long-range /
+// transonic drops are where BC bites. With observations spread across those
+// regimes we can separate the two. When the spread is too narrow to tell them
+// apart we refuse the joint fit and fit muzzle velocity only, saying so.
+
+// Solver / fit bounds. MV bounds bracket everything from subsonic pistol to
+// hyper-velocity varmint loads; BC bounds match the CLI's --bc validator range.
+const TRUING_MV_MIN_FPS: f64 = 1000.0;
+const TRUING_MV_MAX_FPS: f64 = 5000.0;
+const TRUING_BC_MIN: f64 = 0.05;
+const TRUING_BC_MAX: f64 = 2.0;
+const TRUING_MAX_ITERS: usize = 40;
+
+// Identifiability gates (calibrated against real .30-cal data, MBA-1316).
+//
+// `sensitivity_ratio = ||bc*d(drop)/d(bc)|| / ||mv*d(drop)/d(mv)||` measures how
+// much a fractional BC change moves the predicted drops relative to a fractional
+// MV change. `condition_number = (1+|c|)/(1-|c|)` (|c| = correlation of the raw
+// MV/BC Jacobian columns) measures collinearity. BOTH must pass to attempt the
+// joint fit.
+//
+// Empirical basis (.308 168gr @ 2700/0.475, ~0.03 mil observation noise):
+//   * 300/600/900 -> sens 0.29, cond 112 -> BC recovered to ~2%   (JOINT)
+//   * 300/600/900/1000 -> sens 0.33, cond 214 -> BC to <0.1%      (JOINT)
+//   * 300/400/500 -> sens 0.16, cond 282 -> BC error ~3%          (MV-ONLY)
+//   * 200/250/300 -> sens 0.12, cond 2337 -> BC error ~12%        (MV-ONLY)
+// The gates sit between the "recovers to ~2%" band and the "several-percent
+// garbage" band. They are heuristics: a set that just clears them still carries
+// more BC uncertainty than a set that clears them comfortably.
+const TRUING_MIN_BC_SENSITIVITY_RATIO: f64 = 0.20;
+const TRUING_MAX_CONDITION_NUMBER: f64 = 1.0e3;
+
+/// A single observed impact used for truing: range (internal yards) and the
+/// measured drop below line of sight expressed in the caller's drop unit.
+#[derive(Debug, Clone, Copy)]
+struct TruingObservation {
+    range_yd: f64,
+    drop: f64,
+}
+
+/// Parse an `--observed RANGE:DROP` token. RANGE is in the caller's distance
+/// units (yards imperial / meters metric) and is normalized to internal yards;
+/// DROP stays in the caller's drop unit. Returns a user-facing error string on
+/// malformed input so the CLI can report cleanly instead of panicking.
+fn parse_truing_observation(s: &str, units: UnitSystem) -> Result<TruingObservation, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "invalid --observed '{s}': expected RANGE:DROP (e.g. 600:5.1)"
+        ));
+    }
+    let range: f64 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --observed range '{}' in '{s}'", parts[0]))?;
+    let drop: f64 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --observed drop '{}' in '{s}'", parts[1]))?;
+    if !range.is_finite() || !drop.is_finite() {
+        return Err(format!("invalid --observed '{s}': values must be finite"));
+    }
+    let range_yd = match units {
+        UnitSystem::Imperial => range,
+        UnitSystem::Metric => range / 0.9144,
+    };
+    Ok(TruingObservation { range_yd, drop })
+}
+
+/// Fixed load / atmosphere for a truing fit. The two free parameters (muzzle
+/// velocity and BC) are supplied per prediction so the fitter can vary them.
+struct TruingForwardModel<'a> {
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_yd: f64,
+    sight_in: f64,
+    temp_f: f64,
+    press_inhg: f64,
+    humidity: f64,
+    alt_ft: f64,
+    bc_segments: &'a Option<Vec<BCSegmentData>>,
+    drop_unit: DropUnit,
+}
+
+impl TruingForwardModel<'_> {
+    /// Predicted drop (in the configured drop unit) at `range_yd` for the given
+    /// muzzle velocity and BC, using the real trajectory solver.
+    fn predict(&self, mv_fps: f64, bc: f64, range_yd: f64) -> Result<f64, Box<dyn Error>> {
+        let (drop_m, z_m) = solve_trajectory_drop(
+            mv_fps,
+            bc,
+            self.drag_model,
+            self.mass_gr,
+            self.diameter_in,
+            self.zero_yd,
+            range_yd,
+            self.sight_in,
+            self.temp_f,
+            self.press_inhg,
+            self.humidity,
+            self.alt_ft,
+            self.bc_segments,
+            true, // interpolate: smooth forward model for the fitter
+        )?;
+        Ok(self.drop_unit.express_drop_m(drop_m, z_m))
+    }
+
+    /// Sum of squared residuals (predicted - observed) over all observations.
+    fn cost(&self, mv: f64, bc: f64, obs: &[TruingObservation]) -> Result<f64, Box<dyn Error>> {
+        let mut c = 0.0;
+        for o in obs {
+            let r = self.predict(mv, bc, o.range_yd)? - o.drop;
+            c += r * r;
+        }
+        Ok(c)
+    }
+}
+
+/// One-parameter (muzzle velocity) least-squares fit with BC held fixed. Damped
+/// Gauss-Newton with a central finite-difference derivative; robust because drop
+/// is monotonic in muzzle velocity. Returns `(mv_fps, iterations, converged)`.
+fn fit_truing_mv_only(
+    model: &TruingForwardModel<'_>,
+    obs: &[TruingObservation],
+    bc: f64,
+    mv_init: f64,
+) -> Result<(f64, usize, bool), Box<dyn Error>> {
+    let mut mv = mv_init.clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
+    let mut converged = false;
+    let mut iters = 0;
+    for i in 0..TRUING_MAX_ITERS {
+        iters = i + 1;
+        let h = (mv * 1e-3).max(0.5);
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for o in obs {
+            let r = model.predict(mv, bc, o.range_yd)? - o.drop;
+            let dp = model.predict(mv + h, bc, o.range_yd)?;
+            let dm = model.predict(mv - h, bc, o.range_yd)?;
+            let j = (dp - dm) / (2.0 * h);
+            num += j * r;
+            den += j * j;
+        }
+        if den < 1e-12 {
+            break;
+        }
+        // Gauss-Newton step, limited to keep the solver in a sane regime.
+        let step = (-num / den).clamp(-300.0, 300.0);
+        let new_mv = (mv + step).clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
+        if (new_mv - mv).abs() < 0.05 {
+            mv = new_mv;
+            converged = true;
+            break;
+        }
+        mv = new_mv;
+    }
+    Ok((mv, iters, converged))
+}
+
+/// Identifiability diagnostics for BC at the operating point `(mv, bc)`.
+///
+/// Returns `(sensitivity_ratio, condition_number)`:
+///
+/// * `sensitivity_ratio = ||bc*d(drop)/d(bc)|| / ||mv*d(drop)/d(mv)||` — the
+///   relative influence of a fractional BC change vs a fractional MV change on
+///   the predicted drops. Small => BC barely moves the drops (weak-signal mode).
+///
+/// * `condition_number = (1+|c|)/(1-|c|)` where `c` is the correlation between
+///   the raw MV and BC Jacobian columns. Large => the two columns point the same
+///   way, so a BC change can be undone by an MV change and the pair is not
+///   separable (collinearity mode). This is magnitude-independent, unlike the
+///   scaled-normal-matrix condition, so it actually tracks observation spread.
+fn truing_identifiability(
+    model: &TruingForwardModel<'_>,
+    obs: &[TruingObservation],
+    mv: f64,
+    bc: f64,
+) -> Result<(f64, f64), Box<dyn Error>> {
+    let hmv = (mv * 1e-3).max(0.5);
+    let hbc = (bc * 1e-3).max(1e-4);
+    let (mut n_mv, mut n_bc, mut cross) = (0.0, 0.0, 0.0);
+    for o in obs {
+        let jmv = (model.predict(mv + hmv, bc, o.range_yd)?
+            - model.predict(mv - hmv, bc, o.range_yd)?)
+            / (2.0 * hmv);
+        let jbc = (model.predict(mv, bc + hbc, o.range_yd)?
+            - model.predict(mv, bc - hbc, o.range_yd)?)
+            / (2.0 * hbc);
+        n_mv += jmv * jmv;
+        n_bc += jbc * jbc;
+        cross += jmv * jbc;
+    }
+    let norm_mv = n_mv.sqrt();
+    let norm_bc = n_bc.sqrt();
+    let sensitivity_ratio = if mv * norm_mv > 0.0 {
+        (bc * norm_bc) / (mv * norm_mv)
+    } else {
+        0.0
+    };
+    // Correlation between the raw Jacobian columns.
+    let condition_number = if norm_mv > 0.0 && norm_bc > 0.0 {
+        let c = (cross / (norm_mv * norm_bc)).clamp(-1.0, 1.0).abs();
+        if (1.0 - c) > 1e-15 {
+            (1.0 + c) / (1.0 - c)
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        // One column is numerically zero: the missing parameter is unconstrained.
+        f64::INFINITY
+    };
+    Ok((sensitivity_ratio, condition_number))
+}
+
+/// Two-parameter (muzzle velocity, BC) joint fit via Levenberg-Marquardt
+/// (damped Gauss-Newton) with central finite-difference Jacobian. Only the
+/// diagonal of the normal matrix is damped (classic Marquardt scaling). Returns
+/// `(mv_fps, bc, iterations, converged)`.
+fn fit_truing_joint(
+    model: &TruingForwardModel<'_>,
+    obs: &[TruingObservation],
+    mv_init: f64,
+    bc_init: f64,
+) -> Result<(f64, f64, usize, bool), Box<dyn Error>> {
+    let mut mv = mv_init.clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
+    let mut bc = bc_init.clamp(TRUING_BC_MIN, TRUING_BC_MAX);
+    let mut lambda = 1e-3;
+    let mut cur_cost = model.cost(mv, bc, obs)?;
+    let mut converged = false;
+    let mut iters = 0;
+
+    for it in 0..TRUING_MAX_ITERS {
+        iters = it + 1;
+        let hmv = (mv * 1e-3).max(0.5);
+        let hbc = (bc * 1e-3).max(1e-4);
+        // Build J^T J (a00,a01,a11) and J^T r (g0,g1).
+        let (mut a00, mut a01, mut a11) = (0.0, 0.0, 0.0);
+        let (mut g0, mut g1) = (0.0, 0.0);
+        for o in obs {
+            let r = model.predict(mv, bc, o.range_yd)? - o.drop;
+            let jmv = (model.predict(mv + hmv, bc, o.range_yd)?
+                - model.predict(mv - hmv, bc, o.range_yd)?)
+                / (2.0 * hmv);
+            let jbc = (model.predict(mv, bc + hbc, o.range_yd)?
+                - model.predict(mv, bc - hbc, o.range_yd)?)
+                / (2.0 * hbc);
+            a00 += jmv * jmv;
+            a01 += jmv * jbc;
+            a11 += jbc * jbc;
+            g0 += jmv * r;
+            g1 += jbc * r;
+        }
+
+        // Inner loop: grow lambda until a step reduces the cost.
+        let mut accepted = false;
+        for _ in 0..30 {
+            let m00 = a00 + lambda * a00.max(1e-12);
+            let m11 = a11 + lambda * a11.max(1e-12);
+            let det = m00 * m11 - a01 * a01;
+            if det.abs() < 1e-20 {
+                lambda *= 10.0;
+                continue;
+            }
+            // delta = -(JtJ + lambda*diag)^-1 * Jtr
+            let dmv = -(m11 * g0 - a01 * g1) / det;
+            let dbc = -(-a01 * g0 + m00 * g1) / det;
+            let nmv = (mv + dmv).clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
+            let nbc = (bc + dbc).clamp(TRUING_BC_MIN, TRUING_BC_MAX);
+            let nc = model.cost(nmv, nbc, obs)?;
+            if nc < cur_cost {
+                let rel_change =
+                    (nmv - mv).abs() / mv.max(1.0) + (nbc - bc).abs() / bc.max(1e-3);
+                mv = nmv;
+                bc = nbc;
+                cur_cost = nc;
+                lambda = (lambda * 0.5).max(1e-9);
+                accepted = true;
+                if rel_change < 1e-6 {
+                    converged = true;
+                }
+                break;
+            }
+            lambda *= 4.0;
+            if lambda > 1e12 {
+                break;
+            }
+        }
+        if !accepted {
+            // No downhill step exists within damping range: we are at (or
+            // numerically indistinguishable from) a local optimum.
+            converged = true;
+            break;
+        }
+        if converged {
+            break;
+        }
+    }
+    Ok((mv, bc, iters, converged))
+}
+
+/// Final report produced by a multi-observation truing fit.
+struct MultiTruingReport {
+    fitted_mv_fps: f64,
+    fitted_bc: f64,
+    bc_input: f64,
+    bc_fitted: bool,
+    observations: Vec<TruingObservation>,
+    predicted: Vec<f64>,
+    residuals: Vec<f64>,
+    rms: f64,
+    iterations: usize,
+    converged: bool,
+    sensitivity_ratio: f64,
+    condition_number: f64,
+    quality: String,
+    reason: String,
+}
+
+/// Orchestrate the multi-observation joint MV+BC calibration and print the
+/// result. `measured_drop`/`range_yd` are the primary observation (drop already
+/// in `drop_unit`); `observed` holds the additional `RANGE:DROP` tokens.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable true-velocity CLI command shape"
+)]
+fn run_multi_observation_truing(
+    measured_drop: f64,
+    range_yd: f64,
+    observed: &[String],
+    drop_unit: DropUnit,
+    bc_input: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_yd: f64,
+    sight_in: f64,
+    temp_f: f64,
+    press_inhg: f64,
+    humidity: f64,
+    alt_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    chrono_fps: Option<f64>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Assemble the observation set: primary (--range/--measured-drop) first,
+    // then every --observed token.
+    let mut observations: Vec<TruingObservation> = Vec::with_capacity(observed.len() + 1);
+    observations.push(TruingObservation {
+        range_yd,
+        drop: measured_drop,
+    });
+    for token in observed {
+        observations.push(parse_truing_observation(token, units)?);
+    }
+
+    // Validate: finite, positive range, non-zero drop, no duplicate ranges.
+    for o in &observations {
+        if !o.range_yd.is_finite() || o.range_yd <= 0.0 {
+            return Err(format!(
+                "observation range must be a positive finite distance (got {})",
+                o.range_yd
+            )
+            .into());
+        }
+        if !o.drop.is_finite() || o.drop == 0.0 {
+            return Err(
+                "observation drop must be non-zero (a zero drop carries no truing information)"
+                    .to_string()
+                    .into(),
+            );
+        }
+    }
+    for i in 0..observations.len() {
+        for j in (i + 1)..observations.len() {
+            if (observations[i].range_yd - observations[j].range_yd).abs() < 1e-6 {
+                return Err(format!(
+                    "duplicate observation range ({:.3} yd internal): each observation must be at a distinct range",
+                    observations[i].range_yd
+                )
+                .into());
+            }
+        }
+    }
+
+    eprintln!(
+        "Fitting {} observations (joint MV+BC calibration)...",
+        observations.len()
+    );
+
+    let model = TruingForwardModel {
+        drag_model,
+        mass_gr,
+        diameter_in,
+        zero_yd,
+        sight_in,
+        temp_f,
+        press_inhg,
+        humidity,
+        alt_ft,
+        bc_segments,
+        drop_unit,
+    };
+
+    // Step 1: MV-only fit holding BC at the supplied value. This is always
+    // well-posed and gives a good operating point for the identifiability check
+    // and (if BC is identifiable) the joint fit.
+    let mv_init = (TRUING_MV_MIN_FPS + TRUING_MV_MAX_FPS) / 2.0;
+    let (mv0, mv_iters, _mv_conv) = fit_truing_mv_only(&model, &observations, bc_input, mv_init)?;
+    let rms_mv_only = rms_at(&model, &observations, mv0, bc_input)?;
+
+    // Step 2: is BC identifiable from this observation set?
+    let (sensitivity_ratio, condition_number) =
+        truing_identifiability(&model, &observations, mv0, bc_input)?;
+    let bc_identifiable = sensitivity_ratio >= TRUING_MIN_BC_SENSITIVITY_RATIO
+        && condition_number <= TRUING_MAX_CONDITION_NUMBER
+        && condition_number.is_finite();
+
+    // Step 3: joint fit when identifiable, with a guard against a worse or
+    // out-of-bounds result (never report a garbage joint fit).
+    let mut fitted_mv = mv0;
+    let mut fitted_bc = bc_input;
+    let mut bc_fitted = false;
+    let mut iterations = mv_iters;
+    let mut converged = true;
+    let mut reason = String::new();
+
+    if bc_identifiable {
+        let (mv_j, bc_j, iters_j, conv_j) =
+            fit_truing_joint(&model, &observations, mv0, bc_input)?;
+        let rms_joint = rms_at(&model, &observations, mv_j, bc_j)?;
+        let bc_at_bound = bc_j <= TRUING_BC_MIN * 1.001 || bc_j >= TRUING_BC_MAX * 0.999;
+        if !bc_at_bound && rms_joint <= rms_mv_only + 1e-9 {
+            fitted_mv = mv_j;
+            fitted_bc = bc_j;
+            bc_fitted = true;
+            iterations = iters_j;
+            converged = conv_j;
+        } else {
+            // Joint fit did not help (or ran to a bound): keep the honest
+            // MV-only answer rather than a false-precision BC.
+            reason = if bc_at_bound {
+                format!(
+                    "joint fit drove BC to a bound ({bc_j:.3}); BC held at input {bc_input:.3}"
+                )
+            } else {
+                format!(
+                    "joint fit did not improve on the MV-only solution; BC held at input {bc_input:.3}"
+                )
+            };
+        }
+    } else {
+        reason = if !condition_number.is_finite() || condition_number > TRUING_MAX_CONDITION_NUMBER
+        {
+            format!(
+                "observation ranges are too similar to separate MV from BC (condition {condition_number:.3e} > {TRUING_MAX_CONDITION_NUMBER:.0e}); BC held at input {bc_input:.3}"
+            )
+        } else {
+            format!(
+                "observations do not constrain BC (BC sensitivity ratio {sensitivity_ratio:.4} < {TRUING_MIN_BC_SENSITIVITY_RATIO:.2} threshold); BC held at input {bc_input:.3}. Add a longer-range / transonic observation to fit BC."
+            )
+        };
+    }
+
+    // Final residuals at the reported parameters.
+    let mut predicted = Vec::with_capacity(observations.len());
+    let mut residuals = Vec::with_capacity(observations.len());
+    let mut sse = 0.0;
+    for o in &observations {
+        let p = model.predict(fitted_mv, fitted_bc, o.range_yd)?;
+        let r = p - o.drop;
+        predicted.push(p);
+        residuals.push(r);
+        sse += r * r;
+    }
+    let rms = (sse / observations.len() as f64).sqrt();
+
+    let quality = truing_quality_line(bc_fitted, rms, drop_unit, condition_number, converged);
+
+    let report = MultiTruingReport {
+        fitted_mv_fps: fitted_mv,
+        fitted_bc,
+        bc_input,
+        bc_fitted,
+        observations,
+        predicted,
+        residuals,
+        rms,
+        iterations,
+        converged,
+        sensitivity_ratio,
+        condition_number,
+        quality,
+        reason,
+    };
+
+    display_multi_truing_result(&report, drop_unit, units, chrono_fps, output);
+    Ok(())
+}
+
+/// RMS of residuals at a candidate `(mv, bc)`.
+fn rms_at(
+    model: &TruingForwardModel<'_>,
+    obs: &[TruingObservation],
+    mv: f64,
+    bc: f64,
+) -> Result<f64, Box<dyn Error>> {
+    let mut sse = 0.0;
+    for o in obs {
+        let r = model.predict(mv, bc, o.range_yd)? - o.drop;
+        sse += r * r;
+    }
+    Ok((sse / obs.len() as f64).sqrt())
+}
+
+/// Plain-language quality assessment for the fit.
+fn truing_quality_line(
+    bc_fitted: bool,
+    rms: f64,
+    drop_unit: DropUnit,
+    condition_number: f64,
+    converged: bool,
+) -> String {
+    let unit = drop_unit.label();
+    if bc_fitted {
+        let quality = if rms < 0.05 {
+            "excellent"
+        } else if rms < 0.15 {
+            "good"
+        } else if rms < 0.4 {
+            "fair"
+        } else {
+            "poor (observations may be inconsistent)"
+        };
+        let cond = if condition_number.is_finite() {
+            format!("{condition_number:.0}")
+        } else {
+            "inf".to_string()
+        };
+        format!(
+            "Joint MV+BC fit, {quality}: RMS residual {rms:.3} {unit}, conditioning {cond}{}",
+            if converged { "" } else { " (did not fully converge)" }
+        )
+    } else {
+        let quality = if rms < 0.05 {
+            "excellent"
+        } else if rms < 0.15 {
+            "good"
+        } else if rms < 0.4 {
+            "fair"
+        } else {
+            "poor (observations may be inconsistent)"
+        };
+        format!("MV-only fit, {quality}: RMS residual {rms:.3} {unit} (BC held fixed)")
+    }
+}
+
+/// Render a multi-observation truing report as table / JSON / CSV.
+fn display_multi_truing_result(
+    report: &MultiTruingReport,
+    drop_unit: DropUnit,
+    units: UnitSystem,
+    chrono_fps: Option<f64>,
+    output: OutputFormat,
+) {
+    let vel_unit = match units {
+        UnitSystem::Imperial => "fps",
+        UnitSystem::Metric => "m/s",
+    };
+    let range_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let drop_label = drop_unit.label();
+    let mv_display = match units {
+        UnitSystem::Imperial => report.fitted_mv_fps,
+        UnitSystem::Metric => report.fitted_mv_fps * 0.3048,
+    };
+    let range_display = |range_yd: f64| match units {
+        UnitSystem::Imperial => range_yd,
+        UnitSystem::Metric => range_yd * 0.9144,
+    };
+    // Chrono comparison (chrono_fps is already in fps).
+    let (adj_display, adj_pct) = match chrono_fps {
+        Some(c) => {
+            let adj_fps = report.fitted_mv_fps - c;
+            let adj_disp = match units {
+                UnitSystem::Imperial => adj_fps,
+                UnitSystem::Metric => adj_fps * 0.3048,
+            };
+            let pct = if c != 0.0 { adj_fps / c * 100.0 } else { 0.0 };
+            (Some(adj_disp), Some(pct))
+        }
+        None => (None, None),
+    };
+
+    match output {
+        OutputFormat::Json => {
+            let obs_json: Vec<serde_json::Value> = report
+                .observations
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    serde_json::json!({
+                        format!("range_{range_unit}"): range_display(o.range_yd),
+                        format!("observed_drop_{drop_label}"): o.drop,
+                        format!("predicted_drop_{drop_label}"): report.predicted[i],
+                        format!("residual_{drop_label}"): report.residuals[i],
+                    })
+                })
+                .collect();
+
+            let mut json_output = serde_json::json!({
+                "mode": if report.bc_fitted { "joint_mv_bc" } else { "mv_only" },
+                "fitted_muzzle_velocity": mv_display,
+                "velocity_unit": vel_unit,
+                "bc_fitted": report.bc_fitted,
+                "fitted_bc": report.fitted_bc,
+                "input_bc": report.bc_input,
+                "observations": obs_json,
+                format!("rms_residual_{drop_label}"): report.rms,
+                "iterations": report.iterations,
+                "converged": report.converged,
+                "bc_sensitivity_ratio": report.sensitivity_ratio,
+                "condition_number": if report.condition_number.is_finite() {
+                    serde_json::json!(report.condition_number)
+                } else {
+                    serde_json::Value::Null
+                },
+                "quality": report.quality,
+                "legend": {
+                    "units": {
+                        "range": range_unit,
+                        "drop": drop_label,
+                        "velocity": vel_unit,
+                    },
+                },
+            });
+            if !report.reason.is_empty() {
+                json_output["bc_hold_reason"] = serde_json::json!(report.reason);
+            }
+            if let Some(adj) = adj_display {
+                json_output["velocity_adjustment"] = serde_json::json!(adj);
+            }
+            if let Some(pct) = adj_pct {
+                json_output["adjustment_percent"] = serde_json::json!(pct);
+            }
+            match serde_json::to_string_pretty(&json_output) {
+                Ok(s) => println!("{s}"),
+                Err(e) => eprintln!("Error serializing JSON: {e}"),
+            }
+        }
+        OutputFormat::Csv => {
+            println!("range_{range_unit},observed_drop_{drop_label},predicted_drop_{drop_label},residual_{drop_label}");
+            for (i, o) in report.observations.iter().enumerate() {
+                println!(
+                    "{:.1},{:.4},{:.4},{:+.4}",
+                    range_display(o.range_yd),
+                    o.drop,
+                    report.predicted[i],
+                    report.residuals[i]
+                );
+            }
+            println!();
+            println!("fitted_muzzle_velocity_{vel_unit},bc_fitted,fitted_bc,input_bc,rms_residual_{drop_label},iterations,converged,bc_sensitivity_ratio,condition_number");
+            println!(
+                "{:.1},{},{:.4},{:.4},{:.4},{},{},{:.4},{}",
+                mv_display,
+                report.bc_fitted,
+                report.fitted_bc,
+                report.bc_input,
+                report.rms,
+                report.iterations,
+                report.converged,
+                report.sensitivity_ratio,
+                if report.condition_number.is_finite() {
+                    format!("{:.1}", report.condition_number)
+                } else {
+                    "inf".to_string()
+                },
+            );
+        }
+        OutputFormat::Table => {
+            println!();
+            println!("=== VELOCITY + BC TRUING (multi-observation) ===");
+            println!();
+            println!(
+                "  Fitted muzzle velocity: {:>9.1} {}",
+                mv_display, vel_unit
+            );
+            if report.bc_fitted {
+                println!(
+                    "  Fitted BC:              {:>9.4}  (input {:.4})",
+                    report.fitted_bc, report.bc_input
+                );
+            } else {
+                println!(
+                    "  BC:                     {:>9.4}  (held; not fitted)",
+                    report.fitted_bc
+                );
+            }
+            if let Some(adj) = adj_display {
+                println!("  Adjustment from chrono: {:>+9.1} {}", adj, vel_unit);
+                if let Some(pct) = adj_pct {
+                    println!("  Adjustment percentage:  {:>+9.2}%", pct);
+                }
+            }
+            println!();
+            println!(
+                "  {:>10}  {:>14}  {:>14}  {:>12}",
+                format!("Range ({range_unit})"),
+                format!("Observed ({drop_label})"),
+                format!("Predicted ({drop_label})"),
+                format!("Resid ({drop_label})"),
+            );
+            println!("  {}", "-".repeat(56));
+            for (i, o) in report.observations.iter().enumerate() {
+                println!(
+                    "  {:>10.1}  {:>14.3}  {:>14.3}  {:>+12.3}",
+                    range_display(o.range_yd),
+                    o.drop,
+                    report.predicted[i],
+                    report.residuals[i]
+                );
+            }
+            println!("  {}", "-".repeat(56));
+            println!(
+                "  RMS residual: {:.3} {}   |   iterations: {}{}",
+                report.rms,
+                drop_label,
+                report.iterations,
+                if report.converged {
+                    ""
+                } else {
+                    " (not fully converged)"
+                }
+            );
+            println!();
+            println!("  {}", report.quality);
+            if !report.reason.is_empty() {
+                println!("  Note: {}", report.reason);
+            }
+            println!(
+                "  Diagnostics: BC sensitivity ratio {:.4}, conditioning {}",
+                report.sensitivity_ratio,
+                if report.condition_number.is_finite() {
+                    format!("{:.0}", report.condition_number)
+                } else {
+                    "inf".to_string()
+                }
+            );
+            println!();
+        }
+        OutputFormat::Pdf => {
+            eprintln!("Error: PDF output is not supported for velocity truing results.");
+            eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
+        }
+    }
 }
 
 // ============================================================================
