@@ -5,6 +5,50 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-07-15
+
+### Added
+- `.a7p` profile import (`profile import file.a7p` — ArcherBC2 format): zero-dependency
+  MD5 + proto3 wire reader, full honest mapping report, multi-BC velocity bands into
+  profile BC segments, CUSTOM Mach:Cd drag curves end-to-end (profile schema v2, backward
+  compatible).
+- Mover ring: `trajectory --target-speed` per-point ring column (speed x ToF) in
+  table/CSV/JSON (`mover_ring_m`/`mover_ring_mil`), `--adjustment-unit moa` honored;
+  target speed bounded [0,300] mph on every surface.
+- `lead`: powder-temperature flags (native + WASM); WASM `lead` gains the environmental
+  flags (`--temperature`/`--pressure`/`--humidity`/`--altitude`/wind) it never had.
+- WASM `loadDragTable(bytes)`: custom Mach:Cd drag curves in the browser, same CSV parser
+  as the native CLI, auto-applied to trajectory/zero/lead/monte-carlo.
+- Truing v2: `true-velocity --observed RANGE:DROP` (repeatable) — joint MV+BC fit against
+  the real forward model with identifiability gating and per-observation residuals.
+- WEZ mode: `monte-carlo --wez` — P(hit)-vs-range sweep for WxH targets with
+  `--wind-call-error` and per-range variance attribution.
+- MCP server: `ballistics mcp` — zero-dependency Model Context Protocol server over stdio
+  (tools: solve on the solve-json v1 schema, engine_info).
+- solve-json v1: versioned single-solve JSON protocol (library service + `solve-json`
+  stdin transport + compatibility lock).
+- `trajectory --plot [braille|ascii]`: inline terminal charts of drop and drift.
+- Trajectory JSON self-description: top-level `legend` block documenting units and axis
+  conventions (x = lateral, z = downrange, yards) — existing keys unchanged.
+- Golden physics validation harness (`cargo test --features validation`): versioned
+  reference cases (analytic + pinned cross-implementation) with per-source tolerances.
+- npm packaging: `scripts/build-npm.sh` produces the publish-ready `ballistics-engine`
+  package (resumed from 0.13.4).
+
+### Changed
+- Integration divergence guard: `solve()` now returns `Err` for stiff inputs whose
+  accepted steps exceed the physical speed budget (previously could return Ok with
+  non-physical results, e.g. negative terminal range); result postcondition also rejects
+  negative range/time/velocity/energy (MBA-1293).
+- Grain<->gram conversions unified on exact SI constants (~1e-7 relative shift in a few
+  display paths); a guard test bans drifted literals.
+- PDF `--target-speed` now respects `--units metric` (was always mph).
+
+### Fixed
+- wasm_tests.rs brace nesting (tests were lexically nested inside one function).
+- WEZ baseline solve errors propagate instead of panicking.
+- no_std feasibility spike report committed under docs/ (qualified GO).
+
 ## [0.22.14] - 2026-07-08
 
 ### Added
