@@ -110,6 +110,45 @@ fn parse_powder_temp_curve_str(
     Ok(pts)
 }
 
+/// Self-describing units/axes metadata for [`format_trajectory_json`]'s `-o json` output
+/// (MBA-1315), additive: appended as a third top-level key alongside the pre-existing
+/// `trajectory`/`summary` keys, which are unchanged. The WASM `-o json` fields already carry
+/// their unit in the key name (`range_yards`, `drop_inches`, `drift_inches`, ...), so this
+/// block's `units` restates those labels generically (matching the native CLI legacy JSON's
+/// `legend.units`, MBA-1315) and its `axes` states the sign convention those field names don't
+/// spell out on their own.
+///
+/// Sign conventions verified against `crate::wind::wind_vector`'s documented McCoy frame
+/// (x downrange, y up, z right) and the native CLI's crosswind recon (MBA-1315): `drop` is
+/// LOS-relative (`los_height - position.y`), positive when the bullet is below the line of
+/// sight; `drift` is `position.z` directly, positive to the shooter's right, identical in
+/// sign and source to the native CLI legacy JSON's `x`.
+fn trajectory_json_legend(units: UnitSystem) -> serde_json::Value {
+    let (distance, drop, drift, velocity, energy) = match units {
+        UnitSystem::Imperial => ("yd", "in", "in", "fps", "ft-lb"),
+        UnitSystem::Metric => ("m", "cm", "cm", "m/s", "J"),
+    };
+    serde_json::json!({
+        "units": {
+            "range": distance,
+            "drop": drop,
+            "drift": drift,
+            "velocity": velocity,
+            "energy": energy
+        },
+        "axes": {
+            "range": "downrange distance from the muzzle; zero at the muzzle, always increasing.",
+            "drop": "vertical miss from the line of sight; positive means the bullet is below \
+                     the line of sight (has fallen below the aim point). Not the same reference \
+                     as the native CLI legacy JSON's world-frame `y`.",
+            "drift": "lateral miss from the line of sight; positive means to the shooter's \
+                      right (e.g. a crosswind FROM the left, --wind-direction 270, drifts it \
+                      positive; FROM the right, --wind-direction 90, drifts it negative). Same \
+                      sign and source as the native CLI legacy JSON's `x`."
+        }
+    })
+}
+
 #[wasm_bindgen]
 impl WasmBallistics {
     #[wasm_bindgen(constructor)]
@@ -2850,7 +2889,8 @@ impl WasmBallistics {
 
         let output = serde_json::json!({
             "trajectory": points,
-            "summary": summary
+            "summary": summary,
+            "legend": trajectory_json_legend(units),
         });
 
         serde_json::to_string_pretty(&output)

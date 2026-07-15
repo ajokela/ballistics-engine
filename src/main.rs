@@ -1901,6 +1901,80 @@ struct TrajectoryResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     final_yaw_angle: Option<f64>,
     trajectory: Vec<TrajectoryPoint>,
+    /// Self-describing metadata for this document (MBA-1315), additive only: every key/value
+    /// above and every `trajectory[]` point key are unchanged. Appended last so the
+    /// pre-existing fields serialize byte-identically ahead of it. See `TrajectoryLegend` for
+    /// how the unit/axis text was derived (empirically, from controlled crosswind/no-wind
+    /// runs) and CLI_USAGE.md's JSON Format section for the same text with worked examples.
+    legend: TrajectoryLegend,
+}
+
+/// Concrete unit labels and `trajectory[]` axis semantics for one [`TrajectoryResult`]
+/// document (MBA-1315). A field tester's tooling once misread `trajectory[].x`/`z` as feet
+/// and swapped their meaning because the legacy JSON never stated either; this block states
+/// both. Nested under one `legend` key rather than top-level `units`/`axes` keys because
+/// `units` already names the pre-existing "imperial"/"metric" string field on
+/// [`TrajectoryResult`].
+#[derive(Debug, Serialize, Deserialize)]
+struct TrajectoryLegend {
+    /// Concrete unit abbreviation for each numeric quantity family in this document.
+    units: TrajectoryLegendUnits,
+    /// `trajectory[]` point axis semantics, verified empirically (not assumed): a pure
+    /// crosswind run and a no-wind run, comparing which point component moved, in which sign
+    /// direction, against the table output (see `tests/legacy_trajectory_json_contract.rs`).
+    axes: TrajectoryLegendAxes,
+}
+
+/// Unit abbreviation for each numeric quantity family. `distance` applies to
+/// `trajectory[].x`/`y`/`z`, `max_range`, `max_height`, and `spin_drift`; `velocity` to
+/// `trajectory[].velocity` and `impact_velocity`; `energy` to `trajectory[].energy` and
+/// `impact_energy`. Angle fields (`max_yaw_angle`, `max_precession_angle`,
+/// `final_pitch_angle`, `final_yaw_angle`) and time fields are unit-invariant (always
+/// radians / seconds) and are not covered here.
+#[derive(Debug, Serialize, Deserialize)]
+struct TrajectoryLegendUnits {
+    distance: String,
+    velocity: String,
+    energy: String,
+}
+
+/// Axis semantics for `trajectory[]` points. `x` is lateral and `z` is downrange in THIS
+/// output — the reverse of the x=lateral/z=depth convention some 3D tooling assumes, and the
+/// original source of the field-tester misdiagnosis this ticket fixes.
+#[derive(Debug, Serialize, Deserialize)]
+struct TrajectoryLegendAxes {
+    x: String,
+    y: String,
+    z: String,
+}
+
+impl TrajectoryLegend {
+    fn for_units(units: UnitSystem) -> Self {
+        let (distance, velocity, energy) = match units {
+            UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+            UnitSystem::Metric => ("m", "m/s", "J"),
+        };
+        TrajectoryLegend {
+            units: TrajectoryLegendUnits {
+                distance: distance.to_string(),
+                velocity: velocity.to_string(),
+                energy: energy.to_string(),
+            },
+            axes: TrajectoryLegendAxes {
+                x: "lateral offset from the muzzle's initial aiming direction; positive means \
+                    to the shooter's right (e.g. a crosswind FROM the left, --wind-direction \
+                    270, drifts x positive; FROM the right, --wind-direction 90, drifts x \
+                    negative). Zero at the muzzle."
+                    .to_string(),
+                y: "height above the ground in the world frame; positive means up. Starts near \
+                    bore height and reaches 0 at ground impact. This is NOT height above the \
+                    line of sight (compare solve-json v1's LOS-relative drop_m)."
+                    .to_string(),
+                z: "downrange distance from the muzzle; zero at the muzzle, always increasing."
+                    .to_string(),
+            },
+        }
+    }
 }
 
 /// Configuration struct for run_trajectory(), replacing the 31+ parameter signature.
@@ -6456,6 +6530,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 } else {
                     vec![]
                 },
+                legend: TrajectoryLegend::for_units(units),
             };
             println!("{}", serde_json::to_string_pretty(&trajectory_result)?);
         }
