@@ -936,6 +936,105 @@ Statistical analysis with parameter variations:
   --target-distance 600 # For hit probability
 ```
 
+### WEZ (Weapon Employment Zone) Sweep
+
+`monte-carlo --wez` answers a different question than the base command above. Instead of a
+single summary at one `--target-distance`, it sweeps a range of distances and reports **hit
+probability on a fixed target size at each range, holding a single zero** — the classic
+"point-blank range" question: *how far out can I engage this target size without holding over
+or dialing elevation?*
+
+This matters because it means ballistic **drop below your line of sight counts as a miss
+source**, exactly like it would for a real shot fired with that one zero. That is different from
+the base `monte-carlo --target-distance` command, whose hit probability is measured against
+*that run's own* point of aim — i.e. it implicitly assumes you re-dial correctly for every
+range. A WEZ sweep does not assume that; it uses the elevation you pass with `-a/--angle` (from
+`ballistics zero`, typically) for every step of the sweep.
+
+```bash
+# Zero for 300 yards first
+./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300
+# -> Zero Angle: 0.1432°
+
+# Sweep 200-1000 yd in 100 yd steps against an 18"x30" target (e.g. IPSC/steel silhouette),
+# with a 3 mph wind-call error on top of a 1 mph physical wind-speed uncertainty
+./ballistics monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -a 0.1432 \
+  --wez --target-size 18x30 \
+  --wind-call-error 3 --wind-std 1
+
+# WEZ sweep: 1000 sims/step, wind call 3.00 mph + wind std 1.00 mph (quadrature) = 3.16 mph effective
+# ┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐
+# │ Range ( yd) │  P(hit)  │ Dominant      │ Wind call │  MV SD    │ Other/grp │
+# ├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤
+# │      200.0 │    61.1% │ other/group   │      0.0% │      0.0% │    100.0% │
+# │      300.0 │    37.5% │ other/group   │      0.0% │      0.0% │    100.0% │
+# │      400.0 │    18.7% │ other/group   │      0.0% │      0.0% │    100.0% │
+# │      500.0 │     9.0% │ other/group   │      0.0% │      0.0% │    100.0% │
+# │      600.0 │     3.2% │ n/a           │      0.0% │      0.0% │      0.0% │
+# │      700.0 │     0.4% │ n/a           │      0.0% │      0.0% │      0.0% │
+# │      800.0 │     0.0% │ n/a           │      0.0% │      0.0% │      0.0% │
+# │      900.0 │     0.0% │ n/a           │      0.0% │      0.0% │      0.0% │
+# │     1000.0 │     0.0% │ n/a           │      0.0% │      0.0% │      0.0% │
+# └────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘
+```
+
+Past a range the (undispersed) trajectory can no longer physically reach — because a nearly
+flat shot from a normal bore height eventually crosses the ground plane — `Dominant` and the
+share columns read `n/a`: the variance attribution isn't meaningful there, though `P(hit)` is
+still correct (and will simply read 0%, since every sample is a miss).
+
+**Wind call vs. ballistic wind.** `--wind-call-error` is the shooter's own uncertainty in
+*reading* the wind (e.g. "I think it's 8-10 mph, call it 9") — a human estimation error. It is
+distinct from `--wind-std`, which models physical gust-to-gust variability in the wind itself.
+Both perturb the same physical channel (the wind speed fed to the trajectory solve), so as
+independent random errors they combine **in quadrature**, not by simple addition:
+
+```
+effective_wind_std = sqrt(wind_std^2 + wind_call_error^2)
+```
+
+`--wind-call-error` defaults to `0.0` (perfect wind call — only `--wind-std` and the other
+dispersion sources contribute), matching the base command's existing behavior when `--wez` is
+not set.
+
+**Target size** (`--target-size WIDTHxHEIGHT` or `--target-size RADIUS`):
+- `18x30` — a rectangle, 18" wide x 30" tall (cm under `--units metric`), centered on the line
+  of sight.
+- `12` — a single number falls back to a circular hit radius (same units, same "distance from
+  point of aim" semantics as the base command's `--target-radius`), just expressed in
+  target-size units (inches/cm) instead of range units (yards/meters).
+
+**Variance attribution.** Each row's `Dominant` column and the three share columns (`Wind
+call`, `MV SD`, `Other/grp`) report which uncertainty source contributes the most to the miss
+variance at that range, and their approximate shares (they sum to ~100%). `Other/grp` bundles
+mechanical/ammo group dispersion (`--angle-std`, the derived azimuth spread, `--bc-std`) with
+the *ballistic* (non-call) share of wind uncertainty (`--wind-std`, `--wind-direction-std`).
+
+This is computed **analytically** from a linearized (one-standard-deviation finite-difference)
+sensitivity of the impact point to each independent source, rather than by re-running the full
+Monte Carlo sample set once per bucket with that source zeroed out. A full decomposed re-run
+would multiply the sweep's cost by the number of buckets; the linearized estimate instead costs
+a handful of extra deterministic trajectory solves per range and keeps the default sweep's
+runtime in the same ballpark as the base `monte-carlo` command (a few seconds for the default
+9-step sweep). At the magnitude of a single sigma the ballistic response is close enough to
+linear for this to be a reasonable first-order error budget — not an exact decomposition.
+
+**Sweep range**: `--wez-start`, `--wez-end` (inclusive), `--wez-step` (all in yards for
+imperial, meters for metric; defaults `200`/`1000`/`100`).
+
+**Output**: `-o summary` (default) prints the table above; `-o full` prints JSON with
+unit-labeled fields (`range_m`, `p_hit`, `dominant_error_source`, `wind_call_share`,
+`mv_sd_share`, `other_share`, plus the resolved `target_size`, `wind_speed_std_mps`,
+`wind_call_error_mps`, and `combined_wind_speed_std_mps`); `-o statistics` prints one CSV row
+per range step.
+
+**Performance**: `--num-sims` (`-n`, default 1000) is respected per range step, same as the
+base command — a WEZ sweep is `--num-sims` trajectories times the number of sweep steps, plus a
+handful of cheap deterministic solves per step for attribution.
+
+**Known limitation (WASM)**: `--wez` is currently CLI-only; the WASM build does not yet expose
+it. Tracked as a follow-up alongside the rest of WASM parity for this feature.
+
 ### BC Estimation
 
 Estimate ballistic coefficient from observed data. Supports both the **G1 and G7** drag
