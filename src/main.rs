@@ -3282,6 +3282,60 @@ fn load_drag_table_or_exit(path: &std::path::Path) -> ballistics_engine::drag::D
     }
 }
 
+/// Build an engine [`DragTable`](ballistics_engine::drag::DragTable) from a profile's stored
+/// Mach/Cd curve ([`ProfileData::drag_curve`]). Returns a descriptive error (never panics) if
+/// the stored points fail `DragTable::try_new`'s validation — `map_a7p_to_profile` already
+/// validates on import, so this should only fire for a hand-edited or foreign-tool-written
+/// profile JSON.
+fn drag_table_from_profile(
+    points: &[ProfileDragPoint],
+) -> Result<ballistics_engine::drag::DragTable, String> {
+    let mach: Vec<f64> = points.iter().map(|p| p.mach).collect();
+    let cd: Vec<f64> = points.iter().map(|p| p.cd).collect();
+    ballistics_engine::drag::DragTable::try_new(mach, cd)
+}
+
+/// Convert a profile's stored velocity-BC breakpoints ([`ProfileData::bc_segments`]) into the
+/// engine's velocity-banded [`BCSegmentData`] schedule.
+///
+/// Mirrors the ArcherBC2 "coefficient row" convention preserved by `A7pProfile::bc_rows()`:
+/// each row's velocity marks the point *below which* the row's BC stops applying and the next
+/// (lower-velocity) row's BC takes over. Concretely, after sorting descending by velocity, row
+/// `i`'s band is `[breakpoint(i+1), breakpoint(i-1))` — the fastest row's band is open-ended
+/// upward and the slowest row's band is open-ended down to zero. Velocities convert m/s -> fps
+/// (`BCSegmentData`'s unit, matching `parse_bc_segment`). The fastest row's upper bound uses
+/// the same 5000 fps top sentinel as `BCSegmentEstimator::estimate_bc_segments` (comfortably
+/// above any realistic muzzle velocity), floored against the row's own velocity so an
+/// unrealistically fast import still gets a valid (non-empty) top band.
+fn bc_segments_from_profile(rows: &[ProfileBcSegment]) -> Vec<BCSegmentData> {
+    const MPS_TO_FPS: f64 = 3.280_839_895;
+    const TOP_SENTINEL_FPS: f64 = 5000.0;
+
+    let mut sorted: Vec<(f64, f64)> = rows
+        .iter()
+        .map(|r| (r.bc, r.velocity_mps * MPS_TO_FPS))
+        .collect();
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1)); // descending by velocity
+    let n = sorted.len();
+    sorted
+        .iter()
+        .enumerate()
+        .map(|(i, &(bc, v))| {
+            let velocity_max = if i == 0 {
+                v.max(TOP_SENTINEL_FPS)
+            } else {
+                sorted[i - 1].1
+            };
+            let velocity_min = if i + 1 == n { 0.0 } else { sorted[i + 1].1 };
+            BCSegmentData {
+                velocity_min,
+                velocity_max,
+                bc_value: bc,
+            }
+        })
+        .collect()
+}
+
 /// Resolve the velocity-keyed BC schedule once so auto-zero, native flight, and compare flight
 /// cannot synthesize different drag inputs. Explicit manual/table segments take precedence over
 /// the characteristic-based estimator.
@@ -4148,6 +4202,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 trued_bc = pre_table_bc;
             }
 
+            // Saved-profile velocity-BC breakpoints (MBA-1323 Phase 2: `.a7p` multi-row G1/G7
+            // import) fill the schedule only when nothing more specific for THIS run already
+            // did (no --bc-segment, no --bc-table-dir correction table) — a saved default,
+            // not an override of explicit CLI intent.
+            if bc_table_segments.is_none() {
+                if let Some(rows) = saved_profile_data.as_ref().and_then(|p| p.bc_segments.as_ref())
+                {
+                    bc_table_segments = Some(bc_segments_from_profile(rows));
+                }
+            }
+
             // Resolve the final velocity-keyed BC schedule before auto-zero. This is the single
             // schedule cloned into the zero solve, native flight, and compare-local flight.
             let bc_segments_data = resolve_velocity_bc_segments(
@@ -4161,8 +4226,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             let effective_use_bc_segments = use_bc_segments || bc_segments_data.is_some();
 
             // Resolve --drag-table once, shared by the zero solve, native flight, and
-            // compare-local flight, same as the BC schedule above.
-            let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
+            // compare-local flight, same as the BC schedule above. A saved profile's Mach/Cd
+            // drag curve (MBA-1323 Phase 2: `.a7p` CUSTOM import) is the fallback when
+            // --drag-table was not given for THIS run — same "saved default, not an override
+            // of explicit CLI intent" precedence as the BC segments above.
+            let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit).or_else(|| {
+                saved_profile_data
+                    .as_ref()
+                    .and_then(|p| p.drag_curve.as_ref())
+                    .map(|pts| {
+                        drag_table_from_profile(pts).unwrap_or_else(|e| {
+                            eprintln!("Error: saved profile's drag curve is invalid: {e}");
+                            std::process::exit(1);
+                        })
+                    })
+            });
             if custom_drag_table.is_some() && effective_use_bc_segments {
                 eprintln!(
                     "Warning: --drag-table and BC segments were both provided; the drag table takes \
@@ -5442,6 +5520,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (Some(profile), None) => parse_drag_model_arg(&profile.drag_model),
                 _ => drag_model,
             };
+            // MBA-1323 Phase 2: a `.a7p`-imported profile's velocity-BC segments / Mach-Cd
+            // drag curve, resolved to engine shapes. come-ups has no --bc-segment/--drag-table
+            // CLI flags of its own, so a saved profile is the only source for these.
+            let bc_segments_data = profile_data
+                .as_ref()
+                .and_then(|p| p.bc_segments.as_ref())
+                .map(|rows| bc_segments_from_profile(rows));
+            let custom_drag_table = profile_data.as_ref().and_then(|p| p.drag_curve.as_ref()).map(|pts| {
+                drag_table_from_profile(pts).unwrap_or_else(|e| {
+                    eprintln!("Error: saved profile's drag curve is invalid: {e}");
+                    std::process::exit(1);
+                })
+            });
 
             handle_come_ups(
                 final_velocity,
@@ -5463,6 +5554,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_direction,
                 cli.units,
                 output,
+                bc_segments_data,
+                custom_drag_table,
             )?;
         }
 
@@ -5553,6 +5646,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => None,
             };
 
+            // MBA-1323 Phase 2: a `.a7p`-imported profile's velocity-BC segments / Mach-Cd
+            // drag curve, resolved to engine shapes. lead has no --bc-segment/--drag-table
+            // CLI flags of its own, so a saved profile is the only source for these.
+            let bc_segments_data = profile_data
+                .as_ref()
+                .and_then(|p| p.bc_segments.as_ref())
+                .map(|rows| bc_segments_from_profile(rows));
+            let custom_drag_table = profile_data.as_ref().and_then(|p| p.drag_curve.as_ref()).map(|pts| {
+                drag_table_from_profile(pts).unwrap_or_else(|e| {
+                    eprintln!("Error: saved profile's drag curve is invalid: {e}");
+                    std::process::exit(1);
+                })
+            });
+
             handle_lead(
                 final_velocity,
                 final_bc,
@@ -5580,6 +5687,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 adjustment_unit,
                 cli.units,
                 output,
+                bc_segments_data,
+                custom_drag_table,
             )?;
         }
 
@@ -5988,7 +6097,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                             "fps"
                         }
                     );
-                    println!("║  BC:            {:>10.4}             ║", profile.bc);
+                    if profile.drag_curve.is_some() {
+                        // No scalar BC applies to a full drag curve — see
+                        // map_a7p_to_profile's CUSTOM handling. Printing the inert 0.0
+                        // sentinel here would read as a real coefficient, so it is
+                        // replaced by the "Drag curve:" summary line below instead.
+                        println!("║  BC:                    (see drag curve below)  ║");
+                    } else {
+                        println!("║  BC:            {:>10.4}             ║", profile.bc);
+                    }
                     println!(
                         "║  Mass:          {:>10.1} {:<10}  ║",
                         profile.mass,
@@ -6073,6 +6190,37 @@ fn main() -> Result<(), Box<dyn Error>> {
                             } else {
                                 "in"
                             }
+                        );
+                    }
+                    // MBA-1323 Phase 2: velocity-BC bands / Mach-Cd drag curve summaries
+                    // (count + range). velocity_mps is always SI (see ProfileBcSegment).
+                    if let Some(ref segs) = profile.bc_segments {
+                        let vmin = segs
+                            .iter()
+                            .map(|s| s.velocity_mps)
+                            .fold(f64::INFINITY, f64::min);
+                        let vmax = segs
+                            .iter()
+                            .map(|s| s.velocity_mps)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        println!(
+                            "║  BC bands:      {:>3} rows, {:>4.0}-{:<4.0} m/s     ║",
+                            segs.len(),
+                            vmin,
+                            vmax
+                        );
+                    }
+                    if let Some(ref curve) = profile.drag_curve {
+                        let mmin = curve.iter().map(|p| p.mach).fold(f64::INFINITY, f64::min);
+                        let mmax = curve
+                            .iter()
+                            .map(|p| p.mach)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        println!(
+                            "║  Drag curve:    {:>3} pts, Mach {:.2}-{:.2}       ║",
+                            curve.len(),
+                            mmin,
+                            mmax
                         );
                     }
                     println!(
@@ -8595,12 +8743,19 @@ fn build_trajectory_components(
     wind_direction: f64,
     max_range: f64,
     sample_interval: f64,
+    // MBA-1323 Phase 2: saved-profile velocity-BC segments / Mach-Cd drag curve, already
+    // resolved to engine shapes by the caller (bc_segments_from_profile /
+    // drag_table_from_profile). `None` for every caller that does not (yet) source these from
+    // a saved profile — see handle_come_ups/handle_lead for the callers that do.
+    bc_segments_data: Option<Vec<BCSegmentData>>,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> (BallisticInputs, WindConditions, AtmosphericConditions) {
     let drag_model_enum = match drag_model {
         DragModelArg::G1 => DragModel::G1,
         DragModelArg::G7 => DragModel::G7,
     };
     let wind_direction_rad = wind_direction.to_radians();
+    let use_bc_segments = bc_segments_data.is_some();
 
     let inputs = BallisticInputs {
         bc_value: bc,
@@ -8626,6 +8781,9 @@ fn build_trajectory_components(
         weight_grains: mass / 0.00006479891,
         twist_rate: 12.0,
         is_twist_right: true,
+        use_bc_segments,
+        bc_segments_data,
+        custom_drag_table,
         ..Default::default()
     };
 
@@ -8667,6 +8825,9 @@ fn run_sampled_trajectory(
     max_range: f64,
     sample_interval: f64,
     zero_angle_rad: f64,
+    // MBA-1323 Phase 2: see build_trajectory_components's doc comment on these two.
+    bc_segments_data: Option<Vec<BCSegmentData>>,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> Result<Vec<trajectory_sampling::TrajectorySample>, Box<dyn Error>> {
     let (mut inputs, wind, atmosphere) = build_trajectory_components(
         velocity,
@@ -8683,6 +8844,8 @@ fn run_sampled_trajectory(
         wind_direction,
         max_range,
         sample_interval,
+        bc_segments_data,
+        custom_drag_table,
     );
     inputs.muzzle_angle = zero_angle_rad;
 
@@ -8808,6 +8971,10 @@ fn handle_mpbr(
             test_zero_m * 1.5, // max range past zero
             UnitConverter::distance_to_metric(1.0, UnitSystem::Imperial), // ~1 yd sample interval
             zero_angle,
+            // MPBR does not yet consume saved-profile bc_segments/drag_curve (MBA-1323
+            // Phase 2 follow-up) — see CLI_USAGE.md's a7p import section.
+            None,
+            None,
         ) {
             Ok(s) => s,
             Err(_) => {
@@ -8915,6 +9082,8 @@ fn handle_mpbr(
         best_zero_m * 2.0,
         UnitConverter::distance_to_metric(1.0, UnitSystem::Imperial),
         final_zero_angle,
+        None,
+        None,
     )?;
 
     // Find near zero crossing (first time trajectory crosses from below LOS to above)
@@ -9100,6 +9269,10 @@ fn handle_come_ups(
     wind_direction: f64,
     units: UnitSystem,
     output: OutputFormat,
+    // MBA-1323 Phase 2: saved-profile velocity-BC segments / Mach-Cd drag curve, already
+    // resolved to engine shapes by the caller. See build_trajectory_components's doc comment.
+    bc_segments_data: Option<Vec<BCSegmentData>>,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> Result<(), Box<dyn Error>> {
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
@@ -9120,6 +9293,9 @@ fn handle_come_ups(
         DragModelArg::G7 => DragModel::G7,
     };
 
+    // The zero-angle solve must use the SAME velocity-keyed BC / drag curve as the flight
+    // below it (otherwise a segment or curve that changes early-flight drag would mis-zero
+    // the shot) — same reasoning as the `trajectory` command's shared resolution.
     let zero_inputs = BallisticInputs {
         bc_value: bc,
         bc_type: drag_model_enum,
@@ -9129,6 +9305,9 @@ fn handle_come_ups(
         bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
+        use_bc_segments: bc_segments_data.is_some(),
+        bc_segments_data: bc_segments_data.clone(),
+        custom_drag_table: custom_drag_table.clone(),
         ..Default::default()
     };
 
@@ -9164,6 +9343,8 @@ fn handle_come_ups(
         end_m * 1.1,
         sample_m,
         zero_angle,
+        bc_segments_data,
+        custom_drag_table,
     )?;
 
     // Build output rows at the requested range intervals
@@ -9329,6 +9510,10 @@ fn handle_lead(
     adjustment_unit: AdjustmentUnit,
     units: UnitSystem,
     output: OutputFormat,
+    // MBA-1323 Phase 2: saved-profile velocity-BC segments / Mach-Cd drag curve, already
+    // resolved to engine shapes by the caller. See build_trajectory_components's doc comment.
+    bc_segments_data: Option<Vec<BCSegmentData>>,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> Result<(), Box<dyn Error>> {
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
@@ -9362,6 +9547,8 @@ fn handle_lead(
         wind_direction,
         end_m,
         step_m,
+        bc_segments_data,
+        custom_drag_table,
     );
 
     // Powder temperature (MBA-1325): identical resolution to `run_trajectory` so a
@@ -9730,6 +9917,10 @@ fn handle_wind_card(
                 end_m * 1.1,
                 sample_m,
                 zero_angle,
+                // wind-card does not yet consume saved-profile bc_segments/drag_curve
+                // (MBA-1323 Phase 2 follow-up) — see CLI_USAGE.md's a7p import section.
+                None,
+                None,
             )?;
 
             for (ri, &range_display) in ranges.iter().enumerate() {
@@ -10133,6 +10324,8 @@ fn handle_range_table(
     )?;
 
     // Run trajectory WITH wind (for wind drift values)
+    // range-table does not yet consume saved-profile bc_segments/drag_curve (MBA-1323
+    // Phase 2 follow-up) — see CLI_USAGE.md's a7p import section.
     let wind_samples = run_sampled_trajectory(
         velocity_m,
         bc,
@@ -10149,6 +10342,8 @@ fn handle_range_table(
         end_m * 1.1,
         sample_m,
         zero_angle,
+        None,
+        None,
     )?;
 
     // Run trajectory WITHOUT wind (for pure drop)
@@ -10168,6 +10363,8 @@ fn handle_range_table(
         end_m * 1.1,
         sample_m,
         zero_angle,
+        None,
+        None,
     )?;
 
     // Build output rows
@@ -10900,6 +11097,8 @@ mod wind_angle_unit_tests {
             90.0,
             1000.0,
             100.0,
+            None,
+            None,
         );
 
         assert!((inputs.wind_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
