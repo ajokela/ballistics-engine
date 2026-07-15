@@ -27,6 +27,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
   - **Trajectory Sampling**: Regular interval data collection for analysis
   - **Form Factor Corrections**: Bullet-specific drag adjustments
 - **Multiple Output Formats** - JSON, CSV, formatted tables, and printable PDF dope cards
+- **Terminal Chart** - Inline drop-vs-range and drift-vs-range charts right in the terminal (`trajectory --plot`, Unicode braille-dot canvas by default, `--plot ascii` fallback); pure Rust, zero new dependencies, no ANSI colors — see [CLI_USAGE.md](CLI_USAGE.md#terminal-chart---plot)
 - **Profile import**: `ballistics profile import file.a7p` — imports ArcherBC2 `.a7p` profiles (rifle, bullet, atmosphere, zero) with a full mapping report; `--dry-run` previews without saving
 
 ## Installation

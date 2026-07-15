@@ -612,6 +612,83 @@ time_s,x_yd,y_yd,z_yd,velocity_fps,energy_ft-lb,ring_mil
 - **Doesn't fold in wind.** Like `lead`'s hold, the ring is pure target-motion bookkeeping —
   it stays separate from the wind column/dial on the same dope.
 
+### Terminal Chart (`--plot`)
+
+Render two stacked inline terminal charts after the normal `trajectory` output (MBA-1320):
+drop vs. range, then lateral drift vs. range. Pure Rust, zero new dependencies — no
+terminal-graphics crate, no terminal-size detection, no ANSI colors.
+
+```bash
+# Bare --plot: default Unicode braille-dot renderer
+./ballistics trajectory -v 2700 -m 168 -d 0.308 -b 0.5 --wind-speed 10 --wind-direction 90 --plot
+
+# --plot ascii: '*'-per-cell fallback for terminals/fonts without braille glyph coverage
+./ballistics trajectory -v 2700 -m 168 -d 0.308 -b 0.5 --wind-speed 10 --wind-direction 90 --plot ascii
+```
+
+- **`--plot`** (bare) — the default renderer: each terminal character cell packs a 2 (wide)
+  x 4 (tall) grid of dots into one Unicode Braille Patterns glyph (`U+2800`–`U+28FF`),
+  giving roughly 4x the vertical and 2x the horizontal resolution of one character cell.
+- **`--plot ascii`** — a `'*'`-per-cell fallback for terminals/fonts without full braille
+  glyph coverage. Same dot-addressed layout and axis scaling; only the dot canvas itself
+  changes between the two styles — the frame (`┌─┐│└┘`) and axis-range text
+  stay ordinary Unicode box-drawing either way, since those glyphs have near-universal font
+  support (unlike the braille block, which is why it needs a fallback at all).
+- Only affects `-o table` (the default output format). `-o json`/`-o csv`/`-o pdf` are
+  completely unaffected, so scripts parsing those formats never see chart text, and
+  omitting `--plot` leaves every output format byte-identical to a pre-MBA-1320 run.
+- Fixed 72x12-cell canvas per chart. There's no terminal-size detection — that would need a
+  dependency this feature deliberately doesn't take on.
+- Deliberately monochrome: no ANSI color/SGR codes anywhere in the renderer. That sidesteps
+  `NO_COLOR` (<https://no-color.org/>) entirely — there's nothing to suppress — and keeps
+  output byte-identical whether the terminal honors color, redirects to a file, or is a
+  dumb pipe.
+- Both charts plot the SAME per-point data the `--full` "Trajectory Points:" table prints
+  (`result.points`, the raw un-decimated integration output — `--plot` works without
+  `--full` too, it just doesn't print the table itself). Drop is the table's `Y` column
+  (vertical position), lateral drift is the table's downrange-paired `Z` column (not
+  printed by the table by default) — both in the same range unit (yd/m) the rest of the
+  table uses, **not** inches. This is a different, deliberate convention from
+  `--sample-trajectory`'s sight-line-relative `drop_m`/`wind_drift_m` (see
+  [Trajectory Sampling for Analysis](#trajectory-sampling-for-analysis)); don't conflate
+  the two.
+
+Example (`--plot ascii`, 10 mph 90° crosswind):
+
+```
+Drop vs Range:
+┌ drop (yd) — y:[0.00, 1.67] ────────────────────────────────────────────┐
+│** ** *** ** *** *** *                                                  │
+│                      *** *** *                                         │
+│                               *** ***                                  │
+│                                      ** **                             │
+│                                           **** *                       │
+│                                                 ***                    │
+│                                                    *** *               │
+│                                                         ***            │
+│                                                            ***         │
+│                                                               ***      │
+│                                                                  ** *  │
+│                                                                      **│
+└ x:[0.00, 448.79] ──────────────────────────────────────────────────────┘
+
+Lateral Drift vs Range:
+┌ drift (yd) — y:[-0.44, 0.00] ──────────────────────────────────────────┐
+│** ** *** ** *** ***                                                    │
+│                     **** *** *                                         │
+│                               *** **                                   │
+│                                     *** **                             │
+│                                           ****                         │
+│                                                ****                    │
+│                                                    ***                 │
+│                                                        ****            │
+│                                                            ***         │
+│                                                               ***      │
+│                                                                  ** *  │
+│                                                                      **│
+└ x:[0.00, 448.79] ──────────────────────────────────────────────────────┘
+```
+
 ### Wind Card
 
 Generate a wind-drift dope card: deflection at a sweep of ranges, one column per wind
@@ -1103,6 +1180,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
 | --target-speed | Moving-target speed, 0–300 (see [Mover Ring](#mover-ring---target-speed)); also drives the PDF dope card's Lead column. `0` disables both | 0 | mph | m/s |
+| --plot | Inline terminal chart, drop then lateral drift vs. range (see [Terminal Chart](#terminal-chart---plot)); bare = braille, `--plot ascii` = ASCII fallback. `-o table` only | off | - | - |
 
 ### Manual BC Segments (`--bc-segment`)
 
