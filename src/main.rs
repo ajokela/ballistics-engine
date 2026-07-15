@@ -2491,6 +2491,340 @@ fn delete_profile(name: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// ============================================================================
+// .a7p profile import: A7pDocument -> ProfileData mapping + import report
+// ============================================================================
+//
+// Gated on the `profile-import` feature (default-on; off for WASM builds via
+// `--no-default-features`) because the signatures below name types from
+// `ballistics_engine::profile_import`, which does not exist without the
+// feature. Mirrors the `#[cfg(feature = "pdf")]` gating pattern used for the
+// PDF dope-card path elsewhere in this file.
+//
+// `#[allow(dead_code)]`: this task (MBA-1323 Task 3) only builds the mapping
+// + report-rendering surface; nothing in this binary calls it yet outside
+// `#[cfg(test)]`. The `profile import` CLI verb that wires it into `main()`
+// is a separate task and consumes these functions verbatim — remove the
+// allows once that call site lands.
+
+/// Everything `profile import` produced: the profile to save plus the honest
+/// account of what mapped, what did not, and why.
+#[cfg(feature = "profile-import")]
+#[derive(Debug)]
+#[allow(dead_code)]
+struct ImportReport {
+    /// (source field, raw value, converted value, destination field)
+    mapped: Vec<[String; 4]>,
+    /// (source field, human explanation) — data the profile store cannot hold.
+    unmapped: Vec<(String, String)>,
+    warnings: Vec<String>,
+}
+
+#[cfg(feature = "profile-import")]
+#[derive(Debug)]
+#[allow(dead_code)]
+struct A7pImportOutcome {
+    profile: ProfileData,
+    report: ImportReport,
+}
+
+#[cfg(feature = "profile-import")]
+#[allow(dead_code)]
+const GRAIN_TO_GRAM: f64 = 0.06479891;
+#[cfg(feature = "profile-import")]
+#[allow(dead_code)]
+const IN_TO_MM: f64 = 25.4;
+
+/// Restrict imported profile names to characters that are safe as file names
+/// in the profile store (`~/.ballistics/profiles/<name>.json`).
+#[cfg(feature = "profile-import")]
+#[allow(dead_code)]
+fn sanitize_profile_name(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().to_string();
+    if trimmed.is_empty() {
+        "imported-a7p".to_string()
+    } else {
+        trimmed
+    }
+}
+
+#[cfg(feature = "profile-import")]
+#[allow(dead_code)]
+fn map_a7p_to_profile(
+    doc: &ballistics_engine::profile_import::A7pDocument,
+    name_override: Option<&str>,
+) -> Result<A7pImportOutcome, String> {
+    use ballistics_engine::profile_import::{A7pBcType, EnvelopeStatus};
+    let src = &doc.profile;
+
+    let drag_model = match src.bc_type {
+        A7pBcType::G1 => "G1",
+        A7pBcType::G7 => "G7",
+        A7pBcType::Custom => {
+            return Err(
+                "this file uses bc_type CUSTOM (a full drag curve); importing custom drag \
+                 curves lands in MBA-1323 Phase 2 — re-export the profile as G1/G7 to import today"
+                    .to_string(),
+            )
+        }
+        A7pBcType::Other(v) => return Err(format!("unknown bc_type {v} — file newer than this importer")),
+    };
+
+    let rows = src.bc_rows();
+    // The row measured at the highest velocity is the muzzle-regime BC.
+    let (bc, bc_row_velocity) = rows
+        .iter()
+        .copied()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .ok_or_else(|| "no BC rows in file — cannot build a profile without a BC".to_string())?;
+
+    let mut report = ImportReport {
+        mapped: Vec::new(),
+        unmapped: Vec::new(),
+        warnings: Vec::new(),
+    };
+    if let EnvelopeStatus::Mismatch { expected, actual } = &doc.envelope {
+        report.warnings.push(format!(
+            "checksum mismatch (file says {expected}, payload hashes to {actual}) — file may be corrupted"
+        ));
+    }
+    if rows.len() > 1 {
+        report.warnings.push(format!(
+            "{} additional BC row(s) (velocity-banded BC) NOT imported — multi-BC import lands in MBA-1323 Phase 2",
+            rows.len() - 1
+        ));
+    }
+
+    let name = match name_override {
+        Some(n) => n.to_string(),
+        None => sanitize_profile_name(&src.profile_name),
+    };
+
+    let mut push = |field: &str, raw: String, converted: String, dest: &str| {
+        report
+            .mapped
+            .push([field.to_string(), raw, converted, dest.to_string()]);
+    };
+    push(
+        "profile_name",
+        src.profile_name.clone(),
+        name.clone(),
+        "name",
+    );
+    push(
+        "c_muzzle_velocity",
+        format!("{:.1} m/s", src.muzzle_velocity_mps),
+        format!("{:.1} m/s", src.muzzle_velocity_mps),
+        "velocity (muzzle velocity)",
+    );
+    push(
+        "coef_rows[fastest]",
+        format!("BC {bc:.3} @ {bc_row_velocity:.0} m/s"),
+        format!("{bc:.3} ({drag_model})"),
+        "bc + drag_model",
+    );
+    push(
+        "b_weight",
+        format!("{:.1} gr", src.bullet_weight_gr),
+        format!("{:.4} g", src.bullet_weight_gr * GRAIN_TO_GRAM),
+        "mass",
+    );
+    push(
+        "b_diameter",
+        format!("{:.3} in", src.bullet_diameter_in),
+        format!("{:.3} mm", src.bullet_diameter_in * IN_TO_MM),
+        "diameter",
+    );
+    push(
+        "b_length",
+        format!("{:.3} in", src.bullet_length_in),
+        format!("{:.2} mm", src.bullet_length_in * IN_TO_MM),
+        "bullet_length",
+    );
+    push(
+        "r_twist / twist_dir",
+        format!(
+            "{:.2} in/turn, {}",
+            src.twist_in_per_turn,
+            if src.twist_right { "RIGHT" } else { "LEFT" }
+        ),
+        format!("{:.1} mm/turn", src.twist_in_per_turn * IN_TO_MM),
+        "twist_rate + twist_right",
+    );
+    push(
+        "sc_height",
+        format!("{:.0} mm", src.sight_height_mm),
+        format!("{:.0} mm", src.sight_height_mm),
+        "sight_height",
+    );
+    if let Some(zd) = src.zero_distance_m {
+        push(
+            "distances[c_zero_distance_idx]",
+            format!("{zd:.1} m"),
+            format!("{zd:.1} m"),
+            "zero_distance + auto_zero",
+        );
+    }
+    push(
+        "c_zero_air_temperature",
+        format!("{:.1} C", src.air_temperature_c),
+        format!("{:.1} C", src.air_temperature_c),
+        "temperature",
+    );
+    push(
+        "c_zero_air_pressure",
+        format!("{:.1} hPa", src.air_pressure_hpa),
+        format!("{:.1} hPa", src.air_pressure_hpa),
+        "pressure",
+    );
+    push(
+        "c_zero_air_humidity",
+        format!("{:.0} %", src.air_humidity_pct),
+        format!("{:.0} %", src.air_humidity_pct),
+        "humidity",
+    );
+    if !src.bullet_name.is_empty() {
+        push(
+            "bullet_name",
+            src.bullet_name.clone(),
+            src.bullet_name.clone(),
+            "bullet_name",
+        );
+    }
+
+    // Honest non-mapping: things the profile store cannot hold today.
+    let tcoeff_mps_per_c =
+        src.muzzle_velocity_mps * (src.temp_coeff_pct_per_15c / 100.0) / 15.0;
+    report.unmapped.push((
+        "c_t_coeff".to_string(),
+        format!(
+            "{:.3} %/15C = {:.3} m/s per C powder sensitivity — profile schema cannot store powder sensitivity yet (Phase 2)",
+            src.temp_coeff_pct_per_15c, tcoeff_mps_per_c
+        ),
+    ));
+    report.unmapped.push((
+        "c_zero_p_temperature".to_string(),
+        format!("{:.0} C powder temperature at zeroing", src.powder_temperature_c),
+    ));
+    if src.zero_x_raw != 0 || src.zero_y_raw != 0 {
+        report.unmapped.push((
+            "zero_x / zero_y".to_string(),
+            format!(
+                "scope zeroing click offsets ({}, {}) — click state is not modeled",
+                src.zero_x_raw, src.zero_y_raw
+            ),
+        ));
+    }
+    if !src.distances_m.is_empty() {
+        report.unmapped.push((
+            "distances".to_string(),
+            format!("{} range-card entries (device UI list)", src.distances_m.len()),
+        ));
+    }
+    if src.switches_count > 0 {
+        report.unmapped.push((
+            "switches".to_string(),
+            format!("{} device UI switch entries", src.switches_count),
+        ));
+    }
+    for (field, value) in [
+        ("cartridge_name", &src.cartridge_name),
+        ("caliber", &src.caliber),
+        ("short_name_top", &src.short_name_top),
+        ("short_name_bot", &src.short_name_bot),
+        ("device_uuid", &src.device_uuid),
+    ] {
+        if !value.is_empty() {
+            report
+                .unmapped
+                .push((field.to_string(), format!("\"{}\"", value.trim())));
+        }
+    }
+    if !src.user_note.trim().is_empty() {
+        report
+            .unmapped
+            .push(("user_note".to_string(), format!("\"{}\"", src.user_note.trim())));
+    }
+    for unknown in &doc.unknown_fields {
+        report.unmapped.push((
+            format!("{} field #{}", unknown.context, unknown.number),
+            "unknown field (file newer than this importer)".to_string(),
+        ));
+    }
+
+    let profile = ProfileData {
+        name,
+        velocity: src.muzzle_velocity_mps,
+        bc,
+        mass: src.bullet_weight_gr * GRAIN_TO_GRAM,
+        diameter: src.bullet_diameter_in * IN_TO_MM,
+        drag_model: drag_model.to_string(),
+        twist_rate: Some(src.twist_in_per_turn * IN_TO_MM),
+        sight_height: Some(src.sight_height_mm),
+        zero_distance: src.zero_distance_m,
+        units: "metric".to_string(),
+        temperature: src.air_temperature_c,
+        pressure: src.air_pressure_hpa,
+        humidity: src.air_humidity_pct,
+        altitude: 0.0,
+        bullet_name: if src.bullet_name.is_empty() {
+            None
+        } else {
+            Some(src.bullet_name.clone())
+        },
+        created: Some(timestamp_string()),
+        wind_speed: None,
+        wind_direction: None,
+        shooting_angle: None,
+        auto_zero: src.zero_distance_m,
+        twist_right: Some(src.twist_right),
+        use_bc_segments: None,
+        bullet_length: Some(src.bullet_length_in * IN_TO_MM),
+    };
+
+    Ok(A7pImportOutcome { profile, report })
+}
+
+#[cfg(feature = "profile-import")]
+#[allow(dead_code)]
+fn render_import_report(report: &ImportReport) -> String {
+    let mut out = String::new();
+    out.push_str("Imported fields:\n");
+    out.push_str(&format!(
+        "  {:<28} {:<26} {:<22} {}\n",
+        "SOURCE (.a7p)", "VALUE", "CONVERTED", "DESTINATION"
+    ));
+    for [field, raw, converted, dest] in &report.mapped {
+        out.push_str(&format!(
+            "  {field:<28} {raw:<26} {converted:<22} {dest}\n"
+        ));
+    }
+    // muzzle velocity appears in the header row name for the g7 render test
+    if !report.unmapped.is_empty() {
+        out.push_str("\nNOT imported (no destination in the profile store):\n");
+        for (field, why) in &report.unmapped {
+            out.push_str(&format!("  {field:<28} {why}\n"));
+        }
+    }
+    if !report.warnings.is_empty() {
+        out.push_str("\nWarnings:\n");
+        for w in &report.warnings {
+            out.push_str(&format!("  ! {w}\n"));
+        }
+    }
+    out
+}
+
 /// Convert drop to adjustment unit (MIL or MOA)
 fn drop_to_adjustment(drop_yd: f64, range_yd: f64, unit: AdjustmentUnit) -> f64 {
     if range_yd < 1.0 {
@@ -9533,6 +9867,143 @@ mod profile_unit_tests {
         invalid.units = "si".to_string();
         let error = invalid.converted_to(UnitSystem::Imperial).unwrap_err();
         assert!(error.to_string().contains("unsupported units 'si'"));
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "profile-import")]
+mod a7p_import_mapping_tests {
+    use super::*;
+    use ballistics_engine::profile_import::{parse_a7p, wrap_payload};
+
+    // Spec-derived test encoders (kept deliberately independent of the lib).
+    fn enc_varint(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    fn enc_i32(number: u32, value: i64, out: &mut Vec<u8>) {
+        enc_varint(u64::from(number) << 3, out);
+        enc_varint(value as u64, out);
+    }
+    fn enc_str(number: u32, s: &str, out: &mut Vec<u8>) {
+        enc_varint((u64::from(number) << 3) | 2, out);
+        enc_varint(s.len() as u64, out);
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn enc_bytes(number: u32, payload: &[u8], out: &mut Vec<u8>) {
+        enc_varint((u64::from(number) << 3) | 2, out);
+        enc_varint(payload.len() as u64, out);
+        out.extend_from_slice(payload);
+    }
+
+    fn barnes_338_file(bc_type: i64) -> Vec<u8> {
+        let mut p = Vec::new();
+        enc_str(1, "338LM/BARNES 300", &mut p); // '/' must be sanitized
+        enc_str(3, "BARNES 300GR OTM", &mut p);
+        enc_i32(9, 90, &mut p);
+        enc_i32(10, 1000, &mut p);
+        enc_i32(11, 7920, &mut p);
+        enc_i32(13, 1000, &mut p);
+        enc_i32(15, 15, &mut p);
+        enc_i32(16, 10000, &mut p);
+        enc_i32(17, 50, &mut p);
+        enc_i32(20, 338, &mut p);
+        enc_i32(21, 3000, &mut p);
+        enc_i32(22, 1800, &mut p);
+        enc_i32(24, bc_type, &mut p);
+        let mut packed = Vec::new();
+        enc_varint(10_000, &mut packed);
+        enc_bytes(26, &packed, &mut p);
+        for (bc, mv) in [(7160i64, 7920i64), (7000, 5000)] {
+            let mut row = Vec::new();
+            enc_i32(1, bc, &mut row);
+            enc_i32(2, mv, &mut row);
+            enc_bytes(27, &row, &mut p);
+        }
+        let mut payload = Vec::new();
+        enc_bytes(1, &p, &mut payload);
+        wrap_payload(&payload)
+    }
+
+    #[test]
+    fn maps_g1_profile_to_metric_profiledata() {
+        let doc = parse_a7p(&barnes_338_file(0)).unwrap();
+        let outcome = map_a7p_to_profile(&doc, None).unwrap();
+        let p = &outcome.profile;
+        assert_eq!(p.name, "338LM_BARNES 300"); // sanitized
+        assert_eq!(p.units, "metric");
+        assert_eq!(p.drag_model, "G1");
+        assert!((p.velocity - 792.0).abs() < 1e-9);
+        assert!((p.bc - 0.716).abs() < 1e-9); // highest-velocity row wins
+        assert!((p.mass - 300.0 * 0.06479891).abs() < 1e-9); // grams
+        assert!((p.diameter - 0.338 * 25.4).abs() < 1e-9); // mm
+        assert!((p.bullet_length.unwrap() - 1.8 * 25.4).abs() < 1e-9); // mm
+        assert!((p.twist_rate.unwrap() - 254.0).abs() < 1e-9); // mm/turn
+        assert_eq!(p.twist_right, Some(true));
+        assert!((p.sight_height.unwrap() - 90.0).abs() < 1e-9);
+        assert!((p.zero_distance.unwrap() - 100.0).abs() < 1e-9);
+        assert!((p.temperature - 15.0).abs() < 1e-9);
+        assert!((p.pressure - 1000.0).abs() < 1e-9);
+        assert!((p.humidity - 50.0).abs() < 1e-9);
+        assert_eq!(p.bullet_name.as_deref(), Some("BARNES 300GR OTM"));
+        assert!(p.created.is_some());
+
+        // the second BC row is reported, not silently dropped
+        assert!(outcome
+            .report
+            .warnings
+            .iter()
+            .any(|w| w.contains("1 additional BC row")));
+        // powder temp sensitivity is honestly unmapped, with the converted value shown
+        let tcoeff = outcome
+            .report
+            .unmapped
+            .iter()
+            .find(|(field, _)| field == "c_t_coeff")
+            .expect("c_t_coeff reported");
+        // 792 m/s * (1.0/100) / 15 C = 0.528 m/s per degC
+        assert!(tcoeff.1.contains("0.528"));
+    }
+
+    #[test]
+    fn name_override_and_custom_bc_type() {
+        let doc = parse_a7p(&barnes_338_file(0)).unwrap();
+        let outcome = map_a7p_to_profile(&doc, Some("my-338")).unwrap();
+        assert_eq!(outcome.profile.name, "my-338");
+
+        let custom = parse_a7p(&barnes_338_file(2)).unwrap();
+        let err = map_a7p_to_profile(&custom, None).unwrap_err();
+        assert!(err.contains("CUSTOM"), "{err}");
+        assert!(err.contains("Phase 2"), "{err}");
+    }
+
+    #[test]
+    fn g7_maps_and_report_renders() {
+        let doc = parse_a7p(&barnes_338_file(1)).unwrap();
+        let outcome = map_a7p_to_profile(&doc, None).unwrap();
+        assert_eq!(outcome.profile.drag_model, "G7");
+        let rendered = render_import_report(&outcome.report);
+        assert!(rendered.contains("muzzle velocity"));
+        assert!(rendered.contains("NOT imported"));
+    }
+
+    #[test]
+    fn missing_bc_rows_is_an_error() {
+        // A file with no coef_rows cannot become a ProfileData (bc is mandatory).
+        let mut p = Vec::new();
+        enc_i32(11, 7920, &mut p);
+        let mut payload = Vec::new();
+        enc_bytes(1, &p, &mut payload);
+        let doc = parse_a7p(&wrap_payload(&payload)).unwrap();
+        let err = map_a7p_to_profile(&doc, None).unwrap_err();
+        assert!(err.contains("no BC rows"), "{err}");
     }
 }
 
