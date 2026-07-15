@@ -576,10 +576,11 @@ Trajectory Points:
 ```
 
 - **`mover_ring_m`** — linear ring radius in **meters**, always, regardless of `--units` — the
-  unit is in the field name so it can't be silently misread as something else (this codebase
-  otherwise has a wart of unlabeled JSON units on a handful of older fields, MBA-1315; this
-  field is deliberately named to not add to it). Present at every point once the flag is on,
-  including the muzzle (`0.0`, since `target_speed × 0 = 0`).
+  unit is in the field name so it can't be silently misread as something else (the legacy
+  `trajectory[].x`/`y`/`z` fields don't have that luxury, being bare numbers; see the `legend`
+  block documented under [JSON Format](#json-format), MBA-1315, for how those are labeled
+  instead). Present at every point once the flag is on, including the muzzle (`0.0`, since
+  `target_speed × 0 = 0`).
 - **`mover_ring_mil`** — `mover_ring_m / downrange_m × 1000`. **Omitted** at the muzzle
   (`downrange = 0`, the ratio is undefined), not emitted as `0` or `null`.
 
@@ -1082,6 +1083,97 @@ All commands support four output formats via `-o`:
 ```bash
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o json > trajectory.json
 ```
+
+**Units and axes (MBA-1315).** The legacy `trajectory[]` points are bare `x`/`y`/`z` numbers
+with no unit suffix in the field name, and their axis order surprises tooling written against
+a "x=lateral, y=up, z=depth" 3D convention — in this output `x` is lateral and `z` is
+downrange. A field tester's tooling once misread `x`/`z` (in **yards**, not feet) as a depth
+axis in feet and misdiagnosed a bug. The document carries a `legend` block (appended after
+`trajectory`; every pre-existing key/value is unchanged) that states both explicitly:
+
+```json
+{
+  "units": "imperial",
+  "max_range": 25.0,
+  "max_height": 1.6666666666666667,
+  "time_of_flight": 0.02803675408939502,
+  "impact_velocity": 2651.8043404763275,
+  "impact_energy": 2622.759081598047,
+  "stability_coefficient": 2.000083126080045,
+  "spin_drift": null,
+  "trajectory": [
+    {
+      "time": 0.0,
+      "x": 0.0,
+      "y": 1.6666666666666667,
+      "z": 0.0,
+      "velocity": 2700.0,
+      "energy": 2718.96097071048
+    }
+  ],
+  "legend": {
+    "units": {
+      "distance": "yd",
+      "velocity": "fps",
+      "energy": "ft-lb"
+    },
+    "axes": {
+      "x": "lateral offset from the muzzle's initial aiming direction; positive means to the shooter's right (e.g. a crosswind FROM the left, --wind-direction 270, drifts x positive; FROM the right, --wind-direction 90, drifts x negative). Zero at the muzzle.",
+      "y": "height above the ground in the world frame; positive means up. Starts near bore height and reaches 0 at ground impact. This is NOT height above the line of sight (compare solve-json v1's LOS-relative drop_m).",
+      "z": "downrange distance from the muzzle; zero at the muzzle, always increasing."
+    }
+  }
+}
+```
+
+- **`legend.units`** — concrete abbreviation for each numeric quantity family: `distance`
+  (`trajectory[].x`/`y`/`z`, `max_range`, `max_height`, `spin_drift`), `velocity`
+  (`trajectory[].velocity`, `impact_velocity`), and `energy` (`trajectory[].energy`,
+  `impact_energy`). These are `yd`/`fps`/`ft-lb` under `--units imperial` (the default) and
+  `m`/`m/s`/`J` under `--units metric` — the same mapping as the top-level `units` field, spelled
+  out numerically instead of left for tooling to infer. Angle fields (`max_yaw_angle`,
+  `max_precession_angle`, `final_pitch_angle`, `final_yaw_angle`, present only with
+  `--enable-precession`) are always radians; time fields are always seconds; neither varies
+  with `--units`, so neither is covered by `legend.units`.
+- **`legend.axes`** — verified empirically (not assumed) from controlled solves: a pure
+  crosswind run and a no-wind run, comparing which point component moved, in which sign
+  direction, against the table output. `x` is **lateral** (positive = shooter's right; wind
+  FROM the left, `--wind-direction 270`, drifts it positive), `y` is **height above the
+  ground** (positive = up; this is a world-frame height, NOT height above the line of sight),
+  and `z` is **downrange distance** from the muzzle (always increasing). Note the reversal
+  from some 3D conventions: `x` is lateral and `z` is downrange here, not the other way round.
+
+**Mover ring** (`mover_ring_m`/`mover_ring_mil`, only with `--target-speed > 0`) and the
+`min_pitch_damping`/`transonic_mach`/`max_yaw_angle`/`max_precession_angle`/
+`final_pitch_angle`/`final_yaw_angle` diagnostics (only with `--enable-pitch-damping` /
+`--enable-precession`) carry their unit in the field name already and are covered above and
+in the [Mover Ring](#mover-ring---target-speed) section, not restated in `legend`.
+
+**WASM `-o json`** (browser/`ballistics.sh` interface) uses a different, already
+self-describing shape — `range_yards`/`drop_inches`/`drift_inches` (or the `_meters`/`_cm`
+metric equivalents) instead of bare `x`/`y`/`z` — but until MBA-1315 it still left the sign
+convention of `drop`/`drift` unstated. It carries the same `legend` block, adapted to its own
+field names:
+
+```json
+{
+  "trajectory": [ { "range_yards": 0.0, "drop_inches": 0.0, "drift_inches": 0.0, "velocity_fps": 2700.0, "energy_ftlb": 2718.96, "time_seconds": 0.0 } ],
+  "summary": { "max_range_yards": 25.0, "max_height_inches": 60.0, "time_of_flight_seconds": 0.028, "impact_velocity_fps": 2651.8 },
+  "legend": {
+    "units": { "range": "yd", "drop": "in", "drift": "in", "velocity": "fps", "energy": "ft-lb" },
+    "axes": {
+      "range": "downrange distance from the muzzle; zero at the muzzle, always increasing.",
+      "drop": "vertical miss from the line of sight; positive means the bullet is below the line of sight (has fallen below the aim point). Not the same reference as the native CLI legacy JSON's world-frame `y`.",
+      "drift": "lateral miss from the line of sight; positive means to the shooter's right (e.g. a crosswind FROM the left, --wind-direction 270, drifts it positive; FROM the right, --wind-direction 90, drifts it negative). Same sign and source as the native CLI legacy JSON's `x`."
+    }
+  }
+}
+```
+
+`drift` is read off the same underlying value as the native CLI's `x` (both are `position.z`
+in the engine's internal frame), so the two agree in sign; `drop` is LOS-relative (subtracts
+the line-of-sight height) where the native CLI's `y` is an absolute world-frame height, so the
+two do **not** share a reference despite both being "vertical".
 
 ### CSV Format
 ```bash
