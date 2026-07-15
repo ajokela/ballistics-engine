@@ -3013,6 +3013,39 @@ impl MonteCarloResults {
             .count();
         hits as f64 / self.impact_positions.len() as f64
     }
+
+    /// Fraction of simulations whose impact at the target plane lands within the axis-aligned
+    /// rectangle `width_m` (lateral, Z) x `height_m` (vertical, Y) centered on the point of aim
+    /// — i.e. within `width_m / 2` of center laterally AND `height_m / 2` of center vertically.
+    ///
+    /// This is the WEZ (Weapon Employment Zone, MBA-1317) counterpart of [`hit_probability`]'s
+    /// circular radius for rectangular target sizes (e.g. an 18"x30" steel plate). Samples that
+    /// fall short of the target plane remain in the denominator and count as misses, matching
+    /// `hit_probability`'s convention. Returns 0.0 when there are no samples or when either
+    /// dimension is non-positive.
+    ///
+    /// [`hit_probability`]: Self::hit_probability
+    pub fn rect_hit_probability(&self, width_m: f64, height_m: f64) -> f64 {
+        let dimensions_invalid = width_m.is_nan()
+            || width_m <= 0.0
+            || height_m.is_nan()
+            || height_m <= 0.0;
+        if self.impact_positions.is_empty() || dimensions_invalid {
+            return 0.0;
+        }
+        let half_width = width_m / 2.0;
+        let half_height = height_m / 2.0;
+        let hits = self
+            .impact_positions
+            .iter()
+            .filter(|position| {
+                Self::position_reached_target(position)
+                    && position.z.abs() <= half_width
+                    && position.y.abs() <= half_height
+            })
+            .count();
+        hits as f64 / self.impact_positions.len() as f64
+    }
 }
 
 fn wind_from_signed_speed_sample(
@@ -3126,6 +3159,30 @@ pub fn run_monte_carlo_with_wind_and_direction_std_dev(
     wind_direction_std_dev: f64,
 ) -> Result<MonteCarloResults, BallisticsError> {
     let mut rng = rand::rng();
+    run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
+        base_inputs,
+        base_wind,
+        params,
+        wind_direction_std_dev,
+        &mut rng,
+    )
+}
+
+/// Run Monte Carlo with an explicit PRNG seed, for deterministic/reproducible output.
+///
+/// Otherwise identical to [`run_monte_carlo_with_wind_and_direction_std_dev`], which draws
+/// from the process-global RNG instead. Intended for callers that need repeatable results
+/// across runs — e.g. tests, or a WEZ (Weapon Employment Zone, MBA-1317) sweep that a caller
+/// wants to reproduce exactly while tuning target size or wind-call error.
+pub fn run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+    base_inputs: BallisticInputs,
+    base_wind: WindConditions,
+    params: MonteCarloParams,
+    wind_direction_std_dev: f64,
+    seed: u64,
+) -> Result<MonteCarloResults, BallisticsError> {
+    use rand::{rngs::StdRng, SeedableRng};
+    let mut rng = StdRng::seed_from_u64(seed);
     run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
         base_inputs,
         base_wind,
@@ -3993,6 +4050,121 @@ mod monte_carlo_result_tests {
             Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0),
         ]);
         assert_eq!(one_hit_one_shortfall.hit_probability(0.3), 0.5);
+    }
+
+    // MBA-1317: WEZ rectangular hit probability.
+    #[test]
+    fn rect_hit_probability_checks_independent_axis_halves() {
+        let results = make_results(vec![
+            // Inside a 0.4 (lateral) x 0.6 (vertical) box: half-width 0.2, half-height 0.3.
+            Vector3::new(0.0, 0.1, 0.1),
+            // On the lateral edge (exactly half-width) -> counts as a hit ("<=").
+            Vector3::new(0.0, 0.0, 0.2),
+            // Outside laterally (just past half-width).
+            Vector3::new(0.0, 0.0, 0.201),
+            // Outside vertically (just past half-height).
+            Vector3::new(0.0, 0.301, 0.0),
+            // Shortfall marker: stays in the denominator, never a hit.
+            Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0),
+        ]);
+        // 2 hits out of 5 samples.
+        assert!((results.rect_hit_probability(0.4, 0.6) - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rect_hit_probability_matches_circular_hit_probability_for_a_centered_hit() {
+        let results = make_results(vec![Vector3::new(0.0, 0.0, 0.0)]);
+        assert_eq!(results.rect_hit_probability(0.5, 0.5), 1.0);
+        assert_eq!(results.hit_probability(0.3), 1.0);
+    }
+
+    #[test]
+    fn rect_hit_probability_is_zero_for_empty_or_nonpositive_dimensions() {
+        let empty = make_results(vec![]);
+        assert_eq!(empty.rect_hit_probability(1.0, 1.0), 0.0);
+
+        let results = make_results(vec![Vector3::new(0.0, 0.0, 0.0)]);
+        assert_eq!(results.rect_hit_probability(0.0, 1.0), 0.0);
+        assert_eq!(results.rect_hit_probability(1.0, 0.0), 0.0);
+        assert_eq!(results.rect_hit_probability(-1.0, 1.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod monte_carlo_seeded_tests {
+    use super::*;
+
+    #[test]
+    fn seeded_runs_are_deterministic_and_match_the_using_rng_path() {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            ..BallisticInputs::default()
+        };
+        let params = MonteCarloParams {
+            num_simulations: 64,
+            target_distance: Some(200.0),
+            ..MonteCarloParams::default()
+        };
+
+        let a = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            inputs.clone(),
+            WindConditions::default(),
+            params.clone(),
+            0.01,
+            42,
+        )
+        .expect("seeded run a");
+        let b = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            inputs,
+            WindConditions::default(),
+            params,
+            0.01,
+            42,
+        )
+        .expect("seeded run b");
+
+        assert_eq!(a.ranges.len(), b.ranges.len());
+        for (ra, rb) in a.ranges.iter().zip(b.ranges.iter()) {
+            assert_eq!(ra.to_bits(), rb.to_bits());
+        }
+        for (pa, pb) in a.impact_positions.iter().zip(b.impact_positions.iter()) {
+            assert_eq!(pa.x.to_bits(), pb.x.to_bits());
+            assert_eq!(pa.y.to_bits(), pb.y.to_bits());
+            assert_eq!(pa.z.to_bits(), pb.z.to_bits());
+        }
+    }
+
+    #[test]
+    fn different_seeds_generally_produce_different_draws() {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            ..BallisticInputs::default()
+        };
+        let params = MonteCarloParams {
+            num_simulations: 32,
+            velocity_std_dev: 5.0,
+            target_distance: Some(200.0),
+            ..MonteCarloParams::default()
+        };
+
+        let a = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            inputs.clone(),
+            WindConditions::default(),
+            params.clone(),
+            0.0,
+            1,
+        )
+        .expect("seeded run a");
+        let b = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            inputs,
+            WindConditions::default(),
+            params,
+            0.0,
+            2,
+        )
+        .expect("seeded run b");
+
+        assert_ne!(a.impact_velocities, b.impact_velocities);
     }
 }
 
