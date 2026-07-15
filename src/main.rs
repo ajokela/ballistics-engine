@@ -10238,7 +10238,9 @@ mod a7p_import_mapping_tests {
         assert_eq!(p.drag_model, "G1");
         assert!((p.velocity - 792.0).abs() < 1e-9);
         assert!((p.bc - 0.716).abs() < 1e-9); // highest-velocity row wins
-        assert!((p.mass - 300.0 * GRAIN_TO_GRAM).abs() < 1e-9); // grams
+        // Independent literal (not GRAIN_TO_GRAM) so this assertion still
+        // catches a corrupted grain->gram constant in production code.
+        assert!((p.mass - 300.0 * 0.06479891).abs() < 1e-9); // grams
         assert!((p.diameter - 0.338 * 25.4).abs() < 1e-9); // mm
         assert!((p.bullet_length.unwrap() - 1.8 * 25.4).abs() < 1e-9); // mm
         assert!((p.twist_rate.unwrap() - 254.0).abs() < 1e-9); // mm/turn
