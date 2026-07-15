@@ -123,6 +123,8 @@ Warning: shot Mach range [1.47, 2.42] extends beyond the drag table domain [0.80
 
 **Monte Carlo caveat:** when a custom drag table is active, `--bc-std` dispersion is a no-op — the table fixes Cd directly, so perturbing the (ignored) BC value has no effect on drag. Velocity, angle, and wind dispersion still vary normally.
 
+**WASM:** the browser/Node build has no filesystem, so `--drag-table <FILE>` isn't a CLI flag there. Instead, call `wasm.loadDragTable(bytes)` with the raw bytes of the same `mach,cd` CSV (parsed by the identical `DragTable::from_csv_str`) before running a command; `wasm.hasDragTable()` reports whether one is loaded. Once loaded, the table is applied automatically to every `trajectory`, `zero`, `lead`, and `monte-carlo` run — including `lead`, which has no native `--drag-table` flag of its own — until a new table replaces it. See `loadDragTable`'s doc comment in `src/wasm.rs` for the exact contract.
+
 #### BC5D Correction Tables
 
 BC5D (5-Dimensional BC Correction) tables provide ML-derived, velocity-dependent BC corrections for specific calibers. These tables capture how BC changes throughout the flight envelope based on weight, BC, muzzle velocity, current velocity, and drag model.
