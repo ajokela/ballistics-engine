@@ -55,6 +55,61 @@ impl OutputFormat {
     }
 }
 
+/// Parse a `--powder-temp-curve` "TEMP:VEL,..." value into sorted SI
+/// `(temperature_c, velocity_m_s)` points — ONE parser shared by the trajectory and
+/// lead command handlers so their validation cannot drift (review fix M2: the two
+/// inline copies had already drifted from native `parse_powder_temp_curve` by
+/// accepting duplicate temperatures, which make the interpolation order-dependent).
+/// Validation mirrors the native parser: TEMP:VELOCITY shape, positive velocity,
+/// at least 2 points, and no duplicate temperatures after sorting.
+fn parse_powder_temp_curve_str(
+    curve_str: &str,
+    units: UnitSystem,
+) -> Result<Vec<(f64, f64)>, JsValue> {
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    for raw in curve_str.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (t_str, v_str) = part
+            .split_once(':')
+            .ok_or_else(|| JsValue::from_str("--powder-temp-curve point must be TEMP:VELOCITY"))?;
+        let t: f64 = t_str
+            .trim()
+            .parse()
+            .map_err(|_| JsValue::from_str("Invalid temperature in --powder-temp-curve"))?;
+        let v: f64 = v_str
+            .trim()
+            .parse()
+            .map_err(|_| JsValue::from_str("Invalid velocity in --powder-temp-curve"))?;
+        if !(v > 0.0) {
+            return Err(JsValue::from_str(
+                "--powder-temp-curve velocity must be positive",
+            ));
+        }
+        let (t_c, v_ms) = match units {
+            UnitSystem::Imperial => ((t - 32.0) * 5.0 / 9.0, v * 0.3048),
+            UnitSystem::Metric => (t, v),
+        };
+        pts.push((t_c, v_ms));
+    }
+    if pts.len() < 2 {
+        return Err(JsValue::from_str(
+            "--powder-temp-curve needs at least 2 TEMP:VELOCITY points",
+        ));
+    }
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for w in pts.windows(2) {
+        if (w[0].0 - w[1].0).abs() < f64::EPSILON {
+            return Err(JsValue::from_str(
+                "--powder-temp-curve has duplicate temperatures",
+            ));
+        }
+    }
+    Ok(pts)
+}
+
 #[wasm_bindgen]
 impl WasmBallistics {
     #[wasm_bindgen(constructor)]
@@ -271,6 +326,11 @@ impl WasmBallistics {
         // Mover ring (MBA-1325): mph imperial / m/s metric, same convention as `lead
         // --target-speed`. 0.0 (default) disables the per-point Ring column/fields.
         let mut target_speed: f64 = 0.0;
+        // Angular unit for the ring TABLE column (review fix M3) — native trajectory
+        // already exposes --adjustment-unit (PDF dope card), so the WASM surface honors
+        // it too. Only the table reads it; CSV keeps ring_mil and JSON keeps
+        // mover_ring_m/mover_ring_mil (unit-in-the-name contract).
+        let mut adjustment_unit = "mil";
 
         // Additional parameters
         let mut twist_rate: Option<f64> = None;
@@ -511,6 +571,20 @@ impl WasmBallistics {
                         target_speed = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid target speed"))?;
+                        // Same bound the native flags enforce via f64_range(0.0, 300.0)
+                        // (review fix M1) — reject, never silently clamp.
+                        if !(0.0..=300.0).contains(&target_speed) {
+                            return Err(JsValue::from_str(&format!(
+                                "--target-speed must be between 0 and 300 (mph/m/s), got {}",
+                                target_speed
+                            )));
+                        }
+                        i += 1;
+                    }
+                }
+                "--adjustment-unit" => {
+                    if i + 1 < args.len() {
+                        adjustment_unit = args[i + 1];
                         i += 1;
                     }
                 }
@@ -860,43 +934,10 @@ impl WasmBallistics {
         } else {
             None
         };
-        // Parse the optional powder-temperature -> velocity curve into SI points.
+        // Parse the optional powder-temperature -> velocity curve into SI points
+        // (shared parser — see parse_powder_temp_curve_str).
         if let Some(curve_str) = &powder_temp_curve_str {
-            let mut pts: Vec<(f64, f64)> = Vec::new();
-            for raw in curve_str.split(',') {
-                let part = raw.trim();
-                if part.is_empty() {
-                    continue;
-                }
-                let (t_str, v_str) = part.split_once(':').ok_or_else(|| {
-                    JsValue::from_str("--powder-temp-curve point must be TEMP:VELOCITY")
-                })?;
-                let t: f64 = t_str
-                    .trim()
-                    .parse()
-                    .map_err(|_| JsValue::from_str("Invalid temperature in --powder-temp-curve"))?;
-                let v: f64 = v_str
-                    .trim()
-                    .parse()
-                    .map_err(|_| JsValue::from_str("Invalid velocity in --powder-temp-curve"))?;
-                if !(v > 0.0) {
-                    return Err(JsValue::from_str(
-                        "--powder-temp-curve velocity must be positive",
-                    ));
-                }
-                let (t_c, v_ms) = match units {
-                    UnitSystem::Imperial => ((t - 32.0) * 5.0 / 9.0, v * 0.3048),
-                    UnitSystem::Metric => (t, v),
-                };
-                pts.push((t_c, v_ms));
-            }
-            if pts.len() < 2 {
-                return Err(JsValue::from_str(
-                    "--powder-temp-curve needs at least 2 TEMP:VELOCITY points",
-                ));
-            }
-            pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            inputs.powder_temp_curve = Some(pts);
+            inputs.powder_temp_curve = Some(parse_powder_temp_curve_str(curve_str, units)?);
         }
 
         // Set wind conditions
@@ -1077,6 +1118,16 @@ impl WasmBallistics {
             UnitSystem::Imperial => target_speed * 0.44704, // mph to m/s
             UnitSystem::Metric => target_speed,
         };
+        // Validate --adjustment-unit like handle_lead_command does; only the ring
+        // table column consumes it on this command.
+        let adjustment_unit_lower = adjustment_unit.to_lowercase();
+        if adjustment_unit_lower != "mil" && adjustment_unit_lower != "moa" {
+            return Err(JsValue::from_str(&format!(
+                "Invalid --adjustment-unit '{}' (expected mil or moa)",
+                adjustment_unit
+            )));
+        }
+        let ring_in_moa = adjustment_unit_lower == "moa";
 
         match solver.solve() {
             Ok(result) => {
@@ -1088,6 +1139,7 @@ impl WasmBallistics {
                         full,
                         inputs.muzzle_height + inputs.sight_height,
                         target_speed_mps,
+                        ring_in_moa,
                     ),
                     OutputFormat::Json => self.format_trajectory_json(
                         &result,
@@ -1517,11 +1569,18 @@ impl WasmBallistics {
                 }
                 "--target-speed" => {
                     if i + 1 < args.len() {
-                        target_speed = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid target speed"))?,
-                        );
+                        let speed: f64 = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid target speed"))?;
+                        // Same bound native lead enforces via f64_range(0.0, 300.0)
+                        // (review fix M1) — reject, never silently clamp.
+                        if !(0.0..=300.0).contains(&speed) {
+                            return Err(JsValue::from_str(&format!(
+                                "--target-speed must be between 0 and 300 (mph/m/s), got {}",
+                                speed
+                            )));
+                        }
+                        target_speed = Some(speed);
                         i += 1;
                     }
                 }
@@ -1664,43 +1723,10 @@ impl WasmBallistics {
         } else {
             None
         };
-        // Parse the optional powder-temperature -> velocity curve into SI points.
+        // Parse the optional powder-temperature -> velocity curve into SI points
+        // (shared parser — see parse_powder_temp_curve_str).
         if let Some(curve_str) = &powder_temp_curve_str {
-            let mut pts: Vec<(f64, f64)> = Vec::new();
-            for raw in curve_str.split(',') {
-                let part = raw.trim();
-                if part.is_empty() {
-                    continue;
-                }
-                let (t_str, v_str) = part.split_once(':').ok_or_else(|| {
-                    JsValue::from_str("--powder-temp-curve point must be TEMP:VELOCITY")
-                })?;
-                let t: f64 = t_str
-                    .trim()
-                    .parse()
-                    .map_err(|_| JsValue::from_str("Invalid temperature in --powder-temp-curve"))?;
-                let v: f64 = v_str
-                    .trim()
-                    .parse()
-                    .map_err(|_| JsValue::from_str("Invalid velocity in --powder-temp-curve"))?;
-                if !(v > 0.0) {
-                    return Err(JsValue::from_str(
-                        "--powder-temp-curve velocity must be positive",
-                    ));
-                }
-                let (t_c, v_ms) = match units {
-                    UnitSystem::Imperial => ((t - 32.0) * 5.0 / 9.0, v * 0.3048),
-                    UnitSystem::Metric => (t, v),
-                };
-                pts.push((t_c, v_ms));
-            }
-            if pts.len() < 2 {
-                return Err(JsValue::from_str(
-                    "--powder-temp-curve needs at least 2 TEMP:VELOCITY points",
-                ));
-            }
-            pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            inputs.powder_temp_curve = Some(pts);
+            inputs.powder_temp_curve = Some(parse_powder_temp_curve_str(curve_str, units)?);
         }
 
         // Environmental conditions (MBA-1325 env-flags addendum). Start from the exact
@@ -2535,9 +2561,23 @@ impl WasmBallistics {
         full: bool,
         los_height_m: f64,
         target_speed_mps: f64,
+        ring_in_moa: bool,
     ) -> String {
         // Mover ring (MBA-1325): additive "Ring" column, only when --target-speed > 0.
         let ring_enabled = target_speed_mps > 0.0;
+        // Ring cell angular unit honors --adjustment-unit (review fix M3). The MOA
+        // conversion uses the crate's locked printed-table dial constant (MBA-724):
+        // MOA_PER_UNIT_RATIO / MIL_PER_UNIT_RATIO == exactly 3.438 — deliberately NOT
+        // the exact-angle 3437.7467/1000 — matching the native ring table and every
+        // other MIL/MOA column pair this project prints.
+        let (ring_factor, ring_unit) = if ring_in_moa {
+            (
+                crate::moving_target::MOA_PER_UNIT_RATIO / crate::moving_target::MIL_PER_UNIT_RATIO,
+                "moa",
+            )
+        } else {
+            (1.0, "mil")
+        };
         let mut output = String::new();
         output.push_str("Trajectory Calculation Results\n");
         output.push_str("==============================\n\n");
@@ -2626,7 +2666,7 @@ impl WasmBallistics {
                     let (_, ring_mil) =
                         mover_ring(target_speed_mps, point.time, point.position.x);
                     let ring_str = match ring_mil {
-                        Some(mil) => format!("{:.2} mil", mil),
+                        Some(mil) => format!("{:.2} {}", mil * ring_factor, ring_unit),
                         None => "-".to_string(),
                     };
                     output.push_str(&format!(
@@ -2961,6 +3001,10 @@ Trajectory Command:
     -z, --auto-zero <DIST>       Auto-zero at distance
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
+    --target-speed <SPEED>       Mover ring: per-point ring radius = speed x ToF
+                                 (mph/m/s, 0-300; 0 = off). Adds a Ring column (table),
+                                 mover_ring_m/mover_ring_mil (json), ring_mil (csv)
+    --adjustment-unit <UNIT>     Ring table column unit, mil or moa [default: mil]
     
   Environmental:
     --wind-speed <SPEED>         Wind speed (mph/m/s)

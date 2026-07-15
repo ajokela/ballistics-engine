@@ -503,12 +503,20 @@ angle (unlike `lead --target-angle`).
 ```
 
 - **`--target-speed <SPEED>`** — mph under imperial units, m/s under metric (same convention
-  as `lead --target-speed`). `0` (the default) leaves every output format byte-identical to a
+  and same `0`–`300` accepted range as `lead --target-speed`; out-of-range values are
+  rejected, not clamped). `0` (the default) leaves every output format byte-identical to a
   run without the flag. This is the same flag that drives the PDF dope card's `Lead` column
   (see [PDF Dope Card Format](#pdf-dope-card-format)) — setting it turns on both at once.
+- **`--adjustment-unit <mil|moa>`** — angular unit for the ring **table** column only
+  (default `mil`; the flag trajectory already exposes for the PDF dope card). With `moa`
+  the column reads `Ring(moa)` with `ring_moa = ring_mil × 3.438` — the CLI's locked
+  printed-table dial convention (MBA-724, deliberately not the exact-angle 3437.7467/1000),
+  so Ring keeps the same MIL/MOA ratio as every other hold column. CSV keeps `ring_mil` and
+  JSON keeps `mover_ring_m`/`mover_ring_mil` regardless — their names are the unit contract.
 
-**Table** (`--full -o table`) gains a `Ring(mil)` column. The muzzle point prints `-` (no
-flight time has elapsed, so the ring has no defined angular size there yet):
+**Table** (`--full -o table`) gains a `Ring(mil)` column (`Ring(moa)` under
+`--adjustment-unit moa`). The muzzle point prints `-` (no flight time has elapsed, so the
+ring has no defined angular size there yet):
 
 ```
 Trajectory Points:
@@ -1065,7 +1073,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --enable-pitch-damping | Transonic stability analysis | false | - | - |
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
-| --target-speed | Moving-target speed (see [Mover Ring](#mover-ring---target-speed)); also drives the PDF dope card's Lead column. `0` disables both | 0 | mph | m/s |
+| --target-speed | Moving-target speed, 0–300 (see [Mover Ring](#mover-ring---target-speed)); also drives the PDF dope card's Lead column. `0` disables both | 0 | mph | m/s |
 
 ### Manual BC Segments (`--bc-segment`)
 

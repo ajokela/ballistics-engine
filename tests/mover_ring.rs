@@ -331,3 +331,93 @@ fn no_flag_csv_header_is_unchanged() {
     let header = out.lines().next().expect("header");
     assert_eq!(header, "time_s,x_yd,y_yd,z_yd,velocity_fps,energy_ft-lb");
 }
+
+// ---------------------------------------------------------------------------------
+// Review fix M1: --target-speed shares lead's f64_range(0.0, 300.0) clap bound.
+// ---------------------------------------------------------------------------------
+
+#[test]
+fn trajectory_rejects_out_of_range_target_speed() {
+    // "=" syntax so the negative case reaches the value parser rather than being
+    // eaten earlier as an unexpected hyphen argument (also a rejection, but this
+    // asserts the f64_range bound specifically).
+    for bad in ["--target-speed=301", "--target-speed=1000000000", "--target-speed=-1"] {
+        let out = Command::new(get_cli_binary())
+            .args([
+                "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", bad,
+            ])
+            .output()
+            .expect("run");
+        assert!(
+            !out.status.success(),
+            "{bad} must be rejected, but the command succeeded"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("is not in range"),
+            "expected the f64_range clap error for {bad}, got:\n{stderr}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Review fix M3: the ring TABLE column honors --adjustment-unit; the MOA figure uses
+// the crate's locked printed-table dial constant (MBA-724), exactly 3.438 x mil.
+// ---------------------------------------------------------------------------------
+
+#[test]
+fn table_ring_column_honors_moa_adjustment_unit() {
+    // --target-speed 300 (the bound) makes ring_mil large enough (~190 at the last
+    // point) that the dial constant is DISCRIMINABLE from the exact-angle 3437.7467
+    // variant at 2 printed decimals: the two differ by mil x 6.57e-5 > 0.012, more
+    // than the 0.01 print quantum, so a wrong constant cannot round to the same cell.
+    let base = [
+        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--max-range",
+        "400", "--target-speed", "300", "--full",
+    ];
+
+    // Full-precision mil from JSON (JSON is adjustment-unit-invariant by contract).
+    let mut json_args = base.to_vec();
+    json_args.extend(["-o", "json"]);
+    let json = run_json(&json_args);
+    let last = json["trajectory"]
+        .as_array()
+        .expect("points")
+        .last()
+        .expect("last")
+        .clone();
+    let mil = last["mover_ring_mil"].as_f64().expect("mover_ring_mil");
+    assert!(
+        mil > 160.0,
+        "sensitivity precondition: need ring_mil > 160 to pin the constant, got {mil}"
+    );
+
+    // MOA table: header flips to Ring(moa); the last row's cell must equal the
+    // 2dp-rounded mil x 3.438 exactly (string match pins the constant).
+    let mut moa_args = base.to_vec();
+    moa_args.extend(["--adjustment-unit", "moa", "-o", "table"]);
+    let moa_table = run(&moa_args);
+    assert!(moa_table.contains("Ring(moa)"), "moa run must show Ring(moa):\n{moa_table}");
+    assert!(!moa_table.contains("Ring(mil)"), "moa run must not show Ring(mil)");
+    let moa_rows = parse_table_ring_rows(&moa_table);
+    let (_, _, moa_cell) = moa_rows.last().expect("moa table rows");
+    let moa_cell = moa_cell.expect("last row has a numeric ring cell");
+    assert_eq!(
+        format!("{:.2}", moa_cell),
+        format!("{:.2}", mil * 3.438),
+        "Ring(moa) cell must be exactly mil x 3.438 (the MBA-724 dial constant), 2dp-rounded"
+    );
+
+    // MIL table (default): same last row prints the mil value itself.
+    let mut mil_args = base.to_vec();
+    mil_args.extend(["-o", "table"]);
+    let mil_table = run(&mil_args);
+    assert!(mil_table.contains("Ring(mil)"));
+    let mil_rows = parse_table_ring_rows(&mil_table);
+    let (_, _, mil_cell) = mil_rows.last().expect("mil table rows");
+    assert_eq!(
+        format!("{:.2}", mil_cell.expect("numeric ring cell")),
+        format!("{:.2}", mil),
+        "Ring(mil) cell must match the JSON mover_ring_mil, 2dp-rounded"
+    );
+}

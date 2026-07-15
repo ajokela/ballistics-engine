@@ -723,7 +723,7 @@ enum Commands {
         /// output format — a per-point mover Ring column/field (MBA-1325): ring radius =
         /// target_speed x point ToF, the "fire when the mover enters the ring" technique.
         /// See CLI_USAGE.md for the full mover-ring writeup. 0 (default) disables both.
-        #[arg(long, default_value = "0.0")]
+        #[arg(long, default_value = "0.0", value_parser = f64_range(0.0, 300.0))]
         target_speed: f64,
 
         /// Powder type/name (for PDF metadata)
@@ -754,7 +754,9 @@ enum Commands {
         #[arg(long)]
         bold_data: bool,
 
-        /// Angular unit for the PDF dope card's Drop/Wind/Lead columns (mil or moa)
+        /// Angular unit for the PDF dope card's Drop/Wind/Lead columns AND the
+        /// --target-speed mover Ring table column (mil or moa). CSV/JSON ring fields
+        /// stay mil/meters — their names carry the unit contract.
         #[arg(long, value_enum, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
     },
@@ -1956,6 +1958,11 @@ struct TrajectoryConfig {
     // same convention as `lead --target-speed`). 0.0 (default) disables the per-point
     // Ring column/fields in every output format; also feeds the PDF Lead column.
     target_speed: f64,
+    // Angular unit for the ring TABLE column (mil or moa) — from --adjustment-unit,
+    // which trajectory already exposes for the PDF dope card. CSV keeps ring_mil and
+    // JSON keeps mover_ring_m/mover_ring_mil regardless: those carry the unit in the
+    // name (the contract), the table is the human display surface.
+    adjustment_unit: AdjustmentUnit,
 
     // PDF metadata
     pdf_metadata: Option<PdfMetadata>,
@@ -3757,6 +3764,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 powder_temp_curve: powder_temp_curve_si.clone(),
                 powder_curve_temp_c,
                 target_speed,
+                adjustment_unit,
                 pdf_metadata: pdf_metadata.clone(),
             };
 
@@ -5689,6 +5697,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         ref powder_temp_curve,
         powder_curve_temp_c,
         target_speed,
+        adjustment_unit,
         ref pdf_metadata,
     } = *config;
 
@@ -5697,6 +5706,19 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // mph imperial / m/s metric). Resolved once here so every output branch below agrees.
     let target_speed_mps = UnitConverter::wind_to_metric(target_speed, units);
     let ring_enabled = target_speed_mps > 0.0;
+    // Ring TABLE column angular unit honors --adjustment-unit (review fix M3). The MOA
+    // conversion uses the crate's locked printed-table dial constant (MBA-724):
+    // MOA_PER_UNIT_RATIO / MIL_PER_UNIT_RATIO == exactly 3.438 — deliberately NOT the
+    // exact-angle 3437.7467/1000, so Ring(moa)/Ring(mil) keeps the same ratio as every
+    // other MIL/MOA column pair this CLI prints (see moving_target.rs module docs).
+    let (ring_hdr, ring_table_factor) = match adjustment_unit {
+        AdjustmentUnit::Mil => ("Ring(mil)", 1.0),
+        AdjustmentUnit::Moa => (
+            "Ring(moa)",
+            ballistics_engine::moving_target::MOA_PER_UNIT_RATIO
+                / ballistics_engine::moving_target::MIL_PER_UNIT_RATIO,
+        ),
+    };
 
     // MBA-1135: track whether the twist is a synthesized default (shooter omitted --twist-rate)
     // so the stability summary can be honest about it rather than presenting an assumed-twist Sg
@@ -6340,8 +6362,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 if ring_enabled {
                     println!("┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐");
                     println!(
-                        "│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│ Ring(mil)│",
-                        dist_hdr, dist_hdr, vel_hdr, energy_hdr
+                        "│ Time (s) │  X {:5} │  Y {:5} │ Vel{:5} │Energy{:5}│ {}│",
+                        dist_hdr, dist_hdr, vel_hdr, energy_hdr, ring_hdr
                     );
                     println!("├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤");
 
@@ -6355,7 +6377,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                                 UnitConverter::energy_from_metric(p.kinetic_energy, units);
                             let (_, ring_mil) = ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
                             let ring_cell = match ring_mil {
-                                Some(mil) => format!("{:>8.2}", mil),
+                                Some(mil) => format!("{:>8.2}", mil * ring_table_factor),
                                 None => format!("{:>8}", "-"),
                             };
 

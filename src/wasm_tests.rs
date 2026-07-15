@@ -920,5 +920,116 @@ Iterations: 0\n";
             "no powder flags should keep -v 2700 verbatim regardless of --temperature, got {velocity}"
         );
     }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1325 review fix pass: M1 (target-speed bound), M2 (curve parser parity),
+    // M3 (ring table --adjustment-unit).
+    // -----------------------------------------------------------------------------
+
+    /// M1: --target-speed enforces the same [0, 300] bound the native flags carry via
+    /// f64_range(0.0, 300.0), on BOTH WASM commands — rejected with a clear error, not
+    /// silently clamped or let through.
+    #[wasm_bindgen_test]
+    fn target_speed_out_of_range_is_rejected_on_both_commands() {
+        let wasm = WasmBallistics::new();
+        let err = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 301")
+            .unwrap_err();
+        assert!(
+            err.as_string().unwrap_or_default().contains("--target-speed must be between 0 and 300"),
+            "trajectory should reject 301: {err:?}"
+        );
+        let err = wasm
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 1000000000 --range 400",
+            )
+            .unwrap_err();
+        assert!(
+            err.as_string().unwrap_or_default().contains("--target-speed must be between 0 and 300"),
+            "lead should reject 1e9 mph: {err:?}"
+        );
+        // Boundary values stay legal (300 is lead's documented cap).
+        assert!(wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 300 --max-range 200")
+            .is_ok());
+    }
+
+    /// M2: duplicate temperatures in --powder-temp-curve are rejected on both WASM
+    /// commands with the native parser's message (they now share one parser, so this
+    /// also guards against the two copies drifting again).
+    #[wasm_bindgen_test]
+    fn powder_temp_curve_duplicate_temperatures_rejected() {
+        let wasm = WasmBallistics::new();
+        for cmd in [
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 5 \
+             --powder-temp-curve 40:2620,40:2700,100:2760",
+            "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+             --powder-temp-curve 40:2620,40:2700,100:2760",
+        ] {
+            let err = wasm.run_command(cmd).unwrap_err();
+            assert!(
+                err.as_string()
+                    .unwrap_or_default()
+                    .contains("--powder-temp-curve has duplicate temperatures"),
+                "duplicate curve temps must be rejected for `{cmd}`: {err:?}"
+            );
+        }
+    }
+
+    /// M3: the trajectory table's Ring cell honors --adjustment-unit, and the MOA
+    /// figure is exactly mil x 3.438 (the crate's MBA-724 printed-table dial constant,
+    /// shared with the native table). --target-speed 300 makes ring_mil large enough
+    /// (~190) that a wrong constant (exact-angle 3437.7467/1000) would shift the value
+    /// by > 0.012 — past the 0.01 print quantum, so the 2dp string match below pins
+    /// the constant, not just the ballpark.
+    #[wasm_bindgen_test]
+    fn ring_table_honors_moa_adjustment_unit() {
+        let wasm = WasmBallistics::new();
+        let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 400 \
+                    --target-speed 300 --full";
+
+        // Full-precision mil from JSON (adjustment-unit-invariant by contract).
+        let json_out = wasm.run_command(&format!("{base} -o json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json_out).unwrap();
+        let mil = json["trajectory"]
+            .as_array()
+            .expect("points")
+            .last()
+            .expect("last point")["mover_ring_mil"]
+            .as_f64()
+            .expect("mover_ring_mil");
+        assert!(mil > 160.0, "sensitivity precondition: ring_mil > 160, got {mil}");
+
+        // Last ring cell of a table, as the printed numeric string before " <unit>".
+        let last_ring_cell = |table: &str, unit: &str| -> String {
+            let suffix = format!(" {unit}");
+            table
+                .lines()
+                .filter_map(|line| {
+                    let cell = line.rsplit('|').next()?.trim();
+                    cell.strip_suffix(suffix.as_str()).map(str::to_string)
+                })
+                .last()
+                .unwrap_or_else(|| panic!("no ring cell ending in '{suffix}' found:\n{table}"))
+        };
+
+        let moa_table = wasm
+            .run_command(&format!("{base} --adjustment-unit moa"))
+            .unwrap();
+        assert!(moa_table.contains(" moa"), "moa run must label ring cells moa");
+        assert!(!moa_table.contains(" mil"), "moa run must not label ring cells mil");
+        assert_eq!(
+            last_ring_cell(&moa_table, "moa"),
+            format!("{:.2}", mil * 3.438),
+            "Ring moa cell must be exactly mil x 3.438, 2dp-rounded"
+        );
+
+        let mil_table = wasm.run_command(base).unwrap();
+        assert_eq!(
+            last_ring_cell(&mil_table, "mil"),
+            format!("{:.2}", mil),
+            "default (mil) Ring cell must match JSON mover_ring_mil, 2dp-rounded"
+        );
+    }
 }
 }
