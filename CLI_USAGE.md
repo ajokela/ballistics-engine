@@ -246,16 +246,37 @@ ballistics profile import my-rifle.a7p --name match-338 --strict
 The import prints a full mapping report: every field it imported (source
 value, converted value, destination), every field it could NOT map (for
 example powder temperature sensitivity, scope click offsets, and the
-device's range-card list), and any warnings (checksum mismatch, extra BC
-rows). Imported profiles are stored in metric units and can be recalled by
-name with `--profile <name>` (on `mpbr`, `come-ups`, `lead`, `wind-card`,
-`stability`, and `range-table`) or `--saved-profile <name>` on `trajectory`,
-which reserves `--profile` for CSV gun-profile files.
+device's range-card list), and any warnings (checksum mismatch). Imported
+profiles are stored in metric units and can be recalled by name with
+`--profile <name>` (on `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`,
+and `range-table`) or `--saved-profile <name>` on `trajectory`, which
+reserves `--profile` for CSV gun-profile files.
 
-Current limitations (MBA-1323 Phase 1): multi-BC velocity bands import only
-the muzzle-regime row, and `bc_type CUSTOM` (full drag curve) files are
-rejected — both land in Phase 2. The `.a7p` wire format is implemented
-independently for interoperability; no third-party code is bundled.
+**Multi-BC and CUSTOM drag curves (MBA-1323 Phase 2).** A `.a7p` file with
+more than one G1/G7 coefficient row imports ALL rows as a velocity-banded BC
+schedule (`bc_segments` in the saved profile JSON), not just the fastest
+row — the scalar `bc` field is still set to the fastest row's value for
+tools that only understand one BC. A file with `bc_type CUSTOM` (a full
+Mach/Cd drag curve) imports as `drag_model: "CUSTOM"` with the curve stored
+in `drag_curve`; because no single coefficient applies to a full curve, the
+saved profile's `bc` field is set to `0.0` — an intentionally invalid
+sentinel, physically inert once the curve is in use, that makes any
+consumer which still expects a scalar BC fail loudly instead of silently
+solving under an assumed G1 model.
+
+These two fields are consumed automatically by `trajectory --saved-profile`,
+`come-ups --profile`, and `lead --profile`: a saved profile's `bc_segments`
+feeds the same velocity-keyed BC schedule as `--bc-segment`/`--bc-table-dir`
+(only when the run did not already supply one of those), and `drag_curve`
+feeds the same custom drag table as `--drag-table` (only when the run did
+not already supply `--drag-table`). `mpbr`, `wind-card`, `stability`, and
+`range-table` do not yet consume these two fields from a saved profile —
+a profile with multi-BC/CUSTOM data still works there, but only via its
+scalar `bc`/`drag_model` fallback. `profile show` prints a summary line
+(row/point count and range) for whichever of the two is present.
+
+The `.a7p` wire format is implemented independently for interoperability;
+no third-party code is bundled.
 
 ### Canted Shooting
 
