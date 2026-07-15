@@ -30,6 +30,7 @@ pub use solve_json::{
     decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
     SolveRequestV1, SolveSuccessV1, MAX_SOLVE_JSON_SAMPLES_V1, SOLVE_JSON_SCHEMA_VERSION_V1,
 };
+pub use solve_v1::solve_v1;
 pub use trajectory_observation::{
     TrajectoryObservation, TrajectoryObservationError, TrajectoryObservationFlag,
     TrajectoryTermination,
@@ -42,6 +43,7 @@ pub mod moving_target;
 mod drag_model;
 pub mod ffi;
 pub mod solve_json;
+pub mod solve_v1;
 pub mod trajectory_observation;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;

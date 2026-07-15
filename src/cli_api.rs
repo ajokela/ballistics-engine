@@ -567,10 +567,22 @@ impl TrajectoryResult {
 }
 
 // Trajectory solver
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StationAtmosphereResolution {
+    /// Preserve the historical CLI/FFI convention: sea-level standard values at a nonzero
+    /// altitude are treated as omitted and resolved from the ICAO atmosphere.
+    LegacyDefaultSentinels,
+    /// Temperature and pressure have already been resolved by a presence-aware caller and must
+    /// remain authoritative even when they equal the historical sentinel values.
+    Authoritative,
+}
+
+#[derive(Clone)]
 pub struct TrajectorySolver {
     inputs: BallisticInputs,
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
+    station_atmosphere_resolution: StationAtmosphereResolution,
     max_range: f64,
     time_step: f64,
     max_trajectory_points: usize,
@@ -593,9 +605,39 @@ pub struct TrajectorySolver {
 
 impl TrajectorySolver {
     pub fn new(
+        inputs: BallisticInputs,
+        wind: WindConditions,
+        atmosphere: AtmosphericConditions,
+    ) -> Self {
+        Self::new_with_station_atmosphere_resolution(
+            inputs,
+            wind,
+            atmosphere,
+            StationAtmosphereResolution::LegacyDefaultSentinels,
+        )
+    }
+
+    /// Construct a solver from station temperature and pressure that a presence-aware service
+    /// has already resolved. Unlike [`Self::new`], exact sea-level standard values remain
+    /// authoritative at nonzero altitude rather than acting as legacy omission sentinels.
+    pub(crate) fn new_with_resolved_station_atmosphere(
+        inputs: BallisticInputs,
+        wind: WindConditions,
+        atmosphere: AtmosphericConditions,
+    ) -> Self {
+        Self::new_with_station_atmosphere_resolution(
+            inputs,
+            wind,
+            atmosphere,
+            StationAtmosphereResolution::Authoritative,
+        )
+    }
+
+    fn new_with_station_atmosphere_resolution(
         mut inputs: BallisticInputs,
         wind: WindConditions,
         atmosphere: AtmosphericConditions,
+        station_atmosphere_resolution: StationAtmosphereResolution,
     ) -> Self {
         // Compute derived fields from base units
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
@@ -639,6 +681,7 @@ impl TrajectorySolver {
             inputs,
             wind,
             atmosphere,
+            station_atmosphere_resolution,
             max_range: 1000.0,
             time_step: 0.001,
             max_trajectory_points: MAX_TRAJECTORY_POINTS,
@@ -655,6 +698,161 @@ impl TrajectorySolver {
 
     pub fn set_time_step(&mut self, step: f64) {
         self.time_step = step;
+    }
+
+    /// Calculate a level-rifle zero with this solver's configured atmosphere, wind (including
+    /// downrange segments), effects, integration method, and time step, then install the resulting
+    /// muzzle angle on this solver. The solver is mutated only after a zero has converged.
+    pub(crate) fn calculate_and_set_zero_angle(
+        &mut self,
+        target_distance_m: f64,
+        target_height_m: f64,
+    ) -> Result<f64, BallisticsError> {
+        let angle = self.find_zero_angle(target_distance_m, target_height_m)?;
+        self.inputs.muzzle_angle = angle;
+        Ok(angle)
+    }
+
+    fn find_zero_angle(
+        &self,
+        target_distance_m: f64,
+        target_height_m: f64,
+    ) -> Result<f64, BallisticsError> {
+        // Binary search for the angle that hits the target. Use only positive angles to ensure a
+        // proper upward ballistic arc.
+        let mut low_angle = 0.0;
+        let mut high_angle = 0.2; // about 11 degrees
+        let tolerance = 1e-7;
+        let max_iterations = 60;
+
+        // MBA-194: validate the initial bracket before starting the binary search.
+        let low_height = self.zero_trial_height_at(low_angle, target_distance_m)?;
+        let high_height = self.zero_trial_height_at(high_angle, target_distance_m)?;
+
+        match (low_height, high_height) {
+            (Some(low_height), Some(high_height)) => {
+                let low_error = low_height - target_height_m;
+                let high_error = high_height - target_height_m;
+
+                if low_error > 0.0 && high_error > 0.0 {
+                    // Both angles overshoot. Zero degrees is the lowest supported launch angle;
+                    // retain the historical behavior and let the search choose its best result.
+                } else if low_error < 0.0 && high_error < 0.0 {
+                    // Both angles undershoot. Preserve the historical expansion up to 45 degrees.
+                    let mut expanded = false;
+                    for multiplier in [2.0, 3.0, 4.0] {
+                        let new_high = (high_angle * multiplier).min(0.785);
+                        if let Ok(Some(height)) =
+                            self.zero_trial_height_at(new_high, target_distance_m)
+                        {
+                            if height - target_height_m > 0.0 {
+                                high_angle = new_high;
+                                expanded = true;
+                                break;
+                            }
+                        }
+                        if new_high >= 0.785 {
+                            break;
+                        }
+                    }
+                    if !expanded {
+                        return Err("Cannot find zero angle: target beyond effective range even at maximum angle".into());
+                    }
+                }
+            }
+            (None, Some(_)) => {
+                // The low angle does not reach the target while the high angle does; the search
+                // will raise the low end until it reaches a valid trajectory.
+            }
+            (Some(_), None) => {
+                return Err(
+                    "Cannot find zero angle: high angle trajectory doesn't reach target distance"
+                        .into(),
+                );
+            }
+            (None, None) => {
+                return Err(
+                    "Cannot find zero angle: trajectory cannot reach target distance at any angle"
+                        .into(),
+                );
+            }
+        }
+
+        for _ in 0..max_iterations {
+            let mid_angle = (low_angle + high_angle) / 2.0;
+            match self.zero_trial_height_at(mid_angle, target_distance_m)? {
+                Some(height) => {
+                    let error = height - target_height_m;
+                    // MBA-193: height accuracy is the primary convergence criterion. At 0.1 mm,
+                    // short-range zero-day atmosphere differences remain observable.
+                    if error.abs() < 0.0001 {
+                        return Ok(mid_angle);
+                    }
+
+                    // Only use angle tolerance after precision is exhausted and the remaining
+                    // height error is still practically acceptable.
+                    if (high_angle - low_angle).abs() < tolerance {
+                        if error.abs() < 0.01 {
+                            return Ok(mid_angle);
+                        }
+                        return Err("Zero angle did not converge: residual height error too large (target not reachable / not bracketed)".into());
+                    }
+
+                    if error > 0.0 {
+                        high_angle = mid_angle;
+                    } else {
+                        low_angle = mid_angle;
+                    }
+                }
+                None => {
+                    low_angle = mid_angle;
+                    if (high_angle - low_angle).abs() < tolerance {
+                        return Err("Trajectory cannot reach target distance - angle converged without valid solution".into());
+                    }
+                }
+            }
+        }
+
+        Err("Failed to find zero angle".into())
+    }
+
+    /// Solve one zero-angle trial without losing any solver configuration. Only the trial clone's
+    /// launch angle, level-rifle convention, and integration range differ from the final solve.
+    fn zero_trial_height_at(
+        &self,
+        angle_rad: f64,
+        target_distance_m: f64,
+    ) -> Result<Option<f64>, BallisticsError> {
+        let mut trial = self.clone();
+        trial.inputs.muzzle_angle = angle_rad;
+        // MBA-959: zero on the bare bore so aerodynamic jump remains an additive fire-time POI
+        // shift rather than being silently absorbed by the zero search.
+        trial.inputs.enable_aerodynamic_jump = false;
+        // MBA-1286: a zero is a property of a level rifle's sight geometry. Cant is applied only
+        // to the subsequent shot.
+        trial.inputs.cant_angle = 0.0;
+        trial.set_max_range(target_distance_m * 2.0);
+        let result = trial.solve()?;
+
+        for (index, point) in result.points.iter().enumerate() {
+            if point.position.x >= target_distance_m {
+                let shot_y_m = if index == 0 {
+                    point.position.y
+                } else {
+                    let previous = &result.points[index - 1];
+                    let span = point.position.x - previous.position.x;
+                    let fraction = (target_distance_m - previous.position.x) / span;
+                    previous.position.y + fraction * (point.position.y - previous.position.y)
+                };
+                return Ok(Some(crate::atmosphere::shot_frame_altitude(
+                    0.0,
+                    target_distance_m,
+                    shot_y_m,
+                    trial.inputs.shooting_angle,
+                )));
+            }
+        }
+        Ok(None)
     }
 
     /// Reject malformed state before it reaches an integration loop.
@@ -1118,11 +1316,18 @@ impl TrajectorySolver {
     }
 
     fn resolved_atmosphere(&self) -> (f64, f64, f64, f64) {
-        let (temp_c, pressure_hpa) = crate::atmosphere::resolve_station_conditions(
-            self.atmosphere.temperature,
-            self.atmosphere.pressure,
-            self.atmosphere.altitude,
-        );
+        let (temp_c, pressure_hpa) = match self.station_atmosphere_resolution {
+            StationAtmosphereResolution::LegacyDefaultSentinels => {
+                crate::atmosphere::resolve_station_conditions(
+                    self.atmosphere.temperature,
+                    self.atmosphere.pressure,
+                    self.atmosphere.altitude,
+                )
+            }
+            StationAtmosphereResolution::Authoritative => {
+                (self.atmosphere.temperature, self.atmosphere.pressure)
+            }
+        };
         let (density, speed_of_sound) = crate::atmosphere::calculate_atmosphere(
             self.atmosphere.altitude,
             Some(temp_c),
@@ -1515,15 +1720,6 @@ impl TrajectorySolver {
                     position.x,
                     &mut transonic_distances,
                 );
-            }
-
-            // Debug: log first and every 100th point. Debug builds only — this was ungated and
-            // polluted release/WASM stderr on the --use-euler path (the other solvers have none).
-            // McCoy coordinate system: X=downrange, Y=vertical, Z=lateral
-            #[cfg(debug_assertions)]
-            if points.len() == 1 || points.len() % 100 == 0 {
-                eprintln!("Trajectory point {}: time={:.3}s, downrange={:.2}m, vertical={:.2}m, lateral={:.2}m, vel={:.1}m/s",
-                    points.len(), time, position.x, position.y, position.z, velocity_magnitude);
             }
 
             // Track max height
@@ -3084,189 +3280,8 @@ pub fn calculate_zero_angle_with_conditions(
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
 ) -> Result<f64, BallisticsError> {
-    // Helper function to get height at target distance for a given angle
-    let get_height_at_angle = |angle: f64| -> Result<Option<f64>, BallisticsError> {
-        let mut test_inputs = inputs.clone();
-        test_inputs.muzzle_angle = angle;
-        // MBA-959: zero on the bare bore. Aerodynamic jump is a constant elevation
-        // offset, so leaving it on here would let the zero search silently absorb the
-        // vertical jump. Disabling it makes AJ an additive POI shift relative to the
-        // no-jump zero, regardless of the conditions the caller zeroes in.
-        test_inputs.enable_aerodynamic_jump = false;
-        // MBA-1286: zero on a LEVEL rifle. The zero angle is a property of the sight
-        // geometry; canting is applied at fire time, so the classic "zero level, fire
-        // canted" POI error emerges from the flight, not the zero.
-        test_inputs.cant_angle = 0.0;
-
-        let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
-        solver.set_max_range(target_distance * 2.0);
-        solver.set_time_step(0.001);
-        let result = solver.solve()?;
-
-        // X is downrange in McCoy coordinates
-        for i in 0..result.points.len() {
-            if result.points[i].position.x >= target_distance {
-                if i > 0 {
-                    let p1 = &result.points[i - 1];
-                    let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
-                    return Ok(Some(p1.position.y + t * (p2.position.y - p1.position.y)));
-                } else {
-                    return Ok(Some(result.points[i].position.y));
-                }
-            }
-        }
-        Ok(None)
-    };
-
-    // Binary search for the angle that hits the target
-    // Use only positive angles to ensure proper ballistic arc (upward trajectory)
-    let mut low_angle = 0.0; // radians (horizontal)
-    let mut high_angle = 0.2; // radians (about 11 degrees)
-    let tolerance = 1e-7; // radians
-    let max_iterations = 60;
-
-    // MBA-194: Validate bracketing before starting binary search
-    // Check that the target height is actually between low and high angle trajectories
-    let low_height = get_height_at_angle(low_angle)?;
-    let high_height = get_height_at_angle(high_angle)?;
-
-    match (low_height, high_height) {
-        (Some(lh), Some(hh)) => {
-            let low_error = lh - target_height;
-            let high_error = hh - target_height;
-
-            // For proper bracketing, low angle should undershoot (negative error)
-            // and high angle should overshoot (positive error)
-            if low_error > 0.0 && high_error > 0.0 {
-                // Both angles overshoot - target is too close or height too low
-                // This shouldn't happen for typical zeroing, but handle gracefully
-                // Try to find a valid bracket by reducing low_angle (can't go negative)
-                // Since we can't go below 0, just proceed and let binary search find best
-            } else if low_error < 0.0 && high_error < 0.0 {
-                // Both angles undershoot - target is beyond effective range
-                // Try expanding high_angle up to 45 degrees (0.785 rad)
-                let mut expanded = false;
-                for multiplier in [2.0, 3.0, 4.0] {
-                    let new_high = (high_angle * multiplier).min(0.785);
-                    if let Ok(Some(h)) = get_height_at_angle(new_high) {
-                        if h - target_height > 0.0 {
-                            high_angle = new_high;
-                            expanded = true;
-                            break;
-                        }
-                    }
-                    if new_high >= 0.785 {
-                        break;
-                    }
-                }
-                if !expanded {
-                    return Err("Cannot find zero angle: target beyond effective range even at maximum angle".into());
-                }
-            }
-            // If signs are opposite, we have valid bracketing - proceed
-        }
-        (None, Some(_hh)) => {
-            // Low angle doesn't reach target, high does - this is fine
-            // Binary search will increase low_angle until trajectory reaches
-        }
-        (Some(_lh), None) => {
-            // High angle doesn't reach target - shouldn't happen
-            return Err(
-                "Cannot find zero angle: high angle trajectory doesn't reach target distance"
-                    .into(),
-            );
-        }
-        (None, None) => {
-            // Neither reaches target - target too far
-            return Err(
-                "Cannot find zero angle: trajectory cannot reach target distance at any angle"
-                    .into(),
-            );
-        }
-    }
-
-    for _iteration in 0..max_iterations {
-        let mid_angle = (low_angle + high_angle) / 2.0;
-
-        let mut test_inputs = inputs.clone();
-        test_inputs.muzzle_angle = mid_angle;
-        // MBA-959: zero on the bare bore so aerodynamic jump is not absorbed (see above).
-        test_inputs.enable_aerodynamic_jump = false;
-        // MBA-1286: zero on a LEVEL rifle. The zero angle is a property of the sight
-        // geometry; canting is applied at fire time, so the classic "zero level, fire
-        // canted" POI error emerges from the flight, not the zero.
-        test_inputs.cant_angle = 0.0;
-
-        let mut solver = TrajectorySolver::new(test_inputs, wind.clone(), atmosphere.clone());
-        // Make sure we calculate far enough to reach the target
-        solver.set_max_range(target_distance * 2.0);
-        solver.set_time_step(0.001);
-        let result = solver.solve()?;
-
-        // Find the height at target distance (X is downrange)
-        let mut height_at_target = None;
-        for i in 0..result.points.len() {
-            if result.points[i].position.x >= target_distance {
-                if i > 0 {
-                    // Linear interpolation
-                    let p1 = &result.points[i - 1];
-                    let p2 = &result.points[i];
-                    let t = (target_distance - p1.position.x) / (p2.position.x - p1.position.x);
-                    height_at_target = Some(p1.position.y + t * (p2.position.y - p1.position.y));
-                } else {
-                    height_at_target = Some(result.points[i].position.y);
-                }
-                break;
-            }
-        }
-
-        match height_at_target {
-            Some(height) => {
-                let error = height - target_height;
-                // MBA-193: Check height error FIRST (primary convergence criterion)
-                // Height accuracy is what matters for zeroing - angle tolerance is secondary.
-                // 0.0001 m (0.1 mm) at the zero distance: fine enough that the (small)
-                // zero-day atmosphere effect on a short zero still resolves the zero angle
-                // instead of quantizing two very different atmospheres to an identical angle.
-                if error.abs() < 0.0001 {
-                    return Ok(mid_angle);
-                }
-
-                // Only use angle tolerance as convergence criterion if we have
-                // exhausted angle precision AND height error is still acceptable
-                // (within 10mm which is reasonable for long range)
-                if (high_angle - low_angle).abs() < tolerance {
-                    if error.abs() < 0.01 {
-                        // Height error within 10mm - acceptable for practical use
-                        return Ok(mid_angle);
-                    }
-                    // Angle bracket collapsed but the height error is still too large: the
-                    // target is not actually reachable / was never bracketed. Returning
-                    // Ok(mid_angle) here reported a NOT-zeroed angle as success (callers use
-                    // it directly as muzzle_angle); surface it as an error instead.
-                    return Err("Zero angle did not converge: residual height error too large (target not reachable / not bracketed)".into());
-                }
-
-                if error > 0.0 {
-                    high_angle = mid_angle;
-                } else {
-                    low_angle = mid_angle;
-                }
-            }
-            None => {
-                // Trajectory didn't reach target distance, increase angle
-                low_angle = mid_angle;
-
-                // MBA-193: Check angle tolerance for None case too
-                if (high_angle - low_angle).abs() < tolerance {
-                    return Err("Trajectory cannot reach target distance - angle converged without valid solution".into());
-                }
-            }
-        }
-    }
-
-    Err("Failed to find zero angle".into())
+    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    solver.calculate_and_set_zero_angle(target_distance, target_height)
 }
 
 /// What a BC estimate is fit against.
@@ -3507,6 +3522,142 @@ pub fn estimate_bc_from_trajectory(
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod mba1302_solver_seam_tests {
+    use super::*;
+    use crate::wind::WindSegment;
+
+    #[test]
+    fn authoritative_station_atmosphere_preserves_explicit_standard_values_at_altitude() {
+        let atmosphere = AtmosphericConditions {
+            temperature: 15.0,
+            pressure: 1013.25,
+            humidity: 50.0,
+            altitude: 2_000.0,
+        };
+        let legacy = TrajectorySolver::new(
+            BallisticInputs::default(),
+            WindConditions::default(),
+            atmosphere.clone(),
+        );
+        let authoritative = TrajectorySolver::new_with_resolved_station_atmosphere(
+            BallisticInputs::default(),
+            WindConditions::default(),
+            atmosphere,
+        );
+
+        let (legacy_density, _, legacy_temp_c, legacy_pressure_hpa) = legacy.resolved_atmosphere();
+        let (authoritative_density, _, authoritative_temp_c, authoritative_pressure_hpa) =
+            authoritative.resolved_atmosphere();
+        let (icao_temp_k, icao_pressure_pa) =
+            crate::atmosphere::calculate_icao_standard_atmosphere(2_000.0);
+        let (expected_authoritative_density, _) =
+            crate::atmosphere::calculate_atmosphere(2_000.0, Some(15.0), Some(1013.25), 50.0);
+
+        assert!((legacy_temp_c - (icao_temp_k - 273.15)).abs() < 1e-12);
+        assert!((legacy_pressure_hpa - icao_pressure_pa / 100.0).abs() < 1e-12);
+        assert_eq!(authoritative_temp_c.to_bits(), 15.0_f64.to_bits());
+        assert_eq!(authoritative_pressure_hpa.to_bits(), 1013.25_f64.to_bits());
+        assert_eq!(
+            authoritative_density.to_bits(),
+            expected_authoritative_density.to_bits()
+        );
+        assert!(
+            (authoritative_density - legacy_density).abs() > 0.1,
+            "explicit standard values at altitude must differ from ICAO-at-altitude: explicit={authoritative_density}, ICAO={legacy_density}"
+        );
+    }
+
+    fn configured_euler_zero(vertical_wind_mps: f64, time_step_s: f64) -> TrajectorySolver {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            bullet_length: 0.0309,
+            sight_height: 0.05,
+            ground_threshold: -100.0,
+            use_rk4: false,
+            use_adaptive_rk45: false,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(300.0);
+        solver.set_time_step(time_step_s);
+        if vertical_wind_mps != 0.0 {
+            solver.set_wind_segments(vec![WindSegment {
+                speed_kmh: 0.0,
+                angle_deg: 0.0,
+                until_m: 400.0,
+                vertical_mps: vertical_wind_mps,
+            }]);
+        }
+        solver
+    }
+
+    #[test]
+    fn configured_zero_keeps_segments_method_and_time_step_then_sets_base_angle() {
+        const TARGET_DISTANCE_M: f64 = 150.0;
+        const TARGET_HEIGHT_M: f64 = 0.05;
+
+        // A deliberately coarse Euler step makes an accidental reset to the historical 1 ms
+        // zeroing step observable, while remaining stable and physically meaningful.
+        let mut segmented = configured_euler_zero(-10.0, 0.02);
+        let coarse_height = segmented
+            .zero_trial_height_at(0.0, TARGET_DISTANCE_M)
+            .expect("coarse configured trial")
+            .expect("coarse trial reaches target");
+        let mut fine = segmented.clone();
+        fine.set_time_step(0.001);
+        let fine_height = fine
+            .zero_trial_height_at(0.0, TARGET_DISTANCE_M)
+            .expect("fine configured trial")
+            .expect("fine trial reaches target");
+        assert!(
+            (coarse_height - fine_height).abs() > 1e-5,
+            "configured Euler step must affect zero trials: coarse={coarse_height}, fine={fine_height}"
+        );
+
+        let segmented_angle = segmented
+            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M)
+            .expect("segmented zero");
+        assert_eq!(
+            segmented.inputs.muzzle_angle.to_bits(),
+            segmented_angle.to_bits(),
+            "successful zero must install its angle on the configured solver"
+        );
+        assert_eq!(segmented.time_step.to_bits(), 0.02_f64.to_bits());
+        assert_eq!(segmented.max_range.to_bits(), 300.0_f64.to_bits());
+        assert!(segmented.wind_sock.is_some());
+        assert_eq!(
+            segmented.station_atmosphere_resolution,
+            StationAtmosphereResolution::Authoritative
+        );
+        let zero_height = segmented
+            .zero_trial_height_at(segmented_angle, TARGET_DISTANCE_M)
+            .expect("verify segmented zero")
+            .expect("zeroed trial reaches target");
+        assert!(
+            (zero_height - TARGET_HEIGHT_M).abs() < 0.0001,
+            "configured zero missed target: height={zero_height}"
+        );
+
+        let mut calm = configured_euler_zero(0.0, 0.02);
+        let calm_angle = calm
+            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M)
+            .expect("calm zero");
+        assert!(
+            (segmented_angle - calm_angle).abs() > 1e-5,
+            "segmented vertical wind must participate in zero trials: segmented={segmented_angle}, calm={calm_angle}"
+        );
+    }
+}
 
 #[cfg(test)]
 mod result_sanity_tests {
