@@ -338,7 +338,16 @@ subcommand.
 
 Besides the usual load/atmosphere/wind arguments shared with `trajectory` (`-v -b -m -d
 --drag-model --sight-height --temperature --pressure --humidity --altitude --wind-speed
---wind-direction`, plus `--profile`), `lead` adds:
+--wind-direction`, plus `--profile`), `lead` also accepts `trajectory`'s powder-temperature
+flags — `--use-powder-sensitivity`, `--powder-temp-sensitivity`, `--powder-temp`, and
+`--powder-temp-curve` — plumbed identically (MBA-1325: both commands build the same
+`BallisticInputs` and resolve the correction in the same place,
+`cli_api::TrajectorySolver::new`), so a `lead` run can reproduce a powder-corrected muzzle
+velocity without a separate `trajectory` call first. See the [Trajectory
+Command](#trajectory-command) parameters table for their units/defaults; omitting all four is
+unchanged from before (`-v` used verbatim).
+
+`lead` then adds its own moving-target arguments:
 
 - **`--target-speed <SPEED>`** (required) — target ground speed, mph under imperial units,
   m/s under metric.
@@ -477,6 +486,94 @@ CLI. `LeadSolution` carries `time_of_flight_s`, `lead_m`, `lead_mil`, `lead_moa`
 an over-closing (`TargetOvertakesShooter`) target, iteration `Convergence` failure, a
 corrected range that runs `BeyondSolvedSpan`, and an underlying trajectory-solve failure
 (`Solver`).
+
+### Mover Ring (`--target-speed`)
+
+A field-tested alternative to `lead` for engaging movers (MBA-1325): instead of computing a
+directional hold, `trajectory --target-speed <SPEED>` derives a **ring radius** —
+`target_speed × time-of-flight-to-that-point` — around your hold point at every printed/
+exported trajectory point. Watch the target through your optic; fire the instant it crosses
+into the ring. Because ring size only needs time of flight (which the trajectory solve already
+produced) and target speed, it falls out of an already-solved trajectory as pure
+post-processing — no second command, no re-entered ballistic data, and no assumed crossing
+angle (unlike `lead --target-angle`).
+
+```bash
+./ballistics trajectory -v 2700 -m 168 -d 0.308 -b 0.5 --target-speed 3 --full
+```
+
+- **`--target-speed <SPEED>`** — mph under imperial units, m/s under metric (same convention
+  as `lead --target-speed`). `0` (the default) leaves every output format byte-identical to a
+  run without the flag. This is the same flag that drives the PDF dope card's `Lead` column
+  (see [PDF Dope Card Format](#pdf-dope-card-format)) — setting it turns on both at once.
+
+**Table** (`--full -o table`) gains a `Ring(mil)` column. The muzzle point prints `-` (no
+flight time has elapsed, so the ring has no defined angular size there yet):
+
+```
+Trajectory Points:
+┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+│ Time (s) │  X (yd)  │  Y (yd)  │ Vel(fps) │Energy(ft-lb)│ Ring(mil)│
+├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤
+│    0.000 │     0.00 │     1.67 │  2700.00 │  2718.96 │        - │
+│    0.152 │   130.61 │     1.55 │  2465.74 │  2267.62 │     1.71 │
+│    0.302 │   248.75 │     1.21 │  2264.16 │  1912.00 │     1.78 │
+│    0.452 │   357.43 │     0.66 │  2086.99 │  1624.49 │     1.85 │
+│    0.582 │   444.86 │     0.03 │  1950.48 │  1418.91 │     1.92 │
+└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
+**JSON** (`--full -o json`) adds two per-point fields, present only when `--target-speed > 0`:
+
+```json
+{
+  "time": 0.17187200000000002,
+  "x": 0.0,
+  "y": 1.513531761659063,
+  "z": 146.9565529362786,
+  "velocity": 2437.286215359467,
+  "energy": 2215.5854770501155,
+  "mover_ring_m": 0.23050097664000005,
+  "mover_ring_mil": 1.715329655579473
+}
+```
+
+- **`mover_ring_m`** — linear ring radius in **meters**, always, regardless of `--units` — the
+  unit is in the field name so it can't be silently misread as something else (this codebase
+  otherwise has a wart of unlabeled JSON units on a handful of older fields, MBA-1315; this
+  field is deliberately named to not add to it). Present at every point once the flag is on,
+  including the muzzle (`0.0`, since `target_speed × 0 = 0`).
+- **`mover_ring_mil`** — `mover_ring_m / downrange_m × 1000`. **Omitted** at the muzzle
+  (`downrange = 0`, the ratio is undefined), not emitted as `0` or `null`.
+
+**CSV** (`--full -o csv`) gains a trailing `ring_mil` column — the header carries the unit; the
+muzzle row's field is empty rather than `0`:
+
+```
+time_s,x_yd,y_yd,z_yd,velocity_fps,energy_ft-lb,ring_mil
+0.0000,0.00,1.67,0.00,2700.00,2718.96,
+0.0010,0.00,1.67,0.90,2698.34,2715.63,1.630
+0.0028,0.00,1.67,2.52,2695.37,2709.63,1.631
+```
+
+**Reading the ring correctly:**
+
+- **It's a worst-case bound, not an exact intercept solution — it assumes the hold point sits
+  on the mover's track.** If the mover is heading straight for your hold point, firing the
+  instant it enters the ring puts the bullet there exactly when the mover arrives (both cover
+  their respective distance — bullet's flight, mover's ring radius — in the same time). If your
+  hold point is only *near* the mover's actual line of travel rather than on it, entering the
+  ring no longer means "arrives at the hold point in one ToF"; treat the ring as "no later than
+  now," not a promise of an exact hit. Use `lead --target-angle` instead when you know the
+  crossing angle and want the angle-aware exact hold — the ring trades that precision for not
+  needing to know the angle at all.
+- **The mil value is only near-constant across a short stage — it grows slowly with range, not
+  a single number for the whole sheet.** In the table above it climbs from 1.71 to 1.92 mil
+  over 130–445 yd: the bullet decelerates, so later range gates cost more time of flight per
+  yard, and the mover's linear ring radius grows faster than downrange distance does. Read the
+  ring size for the range you're actually engaging at.
+- **Doesn't fold in wind.** Like `lead`'s hold, the ring is pure target-motion bookkeeping —
+  it stays separate from the wind column/dial on the same dope.
 
 ### Wind Card
 
@@ -899,7 +996,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 |-----------|-------------|
 | `--output-file` | Output file path (required for PDF) |
 | `--adjustment-unit` | Angular unit for Drop/Wind/Lead columns: `mil` (default) or `moa` |
-| `--target-speed` | Target speed in mph for lead calculation |
+| `--target-speed` | Target speed for the Lead column (mph imperial / m/s metric — MBA-1325 fixed this to follow `--units` like every other speed flag; previously always read as mph). Also enables the [Mover Ring](#mover-ring---target-speed) column/fields on every output format |
 | `--powder` | Powder type (shown in footer) |
 | `--bullet-name` | Bullet name (shown in footer) |
 | `--location-name` | Location name (shown in header) |
@@ -968,6 +1065,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --enable-pitch-damping | Transonic stability analysis | false | - | - |
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
+| --target-speed | Moving-target speed (see [Mover Ring](#mover-ring---target-speed)); also drives the PDF dope card's Lead column. `0` disables both | 0 | mph | m/s |
 
 ### Manual BC Segments (`--bc-segment`)
 
