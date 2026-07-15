@@ -15,6 +15,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(feature = "pdf")]
 mod pdf_dope_card;
+mod solve_json_command;
 #[cfg(feature = "pdf")]
 use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
 
@@ -318,6 +319,9 @@ struct Cli {
 )]
 #[derive(Subcommand)]
 enum Commands {
+    /// Solve one explicit-SI v1 JSON request from stdin and write one JSON envelope to stdout
+    SolveJson,
+
     /// Calculate a single trajectory
     Trajectory {
         /// Load parameters from CSV profile file (gun_profiles.csv format)
@@ -2670,6 +2674,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::SolveJson => std::process::exit(solve_json_command::run_stdio()),
+
         Commands::Trajectory {
             profile,
             profile_row,
