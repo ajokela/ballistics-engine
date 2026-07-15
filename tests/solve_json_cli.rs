@@ -241,14 +241,20 @@ fn engine_failure_uses_solve_exit_status() {
 #[cfg(unix)]
 #[test]
 fn stdin_read_failure_is_one_io_error_envelope() {
-    let directory = std::fs::File::open(".").expect("open directory handle");
+    let (reader, writer) =
+        std::os::unix::net::UnixStream::pair().expect("create stdin socket pair");
+    reader
+        .set_nonblocking(true)
+        .expect("make stdin socket nonblocking");
+    let reader: std::os::fd::OwnedFd = reader.into();
     let output = Command::new(env!("CARGO_BIN_EXE_ballistics"))
         .arg("solve-json")
-        .stdin(Stdio::from(directory))
+        .stdin(Stdio::from(reader))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .expect("run ballistics with unreadable stdin");
+    drop(writer);
     assert_exit(&output, 1);
     assert!(output.stderr.is_empty());
     assert_eq!(envelope(&output)["error"]["code"], "io_error");
