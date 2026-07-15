@@ -69,7 +69,7 @@ pub(crate) fn parse_message(buf: &[u8]) -> Result<Vec<WireField<'_>>, WireError>
     let mut fields = Vec::new();
     while pos < buf.len() {
         let key = read_varint(buf, &mut pos)?;
-        let number = (key >> 3) as u32;
+        let number = u32::try_from(key >> 3).map_err(|_| WireError::VarintOverflow)?;
         let wire_type = (key & 7) as u8;
         let value = match wire_type {
             0 => WireValue::Varint(read_varint(buf, &mut pos)?),
@@ -84,7 +84,8 @@ pub(crate) fn parse_message(buf: &[u8]) -> Result<Vec<WireField<'_>>, WireError>
                 WireValue::Fixed64(b)
             }
             2 => {
-                let len = read_varint(buf, &mut pos)? as usize;
+                let len = usize::try_from(read_varint(buf, &mut pos)?)
+                    .map_err(|_| WireError::Truncated)?;
                 let end = pos.checked_add(len).ok_or(WireError::Truncated)?;
                 if end > buf.len() {
                     return Err(WireError::Truncated);
@@ -255,5 +256,33 @@ mod tests {
             parse_message(&buf).unwrap_err(),
             WireError::UnsupportedWireType(3)
         );
+    }
+
+    #[test]
+    fn oversized_field_number_is_an_error() {
+        // A key whose field number needs more than 32 bits. Without a
+        // checked narrowing cast this silently truncates to field 0 and can
+        // collide with a legitimate small field number instead of erroring.
+        let mut buf = Vec::new();
+        enc_varint((u64::from(u32::MAX) + 1) << 3, &mut buf);
+        assert_eq!(
+            parse_message(&buf).unwrap_err(),
+            WireError::VarintOverflow
+        );
+    }
+
+    #[test]
+    fn huge_length_claim_is_truncated_error() {
+        // On 32-bit targets (wasm32 is a first-class target of this crate) a
+        // naive `as usize` cast on the length varint truncates u64::MAX down
+        // to a small value *before* the checked_add bounds check runs,
+        // letting a should-be-Truncated claim slip through at the wrong
+        // slice boundary. Pin the 64-bit contract here so a regression
+        // toward the truncating cast is caught even on a 64-bit host.
+        let mut buf = Vec::new();
+        enc_varint((1u64 << 3) | 2, &mut buf); // field 1, wire type 2 (length-delimited)
+        enc_varint(u64::MAX, &mut buf); // claims an enormous length
+        buf.extend_from_slice(b"abc");
+        assert_eq!(parse_message(&buf).unwrap_err(), WireError::Truncated);
     }
 }
