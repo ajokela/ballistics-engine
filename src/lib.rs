@@ -19,9 +19,10 @@ pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions, estimate_bc_fit,
     estimate_bc_from_trajectory, run_monte_carlo, run_monte_carlo_with_direction_std_dev,
     run_monte_carlo_with_wind, run_monte_carlo_with_wind_and_direction_std_dev,
-    AtmosphericConditions, BallisticInputs, BallisticsError, BcEstimate, BcFitMode,
-    MonteCarloParams, MonteCarloResults, TrajectoryPoint, TrajectoryResult, TrajectorySolver,
-    WindConditions, DEFAULT_HIT_RADIUS_M, MAX_TRAJECTORY_POINTS, TARGET_NOT_REACHED_SENTINEL_M,
+    run_monte_carlo_with_wind_and_direction_std_dev_seeded, AtmosphericConditions,
+    BallisticInputs, BallisticsError, BcEstimate, BcFitMode, MonteCarloParams,
+    MonteCarloResults, TrajectoryPoint, TrajectoryResult, TrajectorySolver, WindConditions,
+    DEFAULT_HIT_RADIUS_M, MAX_TRAJECTORY_POINTS, TARGET_NOT_REACHED_SENTINEL_M,
 };
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;
