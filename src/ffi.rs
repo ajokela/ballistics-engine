@@ -549,16 +549,14 @@ unsafe fn calculate_zero_angle_impl(
     // This means the bullet crosses the line of sight at the zero distance
     let target_height = ballistic_inputs.sight_height;
 
-    match calculate_zero_angle_with_conditions(
+    calculate_zero_angle_with_conditions(
         ballistic_inputs,
         zero_distance,
         target_height,
         wind_conditions,
         atmospheric_conditions,
-    ) {
-        Ok(angle) => angle,
-        Err(_) => f64::NAN,
-    }
+    )
+    .unwrap_or(f64::NAN)
 }
 
 /// Calculate the zero angle for a target distance through the C ABI.

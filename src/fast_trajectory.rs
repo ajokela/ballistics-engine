@@ -406,17 +406,18 @@ pub fn fast_integrate(
     // First project into level downrange/up/lateral axes: azimuth 0 = North; omega.Z is NEGATIVE
     // (Omega.East = -Omega cos(lat) sin(az)). The derivative kernel then projects this vector into
     // the inclined shot frame and applies the physical -2 Omega x v.
-    let omega_vector = if inputs.enable_coriolis && inputs.latitude.is_some() {
-        let omega_earth = 7.2921159e-5_f64; // rad/s
-        let lat = inputs.latitude.unwrap().to_radians();
-        let az = inputs.shot_azimuth; // compass bearing (0=N), NOT the aiming offset
-        Some(Vector3::new(
-            omega_earth * lat.cos() * az.cos(),  // X: downrange
-            omega_earth * lat.sin(),             // Y: vertical
-            -omega_earth * lat.cos() * az.sin(), // Z: lateral (corrected sign)
-        ))
-    } else {
-        None
+    let omega_vector = match inputs.latitude {
+        Some(latitude) if inputs.enable_coriolis => {
+            let omega_earth = 7.2921159e-5_f64; // rad/s
+            let lat = latitude.to_radians();
+            let az = inputs.shot_azimuth; // compass bearing (0=N), NOT the aiming offset
+            Some(Vector3::new(
+                omega_earth * lat.cos() * az.cos(),  // X: downrange
+                omega_earth * lat.sin(),             // Y: vertical
+                -omega_earth * lat.cos() * az.sin(), // Z: lateral (corrected sign)
+            ))
+        }
+        _ => None,
     };
     // Parse the string model once; the derivative kernel is called four times per RK4 step.
     let wind_shear_model = if inputs.enable_wind_shear {
@@ -848,19 +849,17 @@ fn compute_derivatives(
         let mach = v_mag / speed_of_sound;
 
         // Get BC value (potentially from segments)
-        let bc_current = if inputs.use_bc_segments
-            && has_bc_segments_data
-            && inputs.bc_segments_data.is_some()
-        {
-            velocity_segment_bc(v_fps, inputs.bc_segments_data.as_ref().unwrap(), bc)
-        } else if has_bc_segments && inputs.bc_segments.is_some() {
-            crate::derivatives::interpolated_bc(
-                mach,
-                inputs.bc_segments.as_ref().unwrap(),
-                Some(inputs),
-            )
-        } else {
-            bc
+        let bc_current = match (
+            inputs.bc_segments_data.as_ref(),
+            inputs.bc_segments.as_ref(),
+        ) {
+            (Some(segments_data), _) if inputs.use_bc_segments && has_bc_segments_data => {
+                velocity_segment_bc(v_fps, segments_data, bc)
+            }
+            (_, Some(segments)) if has_bc_segments => {
+                crate::derivatives::interpolated_bc(mach, segments, Some(inputs))
+            }
+            _ => bc,
         };
         // Guard bc_value == 0 (allowed on FFI/WASM/public MC surfaces): the division below
         // would be Inf -> NaN. Mirrors cli_api's effective_bc.max(1e-6); inert for valid BCs.
