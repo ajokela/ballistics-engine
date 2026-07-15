@@ -133,6 +133,34 @@ pub fn lead_from_tof(speed_mps: f64, angle_deg: f64, tof_s: f64, range_m: f64) -
     }
 }
 
+/// Mover-ring radius for the "wait for the target to enter the ring" hold technique
+/// (MBA-1325): every trajectory point already carries its own time of flight, so the
+/// ring a shooter watches for a mover — radius `target_speed x ToF(range)` around the
+/// hold point — falls out of an already-solved trajectory as pure post-processing. A
+/// mover crossing INTO the ring during the bullet's flight arrives at the hold point at
+/// roughly the same moment the bullet does.
+///
+/// This is a WORST-CASE bound, not an exact intercept solution: it is track-angle-agnostic
+/// (unlike [`lead_from_tof`]'s explicit 90-degree-crossing assumption) and exact only when
+/// the mover's track actually passes through the hold point. Shared by the native CLI
+/// (`trajectory --target-speed`) and the WASM `trajectory` command so both surfaces apply
+/// the identical formula.
+///
+/// Returns `(ring_m, ring_mil)`. `ring_m` is the linear radius in meters — ALWAYS SI,
+/// independent of the caller's display units, because the JSON field it feeds
+/// (`mover_ring_m`) carries its unit in the name (MBA-1315 hygiene: no ambiguous units).
+/// `ring_mil = ring_m / downrange_m * 1000`, `None` at/before the muzzle (`downrange_m
+/// <= 0`) where the ratio is degenerate.
+pub fn mover_ring(target_speed_mps: f64, time_s: f64, downrange_m: f64) -> (f64, Option<f64>) {
+    let ring_m = target_speed_mps * time_s;
+    let ring_mil = if downrange_m > 0.0 {
+        Some(ring_m / downrange_m * MIL_PER_UNIT_RATIO)
+    } else {
+        None
+    };
+    (ring_m, ring_mil)
+}
+
 /// Linear-interpolated time of flight at downrange distance `x_m`, from a solved
 /// trajectory's points. Returns `None` when `x_m` lies beyond the solved span.
 /// (MBA-1218 guarantees the final point sits exactly at the solve's max range.)
