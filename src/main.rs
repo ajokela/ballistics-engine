@@ -2716,6 +2716,22 @@ fn map_a7p_to_profile(
         "c_zero_p_temperature".to_string(),
         format!("{:.0} C powder temperature at zeroing", src.powder_temperature_c),
     ));
+    report.unmapped.push((
+        "c_zero_temperature".to_string(),
+        format!(
+            "{:.0} C ambient temperature when the zero was established",
+            src.zero_temperature_c
+        ),
+    ));
+    if src.w_pitch_raw != 0 {
+        report.unmapped.push((
+            "c_zero_w_pitch".to_string(),
+            format!(
+                "zeroing pitch value ({}) — sight-pitch state is not modeled",
+                src.w_pitch_raw
+            ),
+        ));
+    }
     if src.zero_x_raw != 0 || src.zero_y_raw != 0 {
         report.unmapped.push((
             "zero_x / zero_y".to_string(),
@@ -2801,19 +2817,19 @@ fn render_import_report(report: &ImportReport) -> String {
     let mut out = String::new();
     out.push_str("Imported fields:\n");
     out.push_str(&format!(
-        "  {:<28} {:<26} {:<22} {}\n",
+        "  {:<32} {:<26} {:<22} {}\n",
         "SOURCE (.a7p)", "VALUE", "CONVERTED", "DESTINATION"
     ));
     for [field, raw, converted, dest] in &report.mapped {
         out.push_str(&format!(
-            "  {field:<28} {raw:<26} {converted:<22} {dest}\n"
+            "  {field:<32} {raw:<26} {converted:<22} {dest}\n"
         ));
     }
     // muzzle velocity appears in the header row name for the g7 render test
     if !report.unmapped.is_empty() {
         out.push_str("\nNOT imported (no destination in the profile store):\n");
         for (field, why) in &report.unmapped {
-            out.push_str(&format!("  {field:<28} {why}\n"));
+            out.push_str(&format!("  {field:<32} {why}\n"));
         }
     }
     if !report.warnings.is_empty() {
@@ -9910,6 +9926,7 @@ mod a7p_import_mapping_tests {
         enc_i32(9, 90, &mut p);
         enc_i32(10, 1000, &mut p);
         enc_i32(11, 7920, &mut p);
+        enc_i32(12, 15, &mut p);
         enc_i32(13, 1000, &mut p);
         enc_i32(15, 15, &mut p);
         enc_i32(16, 10000, &mut p);
@@ -9921,7 +9938,12 @@ mod a7p_import_mapping_tests {
         let mut packed = Vec::new();
         enc_varint(10_000, &mut packed);
         enc_bytes(26, &packed, &mut p);
-        for (bc, mv) in [(7160i64, 7920i64), (7000, 5000)] {
+        // Three rows, deliberately ordered so max-velocity, max-BC, first-row,
+        // and last-row selection strategies all disagree:
+        //   (7500, 5000) -> BC 0.750 @ 500 m/s  (highest BC, encoded first)
+        //   (7160, 7920) -> BC 0.716 @ 792 m/s  (highest velocity -- the winner)
+        //   (6900, 3000) -> BC 0.690 @ 300 m/s  (lowest of everything, encoded last)
+        for (bc, mv) in [(7500i64, 5000i64), (7160, 7920), (6900, 3000)] {
             let mut row = Vec::new();
             enc_i32(1, bc, &mut row);
             enc_i32(2, mv, &mut row);
@@ -9955,12 +9977,12 @@ mod a7p_import_mapping_tests {
         assert_eq!(p.bullet_name.as_deref(), Some("BARNES 300GR OTM"));
         assert!(p.created.is_some());
 
-        // the second BC row is reported, not silently dropped
+        // the two additional BC rows are reported, not silently dropped
         assert!(outcome
             .report
             .warnings
             .iter()
-            .any(|w| w.contains("1 additional BC row")));
+            .any(|w| w.contains("2 additional BC row(s)")));
         // powder temp sensitivity is honestly unmapped, with the converted value shown
         let tcoeff = outcome
             .report
@@ -9970,6 +9992,14 @@ mod a7p_import_mapping_tests {
             .expect("c_t_coeff reported");
         // 792 m/s * (1.0/100) / 15 C = 0.528 m/s per degC
         assert!(tcoeff.1.contains("0.528"));
+        // zero-condition ambient temperature (field 12) is honestly unmapped too
+        let zero_temp = outcome
+            .report
+            .unmapped
+            .iter()
+            .find(|(field, _)| field == "c_zero_temperature")
+            .expect("c_zero_temperature reported");
+        assert!(zero_temp.1.contains("15 C"));
     }
 
     #[test]
