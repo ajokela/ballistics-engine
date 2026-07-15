@@ -1100,5 +1100,189 @@ Iterations: 0\n";
             "default (mil) Ring cell must match JSON mover_ring_mil, 2dp-rounded"
         );
     }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1328: custom Mach:Cd drag table, mirroring the BC5D bytes-loader pattern
+    // (load_bc5d_table / has_bc5d_table above). loadDragTable(bytes) parses the SAME
+    // CSV format native --drag-table accepts (DragTable::from_csv_str) and, once
+    // loaded, is applied automatically to every trajectory/zero/lead/monte-carlo run
+    // — no --use-* gate flag needed (unlike BC5D, which needs --use-bc-segments).
+    // -----------------------------------------------------------------------------
+
+    /// A deliberately non-G1/non-G7 curve: flat Cd 0.5 across the whole Mach range.
+    /// 6 points, comfortably above try_new's 2-point minimum, spanning Mach 0-3.
+    const FLAT_CD_CSV: &str = "mach,cd\n0.0,0.5\n0.5,0.5\n1.0,0.5\n1.5,0.5\n2.0,0.5\n3.0,0.5\n";
+
+    #[wasm_bindgen_test]
+    fn drag_table_not_loaded_by_default() {
+        let wasm = WasmBallistics::new();
+        assert!(!wasm.has_drag_table());
+    }
+
+    #[wasm_bindgen_test]
+    fn load_drag_table_reports_point_count_and_mach_range() {
+        let wasm = WasmBallistics::new();
+        let summary = wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+        assert!(wasm.has_drag_table());
+        assert!(summary.contains("6 points"), "got: {summary}");
+        assert!(summary.contains("0.000-3.000"), "got: {summary}");
+    }
+
+    #[wasm_bindgen_test]
+    fn load_drag_table_replaces_previous_table() {
+        let wasm = WasmBallistics::new();
+        wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+        assert!(wasm.has_drag_table());
+        // A second, different (2-point) table must fully replace the first, not merge
+        // with or append to it.
+        let summary = wasm
+            .load_drag_table(b"mach,cd\n0.5,0.30\n2.5,0.25\n")
+            .unwrap();
+        assert!(wasm.has_drag_table());
+        assert!(summary.contains("2 points"), "got: {summary}");
+    }
+
+    /// Live-change: a table loaded via loadDragTable() must actually change the
+    /// physics of a trajectory run, not just be stored inertly. Compares the flat,
+    /// deliberately non-G7-shaped Cd curve above against the unloaded (G1-model) run
+    /// of otherwise-identical args.
+    #[wasm_bindgen_test]
+    fn drag_table_live_change_alters_trajectory_output() {
+        let command = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 -o json";
+
+        let unloaded = WasmBallistics::new();
+        let baseline = unloaded.run_command(command).unwrap();
+
+        let loaded = WasmBallistics::new();
+        loaded.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+        let with_table = loaded.run_command(command).unwrap();
+
+        assert_ne!(
+            baseline, with_table,
+            "loading a drag table must change trajectory output for identical args"
+        );
+    }
+
+    /// Live-change also applies to `zero`, `lead`, and `monte-carlo` (deliberately
+    /// broader than the BC5D auto-apply, which only wires into `trajectory` — see
+    /// handle_trajectory_command's BC5D block vs the unconditional drag_table checks
+    /// added to all four handlers).
+    #[wasm_bindgen_test]
+    fn drag_table_live_change_alters_zero_lead_and_monte_carlo() {
+        let zero_cmd = "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300";
+        let lead_cmd =
+            "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 10 --range 300 -o json";
+        let mc_cmd = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 50";
+
+        for command in [zero_cmd, lead_cmd, mc_cmd] {
+            let unloaded = WasmBallistics::new();
+            let baseline = unloaded.run_command(command).unwrap();
+
+            let loaded = WasmBallistics::new();
+            loaded.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+            let with_table = loaded.run_command(command).unwrap();
+
+            assert_ne!(
+                baseline, with_table,
+                "loading a drag table must change `{command}` output"
+            );
+        }
+    }
+
+    /// Golden-unloaded: with NO table loaded, trajectory output for a fixed command
+    /// must remain byte-identical to a literal captured from the pre-MBA-1328 build
+    /// (harvested via a temporary probe test run under `wasm-pack test --node`,
+    /// following the MBA-1325 golden-compare methodology — see
+    /// `lead_no_env_flags_output_is_byte_identical_to_pre_env_build` above). Guards
+    /// against the new drag_table plumbing silently perturbing the no-table path.
+    #[wasm_bindgen_test]
+    fn drag_table_unloaded_output_is_byte_identical_to_pre_change_build() {
+        const GOLDEN: &str = "Trajectory Calculation Results\n\
+==============================\n\
+\n\
+Range | Drop | Drift | Velocity | Energy | Time\n\
+------|------|-------|----------|--------|------\n\
+0 yd   | 2.0 in | 0.0 in  | 2700 fps   | 2719 ft-lb | 0.000 s\n\
+55 yd  | 2.7 in | 0.0 in  | 2595 fps   | 2512 ft-lb | 0.062 s\n\
+100 yd | 4.5 in | 0.0 in  | 2510 fps   | 2350 ft-lb | 0.115 s\n\
+\n\
+Max Range: 100 yards\n\
+Max Height: 60.0 inches\n\
+Time of Flight: 0.12 seconds\n\
+Impact Velocity: 2510 fps\n";
+
+        let wasm = WasmBallistics::new();
+        assert!(!wasm.has_drag_table());
+        let out = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100")
+            .unwrap();
+        assert_eq!(
+            out, GOLDEN,
+            "unloaded trajectory output drifted from the pre-MBA-1328 build"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn load_drag_table_rejects_malformed_csv_with_parser_message() {
+        let wasm = WasmBallistics::new();
+        let err = wasm
+            .load_drag_table(b"0.5,0.23\n1.0,notanumber\n")
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("line 2"),
+            "expected the DragTable::from_csv_str parser's line-numbered message, got: {msg}"
+        );
+        assert!(
+            !wasm.has_drag_table(),
+            "a failed load must not leave a table installed"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn load_drag_table_rejects_invalid_utf8_cleanly() {
+        let wasm = WasmBallistics::new();
+        // 0xFF is never a valid UTF-8 lead byte.
+        let err = wasm
+            .load_drag_table(&[0xFF, 0xFE, 0x00, 0x00])
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("UTF-8"),
+            "expected a clean UTF-8 decode error, got: {msg}"
+        );
+        assert!(!wasm.has_drag_table());
+    }
+
+    /// Deliverable #4: the WASM surface never hard-requires `-b`/`--bc` (every handler
+    /// defaults it, e.g. `let mut bc = 0.475;` in handle_trajectory_command) — unlike native
+    /// `zero`/`monte-carlo`, which clap-require it even though it's ignored once a table is
+    /// active (CLI_USAGE.md). Confirms the solve path actually succeeds end-to-end with a
+    /// loaded table and the default bc, omitting `-b` entirely, across all four commands.
+    #[wasm_bindgen_test]
+    fn drag_table_solve_succeeds_without_explicit_bc_flag() {
+        let wasm = WasmBallistics::new();
+        wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+
+        let trajectory = wasm
+            .run_command("trajectory -v 2700 -m 168 -d 0.308 --max-range 100")
+            .unwrap();
+        assert!(trajectory.contains("Trajectory Calculation Results"));
+
+        let zero = wasm
+            .run_command("zero -v 2700 -m 168 -d 0.308 --target-distance 300")
+            .unwrap();
+        assert!(zero.contains("Zero Calculation Results"));
+
+        let lead = wasm
+            .run_command("lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300")
+            .unwrap();
+        assert!(lead.contains("Moving-Target Lead"));
+
+        let monte_carlo = wasm
+            .run_command("monte-carlo -v 2700 -m 168 -d 0.308 -n 50")
+            .unwrap();
+        assert!(monte_carlo.contains("Monte Carlo Simulation Results"));
+    }
 }
 }

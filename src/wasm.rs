@@ -20,6 +20,12 @@ pub struct WasmBallistics {
     /// velocity-dependent BC segments from it (offline parity with the online
     /// solver's ClusterBCDegradation + BC-segment + weather corrections).
     bc5d_table: RefCell<Option<Bc5dTable>>,
+    /// Optional custom Mach:Cd drag table loaded from an in-memory CSV (MBA-1328;
+    /// mirrors `bc5d_table` above). When present, every `trajectory`, `zero`, `lead`,
+    /// and `monte-carlo` run applies it automatically as a full physical substitute
+    /// for the BC + G-model drag (see `calculate_drag_coefficient`) — no `--use-*`
+    /// gate flag needed, unlike BC5D's `--use-bc-segments`.
+    drag_table: RefCell<Option<crate::drag::DragTable>>,
 }
 
 // Unit system for conversions
@@ -156,6 +162,7 @@ impl WasmBallistics {
     pub fn new() -> Self {
         WasmBallistics {
             bc5d_table: RefCell::new(None),
+            drag_table: RefCell::new(None),
         }
     }
 
@@ -188,6 +195,50 @@ impl WasmBallistics {
     #[wasm_bindgen(js_name = hasBc5dTable)]
     pub fn has_bc5d_table(&self) -> bool {
         self.bc5d_table.borrow().is_some()
+    }
+
+    /// Load a custom Mach:Cd drag table (MBA-1328) — a measured or manufacturer-published
+    /// drag curve (Hornady CDM data, a Lapua/Doppler-radar-derived deck, or your own) — from
+    /// the raw bytes of a CSV file. The host (browser `fetch()` or Node `fs`/`fetch`) is
+    /// responsible for retrieving the file — WASM has no filesystem or network — and passes
+    /// the bytes here, mirroring [`Self::load_bc5d_table`].
+    ///
+    /// The bytes must be valid UTF-8 CSV text; parsing is delegated to
+    /// [`crate::drag::DragTable::from_csv_str`] — the SAME parser native `--drag-table`
+    /// uses — so the accepted format is identical: two columns `mach,cd` per line, blank
+    /// lines and `#` comments ignored, a single leading textual header row tolerated, Mach
+    /// strictly ascending with at least 2 points, Cd finite and > 0.
+    ///
+    /// Once loaded, EVERY subsequent `trajectory`, `zero`, `lead`, and `monte-carlo` run
+    /// applies the table automatically — no `--use-*` gate flag is needed (unlike a loaded
+    /// BC5D table, which only takes effect with `--use-bc-segments`). A loaded table is a
+    /// full physical substitute for the G-model + BC (see `calculate_drag_coefficient`):
+    /// `-b`/`--bc` may still be supplied but is ignored for drag once a table is active
+    /// (matching the native `--drag-table` CLI semantics documented in CLI_USAGE.md).
+    ///
+    /// Returns a short human-readable summary of the loaded table (point count + Mach
+    /// range). Replaces any previously loaded table.
+    #[wasm_bindgen(js_name = loadDragTable)]
+    pub fn load_drag_table(&self, bytes: &[u8]) -> Result<String, JsValue> {
+        let csv = std::str::from_utf8(bytes).map_err(|e| {
+            JsValue::from_str(&format!("Drag table bytes are not valid UTF-8: {}", e))
+        })?;
+        let table = crate::drag::DragTable::from_csv_str(csv)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse drag table: {}", e)))?;
+        let summary = format!(
+            "Loaded drag table: {} points, Mach {:.3}-{:.3}",
+            table.mach_values.len(),
+            table.mach_values.first().copied().unwrap_or(0.0),
+            table.mach_values.last().copied().unwrap_or(0.0),
+        );
+        *self.drag_table.borrow_mut() = Some(table);
+        Ok(summary)
+    }
+
+    /// Report whether a custom drag table is currently loaded.
+    #[wasm_bindgen(js_name = hasDragTable)]
+    pub fn has_drag_table(&self) -> bool {
+        self.drag_table.borrow().is_some()
     }
 
     /// Run a command and return the output
@@ -817,6 +868,13 @@ impl WasmBallistics {
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
+        // Custom drag table (MBA-1328): a table loaded via loadDragTable() is a full physical
+        // substitute for the BC + G-model (see calculate_drag_coefficient) — apply it
+        // unconditionally when present, mirroring native --drag-table (main.rs
+        // load_drag_table_or_exit). Unlike a loaded BC5D table it needs no --use-* gate flag.
+        if let Some(table) = self.drag_table.borrow().as_ref() {
+            inputs.custom_drag_table = Some(table.clone());
+        }
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
         inputs.cant_angle = cant_angle_deg * std::f64::consts::PI / 180.0;
@@ -1389,6 +1447,11 @@ impl WasmBallistics {
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
+        // Custom drag table (MBA-1328): see handle_trajectory_command for the rationale —
+        // applied unconditionally, no gate flag, mirrors native --drag-table on `zero`.
+        if let Some(table) = self.drag_table.borrow().as_ref() {
+            inputs.custom_drag_table = Some(table.clone());
+        }
 
         let target_distance_m = match units {
             UnitSystem::Imperial => target_distance * 0.9144,
@@ -1740,6 +1803,13 @@ impl WasmBallistics {
         inputs.bc_value = bc;
         inputs.bc_type = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
+        // Custom drag table (MBA-1328): see handle_trajectory_command for the rationale —
+        // applied unconditionally, no gate flag. Native `lead` has no --drag-table flag of
+        // its own, but calculate_lead solves through the same TrajectorySolver/BallisticInputs
+        // as trajectory/zero, so a loaded table is honored identically here.
+        if let Some(table) = self.drag_table.borrow().as_ref() {
+            inputs.custom_drag_table = Some(table.clone());
+        }
 
         // Powder temperature (MBA-1325): identical resolution to handle_trajectory_command
         // so a curve/sensitivity muzzle-velocity correction reproduces exactly between the
@@ -2096,6 +2166,13 @@ impl WasmBallistics {
         // Carlo path silently always used the G1 default even when G7 was intended.
         inputs.bc_type = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model (expected G1 or G7)"))?;
+        // Custom drag table (MBA-1328): see handle_trajectory_command for the rationale —
+        // applied unconditionally, no gate flag, mirrors native --drag-table on `monte-carlo`.
+        // Note: with a table active, --bc-std dispersion becomes a no-op for drag (the table
+        // fixes Cd directly) — same documented caveat as native (CLI_USAGE.md).
+        if let Some(table) = self.drag_table.borrow().as_ref() {
+            inputs.custom_drag_table = Some(table.clone());
+        }
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
         inputs.muzzle_height = 1.5;
         inputs.ground_threshold = 0.0;
@@ -3027,6 +3104,15 @@ Commands:
 
 Global Options:
   -u, --units <SYSTEM>  Unit system (imperial/metric) [default: imperial]
+
+Host API (JavaScript, not a CLI flag):
+  loadDragTable(bytes)   Load a custom Mach:Cd drag table (CSV, same format as native
+                         --drag-table). Once loaded, EVERY trajectory/zero/lead/monte-carlo
+                         run applies it automatically (no --use-* flag needed); -b/--bc is
+                         still accepted but ignored for drag while a table is active.
+  hasDragTable()         Report whether a drag table is currently loaded.
+  loadBc5dTable(bytes)   Load a BC5D correction table (see --use-bc-segments below).
+  hasBc5dTable()         Report whether a BC5D table is currently loaded.
 
 Trajectory Command:
   ballistics trajectory [OPTIONS]
