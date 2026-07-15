@@ -52,11 +52,12 @@ exclude = [
 ]
 
 [features]
-default = ["online", "pdf"]
+default = ["online", "pdf", "profile-import"]
 online = ["dep:ureq"]
 pdf = ["dep:printpdf"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
+profile-import = []
 
 [dependencies]
 nalgebra = "0.35"

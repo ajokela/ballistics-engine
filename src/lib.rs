@@ -101,6 +101,10 @@ pub mod bc_table;
 // 5D BC correction tables (caliber-specific, ML-derived)
 pub mod bc_table_5d;
 
+// Import of third-party ballistic profile files (.a7p), feature-gated
+#[cfg(feature = "profile-import")]
+pub mod profile_import;
+
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;
 
