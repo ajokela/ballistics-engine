@@ -643,5 +643,161 @@ mod tests {
             "90-deg cant symmetry broken: drop {d} vs drift {w} (ratio {ratio})"
         );
     }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1325: mover ring (`trajectory --target-speed`) WASM parity.
+    // -----------------------------------------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn target_speed_adds_ring_column_to_trajectory_table() {
+        let wasm = WasmBallistics::new();
+        let without = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --full --max-range 500")
+            .unwrap();
+        assert!(!without.contains("Ring"), "Ring column must not appear without --target-speed");
+
+        let with_ring = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --full --max-range 500 \
+                 --target-speed 5",
+            )
+            .unwrap();
+        assert!(with_ring.contains("Ring"), "table should carry a Ring column:\n{with_ring}");
+        assert!(with_ring.contains("mil"), "ring values should be labeled mil");
+    }
+
+    #[wasm_bindgen_test]
+    fn target_speed_adds_mover_ring_m_to_trajectory_json() {
+        let wasm = WasmBallistics::new();
+        let without = wasm
+            .run_command(
+                "trajectory --units metric -v 823 -b 0.475 -m 10.9 -d 7.82 --full \
+                 --max-range 400 -o json",
+            )
+            .unwrap();
+        assert!(
+            !without.contains("mover_ring"),
+            "mover_ring fields must not appear without --target-speed"
+        );
+
+        let result = wasm
+            .run_command(
+                "trajectory --units metric -v 823 -b 0.475 -m 10.9 -d 7.82 --full \
+                 --max-range 400 --target-speed 3 -o json",
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let points = json["trajectory"].as_array().expect("trajectory array");
+        assert!(points.len() > 5);
+
+        // mover_ring_m is EXACTLY target_speed_mps * time at every point (metric run,
+        // so --target-speed 3 is already 3 m/s, matching the native CLI convention).
+        let mut checked = 0;
+        for p in points {
+            let time = p["time_seconds"].as_f64().expect("time_seconds");
+            let ring_m = p["mover_ring_m"].as_f64().expect("mover_ring_m present");
+            let expected = 3.0 * time;
+            assert!(
+                (ring_m - expected).abs() < 1e-9,
+                "ring_m {ring_m} != target_speed_mps*time {expected} at t={time}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 5);
+
+        // Muzzle point: mover_ring_m is 0 (present), mover_ring_mil is omitted (0/0
+        // is degenerate) — matches the native CLI contract exactly.
+        let muzzle = &points[0];
+        assert_eq!(muzzle["range_meters"].as_f64().unwrap(), 0.0);
+        assert_eq!(muzzle["mover_ring_m"].as_f64().unwrap(), 0.0);
+        assert!(muzzle.get("mover_ring_mil").is_none());
+    }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1325: `lead` powder-temperature parity with `trajectory`.
+    // -----------------------------------------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn lead_powder_curve_matches_manually_resolved_velocity() {
+        let wasm = WasmBallistics::new();
+        // WASM's `lead` has no --temperature flag (it always solves at the default
+        // atmosphere — a pre-existing gap unrelated to MBA-1325, which only adds the
+        // POWDER flags), so drive the curve lookup directly via --powder-temp rather
+        // than the ambient air temperature. 55F is the midpoint of the 40/70 curve
+        // points, so this is a genuine correction, not a no-op.
+        let resolved_json = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 --max-range 5 \
+                 --sight-height 2.48 --powder-temp-curve 40:2620,70:2700,100:2760 \
+                 --powder-temp 55 --full -o json",
+            )
+            .unwrap();
+        let resolved_json: serde_json::Value = serde_json::from_str(&resolved_json).unwrap();
+        let resolved_velocity = resolved_json["trajectory"][0]["velocity_fps"].as_f64().unwrap();
+        assert!(
+            (resolved_velocity - 2660.0).abs() < 0.5,
+            "sanity: 55F should interpolate to ~2660 fps, got {resolved_velocity}"
+        );
+
+        let with_curve = wasm
+            .run_command(
+                "lead -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 --sight-height 2.48 \
+                 --powder-temp-curve 40:2620,70:2700,100:2760 --powder-temp 55 \
+                 --target-speed 5 --range 300 -o json",
+            )
+            .unwrap();
+        let manual = wasm
+            .run_command(&format!(
+                "lead -v {resolved_velocity} -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+                 --sight-height 2.48 --target-speed 5 --range 300 -o json"
+            ))
+            .unwrap();
+
+        let with_curve: serde_json::Value = serde_json::from_str(&with_curve).unwrap();
+        let manual: serde_json::Value = serde_json::from_str(&manual).unwrap();
+        // `resolved_velocity` was already round-tripped once through WASM's imprecise
+        // fps<->m/s constants (m/s -> fps via *3.28084, not the exact reciprocal of
+        // the *0.3048 used on the way in — see lead_without_powder_flags_uses_
+        // velocity_verbatim above); feeding it back in via `-v` round-trips it AGAIN,
+        // so the two lead solutions agree to within float noise (~1e-7), not bit-for-
+        // bit. Compare numerically with a tolerance instead of assert_eq! on the raw
+        // JSON values (iterations is an integer count, compared exactly).
+        for field in ["lead_mil", "lead_moa", "lead", "tof_s", "intercept_range"] {
+            let a = with_curve[field].as_f64().unwrap_or_else(|| panic!("{field} missing"));
+            let b = manual[field].as_f64().unwrap_or_else(|| panic!("{field} missing"));
+            assert!(
+                (a - b).abs() < 1e-5,
+                "field '{field}' differs between curve-corrected and manually-resolved lead runs: {a} vs {b}"
+            );
+        }
+        assert_eq!(
+            with_curve["iterations"], manual["iterations"],
+            "iterations should match exactly (integer count)"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn lead_without_powder_flags_uses_velocity_verbatim() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.19 -m 77 -d 0.224 --drag-model g7 --max-range 5 \
+                 --sight-height 2.48 --temperature 100 --full -o json",
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let velocity = json["trajectory"][0]["velocity_fps"].as_f64().unwrap();
+        // Tolerance, not exact equality: the WASM imperial round-trip (m/s -> fps via
+        // a fixed *3.28084, not the exact reciprocal of the fps -> m/s *0.3048 used on
+        // the way in) carries an inherent ~3e-8 relative bias (~0.0001 fps at 2700),
+        // pre-existing and unrelated to MBA-1325. 1e-3 is >100x looser than that noise
+        // floor while still being >1000x tighter than any real powder correction
+        // (which is many fps), so this still catches a genuine verbatim-velocity
+        // regression.
+        assert!(
+            (velocity - 2700.0).abs() < 1e-3,
+            "no powder flags should keep -v 2700 verbatim regardless of --temperature, got {velocity}"
+        );
+    }
 }
 }
