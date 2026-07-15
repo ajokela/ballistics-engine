@@ -1652,6 +1652,25 @@ enum ProfileAction {
         bullet_length: Option<f64>,
     },
 
+    /// Import a profile from a third-party file (.a7p — ArcherBC2 format)
+    #[cfg(feature = "profile-import")]
+    Import {
+        /// Path to the .a7p file
+        file: PathBuf,
+
+        /// Profile name to save under (defaults to the file's profile name, sanitized)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Parse and show the full mapping report without saving anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Treat a checksum mismatch as a fatal error instead of a warning
+        #[arg(long)]
+        strict: bool,
+    },
+
     /// List all saved profiles
     List,
 
@@ -2500,18 +2519,11 @@ fn delete_profile(name: &str) -> Result<(), Box<dyn Error>> {
 // `ballistics_engine::profile_import`, which does not exist without the
 // feature. Mirrors the `#[cfg(feature = "pdf")]` gating pattern used for the
 // PDF dope-card path elsewhere in this file.
-//
-// `#[allow(dead_code)]`: this task (MBA-1323 Task 3) only builds the mapping
-// + report-rendering surface; nothing in this binary calls it yet outside
-// `#[cfg(test)]`. The `profile import` CLI verb that wires it into `main()`
-// is a separate task and consumes these functions verbatim — remove the
-// allows once that call site lands.
 
 /// Everything `profile import` produced: the profile to save plus the honest
 /// account of what mapped, what did not, and why.
 #[cfg(feature = "profile-import")]
 #[derive(Debug)]
-#[allow(dead_code)]
 struct ImportReport {
     /// (source field, raw value, converted value, destination field)
     mapped: Vec<[String; 4]>,
@@ -2522,23 +2534,19 @@ struct ImportReport {
 
 #[cfg(feature = "profile-import")]
 #[derive(Debug)]
-#[allow(dead_code)]
 struct A7pImportOutcome {
     profile: ProfileData,
     report: ImportReport,
 }
 
 #[cfg(feature = "profile-import")]
-#[allow(dead_code)]
 const GRAIN_TO_GRAM: f64 = 0.06479891;
 #[cfg(feature = "profile-import")]
-#[allow(dead_code)]
 const IN_TO_MM: f64 = 25.4;
 
 /// Restrict imported profile names to characters that are safe as file names
 /// in the profile store (`~/.ballistics/profiles/<name>.json`).
 #[cfg(feature = "profile-import")]
-#[allow(dead_code)]
 fn sanitize_profile_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
@@ -2559,7 +2567,6 @@ fn sanitize_profile_name(raw: &str) -> String {
 }
 
 #[cfg(feature = "profile-import")]
-#[allow(dead_code)]
 fn map_a7p_to_profile(
     doc: &ballistics_engine::profile_import::A7pDocument,
     name_override: Option<&str>,
@@ -2812,7 +2819,6 @@ fn map_a7p_to_profile(
 }
 
 #[cfg(feature = "profile-import")]
-#[allow(dead_code)]
 fn render_import_report(report: &ImportReport) -> String {
     let mut out = String::new();
     out.push_str("Imported fields:\n");
@@ -5563,6 +5569,53 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     let path = save_profile(&profile)?;
                     eprintln!("Profile '{}' saved to {:?}", name, path);
+                }
+
+                #[cfg(feature = "profile-import")]
+                ProfileAction::Import {
+                    file,
+                    name,
+                    dry_run,
+                    strict,
+                } => {
+                    use ballistics_engine::profile_import::{parse_a7p, EnvelopeStatus};
+                    let bytes = fs::read(&file)
+                        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+                    let doc = parse_a7p(&bytes)
+                        .map_err(|e| format!("not a usable .a7p file: {e}"))?;
+                    if strict {
+                        if let EnvelopeStatus::Mismatch { expected, actual } = &doc.envelope {
+                            return Err(format!(
+                                "checksum mismatch (file says {expected}, payload hashes to {actual}) — refusing under --strict"
+                            )
+                            .into());
+                        }
+                    }
+                    // Sanitize the --name override the same way a name derived from the
+                    // file itself is sanitized (map_a7p_to_profile does that internally
+                    // when there is no override) — an unsanitized override would otherwise
+                    // be written verbatim into the profile store's file path.
+                    let sanitized_name = name.as_deref().map(|raw| {
+                        let sanitized = sanitize_profile_name(raw);
+                        if sanitized != raw {
+                            println!(
+                                "note: profile name sanitized to '{sanitized}' for the profile store"
+                            );
+                        }
+                        sanitized
+                    });
+                    let outcome = map_a7p_to_profile(&doc, sanitized_name.as_deref())?;
+                    print!("{}", render_import_report(&outcome.report));
+                    if dry_run {
+                        println!("\nDry run — nothing saved.");
+                    } else {
+                        let path = save_profile(&outcome.profile)?;
+                        println!(
+                            "\nSaved profile '{}' -> {}",
+                            outcome.profile.name,
+                            path.display()
+                        );
+                    }
                 }
 
                 ProfileAction::List => {
