@@ -217,213 +217,35 @@ jobs:
     if: contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
     name: Build OpenBSD binary
-    continue-on-error: true  # Allow this to fail without blocking release
-    timeout-minutes: 45
-    
+
     steps:
     - uses: actions/checkout@v7
-    
-    - name: Build with QEMU OpenBSD VM
-      run: |
-        set -ex
-        
-        # Install QEMU and dependencies
-        sudo apt-get update
-        sudo apt-get install -y qemu-system-x86 qemu-utils expect
-        
-        # Download pre-installed OpenBSD QCOW2 image from GitHub releases
-        # Using a community-provided pre-installed image to skip installation
-        echo "Downloading pre-installed OpenBSD image..."
-        
-        # Try to use the vagrant box as a pre-installed image
-        curl -L -o openbsd.box "https://app.vagrantup.com/generic/boxes/openbsd7/versions/4.3.12/providers/libvirt/amd64/vagrant.box" || {
-          echo "Failed to download vagrant box, trying alternative..."
-          # Alternative: Download install ISO and automate installation
-          curl -L -o install75.iso "https://cdn.openbsd.org/pub/OpenBSD/7.5/amd64/install75.iso"
-        }
-        
-        # If we got the vagrant box, extract it
-        if [ -f openbsd.box ]; then
-          echo "Extracting vagrant box..."
-          tar xf openbsd.box
-          
-          # Find the disk image
-          DISK_IMAGE=$(find . -name "*.qcow2" -o -name "*.img" | head -1)
-          if [ -n "$DISK_IMAGE" ]; then
-            echo "Found disk image: $DISK_IMAGE"
-            mv "$DISK_IMAGE" openbsd.qcow2
-          else
-            echo "No disk image found in vagrant box"
-            # Create a new disk
-            qemu-img create -f qcow2 openbsd.qcow2 20G
-          fi
-        else
-          # Create a new disk for installation
-          qemu-img create -f qcow2 openbsd.qcow2 20G
-        fi
-        
-        # Create the build script
-        cat > build.sh << 'BUILDSCRIPT'
-        #!/bin/sh
-        set -e
-        
-        # Install rust if not present
-        which cargo || pkg_add rust
-        
-        # Build the project
-        cd /tmp
-        tar xzf /tmp/source.tar.gz
-        cd ballistics-engine
-        
-        # Quick build with minimal optimization
-        export CARGO_BUILD_JOBS=1
-        cargo build --release --jobs 1
-        
-        # Copy binary
-        cp target/release/ballistics /tmp/ballistics-output
-        sha256 -q /tmp/ballistics-output > /tmp/ballistics-output.sha256
-        
-        # Signal completion
-        echo "BUILD_SUCCESS" > /tmp/build-status
-        halt -p
-        BUILDSCRIPT
-        
-        # Package source code (create in /tmp to avoid circular reference)
-        tar czf /tmp/source.tar.gz --exclude=openbsd.box --exclude=openbsd.qcow2 --exclude=box.img .
-        
-        # Create expect script to run QEMU and execute build
-        cat > run_build.expect << 'EXPECT'
-        #!/usr/bin/expect -f
-        set timeout 3600
-        
-        # Start QEMU with the OpenBSD image
-        spawn qemu-system-x86_64 \
-          -m 2048 \
-          -smp 2 \
-          -drive file=openbsd.qcow2,format=qcow2 \
-          -netdev user,id=net0 \
-          -device e1000,netdev=net0 \
-          -nographic \
-          -serial mon:stdio
-        
-        # Wait for boot and login prompt
-        set timeout 120
-        expect {
-          "login:" {
-            puts "Found login prompt"
-            send "root\r"
-          }
-          "boot>" {
-            puts "Found boot prompt, sending enter"
-            send "\r"
-            exp_continue
-          }
-          timeout {
-            puts "Timeout waiting for login"
-            exit 1
-          }
-        }
-        
-        # Wait for shell
-        expect "# "
-        
-        # Copy files via base64 encoding (since no SSH)
-        send "cat > /tmp/source.tar.gz.b64 << 'EOF'\r"
-        send [exec base64 /tmp/source.tar.gz]
-        send "\rEOF\r"
-        expect "# "
-        
-        send "cat > /tmp/build.sh.b64 << 'EOF'\r"
-        send [exec base64 build.sh]
-        send "\rEOF\r"
-        expect "# "
-        
-        # Decode the files
-        send "base64 -d /tmp/source.tar.gz.b64 > /tmp/source.tar.gz\r"
-        expect "# "
-        
-        send "base64 -d /tmp/build.sh.b64 > /tmp/build.sh\r"
-        expect "# "
-        
-        send "chmod +x /tmp/build.sh\r"
-        expect "# "
-        
-        # Run the build
-        send "/tmp/build.sh\r"
-        
-        # Wait for completion or timeout
-        expect {
-          "BUILD_SUCCESS" {
-            puts "Build completed successfully"
-          }
-          timeout {
-            puts "Build timed out"
-            exit 1
-          }
-        }
-        
-        expect eof
-        EXPECT
-        
-        # Debug: Check if image is valid
-        qemu-img info openbsd.qcow2
-        
-        # Try the automated build with shorter timeout for testing
-        chmod +x run_build.expect
-        if timeout 5m ./run_build.expect; then
-          echo "QEMU build completed successfully"
-          
-          # Mount the disk image to extract the binary
-          # Convert to raw format for mounting
-          qemu-img convert -f qcow2 -O raw openbsd.qcow2 openbsd.raw
-          
-          # Find the OpenBSD partition and mount it
-          # OpenBSD uses its own partition scheme, so we need to find the offset
-          sudo apt-get install -y kpartx
-          sudo kpartx -av openbsd.raw || true
-          
-          # Try to mount and extract (this might fail due to OpenBSD filesystem)
-          sudo mkdir -p /mnt/openbsd
-          
-          # Try mounting various partition mappings
-          for part in /dev/mapper/loop*p*; do
-            if [ -e "$part" ]; then
-              echo "Trying to mount $part..."
-              sudo mount -t ufs -o ufstype=44bsd,ro "$part" /mnt/openbsd 2>/dev/null || \
-              sudo mount -t ffs -o ro "$part" /mnt/openbsd 2>/dev/null || \
-              sudo mount -o ro "$part" /mnt/openbsd 2>/dev/null || true
-              
-              if [ -f /mnt/openbsd/tmp/ballistics-output ]; then
-                echo "Found binary!"
-                VERSION="${{ github.event.inputs.version }}"
-                cp /mnt/openbsd/tmp/ballistics-output ballistics-${VERSION}-openbsd-x86_64
-                cp /mnt/openbsd/tmp/ballistics-output.sha256 ballistics-${VERSION}-openbsd-x86_64.sha256 || \
-                  sha256sum ballistics-${VERSION}-openbsd-x86_64 | cut -d' ' -f1 > ballistics-${VERSION}-openbsd-x86_64.sha256
-                sudo umount /mnt/openbsd || true
-                break
-              fi
-              sudo umount /mnt/openbsd 2>/dev/null || true
-            fi
-          done
-          
-          # Clean up loop devices
-          sudo kpartx -dv openbsd.raw || true
-          
-          # If we couldn't extract, create a placeholder
-          if [ ! -f ballistics-*-openbsd-* ]; then
-            VERSION="${{ github.event.inputs.version }}"
-            echo "OpenBSD build succeeded but extraction failed" > ballistics-${VERSION}-openbsd-x86_64.txt
-            echo "placeholder" > ballistics-${VERSION}-openbsd-x86_64.sha256
-          fi
-        else
-          echo "QEMU build failed or timed out"
+
+    - name: Build in OpenBSD VM
+      uses: cross-platform-actions/action@v1.3.0
+      with:
+        operating_system: openbsd
+        version: '7.8'
+        architecture: x86-64
+        run: |
+          # Install Rust
+          sudo pkg_add -I rust git
+
+          # OpenBSD's default login-class datasize limit is too low for a release
+          # rustc/LLVM build; raise the soft limit to the hard cap for this shell.
+          ulimit -d "$(ulimit -dH)" 2>/dev/null || true
+
+          # Build the project
+          cargo build --release
+
+          # Create versioned binary
           VERSION="${{ github.event.inputs.version }}"
-          echo "OpenBSD QEMU build failed" > ballistics-${VERSION}-openbsd-x86_64.txt
-          echo "placeholder" > ballistics-${VERSION}-openbsd-x86_64.sha256
-        fi
-    
+          cp target/release/ballistics ./ballistics-${VERSION}-openbsd-x86_64
+
+          # Generate checksum
+          sha256 ./ballistics-${VERSION}-openbsd-x86_64 > ./ballistics-${VERSION}-openbsd-x86_64.sha256
+
     - name: Upload artifacts
-      if: always()
       uses: actions/upload-artifact@v7
       with:
         name: openbsd-x86_64
