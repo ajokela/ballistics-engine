@@ -12,10 +12,11 @@ on:
         required: true
         default: 'macos,linux,bsd'
 
-# The create-release job needs write access to create the GitHub Release and upload
-# binaries; the default GITHUB_TOKEN is read-only, which previously 403'd (v0.25.1).
+# Default every job to read-only; only create-release is granted write (below), so a
+# compromised build-job dependency can't push to the repo. The default token is read-only,
+# which 403'd on gh release create during v0.25.1.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-macos:
@@ -432,6 +433,8 @@ jobs:
   create-release:
     needs: [build-macos, build-linux, build-windows, build-freebsd, build-netbsd, build-openbsd]
     if: always()
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     
     steps:
