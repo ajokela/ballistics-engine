@@ -241,6 +241,22 @@ impl WasmBallistics {
         self.drag_table.borrow().is_some()
     }
 
+    /// Unload any custom drag table previously installed via [`Self::load_drag_table`],
+    /// reverting every subsequent `trajectory`, `zero`, `lead`, and `monte-carlo` run to the
+    /// standard G-model + BC drag (the `-b`/`--bc` value with the selected G1/G7 curve).
+    ///
+    /// The inverse of `loadDragTable`. It lets a single engine instance alternate between a
+    /// measured-curve (CDM) solve and a plain G7-BC solve without constructing a second
+    /// instance: `load → solve CDM → clear → solve G7`, with the G7 half uncontaminated —
+    /// the same load/clear pattern `clearWindSegments` provides for segmented wind.
+    ///
+    /// Returns `true` if a table was loaded (and is now cleared), `false` if none was loaded
+    /// (a harmless no-op). Idempotent.
+    #[wasm_bindgen(js_name = clearDragTable)]
+    pub fn clear_drag_table(&self) -> bool {
+        self.drag_table.borrow_mut().take().is_some()
+    }
+
     /// Run a command and return the output
     #[wasm_bindgen(js_name = runCommand)]
     pub fn run_command(&self, command: &str) -> Result<String, JsValue> {
@@ -3111,6 +3127,8 @@ Host API (JavaScript, not a CLI flag):
                          run applies it automatically (no --use-* flag needed); -b/--bc is
                          still accepted but ignored for drag while a table is active.
   hasDragTable()         Report whether a drag table is currently loaded.
+  clearDragTable()       Unload the drag table, reverting to G1/G7 + BC drag. Lets one
+                         instance compare CDM vs G7: load -> solve -> clear -> solve.
   loadBc5dTable(bytes)   Load a BC5D correction table (see --use-bc-segments below).
   hasBc5dTable()         Report whether a BC5D table is currently loaded.
 

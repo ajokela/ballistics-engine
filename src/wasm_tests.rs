@@ -1190,6 +1190,63 @@ Iterations: 0\n";
         }
     }
 
+    /// Clearing reverts the physics: after load → clear, a run must be byte-identical to a
+    /// never-loaded instance's run of the same args — not merely "different from the CDM
+    /// run". This is exactly the property Bero needs for a G7-vs-CDM comparison on ONE
+    /// instance (load → solve CDM → clear → solve G7), the inverse of the live-change test
+    /// above.
+    #[wasm_bindgen_test]
+    fn clear_drag_table_reverts_trajectory_output_to_g7_baseline() {
+        let command = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 -o json";
+
+        let baseline = WasmBallistics::new().run_command(command).unwrap();
+
+        let engine = WasmBallistics::new();
+        engine.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+        let with_table = engine.run_command(command).unwrap();
+        assert_ne!(
+            baseline, with_table,
+            "sanity: the loaded CDM run must differ from the G7 baseline"
+        );
+
+        assert!(
+            engine.clear_drag_table(),
+            "clear must report it unloaded a table"
+        );
+        assert!(!engine.has_drag_table());
+        let after_clear = engine.run_command(command).unwrap();
+        assert_eq!(
+            baseline, after_clear,
+            "after clearDragTable the solve must revert byte-for-byte to the G7-BC baseline"
+        );
+    }
+
+    /// Return value + idempotence: clear reports whether it actually unloaded a table, and
+    /// a second clear (or a clear on a fresh instance) is a harmless `false` no-op.
+    #[wasm_bindgen_test]
+    fn clear_drag_table_reports_prior_state_and_is_idempotent() {
+        let engine = WasmBallistics::new();
+        assert!(
+            !engine.clear_drag_table(),
+            "no table loaded → clear returns false"
+        );
+
+        engine.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+        assert!(engine.has_drag_table());
+        assert!(
+            engine.clear_drag_table(),
+            "a loaded table → clear returns true"
+        );
+        assert!(
+            !engine.has_drag_table(),
+            "after clear, no table remains loaded"
+        );
+        assert!(
+            !engine.clear_drag_table(),
+            "a second clear is an idempotent false no-op"
+        );
+    }
+
     /// Golden-unloaded: with NO table loaded, trajectory output for a fixed command
     /// must remain byte-identical to a literal captured from the pre-MBA-1328 build
     /// (harvested via a temporary probe test run under `wasm-pack test --node`,
