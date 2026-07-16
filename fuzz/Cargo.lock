@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "ballistics-engine"
-version = "0.25.0"
+version = "0.25.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -283,7 +283,7 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "ballistics-engine 0.21.5",
- "ballistics-engine 0.25.0",
+ "ballistics-engine 0.25.1",
  "libfuzzer-sys",
  "serde_json",
 ]
