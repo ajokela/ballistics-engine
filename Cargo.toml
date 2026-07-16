@@ -107,8 +107,14 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 approx = "0.5"
-criterion = "0.8"
 wasm-bindgen-test = "0.3"
+
+# criterion (0.8) pulls in Rayon, which hard-errors on wasm32 via its own compile_error!,
+# breaking `wasm-pack test --node` for the entire WASM test harness. Benchmarks only ever
+# run natively, so gate the dep to non-wasm targets (the [[bench]] below is native-only in
+# practice — cargo never builds it for wasm32 during `--tests`).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.8"
 
 [[bin]]
 name = "ballistics"
