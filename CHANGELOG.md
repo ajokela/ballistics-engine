@@ -5,6 +5,19 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.2] - 2026-07-16
+
+### Fixed
+- Build: `printpdf` is now depended on with `default-features = false`, dropping its
+  default `html` feature. That feature was the sole path to `azul-layout` →
+  `rust-fontconfig` → `mmapio`, whose `MAP_LOCKED` usage is Linux-only and failed to
+  compile on every BSD target (`cannot find value MAP_LOCKED in crate libc`). This had
+  broken FreeBSD/OpenBSD/NetBSD binary builds since the printpdf 0.7 → 0.10 bump. The
+  `pdf` feature still generates dope-card PDFs via core printpdf + `allsorts-azul` font
+  embedding — unchanged output. As a side effect the `azul-*`, `rust-fontconfig`, and
+  `mmapio` transitive subtree is removed from **all** targets, slimming build times and
+  binary size. No physics, API, or numerical-output change; PDF export is byte-compatible.
+
 ## [0.25.1] - 2026-07-16
 
 ### Added

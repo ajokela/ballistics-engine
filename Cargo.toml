@@ -4,7 +4,7 @@ exclude = ["ballistics-engine-rb", "ballistics-engine-py"]
 
 [package]
 name = "ballistics-engine"
-version = "0.25.1"
+version = "0.25.2"
 edition = "2021"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
@@ -86,7 +86,9 @@ dirs = "6.0"
 strsim = "0.11"
 
 # PDF generation for dope cards (optional, not WASM compatible)
-printpdf = { version = "0.10", optional = true }
+# default-features=false drops the `html` feature (azul-layout -> rust-fontconfig
+# -> mmapio, which is Linux-only via MAP_LOCKED and breaks all BSD targets).
+printpdf = { version = "0.10", optional = true, default-features = false }
 
 # Optional: HTTP client for online mode
 ureq = { version = "3.1", optional = true, features = ["json"] }
