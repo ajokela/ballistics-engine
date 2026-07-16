@@ -256,7 +256,7 @@ checksum = "8259ebd5ee48a37fd8931116405456fd67efbb5435b4789e45bdbccf5d7dea7e"
 
 [[package]]
 name = "ballistics-engine"
-version = "0.25.0"
+version = "0.25.1"
 dependencies = [
  "approx",
  "clap",
