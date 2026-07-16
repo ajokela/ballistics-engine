@@ -12,6 +12,11 @@ on:
         required: true
         default: 'macos,linux,bsd'
 
+# The create-release job needs write access to create the GitHub Release and upload
+# binaries; the default GITHUB_TOKEN is read-only, which previously 403'd (v0.25.1).
+permissions:
+  contents: write
+
 jobs:
   build-macos:
     if: contains(github.event.inputs.platforms, 'macos')
