@@ -1642,6 +1642,75 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Compare multiple loads side-by-side at the same conditions (MBA-735)
+    Compare {
+        /// A load as NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER] (repeat 2-8 times).
+        /// DRAG is g1|g7; MASS is grains/grams, VELOCITY fps|m/s, DIAMETER in|mm
+        /// per --units (diameter defaults to .308 in / 7.82 mm). NAME must not
+        /// contain ':'. Mixable with --profile.
+        #[arg(long = "load", value_name = "SPEC")]
+        loads: Vec<String>,
+
+        /// A saved profile as a load (repeatable; mixable with --load). Like
+        /// range-table, a profile's bc_segments/drag_curve are not yet consumed
+        /// here — the scalar BC is used.
+        #[arg(long = "profile", value_name = "NAME")]
+        profiles: Vec<String>,
+
+        /// Shared zero distance (yards for imperial, meters for metric); every
+        /// load is zeroed independently at this distance
+        #[arg(long)]
+        zero_distance: f64,
+
+        /// Start range (yards or meters)
+        #[arg(long, default_value = "100.0")]
+        start: f64,
+
+        /// End range (yards or meters)
+        #[arg(long, default_value = "500.0")]
+        end: f64,
+
+        /// Range step (yards or meters)
+        #[arg(long, default_value = "100.0", value_parser = f64_range(0.001, 100000.0))]
+        step: f64,
+
+        /// Wind speed (mph or m/s based on --units)
+        #[arg(long, default_value = "10.0")]
+        wind_speed: f64,
+
+        /// Wind direction (degrees, 0=headwind, 90=from right)
+        #[arg(long, default_value = "90.0")]
+        wind_direction: f64,
+
+        /// Adjustment unit (mil or moa)
+        #[arg(long, default_value = "mil")]
+        adjustment_unit: AdjustmentUnit,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long, default_value = "1.5")]
+        sight_height: f64,
+
+        /// Temperature (F or C based on --units)
+        #[arg(long)]
+        temperature: Option<f64>,
+
+        /// Pressure (inHg or hPa based on --units)
+        #[arg(long)]
+        pressure: Option<f64>,
+
+        /// Humidity (percent)
+        #[arg(long, default_value = "50.0")]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Output format (table, json, csv)
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Manage saved ballistic profiles
     Profile {
         #[command(subcommand)]
@@ -6143,6 +6212,72 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_direction,
                 adjustment_unit,
                 final_sight_height,
+                temperature,
+                pressure,
+                humidity,
+                altitude,
+                cli.units,
+                output,
+            )?;
+        }
+
+        Commands::Compare {
+            loads,
+            profiles,
+            zero_distance,
+            start,
+            end,
+            step,
+            wind_speed,
+            wind_direction,
+            adjustment_unit,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            output,
+        } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
+            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+
+            // Assemble the load list: explicit --load specs first, then --profile loads,
+            // preserving command-line order within each group. Load #1 is the delta baseline.
+            let mut compare_loads: Vec<CompareLoad> = Vec::new();
+            for spec in &loads {
+                compare_loads.push(parse_compare_load_spec(spec, cli.units)?);
+            }
+            for name in &profiles {
+                let p = load_profile_for_units(name, cli.units)?;
+                compare_loads.push(CompareLoad {
+                    name: name.clone(),
+                    drag_model: parse_drag_model_arg(&p.drag_model),
+                    bc: p.bc,
+                    mass: p.mass,
+                    velocity: p.velocity,
+                    diameter: p.diameter,
+                });
+            }
+            if compare_loads.len() < 2 {
+                return Err("compare needs at least 2 loads (via --load and/or --profile)".into());
+            }
+            if compare_loads.len() > 8 {
+                return Err("compare supports at most 8 loads".into());
+            }
+            if start >= end {
+                return Err("--start must be less than --end".into());
+            }
+
+            handle_compare(
+                compare_loads,
+                zero_distance,
+                start,
+                end,
+                step,
+                wind_speed,
+                wind_direction,
+                adjustment_unit,
+                sight_height,
                 temperature,
                 pressure,
                 humidity,
@@ -12678,6 +12813,432 @@ fn handle_range_table(
             }
             println!(
                 "└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// One load in a `compare` run, in DISPLAY units per the session `--units`.
+struct CompareLoad {
+    name: String,
+    drag_model: DragModelArg,
+    bc: f64,
+    mass: f64,
+    velocity: f64,
+    diameter: f64,
+}
+
+/// Parse a `--load` spec: NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER] (MBA-735).
+/// Follows the `--wind-segment` colon convention; all numbers are display units.
+fn parse_compare_load_spec(spec: &str, units: UnitSystem) -> Result<CompareLoad, Box<dyn Error>> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() != 5 && parts.len() != 6 {
+        return Err(format!(
+            "invalid --load '{spec}': expected NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER] \
+             (5 or 6 colon-separated fields; NAME must not contain ':')"
+        )
+        .into());
+    }
+    let name = parts[0].trim();
+    if name.is_empty() {
+        return Err(format!("invalid --load '{spec}': NAME is empty").into());
+    }
+    let drag_model = match parts[1].trim().to_ascii_lowercase().as_str() {
+        "g1" => DragModelArg::G1,
+        "g7" => DragModelArg::G7,
+        other => {
+            return Err(format!("invalid --load '{spec}': DRAG '{other}' must be g1 or g7").into())
+        }
+    };
+    let num = |i: usize, field: &str| -> Result<f64, Box<dyn Error>> {
+        let v: f64 = parts[i].trim().parse().map_err(|_| {
+            format!("invalid --load '{spec}': {field} '{}' is not a number", parts[i])
+        })?;
+        if !v.is_finite() || v <= 0.0 {
+            return Err(format!("invalid --load '{spec}': {field} must be finite and > 0").into());
+        }
+        Ok(v)
+    };
+    let bc = num(2, "BC")?;
+    let mass = num(3, "MASS")?;
+    let velocity = num(4, "VELOCITY")?;
+    let diameter = if parts.len() == 6 {
+        num(5, "DIAMETER")?
+    } else {
+        match units {
+            UnitSystem::Imperial => 0.308,
+            UnitSystem::Metric => 7.82,
+        }
+    };
+    Ok(CompareLoad {
+        name: name.to_string(),
+        drag_model,
+        bc,
+        mass,
+        velocity,
+        diameter,
+    })
+}
+
+/// Side-by-side multi-load comparison (MBA-735): every load is zeroed independently at
+/// the shared zero distance, then run through identical wind/atmosphere; rows mirror
+/// `range-table` semantics (pure drop from a no-wind pass, drift from the wind pass).
+/// Like range-table, saved-profile bc_segments/drag_curve are not consumed here.
+#[allow(clippy::too_many_arguments)] // mirrors the sibling range-table handler
+fn handle_compare(
+    loads: Vec<CompareLoad>,
+    zero_distance: f64,
+    start: f64,
+    end: f64,
+    step: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    adjustment_unit: AdjustmentUnit,
+    sight_height: f64,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Shared conditions in metric
+    let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
+    let zero_distance_m = UnitConverter::distance_to_metric(zero_distance, units);
+    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
+    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
+    let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
+    let end_m = UnitConverter::distance_to_metric(end, units);
+    let sample_m = UnitConverter::distance_to_metric(step, units);
+
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        altitude: altitude_m,
+    };
+
+    struct LoadRow {
+        drop_linear: f64,
+        drop_adj: f64,
+        wind_linear: f64,
+        wind_adj: f64,
+        velocity: f64,
+        energy: f64,
+        time: f64,
+    }
+    struct LoadResult {
+        zero_angle_deg: f64,
+        rows: Vec<LoadRow>,
+    }
+
+    // The shared range grid (display units)
+    let mut ranges: Vec<f64> = Vec::new();
+    let mut r = start;
+    while r <= end + 0.1 {
+        ranges.push(r);
+        r += step;
+    }
+
+    let mut results: Vec<LoadResult> = Vec::new();
+    for load in &loads {
+        let velocity_m = UnitConverter::velocity_to_metric(load.velocity, units);
+        let mass_kg = UnitConverter::mass_to_metric(load.mass, units);
+        let diameter_m = UnitConverter::diameter_to_metric(load.diameter, units);
+        let drag_model_enum = match load.drag_model {
+            DragModelArg::G1 => DragModel::G1,
+            DragModelArg::G7 => DragModel::G7,
+        };
+
+        let zero_inputs = BallisticInputs {
+            bc_value: load.bc,
+            bc_type: drag_model_enum,
+            bullet_mass: mass_kg,
+            muzzle_velocity: velocity_m,
+            bullet_diameter: diameter_m,
+            bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
+            sight_height: sight_height_m,
+            use_rk4: true,
+            ..Default::default()
+        };
+        let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+            zero_inputs,
+            zero_distance_m,
+            sight_height_m,
+            WindConditions::default(),
+            atmosphere.clone(),
+        )
+        .map_err(|e| format!("load '{}': zeroing failed: {e}", load.name))?;
+
+        let wind_samples = run_sampled_trajectory(
+            velocity_m,
+            load.bc,
+            mass_kg,
+            diameter_m,
+            load.drag_model,
+            sight_height_m,
+            temperature_c,
+            pressure_hpa,
+            humidity,
+            altitude_m,
+            wind_speed_m,
+            wind_direction,
+            end_m * 1.1,
+            sample_m,
+            zero_angle,
+            None,
+            None,
+        )
+        .map_err(|e| format!("load '{}': {e}", load.name))?;
+        let no_wind_samples = run_sampled_trajectory(
+            velocity_m,
+            load.bc,
+            mass_kg,
+            diameter_m,
+            load.drag_model,
+            sight_height_m,
+            temperature_c,
+            pressure_hpa,
+            humidity,
+            altitude_m,
+            0.0,
+            0.0,
+            end_m * 1.1,
+            sample_m,
+            zero_angle,
+            None,
+            None,
+        )
+        .map_err(|e| format!("load '{}': {e}", load.name))?;
+
+        let mut rows: Vec<LoadRow> = Vec::new();
+        for &range_display in &ranges {
+            let range_m = UnitConverter::distance_to_metric(range_display, units);
+            let nw = no_wind_samples.iter().min_by(|a, b| {
+                (a.distance_m - range_m)
+                    .abs()
+                    .partial_cmp(&(b.distance_m - range_m).abs())
+                    .unwrap()
+            });
+            let w = wind_samples.iter().min_by(|a, b| {
+                (a.distance_m - range_m)
+                    .abs()
+                    .partial_cmp(&(b.distance_m - range_m).abs())
+                    .unwrap()
+            });
+            let (nw, w) = match (nw, w) {
+                (Some(nw), Some(w)) => (nw, w),
+                _ => {
+                    return Err(format!(
+                        "load '{}': no trajectory samples near {range_display} \
+                         (bullet may not reach --end)",
+                        load.name
+                    )
+                    .into())
+                }
+            };
+            let drop_linear = match units {
+                UnitSystem::Imperial => nw.drop_m / 0.0254,
+                UnitSystem::Metric => nw.drop_m * 1000.0,
+            };
+            let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
+            let drop_adj = drop_to_adjustment(drop_yd, range_display, adjustment_unit);
+            let wind_linear = match units {
+                UnitSystem::Imperial => w.wind_drift_m / 0.0254,
+                UnitSystem::Metric => w.wind_drift_m * 1000.0,
+            };
+            let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
+            let wind_adj = drop_to_adjustment(drift_yd, range_display, adjustment_unit);
+            rows.push(LoadRow {
+                drop_linear,
+                drop_adj,
+                wind_linear,
+                wind_adj,
+                velocity: UnitConverter::velocity_from_metric(nw.velocity_mps, units),
+                energy: UnitConverter::energy_from_metric(nw.energy_j, units),
+                time: nw.time_s,
+            });
+        }
+        results.push(LoadResult {
+            zero_angle_deg: zero_angle.to_degrees(),
+            rows,
+        });
+    }
+
+    let adj_label = match adjustment_unit {
+        AdjustmentUnit::Mil => "MIL",
+        AdjustmentUnit::Moa => "MOA",
+    };
+    let (dist_unit, vel_unit, energy_unit, drop_unit, wind_unit_label) = match units {
+        UnitSystem::Imperial => ("yd", "fps", "ft-lb", "in", "mph"),
+        UnitSystem::Metric => ("m", "m/s", "J", "mm", "m/s"),
+    };
+
+    match output {
+        OutputFormat::Json => {
+            let json = serde_json::json!({
+                "compare": {
+                    "loads": loads.iter().zip(results.iter()).map(|(l, res)| {
+                        serde_json::json!({
+                            "name": l.name,
+                            "drag_model": match l.drag_model { DragModelArg::G1 => "G1", DragModelArg::G7 => "G7" },
+                            "bc": l.bc,
+                            "mass": l.mass,
+                            "velocity": l.velocity,
+                            "diameter": l.diameter,
+                            "zero_angle_deg": res.zero_angle_deg,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "conditions": {
+                        "zero_distance": zero_distance,
+                        "wind_speed": wind_speed,
+                        "wind_direction": wind_direction,
+                        "temperature": temperature,
+                        "pressure": pressure,
+                        "humidity": humidity,
+                        "altitude": altitude,
+                        "sight_height": sight_height,
+                    },
+                    "units": {
+                        "distance": dist_unit,
+                        "drop": drop_unit,
+                        "adjustment": adj_label,
+                        "velocity": vel_unit,
+                        "energy": energy_unit,
+                        "wind_speed": wind_unit_label,
+                    },
+                    "rows": ranges.iter().enumerate().map(|(ri, &range)| {
+                        serde_json::json!({
+                            "range": range,
+                            "loads": results.iter().enumerate().map(|(li, res)| {
+                                let row = &res.rows[ri];
+                                let baseline = &results[0].rows[ri];
+                                serde_json::json!({
+                                    "name": loads[li].name,
+                                    "drop": row.drop_linear,
+                                    "drop_adj": row.drop_adj,
+                                    "drift": row.wind_linear,
+                                    "drift_adj": row.wind_adj,
+                                    "velocity": row.velocity,
+                                    "energy": row.energy,
+                                    "time": row.time,
+                                    // deltas vs load #1 (zero for the baseline itself)
+                                    "delta_drop": row.drop_linear - baseline.drop_linear,
+                                    "delta_drift": row.wind_linear - baseline.wind_linear,
+                                    "delta_velocity": row.velocity - baseline.velocity,
+                                    "delta_energy": row.energy - baseline.energy,
+                                })
+                            }).collect::<Vec<_>>(),
+                        })
+                    }).collect::<Vec<_>>(),
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        OutputFormat::Csv => {
+            // Sanitize load names for CSV headers (no commas/quotes/newlines)
+            let safe: Vec<String> = loads
+                .iter()
+                .map(|l| {
+                    l.name
+                        .chars()
+                        .map(|c| if c == ',' || c == '"' || c == '\n' { ' ' } else { c })
+                        .collect()
+                })
+                .collect();
+            let mut header = format!("range_{dist_unit}");
+            for name in &safe {
+                header.push_str(&format!(
+                    ",{name}_drop_{drop_unit},{name}_drop_{adj_label},{name}_drift_{drop_unit},\
+                     {name}_drift_{adj_label},{name}_velocity_{vel_unit},{name}_energy_{energy_unit},\
+                     {name}_tof_s"
+                ));
+            }
+            println!("{header}");
+            for (ri, &range) in ranges.iter().enumerate() {
+                let mut line = format!("{range:.0}");
+                for res in &results {
+                    let row = &res.rows[ri];
+                    line.push_str(&format!(
+                        ",{:.2},{:.2},{:.2},{:.2},{:.0},{:.0},{:.3}",
+                        row.drop_linear,
+                        row.drop_adj,
+                        row.wind_linear,
+                        row.wind_adj,
+                        row.velocity,
+                        row.energy,
+                        row.time
+                    ));
+                }
+                println!("{line}");
+            }
+        }
+        OutputFormat::Pdf => {
+            return Err("PDF output is not supported for compare (use the card commands)".into());
+        }
+        OutputFormat::Table => {
+            println!("Load Comparison");
+            println!(
+                "Zero: {zero_distance:.0} {dist_unit} | Wind: {wind_speed:.0} {wind_unit_label} @ {wind_direction:.0}\u{b0} | Sight: {sight_height} {sh_unit} | Alt: {altitude:.0} {alt_unit}",
+                sh_unit = match units { UnitSystem::Imperial => "in", UnitSystem::Metric => "mm" },
+                alt_unit = match units { UnitSystem::Imperial => "ft", UnitSystem::Metric => "m" }
+            );
+            println!();
+            for (i, l) in loads.iter().enumerate() {
+                println!(
+                    "  #{num} {name}: {dm} BC {bc}, {mass} @ {vel} {vel_unit} (dia {dia})",
+                    num = i + 1,
+                    name = l.name,
+                    dm = match l.drag_model {
+                        DragModelArg::G1 => "G1",
+                        DragModelArg::G7 => "G7",
+                    },
+                    bc = l.bc,
+                    mass = l.mass,
+                    vel = l.velocity,
+                    dia = l.diameter,
+                );
+            }
+            println!();
+
+            // Two-line header: load names over their [Drop Drift Vel] groups
+            let trunc = |s: &str| -> String {
+                if s.chars().count() > 26 {
+                    let t: String = s.chars().take(25).collect();
+                    format!("{t}\u{2026}")
+                } else {
+                    s.to_string()
+                }
+            };
+            let mut h1 = format!("{:>8} ", "Range");
+            let mut h2 = format!("{:>8} ", format!("({dist_unit})"));
+            for l in &loads {
+                h1.push_str(&format!("| {:^26} ", trunc(&l.name)));
+                h2.push_str(&format!("| {:>8} {:>8} {:>8} ", "Drop", "Drift", "Vel"));
+            }
+            println!("{h1}");
+            println!("{h2}");
+            let width = 9 + loads.len() * 29;
+            println!("{}", "-".repeat(width));
+            for (ri, &range) in ranges.iter().enumerate() {
+                let mut line = format!("{range:>8.0} ");
+                for res in &results {
+                    let row = &res.rows[ri];
+                    line.push_str(&format!(
+                        "| {:>8.2} {:>8.2} {:>8.0} ",
+                        row.drop_adj, row.wind_adj, row.velocity
+                    ));
+                }
+                println!("{line}");
+            }
+            println!("{}", "-".repeat(width));
+            println!(
+                "Drop/Drift in {adj_label} (- is down/left), Vel in {vel_unit}. \
+                 Use -o json or -o csv for linear drop/drift ({drop_unit}), energy \
+                 ({energy_unit}), time of flight, and deltas vs load #1."
             );
         }
     }

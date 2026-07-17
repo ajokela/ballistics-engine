@@ -958,6 +958,37 @@ Output provides:
 - Mrad adjustment
 - Maximum ordinate
 
+### Load Comparison (`compare`)
+
+Run several loads through identical conditions and see them side by side. Each load is
+zeroed independently at the shared `--zero-distance`, then solved twice (a no-wind pass
+for pure drop, a wind pass for drift), exactly like `range-table`:
+
+```bash
+# Two loads by inline spec: NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]
+ballistics compare \
+  --load "175 SMK:g7:0.243:175:2650" \
+  --load "168 ELD-M:g7:0.523:168:2700" \
+  --zero-distance 100 --end 800 --step 100
+
+# Mix inline specs with saved profiles; MOA adjustments; machine output
+ballistics compare --load "Factory:g1:0.475:168:2700" --profile my-match-load \
+  --zero-distance 100 --adjustment-unit moa -o json
+```
+
+Load-spec fields follow the session `--units`: `MASS` is grains (imperial) or grams
+(metric), `VELOCITY` fps or m/s, and the optional `DIAMETER` inches or mm (defaulting to
+.308 in / 7.82 mm). `DRAG` is `g1` or `g7`, and `NAME` may not contain `:`. Between 2 and
+8 loads are accepted, from `--load` and/or `--profile` in any combination (like
+`range-table`, a saved profile's `bc_segments`/`drag_curve` are not yet consumed here —
+the scalar BC is used).
+
+The table shows per-load drop, drift (both in the `--adjustment-unit`), and velocity at
+each range. `-o json` adds linear drop/drift, energy, time of flight, each load's zero
+angle, and per-row deltas against load #1 (`delta_drop`, `delta_drift`, `delta_velocity`,
+`delta_energy` — zero for the baseline itself); `-o csv` emits one column group per load
+(names sanitized for CSV). PDF output is not supported for this command.
+
 ### Monte Carlo Simulation
 
 Statistical analysis with parameter variations:
