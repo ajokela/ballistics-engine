@@ -5,6 +5,16 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `compare` command (MBA-735): side-by-side multi-load comparison. Repeatable
+  `--load "NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]"` specs (2-8 loads, mixable with
+  `--profile`), each load zeroed independently at the shared `--zero-distance`, then run
+  through identical wind/atmosphere. Table output shows per-load drop/drift/velocity per
+  range; JSON adds energy, time of flight, zero angles, and per-row deltas vs load #1;
+  CSV emits one sanitized column group per load.
+
 ## [0.26.0] - 2026-07-17
 
 ### Changed
