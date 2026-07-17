@@ -5,7 +5,7 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.26.0] - 2026-07-17
 
 ### Changed
 - **BREAKING (MBA-1339):** the native CLI `--bore-height` flag now takes **inches** in
@@ -16,15 +16,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both surfaces now accept both flag names: native `--bore-height` gains a `--muzzle-height`
   alias and the WASM `--muzzle-height` gains a `--bore-height` alias, with identical units
   and defaults on each.
+- Removed the unused `rayon` dependency (MBA-1332). No code referenced it; downstream
+  builds shed the transitive dependency tree.
+- Internal: all 57 duplicated kg-scale grain-conversion literals now reference
+  `constants::GRAINS_TO_KG`, enforced by the constants-guard test (MBA-1333). The value
+  was exact and internally consistent everywhere, so trajectory output is unchanged.
+
+### Added
+- Fallible segmented-wind construction and raw integration APIs (MBA-1338):
+  `wind::WindSegmentError` — a typed validation error carrying the caller's segment
+  index, the offending field, and the violated rule — plus `WindSock::try_new`,
+  `TryFrom<Vec<WindSegment>> for WindSock`, `try_integrate_trajectory`, and
+  `try_solve_trajectory_rust`. Checked APIs reject non-finite or negative `speed_kmh`,
+  non-finite `angle_deg`, non-finite or non-positive `until_m`, and non-finite
+  `vertical_mps` **before** sorting, precomputation, or producing any trajectory points.
+  `wind::validate_wind_segments` is now public. The existing infallible signatures are
+  unchanged and documented as legacy/unchecked entry points; their error text is
+  byte-identical to previous releases.
+- WASM tests for `--print-bc-segments` table-gating and `lead -o` invalid-value rejection.
 
 ### Fixed
 - WASM (MBA-1294): the auto-zero "Rifle zeroed at …" banner is now table-only; `-o json`
   and `-o csv` output stay pure machine payloads. The native "non-finite state" integration
   error now names the likely cause (extreme bore/muzzle height → air density) and points to
   `--altitude`.
-
-### Added
-- WASM tests for `--print-bc-segments` table-gating and `lead -o` invalid-value rejection.
 
 ## [0.25.2] - 2026-07-16
 
