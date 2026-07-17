@@ -159,7 +159,7 @@ pub fn calculate_spin_decay_rate(
     bullet_shape: &str,
 ) -> f64 {
     // Convert units
-    let mass_kg = mass_grains * 0.00006479891; // grains to kg
+    let mass_kg = mass_grains * crate::constants::GRAINS_TO_KG; // grains to kg
     let caliber_m = caliber_inches * 0.0254;
     let length_m = length_inches * 0.0254;
 

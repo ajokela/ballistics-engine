@@ -32,7 +32,7 @@ pub fn compute_stability_coefficient(
     let length_calibers = inputs.bullet_length / inputs.bullet_diameter;
 
     // Convert units for Miller formula
-    let mass_grains = inputs.bullet_mass / 0.00006479891; // kg to grains
+    let mass_grains = inputs.bullet_mass / crate::constants::GRAINS_TO_KG; // kg to grains
     let diameter_inches = inputs.bullet_diameter / 0.0254; // meters to inches
 
     // Miller stability formula components
@@ -85,7 +85,7 @@ const MAX_LENGTH_CALIBERS: f64 = 6.5;
 /// match bullets (.308/175 gr -> ~1:11", 6.5mm/140 gr -> ~1:8") most faithfully.
 pub const DEFAULT_TWIST_SG_TARGET: f64 = 2.0;
 
-const GRAINS_PER_KG: f64 = 1.0 / 0.00006479891;
+const GRAINS_PER_KG: f64 = 1.0 / crate::constants::GRAINS_TO_KG;
 const METERS_PER_INCH: f64 = 0.0254;
 const MPS_TO_FPS: f64 = 3.28084;
 const MILLER_VEL_REF_FPS: f64 = 2800.0;
@@ -378,7 +378,7 @@ mod tests {
 
     // --- MBA-1135: mass-based length + Miller-inverse twist defaults ---
 
-    const GR_TO_KG: f64 = 0.00006479891;
+    const GR_TO_KG: f64 = crate::constants::GRAINS_TO_KG;
     const IN_TO_M: f64 = 0.0254;
 
     fn len_in(diameter_in: f64, mass_gr: f64) -> f64 {

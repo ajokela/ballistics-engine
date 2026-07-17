@@ -191,7 +191,7 @@ pub fn calculate_combined_angular_motion(
     // for stability (which depends on p^2); the signed rate below still controls phase direction.
     let caliber_in = params.caliber_m / 0.0254;
     let length_in = params.length_m / 0.0254;
-    let mass_gr = params.mass_kg / 0.00006479891;
+    let mass_gr = params.mass_kg / crate::constants::GRAINS_TO_KG;
     let stability = crate::spin_drift::calculate_dynamic_stability(
         mass_gr,
         params.velocity_mps,
@@ -794,7 +794,7 @@ mod tests {
 
         let caliber_in = params.caliber_m / 0.0254;
         let length_in = params.length_m / 0.0254;
-        let mass_gr = params.mass_kg / 0.00006479891;
+        let mass_gr = params.mass_kg / crate::constants::GRAINS_TO_KG;
         let spin_rps = spin_rate_rad_s / (2.0 * std::f64::consts::PI);
         let twist_in = velocity_mps * 3.28084 * 12.0 / spin_rps;
         let bare_sg = crate::spin_drift::miller_stability(

@@ -239,7 +239,7 @@ pub fn calculate_damped_yaw_of_repose(
     // Convert units
     let caliber_m = caliber_inches * 0.0254;
     let length_m = length_inches * 0.0254;
-    let mass_kg = mass_grains * 0.00006479891;
+    let mass_kg = mass_grains * crate::constants::GRAINS_TO_KG;
 
     // Crosswind creates an initial transient handled by aerodynamic-jump physics; it is not part
     // of the persistent equilibrium yaw. Use the gravity/gyroscopic balance for repose instead.
@@ -351,7 +351,7 @@ mod tests {
         let density = 1.225;
         let caliber = 0.308 * 0.0254;
         let length = 1.3 * 0.0254;
-        let mass = 175.0 * 0.00006479891;
+        let mass = 175.0 * crate::constants::GRAINS_TO_KG;
         let mach = velocity / 343.0;
         let coeffs = PitchDampingCoefficients::default();
 
@@ -552,7 +552,7 @@ mod tests {
         let stability_factor = 2.5;
         let velocity_mps = 300.0;
         let spin_rate_rad_s = 19_000.0;
-        let mass_kg = 175.0 * 0.00006479891;
+        let mass_kg = 175.0 * crate::constants::GRAINS_TO_KG;
         let caliber_m = 0.308 * 0.0254;
         let length_m = 1.3 * 0.0254;
 

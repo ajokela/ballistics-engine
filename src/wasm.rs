@@ -859,7 +859,7 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 inputs.muzzle_velocity = velocity * 0.3048; // fps to m/s
-                inputs.bullet_mass = mass * 0.00006479891; // grains to kg
+                inputs.bullet_mass = mass * crate::constants::GRAINS_TO_KG; // grains to kg
                 inputs.bullet_diameter = diameter * 0.0254; // inches to meters
                 inputs.sight_height = sight_height * 0.0254; // inches to meters
                 inputs.muzzle_height = muzzle_height * 0.0254; // inches to meters
@@ -1450,7 +1450,7 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 inputs.muzzle_velocity = velocity * 0.3048;
-                inputs.bullet_mass = mass * 0.00006479891;
+                inputs.bullet_mass = mass * crate::constants::GRAINS_TO_KG;
                 inputs.bullet_diameter = diameter * 0.0254;
                 inputs.sight_height = sight_height * 0.0254;
             }
@@ -1806,7 +1806,7 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 inputs.muzzle_velocity = velocity * 0.3048;
-                inputs.bullet_mass = mass * 0.00006479891;
+                inputs.bullet_mass = mass * crate::constants::GRAINS_TO_KG;
                 inputs.bullet_diameter = diameter * 0.0254;
                 inputs.sight_height = sight_height * 0.0254;
             }
@@ -2168,7 +2168,7 @@ impl WasmBallistics {
         match units {
             UnitSystem::Imperial => {
                 inputs.muzzle_velocity = velocity * 0.3048;
-                inputs.bullet_mass = mass * 0.00006479891;
+                inputs.bullet_mass = mass * crate::constants::GRAINS_TO_KG;
                 inputs.bullet_diameter = diameter * 0.0254;
             }
             UnitSystem::Metric => {
@@ -2535,7 +2535,7 @@ impl WasmBallistics {
             UnitSystem::Metric => velocity,
         };
         let mass_kg = match units {
-            UnitSystem::Imperial => mass * 0.00006479891,
+            UnitSystem::Imperial => mass * crate::constants::GRAINS_TO_KG,
             UnitSystem::Metric => mass * 0.001,
         };
         let diameter_m = match units {

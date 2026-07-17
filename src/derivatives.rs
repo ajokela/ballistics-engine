@@ -277,7 +277,7 @@ pub fn compute_derivatives(
             if inputs.weight_grains > 0.0 {
                 Some(inputs.weight_grains)
             } else {
-                Some(inputs.bullet_mass / 0.00006479891) // kg -> grains
+                Some(inputs.bullet_mass / crate::constants::GRAINS_TO_KG) // kg -> grains
             },
             Some(speed_air),
             Some(air_density),
@@ -350,7 +350,7 @@ pub fn compute_derivatives(
         let weight_gr = if inputs.weight_grains > 0.0 {
             inputs.weight_grains
         } else {
-            inputs.bullet_mass / 0.00006479891 // kg -> grains
+            inputs.bullet_mass / crate::constants::GRAINS_TO_KG // kg -> grains
         };
         // MBA-949: shared resolver so named bullet_model shapes are honored here too (this path
         // previously used only the caliber/weight heuristic and ignored the name).
@@ -721,7 +721,7 @@ mod tests {
         BallisticInputs {
             muzzle_velocity: 800.0, // m/s
             bc_value: 0.5,
-            bullet_mass: 168.0 * 0.00006479891, // kg (168 gr)
+            bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG, // kg (168 gr)
             bullet_diameter: 0.308 * 0.0254,    // meters (.308 in)
             bullet_length: 1.215 * 0.0254,      // meters
             caliber_inches: 0.308,
@@ -942,7 +942,7 @@ mod tests {
         inputs.bc_value = 0.243;
         inputs.bc_type = crate::DragModel::G7;
         inputs.bc_type_str = None;
-        inputs.bullet_mass = 175.0 * 0.00006479891;
+        inputs.bullet_mass = 175.0 * crate::constants::GRAINS_TO_KG;
         inputs.weight_grains = 175.0;
 
         let actual = estimate_bc_segments_for(&inputs, inputs.bc_value).unwrap();

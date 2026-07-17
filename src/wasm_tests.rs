@@ -233,7 +233,7 @@ mod tests {
                        --enable-spin-drift --max-range 500 -o json";
         let default_twist = crate::stability::default_twist_inches(
             0.224 * 0.0254,
-            77.0 * 0.00006479891,
+            77.0 * crate::constants::GRAINS_TO_KG,
             2750.0 * 0.3048,
         );
 
