@@ -10,7 +10,7 @@ use nalgebra::{Vector3, Vector6};
 use std::collections::HashMap;
 
 use crate::derivatives::compute_derivatives;
-use crate::wind::WindSegment;
+use crate::wind::{WindSegment, WindSegmentError};
 use crate::BallisticInputs;
 use crate::DragModel;
 
@@ -442,7 +442,36 @@ fn interpolate_target_crossing(
     (crossing_time, crossing_state)
 }
 
+/// Checked sibling of [`integrate_trajectory`] (MBA-1338): rejects malformed wind
+/// segments with a typed [`WindSegmentError`] **before** sorting, vector precomputation,
+/// or producing any trajectory points, so a caller can never receive a poisoned
+/// trajectory from non-finite segment fields. The error's `index` refers to the
+/// caller's own segment ordering.
+pub fn try_integrate_trajectory(
+    initial_state: [f64; 6],
+    t_span: (f64, f64),
+    params: TrajectoryParams,
+    method: &str,
+    tolerance: f64,
+    max_step: f64,
+) -> Result<Vec<(f64, Vector6<f64>)>, WindSegmentError> {
+    crate::wind::validate_wind_segments(&params.wind_segments)?;
+    Ok(integrate_trajectory(
+        initial_state,
+        t_span,
+        params,
+        method,
+        tolerance,
+        max_step,
+    ))
+}
+
 /// Main trajectory integration function
+///
+/// **Legacy/unchecked entry point** (MBA-1338): wind segments are sorted and consumed
+/// without validation, so non-finite fields silently poison the returned trajectory.
+/// Prefer [`try_integrate_trajectory`], which rejects malformed segments with a typed
+/// error before any integration work.
 pub fn integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),
@@ -647,7 +676,52 @@ pub fn integrate_trajectory(
     trajectory
 }
 
+/// Checked sibling of [`solve_trajectory_rust`] (MBA-1338): rejects malformed wind
+/// segments with a typed [`WindSegmentError`] before any integration work or trajectory
+/// points are produced. Bindings should migrate to this entry point so malformed
+/// segments surface as a structured error instead of a silently poisoned trajectory.
+#[allow(clippy::too_many_arguments)] // Mirrors the binding-compatibility signature below.
+pub fn try_solve_trajectory_rust(
+    initial_state: [f64; 6],
+    t_span: (f64, f64),
+    mass_kg: f64,
+    bc: f64,
+    drag_model: DragModel,
+    wind_segments: Vec<WindSegment>,
+    atmos_params: (f64, f64, f64, f64),
+    omega_vector: Option<Vec<f64>>,
+    enable_spin_drift: bool,
+    enable_magnus: bool,
+    enable_coriolis: bool,
+    method: String,
+    tolerance: f64,
+    max_step: f64,
+    target_distance_m: f64,
+) -> Result<Vec<HashMap<String, f64>>, WindSegmentError> {
+    crate::wind::validate_wind_segments(&wind_segments)?;
+    Ok(solve_trajectory_rust(
+        initial_state,
+        t_span,
+        mass_kg,
+        bc,
+        drag_model,
+        wind_segments,
+        atmos_params,
+        omega_vector,
+        enable_spin_drift,
+        enable_magnus,
+        enable_coriolis,
+        method,
+        tolerance,
+        max_step,
+        target_distance_m,
+    ))
+}
+
 /// Python-exposed function for complete trajectory integration
+///
+/// **Legacy/unchecked entry point** (MBA-1338): consumes wind segments without
+/// validation. Prefer [`try_solve_trajectory_rust`].
 #[allow(clippy::too_many_arguments)] // Binding compatibility API; grouping would be breaking.
 pub fn solve_trajectory_rust(
     initial_state: [f64; 6],
@@ -746,6 +820,113 @@ mod tests {
             ground_threshold: -1000.0,
             atmo_sock: None,
         }
+    }
+
+    #[test]
+    fn try_integrate_trajectory_rejects_malformed_segments_before_any_points() {
+        // MBA-1338: a poisoned segment (index 1, caller order) must yield the typed error
+        // and NO trajectory points — validation precedes sorting and integration.
+        let mut params = create_test_params(300.0);
+        params.wind_segments = vec![
+            WindSegment::new(10.0, 90.0, 200.0),
+            WindSegment::new(10.0, 90.0, f64::NAN),
+        ];
+        let err = try_integrate_trajectory(
+            [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+            (0.0, 2.0),
+            params,
+            "RK4",
+            1e-6,
+            0.001,
+        )
+        .unwrap_err();
+        assert_eq!(err.index, 1);
+        assert_eq!(err.field, crate::wind::WindSegmentField::UntilM);
+        assert_eq!(
+            err.to_string(),
+            "wind.segments[1].until_m must be finite and greater than zero"
+        );
+    }
+
+    #[test]
+    fn try_integrate_trajectory_matches_unchecked_on_valid_input() {
+        let mk = || {
+            let mut params = create_test_params(300.0);
+            params.wind_segments = vec![WindSegment::new(16.0934, 90.0, 500.0)];
+            params
+        };
+        let checked = try_integrate_trajectory(
+            [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+            (0.0, 2.0),
+            mk(),
+            "RK4",
+            1e-6,
+            0.001,
+        )
+        .expect("valid segments must integrate");
+        let unchecked = integrate_trajectory(
+            [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+            (0.0, 2.0),
+            mk(),
+            "RK4",
+            1e-6,
+            0.001,
+        );
+        assert_eq!(checked.len(), unchecked.len());
+        assert_eq!(checked.last().unwrap().1, unchecked.last().unwrap().1);
+    }
+
+    #[test]
+    fn try_solve_trajectory_rust_rejects_malformed_segments() {
+        let bad = vec![WindSegment::new(-5.0, 0.0, 100.0)];
+        let err = try_solve_trajectory_rust(
+            [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+            (0.0, 2.0),
+            0.01134,
+            0.442,
+            DragModel::G7,
+            bad,
+            (0.0, 15.0, 1013.25, 1.0),
+            None,
+            false,
+            false,
+            false,
+            "RK4".to_string(),
+            1e-6,
+            0.001,
+            300.0,
+        )
+        .unwrap_err();
+        assert_eq!(err.index, 0);
+        assert_eq!(err.field, crate::wind::WindSegmentField::SpeedKmh);
+        assert_eq!(
+            err.to_string(),
+            "wind.segments[0].speed_kmh must be finite and non-negative"
+        );
+    }
+
+    #[test]
+    fn try_solve_trajectory_rust_succeeds_on_valid_segments() {
+        let points = try_solve_trajectory_rust(
+            [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+            (0.0, 2.0),
+            0.01134,
+            0.442,
+            DragModel::G7,
+            vec![WindSegment::new(16.0934, 90.0, 500.0)],
+            (0.0, 15.0, 1013.25, 1.0),
+            None,
+            false,
+            false,
+            false,
+            "RK4".to_string(),
+            1e-6,
+            0.001,
+            300.0,
+        )
+        .expect("valid segments must solve");
+        assert!(!points.is_empty());
+        assert!(points.last().unwrap()["x"] > 0.0);
     }
 
     #[test]

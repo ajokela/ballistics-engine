@@ -1,6 +1,7 @@
 use nalgebra::Vector3;
 use std::cmp::Ordering;
 use std::f64::consts::PI;
+use thiserror::Error;
 
 /// Conversion constant from KMH to MPS
 const KMH_TO_MPS: f64 = 1000.0 / 3600.0;
@@ -61,27 +62,93 @@ pub(crate) fn sort_wind_segments_by_distance(segments: &mut [WindSegment]) {
     });
 }
 
-pub(crate) fn validate_wind_segments(segments: &[WindSegment]) -> Result<(), String> {
+/// Which [`WindSegment`] field failed validation (MBA-1338).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindSegmentField {
+    SpeedKmh,
+    AngleDeg,
+    UntilM,
+    VerticalMps,
+}
+
+impl WindSegmentField {
+    /// The struct field name, as it appears in error messages and the public API.
+    pub fn name(self) -> &'static str {
+        match self {
+            WindSegmentField::SpeedKmh => "speed_kmh",
+            WindSegmentField::AngleDeg => "angle_deg",
+            WindSegmentField::UntilM => "until_m",
+            WindSegmentField::VerticalMps => "vertical_mps",
+        }
+    }
+}
+
+impl std::fmt::Display for WindSegmentField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The validation rule a [`WindSegment`] field violated (MBA-1338).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindSegmentRule {
+    /// The value must be finite (`angle_deg`, `vertical_mps`).
+    Finite,
+    /// The value must be finite and `>= 0` (`speed_kmh`).
+    FiniteAndNonNegative,
+    /// The value must be finite and `> 0` (`until_m`).
+    FiniteAndPositive,
+}
+
+impl std::fmt::Display for WindSegmentRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Phrasing matches the historical String errors exactly so consumers that surface
+        // Display output (FastSolution, solver boundaries, bindings) see unchanged messages.
+        f.write_str(match self {
+            WindSegmentRule::Finite => "finite",
+            WindSegmentRule::FiniteAndNonNegative => "finite and non-negative",
+            WindSegmentRule::FiniteAndPositive => "finite and greater than zero",
+        })
+    }
+}
+
+/// A malformed [`WindSegment`] rejected at a checked construction/solve boundary (MBA-1338).
+///
+/// `index` is the segment's position in the vector **as supplied by the caller** —
+/// validation runs before any sorting or normalization, so the index always refers to
+/// the caller's own ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("wind.segments[{index}].{field} must be {rule}")]
+pub struct WindSegmentError {
+    pub index: usize,
+    pub field: WindSegmentField,
+    pub rule: WindSegmentRule,
+}
+
+/// Validate every segment, reporting the first violation as a typed error carrying the
+/// caller's segment index, the offending field, and the violated rule (MBA-1338).
+///
+/// Checked APIs ([`WindSock::try_new`], `try_integrate_trajectory`,
+/// `try_solve_trajectory_rust`) call this before sorting, vector precomputation, or
+/// producing any trajectory points.
+pub fn validate_wind_segments(segments: &[WindSegment]) -> Result<(), WindSegmentError> {
     for (index, segment) in segments.iter().enumerate() {
-        let field = |name: &str| format!("wind.segments[{index}].{name}");
+        let err = |field, rule| Err(WindSegmentError { index, field, rule });
 
         if !segment.speed_kmh.is_finite() || segment.speed_kmh < 0.0 {
-            return Err(format!(
-                "{} must be finite and non-negative",
-                field("speed_kmh")
-            ));
+            return err(
+                WindSegmentField::SpeedKmh,
+                WindSegmentRule::FiniteAndNonNegative,
+            );
         }
         if !segment.angle_deg.is_finite() {
-            return Err(format!("{} must be finite", field("angle_deg")));
+            return err(WindSegmentField::AngleDeg, WindSegmentRule::Finite);
         }
         if !segment.until_m.is_finite() || segment.until_m <= 0.0 {
-            return Err(format!(
-                "{} must be finite and greater than zero",
-                field("until_m")
-            ));
+            return err(WindSegmentField::UntilM, WindSegmentRule::FiniteAndPositive);
         }
         if !segment.vertical_mps.is_finite() {
-            return Err(format!("{} must be finite", field("vertical_mps")));
+            return err(WindSegmentField::VerticalMps, WindSegmentRule::Finite);
         }
     }
 
@@ -103,20 +170,43 @@ pub struct WindSock {
     /// Current wind vector
     current_vec: Vector3<f64>,
     /// Validation result captured before sorting, preserving the caller's segment index.
-    validation_error: Option<String>,
+    validation_error: Option<WindSegmentError>,
 }
 
 impl WindSock {
-    /// Create a new WindSock from wind segments
+    /// Create a new WindSock from wind segments.
+    ///
+    /// **Legacy/unchecked entry point** (MBA-1338): this constructor is infallible for API
+    /// compatibility — a malformed segment is captured as a deferred error that the solver
+    /// consumes at its pre-integration validation boundary, but a direct library consumer
+    /// gets a constructed sock with no structured signal. Prefer [`WindSock::try_new`]
+    /// (or `TryFrom<Vec<WindSegment>>`), which rejects malformed segments up front.
     ///
     /// Args:
     ///     segments: List of (speed_kmh, angle_deg, until_distance_m) tuples
-    pub fn new(mut segments: Vec<WindSegment>) -> Self {
-        // Keep this infallible for API compatibility, but validate before sorting so an error can
-        // identify the segment index supplied by the caller. The solver consumes this deferred
-        // error at its common pre-integration validation boundary.
+    pub fn new(segments: Vec<WindSegment>) -> Self {
+        // Validate before sorting so an error can identify the segment index supplied by
+        // the caller; defer it rather than fail (see doc above).
         let validation_error = validate_wind_segments(&segments).err();
+        Self::build_unchecked(segments, validation_error)
+    }
 
+    /// Create a new WindSock, rejecting malformed segments with a typed error (MBA-1338).
+    ///
+    /// Validation runs **before** sorting and wind-vector precomputation, and the error's
+    /// `index` refers to the caller's own segment ordering. Rejects non-finite or negative
+    /// `speed_kmh`, non-finite `angle_deg`, non-finite or non-positive `until_m`, and
+    /// non-finite `vertical_mps`.
+    pub fn try_new(segments: Vec<WindSegment>) -> Result<Self, WindSegmentError> {
+        validate_wind_segments(&segments)?;
+        Ok(Self::build_unchecked(segments, None))
+    }
+
+    /// Shared constructor body: sort, precompute vectors, seed the cursor.
+    fn build_unchecked(
+        mut segments: Vec<WindSegment>,
+        validation_error: Option<WindSegmentError>,
+    ) -> Self {
         // Sort segments by distance, handling NaN safely by treating it as greater than any value
         sort_wind_segments_by_distance(&mut segments);
 
@@ -141,7 +231,8 @@ impl WindSock {
 
     /// Return any malformed-segment error captured before normalization.
     pub(crate) fn validate_segments(&self) -> Result<(), String> {
-        self.validation_error.clone().map_or(Ok(()), Err)
+        self.validation_error
+            .map_or(Ok(()), |err| Err(err.to_string()))
     }
 
     /// Calculate wind vector from wind segment
@@ -228,6 +319,15 @@ impl WindSock {
 
         // Beyond all segments
         Vector3::zeros()
+    }
+}
+
+/// Checked conversion mirroring [`WindSock::try_new`] (MBA-1338).
+impl TryFrom<Vec<WindSegment>> for WindSock {
+    type Error = WindSegmentError;
+
+    fn try_from(segments: Vec<WindSegment>) -> Result<Self, Self::Error> {
+        WindSock::try_new(segments)
     }
 }
 
@@ -319,6 +419,116 @@ mod tests {
         let sock = WindSock::new(vec![]);
         assert_eq!(sock.vector_for_range_stateless(50.0), Vector3::zeros());
         assert_eq!(sock.muzzle_crosswind_from_right_mps(), None);
+    }
+
+    #[test]
+    fn try_new_accepts_valid_and_empty_segments() {
+        assert!(WindSock::try_new(vec![]).is_ok());
+        let sock = WindSock::try_new(vec![WindSegment::new(16.0934, 90.0, 100.0)]).unwrap();
+        assert!(sock.vector_for_range_stateless(50.0).norm() > 0.0);
+        // TryFrom mirrors try_new.
+        assert!(WindSock::try_from(vec![WindSegment::new(10.0, 0.0, 50.0)]).is_ok());
+        assert!(WindSock::try_from(vec![WindSegment::new(f64::NAN, 0.0, 50.0)]).is_err());
+    }
+
+    #[test]
+    fn try_new_rejects_each_field_with_typed_index_field_rule() {
+        // MBA-1338 acceptance criteria: non-finite or negative speed_kmh, non-finite
+        // angle_deg, non-finite or non-positive until_m, non-finite vertical_mps.
+        let ok = WindSegment::new(10.0, 0.0, 100.0);
+        let cases: Vec<(WindSegment, WindSegmentField, WindSegmentRule)> = vec![
+            (
+                WindSegment::new(f64::NAN, 0.0, 100.0),
+                WindSegmentField::SpeedKmh,
+                WindSegmentRule::FiniteAndNonNegative,
+            ),
+            (
+                WindSegment::new(-1.0, 0.0, 100.0),
+                WindSegmentField::SpeedKmh,
+                WindSegmentRule::FiniteAndNonNegative,
+            ),
+            (
+                WindSegment::new(10.0, f64::INFINITY, 100.0),
+                WindSegmentField::AngleDeg,
+                WindSegmentRule::Finite,
+            ),
+            (
+                WindSegment::new(10.0, 0.0, 0.0),
+                WindSegmentField::UntilM,
+                WindSegmentRule::FiniteAndPositive,
+            ),
+            (
+                WindSegment::new(10.0, 0.0, f64::NEG_INFINITY),
+                WindSegmentField::UntilM,
+                WindSegmentRule::FiniteAndPositive,
+            ),
+            (
+                WindSegment {
+                    vertical_mps: f64::NAN,
+                    ..ok
+                },
+                WindSegmentField::VerticalMps,
+                WindSegmentRule::Finite,
+            ),
+        ];
+        for (bad, field, rule) in cases {
+            // Put the bad segment at index 1 behind a valid one so the reported index is
+            // meaningful (and would be perturbed if validation ran after sorting).
+            let err = WindSock::try_new(vec![ok, bad]).unwrap_err();
+            assert_eq!(err.index, 1, "index for {field}");
+            assert_eq!(err.field, field);
+            assert_eq!(err.rule, rule);
+        }
+    }
+
+    #[test]
+    fn try_new_error_index_is_the_callers_presort_index() {
+        // The bad segment sorts FIRST by until_m; the reported index must still be the
+        // caller's (2), proving validation runs before sorting.
+        let err = WindSock::try_new(vec![
+            WindSegment::new(10.0, 0.0, 500.0),
+            WindSegment::new(20.0, 0.0, 300.0),
+            WindSegment::new(f64::NAN, 0.0, 1.0),
+        ])
+        .unwrap_err();
+        assert_eq!(err.index, 2);
+        assert_eq!(err.field, WindSegmentField::SpeedKmh);
+    }
+
+    #[test]
+    fn wind_segment_error_display_matches_legacy_strings() {
+        // The deferred WindSock::new path and FastSolution surface this Display output;
+        // it must stay byte-identical to the historical String errors.
+        let err = WindSock::try_new(vec![WindSegment::new(f64::NAN, 0.0, 100.0)]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "wind.segments[0].speed_kmh must be finite and non-negative"
+        );
+        let err = WindSock::try_new(vec![WindSegment::new(10.0, 0.0, -5.0)]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "wind.segments[0].until_m must be finite and greater than zero"
+        );
+        let err = WindSock::try_new(vec![WindSegment {
+            vertical_mps: f64::INFINITY,
+            ..WindSegment::new(10.0, 0.0, 100.0)
+        }])
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "wind.segments[0].vertical_mps must be finite"
+        );
+    }
+
+    #[test]
+    fn infallible_new_still_defers_the_same_error() {
+        // Legacy behavior preserved: WindSock::new constructs, and the solver-boundary
+        // validate_segments() reports the identical message try_new would have raised.
+        let sock = WindSock::new(vec![WindSegment::new(10.0, f64::NAN, 100.0)]);
+        assert_eq!(
+            sock.validate_segments().unwrap_err(),
+            "wind.segments[0].angle_deg must be finite"
+        );
     }
 
     #[test]
