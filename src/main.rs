@@ -469,9 +469,10 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Bore height above ground (feet for imperial, meters for metric). Default: 5ft/1.5m.
-        /// The WASM CLI exposes the same parameter as --muzzle-height, in inches/mm.
-        #[arg(long)]
+        /// Bore height above ground (inches for imperial, mm for metric; MBA-1339 unified
+        /// this with --sight-height and the WASM --muzzle-height flag). Default: 60in/1500mm
+        /// (= 5ft/1.5m). Also accepts --muzzle-height.
+        #[arg(long, visible_alias = "muzzle-height")]
         bore_height: Option<f64>,
 
         /// Ignore ground impact detection (trajectory continues to max range)
@@ -4208,15 +4209,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             let sight_height_metric =
                 UnitConverter::sight_height_to_metric(sight_height_value, cli.units);
 
-            // Bore height above ground: default 5 feet (imperial) or 1.5 meters (metric)
+            // Bore height above ground. MBA-1339 unified this flag onto the same inches/mm
+            // units as --sight-height and the WASM --muzzle-height flag (previously feet/
+            // meters). Defaults are unchanged: 60 in = 5 ft = 1.524 m; 1500 mm = 1.5 m.
             let bore_height_default = match cli.units {
-                UnitSystem::Imperial => 5.0, // feet
-                UnitSystem::Metric => 1.5,   // meters
+                UnitSystem::Imperial => 60.0,  // inches
+                UnitSystem::Metric => 1500.0,  // mm
             };
             let bore_height_value = bore_height.unwrap_or(bore_height_default);
             let bore_height_metric = match cli.units {
-                UnitSystem::Imperial => bore_height_value * 0.3048, // feet to meters
-                UnitSystem::Metric => bore_height_value,
+                UnitSystem::Imperial => bore_height_value * 0.0254, // inches to meters
+                UnitSystem::Metric => bore_height_value * 0.001,    // mm to meters
             };
             // Trajectory altitude feeds local air density, so an absurd bore height
             // silently thins the air over the whole flight (a 25 km "muzzle" flies in

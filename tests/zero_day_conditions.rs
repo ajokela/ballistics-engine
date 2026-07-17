@@ -120,8 +120,9 @@ fn run_linear_powder_zero(extra: &[&str]) -> (Vec<(f64, f64)>, f64) {
         "500",
         "--max-range",
         "600",
+        // MBA-1339: --bore-height is now inches (was feet); 60 in = the previous 5 ft = 1.524 m.
         "--bore-height",
-        "5",
+        "60",
         "--sight-height",
         "2.48",
         "--ignore-ground-impact",
@@ -180,8 +181,9 @@ fn run_curve_powder_zero(extra: &[&str]) -> (Vec<(f64, f64)>, f64) {
         "100",
         "--max-range",
         "300",
+        // MBA-1339: --bore-height is now inches (was feet); 60 in = the previous 5 ft = 1.524 m.
         "--bore-height",
-        "5",
+        "60",
         "--sight-height",
         "2.48",
         "--ignore-ground-impact",
