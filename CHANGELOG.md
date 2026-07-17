@@ -5,6 +5,27 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **BREAKING (MBA-1339):** the native CLI `--bore-height` flag now takes **inches** in
+  imperial and **millimetres** in metric (previously feet / metres), unifying it with
+  `--sight-height` and the WASM CLI's `--muzzle-height`. Defaults are unchanged
+  (60 in / 1500 mm = 5 ft / 1.5 m), so any run that does not set `--bore-height` is
+  byte-identical — but a run passing e.g. `--bore-height 5` now means 5 inches, not 5 feet.
+  Both surfaces now accept both flag names: native `--bore-height` gains a `--muzzle-height`
+  alias and the WASM `--muzzle-height` gains a `--bore-height` alias, with identical units
+  and defaults on each.
+
+### Fixed
+- WASM (MBA-1294): the auto-zero "Rifle zeroed at …" banner is now table-only; `-o json`
+  and `-o csv` output stay pure machine payloads. The native "non-finite state" integration
+  error now names the likely cause (extreme bore/muzzle height → air density) and points to
+  `--altitude`.
+
+### Added
+- WASM tests for `--print-bc-segments` table-gating and `lead -o` invalid-value rejection.
+
 ## [0.25.2] - 2026-07-16
 
 ### Fixed

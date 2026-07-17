@@ -39,8 +39,9 @@ fn zero_miss_inches(velocity: &str, bc: &str, mass: &str, diameter: &str, bc_opt
             "600",
             "--max-range",
             "650",
+            // MBA-1339: --bore-height is now inches (was feet); 60 in = the previous 5 ft = 1.524 m.
             "--bore-height",
-            "5",
+            "60",
             "--sight-height",
             "2",
             "--ignore-ground-impact",

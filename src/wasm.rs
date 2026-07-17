@@ -636,7 +636,9 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
-                "--muzzle-height" => {
+                // MBA-1339: --bore-height is the native CLI's name for this same parameter,
+                // now on identical inches/mm units — accept both names on both surfaces.
+                "--muzzle-height" | "--bore-height" => {
                     if i + 1 < args.len() {
                         muzzle_height = args[i + 1]
                             .parse()
@@ -3199,8 +3201,8 @@ Trajectory Command:
     --cant <DEGREES>             Rifle cant angle (degrees); positive = clockwise from the
                                  shooter, moving point of impact right and low
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
-    --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm; the native CLI
-                                 calls this --bore-height, in feet/meters). A value above
+    --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm; also accepts
+                                 --bore-height, matching the native CLI). A value above
                                  ~39,370in/1,000,000mm (1000m) triggers a warning: it feeds
                                  air density, thinning it over the whole flight — use
                                  --altitude for site elevation, --ignore-ground-impact to

@@ -1419,4 +1419,26 @@ Impact Velocity: 2510 fps\n";
             "unexpected lead -o error: {err:?}"
         );
     }
+
+    /// MBA-1339: the WASM CLI accepts --bore-height as an alias for --muzzle-height on the
+    /// same inches/mm units (unifying with the native CLI), so the two must produce identical
+    /// trajectories.
+    #[wasm_bindgen_test]
+    fn test_bore_height_aliases_muzzle_height() {
+        let wasm = WasmBallistics::new();
+        let via_muzzle = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --muzzle-height 40 --max-range 300",
+            )
+            .unwrap();
+        let via_bore = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bore-height 40 --max-range 300",
+            )
+            .unwrap();
+        assert_eq!(
+            via_muzzle, via_bore,
+            "--bore-height must alias --muzzle-height in the WASM CLI"
+        );
+    }
 }
