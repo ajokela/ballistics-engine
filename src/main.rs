@@ -469,7 +469,8 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Bore height above ground (feet for imperial, meters for metric). Default: 5ft/1.5m
+        /// Bore height above ground (feet for imperial, meters for metric). Default: 5ft/1.5m.
+        /// The WASM CLI exposes the same parameter as --muzzle-height, in inches/mm.
         #[arg(long)]
         bore_height: Option<f64>,
 

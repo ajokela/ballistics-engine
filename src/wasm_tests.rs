@@ -311,9 +311,11 @@ mod tests {
     #[wasm_bindgen_test]
     fn explicit_zero_velocity_ignores_linear_powder_adjustment() {
         let wasm = WasmBallistics::new();
+        // Table format: the "Rifle zeroed at ..." banner is a table-only human header
+        // (MBA-1294(a) keeps JSON/CSV pure), and this test reads the banner's adjustment line.
         let command = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
                        --auto-zero 300 --zero-velocity 2400 --zero-temperature 20 \
-                       --max-range 100 -o json";
+                       --max-range 100";
         let zero_line = |output: &str| output.lines().next().unwrap().to_string();
 
         let without_linear = zero_line(&wasm.run_command(command).unwrap());
@@ -332,10 +334,12 @@ mod tests {
     #[wasm_bindgen_test]
     fn auto_zero_inherits_explicit_shot_day_powder_temperature() {
         let wasm = WasmBallistics::new();
+        // Table format: reads the auto-zero banner's adjustment (banner is table-only
+        // since MBA-1294(a); JSON/CSV stay pure machine output).
         let command = "trajectory -v 2650 -b 0.19 -m 77 -d 0.224 --drag-model g7 \
                        --temperature 32 --powder-temp 68 \
                        --powder-temp-curve 32:2650,77:2720 \
-                       --auto-zero 100 --max-range 100 -o json";
+                       --auto-zero 100 --max-range 100";
         let adjustment = |output: &str| {
             output
                 .lines()
@@ -1341,5 +1345,78 @@ Impact Velocity: 2510 fps\n";
             .run_command("monte-carlo -v 2700 -m 168 -d 0.308 -n 50")
             .unwrap();
         assert!(monte_carlo.contains("Monte Carlo Simulation Results"));
+    }
+
+    /// MBA-1294(a): the auto-zero "Rifle zeroed at ..." banner is a table-only human header;
+    /// JSON output must stay pure machine output (a text prefix makes it unparseable).
+    #[wasm_bindgen_test]
+    fn test_json_output_pure_with_auto_zero() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 200 -o json")
+            .unwrap();
+        assert!(
+            !result.contains("Rifle zeroed at"),
+            "auto-zero banner leaked into JSON output: {result}"
+        );
+        // The prefix, if present, would break this parse.
+        let _: serde_json::Value =
+            serde_json::from_str(&result).expect("auto-zero JSON output must be pure JSON");
+    }
+
+    /// MBA-1294(a): same purity guarantee for CSV output.
+    #[wasm_bindgen_test]
+    fn test_csv_output_pure_with_auto_zero() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 200 -o csv")
+            .unwrap();
+        assert!(
+            !result.contains("Rifle zeroed at"),
+            "auto-zero banner leaked into CSV output: {result}"
+        );
+    }
+
+    /// MBA-1294(c): --print-bc-segments appends the BC ladder in TABLE view only; it must
+    /// never contaminate a JSON payload.
+    #[wasm_bindgen_test]
+    fn test_print_bc_segments_table_only() {
+        let wasm = WasmBallistics::new();
+        let table = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --print-bc-segments")
+            .unwrap();
+        // A plain scalar BC yields the "none active" note; either way the report block is present.
+        assert!(
+            table.contains("BC segments") || table.contains("BC Segments"),
+            "bc-segments report missing from table view: {table}"
+        );
+        let json = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --print-bc-segments -o json")
+            .unwrap();
+        assert!(
+            !json.contains("BC Segments (active)") && !json.contains("No BC segments active"),
+            "bc-segments report leaked into JSON output: {json}"
+        );
+        let _: serde_json::Value =
+            serde_json::from_str(&json).expect("--print-bc-segments must not break JSON");
+    }
+
+    /// MBA-1294(c): the `lead` command rejects an unknown -o value instead of silently
+    /// defaulting to a format; a valid value is accepted.
+    #[wasm_bindgen_test]
+    fn test_lead_invalid_output_rejected() {
+        let wasm = WasmBallistics::new();
+        assert!(
+            wasm.run_command("lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 -o json")
+                .is_ok(),
+            "lead -o json should be accepted"
+        );
+        let err = wasm
+            .run_command("lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 -o bogus")
+            .expect_err("lead must reject an invalid -o value");
+        assert!(
+            format!("{err:?}").contains("Invalid --output"),
+            "unexpected lead -o error: {err:?}"
+        );
     }
 }

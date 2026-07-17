@@ -1133,7 +1133,10 @@ impl TrajectorySolver {
             && time.is_finite())
         {
             return Err(BallisticsError::from(
-                "trajectory integration produced a non-finite state",
+                "trajectory integration produced a non-finite state (often from physically \
+                 extreme inputs — e.g. an absurd bore/muzzle height placing the launch far \
+                 from sea level, or a degenerate atmosphere; check those inputs, or set \
+                 --altitude explicitly)",
             ));
         }
 
