@@ -184,7 +184,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
 
     // Set derived values
     ballistic_inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
-    ballistic_inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
+    ballistic_inputs.weight_grains = inputs.bullet_mass / crate::constants::GRAINS_TO_KG;
     // MBA-1135: mass-based length estimate (was a mass-blind 4.5-caliber default). The C ABI does
     // not carry a bullet length, so derive it from diameter + mass; fall back to 4.5-cal if mass<=0.
     ballistic_inputs.bullet_length = {

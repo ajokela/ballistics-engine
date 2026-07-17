@@ -27,9 +27,7 @@ use ballistics_engine::bc_table::BcCorrectionTable;
 use ballistics_engine::bc_table_5d::Bc5dTableManager;
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
-use ballistics_engine::constants::{
-    DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN,
-};
+use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN};
 use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, BallisticsError,
     DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
@@ -2286,7 +2284,7 @@ impl UnitConverter {
     fn mass_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val * 0.001,           // grams to kg
-            UnitSystem::Imperial => val * 0.00006479891, // grains to kg
+            UnitSystem::Imperial => val * GRAINS_TO_KG, // grains to kg
         }
     }
 
@@ -2429,7 +2427,7 @@ impl UnitConverter {
     fn mass_from_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
             UnitSystem::Metric => val * 1000.0,          // kg to grams
-            UnitSystem::Imperial => val / 0.00006479891, // kg to grains
+            UnitSystem::Imperial => val / GRAINS_TO_KG, // kg to grains
         }
     }
 
@@ -3487,7 +3485,7 @@ fn resolve_velocity_bc_segments(
         ballistics_engine::bc_estimation::BCSegmentEstimator::estimate_bc_segments(
             bc,
             diameter_m / 0.0254,
-            mass_kg / 0.00006479891,
+            mass_kg / GRAINS_TO_KG,
             "",
             match drag_model {
                 DragModelArg::G1 => "G1",
@@ -3877,7 +3875,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 };
                                 let est_m = ballistics_engine::stability::estimate_bullet_length_m(
                                     caliber_in * 0.0254,
-                                    mass_gr * 0.00006479891,
+                                    mass_gr * GRAINS_TO_KG,
                                 );
                                 if est_m > 0.0 {
                                     est_m / 0.0254
@@ -4101,7 +4099,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // lookup axis); fall back to caliber*3.5 only if mass<=0.
                         let est_m = ballistics_engine::stability::estimate_bullet_length_m(
                             caliber_in * 0.0254,
-                            mass_grains * 0.00006479891,
+                            mass_grains * GRAINS_TO_KG,
                         );
                         if est_m > 0.0 {
                             est_m / 0.0254
@@ -4437,7 +4435,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     bullet_mass: mass_metric,
                     bullet_diameter: diameter_metric,
                     caliber_inches: diameter_metric / 0.0254,
-                    weight_grains: mass_metric / 0.00006479891,
+                    weight_grains: mass_metric / GRAINS_TO_KG,
                     bullet_length: bullet_length
                         .map(|l| match cli.units {
                             UnitSystem::Imperial => l * 0.0254,
@@ -4722,7 +4720,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     }),
                                     is_twist_right: twist_right,
                                     caliber_inches: diameter_metric / 0.0254,
-                                    weight_grains: mass_metric / 0.00006479891,
+                                    weight_grains: mass_metric / GRAINS_TO_KG,
                                     manufacturer: None,
                                     bullet_model: None,
                                     bullet_id: None,
@@ -6562,7 +6560,7 @@ fn generate_bc5d_segments(
             // MBA-1135: mass-based length estimate (was a mass-blind caliber*3.5 heuristic).
             let est_m = ballistics_engine::stability::estimate_bullet_length_m(
                 caliber * 0.0254,
-                weight_grains * 0.00006479891,
+                weight_grains * GRAINS_TO_KG,
             );
             if est_m > 0.0 {
                 est_m / 0.0254
@@ -6784,7 +6782,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         }),
         is_twist_right: twist_right,
         caliber_inches: diameter / 0.0254,
-        weight_grains: mass / 0.00006479891,
+        weight_grains: mass / GRAINS_TO_KG,
         manufacturer: None,
         bullet_model: None,
         bullet_id: None,
@@ -9357,7 +9355,7 @@ fn run_bc_segment_generation(
     use ballistics_engine::bc_estimation::BCSegmentEstimator;
 
     // Convert mass to grains and diameter to inches for the estimation
-    let weight_grains = mass / 0.00006479891;
+    let weight_grains = mass / GRAINS_TO_KG;
     let caliber_inches = diameter / 0.0254;
 
     // Generate BC segments
@@ -10926,7 +10924,7 @@ fn build_trajectory_components(
         enable_trajectory_sampling: true,
         sample_interval,
         caliber_inches: diameter / 0.0254,
-        weight_grains: mass / 0.00006479891,
+        weight_grains: mass / GRAINS_TO_KG,
         twist_rate: 12.0,
         is_twist_right: true,
         use_bc_segments,
@@ -13142,7 +13140,7 @@ mod bc_segment_parse_tests {
             true,
             0.19,
             0.224 * 0.0254,
-            77.0 * 0.00006479891,
+            77.0 * GRAINS_TO_KG,
             DragModelArg::G7,
         )
         .unwrap();
@@ -13154,7 +13152,7 @@ mod bc_segment_parse_tests {
             true,
             0.19,
             0.224 * 0.0254,
-            77.0 * 0.00006479891,
+            77.0 * GRAINS_TO_KG,
             DragModelArg::G7,
         )
         .unwrap();
@@ -13179,7 +13177,7 @@ mod bc_segment_parse_tests {
             false,
             0.19,
             0.224 * 0.0254,
-            77.0 * 0.00006479891,
+            77.0 * GRAINS_TO_KG,
             DragModelArg::G7,
         )
         .is_none());

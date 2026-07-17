@@ -325,7 +325,7 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         ground_threshold: params.ground_threshold, // MBA-954: honor the configured ground plane
         bc_segments: params.bc_segments.clone(),
         caliber_inches: params.bullet_diameter / 0.0254, // MBA-717: from real diameter
-        weight_grains: params.mass_kg / 0.00006479891,
+        weight_grains: params.mass_kg / crate::constants::GRAINS_TO_KG,
         use_bc_segments: params.use_bc_segments,
         bullet_id: None,
         bc_segments_data: None,

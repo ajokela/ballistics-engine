@@ -419,7 +419,7 @@ pub fn fast_integrate(
     let weight_gr = if inputs.weight_grains > 0.0 {
         inputs.weight_grains
     } else {
-        inputs.bullet_mass / 0.00006479891
+        inputs.bullet_mass / crate::constants::GRAINS_TO_KG
     };
 
     // Projectile shape for transonic corrections (MBA-949: shared resolver — bullet_model name
@@ -666,7 +666,7 @@ fn fast_magnus_acceleration(
     let m_gr = if inputs.weight_grains > 0.0 {
         inputs.weight_grains
     } else {
-        inputs.bullet_mass / 0.00006479891
+        inputs.bullet_mass / crate::constants::GRAINS_TO_KG
     };
     let l_in = if inputs.bullet_length > 0.0 {
         inputs.bullet_length / 0.0254
@@ -1451,7 +1451,7 @@ mod tests {
                 muzzle_velocity: 800.0,
                 bc_value: 0.5,
                 bc_type: DragModel::G7,
-                bullet_mass: 168.0 * 0.00006479891,
+                bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
                 bullet_diameter: 0.308 * 0.0254,
                 enable_wind_shear,
                 wind_shear_model: model.to_string(),
@@ -2182,7 +2182,7 @@ mod tests {
         ) -> Vector3<f64> {
             let inputs = BallisticInputs {
                 muzzle_velocity: 823.0,
-                bullet_mass: 168.0 * 0.00006479891,
+                bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
                 bullet_diameter: 0.308 * 0.0254,
                 bullet_length: 1.215 * 0.0254,
                 caliber_inches: 0.308,

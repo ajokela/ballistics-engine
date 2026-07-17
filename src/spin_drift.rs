@@ -232,7 +232,7 @@ pub fn calculate_yaw_of_repose(
         stability_factor,
         velocity_mps,
         spin_rate_rad_s,
-        mass_grains * 0.00006479891,
+        mass_grains * crate::constants::GRAINS_TO_KG,
         caliber_inches * 0.0254,
         length_inches * 0.0254,
     );
@@ -251,7 +251,7 @@ pub fn calculate_magnus_drift_component(
     mass_grains: f64,
 ) -> f64 {
     let diameter_m = caliber_inches * 0.0254;
-    let mass_kg = mass_grains * 0.00006479891; // Convert grains to kg
+    let mass_kg = mass_grains * crate::constants::GRAINS_TO_KG; // Convert grains to kg
 
     // Magnus force coefficient (empirical)
     // Varies with Mach number
@@ -775,7 +775,7 @@ mod tests {
         // and (3) apply the 4.5-caliber length fallback when bullet_length is unset.
         let inputs = BallisticInputs {
             muzzle_velocity: 800.0, // 2624.7 fps -> velocity term < 1.0
-            bullet_mass: 175.0 * 0.00006479891,
+            bullet_mass: 175.0 * crate::constants::GRAINS_TO_KG,
             bullet_diameter: 0.308 * 0.0254,
             bullet_length: 1.24 * 0.0254,
             twist_rate: 10.0,
@@ -794,7 +794,7 @@ mod tests {
         // (2) includes the velocity term: at sea-level standard the density factor is 1.0, so
         //     sg == bare_geometric_Sg * (v_fps/2800)^(1/3).
         let d_in = inputs.bullet_diameter / 0.0254;
-        let m_gr = inputs.bullet_mass / 0.00006479891;
+        let m_gr = inputs.bullet_mass / crate::constants::GRAINS_TO_KG;
         let l_in = inputs.bullet_length / 0.0254;
         let bare = miller_stability(d_in, m_gr, inputs.twist_rate, l_in);
         let vel_corr = (inputs.muzzle_velocity * 3.28084 / 2800.0).powf(1.0 / 3.0);
@@ -833,7 +833,7 @@ mod tests {
     fn test_effective_sg_preserves_short_handgun_length_estimate() {
         let inputs = BallisticInputs {
             muzzle_velocity: 1150.0 * 0.3048,
-            bullet_mass: 115.0 * 0.00006479891,
+            bullet_mass: 115.0 * crate::constants::GRAINS_TO_KG,
             bullet_diameter: 0.355 * 0.0254,
             bullet_length: 0.0,
             twist_rate: 10.0,

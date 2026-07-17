@@ -245,7 +245,7 @@ impl BcCorrectionTable {
         // estimate improves the correction. Fall back to the old heuristic if mass is unavailable.
         let est_m = crate::stability::estimate_bullet_length_m(
             caliber_inches * 0.0254,
-            mass_grains * 0.00006479891,
+            mass_grains * crate::constants::GRAINS_TO_KG,
         );
         let estimated_length = if est_m > 0.0 {
             est_m / 0.0254

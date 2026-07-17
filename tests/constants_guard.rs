@@ -56,6 +56,15 @@ fn contains_rounded_grains_per_gram(text: &str) -> bool {
     text.contains("15.4323") || text.contains("15.432358")
 }
 
+/// True if `text` contains the bare kg-scale grain literal (`0.00006479891`,
+/// exact) instead of referencing `constants::GRAINS_TO_KG` (MBA-1333). Unlike
+/// the two checks above this bans the *correct* digits too: ~60 sites used to
+/// duplicate them, and every `src/` site now goes through the named constant.
+/// `tests/` fixtures still hardcode the value independently as a cross-check.
+fn contains_kg_scale_grain_literal(text: &str) -> bool {
+    text.contains("0.00006479891") || text.contains("6.479891e-5") || text.contains("6.479891E-5")
+}
+
 #[test]
 fn no_duplicate_grain_gram_constants_outside_constants_rs() {
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -75,16 +84,20 @@ fn no_duplicate_grain_gram_constants_outside_constants_rs() {
         let Ok(text) = fs::read_to_string(&path) else {
             continue; // non-UTF8/unreadable file is not this test's concern
         };
-        if contains_truncated_grams_per_grain(&text) || contains_rounded_grains_per_gram(&text) {
+        if contains_truncated_grams_per_grain(&text)
+            || contains_rounded_grains_per_gram(&text)
+            || contains_kg_scale_grain_literal(&text)
+        {
             offenders.push(path.display().to_string());
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "MBA-1327: found a duplicate/truncated/rounded grain<->gram conversion \
-         literal outside src/constants.rs -- use \
-         ballistics_engine::constants::{{GRAMS_PER_GRAIN, GRAINS_PER_GRAM}} instead:\n{}",
+        "MBA-1327/MBA-1333: found a duplicate/truncated/rounded grain<->gram or bare \
+         kg-scale grain conversion literal outside src/constants.rs -- use \
+         ballistics_engine::constants::{{GRAMS_PER_GRAIN, GRAINS_PER_GRAM, GRAINS_TO_KG}} \
+         instead:\n{}",
         offenders.join("\n")
     );
 }

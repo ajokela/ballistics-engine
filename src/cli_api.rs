@@ -190,7 +190,7 @@ impl BallisticInputs {
         let weight_gr = if self.weight_grains > 0.0 {
             self.weight_grains
         } else {
-            self.bullet_mass / 0.00006479891 // kg -> grains
+            self.bullet_mass / crate::constants::GRAINS_TO_KG // kg -> grains
         };
         let diameter_in = if self.caliber_inches > 0.0 {
             self.caliber_inches
@@ -279,7 +279,7 @@ impl Default for BallisticInputs {
             twist_rate: 12.0, // 1:12" typical
             is_twist_right: true,
             caliber_inches: diameter_m / 0.0254, // Convert to inches
-            weight_grains: mass_kg / 0.00006479891, // Convert to grains
+            weight_grains: mass_kg / crate::constants::GRAINS_TO_KG, // Convert to grains
             manufacturer: None,
             bullet_model: None,
             bullet_id: None,
@@ -641,7 +641,7 @@ impl TrajectorySolver {
     ) -> Self {
         // Compute derived fields from base units
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
-        inputs.weight_grains = inputs.bullet_mass / 0.00006479891;
+        inputs.weight_grains = inputs.bullet_mass / crate::constants::GRAINS_TO_KG;
 
         // Resolve the muzzle velocity for the ambient temperature before integration.
         // A measured powder-temperature -> velocity curve (data-driven, non-linear)
@@ -1561,7 +1561,7 @@ impl TrajectorySolver {
             return;
         }
         let d_in = self.inputs.bullet_diameter / 0.0254; // m -> in
-        let m_gr = self.inputs.bullet_mass / 0.00006479891; // kg -> grains
+        let m_gr = self.inputs.bullet_mass / crate::constants::GRAINS_TO_KG; // kg -> grains
         let twist_in = self.inputs.twist_rate; // inches/turn
         if d_in <= 0.0 || m_gr <= 0.0 || twist_in <= 0.0 {
             return;
@@ -2813,7 +2813,7 @@ impl TrajectorySolver {
 
             // Imperial conversions for the stability / yaw-of-repose helpers.
             let d_in = self.inputs.bullet_diameter / 0.0254;
-            let m_gr = self.inputs.bullet_mass / 0.00006479891;
+            let m_gr = self.inputs.bullet_mass / crate::constants::GRAINS_TO_KG;
             let l_in = if self.inputs.bullet_length > 0.0 {
                 self.inputs.bullet_length / 0.0254
             } else {
@@ -4417,7 +4417,7 @@ mod cluster_bc_reference_space_tests {
         let inputs = BallisticInputs {
             bc_value: 0.190,
             bc_type: DragModel::G7,
-            bullet_mass: 77.0 * 0.00006479891,
+            bullet_mass: 77.0 * crate::constants::GRAINS_TO_KG,
             bullet_diameter: 0.224 * 0.0254,
             use_cluster_bc: true,
             ..BallisticInputs::default()
@@ -5042,7 +5042,7 @@ mod precession_inertia_wiring_tests {
 
     #[test]
     fn solver_uses_projectile_specific_moments_of_inertia() {
-        let mass_kg = 55.0 * 0.00006479891;
+        let mass_kg = 55.0 * crate::constants::GRAINS_TO_KG;
         let caliber_m = 0.224 * 0.0254;
         let length_m = 0.75 * 0.0254;
         let inputs = BallisticInputs {
@@ -5382,7 +5382,7 @@ mod magnus_stability_tests {
         let acceleration = |enable_magnus, is_twist_right| {
             let inputs = BallisticInputs {
                 muzzle_velocity: 822.96,
-                bullet_mass: 168.0 * 0.00006479891,
+                bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
                 bullet_diameter: 0.308 * 0.0254,
                 bullet_length: 1.215 * 0.0254,
                 twist_rate: 10.0,
@@ -5426,7 +5426,7 @@ mod magnus_stability_tests {
         let muzzle_velocity = 1_400.0 / 3.28084;
         let inputs = BallisticInputs {
             muzzle_velocity,
-            bullet_mass: 168.0 * 0.00006479891,
+            bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
             bullet_diameter: 0.308 * 0.0254,
             bullet_length: 1.215 * 0.0254,
             twist_rate: 15.0,
@@ -5478,7 +5478,7 @@ mod magnus_stability_tests {
     fn magnus_force_grows_as_fixed_spin_projectile_slows() {
         let inputs = BallisticInputs {
             muzzle_velocity: 800.0,
-            bullet_mass: 168.0 * 0.00006479891,
+            bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
             bullet_diameter: 0.308 * 0.0254,
             bullet_length: 1.215 * 0.0254,
             twist_rate: 12.0,
