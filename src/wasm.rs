@@ -1269,7 +1269,14 @@ impl WasmBallistics {
                         target_speed_mps,
                     ),
                 };
-                let mut combined = format!("{}{}", zero_info, output);
+                // JSON/CSV must stay pure machine output: the human-readable "Rifle zeroed
+                // at ..." banner is table-only, exactly like the bc-segments and warning
+                // blocks below. Prepending it to a JSON/CSV payload makes it unparseable.
+                let mut combined = if matches!(output_format, OutputFormat::Table) {
+                    format!("{}{}", zero_info, output)
+                } else {
+                    output
+                };
                 // Human-readable append only for the table view: tacking text after a
                 // JSON/CSV payload would break any downstream parser of those formats.
                 if print_bc_segments && matches!(output_format, OutputFormat::Table) {
@@ -3192,7 +3199,8 @@ Trajectory Command:
     --cant <DEGREES>             Rifle cant angle (degrees); positive = clockwise from the
                                  shooter, moving point of impact right and low
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
-    --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm). A value above
+    --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm; the native CLI
+                                 calls this --bore-height, in feet/meters). A value above
                                  ~39,370in/1,000,000mm (1000m) triggers a warning: it feeds
                                  air density, thinning it over the whole flight — use
                                  --altitude for site elevation, --ignore-ground-impact to
