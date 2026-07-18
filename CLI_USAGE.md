@@ -1460,6 +1460,30 @@ field names (`range_yd`, `observed_drop_mil`, `predicted_drop_mil`,
 
 ## Output Formats
 
+### Units by Output Surface
+
+The same solved trajectory is expressed differently depending on which output you
+ask for — when comparing numbers across surfaces, check which one you are reading:
+
+| Surface | Vertical | Units |
+|---|---|---|
+| Native `-o json` (`--full` points) | world-frame `x`/`y`/`z`, `y` = height above ground | yd (imperial) / m (metric), per its legend |
+| Native table / CSV drop & drift | below the line of sight | inches (imperial) / meters (metric) |
+| `solve-json` v1 | below the line of sight (`drop_m`) | always SI (meters) |
+| WASM terminal `-o json` | below the line of sight, unit in the key name | `drop_inches`/`drift_inches` (imperial), `drop_cm`/`drift_cm` (metric), per its `units` legend |
+
+Two related cross-system notes:
+
+- The **default bore height** is the round number of each system: 60 in (imperial)
+  vs 1500 mm (metric) — 1.524 m vs 1.5 m. The 2.4 cm difference is visible in
+  `max_height` and in high-precision imperial-vs-metric parity checks; pass
+  `--bore-height` explicitly when comparing systems digit-for-digit.
+- The **mover ring** renders as an angular hold (`--adjustment-unit`, mil or MOA)
+  in the human table, while CSV keeps `ring_mil` and JSON keeps `mover_ring_m` /
+  `mover_ring_mil` regardless — machine columns carry their unit in the name and
+  stay stable.
+
+
 All commands support four output formats via `-o`:
 
 ### Table Format (default)
