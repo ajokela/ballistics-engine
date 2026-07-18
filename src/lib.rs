@@ -51,6 +51,7 @@ mod drag_model;
 pub mod ffi;
 pub mod solve_json;
 pub mod solve_v1;
+pub mod terminal_plot;
 pub mod trajectory_observation;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;

@@ -397,6 +397,9 @@ impl WasmBallistics {
         let mut altitude = 0.0;
         let mut output_format = OutputFormat::Table;
         let mut full = false;
+        // MBA-1337 p3: native --plot parity. None = no chart; Some(style) appends the
+        // two terminal charts after the table, exactly like the native CLI.
+        let mut plot: Option<crate::terminal_plot::CanvasStyle> = None;
         let mut auto_zero: Option<f64> = None;
         let mut sight_height = if units == UnitSystem::Imperial {
             2.0
@@ -616,6 +619,27 @@ impl WasmBallistics {
                     if i + 1 < args.len() {
                         output_format = OutputFormat::from_str(args[i + 1]);
                         i += 1;
+                    }
+                }
+                "--plot" => {
+                    // clap parity (num_args 0..=1, default_missing_value "braille"):
+                    // bare --plot before another flag = braille; an explicit next
+                    // token is the style value and anything but braille/ascii is a
+                    // hard error, exactly like the native CLI.
+                    plot = Some(crate::terminal_plot::CanvasStyle::Braille);
+                    if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                        match args[i + 1] {
+                            "braille" => i += 1,
+                            "ascii" => {
+                                plot = Some(crate::terminal_plot::CanvasStyle::Ascii);
+                                i += 1;
+                            }
+                            other => {
+                                return Err(JsValue::from_str(&format!(
+                                    "Invalid value '{other}' for --plot (expected braille or ascii)"
+                                )));
+                            }
+                        }
                     }
                 }
                 "--full" => full = true,
@@ -1284,6 +1308,46 @@ impl WasmBallistics {
                 // JSON/CSV payload would break any downstream parser of those formats.
                 if print_bc_segments && matches!(output_format, OutputFormat::Table) {
                     combined.push_str(&self.format_bc_segments_report(&inputs, units));
+                }
+                // MBA-1337 p3: table-only chart append, mirroring the native CLI's
+                // --plot block (72x12 cells; drop then lateral drift vs range). JSON
+                // and CSV stay pure machine output.
+                if let Some(style) = plot {
+                    if matches!(output_format, OutputFormat::Table) && !result.points.is_empty() {
+                        let (dist_div, range_unit) = match units {
+                            UnitSystem::Imperial => (0.9144, "yd"),
+                            UnitSystem::Metric => (1.0, "m"),
+                        };
+                        let drop_label = format!("drop ({})", range_unit);
+                        let drop_points: Vec<(f64, f64)> = result
+                            .points
+                            .iter()
+                            .map(|p| (p.position.x / dist_div, p.position.y / dist_div))
+                            .collect();
+                        combined.push_str("\nDrop vs Range:\n");
+                        combined.push_str(&crate::terminal_plot::render_chart(
+                            &[(drop_label.as_str(), drop_points.as_slice())],
+                            72,
+                            12,
+                            style,
+                        ));
+                        combined.push('\n');
+
+                        let drift_label = format!("drift ({})", range_unit);
+                        let drift_points: Vec<(f64, f64)> = result
+                            .points
+                            .iter()
+                            .map(|p| (p.position.x / dist_div, p.position.z / dist_div))
+                            .collect();
+                        combined.push_str("\nLateral Drift vs Range:\n");
+                        combined.push_str(&crate::terminal_plot::render_chart(
+                            &[(drift_label.as_str(), drift_points.as_slice())],
+                            72,
+                            12,
+                            style,
+                        ));
+                        combined.push('\n');
+                    }
                 }
                 if let Some(warning) = &muzzle_height_warning {
                     if matches!(output_format, OutputFormat::Table) {
@@ -3555,6 +3619,9 @@ Trajectory Command:
     -z, --auto-zero <DIST>       Auto-zero at distance
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
+    --plot [STYLE]               Append terminal charts after the table (drop and
+                                 drift vs range); STYLE = braille (default) or ascii
+                                 (for fonts without braille glyph coverage)
     --target-speed <SPEED>       Mover ring: per-point ring radius = speed x ToF
                                  (mph/m/s, 0-300; 0 = off). Adds a Ring column (table),
                                  mover_ring_m/mover_ring_mil (json), ring_mil (csv)

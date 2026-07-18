@@ -17,7 +17,7 @@ mod mcp_command;
 #[cfg(feature = "pdf")]
 mod pdf_dope_card;
 mod solve_json_command;
-mod terminal_plot;
+use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
 use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
 
@@ -8237,10 +8237,13 @@ enum WezErrorBucket {
 
 impl std::fmt::Display for WezErrorBucket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // MBA-1337 w2: one spelling everywhere. These must match the serde
+        // rename_all = "snake_case" values the -o full JSON contract shipped with
+        // (0.25.0), so summary/CSV/JSON all agree on the same strings.
         let label = match self {
-            WezErrorBucket::WindCall => "wind call",
-            WezErrorBucket::MvSd => "MV SD",
-            WezErrorBucket::Other => "other/group",
+            WezErrorBucket::WindCall => "wind_call",
+            WezErrorBucket::MvSd => "mv_sd",
+            WezErrorBucket::Other => "other",
         };
         write!(f, "{label}")
     }
@@ -10430,6 +10433,23 @@ impl TruingForwardModel<'_> {
     /// Predicted drop (in the configured drop unit) at `range_yd` for the given
     /// muzzle velocity and BC, using the real trajectory solver.
     fn predict(&self, mv_fps: f64, bc: f64, range_yd: f64) -> Result<f64, Box<dyn Error>> {
+        self.predict_in_unit(mv_fps, bc, range_yd, self.drop_unit)
+    }
+
+    /// `predict` expressed in an explicit unit, independent of the configured
+    /// `--drop-unit`. The identifiability diagnostics use this to stay in mil space
+    /// (MBA-1337 t1): the linear `in` unit weights each Jacobian row by its range,
+    /// which shifts the column correlation. NOTE this makes the gate DIAGNOSTICS
+    /// unit-invariant; the MV-only operating point and the least-squares cost are
+    /// still minimized in the display unit (deliberately out of scope — changing
+    /// them changes fitted numbers), so extreme near-boundary sets can still differ.
+    fn predict_in_unit(
+        &self,
+        mv_fps: f64,
+        bc: f64,
+        range_yd: f64,
+        unit: DropUnit,
+    ) -> Result<f64, Box<dyn Error>> {
         let (drop_m, z_m) = solve_trajectory_drop(
             mv_fps,
             bc,
@@ -10446,7 +10466,7 @@ impl TruingForwardModel<'_> {
             self.bc_segments,
             true, // interpolate: smooth forward model for the fitter
         )?;
-        Ok(self.drop_unit.express_drop_m(drop_m, z_m))
+        Ok(unit.express_drop_m(drop_m, z_m))
     }
 
     /// Sum of squared residuals (predicted - observed) over all observations.
@@ -10523,12 +10543,17 @@ fn truing_identifiability(
     let hmv = (mv * 1e-3).max(0.5);
     let hbc = (bc * 1e-3).max(1e-4);
     let (mut n_mv, mut n_bc, mut cross) = (0.0, 0.0, 0.0);
+    // Differentiate in mil space regardless of --drop-unit (MBA-1337 t1) so these
+    // gate diagnostics do not shift with the display unit. (The operating point mv
+    // comes from a display-unit fit, so full invariance is not guaranteed — see
+    // predict_in_unit's note.)
+    let unit = DropUnit::Mil;
     for o in obs {
-        let jmv = (model.predict(mv + hmv, bc, o.range_yd)?
-            - model.predict(mv - hmv, bc, o.range_yd)?)
+        let jmv = (model.predict_in_unit(mv + hmv, bc, o.range_yd, unit)?
+            - model.predict_in_unit(mv - hmv, bc, o.range_yd, unit)?)
             / (2.0 * hmv);
-        let jbc = (model.predict(mv, bc + hbc, o.range_yd)?
-            - model.predict(mv, bc - hbc, o.range_yd)?)
+        let jbc = (model.predict_in_unit(mv, bc + hbc, o.range_yd, unit)?
+            - model.predict_in_unit(mv, bc - hbc, o.range_yd, unit)?)
             / (2.0 * hbc);
         n_mv += jmv * jmv;
         n_bc += jbc * jbc;
@@ -10750,7 +10775,7 @@ fn run_multi_observation_truing(
     // well-posed and gives a good operating point for the identifiability check
     // and (if BC is identifiable) the joint fit.
     let mv_init = (TRUING_MV_MIN_FPS + TRUING_MV_MAX_FPS) / 2.0;
-    let (mv0, mv_iters, _mv_conv) = fit_truing_mv_only(&model, &observations, bc_input, mv_init)?;
+    let (mv0, mv_iters, mv_conv) = fit_truing_mv_only(&model, &observations, bc_input, mv_init)?;
     let rms_mv_only = rms_at(&model, &observations, mv0, bc_input)?;
 
     // Step 2: is BC identifiable from this observation set?
@@ -10766,7 +10791,10 @@ fn run_multi_observation_truing(
     let mut fitted_bc = bc_input;
     let mut bc_fitted = false;
     let mut iterations = mv_iters;
-    let mut converged = true;
+    // Start from the MV-only fitter's own flag (MBA-1337 t2): both MV-only outcomes
+    // (gate-refused joint, or joint rejected as worse) report THIS fit's convergence.
+    // The accepted-joint branch overwrites it with the joint fitter's flag.
+    let mut converged = mv_conv;
     let mut reason = String::new();
 
     if bc_identifiable {
@@ -10806,20 +10834,41 @@ fn run_multi_observation_truing(
         };
     }
 
-    // Final residuals at the reported parameters.
+    // Final residuals at the reported parameters. Alongside the display-unit RMS,
+    // accumulate a mil-equivalent RMS: the quality bands were calibrated in mil
+    // (~0.03 mil observation noise), so banding must not shift with --drop-unit
+    // (MBA-1337 t1). Reported numbers stay in the user's unit.
     let mut predicted = Vec::with_capacity(observations.len());
     let mut residuals = Vec::with_capacity(observations.len());
     let mut sse = 0.0;
+    let mut sse_mil = 0.0;
     for o in &observations {
         let p = model.predict(fitted_mv, fitted_bc, o.range_yd)?;
         let r = p - o.drop;
+        let r_mil = match drop_unit {
+            DropUnit::Mil => r,
+            // moa -> mil: divide by (180/pi)*60/1000 moa-per-mil.
+            DropUnit::Moa => r / ((180.0 / std::f64::consts::PI) * 60.0 / 1000.0),
+            // inches -> meters -> small-angle mil at this observation's range.
+            DropUnit::In => r * 0.0254 / (o.range_yd * 0.9144) * 1000.0,
+        };
         predicted.push(p);
         residuals.push(r);
         sse += r * r;
+        sse_mil += r_mil * r_mil;
     }
     let rms = (sse / observations.len() as f64).sqrt();
+    let rms_mil = (sse_mil / observations.len() as f64).sqrt();
 
-    let quality = truing_quality_line(bc_fitted, rms, drop_unit, condition_number, converged);
+    let quality = truing_quality_line(
+        bc_fitted,
+        rms,
+        rms_mil,
+        drop_unit,
+        condition_number,
+        converged,
+        observations.len(),
+    );
 
     let report = MultiTruingReport {
         fitted_mv_fps: fitted_mv,
@@ -10857,45 +10906,51 @@ fn rms_at(
     Ok((sse / obs.len() as f64).sqrt())
 }
 
-/// Plain-language quality assessment for the fit.
+/// Plain-language quality assessment for the fit. `rms` is in the user's drop unit
+/// (displayed); `rms_mil` is the mil-equivalent the bands were calibrated against
+/// (~0.03 mil observation noise), so the quality word is unit-invariant (MBA-1337 t1).
 fn truing_quality_line(
     bc_fitted: bool,
     rms: f64,
+    rms_mil: f64,
     drop_unit: DropUnit,
     condition_number: f64,
     converged: bool,
+    n_obs: usize,
 ) -> String {
     let unit = drop_unit.label();
+    let n_params = if bc_fitted { 2 } else { 1 };
+    // Exactly-determined fit (MBA-1337 t3): zero degrees of freedom drive the
+    // residuals to ~0 by construction — an "excellent" RMS validates nothing.
+    if n_obs == n_params {
+        return format!(
+            "{} fit is exactly determined ({n_obs} observations, {n_params} fitted \
+             parameters): residuals are zero by construction and do not validate the \
+             fit; add an observation to assess quality",
+            if bc_fitted { "Joint MV+BC" } else { "MV-only" }
+        );
+    }
+    let quality = if rms_mil < 0.05 {
+        "excellent"
+    } else if rms_mil < 0.15 {
+        "good"
+    } else if rms_mil < 0.4 {
+        "fair"
+    } else {
+        "poor (observations may be inconsistent)"
+    };
+    let nonconv = if converged { "" } else { " (did not fully converge)" };
     if bc_fitted {
-        let quality = if rms < 0.05 {
-            "excellent"
-        } else if rms < 0.15 {
-            "good"
-        } else if rms < 0.4 {
-            "fair"
-        } else {
-            "poor (observations may be inconsistent)"
-        };
         let cond = if condition_number.is_finite() {
             format!("{condition_number:.0}")
         } else {
             "inf".to_string()
         };
         format!(
-            "Joint MV+BC fit, {quality}: RMS residual {rms:.3} {unit}, conditioning {cond}{}",
-            if converged { "" } else { " (did not fully converge)" }
+            "Joint MV+BC fit, {quality}: RMS residual {rms:.3} {unit}, conditioning {cond}{nonconv}"
         )
     } else {
-        let quality = if rms < 0.05 {
-            "excellent"
-        } else if rms < 0.15 {
-            "good"
-        } else if rms < 0.4 {
-            "fair"
-        } else {
-            "poor (observations may be inconsistent)"
-        };
-        format!("MV-only fit, {quality}: RMS residual {rms:.3} {unit} (BC held fixed)")
+        format!("MV-only fit, {quality}: RMS residual {rms:.3} {unit} (BC held fixed){nonconv}")
     }
 }
 
