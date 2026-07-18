@@ -53,9 +53,16 @@ exclude = [
 ]
 
 [features]
-default = ["online", "pdf", "profile-import", "ffi"]
-online = ["dep:ureq"]
-pdf = ["dep:printpdf"]
+default = ["online", "pdf", "profile-import", "ffi", "cli"]
+# dirs is shared: the CLI (config/profile paths), the online BC-table cache, and the
+# PDF dope card's font lookup all resolve user directories.
+online = ["dep:ureq", "dep:dirs"]
+pdf = ["dep:printpdf", "dep:dirs"]
+# MBA-1331: dependencies used only by the `ballistics` binary (src/main.rs). Default-on
+# so plain `cargo build/install` is unchanged; lib-only consumers (bindings, wasm) can
+# drop them with default-features = false. The [[bin]] declares required-features, so a
+# no-default-features build simply skips the binary.
+cli = ["dep:clap", "dep:clap_complete", "dep:csv", "dep:dirs", "dep:strsim"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 profile-import = []
@@ -75,14 +82,14 @@ ndarray = "0.17"
 ndarray-npy = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-clap_complete = "4"
-csv = "1.3"
+clap = { version = "4.5", features = ["derive"], optional = true }
+clap_complete = { version = "4", optional = true }
+csv = { version = "1.3", optional = true }
 thiserror = "2.0"
 rand = "0.10"
 rand_distr = "0.6"
-dirs = "6.0"
-strsim = "0.11"
+dirs = { version = "6.0", optional = true }
+strsim = { version = "0.11", optional = true }
 
 # PDF generation for dope cards (optional, not WASM compatible)
 # default-features=false drops the `html` feature (azul-layout -> rust-fontconfig
@@ -120,6 +127,7 @@ criterion = "0.8"
 [[bin]]
 name = "ballistics"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [[bench]]
 name = "trajectory_bench"

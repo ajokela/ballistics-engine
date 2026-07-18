@@ -56,7 +56,11 @@ jobs:
         run: RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps --all-features
 
       - name: Verify the offline minimal-feature process protocol
-        run: cargo test --locked --no-default-features --test solve_json_cli
+        # MBA-1331: the binary is behind the default-on `cli` feature ([[bin]]
+        # required-features), so the offline-minimal check must enable it explicitly
+        # or the spawned CARGO_BIN_EXE_ballistics does not exist (or worse, a stale
+        # all-features binary from the earlier build step gets exercised instead).
+        run: cargo test --locked --no-default-features --features cli --test solve_json_cli
 
       # MBA-1318: the golden-reference physics validation harness. The all-features test step above
       # already exercises it (the `validation` feature is on under --all-features), but run it

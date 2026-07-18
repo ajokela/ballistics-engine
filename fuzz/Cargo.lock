@@ -170,9 +170,6 @@ dependencies = [
 name = "ballistics-engine"
 version = "0.26.0"
 dependencies = [
- "clap",
- "clap_complete",
- "csv",
  "dirs",
  "getrandom 0.4.3",
  "js-sys",
@@ -185,7 +182,6 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "strsim",
  "thiserror",
  "ureq",
  "wasm-bindgen",
