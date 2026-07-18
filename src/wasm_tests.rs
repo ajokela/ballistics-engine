@@ -1555,4 +1555,172 @@ Impact Velocity: 2510 fps\n";
             .unwrap();
         assert!(out.contains("2719 ft\u{b7}lb"), "{}", out);
     }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1343 Phase C: `true-velocity` (single- and multi-observation truing) and
+    // `monte-carlo --wez`, both sharing the native compute cores
+    // (ballistics_engine::truing / ballistics_engine::wez) with renderers that
+    // replicate the native printers byte-for-byte.
+    // -----------------------------------------------------------------------------
+
+    /// Single-observation smoke: recovers an effective velocity via the shared
+    /// binary-search core and prints the native table's headline strings. The
+    /// pinned 2355.5 fps matches the native binary's `--offline` output for these
+    /// exact args (deterministic solve, native parity pin).
+    #[wasm_bindgen_test]
+    fn true_velocity_single_observation_recovers_a_velocity() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 300 --measured-drop 1.8 --bc 0.475 -m 168 -d 0.308 \
+                 --zero-distance 100 --chrono-velocity 2700",
+            )
+            .unwrap();
+        assert!(out.contains("VELOCITY TRUING RESULTS"), "{}", out);
+        assert!(out.contains("Effective Muzzle Velocity:"), "{}", out);
+        assert!(out.contains("2355.5"), "{}", out);
+        assert!(out.contains("Adjustment from Chrono:"), "{}", out);
+    }
+
+    /// Multi-observation native parity pin: the 300/600/900 mil set must run the
+    /// joint MV+BC calibration and land on the native binary's fitted MV (2514.5
+    /// fps) — the compute core is shared and deterministic, so any drift here is a
+    /// real cross-surface divergence.
+    #[wasm_bindgen_test]
+    fn true_velocity_multi_observation_matches_native_joint_fit() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
+                 --observed 900:10.9 --bc 0.475 -m 168 -d 0.308 --zero-distance 100 \
+                 --chrono-velocity 2700",
+            )
+            .unwrap();
+        assert!(out.contains("Joint MV+BC fit"), "{}", out);
+        assert!(out.contains("2514.5"), "{}", out);
+    }
+
+    /// WEZ summary parity: the seeded sweep (fixed per-step seed in the shared core)
+    /// is deterministic, so the sims/step banner and the 200 yd P(hit) row must
+    /// match the native binary's output for identical args verbatim.
+    #[wasm_bindgen_test]
+    fn wez_summary_reports_sims_per_step_and_p_hit_rows() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez --target-size 18x30 \
+                 -n 300 --wez-start 200 --wez-end 500 --wez-step 100",
+            )
+            .unwrap();
+        assert!(out.contains("WEZ sweep: 300 sims/step"), "{}", out);
+        // A full P(hit) table row, byte-identical to the native summary printer.
+        assert!(
+            out.contains("│      200.0 │    49.0% │ other         │      0.0% │      0.0% │    100.0% │"),
+            "{}",
+            out
+        );
+    }
+
+    /// `--wez` without `--target-size` must fail with the native dispatch's message.
+    #[wasm_bindgen_test]
+    fn wez_without_target_size_errors_like_native() {
+        let err = WasmBallistics::new()
+            .run_command("monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez -n 10")
+            .unwrap_err();
+        assert!(
+            err.as_string()
+                .unwrap_or_default()
+                .contains("--target-size is required with --wez (e.g. --target-size 18x30)"),
+            "{err:?}"
+        );
+    }
+
+    /// `--drag-model` must actually reach the WEZ sweep (MBA-1343 review: it was
+    /// parsed and then dropped, so a G7 user silently got a G1 sweep). G1 and G7
+    /// referenced to the same BC value give materially different trajectories, so
+    /// the two summaries must differ; the G1 run must equal the default-model run.
+    #[wasm_bindgen_test]
+    fn wez_drag_model_reaches_the_sweep() {
+        let base = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez --target-size 18x30 \
+                    -n 100 --wez-start 200 --wez-end 400 --wez-step 100";
+        let default_out = WasmBallistics::new().run_command(base).unwrap();
+        let g1_out = WasmBallistics::new()
+            .run_command(&format!("{base} --drag-model g1"))
+            .unwrap();
+        let g7_out = WasmBallistics::new()
+            .run_command(&format!("{base} --drag-model g7"))
+            .unwrap();
+        assert_eq!(default_out, g1_out, "explicit g1 must equal the default");
+        assert_ne!(
+            g1_out, g7_out,
+            "a G7 sweep must not silently degrade to G1:\n{g7_out}"
+        );
+    }
+
+    /// Bare (non-flag) tokens and dangling value-taking flags are hard errors on
+    /// the truing/monte-carlo surfaces (MBA-1343 review: both were silently
+    /// ignored, corrupting fits — `--observed 600:4.8 700:5.9` dropped the second
+    /// point; a dangling `--observed` fell back to single-observation truing).
+    #[wasm_bindgen_test]
+    fn true_velocity_rejects_bare_tokens_and_dangling_flags() {
+        let wasm = WasmBallistics::new();
+        let err = wasm
+            .run_command(
+                "true-velocity --range 300 --measured-drop 1.8 --observed 600:4.8 700:5.9 \
+                 --bc 0.475 -m 168 -d 0.308",
+            )
+            .unwrap_err();
+        assert!(
+            err.as_string()
+                .unwrap_or_default()
+                .contains("unexpected argument '700:5.9'"),
+            "{err:?}"
+        );
+        let err = wasm
+            .run_command("true-velocity --range 300 --measured-drop 1.8 --bc 0.475 --observed")
+            .unwrap_err();
+        assert!(
+            err.as_string()
+                .unwrap_or_default()
+                .contains("a value is required for '--observed'"),
+            "{err:?}"
+        );
+        let err = wasm
+            .run_command("monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 300")
+            .unwrap_err();
+        assert!(
+            err.as_string()
+                .unwrap_or_default()
+                .contains("unexpected argument '300'"),
+            "{err:?}"
+        );
+        let err = wasm
+            .run_command("monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --velocity-std")
+            .unwrap_err();
+        assert!(
+            err.as_string()
+                .unwrap_or_default()
+                .contains("a value is required for '--velocity-std'"),
+            "{err:?}"
+        );
+    }
+
+    /// Native clap's f64_range bounds for the true-velocity bullet parameters
+    /// (-b 0.001..=2, -m 0.1..=2000, -d 0.01..=60) now also apply on this surface.
+    #[wasm_bindgen_test]
+    fn true_velocity_range_validates_bullet_parameters() {
+        let wasm = WasmBallistics::new();
+        for (args, needle) in [
+            ("-b 5 -m 168 -d 0.308", "for '--bc'"),
+            ("-b 0.475 -m 0.05 -d 0.308", "for '--mass'"),
+            ("-b 0.475 -m 168 -d 99", "for '--diameter'"),
+        ] {
+            let err = wasm
+                .run_command(&format!(
+                    "true-velocity --range 300 --measured-drop 1.8 {args}"
+                ))
+                .unwrap_err();
+            assert!(
+                err.as_string().unwrap_or_default().contains(needle),
+                "{args}: {err:?}"
+            );
+        }
+    }
 }

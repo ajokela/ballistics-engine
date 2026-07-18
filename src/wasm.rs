@@ -156,6 +156,483 @@ fn trajectory_json_legend(units: UnitSystem) -> serde_json::Value {
     })
 }
 
+/// Map the WASM terminal's session unit system onto the engine-side
+/// [`crate::cli_api::UnitSystem`] shared by the truing and WEZ cores (MBA-1343).
+fn engine_units(units: UnitSystem) -> crate::cli_api::UnitSystem {
+    match units {
+        UnitSystem::Imperial => crate::cli_api::UnitSystem::Imperial,
+        UnitSystem::Metric => crate::cli_api::UnitSystem::Metric,
+    }
+}
+
+/// Fetch the value token for the value-taking flag at `args[i]`, or error when the
+/// command line ends right after the flag. Mirrors native clap's "a value is
+/// required" failure; the hand-rolled parsers previously skipped such a dangling
+/// flag silently, which corrupted fits (a dangling `--observed` silently fell
+/// back to single-observation truing — MBA-1343 review).
+fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
+    if i + 1 < args.len() {
+        Ok(args[i + 1])
+    } else {
+        Err(JsValue::from_str(&format!(
+            "Error: a value is required for '{}'",
+            args[i]
+        )))
+    }
+}
+
+/// Local mirror of the native CLI's `MonteCarloOutput` modes for the WEZ path
+/// (MBA-1343 Phase C). The WASM `-o` spellings map onto these in
+/// `run_monte_carlo_wez`.
+enum WezOutputMode {
+    Summary,
+    Statistics,
+    Full,
+}
+
+/// Dominant-bucket label shared by the WEZ summary-table and statistics-CSV
+/// renderers — replicates the native CLI's `wez_dominant_label` (main.rs) exactly.
+fn wez_dominant_label(row: &crate::wez::WezRow) -> String {
+    if row.attribution_unavailable {
+        "n/a".to_string()
+    } else {
+        row.dominant_error_source
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    }
+}
+
+/// Meters -> user distance units (native `UnitConverter::distance_from_metric`).
+fn distance_from_metric(val: f64, units: UnitSystem) -> f64 {
+    match units {
+        UnitSystem::Metric => val,
+        UnitSystem::Imperial => val / 0.9144, // meters to yards
+    }
+}
+
+/// m/s -> user wind units (native `UnitConverter::wind_from_metric`).
+fn wind_from_metric(val: f64, units: UnitSystem) -> f64 {
+    match units {
+        UnitSystem::Metric => val,
+        UnitSystem::Imperial => val / 0.44704, // m/s to mph
+    }
+}
+
+/// `-o full`: the entire [`crate::wez::WezResult`] as pretty JSON — replicates the
+/// native `print_wez_full` (the 0.25.0 JSON contract) byte-for-byte, including the
+/// trailing newline native's `println!` emits.
+fn format_wez_full(result: &crate::wez::WezResult) -> Result<String, JsValue> {
+    let json = serde_json::to_string_pretty(result)
+        .map_err(|e| JsValue::from_str(&format!("Error serializing JSON: {e}")))?;
+    Ok(format!("{json}\n"))
+}
+
+/// `-o statistics`: one CSV row per range step — replicates the native
+/// `print_wez_statistics` byte-for-byte.
+fn format_wez_statistics(result: &crate::wez::WezResult, units: UnitSystem) -> String {
+    let mut out = String::new();
+    out.push_str("range,p_hit,dominant_error_source,wind_call_share,mv_sd_share,other_share\n");
+    for row in &result.rows {
+        out.push_str(&format!(
+            "{:.2},{:.4},{},{:.4},{:.4},{:.4}\n",
+            distance_from_metric(row.range_m, units),
+            row.p_hit,
+            wez_dominant_label(row),
+            row.wind_call_share,
+            row.mv_sd_share,
+            row.other_share
+        ));
+    }
+    out
+}
+
+/// Default `-o summary`: the human-readable sweep table — replicates the native
+/// `print_wez_summary` byte-for-byte.
+fn format_wez_summary(result: &crate::wez::WezResult, units: UnitSystem) -> String {
+    let dist_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let wind_unit = match units {
+        UnitSystem::Imperial => "mph",
+        UnitSystem::Metric => "m/s",
+    };
+    let mut out = String::new();
+    out.push_str(&format!(
+        "WEZ sweep: {} sims/step, wind call {:.2} {wind_unit} + wind std {:.2} {wind_unit} (quadrature) = {:.2} {wind_unit} effective\n",
+        result.num_sims_per_step,
+        wind_from_metric(result.wind_call_error_mps, units),
+        wind_from_metric(result.wind_speed_std_mps, units),
+        wind_from_metric(result.combined_wind_speed_std_mps, units),
+    ));
+    out.push_str(
+        "┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐\n",
+    );
+    out.push_str(&format!(
+        "│ Range ({dist_unit:>3}) │  P(hit)  │ Dominant      │ Wind call │  MV SD    │ Other/grp │\n"
+    ));
+    out.push_str(
+        "├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤\n",
+    );
+    for row in &result.rows {
+        out.push_str(&format!(
+            "│ {:>10.1} │ {:>7.1}% │ {:<13} │ {:>8.1}% │ {:>8.1}% │ {:>8.1}% │\n",
+            distance_from_metric(row.range_m, units),
+            row.p_hit * 100.0,
+            wez_dominant_label(row),
+            row.wind_call_share * 100.0,
+            row.mv_sd_share * 100.0,
+            row.other_share * 100.0,
+        ));
+    }
+    out.push_str(
+        "└────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘\n",
+    );
+    out
+}
+
+/// Render a multi-observation truing report as table / JSON / CSV — replicates the
+/// native CLI's `display_multi_truing_result` (main.rs) byte-for-byte so terminal
+/// parity can be tested against the native binary (MBA-1343 Phase C).
+fn format_multi_truing_result(
+    report: &crate::truing::MultiTruingReport,
+    drop_unit: crate::truing::DropUnit,
+    units: UnitSystem,
+    chrono_fps: Option<f64>,
+    output: OutputFormat,
+) -> String {
+    let vel_unit = match units {
+        UnitSystem::Imperial => "fps",
+        UnitSystem::Metric => "m/s",
+    };
+    let range_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let drop_label = drop_unit.label();
+    let mv_display = match units {
+        UnitSystem::Imperial => report.fitted_mv_fps,
+        UnitSystem::Metric => report.fitted_mv_fps * 0.3048,
+    };
+    let range_display = |range_yd: f64| match units {
+        UnitSystem::Imperial => range_yd,
+        UnitSystem::Metric => range_yd * 0.9144,
+    };
+    // Chrono comparison (chrono_fps is already in fps).
+    let (adj_display, adj_pct) = match chrono_fps {
+        Some(c) => {
+            let adj_fps = report.fitted_mv_fps - c;
+            let adj_disp = match units {
+                UnitSystem::Imperial => adj_fps,
+                UnitSystem::Metric => adj_fps * 0.3048,
+            };
+            let pct = if c != 0.0 { adj_fps / c * 100.0 } else { 0.0 };
+            (Some(adj_disp), Some(pct))
+        }
+        None => (None, None),
+    };
+
+    let mut out = String::new();
+    match output {
+        OutputFormat::Json => {
+            let obs_json: Vec<serde_json::Value> = report
+                .observations
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    serde_json::json!({
+                        format!("range_{range_unit}"): range_display(o.range_yd),
+                        format!("observed_drop_{drop_label}"): o.drop,
+                        format!("predicted_drop_{drop_label}"): report.predicted[i],
+                        format!("residual_{drop_label}"): report.residuals[i],
+                    })
+                })
+                .collect();
+
+            let mut json_output = serde_json::json!({
+                "mode": if report.bc_fitted { "joint_mv_bc" } else { "mv_only" },
+                "fitted_muzzle_velocity": mv_display,
+                "velocity_unit": vel_unit,
+                "bc_fitted": report.bc_fitted,
+                "fitted_bc": report.fitted_bc,
+                "input_bc": report.bc_input,
+                "observations": obs_json,
+                format!("rms_residual_{drop_label}"): report.rms,
+                "iterations": report.iterations,
+                "converged": report.converged,
+                "bc_sensitivity_ratio": report.sensitivity_ratio,
+                "condition_number": if report.condition_number.is_finite() {
+                    serde_json::json!(report.condition_number)
+                } else {
+                    serde_json::Value::Null
+                },
+                "quality": report.quality,
+                "legend": {
+                    "units": {
+                        "range": range_unit,
+                        "drop": drop_label,
+                        "velocity": vel_unit,
+                    },
+                },
+            });
+            if !report.reason.is_empty() {
+                json_output["bc_hold_reason"] = serde_json::json!(report.reason);
+            }
+            if let Some(adj) = adj_display {
+                json_output["velocity_adjustment"] = serde_json::json!(adj);
+            }
+            if let Some(pct) = adj_pct {
+                json_output["adjustment_percent"] = serde_json::json!(pct);
+            }
+            // Native prints a serialization error to stderr and leaves stdout empty;
+            // the returned string mirrors stdout exactly either way.
+            if let Ok(s) = serde_json::to_string_pretty(&json_output) {
+                out.push_str(&s);
+                out.push('\n');
+            }
+        }
+        OutputFormat::Csv => {
+            out.push_str(&format!(
+                "range_{range_unit},observed_drop_{drop_label},predicted_drop_{drop_label},residual_{drop_label}\n"
+            ));
+            for (i, o) in report.observations.iter().enumerate() {
+                out.push_str(&format!(
+                    "{:.1},{:.4},{:.4},{:+.4}\n",
+                    range_display(o.range_yd),
+                    o.drop,
+                    report.predicted[i],
+                    report.residuals[i]
+                ));
+            }
+            out.push('\n');
+            out.push_str(&format!(
+                "fitted_muzzle_velocity_{vel_unit},bc_fitted,fitted_bc,input_bc,rms_residual_{drop_label},iterations,converged,bc_sensitivity_ratio,condition_number\n"
+            ));
+            out.push_str(&format!(
+                "{:.1},{},{:.4},{:.4},{:.4},{},{},{:.4},{}\n",
+                mv_display,
+                report.bc_fitted,
+                report.fitted_bc,
+                report.bc_input,
+                report.rms,
+                report.iterations,
+                report.converged,
+                report.sensitivity_ratio,
+                if report.condition_number.is_finite() {
+                    format!("{:.1}", report.condition_number)
+                } else {
+                    "inf".to_string()
+                },
+            ));
+        }
+        OutputFormat::Table => {
+            out.push('\n');
+            out.push_str("=== VELOCITY + BC TRUING (multi-observation) ===\n");
+            out.push('\n');
+            out.push_str(&format!(
+                "  Fitted muzzle velocity: {:>9.1} {}\n",
+                mv_display, vel_unit
+            ));
+            if report.bc_fitted {
+                out.push_str(&format!(
+                    "  Fitted BC:              {:>9.4}  (input {:.4})\n",
+                    report.fitted_bc, report.bc_input
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  BC:                     {:>9.4}  (held; not fitted)\n",
+                    report.fitted_bc
+                ));
+            }
+            if let Some(adj) = adj_display {
+                out.push_str(&format!(
+                    "  Adjustment from chrono: {:>+9.1} {}\n",
+                    adj, vel_unit
+                ));
+                if let Some(pct) = adj_pct {
+                    out.push_str(&format!("  Adjustment percentage:  {:>+9.2}%\n", pct));
+                }
+            }
+            out.push('\n');
+            out.push_str(&format!(
+                "  {:>10}  {:>14}  {:>14}  {:>12}\n",
+                format!("Range ({range_unit})"),
+                format!("Observed ({drop_label})"),
+                format!("Predicted ({drop_label})"),
+                format!("Resid ({drop_label})"),
+            ));
+            out.push_str(&format!("  {}\n", "-".repeat(56)));
+            for (i, o) in report.observations.iter().enumerate() {
+                out.push_str(&format!(
+                    "  {:>10.1}  {:>14.3}  {:>14.3}  {:>+12.3}\n",
+                    range_display(o.range_yd),
+                    o.drop,
+                    report.predicted[i],
+                    report.residuals[i]
+                ));
+            }
+            out.push_str(&format!("  {}\n", "-".repeat(56)));
+            out.push_str(&format!(
+                "  RMS residual: {:.3} {}   |   iterations: {}{}\n",
+                report.rms,
+                drop_label,
+                report.iterations,
+                if report.converged {
+                    ""
+                } else {
+                    " (not fully converged)"
+                }
+            ));
+            out.push('\n');
+            out.push_str(&format!("  {}\n", report.quality));
+            if !report.reason.is_empty() {
+                out.push_str(&format!("  Note: {}\n", report.reason));
+            }
+            out.push_str(&format!(
+                "  Diagnostics: BC sensitivity ratio {:.4}, conditioning {}\n",
+                report.sensitivity_ratio,
+                if report.condition_number.is_finite() {
+                    format!("{:.0}", report.condition_number)
+                } else {
+                    "inf".to_string()
+                }
+            ));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Render a single-observation truing result as table / JSON / CSV — replicates the
+/// native CLI's `display_true_velocity_result` (main.rs) byte-for-byte.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the native display_true_velocity_result signature"
+)]
+fn format_true_velocity_result(
+    effective_vel: f64,
+    vel_unit: &str,
+    velocity_adjustment: Option<f64>,
+    adjustment_percent: Option<f64>,
+    confidence: &str,
+    iterations: i32,
+    final_error_mil: f64,
+    calculated_drop_mil: f64,
+    measured_drop: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+    used_bc_table: bool,
+) -> Result<String, JsValue> {
+    let mut out = String::new();
+    match output {
+        OutputFormat::Json => {
+            let mut json_output = serde_json::json!({
+                "effective_velocity": effective_vel,
+                "velocity_unit": vel_unit,
+                "confidence": confidence,
+                "iterations": iterations,
+                "final_error_mil": final_error_mil,
+                "calculated_drop_mil": calculated_drop_mil,
+                "measured_drop_mil": measured_drop,
+                "used_bc_table": used_bc_table,
+            });
+            if let Some(adj) = velocity_adjustment {
+                let adj_display = match units {
+                    UnitSystem::Imperial => adj,
+                    UnitSystem::Metric => adj * 0.3048,
+                };
+                json_output["velocity_adjustment"] = serde_json::json!(adj_display);
+            }
+            if let Some(pct) = adjustment_percent {
+                json_output["adjustment_percent"] = serde_json::json!(pct);
+            }
+            let s = serde_json::to_string_pretty(&json_output)
+                .map_err(|e| JsValue::from_str(&format!("Error serializing JSON: {e}")))?;
+            out.push_str(&s);
+            out.push('\n');
+        }
+        OutputFormat::Csv => {
+            out.push_str("effective_velocity,unit,adjustment,adjustment_pct,confidence,iterations,final_error_mil,calculated_drop_mil,used_bc_table\n");
+            out.push_str(&format!(
+                "{:.1},{},{},{},{},{},{:.4},{:.2},{}\n",
+                effective_vel,
+                vel_unit,
+                velocity_adjustment
+                    .map(|v| {
+                        let adj = match units {
+                            UnitSystem::Imperial => v,
+                            UnitSystem::Metric => v * 0.3048,
+                        };
+                        format!("{:.1}", adj)
+                    })
+                    .unwrap_or_default(),
+                adjustment_percent
+                    .map(|v| format!("{:.2}", v))
+                    .unwrap_or_default(),
+                confidence,
+                iterations,
+                final_error_mil,
+                calculated_drop_mil,
+                used_bc_table,
+            ));
+        }
+        OutputFormat::Table => {
+            out.push('\n');
+            out.push_str("╔════════════════════════════════════════════════════════════╗\n");
+            out.push_str("║           VELOCITY TRUING RESULTS                          ║\n");
+            out.push_str("╠════════════════════════════════════════════════════════════╣\n");
+            out.push_str(&format!(
+                "║  Effective Muzzle Velocity: {:>8.1} {:>4}                 ║\n",
+                effective_vel, vel_unit
+            ));
+            if let Some(adj) = velocity_adjustment {
+                let adj_display = match units {
+                    UnitSystem::Imperial => adj,
+                    UnitSystem::Metric => adj * 0.3048,
+                };
+                out.push_str(&format!(
+                    "║  Adjustment from Chrono:    {:>+8.1} {:>4}                 ║\n",
+                    adj_display, vel_unit
+                ));
+                if let Some(pct) = adjustment_percent {
+                    out.push_str(&format!(
+                        "║  Adjustment Percentage:     {:>+8.2}%                      ║\n",
+                        pct
+                    ));
+                }
+            }
+            out.push_str("╠════════════════════════════════════════════════════════════╣\n");
+            out.push_str(&format!(
+                "║  Confidence:                {:>8}                        ║\n",
+                confidence
+            ));
+            out.push_str(&format!(
+                "║  Iterations:                {:>8}                        ║\n",
+                iterations
+            ));
+            out.push_str(&format!(
+                "║  Final Error:               {:>8.4} MIL                  ║\n",
+                final_error_mil
+            ));
+            out.push_str(&format!(
+                "║  Calculated Drop:           {:>8.2} MIL                  ║\n",
+                calculated_drop_mil
+            ));
+            out.push_str(&format!(
+                "║  Measured Drop:             {:>8.2} MIL                  ║\n",
+                measured_drop
+            ));
+            if used_bc_table {
+                out.push_str("╠════════════════════════════════════════════════════════════╣\n");
+                out.push_str("║  BC5D Table:                     Yes                       ║\n");
+            }
+            out.push_str("╚════════════════════════════════════════════════════════════╝\n");
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
 #[wasm_bindgen]
 impl WasmBallistics {
     #[wasm_bindgen(constructor)]
@@ -343,6 +820,7 @@ impl WasmBallistics {
             "trajectory" => self.handle_trajectory_command(&args[1..], units),
             "zero" => self.handle_zero_command(&args[1..], units),
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
+            "true-velocity" => self.handle_true_velocity_command(&args[1..], units),
             "estimate-bc" => self.handle_estimate_bc_command(&args[1..], units),
             "lead" => self.handle_lead_command(&args[1..], units),
             "powder" => self.handle_powder_command(&args[1..], units),
@@ -2103,118 +2581,153 @@ impl WasmBallistics {
         let mut mass = default_mass;
         let mut diameter = default_diameter;
         let mut num_sims = 1000;
-        let mut velocity_std = if units == UnitSystem::Imperial {
-            10.0
-        } else {
-            3.0
-        };
+        // The two std-dev flags stay unset until parsed: the base (non-WEZ) path keeps
+        // this handler's historical defaults (10 fps / 3 m/s velocity std, 2 mph /
+        // 0.5 m/s wind std), while the --wez path uses the native CLI's clap defaults
+        // (1.0 each, user units) so a WEZ sweep with identical args is byte-identical
+        // to the native binary (MBA-1343 Phase C).
+        let mut velocity_std: Option<f64> = None;
         let mut angle_std = 0.1;
         let mut bc_std = 0.01;
-        let mut wind_speed_std = if units == UnitSystem::Imperial {
-            2.0
-        } else {
-            0.5
-        };
+        let mut wind_speed_std: Option<f64> = None;
         let mut wind_direction_std = 0.0;
         let mut drag_model = "G1";
+        // MBA-1343 Phase C: WEZ (Weapon Employment Zone) sweep mode, mirroring the
+        // native `monte-carlo --wez` flag set (MBA-1317). The wez-only flags are kept
+        // as Options so using one without --wez can be rejected (native clap's
+        // `requires = "wez"`), not silently ignored.
+        let mut wez = false;
+        let mut target_size: Option<String> = None;
+        let mut wind_call_error: Option<f64> = None;
+        let mut wez_start: Option<f64> = None;
+        let mut wez_end: Option<f64> = None;
+        let mut wez_step: Option<f64> = None;
+        let mut output = "summary";
 
-        // Parse arguments
+        // Parse arguments. Every value-taking flag goes through `require_value`, so a
+        // flag dangling at the end of the line is an error, never a silent skip; bare
+        // non-flag tokens are rejected like native clap's "unexpected argument".
         let mut i = 0;
         while i < args.len() {
             match args[i] {
                 "-v" | "--velocity" => {
-                    if i + 1 < args.len() {
-                        velocity = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid velocity"))?;
-                        i += 1;
-                    }
+                    velocity = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid velocity"))?;
+                    i += 1;
                 }
                 "-a" | "--angle" => {
-                    if i + 1 < args.len() {
-                        angle = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid angle"))?;
-                        i += 1;
-                    }
+                    angle = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid angle"))?;
+                    i += 1;
                 }
                 "-b" | "--bc" => {
-                    if i + 1 < args.len() {
-                        bc = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid BC"))?;
-                        i += 1;
-                    }
+                    bc = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid BC"))?;
+                    i += 1;
                 }
                 "-m" | "--mass" => {
-                    if i + 1 < args.len() {
-                        mass = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid mass"))?;
-                        i += 1;
-                    }
+                    mass = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid mass"))?;
+                    i += 1;
                 }
                 "-d" | "--diameter" => {
-                    if i + 1 < args.len() {
-                        diameter = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid diameter"))?;
-                        i += 1;
-                    }
+                    diameter = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid diameter"))?;
+                    i += 1;
                 }
                 "-n" | "--num-sims" => {
-                    if i + 1 < args.len() {
-                        num_sims = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid number of simulations"))?;
-                        i += 1;
-                    }
+                    num_sims = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid number of simulations"))?;
+                    i += 1;
                 }
                 "--velocity-std" => {
-                    if i + 1 < args.len() {
-                        velocity_std = args[i + 1]
+                    velocity_std = Some(
+                        require_value(args, i)?
                             .parse()
-                            .map_err(|_| JsValue::from_str("Invalid velocity std"))?;
-                        i += 1;
-                    }
+                            .map_err(|_| JsValue::from_str("Invalid velocity std"))?,
+                    );
+                    i += 1;
                 }
                 "--angle-std" => {
-                    if i + 1 < args.len() {
-                        angle_std = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid angle std"))?;
-                        i += 1;
-                    }
+                    angle_std = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid angle std"))?;
+                    i += 1;
                 }
                 "--bc-std" => {
-                    if i + 1 < args.len() {
-                        bc_std = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid BC std"))?;
-                        i += 1;
-                    }
+                    bc_std = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid BC std"))?;
+                    i += 1;
                 }
-                "--wind-speed-std" => {
-                    if i + 1 < args.len() {
-                        wind_speed_std = args[i + 1]
+                // --wind-std is the native CLI's name for this flag; accept both so a
+                // native command line pastes into the terminal unchanged.
+                "--wind-speed-std" | "--wind-std" => {
+                    wind_speed_std = Some(
+                        require_value(args, i)?
                             .parse()
-                            .map_err(|_| JsValue::from_str("Invalid wind speed std"))?;
-                        i += 1;
-                    }
+                            .map_err(|_| JsValue::from_str("Invalid wind speed std"))?,
+                    );
+                    i += 1;
                 }
                 "--wind-direction-std" | "--wind-dir-std" => {
-                    if i + 1 < args.len() {
-                        wind_direction_std = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid wind direction std"))?;
-                        i += 1;
-                    }
+                    wind_direction_std = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid wind direction std"))?;
+                    i += 1;
                 }
                 "--drag-model" => {
-                    if i + 1 < args.len() {
-                        drag_model = args[i + 1];
-                        i += 1;
-                    }
+                    drag_model = require_value(args, i)?;
+                    i += 1;
+                }
+                "--wez" => {
+                    wez = true;
+                }
+                "--target-size" => {
+                    target_size = Some(require_value(args, i)?.to_string());
+                    i += 1;
+                }
+                "--wind-call-error" => {
+                    wind_call_error = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid wind call error"))?,
+                    );
+                    i += 1;
+                }
+                "--wez-start" => {
+                    wez_start = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid wez start range"))?,
+                    );
+                    i += 1;
+                }
+                "--wez-end" => {
+                    wez_end = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid wez end range"))?,
+                    );
+                    i += 1;
+                }
+                "--wez-step" => {
+                    wez_step = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid wez step"))?,
+                    );
+                    i += 1;
+                }
+                "-o" | "--output" => {
+                    output = require_value(args, i)?;
+                    i += 1;
                 }
                 // --units/-u (+ its value) is consumed globally in run_command, which
                 // pre-scans it to set the unit system before dispatch. Skip it here so
@@ -2229,10 +2742,83 @@ impl WasmBallistics {
                 other if other.starts_with('-') => {
                     return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
                 }
-                _ => {}
+                // Bare non-flag tokens are equally errors (native clap: "unexpected
+                // argument"): silently ignoring them made e.g. a mistyped flag value
+                // look like a successful run (MBA-1343 review).
+                other => {
+                    return Err(JsValue::from_str(&format!(
+                        "Error: unexpected argument '{other}'"
+                    )));
+                }
             }
             i += 1;
         }
+
+        // MBA-1343 Phase C: WEZ sweep mode. Mirrors the native dispatch
+        // (Commands::MonteCarlo with `wez: true` in main.rs): convert to metric, run
+        // the shared seeded compute (ballistics_engine::wez::compute_wez), and render
+        // summary / statistics / full exactly as the native printers do.
+        if wez {
+            return self.run_monte_carlo_wez(
+                units,
+                velocity,
+                angle,
+                bc,
+                mass,
+                diameter,
+                num_sims,
+                velocity_std,
+                angle_std,
+                bc_std,
+                wind_speed_std,
+                wind_direction_std,
+                wind_call_error,
+                target_size.as_deref(),
+                wez_start,
+                wez_end,
+                wez_step,
+                drag_model,
+                output,
+            );
+        }
+        // The wez-only flags mirror native clap's `requires = "wez"`: using one
+        // without --wez is an error, never a silent no-op.
+        if target_size.is_some() {
+            return Err(JsValue::from_str("--target-size requires --wez"));
+        }
+        if wind_call_error.is_some() {
+            return Err(JsValue::from_str("--wind-call-error requires --wez"));
+        }
+        if wez_start.is_some() {
+            return Err(JsValue::from_str("--wez-start requires --wez"));
+        }
+        if wez_end.is_some() {
+            return Err(JsValue::from_str("--wez-end requires --wez"));
+        }
+        if wez_step.is_some() {
+            return Err(JsValue::from_str("--wez-step requires --wez"));
+        }
+        // Base monte-carlo has a single (summary) output format on the WASM surface;
+        // the statistics/full modes native supports there remain a documented gap.
+        match output.to_lowercase().as_str() {
+            "summary" | "table" => {}
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "-o {other} requires --wez in the WASM terminal (base monte-carlo has a single summary output)"
+                )));
+            }
+        }
+        // Historical base-path defaults (pre-WEZ behavior, unchanged).
+        let velocity_std = velocity_std.unwrap_or(if units == UnitSystem::Imperial {
+            10.0
+        } else {
+            3.0
+        });
+        let wind_speed_std = wind_speed_std.unwrap_or(if units == UnitSystem::Imperial {
+            2.0
+        } else {
+            0.5
+        });
 
         // Build inputs
         let mut inputs = InternalBallisticInputs::default();
@@ -2426,6 +3012,531 @@ impl WasmBallistics {
                 ))
             }
             Err(e) => Ok(format!("Error running Monte Carlo simulation: {}", e)),
+        }
+    }
+
+    /// Native `monte-carlo --wez` parity path (MBA-1343 Phase C): unit conversions
+    /// mirror the native dispatch factor-for-factor, the compute is the shared
+    /// per-step-seeded [`crate::wez::compute_wez`] core (deterministic, so outputs are
+    /// directly comparable to the native binary), and the three renderers replicate
+    /// the native printers byte-for-byte.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "flat arguments mirror the stable Monte Carlo CLI command shape (MBA-1317)"
+    )]
+    fn run_monte_carlo_wez(
+        &self,
+        units: UnitSystem,
+        velocity: f64,
+        angle: f64,
+        bc: f64,
+        mass: f64,
+        diameter: f64,
+        num_sims: usize,
+        velocity_std: Option<f64>,
+        angle_std: f64,
+        bc_std: f64,
+        wind_speed_std: Option<f64>,
+        wind_direction_std: f64,
+        wind_call_error: Option<f64>,
+        target_size: Option<&str>,
+        wez_start: Option<f64>,
+        wez_end: Option<f64>,
+        wez_step: Option<f64>,
+        drag_model: &str,
+        output: &str,
+    ) -> Result<String, JsValue> {
+        // Native clap defaults: --velocity-std 1.0, --wind-std 1.0, --wind-call-error
+        // 0.0, --wez-start 200, --wez-end 1000, --wez-step 100 — all in user units.
+        // (The base WASM monte-carlo keeps its own historical std defaults; see
+        // handle_monte_carlo_command.)
+        let velocity_std = velocity_std.unwrap_or(1.0);
+        let wind_speed_std = wind_speed_std.unwrap_or(1.0);
+        let wind_call_error = wind_call_error.unwrap_or(0.0);
+        let wez_start = wez_start.unwrap_or(200.0);
+        let wez_end = wez_end.unwrap_or(1000.0);
+        let wez_step = wez_step.unwrap_or(100.0);
+
+        // Native MonteCarloOutput mode names first; the WASM terminal's conventional
+        // table/csv/json spellings map onto the same three modes (table -> summary,
+        // csv -> statistics, json -> full).
+        let output = match output.to_lowercase().as_str() {
+            "summary" | "table" => WezOutputMode::Summary,
+            "statistics" | "csv" => WezOutputMode::Statistics,
+            "full" | "json" => WezOutputMode::Full,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid --output '{other}' (expected summary, statistics, or full; \
+                     table/csv/json are accepted aliases)"
+                )))
+            }
+        };
+
+        let target_size_spec = target_size.ok_or_else(|| {
+            JsValue::from_str("--target-size is required with --wez (e.g. --target-size 18x30)")
+        })?;
+        let target_size_parsed = crate::wez::parse_target_size(target_size_spec)
+            .map_err(|e| JsValue::from_str(&format!("--target-size: {e}")))?;
+        let target_size_metric = target_size_parsed.to_metric(engine_units(units));
+
+        // Unit conversions, mirroring the native dispatch (UnitConverter::*_to_metric).
+        let (velocity_metric, mass_metric, diameter_metric) = match units {
+            UnitSystem::Imperial => (
+                velocity * 0.3048,
+                mass * crate::constants::GRAINS_TO_KG,
+                diameter * 0.0254,
+            ),
+            UnitSystem::Metric => (velocity, mass * 0.001, diameter * 0.001),
+        };
+        let velocity_std_metric = match units {
+            UnitSystem::Imperial => velocity_std * 0.3048, // fps to m/s
+            UnitSystem::Metric => velocity_std,
+        };
+        let to_wind = |v: f64| match units {
+            UnitSystem::Imperial => v * 0.44704, // mph to m/s
+            UnitSystem::Metric => v,
+        };
+        let to_distance = |v: f64| match units {
+            UnitSystem::Imperial => v * 0.9144, // yards to meters
+            UnitSystem::Metric => v,
+        };
+
+        // Custom drag table (MBA-1328): applied unconditionally when loaded, mirroring
+        // native --drag-table on `monte-carlo` (see handle_monte_carlo_command).
+        let custom_drag_table = self.drag_table.borrow().as_ref().cloned();
+
+        // --drag-model (a WASM-surface extension; the native `monte-carlo` has no such
+        // flag and always sweeps G1). Same validation/message as the base path below.
+        let drag_model = DragModel::from_str(drag_model)
+            .ok_or_else(|| JsValue::from_str("Invalid drag model (expected G1 or G7)"))?;
+
+        // Flags the WASM monte-carlo surface does not (yet) expose keep the native
+        // defaults: base wind (--wind-speed / --wind-direction / --wind-vertical) and
+        // --cant are all 0.
+        let result = crate::wez::compute_wez(
+            velocity_metric,
+            angle,
+            bc,
+            mass_metric,
+            diameter_metric,
+            num_sims,
+            velocity_std_metric,
+            angle_std,
+            bc_std,
+            to_wind(wind_speed_std),
+            wind_direction_std,
+            0.0, // wind_speed
+            0.0, // wind_direction
+            0.0, // wind_vertical
+            to_wind(wind_call_error),
+            target_size_metric,
+            to_distance(wez_start),
+            to_distance(wez_end),
+            to_distance(wez_step),
+            drag_model,
+            custom_drag_table,
+            0.0, // cant
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        match output {
+            WezOutputMode::Full => format_wez_full(&result),
+            WezOutputMode::Statistics => Ok(format_wez_statistics(&result, units)),
+            WezOutputMode::Summary => Ok(format_wez_summary(&result, units)),
+        }
+    }
+
+    /// `true-velocity` (MBA-1343 Phase C): the native command's local compute paths on
+    /// the WASM terminal. Zero `--observed` flags -> the classic single-observation
+    /// binary search ([`crate::truing::calculate_true_velocity_local`]); one or more ->
+    /// the MBA-1316 joint MV+BC calibration
+    /// ([`crate::truing::run_multi_observation_truing_core`]). Unit conversions and all
+    /// three output formats mirror the native dispatch/printers byte-for-byte.
+    fn handle_true_velocity_command(
+        &self,
+        args: &[&str],
+        units: UnitSystem,
+    ) -> Result<String, JsValue> {
+        use crate::truing::{DragModelArg, DropUnit};
+
+        // Default bullet parameters follow this file's house convention (the native
+        // command clap-requires -b/-m/-d instead).
+        let (default_mass, default_diameter) = match units {
+            UnitSystem::Imperial => (168.0, 0.308),
+            UnitSystem::Metric => (10.9, 7.82),
+        };
+
+        let mut measured_drop: Option<f64> = None;
+        let mut range: Option<f64> = None;
+        let mut observed: Vec<String> = Vec::new();
+        let mut drop_unit = DropUnit::Mil;
+        let mut bc = 0.475;
+        let mut drag_model = "g1";
+        let mut mass = default_mass;
+        let mut diameter = default_diameter;
+        let mut chrono_velocity: Option<f64> = None;
+        let mut zero_distance = 100.0;
+        let mut sight_height: Option<f64> = None;
+        let mut temperature: Option<f64> = None;
+        let mut pressure: Option<f64> = None;
+        let mut humidity = 50.0;
+        let mut altitude = 0.0;
+        let mut output = "table";
+
+        // Every value-taking flag goes through `require_value`, so a flag dangling at
+        // the end of the line is an error, never a silent skip (a dangling --observed
+        // used to silently fall back to single-observation truing); bare non-flag
+        // tokens are rejected like native clap's "unexpected argument" (a space-
+        // separated second observation, e.g. `--observed 600:4.8 700:5.9`, used to
+        // silently drop the second point and corrupt the fit — MBA-1343 review).
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--measured-drop" => {
+                    measured_drop = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid measured drop"))?,
+                    );
+                    i += 1;
+                }
+                "--range" => {
+                    range = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid range"))?,
+                    );
+                    i += 1;
+                }
+                "--observed" => {
+                    observed.push(require_value(args, i)?.to_string());
+                    i += 1;
+                }
+                "--drop-unit" => {
+                    drop_unit = DropUnit::parse(require_value(args, i)?)
+                        .map_err(|e| JsValue::from_str(&e))?;
+                    i += 1;
+                }
+                "-b" | "--bc" => {
+                    bc = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid BC"))?;
+                    i += 1;
+                }
+                "--drag-model" => {
+                    drag_model = require_value(args, i)?;
+                    i += 1;
+                }
+                "-m" | "--mass" => {
+                    mass = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid mass"))?;
+                    i += 1;
+                }
+                "-d" | "--diameter" => {
+                    diameter = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid diameter"))?;
+                    i += 1;
+                }
+                "--chrono-velocity" => {
+                    chrono_velocity = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid chrono velocity"))?,
+                    );
+                    i += 1;
+                }
+                "--zero-distance" => {
+                    zero_distance = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid zero distance"))?;
+                    i += 1;
+                }
+                "--sight-height" => {
+                    sight_height = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid sight height"))?,
+                    );
+                    i += 1;
+                }
+                "--temperature" => {
+                    temperature = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid temperature"))?,
+                    );
+                    i += 1;
+                }
+                "--pressure" => {
+                    pressure = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid pressure"))?,
+                    );
+                    i += 1;
+                }
+                "--humidity" => {
+                    humidity = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                    i += 1;
+                }
+                "--altitude" => {
+                    altitude = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                    i += 1;
+                }
+                "-o" | "--output" => {
+                    output = require_value(args, i)?;
+                    i += 1;
+                }
+                // Native's --offline forces the local calculation; the WASM terminal is
+                // always local, so accept it as a harmless no-op for command parity.
+                "--offline" => {}
+                // --units/-u (+ its value) is consumed globally in run_command, which
+                // pre-scans it to set the unit system before dispatch. Skip it here so
+                // it isn't rejected as an unknown flag.
+                "--units" | "-u" => {
+                    i += 1;
+                }
+                // Reject unrecognized flags instead of silently ignoring them (this
+                // includes the native online/BC5D flags this surface does not support).
+                other if other.starts_with('-') => {
+                    return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
+                }
+                // Bare non-flag tokens are equally errors (native clap: "unexpected
+                // argument").
+                other => {
+                    return Err(JsValue::from_str(&format!(
+                        "Error: unexpected argument '{other}'"
+                    )));
+                }
+            }
+            i += 1;
+        }
+
+        let measured_drop =
+            measured_drop.ok_or_else(|| JsValue::from_str("--measured-drop is required"))?;
+        let range = range.ok_or_else(|| JsValue::from_str("--range is required"))?;
+
+        let drag_model_arg = match drag_model.to_lowercase().as_str() {
+            "g1" => DragModelArg::G1,
+            "g7" => DragModelArg::G7,
+            _ => return Err(JsValue::from_str("Invalid drag model (expected G1 or G7)")),
+        };
+
+        let output = match output.to_lowercase().as_str() {
+            "table" => OutputFormat::Table,
+            "json" => OutputFormat::Json,
+            "csv" => OutputFormat::Csv,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid --output '{other}' (expected table, json, or csv)"
+                )))
+            }
+        };
+
+        if !(0.0..=100.0).contains(&humidity) {
+            return Err(JsValue::from_str("--humidity must be between 0 and 100"));
+        }
+
+        // Native clap's f64_range validators for the bullet parameters (same bounds
+        // under either unit system). The hand-rolled parser previously accepted any
+        // finite (or NaN) value here.
+        if !(0.001..=2.0).contains(&bc) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{bc}' for '--bc': must be in range 0.001..=2"
+            )));
+        }
+        if !(0.1..=2000.0).contains(&mass) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{mass}' for '--mass': must be in range 0.1..=2000"
+            )));
+        }
+        if !(0.01..=60.0).contains(&diameter) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{diameter}' for '--diameter': must be in range 0.01..=60"
+            )));
+        }
+
+        // Resolve temperature/pressure AFTER units are known — replicates the native
+        // UnitConverter::resolve_temperature / resolve_pressure defaults and range
+        // checks (identical error strings).
+        let temperature = match (temperature, units) {
+            (None, UnitSystem::Imperial) => 59.0,
+            (None, UnitSystem::Metric) => 15.0,
+            (Some(v), UnitSystem::Imperial) => {
+                if !(-148.0..=392.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--temperature {v} F is out of range (expected ~-148..392 F for imperial units)"
+                    )));
+                }
+                v
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(-100.0..=200.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--temperature {v} C is out of range (expected ~-100..200 C for metric units)"
+                    )));
+                }
+                v
+            }
+        };
+        let pressure = match (pressure, units) {
+            (None, UnitSystem::Imperial) => 29.92,
+            (None, UnitSystem::Metric) => 1013.25,
+            (Some(v), UnitSystem::Imperial) => {
+                if !(8.0..=33.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--pressure {v} inHg is out of range (expected ~8..33 inHg for imperial units)"
+                    )));
+                }
+                v
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(250.0..=1100.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--pressure {v} hPa is out of range (expected ~250..1100 hPa for metric units)"
+                    )));
+                }
+                v
+            }
+        };
+
+        // Convert to the truing core's internal imperial units — factor-for-factor the
+        // native Commands::TrueVelocity dispatch.
+        let range_yd = match units {
+            UnitSystem::Imperial => range,
+            UnitSystem::Metric => range / 0.9144, // meters to yards
+        };
+        let weight_gr = match units {
+            UnitSystem::Imperial => mass,
+            UnitSystem::Metric => mass / crate::constants::GRAMS_PER_GRAIN, // grams to grains
+        };
+        let caliber_in = match units {
+            UnitSystem::Imperial => diameter,
+            UnitSystem::Metric => diameter / 25.4, // mm to inches
+        };
+        let chrono_fps = chrono_velocity.map(|v| match units {
+            UnitSystem::Imperial => v,
+            UnitSystem::Metric => v / 0.3048, // m/s to fps
+        });
+        let zero_yd = match units {
+            UnitSystem::Imperial => zero_distance,
+            UnitSystem::Metric => zero_distance / 0.9144,
+        };
+        let sight_height_default = match units {
+            UnitSystem::Imperial => 2.0,
+            UnitSystem::Metric => 50.0,
+        };
+        let sight_height = sight_height.unwrap_or(sight_height_default);
+        let sight_in = match units {
+            UnitSystem::Imperial => sight_height,
+            UnitSystem::Metric => sight_height / 25.4, // mm to inches
+        };
+        let temp_f = match units {
+            UnitSystem::Imperial => temperature,
+            UnitSystem::Metric => temperature * 9.0 / 5.0 + 32.0, // C to F
+        };
+        let press_inhg = match units {
+            UnitSystem::Imperial => pressure,
+            UnitSystem::Metric => pressure / 33.8639, // hPa to inHg
+        };
+        let alt_ft = match units {
+            UnitSystem::Imperial => altitude,
+            UnitSystem::Metric => altitude / 0.3048, // meters to feet
+        };
+
+        // No BC5D segment synthesis on this path: native gates it behind
+        // --bc-table-dir / --bc-table-auto, which the WASM terminal does not expose
+        // (the loaded-BC5D host API only wires into `trajectory --use-bc-segments`).
+        let bc_segments: Option<Vec<crate::BCSegmentData>> = None;
+
+        if !observed.is_empty() {
+            // MBA-1316: one or more --observed impacts -> joint MV+BC calibration via
+            // the shared core. Token parsing happens here (the typed core takes
+            // parsed observations); the parse and validation errors (e.g. duplicate
+            // ranges) carry the native messages verbatim.
+            let mut observations: Vec<crate::truing::TruingObservation> =
+                Vec::with_capacity(observed.len() + 1);
+            observations.push(crate::truing::TruingObservation {
+                range_yd,
+                drop: measured_drop,
+            });
+            for token in &observed {
+                observations.push(
+                    crate::truing::parse_truing_observation(token, engine_units(units))
+                        .map_err(|e| JsValue::from_str(&e))?,
+                );
+            }
+            let report = crate::truing::run_multi_observation_truing_core(
+                &observations,
+                drop_unit,
+                bc,
+                drag_model_arg,
+                weight_gr,
+                caliber_in,
+                zero_yd,
+                sight_in,
+                temp_f,
+                press_inhg,
+                humidity,
+                alt_ft,
+                &bc_segments,
+            )
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(format_multi_truing_result(
+                &report, drop_unit, units, chrono_fps, output,
+            ))
+        } else {
+            // Classic single-observation velocity truing (drop is always MIL here).
+            let result = crate::truing::calculate_true_velocity_local(
+                measured_drop,
+                range_yd,
+                bc,
+                drag_model_arg,
+                weight_gr,
+                caliber_in,
+                zero_yd,
+                sight_in,
+                temp_f,
+                press_inhg,
+                humidity,
+                alt_ft,
+                &bc_segments,
+            )
+            .map_err(|e| JsValue::from_str(&format!("Local calculation failed: {}", e)))?;
+
+            let velocity_adjustment = chrono_fps.map(|c| result.effective_velocity_fps - c);
+            let adjustment_percent =
+                chrono_fps.map(|c| (result.effective_velocity_fps - c) / c * 100.0);
+
+            let effective_vel = match units {
+                UnitSystem::Imperial => result.effective_velocity_fps,
+                UnitSystem::Metric => result.effective_velocity_fps * 0.3048,
+            };
+            let vel_unit = match units {
+                UnitSystem::Imperial => "fps",
+                UnitSystem::Metric => "m/s",
+            };
+
+            format_true_velocity_result(
+                effective_vel,
+                vel_unit,
+                velocity_adjustment,
+                adjustment_percent,
+                &result.confidence,
+                result.iterations,
+                result.final_error_mil,
+                result.calculated_drop_mil,
+                measured_drop,
+                units,
+                output,
+                false,
+            )
         }
     }
 
@@ -3594,6 +4705,7 @@ Commands:
   trajectory      Calculate ballistic trajectory
   zero           Calculate sight adjustment for zero
   monte-carlo    Run Monte Carlo simulation
+  true-velocity  Calculate effective muzzle velocity from observed drop
   estimate-bc    Estimate BC from trajectory data
   lead           Calculate moving-target lead (hold)
   powder         Resolve powder-temperature velocity shift (no trajectory)
@@ -3700,7 +4812,7 @@ Zero Command:
 
 Monte Carlo Command:
   ballistics monte-carlo [OPTIONS]
-  
+
   Options:
     -v, --velocity <VEL>         Base velocity
     -b, --bc <BC>                Base BC
@@ -3711,8 +4823,65 @@ Monte Carlo Command:
     --velocity-std <STD>         Velocity std deviation
     --angle-std <STD>            Angle std deviation
     --bc-std <STD>               BC std deviation
-    --wind-speed-std <STD>       Wind speed std deviation
+    --wind-speed-std <STD>       Wind speed std deviation (--wind-std also accepted)
     --wind-direction-std <STD>   Wind direction std deviation (degrees)
+
+  WEZ (Weapon Employment Zone) sweep:
+    --wez                        WEZ sweep mode: hit probability vs range for a
+                                 target size instead of a single summary
+    -a, --angle <ANGLE>          Launch (elevation) angle in degrees, held for
+                                 every sweep step (from `ballistics zero`,
+                                 typically) [default: 0]
+    --target-size <WxH|R>        WEZ target size: WIDTHxHEIGHT (inches imperial,
+                                 cm metric; e.g. 18x30) for a rectangle centered
+                                 on the point of aim, or a single number for a
+                                 circular radius. Required with --wez
+    --wind-call-error <ERR>      Shooter's wind CALL error (mph/m/s): uncertainty
+                                 in the shooter's own wind estimate, composed with
+                                 the wind std in quadrature [default: 0]
+    --wez-start <DIST>           Sweep start range (yd/m) [default: 200]
+    --wez-end <DIST>             Sweep end range, inclusive (yd/m) [default: 1000]
+    --wez-step <DIST>            Sweep step (yd/m) [default: 100]
+    -o, --output <FORMAT>        WEZ output format: summary/statistics/full
+                                 (table/csv/json accepted as aliases)
+                                 [default: summary]
+
+  Browser note: a WEZ sweep runs num-sims full trajectory solves per range step
+  (deterministic but heavy) — prefer -n 300 or fewer for interactive use.
+
+True Velocity Command:
+  ballistics true-velocity --range <DIST> --measured-drop <DROP> [OPTIONS]
+
+  Calculates the effective muzzle velocity that reproduces an observed drop.
+  With one or more --observed impacts it fits muzzle velocity and (when the
+  observations constrain it) ballistic coefficient jointly via the real
+  forward model (joint MV+BC calibration).
+
+  Options:
+    --measured-drop <DROP>       Measured drop at --range (MIL by default;
+                                 follows --drop-unit in multi-observation mode).
+                                 Required
+    --range <DIST>               Range where drop was measured (yd/m). Required
+    --observed <RANGE:DROP>      Additional observed impact (repeatable; e.g.
+                                 600:5.1). RANGE follows --units, DROP follows
+                                 --drop-unit. Enables joint MV+BC calibration
+    --drop-unit <UNIT>           Drop unit for --measured-drop/--observed in
+                                 multi-observation mode: mil/moa/in [default: mil]
+    -b, --bc <BC>                Ballistic coefficient (starting value; fitted
+                                 when the observations allow)
+    --drag-model <MODEL>         Drag model (G1/G7) [default: g1]
+    -m, --mass <MASS>            Bullet weight (grains/grams)
+    -d, --diameter <DIA>         Bullet diameter (inches/mm)
+    --chrono-velocity <VEL>      Chronograph velocity for comparison (fps/m/s)
+    --zero-distance <DIST>       Zero distance (yd/m) [default: 100]
+    --sight-height <HEIGHT>      Sight height above bore (in/mm) [default: 2/50]
+    --temperature <T>            Temperature (°F/°C) [default: 59/15]
+    --pressure <P>               Pressure (inHg/hPa) [default: 29.92/1013.25]
+    --humidity <H>               Humidity (0-100%) [default: 50]
+    --altitude <A>               Altitude (ft/m) [default: 0]
+    --offline                    Accepted for native-command parity (the WASM
+                                 terminal always calculates locally)
+    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]
 
 Estimate BC Command:
   ballistics estimate-bc [OPTIONS]
@@ -3803,7 +4972,12 @@ Examples:
   ballistics estimate-bc -v 2700 -m 168 -d 0.308 --data "100,2.1;200,9.4;300,22.8"
   ballistics estimate-bc -v 2650 -m 77 -d 0.224 --data "300,29;500,89.9" \
     --velocity-data "300,1980;500,1560" --drag-model both
-  ballistics monte-carlo -n 1000 --velocity-std 10"#
+  ballistics monte-carlo -n 1000 --velocity-std 10
+  ballistics monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez \
+    --target-size 18x30 -n 300 --wez-start 200 --wez-end 500 --wez-step 100
+  ballistics true-velocity --range 300 --measured-drop 1.8 -b 0.475 -m 168 -d 0.308
+  ballistics true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
+    --observed 900:10.9 -b 0.475 -m 168 -d 0.308 --chrono-velocity 2700"#
             .to_string()
     }
 }

@@ -28,12 +28,18 @@ use ballistics_engine::bc_table_5d::Bc5dTableManager;
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN};
+use ballistics_engine::cli_api::UnitSystem;
+use ballistics_engine::truing::{
+    calculate_true_velocity_local, fallback_bullet_length_m, parse_truing_observation,
+    run_multi_observation_truing_core, validate_truing_observations, DragModelArg, DropUnit,
+    MultiTruingReport, TruingObservation,
+};
+use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 use ballistics_engine::{
-    trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, BallisticsError,
-    DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
+    trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel,
+    MonteCarloParams, TrajectorySolver, WindConditions,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
@@ -1908,19 +1914,7 @@ enum ProfileAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
-enum UnitSystem {
-    /// Metric units (velocity in m/s, mass in grams, distance in meters, diameter in mm, Celsius)
-    Metric,
-    /// Imperial units (velocity in fps, mass in grains, distance in yards, diameter in inches, Fahrenheit)
-    Imperial,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum DragModelArg {
-    G1,
-    G7,
-}
+// UnitSystem and DragModelArg moved to ballistics_engine::truing (MBA-1343).
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -1930,46 +1924,7 @@ enum OutputFormat {
     Pdf,
 }
 
-/// Unit in which observed drops are supplied to (and residuals reported from)
-/// `true-velocity`'s multi-observation joint calibration (MBA-1316). The
-/// historical single-observation path is always MIL, so `mil` is the default and
-/// leaves that path byte-identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum DropUnit {
-    /// Milliradians (angular)
-    Mil,
-    /// Minutes of angle (angular, true 1/60°)
-    Moa,
-    /// Inches below line of sight (linear drop at the target)
-    In,
-}
-
-impl DropUnit {
-    /// Short label used in tables/JSON/CSV.
-    fn label(self) -> &'static str {
-        match self {
-            DropUnit::Mil => "mil",
-            DropUnit::Moa => "moa",
-            DropUnit::In => "in",
-        }
-    }
-
-    /// Express a linear vertical drop below the line of sight (`drop_m`, meters)
-    /// at horizontal distance `z_m` (meters) in this unit. Angular units use the
-    /// same small-angle convention the engine's MIL output has always used
-    /// (`drop/range`), so `mil` matches the legacy single-observation contract
-    /// exactly; `moa` is true minutes of angle and `in` is the linear drop itself.
-    fn express_drop_m(self, drop_m: f64, z_m: f64) -> f64 {
-        match self {
-            // (drop_m / z_m) radians * 1000 mrad/rad
-            DropUnit::Mil => (drop_m / z_m) * 1000.0,
-            // (drop_m / z_m) radians * (180/pi) deg/rad * 60 min/deg
-            DropUnit::Moa => (drop_m / z_m) * (180.0 / std::f64::consts::PI) * 60.0,
-            // linear drop, meters -> inches
-            DropUnit::In => drop_m / 0.0254,
-        }
-    }
-}
+// DropUnit moved to ballistics_engine::truing (MBA-1343).
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MonteCarloOutput {
@@ -2532,14 +2487,7 @@ impl UnitConverter {
         }
     }
 
-    /// WEZ target-size length (MBA-1317): inches under imperial, CENTIMETERS (not mm -- target
-    /// sizes like an 18"x30" plate are naturally cm-scale under metric) under metric.
-    fn target_size_to_metric(val: f64, units: UnitSystem) -> f64 {
-        match units {
-            UnitSystem::Metric => val * 0.01,     // cm to meters
-            UnitSystem::Imperial => val * 0.0254, // inches to meters
-        }
-    }
+    // target_size_to_metric moved to ballistics_engine::wez (MBA-1343 Phase B).
 
     // Output conversions (from metric)
     fn velocity_from_metric(val: f64, units: UnitSystem) -> f64 {
@@ -6871,19 +6819,7 @@ fn generate_bc5d_segments(
     }
 }
 
-/// Resolve a bullet length (meters) for a bullet whose length the shooter did not supply (MBA-1135).
-///
-/// Prefers the mass-based physical estimate ([`ballistics_engine::stability::estimate_bullet_length_m`]),
-/// falling back to the historical 4.5-caliber heuristic only when mass is unavailable so the caller
-/// always gets a positive length. `diameter_m` and `mass_kg` are SI.
-fn fallback_bullet_length_m(diameter_m: f64, mass_kg: f64) -> f64 {
-    let est = ballistics_engine::stability::estimate_bullet_length_m(diameter_m, mass_kg);
-    if est > 0.0 {
-        est
-    } else {
-        diameter_m * 4.5
-    }
-}
+// fallback_bullet_length_m moved to ballistics_engine::truing (MBA-1343).
 
 fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // Destructure config for convenient access throughout the function
@@ -8132,444 +8068,84 @@ fn display_api_trajectory_result(
 // ============================================================================
 // WEZ (Weapon Employment Zone) sweep mode -- MBA-1317
 //
-// `monte-carlo --wez` reports hit probability vs range for a fixed target size, treating the
-// shooter's wind-CALL error (how well they estimate the current wind) as a source of dispersion
-// distinct from the ballistic --wind-std (gust-to-gust physical variability). See the "WEZ" doc
-// section in CLI_USAGE.md for a worked example.
+// The compute path (target-size parsing, the seeded sweep, and variance attribution) lives in
+// ballistics_engine::wez (MBA-1343 Phase B) so non-CLI front ends (e.g. the WASM terminal) can
+// reuse it; only the three renderers (summary table / statistics CSV / full JSON) remain here.
 // ============================================================================
 
-/// A parsed `--target-size` value, still in the CLI's chosen unit (inches imperial / cm
-/// metric) -- call [`TargetSize::to_metric`] before using it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum TargetSize {
-    /// Full width (lateral) x height (vertical), e.g. an 18"x30" plate.
-    Rect { width: f64, height: f64 },
-    /// A circular radius, matching `--target-radius`'s existing hit semantics but expressed in
-    /// target-size units instead of range units.
-    Radius(f64),
-}
-
-/// Parse a `--target-size` argument: `WIDTHxHEIGHT` (e.g. `18x30`) for a rectangle, or a bare
-/// number (e.g. `12`) for a circular radius fallback. Case-insensitive on the `x` separator.
-fn parse_target_size(spec: &str) -> Result<TargetSize, String> {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return Err("expected a size like \"18x30\" or a single radius like \"12\"".to_string());
-    }
-
-    let x_positions: Vec<usize> = trimmed
-        .char_indices()
-        .filter(|(_, c)| *c == 'x' || *c == 'X')
-        .map(|(i, _)| i)
-        .collect();
-
-    match x_positions.len() {
-        0 => {
-            let radius: f64 = trimmed
-                .parse()
-                .map_err(|_| format!("\"{trimmed}\" is not a number or a WIDTHxHEIGHT pair"))?;
-            if !(radius.is_finite() && radius > 0.0) {
-                return Err(format!(
-                    "radius must be a positive, finite number, got {radius}"
-                ));
-            }
-            Ok(TargetSize::Radius(radius))
-        }
-        1 => {
-            let idx = x_positions[0];
-            let width_str = &trimmed[..idx];
-            let height_str = &trimmed[idx + 1..];
-            let width: f64 = width_str
-                .trim()
-                .parse()
-                .map_err(|_| format!("\"{}\" is not a valid width", width_str.trim()))?;
-            let height: f64 = height_str
-                .trim()
-                .parse()
-                .map_err(|_| format!("\"{}\" is not a valid height", height_str.trim()))?;
-            if !(width.is_finite() && width > 0.0 && height.is_finite() && height > 0.0) {
-                return Err(format!(
-                    "width and height must be positive, finite numbers, got {width}x{height}"
-                ));
-            }
-            Ok(TargetSize::Rect { width, height })
-        }
-        _ => Err(format!(
-            "\"{trimmed}\" has more than one 'x' separator; expected WIDTHxHEIGHT or a single radius"
-        )),
+/// Dominant-bucket label shared by the summary-table and statistics-CSV renderers.
+fn wez_dominant_label(row: &WezRow) -> String {
+    if row.attribution_unavailable {
+        "n/a".to_string()
+    } else {
+        row.dominant_error_source
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "none".to_string())
     }
 }
 
-/// A [`TargetSize`] converted to meters, ready for [`ballistics_engine::MonteCarloResults`]'s
-/// hit-probability methods.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum TargetSizeMetric {
-    Rect { width_m: f64, height_m: f64 },
-    Radius { radius_m: f64 },
+/// `-o full`: the entire [`WezResult`] as pretty JSON (the 0.25.0 JSON contract).
+fn print_wez_full(result: &WezResult) -> Result<(), Box<dyn Error>> {
+    println!("{}", serde_json::to_string_pretty(result)?);
+    Ok(())
 }
 
-impl TargetSize {
-    fn to_metric(self, units: UnitSystem) -> TargetSizeMetric {
-        match self {
-            TargetSize::Rect { width, height } => TargetSizeMetric::Rect {
-                width_m: UnitConverter::target_size_to_metric(width, units),
-                height_m: UnitConverter::target_size_to_metric(height, units),
-            },
-            TargetSize::Radius(radius) => TargetSizeMetric::Radius {
-                radius_m: UnitConverter::target_size_to_metric(radius, units),
-            },
-        }
+/// `-o statistics`: one CSV row per range step.
+fn print_wez_statistics(result: &WezResult, units: UnitSystem) {
+    println!("range,p_hit,dominant_error_source,wind_call_share,mv_sd_share,other_share");
+    for row in &result.rows {
+        println!(
+            "{:.2},{:.4},{},{:.4},{:.4},{:.4}",
+            UnitConverter::distance_from_metric(row.range_m, units),
+            row.p_hit,
+            wez_dominant_label(row),
+            row.wind_call_share,
+            row.mv_sd_share,
+            row.other_share
+        );
     }
 }
 
-/// Which WEZ variance-attribution bucket a miss-variance source belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum WezErrorBucket {
-    /// The shooter's wind-call error (`--wind-call-error`).
-    WindCall,
-    /// Muzzle-velocity standard deviation (`--velocity-std`).
-    MvSd,
-    /// Everything else: mechanical/ammo group dispersion (angle, azimuth, BC) plus the
-    /// *ballistic* (non-call) share of wind uncertainty (`--wind-std`, `--wind-direction-std`).
-    Other,
-}
-
-impl std::fmt::Display for WezErrorBucket {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // MBA-1337 w2: one spelling everywhere. These must match the serde
-        // rename_all = "snake_case" values the -o full JSON contract shipped with
-        // (0.25.0), so summary/CSV/JSON all agree on the same strings.
-        let label = match self {
-            WezErrorBucket::WindCall => "wind_call",
-            WezErrorBucket::MvSd => "mv_sd",
-            WezErrorBucket::Other => "other",
-        };
-        write!(f, "{label}")
-    }
-}
-
-/// Per-range WEZ miss-variance attribution shares. `wind_call + mv_sd + other` sums to ~1.0
-/// whenever at least one modeled source has nonzero uncertainty; all fields are exactly 0.0 in
-/// the fully deterministic (zero-uncertainty) case, where there is no dominant source.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
-struct WezVarianceShares {
-    wind_call: f64,
-    mv_sd: f64,
-    other: f64,
-}
-
-impl WezVarianceShares {
-    /// The largest nonzero share, or `None` if every share is zero (nothing to attribute).
-    fn dominant(&self) -> Option<WezErrorBucket> {
-        [
-            (WezErrorBucket::WindCall, self.wind_call),
-            (WezErrorBucket::MvSd, self.mv_sd),
-            (WezErrorBucket::Other, self.other),
-        ]
-        .into_iter()
-        .filter(|(_, share)| *share > 0.0)
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(bucket, _)| bucket)
-    }
-}
-
-/// Solve a single deterministic trajectory and return its target-plane impact position.
-///
-/// The caller is responsible for setting `inputs.muzzle_velocity` to whatever value it wants
-/// solved (e.g. baseline + one sigma for the MV-SD sensitivity). The real Monte Carlo sampler
-/// instead applies a sampled velocity *delta* after `TrajectorySolver::new` resolves any
-/// powder-temperature curve (MBA-1176), because `TrajectorySolver` doesn't expose that resolved
-/// value to callers outside `cli_api`. That distinction is a no-op here: `monte-carlo` (and so
-/// `--wez`) never sets `powder_temp_curve` on its `BallisticInputs`, so there is no curve for
-/// `TrajectorySolver::new` to resolve and a plain pre-construction velocity assignment is
-/// equivalent to the sampler's post-construction delta.
-///
-/// Propagates `solve()`'s error instead of unwrapping it: neither the baseline solve (whose
-/// inputs are the CLI's raw, not-yet-validated `-v`/`-a`/etc. values -- clap's own range checks
-/// permit e.g. `-v 0`, which `solve()` rejects) nor a perturbed one-sigma solve (MV/BC/angle/wind
-/// nudged off a valid baseline) is guaranteed to stay within `solve()`'s validity gate (MBA-1317).
-fn wez_solve_target_plane(
-    inputs: BallisticInputs,
-    wind: WindConditions,
-    atmosphere: AtmosphericConditions,
-    solver_max_range: f64,
-    target_distance_m: f64,
-) -> Result<Vector3<f64>, BallisticsError> {
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
-    solver.set_max_range(solver_max_range);
-    let result = solver.solve()?;
-    // A successful `solve()` always produces a non-empty trajectory (every solve path errors
-    // out on an empty point list before returning `Ok`), so `position_at_range` -- which only
-    // returns `None` for an empty trajectory, clamping to the last point otherwise -- cannot
-    // fail here. See cli_api::TrajectoryResult::position_at_range.
-    Ok(result
-        .position_at_range(target_distance_m)
-        .expect("WEZ attribution solve: non-empty trajectory always has a last point"))
-}
-
-/// One source's target-plane variance contribution: `sigma`'s one-standard-deviation
-/// displacement from `baseline`, or `0.0` when `sigma` is non-positive (that source is disabled).
-/// `inputs` and `wind` must already have that one sigma applied by the caller.
-///
-/// Propagates a failed perturbed solve rather than unwrapping it (MBA-1317) -- a one-sigma nudge
-/// off a valid baseline is not itself guaranteed to stay within `solve()`'s validity gate.
-fn wez_source_variance(
-    sigma: f64,
-    inputs: BallisticInputs,
-    wind: WindConditions,
-    atmosphere: &AtmosphericConditions,
-    solver_max_range: f64,
-    target_distance_m: f64,
-    baseline: &Vector3<f64>,
-) -> Result<f64, BallisticsError> {
-    if sigma.is_nan() || sigma <= 0.0 {
-        return Ok(0.0);
-    }
-    let perturbed = wez_solve_target_plane(
-        inputs,
-        wind,
-        atmosphere.clone(),
-        solver_max_range,
-        target_distance_m,
-    )?;
-    let dy = perturbed.y - baseline.y;
-    let dz = perturbed.z - baseline.z;
-    Ok(dy * dy + dz * dz)
-}
-
-/// Linearized (one-sigma finite-difference) WEZ miss-variance attribution at a single range.
-///
-/// A full "decomposed re-run" attribution -- zero out each source in turn and re-run the whole
-/// Monte Carlo sample set for it -- would multiply the sweep's cost by the number of buckets,
-/// which does not fit a "finishes in seconds" default sweep. Instead this holds every input at
-/// its baseline value except one, nudges that one input by exactly its own standard deviation,
-/// and measures the resulting shift in the target-plane impact point. The Monte Carlo sampler's
-/// inputs are independent Gaussians and the ballistic response is smooth; at the magnitude of a
-/// single sigma it is locally close to linear, so each source's one-sigma displacement `(dy, dz)`
-/// is a standard first-order estimate of its variance contribution, and treating the sources as
-/// independent gives `Var(total) ~= sum_i (dy_i^2 + dz_i^2)`. This costs a handful of
-/// deterministic trajectory solves per range instead of a full extra Monte Carlo sub-run per
-/// bucket.
-///
-/// Takes the (already solved) undispersed `baseline` position at `target_distance_m` from the
-/// caller rather than solving it again -- the caller needs that same baseline to compute `p_hit`
-/// (see `run_monte_carlo_wez`) and to decide whether attribution is meaningful at all when the
-/// baseline doesn't reach this range.
-///
-/// Errors if any one-sigma perturbed solve fails validation (MBA-1317); the caller only invokes
-/// this once the *un*perturbed baseline solve has already succeeded, but a sigma nudge can still
-/// push an input (e.g. muzzle velocity, BC) out of `solve()`'s valid range.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "flat arguments mirror the Monte Carlo sampler's own parameter set (MBA-1317)"
-)]
-fn wez_variance_shares(
-    base_inputs: &BallisticInputs,
-    base_wind: &WindConditions,
-    atmosphere: &AtmosphericConditions,
-    solver_max_range: f64,
-    target_distance_m: f64,
-    baseline: &Vector3<f64>,
-    velocity_std_dev: f64,
-    angle_std_dev_rad: f64,
-    bc_std_dev: f64,
-    azimuth_std_dev_rad: f64,
-    wind_speed_std_dev: f64,
-    wind_call_error_std_dev: f64,
-    wind_direction_std_dev_rad: f64,
-) -> Result<WezVarianceShares, BallisticsError> {
-    // MV SD bucket: muzzle-velocity dispersion.
-    let mv_sd_var = {
-        let mut inputs = base_inputs.clone();
-        inputs.muzzle_velocity = (inputs.muzzle_velocity + velocity_std_dev).max(0.0);
-        wez_source_variance(
-            velocity_std_dev,
-            inputs,
-            base_wind.clone(),
-            atmosphere,
-            solver_max_range,
-            target_distance_m,
-            baseline,
-        )?
+/// Default `-o summary`: the human-readable sweep table.
+fn print_wez_summary(result: &WezResult, units: UnitSystem) {
+    let dist_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
     };
-
-    // Other/group bucket: elevation, azimuth, and BC dispersion (mechanical/ammo "group"), plus
-    // the ballistic (non-call) share of wind uncertainty.
-    let mut other_var = 0.0;
-    {
-        let mut inputs = base_inputs.clone();
-        inputs.muzzle_angle += angle_std_dev_rad;
-        other_var += wez_source_variance(
-            angle_std_dev_rad,
-            inputs,
-            base_wind.clone(),
-            atmosphere,
-            solver_max_range,
-            target_distance_m,
-            baseline,
-        )?;
-    }
-    {
-        let mut inputs = base_inputs.clone();
-        inputs.bc_value = (inputs.bc_value + bc_std_dev).max(0.01);
-        other_var += wez_source_variance(
-            bc_std_dev,
-            inputs,
-            base_wind.clone(),
-            atmosphere,
-            solver_max_range,
-            target_distance_m,
-            baseline,
-        )?;
-    }
-    {
-        let mut inputs = base_inputs.clone();
-        inputs.azimuth_angle += azimuth_std_dev_rad;
-        other_var += wez_source_variance(
-            azimuth_std_dev_rad,
-            inputs,
-            base_wind.clone(),
-            atmosphere,
-            solver_max_range,
-            target_distance_m,
-            baseline,
-        )?;
-    }
-    {
-        let mut wind = base_wind.clone();
-        wind.direction += wind_direction_std_dev_rad;
-        other_var += wez_source_variance(
-            wind_direction_std_dev_rad,
-            base_inputs.clone(),
-            wind,
-            atmosphere,
-            solver_max_range,
-            target_distance_m,
-            baseline,
-        )?;
-    }
-    {
-        let mut wind = base_wind.clone();
-        wind.speed += wind_speed_std_dev;
-        other_var += wez_source_variance(
-            wind_speed_std_dev,
-            base_inputs.clone(),
-            wind,
-            atmosphere,
-            solver_max_range,
-            target_distance_m,
-            baseline,
-        )?;
-    }
-
-    // Wind-call bucket: the shooter's own wind-speed estimation error, kept separate from the
-    // ballistic wind-speed uncertainty above even though both perturb the same physical channel.
-    let wind_call_var = {
-        let mut wind = base_wind.clone();
-        wind.speed += wind_call_error_std_dev;
-        wez_source_variance(
-            wind_call_error_std_dev,
-            base_inputs.clone(),
-            wind,
-            atmosphere,
-            solver_max_range,
-            target_distance_m,
-            baseline,
-        )?
+    let wind_unit = match units {
+        UnitSystem::Imperial => "mph",
+        UnitSystem::Metric => "m/s",
     };
-
-    let total = wind_call_var + mv_sd_var + other_var;
-    if total.is_nan() || total <= 0.0 {
-        return Ok(WezVarianceShares::default());
+    println!(
+        "WEZ sweep: {} sims/step, wind call {:.2} {wind_unit} + wind std {:.2} {wind_unit} (quadrature) = {:.2} {wind_unit} effective",
+        result.num_sims_per_step,
+        UnitConverter::wind_from_metric(result.wind_call_error_mps, units),
+        UnitConverter::wind_from_metric(result.wind_speed_std_mps, units),
+        UnitConverter::wind_from_metric(result.combined_wind_speed_std_mps, units),
+    );
+    println!(
+        "┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐"
+    );
+    println!(
+        "│ Range ({dist_unit:>3}) │  P(hit)  │ Dominant      │ Wind call │  MV SD    │ Other/grp │"
+    );
+    println!(
+        "├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤"
+    );
+    for row in &result.rows {
+        println!(
+            "│ {:>10.1} │ {:>7.1}% │ {:<13} │ {:>8.1}% │ {:>8.1}% │ {:>8.1}% │",
+            UnitConverter::distance_from_metric(row.range_m, units),
+            row.p_hit * 100.0,
+            wez_dominant_label(row),
+            row.wind_call_share * 100.0,
+            row.mv_sd_share * 100.0,
+            row.other_share * 100.0,
+        );
     }
-    Ok(WezVarianceShares {
-        wind_call: wind_call_var / total,
-        mv_sd: mv_sd_var / total,
-        other: other_var / total,
-    })
-}
-
-/// WEZ hit probability: the fraction of `results`' samples whose ABSOLUTE target-plane position
-/// -- reconstructed as `baseline + (that sample's deviation from baseline)`, since
-/// [`ballistics_engine::MonteCarloResults::impact_positions`] stores only the deviation -- falls
-/// within `target_size`, centered on the fixed line of sight (`line_of_sight_height_m` vertically,
-/// `z = 0` laterally).
-///
-/// This is deliberately NOT [`ballistics_engine::MonteCarloResults::hit_probability`] /
-/// `rect_hit_probability`, which measure the miss distance from that SAME range's own baseline
-/// (i.e. assume the shooter re-dials elevation perfectly for every range). A WEZ sweep instead
-/// answers "how far can I hit this target size with ONE hold", so it must also count the
-/// systematic ballistic drop below the fixed line of sight as a source of misses, not just random
-/// dispersion -- see the module doc comment above `run_monte_carlo_wez`.
-///
-/// A sample that never reached the target plane keeps `MonteCarloResults`'s sentinel deviation
-/// (`TARGET_NOT_REACHED_SENTINEL_M`, roughly -1e9 m). Added to any finite baseline that stays a
-/// miss by a vast margin, so it is correctly excluded here without a separate check.
-fn wez_p_hit(
-    results: &ballistics_engine::MonteCarloResults,
-    baseline: &Vector3<f64>,
-    line_of_sight_height_m: f64,
-    target_size: TargetSizeMetric,
-) -> f64 {
-    if results.impact_positions.is_empty() {
-        return 0.0;
-    }
-    let hits = results
-        .impact_positions
-        .iter()
-        .filter(|deviation| {
-            let absolute_y = baseline.y + deviation.y;
-            let absolute_z = baseline.z + deviation.z;
-            let drop_from_los = absolute_y - line_of_sight_height_m;
-            match target_size {
-                TargetSizeMetric::Rect { width_m, height_m } => {
-                    drop_from_los.abs() <= height_m / 2.0 && absolute_z.abs() <= width_m / 2.0
-                }
-                TargetSizeMetric::Radius { radius_m } => {
-                    (drop_from_los * drop_from_los + absolute_z * absolute_z).sqrt() <= radius_m
-                }
-            }
-        })
-        .count();
-    hits as f64 / results.impact_positions.len() as f64
-}
-
-/// One range step of a WEZ sweep.
-#[derive(Debug, Clone, Serialize)]
-struct WezRow {
-    range_m: f64,
-    p_hit: f64,
-    dominant_error_source: Option<WezErrorBucket>,
-    wind_call_share: f64,
-    mv_sd_share: f64,
-    other_share: f64,
-    /// The undispersed baseline trajectory did not reach this range, so `*_share` and
-    /// `dominant_error_source` above are not meaningful (left at their zero/`None` default).
-    /// `p_hit` is unaffected -- it comes from the fully-dispersed Monte Carlo run directly.
-    attribution_unavailable: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct WezTargetSizeJson {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    width_m: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    height_m: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    radius_m: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct WezResult {
-    target_size: WezTargetSizeJson,
-    wind_speed_std_mps: f64,
-    wind_call_error_mps: f64,
-    /// `sqrt(wind_speed_std_mps^2 + wind_call_error_mps^2)`: the effective wind-speed standard
-    /// deviation actually fed to the underlying Monte Carlo sampler at each range step.
-    combined_wind_speed_std_mps: f64,
-    num_sims_per_step: usize,
-    rows: Vec<WezRow>,
+    println!(
+        "└────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘"
+    );
 }
 
 #[allow(
@@ -8601,237 +8177,38 @@ fn run_monte_carlo_wez(
     output: MonteCarloOutput,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
-    if !(wez_step > 0.0 && wez_step.is_finite()) {
-        return Err("--wez-step must be a positive, finite distance".into());
-    }
-    if !wez_start.is_finite() || !wez_end.is_finite() || wez_end < wez_start {
-        return Err("--wez-end must be finite and >= --wez-start".into());
-    }
-
-    // Same bore-height/ground convention as the base `monte-carlo` command (MBA-967).
-    let bore_height_metric = 1.5_f64;
-    let base_inputs = BallisticInputs {
-        muzzle_velocity: velocity,
-        muzzle_angle: angle.to_radians(),
-        bc_value: bc,
-        bullet_mass: mass,
-        bullet_diameter: diameter,
-        muzzle_height: bore_height_metric,
-        ground_threshold: 0.0,
+    let result = compute_wez(
+        velocity,
+        angle,
+        bc,
+        mass,
+        diameter,
+        num_sims,
+        velocity_std,
+        angle_std,
+        bc_std,
+        wind_std,
+        wind_direction_std,
+        wind_speed,
+        wind_direction,
+        wind_vertical,
+        wind_call_error,
+        target_size,
+        wez_start,
+        wez_end,
+        wez_step,
+        // The native `monte-carlo` subcommand has no --drag-model flag, so the sweep
+        // always runs the G1 default `BallisticInputs` has always used (the WASM
+        // terminal's monte-carlo, which does expose --drag-model, passes it through).
+        DragModel::G1,
         custom_drag_table,
-        cant_angle: cant.to_radians(),
-        ..Default::default()
-    };
-    let base_wind = WindConditions {
-        speed: wind_speed,
-        direction: wind_direction.to_radians(),
-        vertical_speed: wind_vertical,
-    };
-
-    // The shooter's wind-call error is a dispersion source distinct from the ballistic
-    // (gust-to-gust) wind-speed uncertainty --wind-std already models, but both perturb the same
-    // physical channel (wind speed fed to the solve). As independent random errors they compose
-    // in quadrature -- not by simple addition -- into the effective standard deviation the
-    // underlying Monte Carlo sampler uses.
-    let combined_wind_speed_std = wind_std.hypot(wind_call_error);
-
-    // Matches run_monte_carlo's own convention: horizontal (azimuth) aim dispersion defaults to
-    // half of the vertical (elevation) dispersion.
-    let angle_std_rad = angle_std.to_radians();
-    let azimuth_std_dev = angle_std_rad * 0.5;
-    let wind_direction_std_rad = wind_direction_std.to_radians();
-
-    // The fixed reference the WEZ target box is centered on: the horizontal line of sight,
-    // extended straight (not the curved bullet path). This is what makes the zero-uncertainty
-    // case a genuine step function -- ballistic drop below this fixed line, not just random
-    // dispersion, can carry the bullet outside the box as range grows. It does NOT change per
-    // range step: a WEZ sweep answers "how far can I engage this target size with ONE hold",
-    // the classic point-blank-range question, not "assuming I re-dial for every range".
-    let atmosphere = AtmosphericConditions {
-        temperature: base_inputs.temperature,
-        pressure: base_inputs.pressure,
-        humidity: base_inputs.humidity_percent(),
-        altitude: base_inputs.altitude,
-    };
-    let line_of_sight_height_m = base_inputs.muzzle_height + base_inputs.sight_height;
-
-    let mut ranges_m = Vec::new();
-    let mut next = wez_start;
-    // Guard against an unbounded loop from a step so small that floating-point addition never
-    // advances `next` past `wez_end`.
-    for _ in 0..100_000 {
-        if next > wez_end + wez_step * 1e-9 {
-            break;
-        }
-        ranges_m.push(next);
-        next += wez_step;
-    }
-
-    let mut rows = Vec::with_capacity(ranges_m.len());
-    for (step_index, &range_m) in ranges_m.iter().enumerate() {
-        let solver_max_range = range_m.max(1000.0) * 2.0;
-        let baseline = wez_solve_target_plane(
-            base_inputs.clone(),
-            base_wind.clone(),
-            atmosphere.clone(),
-            solver_max_range,
-            range_m,
-        )?;
-        let baseline_reached = baseline.x >= range_m - 1e-6;
-
-        let mc_params = MonteCarloParams {
-            num_simulations: num_sims,
-            velocity_std_dev: velocity_std,
-            angle_std_dev: angle_std_rad,
-            bc_std_dev: bc_std,
-            wind_speed_std_dev: combined_wind_speed_std,
-            target_distance: Some(range_m),
-            base_wind_speed: wind_speed,
-            base_wind_direction: wind_direction.to_radians(),
-            azimuth_std_dev,
-        };
-
-        // A fixed, distinct seed per range step keeps a sweep reproducible run-to-run while
-        // still drawing independent samples at each range.
-        let seed = 0x57_45_5A_00_u64 ^ (step_index as u64);
-        let p_hit = match ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev_seeded(
-            base_inputs.clone(),
-            base_wind.clone(),
-            mc_params,
-            wind_direction_std_rad,
-            seed,
-        ) {
-            Ok(results) => {
-                wez_p_hit(&results, &baseline, line_of_sight_height_m, target_size)
-            }
-            // The baseline never reached this range plane at all -> every sample is a definite
-            // miss for it.
-            Err(_) => 0.0,
-        };
-
-        let (shares, attribution_unavailable) = if baseline_reached {
-            (
-                wez_variance_shares(
-                    &base_inputs,
-                    &base_wind,
-                    &atmosphere,
-                    solver_max_range,
-                    range_m,
-                    &baseline,
-                    velocity_std,
-                    angle_std_rad,
-                    bc_std,
-                    azimuth_std_dev,
-                    wind_std,
-                    wind_call_error,
-                    wind_direction_std_rad,
-                )?,
-                false,
-            )
-        } else {
-            (WezVarianceShares::default(), true)
-        };
-
-        rows.push(WezRow {
-            range_m,
-            p_hit,
-            dominant_error_source: shares.dominant(),
-            wind_call_share: shares.wind_call,
-            mv_sd_share: shares.mv_sd,
-            other_share: shares.other,
-            attribution_unavailable,
-        });
-    }
-
-    let dominant_label = |row: &WezRow| -> String {
-        if row.attribution_unavailable {
-            "n/a".to_string()
-        } else {
-            row.dominant_error_source
-                .map(|b| b.to_string())
-                .unwrap_or_else(|| "none".to_string())
-        }
-    };
+        cant,
+    )?;
 
     match output {
-        MonteCarloOutput::Full => {
-            let result = WezResult {
-                target_size: match target_size {
-                    TargetSizeMetric::Rect { width_m, height_m } => WezTargetSizeJson {
-                        width_m: Some(width_m),
-                        height_m: Some(height_m),
-                        radius_m: None,
-                    },
-                    TargetSizeMetric::Radius { radius_m } => WezTargetSizeJson {
-                        width_m: None,
-                        height_m: None,
-                        radius_m: Some(radius_m),
-                    },
-                },
-                wind_speed_std_mps: wind_std,
-                wind_call_error_mps: wind_call_error,
-                combined_wind_speed_std_mps: combined_wind_speed_std,
-                num_sims_per_step: num_sims,
-                rows,
-            };
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-
-        MonteCarloOutput::Statistics => {
-            println!("range,p_hit,dominant_error_source,wind_call_share,mv_sd_share,other_share");
-            for row in &rows {
-                println!(
-                    "{:.2},{:.4},{},{:.4},{:.4},{:.4}",
-                    UnitConverter::distance_from_metric(row.range_m, units),
-                    row.p_hit,
-                    dominant_label(row),
-                    row.wind_call_share,
-                    row.mv_sd_share,
-                    row.other_share
-                );
-            }
-        }
-
-        MonteCarloOutput::Summary => {
-            let dist_unit = match units {
-                UnitSystem::Imperial => "yd",
-                UnitSystem::Metric => "m",
-            };
-            let wind_unit = match units {
-                UnitSystem::Imperial => "mph",
-                UnitSystem::Metric => "m/s",
-            };
-            println!(
-                "WEZ sweep: {} sims/step, wind call {:.2} {wind_unit} + wind std {:.2} {wind_unit} (quadrature) = {:.2} {wind_unit} effective",
-                num_sims,
-                UnitConverter::wind_from_metric(wind_call_error, units),
-                UnitConverter::wind_from_metric(wind_std, units),
-                UnitConverter::wind_from_metric(combined_wind_speed_std, units),
-            );
-            println!(
-                "┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐"
-            );
-            println!(
-                "│ Range ({dist_unit:>3}) │  P(hit)  │ Dominant      │ Wind call │  MV SD    │ Other/grp │"
-            );
-            println!(
-                "├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤"
-            );
-            for row in &rows {
-                println!(
-                    "│ {:>10.1} │ {:>7.1}% │ {:<13} │ {:>8.1}% │ {:>8.1}% │ {:>8.1}% │",
-                    UnitConverter::distance_from_metric(row.range_m, units),
-                    row.p_hit * 100.0,
-                    dominant_label(row),
-                    row.wind_call_share * 100.0,
-                    row.mv_sd_share * 100.0,
-                    row.other_share * 100.0,
-                );
-            }
-            println!(
-                "└────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘"
-            );
-        }
+        MonteCarloOutput::Full => print_wez_full(&result)?,
+        MonteCarloOutput::Statistics => print_wez_statistics(&result, units),
+        MonteCarloOutput::Summary => print_wez_summary(&result, units),
     }
 
     Ok(())
@@ -8841,351 +8218,10 @@ fn run_monte_carlo_wez(
 mod wez_tests {
     use super::*;
 
-    // A modest .308/168gr load, zeroed at 300 m with a shallow elevation that keeps the
-    // trajectory well above ground for the whole 50-600 m range these tests sweep -- chosen with
-    // `ballistics zero` (see CLI_USAGE.md's WEZ worked example for the imperial equivalent).
-    fn test_base_inputs() -> BallisticInputs {
-        BallisticInputs {
-            muzzle_velocity: 823.0, // ~2700 fps
-            muzzle_angle: 0.001274, // ~0.073 degrees: a 300 m zero for this load
-            bc_value: 0.475,
-            bullet_mass: 0.010_886, // 168 gr
-            bullet_diameter: 0.007_82, // .308 in
-            muzzle_height: 1.5,
-            ground_threshold: 0.0,
-            ..Default::default()
-        }
-    }
-
-    fn test_atmosphere(inputs: &BallisticInputs) -> AtmosphericConditions {
-        AtmosphericConditions {
-            temperature: inputs.temperature,
-            pressure: inputs.pressure,
-            humidity: inputs.humidity_percent(),
-            altitude: inputs.altitude,
-        }
-    }
-
-    // ---- parse_target_size --------------------------------------------------------------
-
-    #[test]
-    fn parse_target_size_accepts_a_wxh_rectangle() {
-        assert_eq!(
-            parse_target_size("18x30").unwrap(),
-            TargetSize::Rect {
-                width: 18.0,
-                height: 30.0
-            }
-        );
-        // Case-insensitive separator and surrounding whitespace.
-        assert_eq!(
-            parse_target_size(" 18.5X30.25 ").unwrap(),
-            TargetSize::Rect {
-                width: 18.5,
-                height: 30.25
-            }
-        );
-    }
-
-    #[test]
-    fn parse_target_size_accepts_a_single_radius() {
-        assert_eq!(parse_target_size("12").unwrap(), TargetSize::Radius(12.0));
-        assert_eq!(parse_target_size(" 0.5 ").unwrap(), TargetSize::Radius(0.5));
-    }
-
-    #[test]
-    fn parse_target_size_rejects_garbage() {
-        for bad in [
-            "",
-            "   ",
-            "abc",
-            "18xthirty",
-            "eighteenx30",
-            "18x30x40",
-            "0",
-            "-5",
-            "18x-5",
-            "18x0",
-            "NaN",
-        ] {
-            assert!(
-                parse_target_size(bad).is_err(),
-                "expected an error for {bad:?}"
-            );
-        }
-    }
-
-    // ---- WEZ hit-probability step function -----------------------------------------------
-
-    #[test]
-    fn zero_uncertainty_is_a_step_function_in_range() {
-        let inputs = test_base_inputs();
-        let wind = WindConditions::default();
-        let atmosphere = test_atmosphere(&inputs);
-        // 18x30 box: 0.4572 m x 0.762 m.
-        let target = TargetSizeMetric::Rect {
-            width_m: 0.4572,
-            height_m: 0.762,
-        };
-        let los_height_m = inputs.muzzle_height + inputs.sight_height;
-
-        let mc_params = MonteCarloParams {
-            num_simulations: 20,
-            velocity_std_dev: 0.0,
-            angle_std_dev: 0.0,
-            bc_std_dev: 0.0,
-            wind_speed_std_dev: 0.0,
-            target_distance: None,
-            base_wind_speed: 0.0,
-            base_wind_direction: 0.0,
-            azimuth_std_dev: 0.0,
-        };
-
-        let mut p_hits = Vec::new();
-        for &range_m in &[50.0_f64, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0] {
-            let solver_max_range = range_m.max(1000.0) * 2.0;
-            let baseline = wez_solve_target_plane(
-                inputs.clone(),
-                wind.clone(),
-                atmosphere.clone(),
-                solver_max_range,
-                range_m,
-            )
-            .expect("valid test baseline solve");
-            let mut params = mc_params.clone();
-            params.target_distance = Some(range_m);
-            let results = ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev_seeded(
-                inputs.clone(),
-                wind.clone(),
-                params,
-                0.0,
-                0xA11CE,
-            )
-            .expect("zero-uncertainty solve");
-            let p_hit = wez_p_hit(&results, &baseline, los_height_m, target);
-            // Every one of the (identical, undispersed) samples must agree: exactly a hit or
-            // exactly a miss, never a fractional probability.
-            assert!(
-                p_hit == 0.0 || p_hit == 1.0,
-                "range {range_m} m: expected a step (0.0 or 1.0), got {p_hit}"
-            );
-            p_hits.push((range_m, p_hit));
-        }
-
-        assert!(
-            p_hits.iter().any(|&(_, p)| p == 1.0),
-            "expected at least one in-box range close to the muzzle: {p_hits:?}"
-        );
-        assert!(
-            p_hits.iter().any(|&(_, p)| p == 0.0),
-            "expected at least one out-of-box range far downrange: {p_hits:?}"
-        );
-        // Once it steps down to a miss, a plain (unheld) trajectory that has already passed its
-        // zero does not come back into a fixed-size box further downrange.
-        let first_miss = p_hits.iter().position(|&(_, p)| p == 0.0);
-        if let Some(idx) = first_miss {
-            assert!(
-                p_hits[idx..].iter().all(|&(_, p)| p == 0.0),
-                "expected the box exit to be permanent for the rest of the sweep: {p_hits:?}"
-            );
-        }
-    }
-
-    // ---- P(hit) monotonicity with real dispersion -----------------------------------------
-
-    #[test]
-    fn p_hit_is_monotone_non_increasing_with_range() {
-        let inputs = test_base_inputs();
-        let wind = WindConditions::default();
-        let atmosphere = test_atmosphere(&inputs);
-        let target = TargetSizeMetric::Rect {
-            width_m: 0.4572,
-            height_m: 0.762,
-        };
-        let los_height_m = inputs.muzzle_height + inputs.sight_height;
-        let wind_call_error = 1.5_f64; // m/s
-        let wind_std = 0.5_f64; // m/s
-        let combined_wind_std = wind_std.hypot(wind_call_error);
-
-        let mc_params = MonteCarloParams {
-            num_simulations: 500, // a fixed seed keeps this run-to-run deterministic
-            velocity_std_dev: 1.0,
-            angle_std_dev: 0.001,
-            bc_std_dev: 0.01,
-            wind_speed_std_dev: combined_wind_std,
-            target_distance: None,
-            base_wind_speed: 0.0,
-            base_wind_direction: 0.0,
-            azimuth_std_dev: 0.0005,
-        };
-
-        let ranges_m = [100.0_f64, 200.0, 300.0, 400.0, 500.0, 600.0];
-        let mut p_hits = Vec::new();
-        for (step_index, &range_m) in ranges_m.iter().enumerate() {
-            let solver_max_range = range_m.max(1000.0) * 2.0;
-            let baseline = wez_solve_target_plane(
-                inputs.clone(),
-                wind.clone(),
-                atmosphere.clone(),
-                solver_max_range,
-                range_m,
-            )
-            .expect("valid test baseline solve");
-            let mut params = mc_params.clone();
-            params.target_distance = Some(range_m);
-            let seed = 0x57_45_5A_00_u64 ^ (step_index as u64);
-            let results = ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev_seeded(
-                inputs.clone(),
-                wind.clone(),
-                params,
-                0.0,
-                seed,
-            )
-            .expect("dispersed solve");
-            p_hits.push(wez_p_hit(&results, &baseline, los_height_m, target));
-        }
-
-        // A large sample count plus a fixed seed makes this close to the noiseless limit, but a
-        // finite Monte Carlo estimate can still tick up by a hair at the boundary between two
-        // adjacent steps -- allow a small generous tolerance rather than asserting exact
-        // non-increase (MBA-1317 test spec).
-        let tolerance = 0.03;
-        for pair in p_hits.windows(2) {
-            assert!(
-                pair[1] <= pair[0] + tolerance,
-                "P(hit) rose more than the allowed jitter: {p_hits:?}"
-            );
-        }
-        // The overall trend across the full sweep must be a clear decline.
-        assert!(
-            p_hits.first().unwrap() - p_hits.last().unwrap() > 0.2,
-            "expected a clear overall decline across the sweep: {p_hits:?}"
-        );
-    }
-
-    // ---- Variance-attribution shares --------------------------------------------------------
-
-    #[test]
-    fn variance_shares_sum_to_one_when_multiple_sources_are_active() {
-        let inputs = test_base_inputs();
-        let wind = WindConditions::default();
-        let atmosphere = test_atmosphere(&inputs);
-        let range_m: f64 = 300.0;
-        let solver_max_range = range_m.max(1000.0) * 2.0;
-        let baseline = wez_solve_target_plane(
-            inputs.clone(),
-            wind.clone(),
-            atmosphere.clone(),
-            solver_max_range,
-            range_m,
-        )
-        .expect("valid test baseline solve");
-
-        let shares = wez_variance_shares(
-            &inputs,
-            &wind,
-            &atmosphere,
-            solver_max_range,
-            range_m,
-            &baseline,
-            /* velocity_std_dev */ 1.0,
-            /* angle_std_dev_rad */ 0.001,
-            /* bc_std_dev */ 0.01,
-            /* azimuth_std_dev_rad */ 0.0005,
-            /* wind_speed_std_dev */ 0.4,
-            /* wind_call_error_std_dev */ 1.2,
-            /* wind_direction_std_dev_rad */ 0.02,
-        )
-        .expect("valid test attribution solve");
-
-        let sum = shares.wind_call + shares.mv_sd + shares.other;
-        assert!(
-            (sum - 1.0).abs() < 1e-9,
-            "shares should sum to ~1.0, got {sum} ({shares:?})"
-        );
-        for share in [shares.wind_call, shares.mv_sd, shares.other] {
-            assert!((0.0..=1.0).contains(&share), "share out of range: {share}");
-        }
-        assert!(shares.dominant().is_some());
-    }
-
-    #[test]
-    fn variance_shares_are_all_zero_with_no_dispersion_sources() {
-        let inputs = test_base_inputs();
-        let wind = WindConditions::default();
-        let atmosphere = test_atmosphere(&inputs);
-        let range_m: f64 = 300.0;
-        let solver_max_range = range_m.max(1000.0) * 2.0;
-        let baseline = wez_solve_target_plane(
-            inputs.clone(),
-            wind.clone(),
-            atmosphere.clone(),
-            solver_max_range,
-            range_m,
-        )
-        .expect("valid test baseline solve");
-
-        let shares = wez_variance_shares(
-            &inputs,
-            &wind,
-            &atmosphere,
-            solver_max_range,
-            range_m,
-            &baseline,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        )
-        .expect("valid test attribution solve");
-
-        assert_eq!(shares.wind_call, 0.0);
-        assert_eq!(shares.mv_sd, 0.0);
-        assert_eq!(shares.other, 0.0);
-        assert!(shares.dominant().is_none());
-    }
-
-    #[test]
-    fn wind_call_bucket_dominates_when_it_is_the_only_active_source() {
-        let inputs = test_base_inputs();
-        let wind = WindConditions::default();
-        let atmosphere = test_atmosphere(&inputs);
-        let range_m: f64 = 300.0;
-        let solver_max_range = range_m.max(1000.0) * 2.0;
-        let baseline = wez_solve_target_plane(
-            inputs.clone(),
-            wind.clone(),
-            atmosphere.clone(),
-            solver_max_range,
-            range_m,
-        )
-        .expect("valid test baseline solve");
-
-        let shares = wez_variance_shares(
-            &inputs,
-            &wind,
-            &atmosphere,
-            solver_max_range,
-            range_m,
-            &baseline,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            /* wind_call_error_std_dev */ 3.0,
-            0.0,
-        )
-        .expect("valid test attribution solve");
-
-        assert!((shares.wind_call - 1.0).abs() < 1e-9);
-        assert_eq!(shares.mv_sd, 0.0);
-        assert_eq!(shares.other, 0.0);
-        assert_eq!(shares.dominant(), Some(WezErrorBucket::WindCall));
-    }
+    // The compute-path tests (parse_target_size, step function, monotonicity, variance shares)
+    // moved to ballistics_engine::wez alongside the code they exercise (MBA-1343 Phase B). This
+    // one stays: it pins the CLI wrapper `run_monte_carlo_wez` (compute + print dispatch)
+    // end-to-end.
 
     // ---- Solver-invalid input is a clean error, not a panic (MBA-1317) ---------------------
 
@@ -10035,655 +9071,19 @@ fn display_true_velocity_result(
     Ok(())
 }
 
-/// Calculate drop at a given muzzle velocity using trajectory solver
-/// Returns drop in MILs at the target range
-#[allow(
-    clippy::too_many_arguments,
-    reason = "flat arguments preserve the existing velocity-truing compatibility helper"
-)]
-fn calculate_drop_at_velocity(
-    velocity_fps: f64,
-    bc: f64,
-    drag_model: DragModelArg,
-    mass_gr: f64,
-    diameter_in: f64,
-    zero_distance_yd: f64,
-    range_yd: f64,
-    sight_height_in: f64,
-    temperature_f: f64,
-    pressure_inhg: f64,
-    humidity: f64,
-    altitude_ft: f64,
-    bc_segments: &Option<Vec<BCSegmentData>>,
-) -> Result<f64, Box<dyn Error>> {
-    // Preserve the historical MIL contract by delegating to the shared linear-drop
-    // core (MBA-1316). `interpolate = false` reproduces the original "first point
-    // at or past the range" sampling, so this path stays byte-identical.
-    let (drop_m, z) = solve_trajectory_drop(
-        velocity_fps,
-        bc,
-        drag_model,
-        mass_gr,
-        diameter_in,
-        zero_distance_yd,
-        range_yd,
-        sight_height_in,
-        temperature_f,
-        pressure_inhg,
-        humidity,
-        altitude_ft,
-        bc_segments,
-        false,
-    )?;
-
-    // Convert to MILs: mil = (drop_inches / 36 / range_yards) * 1000
-    // Or equivalently: mil = (drop_m / range_m) * 1000
-    let drop_mil = (drop_m / z) * 1000.0;
-
-    Ok(drop_mil)
-}
-
-/// Shared forward-model core for velocity/BC truing (MBA-1316).
-///
-/// Solves the real trajectory for the given `(velocity_fps, bc)` candidate under
-/// the supplied load/atmosphere and returns `(drop_m, z_m)` where `drop_m` is the
-/// linear vertical distance below the line of sight (positive = below LOS) at the
-/// target range and `z_m` is the horizontal distance actually reached (~range_m).
-/// Callers convert to MIL / MOA / inches as needed. This is the exact assembly
-/// the single-observation binary search has always used, factored out so the
-/// multi-observation joint fit reuses identical physics.
-///
-/// When `interpolate` is false the returned point is the first trajectory sample
-/// at or past the target range (the historical behaviour). When true, the drop
-/// and horizontal distance are linearly interpolated to land exactly on the
-/// target range, removing the ~v*dt spatial quantization that otherwise
-/// stair-steps the cost surface — essential for the multi-observation joint fit,
-/// whose finite-difference Jacobian would otherwise be dominated by that noise.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "flat arguments preserve the existing velocity-truing compatibility helper"
-)]
-fn solve_trajectory_drop(
-    velocity_fps: f64,
-    bc: f64,
-    drag_model: DragModelArg,
-    mass_gr: f64,
-    diameter_in: f64,
-    zero_distance_yd: f64,
-    range_yd: f64,
-    sight_height_in: f64,
-    temperature_f: f64,
-    pressure_inhg: f64,
-    humidity: f64,
-    altitude_ft: f64,
-    bc_segments: &Option<Vec<BCSegmentData>>,
-    interpolate: bool,
-) -> Result<(f64, f64), Box<dyn Error>> {
-    // Convert to SI units
-    let velocity_ms = velocity_fps * 0.3048;
-    let mass_kg = mass_gr * 0.0000647989;
-    let diameter_m = diameter_in * 0.0254;
-    let zero_m = zero_distance_yd * 0.9144;
-    let range_m = range_yd * 0.9144;
-    let sight_height_m = sight_height_in * 0.0254;
-    let altitude_m = altitude_ft * 0.3048;
-    let temperature_c = (temperature_f - 32.0) * 5.0 / 9.0;
-    let pressure_hpa = pressure_inhg * 33.8639; // Convert inHg to hPa
-
-    let drag_model_enum = match drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
-
-    // Create base inputs - match defaults used by trajectory command
-    let mut inputs = BallisticInputs {
-        muzzle_velocity: velocity_ms,
-        bc_value: bc,
-        bc_type: drag_model_enum,
-        bullet_mass: mass_kg,
-        bullet_diameter: diameter_m,
-        bullet_length: fallback_bullet_length_m(diameter_m, mass_kg), // MBA-1135 mass-based estimate
-        sight_height: sight_height_m,
-        target_distance: range_m + 100.0, // Overshoot to ensure we have data
-        use_bc_segments: bc_segments.is_some(),
-        bc_segments_data: bc_segments.clone(),
-        use_rk4: true,
-        muzzle_angle: 0.0,    // Will be set by zero angle calculation
-        ..Default::default()  // Uses muzzle_height: 0.0 by default
-    };
-
-    // Set up atmospheric conditions
-    // AtmosphericConditions expects: temperature in Celsius, pressure in hPa, humidity 0-100, altitude in meters
-    let atmosphere = AtmosphericConditions {
-        temperature: temperature_c,
-        pressure: pressure_hpa,
-        humidity, // Already 0-100 from input
-        altitude: altitude_m,
-    };
-
-    let wind = WindConditions::default();
-
-    // Calculate zero angle for the zero distance
-    // Target height is sight_height because the bullet must cross the LOS at zero distance
-    // The LOS is at y = sight_height (sight is above bore by sight_height)
-    // So the bullet (starting at y = 0 = bore level) must rise to y = sight_height at zero distance
-    let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
-        inputs.clone(),
-        zero_m,
-        sight_height_m, // target height at zero distance (LOS height)
-        wind.clone(),
-        atmosphere.clone(),
-    )?;
-
-    // Set the calculated zero angle
-    inputs.muzzle_angle = zero_angle;
-
-    // Create solver and solve
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
-    solver.set_max_range(range_m + 100.0);
-    solver.set_time_step(0.0001);
-
-    let result = solver.solve()?;
-
-    // Find the first point at or past the target range.
-    let idx = result
-        .points
-        .iter()
-        .position(|p| p.position.x >= range_m)
-        .ok_or("Trajectory didn't reach target range")?;
-
-    // Determine the horizontal distance z and bullet height at the target range.
-    let (z, bullet_y) = if interpolate && idx > 0 {
-        // Linearly interpolate between the bracketing samples to land exactly on
-        // range_m (removes ~v*dt spatial quantization).
-        let p0 = &result.points[idx - 1];
-        let p1 = &result.points[idx];
-        let x0 = p0.position.x;
-        let x1 = p1.position.x;
-        let denom = x1 - x0;
-        if denom.abs() < f64::EPSILON {
-            (p1.position.x, p1.position.y)
-        } else {
-            let frac = (range_m - x0) / denom;
-            let y = p0.position.y + frac * (p1.position.y - p0.position.y);
-            (range_m, y)
-        }
-    } else {
-        let p = &result.points[idx];
-        (p.position.x, p.position.y)
-    };
-
-    // Calculate drop relative to the line of sight. The trajectory was already launched at the
-    // solved zero angle, so the LOS for this zero solve is horizontal at sight_height_m.
-    // Drop = LOS height - bullet position (positive = below LOS)
-    let drop_m = sight_height_m - bullet_y;
-
-    Ok((drop_m, z))
-}
-
-/// Result of local velocity truing calculation
-struct TrueVelocityLocalResult {
-    effective_velocity_fps: f64,
-    iterations: i32,
-    final_error_mil: f64,
-    calculated_drop_mil: f64,
-    confidence: String,
-}
-
-/// Calculate true velocity using local binary search
-/// Returns (effective_velocity_fps, iterations, final_error_mil, calculated_drop_mil)
-#[allow(
-    clippy::too_many_arguments,
-    reason = "flat arguments mirror the stable true-velocity CLI command shape"
-)]
-fn calculate_true_velocity_local(
-    measured_drop_mil: f64,
-    range_yd: f64,
-    bc: f64,
-    drag_model: DragModelArg,
-    mass_gr: f64,
-    diameter_in: f64,
-    zero_distance_yd: f64,
-    sight_height_in: f64,
-    temperature_f: f64,
-    pressure_inhg: f64,
-    humidity: f64,
-    altitude_ft: f64,
-    bc_segments: &Option<Vec<BCSegmentData>>,
-) -> Result<TrueVelocityLocalResult, Box<dyn Error>> {
-    // Binary search between velocity bounds
-    let mut velocity_low = 1500.0;
-    let mut velocity_high = 4500.0;
-    let tolerance_mil = 0.01; // 0.01 MIL tolerance
-    let max_iterations = 50;
-
-    let mut iterations = 0;
-    let mut last_error = 0.0;
-    let mut last_calculated_drop = 0.0;
-
-    for i in 0..max_iterations {
-        iterations = i + 1;
-        let test_velocity = (velocity_low + velocity_high) / 2.0;
-
-        // Run trajectory at test velocity
-        let calculated_drop_mil = calculate_drop_at_velocity(
-            test_velocity,
-            bc,
-            drag_model,
-            mass_gr,
-            diameter_in,
-            zero_distance_yd,
-            range_yd,
-            sight_height_in,
-            temperature_f,
-            pressure_inhg,
-            humidity,
-            altitude_ft,
-            bc_segments,
-        )?;
-
-        last_calculated_drop = calculated_drop_mil;
-        let error = calculated_drop_mil - measured_drop_mil;
-        last_error = error;
-
-        if error.abs() < tolerance_mil {
-            // Converged
-            let confidence = if error.abs() < 0.005 {
-                "high"
-            } else {
-                "medium"
-            };
-
-            return Ok(TrueVelocityLocalResult {
-                effective_velocity_fps: test_velocity,
-                iterations,
-                final_error_mil: error,
-                calculated_drop_mil,
-                confidence: confidence.to_string(),
-            });
-        }
-
-        // Higher calculated drop = bullet is slower = need higher velocity
-        // Lower calculated drop = bullet is faster = need lower velocity
-        if calculated_drop_mil > measured_drop_mil {
-            // Bullet dropping more than observed = slower than actual
-            // Need higher velocity
-            velocity_low = test_velocity;
-        } else {
-            // Bullet dropping less = faster than actual
-            // Need lower velocity
-            velocity_high = test_velocity;
-        }
-
-        // Check for convergence issues
-        if (velocity_high - velocity_low).abs() < 0.5 {
-            break;
-        }
-    }
-
-    // Did not converge within tolerance, return best estimate
-    let final_velocity = (velocity_low + velocity_high) / 2.0;
-    let confidence = if last_error.abs() < 0.1 {
-        "medium"
-    } else {
-        "low"
-    };
-
-    Ok(TrueVelocityLocalResult {
-        effective_velocity_fps: final_velocity,
-        iterations,
-        final_error_mil: last_error,
-        calculated_drop_mil: last_calculated_drop,
-        confidence: confidence.to_string(),
-    })
-}
+// calculate_drop_at_velocity, TrueVelocityLocalResult, and calculate_true_velocity_local
+// moved to ballistics_engine::truing (MBA-1343 Phase C), completing the truing lib surface
+// (single-observation binary search + multi-observation joint fit) so the WASM terminal can
+// reuse the exact compute paths. solve_trajectory_drop moved earlier (Phase A).
 
 // ============================================================================
 // MBA-1316: multi-observation joint MV + BC calibration (truing v2)
 // ============================================================================
 //
-// The classic `true-velocity` path fits muzzle velocity from a single observed
-// drop while BC is held fixed. Mid-range (fully supersonic) drops are dominated
-// by time of flight and therefore constrain muzzle velocity; long-range /
-// transonic drops are where BC bites. With observations spread across those
-// regimes we can separate the two. When the spread is too narrow to tell them
-// apart we refuse the joint fit and fit muzzle velocity only, saying so.
-
-// Solver / fit bounds. MV bounds bracket everything from subsonic pistol to
-// hyper-velocity varmint loads; BC bounds match the CLI's --bc validator range.
-const TRUING_MV_MIN_FPS: f64 = 1000.0;
-const TRUING_MV_MAX_FPS: f64 = 5000.0;
-const TRUING_BC_MIN: f64 = 0.05;
-const TRUING_BC_MAX: f64 = 2.0;
-const TRUING_MAX_ITERS: usize = 40;
-
-// Identifiability gates (calibrated against real .30-cal data, MBA-1316).
-//
-// `sensitivity_ratio = ||bc*d(drop)/d(bc)|| / ||mv*d(drop)/d(mv)||` measures how
-// much a fractional BC change moves the predicted drops relative to a fractional
-// MV change. `condition_number = (1+|c|)/(1-|c|)` (|c| = correlation of the raw
-// MV/BC Jacobian columns) measures collinearity. BOTH must pass to attempt the
-// joint fit.
-//
-// Empirical basis (.308 168gr @ 2700/0.475, ~0.03 mil observation noise):
-//   * 300/600/900 -> sens 0.29, cond 112 -> BC recovered to ~2%   (JOINT)
-//   * 300/600/900/1000 -> sens 0.33, cond 214 -> BC to <0.1%      (JOINT)
-//   * 300/400/500 -> sens 0.16, cond 282 -> BC error ~3%          (MV-ONLY)
-//   * 200/250/300 -> sens 0.12, cond 2337 -> BC error ~12%        (MV-ONLY)
-// The gates sit between the "recovers to ~2%" band and the "several-percent
-// garbage" band. They are heuristics: a set that just clears them still carries
-// more BC uncertainty than a set that clears them comfortably.
-const TRUING_MIN_BC_SENSITIVITY_RATIO: f64 = 0.20;
-const TRUING_MAX_CONDITION_NUMBER: f64 = 1.0e3;
-
-/// A single observed impact used for truing: range (internal yards) and the
-/// measured drop below line of sight expressed in the caller's drop unit.
-#[derive(Debug, Clone, Copy)]
-struct TruingObservation {
-    range_yd: f64,
-    drop: f64,
-}
-
-/// Parse an `--observed RANGE:DROP` token. RANGE is in the caller's distance
-/// units (yards imperial / meters metric) and is normalized to internal yards;
-/// DROP stays in the caller's drop unit. Returns a user-facing error string on
-/// malformed input so the CLI can report cleanly instead of panicking.
-fn parse_truing_observation(s: &str, units: UnitSystem) -> Result<TruingObservation, String> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 2 {
-        return Err(format!(
-            "invalid --observed '{s}': expected RANGE:DROP (e.g. 600:5.1)"
-        ));
-    }
-    let range: f64 = parts[0]
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid --observed range '{}' in '{s}'", parts[0]))?;
-    let drop: f64 = parts[1]
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid --observed drop '{}' in '{s}'", parts[1]))?;
-    if !range.is_finite() || !drop.is_finite() {
-        return Err(format!("invalid --observed '{s}': values must be finite"));
-    }
-    let range_yd = match units {
-        UnitSystem::Imperial => range,
-        UnitSystem::Metric => range / 0.9144,
-    };
-    Ok(TruingObservation { range_yd, drop })
-}
-
-/// Fixed load / atmosphere for a truing fit. The two free parameters (muzzle
-/// velocity and BC) are supplied per prediction so the fitter can vary them.
-struct TruingForwardModel<'a> {
-    drag_model: DragModelArg,
-    mass_gr: f64,
-    diameter_in: f64,
-    zero_yd: f64,
-    sight_in: f64,
-    temp_f: f64,
-    press_inhg: f64,
-    humidity: f64,
-    alt_ft: f64,
-    bc_segments: &'a Option<Vec<BCSegmentData>>,
-    drop_unit: DropUnit,
-}
-
-impl TruingForwardModel<'_> {
-    /// Predicted drop (in the configured drop unit) at `range_yd` for the given
-    /// muzzle velocity and BC, using the real trajectory solver.
-    fn predict(&self, mv_fps: f64, bc: f64, range_yd: f64) -> Result<f64, Box<dyn Error>> {
-        self.predict_in_unit(mv_fps, bc, range_yd, self.drop_unit)
-    }
-
-    /// `predict` expressed in an explicit unit, independent of the configured
-    /// `--drop-unit`. The identifiability diagnostics use this to stay in mil space
-    /// (MBA-1337 t1): the linear `in` unit weights each Jacobian row by its range,
-    /// which shifts the column correlation. NOTE this makes the gate DIAGNOSTICS
-    /// unit-invariant; the MV-only operating point and the least-squares cost are
-    /// still minimized in the display unit (deliberately out of scope — changing
-    /// them changes fitted numbers), so extreme near-boundary sets can still differ.
-    fn predict_in_unit(
-        &self,
-        mv_fps: f64,
-        bc: f64,
-        range_yd: f64,
-        unit: DropUnit,
-    ) -> Result<f64, Box<dyn Error>> {
-        let (drop_m, z_m) = solve_trajectory_drop(
-            mv_fps,
-            bc,
-            self.drag_model,
-            self.mass_gr,
-            self.diameter_in,
-            self.zero_yd,
-            range_yd,
-            self.sight_in,
-            self.temp_f,
-            self.press_inhg,
-            self.humidity,
-            self.alt_ft,
-            self.bc_segments,
-            true, // interpolate: smooth forward model for the fitter
-        )?;
-        Ok(unit.express_drop_m(drop_m, z_m))
-    }
-
-    /// Sum of squared residuals (predicted - observed) over all observations.
-    fn cost(&self, mv: f64, bc: f64, obs: &[TruingObservation]) -> Result<f64, Box<dyn Error>> {
-        let mut c = 0.0;
-        for o in obs {
-            let r = self.predict(mv, bc, o.range_yd)? - o.drop;
-            c += r * r;
-        }
-        Ok(c)
-    }
-}
-
-/// One-parameter (muzzle velocity) least-squares fit with BC held fixed. Damped
-/// Gauss-Newton with a central finite-difference derivative; robust because drop
-/// is monotonic in muzzle velocity. Returns `(mv_fps, iterations, converged)`.
-fn fit_truing_mv_only(
-    model: &TruingForwardModel<'_>,
-    obs: &[TruingObservation],
-    bc: f64,
-    mv_init: f64,
-) -> Result<(f64, usize, bool), Box<dyn Error>> {
-    let mut mv = mv_init.clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
-    let mut converged = false;
-    let mut iters = 0;
-    for i in 0..TRUING_MAX_ITERS {
-        iters = i + 1;
-        let h = (mv * 1e-3).max(0.5);
-        let mut num = 0.0;
-        let mut den = 0.0;
-        for o in obs {
-            let r = model.predict(mv, bc, o.range_yd)? - o.drop;
-            let dp = model.predict(mv + h, bc, o.range_yd)?;
-            let dm = model.predict(mv - h, bc, o.range_yd)?;
-            let j = (dp - dm) / (2.0 * h);
-            num += j * r;
-            den += j * j;
-        }
-        if den < 1e-12 {
-            break;
-        }
-        // Gauss-Newton step, limited to keep the solver in a sane regime.
-        let step = (-num / den).clamp(-300.0, 300.0);
-        let new_mv = (mv + step).clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
-        if (new_mv - mv).abs() < 0.05 {
-            mv = new_mv;
-            converged = true;
-            break;
-        }
-        mv = new_mv;
-    }
-    Ok((mv, iters, converged))
-}
-
-/// Identifiability diagnostics for BC at the operating point `(mv, bc)`.
-///
-/// Returns `(sensitivity_ratio, condition_number)`:
-///
-/// * `sensitivity_ratio = ||bc*d(drop)/d(bc)|| / ||mv*d(drop)/d(mv)||` — the
-///   relative influence of a fractional BC change vs a fractional MV change on
-///   the predicted drops. Small => BC barely moves the drops (weak-signal mode).
-///
-/// * `condition_number = (1+|c|)/(1-|c|)` where `c` is the correlation between
-///   the raw MV and BC Jacobian columns. Large => the two columns point the same
-///   way, so a BC change can be undone by an MV change and the pair is not
-///   separable (collinearity mode). This is magnitude-independent, unlike the
-///   scaled-normal-matrix condition, so it actually tracks observation spread.
-fn truing_identifiability(
-    model: &TruingForwardModel<'_>,
-    obs: &[TruingObservation],
-    mv: f64,
-    bc: f64,
-) -> Result<(f64, f64), Box<dyn Error>> {
-    let hmv = (mv * 1e-3).max(0.5);
-    let hbc = (bc * 1e-3).max(1e-4);
-    let (mut n_mv, mut n_bc, mut cross) = (0.0, 0.0, 0.0);
-    // Differentiate in mil space regardless of --drop-unit (MBA-1337 t1) so these
-    // gate diagnostics do not shift with the display unit. (The operating point mv
-    // comes from a display-unit fit, so full invariance is not guaranteed — see
-    // predict_in_unit's note.)
-    let unit = DropUnit::Mil;
-    for o in obs {
-        let jmv = (model.predict_in_unit(mv + hmv, bc, o.range_yd, unit)?
-            - model.predict_in_unit(mv - hmv, bc, o.range_yd, unit)?)
-            / (2.0 * hmv);
-        let jbc = (model.predict_in_unit(mv, bc + hbc, o.range_yd, unit)?
-            - model.predict_in_unit(mv, bc - hbc, o.range_yd, unit)?)
-            / (2.0 * hbc);
-        n_mv += jmv * jmv;
-        n_bc += jbc * jbc;
-        cross += jmv * jbc;
-    }
-    let norm_mv = n_mv.sqrt();
-    let norm_bc = n_bc.sqrt();
-    let sensitivity_ratio = if mv * norm_mv > 0.0 {
-        (bc * norm_bc) / (mv * norm_mv)
-    } else {
-        0.0
-    };
-    // Correlation between the raw Jacobian columns.
-    let condition_number = if norm_mv > 0.0 && norm_bc > 0.0 {
-        let c = (cross / (norm_mv * norm_bc)).clamp(-1.0, 1.0).abs();
-        if (1.0 - c) > 1e-15 {
-            (1.0 + c) / (1.0 - c)
-        } else {
-            f64::INFINITY
-        }
-    } else {
-        // One column is numerically zero: the missing parameter is unconstrained.
-        f64::INFINITY
-    };
-    Ok((sensitivity_ratio, condition_number))
-}
-
-/// Two-parameter (muzzle velocity, BC) joint fit via Levenberg-Marquardt
-/// (damped Gauss-Newton) with central finite-difference Jacobian. Only the
-/// diagonal of the normal matrix is damped (classic Marquardt scaling). Returns
-/// `(mv_fps, bc, iterations, converged)`.
-fn fit_truing_joint(
-    model: &TruingForwardModel<'_>,
-    obs: &[TruingObservation],
-    mv_init: f64,
-    bc_init: f64,
-) -> Result<(f64, f64, usize, bool), Box<dyn Error>> {
-    let mut mv = mv_init.clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
-    let mut bc = bc_init.clamp(TRUING_BC_MIN, TRUING_BC_MAX);
-    let mut lambda = 1e-3;
-    let mut cur_cost = model.cost(mv, bc, obs)?;
-    let mut converged = false;
-    let mut iters = 0;
-
-    for it in 0..TRUING_MAX_ITERS {
-        iters = it + 1;
-        let hmv = (mv * 1e-3).max(0.5);
-        let hbc = (bc * 1e-3).max(1e-4);
-        // Build J^T J (a00,a01,a11) and J^T r (g0,g1).
-        let (mut a00, mut a01, mut a11) = (0.0, 0.0, 0.0);
-        let (mut g0, mut g1) = (0.0, 0.0);
-        for o in obs {
-            let r = model.predict(mv, bc, o.range_yd)? - o.drop;
-            let jmv = (model.predict(mv + hmv, bc, o.range_yd)?
-                - model.predict(mv - hmv, bc, o.range_yd)?)
-                / (2.0 * hmv);
-            let jbc = (model.predict(mv, bc + hbc, o.range_yd)?
-                - model.predict(mv, bc - hbc, o.range_yd)?)
-                / (2.0 * hbc);
-            a00 += jmv * jmv;
-            a01 += jmv * jbc;
-            a11 += jbc * jbc;
-            g0 += jmv * r;
-            g1 += jbc * r;
-        }
-
-        // Inner loop: grow lambda until a step reduces the cost.
-        let mut accepted = false;
-        for _ in 0..30 {
-            let m00 = a00 + lambda * a00.max(1e-12);
-            let m11 = a11 + lambda * a11.max(1e-12);
-            let det = m00 * m11 - a01 * a01;
-            if det.abs() < 1e-20 {
-                lambda *= 10.0;
-                continue;
-            }
-            // delta = -(JtJ + lambda*diag)^-1 * Jtr
-            let dmv = -(m11 * g0 - a01 * g1) / det;
-            let dbc = -(-a01 * g0 + m00 * g1) / det;
-            let nmv = (mv + dmv).clamp(TRUING_MV_MIN_FPS, TRUING_MV_MAX_FPS);
-            let nbc = (bc + dbc).clamp(TRUING_BC_MIN, TRUING_BC_MAX);
-            let nc = model.cost(nmv, nbc, obs)?;
-            if nc < cur_cost {
-                let rel_change =
-                    (nmv - mv).abs() / mv.max(1.0) + (nbc - bc).abs() / bc.max(1e-3);
-                mv = nmv;
-                bc = nbc;
-                cur_cost = nc;
-                lambda = (lambda * 0.5).max(1e-9);
-                accepted = true;
-                if rel_change < 1e-6 {
-                    converged = true;
-                }
-                break;
-            }
-            lambda *= 4.0;
-            if lambda > 1e12 {
-                break;
-            }
-        }
-        if !accepted {
-            // No downhill step exists within damping range: we are at (or
-            // numerically indistinguishable from) a local optimum.
-            converged = true;
-            break;
-        }
-        if converged {
-            break;
-        }
-    }
-    Ok((mv, bc, iters, converged))
-}
-
-/// Final report produced by a multi-observation truing fit.
-struct MultiTruingReport {
-    fitted_mv_fps: f64,
-    fitted_bc: f64,
-    bc_input: f64,
-    bc_fitted: bool,
-    observations: Vec<TruingObservation>,
-    predicted: Vec<f64>,
-    residuals: Vec<f64>,
-    rms: f64,
-    iterations: usize,
-    converged: bool,
-    sensitivity_ratio: f64,
-    condition_number: f64,
-    quality: String,
-    reason: String,
-}
+// The compute core (constants, TruingObservation, TruingForwardModel, the
+// fitters, identifiability gates and MultiTruingReport) moved to
+// ballistics_engine::truing (MBA-1343) so the WASM terminal can reuse it.
+// Only the thin CLI wrapper and the rendering stay here.
 
 /// Orchestrate the multi-observation joint MV+BC calibration and print the
 /// result. `measured_drop`/`range_yd` are the primary observation (drop already
@@ -10713,7 +9113,8 @@ fn run_multi_observation_truing(
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
     // Assemble the observation set: primary (--range/--measured-drop) first,
-    // then every --observed token.
+    // then every --observed token (the typed core takes parsed observations;
+    // MBA-1343 review).
     let mut observations: Vec<TruingObservation> = Vec::with_capacity(observed.len() + 1);
     observations.push(TruingObservation {
         range_yd,
@@ -10723,41 +9124,21 @@ fn run_multi_observation_truing(
         observations.push(parse_truing_observation(token, units)?);
     }
 
-    // Validate: finite, positive range, non-zero drop, no duplicate ranges.
-    for o in &observations {
-        if !o.range_yd.is_finite() || o.range_yd <= 0.0 {
-            return Err(format!(
-                "observation range must be a positive finite distance (got {})",
-                o.range_yd
-            )
-            .into());
-        }
-        if !o.drop.is_finite() || o.drop == 0.0 {
-            return Err(
-                "observation drop must be non-zero (a zero drop carries no truing information)"
-                    .to_string()
-                    .into(),
-            );
-        }
-    }
-    for i in 0..observations.len() {
-        for j in (i + 1)..observations.len() {
-            if (observations[i].range_yd - observations[j].range_yd).abs() < 1e-6 {
-                return Err(format!(
-                    "duplicate observation range ({:.3} yd internal): each observation must be at a distinct range",
-                    observations[i].range_yd
-                )
-                .into());
-            }
-        }
-    }
+    // Pre-validate before announcing the fit: the core validates again (cheaply),
+    // but running the same check here first keeps the historical stderr contract —
+    // an invalid set (e.g. duplicate ranges) errors WITHOUT a "Fitting ..."
+    // progress line, exactly as it always has.
+    validate_truing_observations(&observations)?;
 
     eprintln!(
         "Fitting {} observations (joint MV+BC calibration)...",
         observations.len()
     );
 
-    let model = TruingForwardModel {
+    let report = run_multi_observation_truing_core(
+        &observations,
+        drop_unit,
+        bc_input,
         drag_model,
         mass_gr,
         diameter_in,
@@ -10768,191 +9149,12 @@ fn run_multi_observation_truing(
         humidity,
         alt_ft,
         bc_segments,
-        drop_unit,
-    };
-
-    // Step 1: MV-only fit holding BC at the supplied value. This is always
-    // well-posed and gives a good operating point for the identifiability check
-    // and (if BC is identifiable) the joint fit.
-    let mv_init = (TRUING_MV_MIN_FPS + TRUING_MV_MAX_FPS) / 2.0;
-    let (mv0, mv_iters, mv_conv) = fit_truing_mv_only(&model, &observations, bc_input, mv_init)?;
-    let rms_mv_only = rms_at(&model, &observations, mv0, bc_input)?;
-
-    // Step 2: is BC identifiable from this observation set?
-    let (sensitivity_ratio, condition_number) =
-        truing_identifiability(&model, &observations, mv0, bc_input)?;
-    let bc_identifiable = sensitivity_ratio >= TRUING_MIN_BC_SENSITIVITY_RATIO
-        && condition_number <= TRUING_MAX_CONDITION_NUMBER
-        && condition_number.is_finite();
-
-    // Step 3: joint fit when identifiable, with a guard against a worse or
-    // out-of-bounds result (never report a garbage joint fit).
-    let mut fitted_mv = mv0;
-    let mut fitted_bc = bc_input;
-    let mut bc_fitted = false;
-    let mut iterations = mv_iters;
-    // Start from the MV-only fitter's own flag (MBA-1337 t2): both MV-only outcomes
-    // (gate-refused joint, or joint rejected as worse) report THIS fit's convergence.
-    // The accepted-joint branch overwrites it with the joint fitter's flag.
-    let mut converged = mv_conv;
-    let mut reason = String::new();
-
-    if bc_identifiable {
-        let (mv_j, bc_j, iters_j, conv_j) =
-            fit_truing_joint(&model, &observations, mv0, bc_input)?;
-        let rms_joint = rms_at(&model, &observations, mv_j, bc_j)?;
-        let bc_at_bound = bc_j <= TRUING_BC_MIN * 1.001 || bc_j >= TRUING_BC_MAX * 0.999;
-        if !bc_at_bound && rms_joint <= rms_mv_only + 1e-9 {
-            fitted_mv = mv_j;
-            fitted_bc = bc_j;
-            bc_fitted = true;
-            iterations = iters_j;
-            converged = conv_j;
-        } else {
-            // Joint fit did not help (or ran to a bound): keep the honest
-            // MV-only answer rather than a false-precision BC.
-            reason = if bc_at_bound {
-                format!(
-                    "joint fit drove BC to a bound ({bc_j:.3}); BC held at input {bc_input:.3}"
-                )
-            } else {
-                format!(
-                    "joint fit did not improve on the MV-only solution; BC held at input {bc_input:.3}"
-                )
-            };
-        }
-    } else {
-        reason = if !condition_number.is_finite() || condition_number > TRUING_MAX_CONDITION_NUMBER
-        {
-            format!(
-                "observation ranges are too similar to separate MV from BC (condition {condition_number:.3e} > {TRUING_MAX_CONDITION_NUMBER:.0e}); BC held at input {bc_input:.3}"
-            )
-        } else {
-            format!(
-                "observations do not constrain BC (BC sensitivity ratio {sensitivity_ratio:.4} < {TRUING_MIN_BC_SENSITIVITY_RATIO:.2} threshold); BC held at input {bc_input:.3}. Add a longer-range / transonic observation to fit BC."
-            )
-        };
-    }
-
-    // Final residuals at the reported parameters. Alongside the display-unit RMS,
-    // accumulate a mil-equivalent RMS: the quality bands were calibrated in mil
-    // (~0.03 mil observation noise), so banding must not shift with --drop-unit
-    // (MBA-1337 t1). Reported numbers stay in the user's unit.
-    let mut predicted = Vec::with_capacity(observations.len());
-    let mut residuals = Vec::with_capacity(observations.len());
-    let mut sse = 0.0;
-    let mut sse_mil = 0.0;
-    for o in &observations {
-        let p = model.predict(fitted_mv, fitted_bc, o.range_yd)?;
-        let r = p - o.drop;
-        let r_mil = match drop_unit {
-            DropUnit::Mil => r,
-            // moa -> mil: divide by (180/pi)*60/1000 moa-per-mil.
-            DropUnit::Moa => r / ((180.0 / std::f64::consts::PI) * 60.0 / 1000.0),
-            // inches -> meters -> small-angle mil at this observation's range.
-            DropUnit::In => r * 0.0254 / (o.range_yd * 0.9144) * 1000.0,
-        };
-        predicted.push(p);
-        residuals.push(r);
-        sse += r * r;
-        sse_mil += r_mil * r_mil;
-    }
-    let rms = (sse / observations.len() as f64).sqrt();
-    let rms_mil = (sse_mil / observations.len() as f64).sqrt();
-
-    let quality = truing_quality_line(
-        bc_fitted,
-        rms,
-        rms_mil,
-        drop_unit,
-        condition_number,
-        converged,
-        observations.len(),
-    );
-
-    let report = MultiTruingReport {
-        fitted_mv_fps: fitted_mv,
-        fitted_bc,
-        bc_input,
-        bc_fitted,
-        observations,
-        predicted,
-        residuals,
-        rms,
-        iterations,
-        converged,
-        sensitivity_ratio,
-        condition_number,
-        quality,
-        reason,
-    };
-
+    )?;
     display_multi_truing_result(&report, drop_unit, units, chrono_fps, output);
     Ok(())
 }
 
-/// RMS of residuals at a candidate `(mv, bc)`.
-fn rms_at(
-    model: &TruingForwardModel<'_>,
-    obs: &[TruingObservation],
-    mv: f64,
-    bc: f64,
-) -> Result<f64, Box<dyn Error>> {
-    let mut sse = 0.0;
-    for o in obs {
-        let r = model.predict(mv, bc, o.range_yd)? - o.drop;
-        sse += r * r;
-    }
-    Ok((sse / obs.len() as f64).sqrt())
-}
-
-/// Plain-language quality assessment for the fit. `rms` is in the user's drop unit
-/// (displayed); `rms_mil` is the mil-equivalent the bands were calibrated against
-/// (~0.03 mil observation noise), so the quality word is unit-invariant (MBA-1337 t1).
-fn truing_quality_line(
-    bc_fitted: bool,
-    rms: f64,
-    rms_mil: f64,
-    drop_unit: DropUnit,
-    condition_number: f64,
-    converged: bool,
-    n_obs: usize,
-) -> String {
-    let unit = drop_unit.label();
-    let n_params = if bc_fitted { 2 } else { 1 };
-    // Exactly-determined fit (MBA-1337 t3): zero degrees of freedom drive the
-    // residuals to ~0 by construction — an "excellent" RMS validates nothing.
-    if n_obs == n_params {
-        return format!(
-            "{} fit is exactly determined ({n_obs} observations, {n_params} fitted \
-             parameters): residuals are zero by construction and do not validate the \
-             fit; add an observation to assess quality",
-            if bc_fitted { "Joint MV+BC" } else { "MV-only" }
-        );
-    }
-    let quality = if rms_mil < 0.05 {
-        "excellent"
-    } else if rms_mil < 0.15 {
-        "good"
-    } else if rms_mil < 0.4 {
-        "fair"
-    } else {
-        "poor (observations may be inconsistent)"
-    };
-    let nonconv = if converged { "" } else { " (did not fully converge)" };
-    if bc_fitted {
-        let cond = if condition_number.is_finite() {
-            format!("{condition_number:.0}")
-        } else {
-            "inf".to_string()
-        };
-        format!(
-            "Joint MV+BC fit, {quality}: RMS residual {rms:.3} {unit}, conditioning {cond}{nonconv}"
-        )
-    } else {
-        format!("MV-only fit, {quality}: RMS residual {rms:.3} {unit} (BC held fixed){nonconv}")
-    }
-}
+// rms_at and truing_quality_line moved to ballistics_engine::truing (MBA-1343).
 
 /// Render a multi-observation truing report as table / JSON / CSV.
 fn display_multi_truing_result(

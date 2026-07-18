@@ -1074,6 +1074,15 @@ Statistical analysis with parameter variations:
 
 ### WEZ (Weapon Employment Zone) Sweep
 
+> Also available in the WASM terminal (ballistics.sh): `monte-carlo --wez` with the
+> WEZ flags (`--target-size`, `--wind-call-error`, `--wez-start/-end/-step`, `-o`)
+> and output matching the native CLI. The terminal's `monte-carlo` does not expose
+> the base-wind or hold flags (`--wind-speed`, `--wind-direction`, `--wind-vertical`,
+> `--cant`, `--target-distance`, `--target-radius`), which stay at their defaults;
+> it does accept `--drag-model`, which the native command lacks. A sweep runs
+> num-sims full solves per range step in the browser — prefer `-n 300` for
+> interactive use.
+
 `monte-carlo --wez` answers a different question than the base command above. Instead of a
 single summary at one `--target-distance`, it sweeps a range of distances and reports **hit
 probability on a fixed target size at each range, holding a single zero** — the classic
@@ -1167,9 +1176,6 @@ per range step.
 **Performance**: `--num-sims` (`-n`, default 1000) is respected per range step, same as the
 base command — a WEZ sweep is `--num-sims` trajectories times the number of sweep steps, plus a
 handful of cheap deterministic solves per step for attribution.
-
-**Known limitation (WASM)**: `--wez` is currently CLI-only; the WASM build does not yet expose
-it. Tracked as a follow-up alongside the rest of WASM parity for this feature.
 
 ### BC Estimation
 
@@ -1457,6 +1463,13 @@ field names (`range_yd`, `observed_drop_mil`, `predicted_drop_mil`,
 
 > With zero `--observed` flags the command behaves exactly as the classic
 > single-observation velocity truing described above.
+
+> The WASM terminal (ballistics.sh) supports the `true-velocity` command —
+> single- and multi-observation — with output matching the native CLI. The
+> gaps: the online/BC5D flags (`--bc-table-dir`, `--bc-table-auto`,
+> `--bc-table-url`, `--offline-fallback`, `--api-url`, `--api-timeout`) and
+> `--bullet-length` are not exposed there (`--offline` is accepted as a no-op;
+> the terminal always calculates locally).
 
 ## Output Formats
 
