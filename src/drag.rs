@@ -259,16 +259,29 @@ pub fn load_drag_table(
         }
     }
 
-    // Fallback to CSV file
+    // Fallback to CSV file. Hand-parsed (MBA-1331: the `csv` crate is now a
+    // cli-feature dependency, and this was its only lib call site): any line whose
+    // first two comma-separated fields parse as f64 is a data row, everything else
+    // (headers, blanks, comments) is skipped. NOTE the old csv::Reader consumed the
+    // FIRST row as headers unconditionally, so a headerless file silently lost its
+    // first data point — parse-based skipping keeps that point.
     let csv_path = drag_tables_dir.join(format!("{filename}.csv"));
-    if let Ok(mut reader) = csv::Reader::from_path(&csv_path) {
+    if let Ok(bytes) = std::fs::read(&csv_path) {
+        // Lossy UTF-8 (a stray Latin-1 byte in a header comment must not reject the
+        // whole file) and bare-CR tolerance — the old csv::Reader accepted both.
+        let text = String::from_utf8_lossy(&bytes).replace('\r', "\n");
         let mut mach_values = Vec::new();
         let mut cd_values = Vec::new();
 
-        for record in reader.records().flatten() {
-            if record.len() >= 2 {
-                if let (Ok(mach), Ok(cd)) = (record[0].parse::<f64>(), record[1].parse::<f64>())
-                {
+        for line in text.lines() {
+            let mut fields = line.split(',');
+            if let (Some(m_str), Some(cd_str)) = (fields.next(), fields.next()) {
+                // trim_matches('"'): the old csv::Reader unquoted "1.05","0.42"-style
+                // rows (Excel exports); keep accepting them.
+                if let (Ok(mach), Ok(cd)) = (
+                    m_str.trim().trim_matches('"').trim().parse::<f64>(),
+                    cd_str.trim().trim_matches('"').trim().parse::<f64>(),
+                ) {
                     mach_values.push(mach);
                     cd_values.push(cd);
                 }
