@@ -1434,6 +1434,61 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Resolve the powder-temperature-adjusted muzzle velocity without running a
+    /// trajectory (MBA-737): the linear sensitivity model or a measured
+    /// temperature->velocity curve, with an optional sweep table across temperatures.
+    Powder {
+        /// Nominal muzzle velocity (fps or m/s based on --units) at the reference
+        /// temperature. Required for the linear model. With --powder-temp-curve the
+        /// curve supplies the velocity and this only anchors the reported shift.
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
+        velocity: Option<f64>,
+
+        /// Shot-day air temperature (°F/°C based on --units). Drives the linear
+        /// model's delta from the reference temperature; with --powder-temp-curve it
+        /// is the curve's lookup temperature when --powder-temp is not given (powder
+        /// assumed at air temperature).
+        #[arg(long)]
+        temperature: Option<f64>,
+
+        /// Powder temperature sensitivity (fps/°F imperial, m/s/°C metric).
+        /// Defaults to 1.0 fps/°F (0.54864 m/s/°C).
+        #[arg(long)]
+        powder_temp_sensitivity: Option<f64>,
+
+        /// Powder temperature (°F/°C). With --powder-temp-curve, this is the powder
+        /// temperature the curve is interpolated at to resolve muzzle velocity (defaults
+        /// to --temperature when omitted, i.e. powder assumed at air temperature). With
+        /// the linear model, it is the reference temperature the stated velocity was
+        /// measured at (defaults to the 70°F equivalent).
+        #[arg(long)]
+        powder_temp: Option<f64>,
+
+        /// Measured powder-temperature -> muzzle-velocity curve as comma-separated
+        /// TEMP:VELOCITY points, e.g. "40:2620,70:2700,100:2760" (temps in F/C,
+        /// velocities in fps / m·s⁻¹ per --units). The muzzle velocity is interpolated
+        /// from this table at the powder temperature (--powder-temp, or --temperature if
+        /// unset; clamped at the endpoints, no extrapolation). Data-driven, non-linear
+        /// alternative that OVERRIDES --powder-temp-sensitivity when supplied.
+        #[arg(long = "powder-temp-curve", value_name = "TEMP:VEL,...")]
+        powder_temp_curve: Option<String>,
+
+        /// Print a velocity table across a temperature range instead of a single
+        /// resolution: START:END:STEP in °F (imperial) or °C (metric), e.g.
+        /// "20:110:10". With a curve, the sweep temperatures are powder temperatures.
+        #[arg(long, value_name = "START:END:STEP")]
+        sweep: Option<String>,
+
+        /// Bullet mass (grains imperial / grams metric). When given, muzzle energy
+        /// (ft·lb / J) is reported alongside each resolved velocity.
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
+        mass: Option<f64>,
+
+        /// Output format (table, json, or csv)
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Generate wind drift card (wind deflection at multiple speeds)
     WindCard {
         /// Load parameters from saved profile
@@ -5965,6 +6020,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                 output,
                 bc_segments_data,
                 custom_drag_table,
+            )?;
+        }
+
+        Commands::Powder {
+            velocity,
+            temperature,
+            powder_temp_sensitivity,
+            powder_temp,
+            powder_temp_curve,
+            sweep,
+            mass,
+            output,
+        } => {
+            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref()
+            {
+                Some(s) => Some(parse_powder_temp_curve(s, cli.units)?),
+                None => None,
+            };
+            handle_powder(
+                velocity,
+                temperature,
+                powder_temp_sensitivity,
+                powder_temp,
+                powder_temp_curve_si,
+                sweep,
+                mass,
+                cli.units,
+                output,
             )?;
         }
 
@@ -11774,6 +11857,300 @@ fn handle_come_ups(
     }
 
     Ok(())
+}
+
+/// Standalone powder-temperature velocity resolution (MBA-737) — no trajectory solve.
+/// Delegates to the same `resolve_powder_adjusted_velocity` the trajectory and lead
+/// solvers call. NOTE: this command always applies the linear model, while
+/// trajectory/lead gate it behind --use-powder-sensitivity (a curve applies there
+/// unconditionally).
+#[allow(clippy::too_many_arguments)]
+fn handle_powder(
+    velocity: Option<f64>,
+    temperature: Option<f64>,
+    powder_temp_sensitivity: Option<f64>,
+    powder_temp: Option<f64>,
+    powder_temp_curve_si: Option<Vec<(f64, f64)>>,
+    sweep: Option<String>,
+    mass: Option<f64>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), String> {
+    use ballistics_engine::cli_api::parse_powder_sweep;
+    use ballistics_engine::resolve_powder_adjusted_velocity;
+
+    let has_curve = powder_temp_curve_si.as_ref().is_some_and(|c| !c.is_empty());
+    let curve_ref = powder_temp_curve_si.as_deref();
+
+    // Display-unit defaults identical to the trajectory/lead commands.
+    let sens_display = powder_temp_sensitivity.unwrap_or(match units {
+        UnitSystem::Imperial => 1.0,
+        UnitSystem::Metric => 0.3048 / (5.0 / 9.0),
+    });
+    let sens_si = UnitConverter::velocity_to_metric(sens_display, units)
+        / UnitConverter::temperature_delta_to_metric(1.0, units);
+    // Linear model: --powder-temp is the reference temperature the stated velocity
+    // was measured at (70F equivalent when omitted). Curve: it is the lookup temp.
+    let ref_temp_c = powder_temp
+        .map(|t| UnitConverter::temperature_to_metric(t, units))
+        .unwrap_or(DEFAULT_POWDER_REFERENCE_TEMP_C);
+    let powder_curve_temp_c: Option<f64> =
+        powder_temp.map(|t| UnitConverter::temperature_to_metric(t, units));
+    let ambient_c: Option<f64> =
+        temperature.map(|t| UnitConverter::temperature_to_metric(t, units));
+    let velocity_si: Option<f64> = velocity.map(|v| UnitConverter::velocity_to_metric(v, units));
+    let mass_kg: Option<f64> = mass.map(|m| UnitConverter::mass_to_metric(m, units));
+
+    // Validation: the linear model needs a nominal velocity; a single (non-sweep)
+    // resolution additionally needs a temperature to resolve at.
+    if !has_curve && velocity.is_none() {
+        return Err(
+            "--velocity is required for the linear model (or supply --powder-temp-curve)"
+                .to_string(),
+        );
+    }
+    let sweep_temps: Option<Vec<f64>> = match sweep.as_deref() {
+        Some(s) => Some(parse_powder_sweep(s)?),
+        None => None,
+    };
+    if sweep_temps.is_none() {
+        if !has_curve && temperature.is_none() {
+            return Err("--temperature is required (the shot-day air temperature), or use --sweep"
+                .to_string());
+        }
+        if has_curve && powder_temp.is_none() && temperature.is_none() {
+            return Err(
+                "--powder-temp or --temperature is required with --powder-temp-curve, or use --sweep"
+                    .to_string(),
+            );
+        }
+    }
+
+    // Resolve one velocity (m/s) at a display-unit temperature. For the linear model
+    // the temperature is the shot-day ambient; for a curve it is the powder
+    // temperature the curve is interpolated at.
+    let resolve_at_c = |temp_c: f64| -> f64 {
+        resolve_powder_adjusted_velocity(
+            velocity_si.unwrap_or(0.0),
+            temp_c,
+            !has_curve, // linear model implied by running this command without a curve
+            sens_si,
+            ref_temp_c,
+            curve_ref,
+            None, // per-row lookup IS temp_c; never pin sweep rows to one powder temp
+        )
+    };
+
+    let energy_at = |v_mps: f64| -> Option<f64> {
+        mass_kg.map(|m| UnitConverter::energy_from_metric(0.5 * m * v_mps * v_mps, units))
+    };
+    let (vel_unit, temp_unit, energy_unit) = match units {
+        UnitSystem::Imperial => ("fps", "°F", "ft·lb"),
+        UnitSystem::Metric => ("m/s", "°C", "J"),
+    };
+
+    struct PowderRow {
+        temp_display: f64,
+        velocity_display: f64,
+        shift_display: Option<f64>,
+        energy_display: Option<f64>,
+    }
+    let row_at = |temp_display: f64, temp_c: f64| -> PowderRow {
+        let v_mps = resolve_at_c(temp_c);
+        let v_display = UnitConverter::velocity_from_metric(v_mps, units);
+        PowderRow {
+            temp_display,
+            velocity_display: v_display,
+            shift_display: velocity.map(|nominal| v_display - nominal),
+            energy_display: energy_at(v_mps),
+        }
+    };
+
+    let rows: Vec<PowderRow> = match &sweep_temps {
+        Some(temps) => temps
+            .iter()
+            .map(|&t| row_at(t, UnitConverter::temperature_to_metric(t, units)))
+            .collect(),
+        None => {
+            // Single resolution. Linear: at the ambient temperature. Curve: at the
+            // powder temperature (falling back to ambient), matching the solver.
+            let (t_display, t_c) = if has_curve {
+                match (powder_temp, powder_curve_temp_c, temperature, ambient_c) {
+                    (Some(td), Some(tc), _, _) => (td, tc),
+                    (_, _, Some(td), Some(tc)) => (td, tc),
+                    _ => unreachable!("validated above"),
+                }
+            } else {
+                (temperature.expect("validated above"), ambient_c.expect("validated above"))
+            };
+            vec![row_at(t_display, t_c)]
+        }
+    };
+
+    let model_desc = if has_curve {
+        let curve = curve_ref.expect("has_curve");
+        let lo = UnitConverter::temperature_from_metric(curve[0].0, units);
+        let hi = UnitConverter::temperature_from_metric(curve[curve.len() - 1].0, units);
+        format!(
+            "measured curve, {} points ({:.1}\u{2013}{:.1} {})",
+            curve.len(),
+            lo,
+            hi,
+            temp_unit
+        )
+    } else {
+        format!("linear, {:.2} {}/{}", sens_display, vel_unit, temp_unit)
+    };
+
+    match output {
+        OutputFormat::Table => {
+            println!("Powder Temperature Velocity");
+            println!("===========================");
+            println!("  Model:              {}", model_desc);
+            if !has_curve {
+                println!(
+                    "  Reference temp:     {:.1} {}",
+                    UnitConverter::temperature_from_metric(ref_temp_c, units),
+                    temp_unit
+                );
+            }
+            if let Some(v) = velocity {
+                println!("  Nominal velocity:   {:.1} {}", v, vel_unit);
+            }
+            println!();
+            if rows.len() == 1 {
+                let r = &rows[0];
+                let temp_label = if has_curve { "Powder temp:" } else { "Shot temp:" };
+                println!("  {:<20}{:.1} {}", temp_label, r.temp_display, temp_unit);
+                match r.shift_display {
+                    Some(s) => println!(
+                        "  Resolved velocity:  {:.1} {}  ({:+.1})",
+                        r.velocity_display, vel_unit, s
+                    ),
+                    None => println!(
+                        "  Resolved velocity:  {:.1} {}",
+                        r.velocity_display, vel_unit
+                    ),
+                }
+                if let Some(e) = r.energy_display {
+                    println!("  Muzzle energy:      {:.0} {}", e, energy_unit);
+                }
+            } else {
+                let has_shift = rows.first().is_some_and(|r| r.shift_display.is_some());
+                let has_energy = rows.first().is_some_and(|r| r.energy_display.is_some());
+                print!("  {:>10}  {:>14}", format!("Temp ({})", temp_unit), format!("Velocity ({})", vel_unit));
+                if has_shift {
+                    print!("  {:>12}", format!("Shift ({})", vel_unit));
+                }
+                if has_energy {
+                    print!("  {:>15}", format!("Energy ({})", energy_unit));
+                }
+                println!();
+                for r in &rows {
+                    print!("  {:>10.1}  {:>14.1}", r.temp_display, r.velocity_display);
+                    if let Some(s) = r.shift_display {
+                        print!("  {:>12.1}", s);
+                    }
+                    if let Some(e) = r.energy_display {
+                        print!("  {:>15.0}", e);
+                    }
+                    println!();
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let round1 = |x: f64| (x * 10.0).round() / 10.0;
+            let rows_json: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    let mut o = serde_json::json!({
+                        "temperature": round1(r.temp_display),
+                        "velocity": round1(r.velocity_display),
+                    });
+                    if let Some(s) = r.shift_display {
+                        o["shift"] = serde_json::json!(round1(s));
+                    }
+                    if let Some(e) = r.energy_display {
+                        o["energy"] = serde_json::json!(e.round());
+                    }
+                    o
+                })
+                .collect();
+            let mut result = serde_json::json!({
+                "command": "powder",
+                "units": match units {
+                    UnitSystem::Imperial => "imperial",
+                    UnitSystem::Metric => "metric",
+                },
+                "model": if has_curve { "curve" } else { "linear" },
+            });
+            if !has_curve {
+                result["sensitivity"] = serde_json::json!(sens_display);
+                result["reference_temp"] =
+                    serde_json::json!(round1(UnitConverter::temperature_from_metric(ref_temp_c, units)));
+            } else {
+                result["curve_points"] = serde_json::json!(curve_ref.expect("has_curve").len());
+            }
+            if let Some(v) = velocity {
+                result["nominal_velocity"] = serde_json::json!(v);
+            }
+            if let Some(m) = mass {
+                result["mass"] = serde_json::json!(m);
+            }
+            if sweep_temps.is_some() {
+                result["sweep"] = serde_json::json!(rows_json);
+            } else {
+                result["resolved"] = rows_json.into_iter().next().unwrap_or(serde_json::json!(null));
+            }
+            println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
+        }
+        OutputFormat::Csv => {
+            let has_shift = rows.first().is_some_and(|r| r.shift_display.is_some());
+            let has_energy = rows.first().is_some_and(|r| r.energy_display.is_some());
+            let mut header = format!("temperature_{},velocity_{}", temp_unit_ascii(units), vel_unit_ascii(units));
+            if has_shift {
+                header.push_str(&format!(",shift_{}", vel_unit_ascii(units)));
+            }
+            if has_energy {
+                header.push_str(&format!(",energy_{}", energy_unit_ascii(units)));
+            }
+            println!("{}", header);
+            for r in &rows {
+                let mut line = format!("{:.1},{:.1}", r.temp_display, r.velocity_display);
+                if let Some(s) = r.shift_display {
+                    line.push_str(&format!(",{:.1}", s));
+                }
+                if let Some(e) = r.energy_display {
+                    line.push_str(&format!(",{:.0}", e));
+                }
+                println!("{}", line);
+            }
+        }
+        OutputFormat::Pdf => {
+            return Err("PDF output is not supported for the powder command".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// ASCII (CSV-header-safe) unit suffixes for the powder command's CSV output.
+fn temp_unit_ascii(units: UnitSystem) -> &'static str {
+    match units {
+        UnitSystem::Imperial => "f",
+        UnitSystem::Metric => "c",
+    }
+}
+fn vel_unit_ascii(units: UnitSystem) -> &'static str {
+    match units {
+        UnitSystem::Imperial => "fps",
+        UnitSystem::Metric => "mps",
+    }
+}
+fn energy_unit_ascii(units: UnitSystem) -> &'static str {
+    match units {
+        UnitSystem::Imperial => "ftlb",
+        UnitSystem::Metric => "j",
+    }
 }
 
 /// Moving-target lead table handler (MBA-1287).

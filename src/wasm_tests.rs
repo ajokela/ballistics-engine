@@ -1441,4 +1441,70 @@ Impact Velocity: 2510 fps\n";
             "--bore-height must alias --muzzle-height in the WASM CLI"
         );
     }
+
+    // --- MBA-737: `powder` command (parity with the native CLI handler) ---
+
+    #[wasm_bindgen_test]
+    fn test_powder_linear_model_mba1296_pin() {
+        // The MBA-1296 repro: 1.0 fps/degF, 40F day, 70F reference -> 2770, never 8400.
+        let out = WasmBallistics::new()
+            .run_command("powder -v 2800 --temperature 40")
+            .unwrap();
+        assert!(out.contains("2770.0 fps"), "{}", out);
+        assert!(out.contains("(-30.0)"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_powder_curve_interpolates_at_powder_temp() {
+        let out = WasmBallistics::new()
+            .run_command("powder --powder-temp-curve 40:2620,70:2700,100:2760 --powder-temp 55")
+            .unwrap();
+        assert!(out.contains("2660.0 fps"), "{}", out);
+        assert!(out.contains("measured curve, 3 points"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_powder_sweep_csv_includes_end_row() {
+        let out = WasmBallistics::new()
+            .run_command("powder -v 2700 --sweep 20:110:30 -o csv")
+            .unwrap();
+        assert!(out.contains("2650.0,-50.0"), "{}", out);
+        // The END row must not be dropped to float drift in the sweep expansion.
+        assert!(out.contains("2740.0,40.0"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_powder_json_resolved_object() {
+        let out = WasmBallistics::new()
+            .run_command("powder -v 2800 --temperature 40 -o json")
+            .unwrap();
+        assert!(out.contains("\"velocity\": 2770.0"), "{}", out);
+        assert!(out.contains("\"shift\": -30.0"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_powder_metric_resolves_in_celsius() {
+        // 0.54864 m/s/degC x (5 - 21) degC = -8.778 m/s -> 814.2
+        let out = WasmBallistics::new()
+            .run_command("--units metric powder -v 823 --temperature 5 --powder-temp 21")
+            .unwrap();
+        assert!(out.contains("814.2 m/s"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_powder_missing_inputs_error() {
+        assert!(WasmBallistics::new()
+            .run_command("powder --temperature 40")
+            .is_err());
+        assert!(WasmBallistics::new().run_command("powder -v 2800").is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_powder_energy_with_mass() {
+        // 168 gr at 2700 fps -> ~2719 ft-lb
+        let out = WasmBallistics::new()
+            .run_command("powder -v 2700 --temperature 70 -m 168")
+            .unwrap();
+        assert!(out.contains("2719 ft\u{b7}lb"), "{}", out);
+    }
 }

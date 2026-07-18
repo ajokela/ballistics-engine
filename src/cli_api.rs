@@ -365,6 +365,87 @@ pub fn interpolate_powder_temp_curve(curve: &[(f64, f64)], temp_c: f64) -> f64 {
     pts[n - 1].1
 }
 
+/// Parse a `--sweep START:END:STEP` temperature range (display units) for the
+/// `powder` command — ONE parser shared by the native CLI and WASM so their
+/// validation cannot drift. Returns the
+/// inclusive row temperatures. Guarded: STEP must be positive, END >= START, and the
+/// row count is capped so a typo can't emit an unbounded table.
+pub fn parse_powder_sweep(s: &str) -> Result<Vec<f64>, String> {
+    const MAX_SWEEP_ROWS: usize = 500;
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!(
+            "Invalid --sweep '{}': expected START:END:STEP (e.g. \"20:110:10\")",
+            s
+        ));
+    }
+    let parse = |p: &str, name: &str| -> Result<f64, String> {
+        p.trim()
+            .parse::<f64>()
+            .map_err(|_| format!("Invalid --sweep {}: '{}' is not a number", name, p.trim()))
+    };
+    let start = parse(parts[0], "START")?;
+    let end = parse(parts[1], "END")?;
+    let step = parse(parts[2], "STEP")?;
+    if !step.is_finite() || step <= 0.0 {
+        return Err(format!("Invalid --sweep STEP {}: must be positive", step));
+    }
+    if !start.is_finite() || !end.is_finite() || end < start {
+        return Err(format!(
+            "Invalid --sweep range {}:{}: END must be >= START",
+            start, end
+        ));
+    }
+    // Row count computed and bounds-checked in f64 BEFORE the usize cast: a huge
+    // range would saturate the cast and overflow the `+ 1` (panic under
+    // overflow-checks, wrap-to-zero in release — silently bypassing this cap).
+    // The epsilon keeps a fractional STEP whose quotient lands a hair below an
+    // integer (e.g. 0:0.3:0.1 -> 2.9999999999999996) from dropping the END row.
+    let n_f = ((end - start) / step + 1e-9).floor();
+    if !n_f.is_finite() || n_f + 1.0 > MAX_SWEEP_ROWS as f64 {
+        return Err(format!(
+            "--sweep would produce more than {} rows; use a larger STEP",
+            MAX_SWEEP_ROWS
+        ));
+    }
+    let n = n_f as usize + 1;
+    // Index-multiplied (not accumulated) so float drift can't drop the END row.
+    Ok((0..n).map(|i| start + step * i as f64).collect())
+}
+
+/// Resolve the powder-temperature-adjusted muzzle velocity (m/s) — the velocity the
+/// solver actually flies. A non-empty measured `powder_temp_curve` takes precedence
+/// (interpolated at `powder_curve_temp_c`, falling back to the ambient
+/// `ambient_temperature_c`; clamped at the endpoints) and REPLACES the nominal
+/// velocity; otherwise, when `use_powder_sensitivity` is set, the linear model adds
+/// `sensitivity x (ambient - reference)` to it. All inputs canonical SI (Celsius,
+/// m/s). This is the single shared implementation behind the trajectory solve, the
+/// `powder` CLI/WASM command (MBA-737), and anything else that must agree with them.
+pub fn resolve_powder_adjusted_velocity(
+    nominal_velocity_mps: f64,
+    ambient_temperature_c: f64,
+    use_powder_sensitivity: bool,
+    powder_temp_sensitivity_mps_per_c: f64,
+    powder_reference_temp_c: f64,
+    powder_temp_curve: Option<&[(f64, f64)]>,
+    powder_curve_temp_c: Option<f64>,
+) -> f64 {
+    if let Some(curve) = powder_temp_curve {
+        if !curve.is_empty() {
+            let lookup_c = powder_curve_temp_c.unwrap_or(ambient_temperature_c);
+            return interpolate_powder_temp_curve(curve, lookup_c);
+        }
+        // A supplied-but-empty curve has always suppressed the linear fallback
+        // (the historical `else if`); preserve that exactly.
+        return nominal_velocity_mps;
+    }
+    if use_powder_sensitivity {
+        let temp_delta_c = ambient_temperature_c - powder_reference_temp_c;
+        return nominal_velocity_mps + powder_temp_sensitivity_mps_per_c * temp_delta_c;
+    }
+    nominal_velocity_mps
+}
+
 // Wind conditions
 #[derive(Debug, Clone)]
 pub struct WindConditions {
@@ -651,19 +732,18 @@ impl TrajectorySolver {
         // inputs — the main trajectory AND the zero-angle search — sees the same
         // temperature-resolved velocity. In particular, when a zero solve passes the
         // zero-day temperature, the curve automatically yields the zero-day velocity.
-        if let Some(curve) = inputs.powder_temp_curve.as_ref() {
-            if !curve.is_empty() {
-                // Interpolate at the POWDER temperature, which defaults to the ambient
-                // air temperature but can be decoupled (powder warmed/cooled relative to
-                // the air) via powder_curve_temp_c. Air temperature still drives density
-                // separately; this only sets the velocity. Absolute override (idempotent).
-                let lookup_c = inputs.powder_curve_temp_c.unwrap_or(inputs.temperature);
-                inputs.muzzle_velocity = interpolate_powder_temp_curve(curve, lookup_c);
-            }
-        } else if inputs.use_powder_sensitivity {
-            let temp_delta_c = inputs.temperature - inputs.powder_temp;
-            inputs.muzzle_velocity += inputs.powder_temp_sensitivity * temp_delta_c;
-        }
+        // (Curve interpolates at the POWDER temperature — powder_curve_temp_c, falling
+        // back to ambient. Air temperature still drives density separately; this only
+        // sets the velocity. Absolute override, so applying it here is idempotent.)
+        inputs.muzzle_velocity = resolve_powder_adjusted_velocity(
+            inputs.muzzle_velocity,
+            inputs.temperature,
+            inputs.use_powder_sensitivity,
+            inputs.powder_temp_sensitivity,
+            inputs.powder_temp,
+            inputs.powder_temp_curve.as_deref(),
+            inputs.powder_curve_temp_c,
+        );
 
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
@@ -3587,6 +3667,99 @@ pub fn estimate_bc_from_trajectory(
 // Add rand dependencies for Monte Carlo
 use rand;
 use rand_distr;
+
+#[cfg(test)]
+mod mba737_powder_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn linear_model_cold_powder_subtracts() {
+        // 0.5486 m/s per degC (1 fps/degF), shot day 10 C below the 21.1 C reference.
+        let v = resolve_powder_adjusted_velocity(823.0, 11.1, true, 0.5486, 21.1, None, None);
+        assert!((v - (823.0 + 0.5486 * (11.1 - 21.1))).abs() < 1e-12);
+        assert!(v < 823.0);
+    }
+
+    #[test]
+    fn linear_model_hot_powder_adds() {
+        let v = resolve_powder_adjusted_velocity(823.0, 31.1, true, 0.5486, 21.1, None, None);
+        assert!((v - (823.0 + 0.5486 * 10.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn disabled_flag_is_passthrough() {
+        let v = resolve_powder_adjusted_velocity(823.0, 40.0, false, 0.5486, 21.1, None, None);
+        assert_eq!(v, 823.0);
+    }
+
+    #[test]
+    fn curve_overrides_linear_and_interpolates_at_powder_temp() {
+        let curve = [(4.4, 798.6), (21.1, 823.0), (37.8, 841.2)];
+        // Explicit powder temp decouples from ambient: interpolate at 4.4 C, not 30 C.
+        let v = resolve_powder_adjusted_velocity(823.0, 30.0, true, 99.0, 21.1, Some(&curve), Some(4.4));
+        assert!((v - 798.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn curve_falls_back_to_ambient_and_clamps() {
+        let curve = [(4.4, 798.6), (37.8, 841.2)];
+        // Ambient far below the coldest measured point: clamp, no extrapolation.
+        let v = resolve_powder_adjusted_velocity(823.0, -40.0, true, 1.0, 21.1, Some(&curve), None);
+        assert!((v - 798.6).abs() < 1e-9);
+        let v_hot = resolve_powder_adjusted_velocity(823.0, 60.0, true, 1.0, 21.1, Some(&curve), None);
+        assert!((v_hot - 841.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn empty_curve_suppresses_linear_fallback() {
+        // Historical `else if` semantics: Some-but-empty curve means NO adjustment.
+        let v = resolve_powder_adjusted_velocity(823.0, 40.0, true, 0.5486, 21.1, Some(&[]), None);
+        assert_eq!(v, 823.0);
+    }
+
+    #[test]
+    fn sweep_huge_range_errors_instead_of_overflowing() {
+        // Review finding: the old count math saturated the usize cast and the +1
+        // panicked (debug) or wrapped to zero rows (release), bypassing the cap.
+        assert!(parse_powder_sweep("0:1e20:1").is_err());
+        assert!(parse_powder_sweep("0:1e308:1e-3").is_err());
+    }
+
+    #[test]
+    fn sweep_fractional_step_keeps_end_row() {
+        // 0.3/0.1 floats to 2.9999999999999996; the END row must survive the floor.
+        let rows = parse_powder_sweep("0:0.3:0.1").unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!((rows[3] - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn solver_and_helper_agree_on_linear_model() {
+        // The solve() seam must fly exactly what the helper reports (MBA-737 contract).
+        let inputs = BallisticInputs {
+            use_powder_sensitivity: true,
+            powder_temp_sensitivity: 0.5486,
+            powder_temp: 21.1,
+            temperature: 4.4,
+            ..Default::default()
+        };
+        let expected = resolve_powder_adjusted_velocity(
+            inputs.muzzle_velocity,
+            inputs.temperature,
+            true,
+            0.5486,
+            21.1,
+            None,
+            None,
+        );
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        assert!((solver.inputs.muzzle_velocity - expected).abs() < 1e-12);
+    }
+}
 
 #[cfg(test)]
 mod mba1302_solver_seam_tests {

@@ -991,6 +991,65 @@ angle, and per-row deltas against load #1 (`delta_drop`, `delta_drift`, `delta_v
 `delta_energy` — zero for the baseline itself); `-o csv` emits one column group per load
 (names sanitized for CSV). PDF output is not supported for this command.
 
+### Powder Temperature Velocity (`powder`)
+
+Resolve the powder-temperature-adjusted muzzle velocity without running a trajectory.
+The physics is the exact resolution the `trajectory` and `lead` solvers apply
+internally (one shared implementation). One flag difference: `powder` always applies
+the linear model, while `trajectory`/`lead` only apply it when you also pass
+`--use-powder-sensitivity` (a measured curve applies there unconditionally) — carry
+that flag along or your trajectory will fly the nominal velocity:
+
+```bash
+# Linear model: 2800 fps load (measured at the default 70 °F reference), 40 °F day
+ballistics powder -v 2800 --temperature 40
+```
+
+```
+Powder Temperature Velocity
+===========================
+  Model:              linear, 1.00 fps/°F
+  Reference temp:     70.0 °F
+  Nominal velocity:   2800.0 fps
+
+  Shot temp:          40.0 °F
+  Resolved velocity:  2770.0 fps  (-30.0)
+```
+
+```bash
+# Measured curve (overrides the linear model): interpolate at a 55 °F powder temp
+ballistics powder --powder-temp-curve "40:2620,70:2700,100:2760" --powder-temp 55
+
+# Velocity ladder across a temperature range, with muzzle energy
+ballistics powder -v 2700 -m 168 --sweep 20:110:30
+```
+
+```
+Powder Temperature Velocity
+===========================
+  Model:              linear, 1.00 fps/°F
+  Reference temp:     70.0 °F
+  Nominal velocity:   2700.0 fps
+
+   Temp (°F)  Velocity (fps)   Shift (fps)   Energy (ft·lb)
+        20.0          2650.0         -50.0             2619
+        50.0          2680.0         -20.0             2679
+        80.0          2710.0          10.0             2739
+       110.0          2740.0          40.0             2800
+```
+
+Flags follow the session `--units` (fps + °F imperial; m/s + °C metric) and carry the
+same meanings as on `trajectory`/`lead`: `--powder-temp-sensitivity` defaults to
+1.0 fps/°F (0.54864 m/s/°C); `--powder-temp` is the linear model's *reference*
+temperature — the temperature the stated `-v` velocity was measured at, defaulting to
+70 °F — or, with `--powder-temp-curve`, the powder temperature the curve is
+interpolated at (defaulting to `--temperature`, i.e. powder at air temperature; the
+curve is clamped at its endpoints, never extrapolated). With a curve the sweep
+temperatures are powder temperatures, and `-v` is optional — the curve supplies the
+velocity, `-v` only anchors the reported shift. `-m/--mass` (grains/grams) adds muzzle
+energy (ft·lb / J). Output: table (default), `-o json`, or `-o csv`; PDF is not
+supported for this command.
+
 ### Monte Carlo Simulation
 
 Statistical analysis with parameter variations:
