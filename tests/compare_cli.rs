@@ -209,3 +209,96 @@ fn optional_diameter_field_is_accepted() {
     ]));
     assert!(stdout.contains("dia 0.338"), "explicit diameter not echoed:\n{stdout}");
 }
+
+#[test]
+fn profile_bc_segments_flow_into_compare() {
+    // MBA-735 follow-up: a saved profile's velocity-BC segments must reach both the
+    // zeroing and the sampled runs (the scalar-BC caveat is lifted for compare).
+    // Hermetic: profiles live under $HOME/.ballistics, so point HOME at a temp dir,
+    // save a scalar profile, then inject bc_segments into its JSON the way an .a7p
+    // import would (profile save has no --bc-segment flag).
+    use std::fs;
+    let home = std::env::temp_dir().join(format!("compare-prof-{}", std::process::id()));
+    fs::create_dir_all(&home).unwrap();
+
+    let save = Command::new(BIN)
+        .env("HOME", &home)
+        .args([
+            "profile", "save", "segtest", "-v", "2650", "-b", "0.243", "-m", "175", "-d",
+            "0.308", "--drag-model", "g7",
+        ])
+        .output()
+        .expect("spawn profile save");
+    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+
+    // Inject two velocity-BC segments (velocity_mps is always m/s in ProfileData):
+    // markedly higher BC than the scalar 0.243 so the trajectories must diverge.
+    let path = home.join(".ballistics").join("profiles").join("segtest.json");
+    let mut profile: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    profile["bc_segments"] = serde_json::json!([
+        {"bc": 0.35, "velocity_mps": 807.7},
+        {"bc": 0.30, "velocity_mps": 500.0}
+    ]);
+    fs::write(&path, serde_json::to_string_pretty(&profile).unwrap()).unwrap();
+
+    // Scalar twin via --load (identical numbers, no segments) vs the segmented profile.
+    let o = Command::new(BIN)
+        .env("HOME", &home)
+        .args([
+            "compare",
+            "--load",
+            "twin:g7:0.243:175:2650",
+            "--profile",
+            "segtest",
+            "--zero-distance",
+            "100",
+            "--end",
+            "600",
+            "--step",
+            "100",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("spawn compare");
+    let stdout = ok_stdout(&o);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let loads = v["compare"]["loads"].as_array().unwrap();
+    assert_eq!(loads[0]["bc_segments"], false, "scalar twin mis-flagged");
+    assert_eq!(loads[1]["bc_segments"], true, "profile segments not detected");
+
+    // Segments (higher BC everywhere) must produce measurably less drop at 600.
+    let last = v["compare"]["rows"].as_array().unwrap().last().unwrap()["loads"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let twin_drop = last[0]["drop_adj"].as_f64().unwrap();
+    let seg_drop = last[1]["drop_adj"].as_f64().unwrap();
+    assert!(
+        seg_drop.abs() < twin_drop.abs() * 0.98,
+        "segments did not change the physics: twin {twin_drop} vs segmented {seg_drop}"
+    );
+
+    // And the table legend tags the segment-backed load.
+    let table = ok_stdout(
+        &Command::new(BIN)
+            .env("HOME", &home)
+            .args([
+                "compare",
+                "--load",
+                "twin:g7:0.243:175:2650",
+                "--profile",
+                "segtest",
+                "--zero-distance",
+                "100",
+                "--end",
+                "300",
+            ])
+            .output()
+            .expect("spawn compare table"),
+    );
+    assert!(table.contains("[BC segments]"), "table legend missing tag:\n{table}");
+
+    fs::remove_dir_all(&home).ok();
+}

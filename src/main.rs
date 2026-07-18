@@ -6249,6 +6249,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             for name in &profiles {
                 let p = load_profile_for_units(name, cli.units)?;
+                // MBA-1323 Phase 2 shape: a profile's velocity-BC segments / Mach-Cd
+                // drag curve, resolved to engine shapes and used by zeroing AND the
+                // sampled runs (the scalar-BC-only caveat is lifted for compare).
+                let bc_segments_data = p
+                    .bc_segments
+                    .as_ref()
+                    .map(|rows| bc_segments_from_profile(rows));
+                let custom_drag_table = p
+                    .drag_curve
+                    .as_ref()
+                    .map(|pts| {
+                        drag_table_from_profile(pts).map_err(|e| {
+                            format!("profile '{name}': saved drag curve is invalid: {e}")
+                        })
+                    })
+                    .transpose()?;
                 compare_loads.push(CompareLoad {
                     name: name.clone(),
                     drag_model: parse_drag_model_arg(&p.drag_model),
@@ -6256,6 +6272,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     mass: p.mass,
                     velocity: p.velocity,
                     diameter: p.diameter,
+                    bc_segments_data,
+                    custom_drag_table,
                 });
             }
             if compare_loads.len() < 2 {
@@ -12821,6 +12839,9 @@ fn handle_range_table(
 }
 
 /// One load in a `compare` run, in DISPLAY units per the session `--units`.
+/// `bc_segments_data`/`custom_drag_table` come only from saved profiles (inline
+/// `--load` specs are scalar-BC by design) and are threaded into BOTH the zero
+/// solve and the sampled runs so the zero uses the same drag physics (MBA-735).
 struct CompareLoad {
     name: String,
     drag_model: DragModelArg,
@@ -12828,6 +12849,8 @@ struct CompareLoad {
     mass: f64,
     velocity: f64,
     diameter: f64,
+    bc_segments_data: Option<Vec<BCSegmentData>>,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 }
 
 /// Parse a `--load` spec: NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER] (MBA-735).
@@ -12879,6 +12902,8 @@ fn parse_compare_load_spec(spec: &str, units: UnitSystem) -> Result<CompareLoad,
         mass,
         velocity,
         diameter,
+        bc_segments_data: None,
+        custom_drag_table: None,
     })
 }
 
@@ -12962,6 +12987,10 @@ fn handle_compare(
             bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
             sight_height: sight_height_m,
             use_rk4: true,
+            // The zero must use the same drag physics as the trajectory runs below.
+            use_bc_segments: load.bc_segments_data.is_some(),
+            bc_segments_data: load.bc_segments_data.clone(),
+            custom_drag_table: load.custom_drag_table.clone(),
             ..Default::default()
         };
         let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
@@ -12989,8 +13018,8 @@ fn handle_compare(
             end_m * 1.1,
             sample_m,
             zero_angle,
-            None,
-            None,
+            load.bc_segments_data.clone(),
+            load.custom_drag_table.clone(),
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
         let no_wind_samples = run_sampled_trajectory(
@@ -13009,8 +13038,8 @@ fn handle_compare(
             end_m * 1.1,
             sample_m,
             zero_angle,
-            None,
-            None,
+            load.bc_segments_data.clone(),
+            load.custom_drag_table.clone(),
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
 
@@ -13090,6 +13119,8 @@ fn handle_compare(
                             "velocity": l.velocity,
                             "diameter": l.diameter,
                             "zero_angle_deg": res.zero_angle_deg,
+                            "bc_segments": l.bc_segments_data.is_some(),
+                            "custom_drag_curve": l.custom_drag_table.is_some(),
                         })
                     }).collect::<Vec<_>>(),
                     "conditions": {
@@ -13188,8 +13219,13 @@ fn handle_compare(
             );
             println!();
             for (i, l) in loads.iter().enumerate() {
+                let physics_tag = match (&l.bc_segments_data, &l.custom_drag_table) {
+                    (_, Some(_)) => " [custom drag curve]",
+                    (Some(_), None) => " [BC segments]",
+                    (None, None) => "",
+                };
                 println!(
-                    "  #{num} {name}: {dm} BC {bc}, {mass} @ {vel} {vel_unit} (dia {dia})",
+                    "  #{num} {name}: {dm} BC {bc}, {mass} @ {vel} {vel_unit} (dia {dia}){physics_tag}",
                     num = i + 1,
                     name = l.name,
                     dm = match l.drag_model {
@@ -13200,6 +13236,7 @@ fn handle_compare(
                     mass = l.mass,
                     vel = l.velocity,
                     dia = l.diameter,
+                    physics_tag = physics_tag,
                 );
             }
             println!();
