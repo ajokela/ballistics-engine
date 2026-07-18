@@ -132,6 +132,62 @@ fn success_is_one_clean_envelope_and_units_are_ignored() {
 }
 
 #[test]
+fn named_conformance_fixture_requests_stay_clean_over_the_cli_transport() {
+    for (name, request, success) in [
+        (
+            "calm-air",
+            include_str!("fixtures/solve_json_v1/calm-air.request.json"),
+            include_str!("fixtures/solve_json_v1/calm-air.success.json"),
+        ),
+        (
+            "crosswind",
+            include_str!("fixtures/solve_json_v1/crosswind.request.json"),
+            include_str!("fixtures/solve_json_v1/crosswind.success.json"),
+        ),
+        (
+            "segmented-wind",
+            include_str!("fixtures/solve_json_v1/segmented-wind.request.json"),
+            include_str!("fixtures/solve_json_v1/segmented-wind.success.json"),
+        ),
+        (
+            "zeroed",
+            include_str!("fixtures/solve_json_v1/zeroed.request.json"),
+            include_str!("fixtures/solve_json_v1/zeroed.success.json"),
+        ),
+    ] {
+        let output = run(&["solve-json"], request.as_bytes());
+        assert_exit(&output, 0);
+        assert!(
+            output.stderr.is_empty(),
+            "{name}: stderr must stay quiet on success"
+        );
+        let wire = envelope(&output);
+        let expected: Value =
+            serde_json::from_str(success).expect("checked success fixture must be valid JSON");
+        assert_eq!(wire["schema_version"], 1, "{name}");
+        assert_eq!(wire["status"], "ok", "{name}");
+        assert_eq!(
+            wire["summary"]["termination"], expected["summary"]["termination"],
+            "{name}"
+        );
+        assert_eq!(
+            wire["samples"].as_array().map(Vec::len),
+            expected["samples"].as_array().map(Vec::len),
+            "{name}: sample cardinality diverged from the checked fixture"
+        );
+        // The resolved request is a deterministic echo of the input plus documented defaults for
+        // every pair except `zeroed`, whose effective muzzle angle is solver-derived and is pinned
+        // with numeric tolerance by the contract tests instead.
+        if name != "zeroed" {
+            assert_eq!(
+                wire["resolved_request"], expected["resolved_request"],
+                "{name}: resolved request diverged from the checked fixture"
+            );
+        }
+    }
+}
+
+#[test]
 fn malformed_json_and_invalid_utf8_report_source_locations() {
     for input in [
         b"{\n  \"schema_version\": 1,\n  \"projectile\": ]\n}".as_slice(),
