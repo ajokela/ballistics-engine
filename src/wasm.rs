@@ -1131,6 +1131,14 @@ impl WasmBallistics {
             // air density and/or muzzle velocity) is modeled correctly while the
             // trajectory below still runs under the current shot-day conditions.
             let mut zero_inputs = inputs.clone();
+            // The zero is torn on a LEVEL range: shot-day slope and cant belong to
+            // the SHOT, not the zero geometry. The native CLI's zero_inputs literal
+            // never carries them (both default to 0); this clone must strip them or
+            // an inclined shot (--shooting-angle) makes the zero root-find
+            // unbracketable — and where it does converge, it bakes the incline into
+            // the zero, which is the wrong physics (Bero's PRS report).
+            zero_inputs.shooting_angle = 0.0;
+            zero_inputs.cant_angle = 0.0;
             let mut zero_atmosphere = atmosphere.clone();
             let mut zero_day_overridden = false;
             if let Some(zv) = zero_velocity {

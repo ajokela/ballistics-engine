@@ -1445,6 +1445,31 @@ Impact Velocity: 2510 fps\n";
     // --- MBA-737: `powder` command (parity with the native CLI handler) ---
 
     #[wasm_bindgen_test]
+    fn test_auto_zero_converges_on_inclined_shot() {
+        // Field report (PRS use): --auto-zero with a nonzero --shooting-angle failed
+        // ("not bracketed") because the zero solve inherited the shot-day incline.
+        // The zero is torn on a level range: same adjustment at any shooting angle.
+        let cmd = |ang: u32| {
+            WasmBallistics::new()
+                .run_command(&format!(
+                    "trajectory -v 2650 -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+                     --sight-height 2.48 --auto-zero 100 --shooting-angle {ang} --max-range 300"
+                ))
+                .unwrap()
+        };
+        let flat = cmd(0);
+        let incline = cmd(5);
+        assert!(!incline.contains("Error calculating zero"), "{}", incline);
+        let zero_line =
+            |s: &str| s.lines().find(|l| l.contains("Rifle zeroed")).map(str::to_string);
+        assert_eq!(
+            zero_line(&flat),
+            zero_line(&incline),
+            "same rifle zero regardless of shot incline"
+        );
+    }
+
+    #[wasm_bindgen_test]
     fn test_trajectory_plot_appends_charts() {
         // MBA-1337 p3: --plot appends both charts after the table (table-only).
         let out = WasmBallistics::new()
