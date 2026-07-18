@@ -55,6 +55,10 @@ const JSON_RPC_INVALID_REQUEST: i64 = -32600;
 const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSON_RPC_INVALID_PARAMS: i64 = -32602;
 const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
+/// MCP lifecycle: request received before a successful `initialize`. The MCP spec
+/// mandates the rejection but reserves no code for it; -32002 follows the LSP
+/// ServerNotInitialized convention MCP implementations commonly borrow.
+const JSON_RPC_SERVER_NOT_INITIALIZED: i64 = -32002;
 
 /// Fallback `protocolVersion` used only when a client's `initialize` request omits it or sends
 /// a non-string value. This server otherwise always echoes the client's requested
@@ -88,6 +92,8 @@ enum LineOutcome {
 }
 
 fn run_session<R: BufRead, W: Write>(mut reader: R, mut writer: W) -> i32 {
+    // MCP lifecycle state: set once an `initialize` request succeeds (MBA-1337 m3).
+    let mut initialized = false;
     loop {
         let outcome = match read_bounded_line(&mut reader) {
             Ok(outcome) => outcome,
@@ -119,7 +125,7 @@ fn run_session<R: BufRead, W: Write>(mut reader: R, mut writer: W) -> i32 {
                 "message is not valid UTF-8",
                 None,
             )),
-            LineOutcome::Line(line) => dispatch_line(&line),
+            LineOutcome::Line(line) => dispatch_line(&line, &mut initialized),
         };
 
         if let Some(response) = response {
@@ -251,7 +257,7 @@ fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) -> V
 /// missing or non-string `method`, or an `id` of a disallowed type) always gets a response, with
 /// `id: null` when no valid id could be recovered — this is the sense in which "malformed lines
 /// produce JSON-RPC errors, never process exit."
-fn dispatch_line(line: &str) -> Option<Value> {
+fn dispatch_line(line: &str, initialized: &mut bool) -> Option<Value> {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(error) => {
@@ -275,7 +281,18 @@ fn dispatch_line(line: &str) -> Option<Value> {
 
     let id_present = object.contains_key("id");
     let id_value = object.get("id").cloned().unwrap_or(Value::Null);
-    let id_type_ok = matches!(id_value, Value::String(_) | Value::Number(_) | Value::Null);
+    // JSON-RPC 2.0: a Number id SHOULD NOT contain fractional parts — reject 1.5 but
+    // keep accepting integral-valued floats like 2.0, which the spec permits and which
+    // this server always accepted (MBA-1337 m1).
+    let id_type_ok = match &id_value {
+        Value::String(_) | Value::Null => true,
+        Value::Number(n) => {
+            n.is_i64()
+                || n.is_u64()
+                || n.as_f64().is_some_and(|f| f.is_finite() && f.fract() == 0.0)
+        }
+        _ => false,
+    };
 
     let jsonrpc_ok = object.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
     let method = object.get("method").and_then(Value::as_str).map(str::to_string);
@@ -300,9 +317,23 @@ fn dispatch_line(line: &str) -> Option<Value> {
         return None;
     }
 
-    Some(dispatch_guarded(id_value, || {
-        handle_request(&method, params.as_ref())
-    }))
+    // MCP lifecycle (MBA-1337 m3): until an `initialize` request has succeeded, only
+    // `initialize` and `ping` are served. Notifications already returned above (no
+    // response channel), so this gates requests only.
+    if !*initialized && method != "initialize" && method != "ping" {
+        return Some(error_response(
+            id_value,
+            JSON_RPC_SERVER_NOT_INITIALIZED,
+            "server not initialized: send an initialize request first",
+            None,
+        ));
+    }
+
+    let response = dispatch_guarded(id_value, || handle_request(&method, params.as_ref()));
+    if method == "initialize" && response.get("result").is_some() {
+        *initialized = true;
+    }
+    Some(response)
 }
 
 /// Run `call` behind [`catch_unwind`] and turn its outcome into a response envelope.
@@ -522,7 +553,22 @@ fn handle_tools_call(params: Option<&Value>) -> Result<Value, RpcError> {
 
     match name {
         "solve" => call_solve_tool(arguments),
-        "engine_info" => Ok(call_engine_info_tool()),
+        // engine_info advertises additionalProperties:false and "takes no arguments";
+        // enforce it (MBA-1337 m2) instead of silently discarding whatever arrives.
+        "engine_info" => match &arguments {
+            Value::Object(map) if map.is_empty() => Ok(call_engine_info_tool()),
+            Value::Object(map) => Err(RpcError::new(
+                JSON_RPC_INVALID_PARAMS,
+                format!(
+                    "engine_info takes no arguments; unexpected argument(s): {}",
+                    map.keys().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            )),
+            _ => Err(RpcError::new(
+                JSON_RPC_INVALID_PARAMS,
+                "engine_info arguments must be an object (or omitted)",
+            )),
+        },
         other => Err(RpcError::new(
             JSON_RPC_INVALID_PARAMS,
             format!("unknown tool: {other}"),
@@ -605,8 +651,11 @@ fn call_engine_info_tool() -> Value {
 mod tests {
     use super::*;
 
+    /// Dispatch one line in an already-initialized session — the common case for
+    /// request tests. Lifecycle-specific tests drive dispatch_line directly.
     fn dispatch(line: &str) -> Value {
-        dispatch_line(line).expect("expected a response for this line")
+        let mut initialized = true;
+        dispatch_line(line, &mut initialized).expect("expected a response for this line")
     }
 
     #[test]
@@ -683,10 +732,85 @@ mod tests {
 
     #[test]
     fn well_formed_notification_gets_no_response() {
+        let mut initialized = true;
         assert_eq!(
-            dispatch_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
+            dispatch_line(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                &mut initialized
+            ),
             None
         );
+    }
+
+    #[test]
+    fn fractional_numeric_id_is_invalid_request() {
+        // JSON-RPC 2.0: Number ids SHOULD NOT contain fractional parts (MBA-1337 m1).
+        let response = dispatch(r#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#);
+        assert_eq!(response["error"]["code"], JSON_RPC_INVALID_REQUEST);
+        assert_eq!(response["id"], Value::Null);
+    }
+
+    #[test]
+    fn integral_valued_float_id_stays_accepted() {
+        // 2.0 has no fractional part: the spec permits it and this server always
+        // accepted it — the m1 tightening must not regress that.
+        let response = dispatch(r#"{"jsonrpc":"2.0","id":2.0,"method":"ping"}"#);
+        assert_eq!(response["result"], json!({}));
+        assert_eq!(response["id"], json!(2.0));
+    }
+
+    #[test]
+    fn engine_info_rejects_unexpected_arguments() {
+        // The schema advertises additionalProperties:false — enforce it (MBA-1337 m2).
+        let response = dispatch(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"engine_info","arguments":{"foo":1}}}"#,
+        );
+        assert_eq!(response["error"]["code"], JSON_RPC_INVALID_PARAMS);
+        assert!(response["error"]["message"].as_str().unwrap().contains("foo"));
+    }
+
+    #[test]
+    fn engine_info_rejects_non_object_arguments() {
+        let response = dispatch(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"engine_info","arguments":42}}"#,
+        );
+        assert_eq!(response["error"]["code"], JSON_RPC_INVALID_PARAMS);
+    }
+
+    #[test]
+    fn requests_before_initialize_are_rejected_except_ping() {
+        // MCP lifecycle (MBA-1337 m3): a fresh session serves only initialize + ping.
+        let mut initialized = false;
+        let rejected = dispatch_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            &mut initialized,
+        )
+        .unwrap();
+        assert_eq!(rejected["error"]["code"], JSON_RPC_SERVER_NOT_INITIALIZED);
+        assert!(!initialized);
+
+        let ping = dispatch_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+            &mut initialized,
+        )
+        .unwrap();
+        assert_eq!(ping["result"], json!({}));
+        assert!(!initialized, "ping must not count as initialization");
+
+        let init = dispatch_line(
+            r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#,
+            &mut initialized,
+        )
+        .unwrap();
+        assert!(init["result"].is_object());
+        assert!(initialized);
+
+        let listed = dispatch_line(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#,
+            &mut initialized,
+        )
+        .unwrap();
+        assert!(listed["result"]["tools"].is_array());
     }
 
     #[test]

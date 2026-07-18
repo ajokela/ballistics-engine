@@ -1445,6 +1445,29 @@ Impact Velocity: 2510 fps\n";
     // --- MBA-737: `powder` command (parity with the native CLI handler) ---
 
     #[wasm_bindgen_test]
+    fn test_trajectory_plot_appends_charts() {
+        // MBA-1337 p3: --plot appends both charts after the table (table-only).
+        let out = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot")
+            .unwrap();
+        assert!(out.contains("Drop vs Range:"), "{}", out);
+        assert!(out.contains("Lateral Drift vs Range:"), "{}", out);
+        let ascii = WasmBallistics::new()
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot ascii",
+            )
+            .unwrap();
+        assert!(ascii.contains("Drop vs Range:"), "{}", ascii);
+        // JSON stays pure machine output even with --plot.
+        let json = WasmBallistics::new()
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot -o json",
+            )
+            .unwrap();
+        assert!(!json.contains("Drop vs Range:"), "{}", json);
+    }
+
+    #[wasm_bindgen_test]
     fn test_powder_linear_model_mba1296_pin() {
         // The MBA-1296 repro: 1.0 fps/degF, 40F day, 70F reference -> 2770, never 8400.
         let out = WasmBallistics::new()

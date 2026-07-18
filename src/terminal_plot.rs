@@ -1,9 +1,8 @@
 //! Zero-dependency terminal chart rendering for `trajectory --plot` (MBA-1320).
 //!
-//! CLI-only presentation code: this module is a `main.rs`-local `mod` (like
-//! [`crate::pdf_dope_card`] and [`crate::solve_json_command`]), not part of the published
-//! `ballistics_engine` library API — bindings/consumers embedding the crate have no use for
-//! a terminal chart renderer.
+//! Presentation code shared by the native CLI and the WASM terminal (MBA-1337 p3
+//! moved it from a `main.rs`-local `mod` into the lib so `wasm.rs` can render the
+//! same charts). It stays dependency-free; bindings consumers can simply ignore it.
 //!
 //! Two canvas backends share one dot-addressed API (`new`, `width_dots`/`height_dots`,
 //! `set`, `render`):
