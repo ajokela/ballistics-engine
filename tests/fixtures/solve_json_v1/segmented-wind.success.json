@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "engine_version": "0.26.0",
+  "status": "ok",
+  "resolved_request": {
+    "schema_version": 1,
+    "projectile": {
+      "mass_kg": 0.01134,
+      "diameter_m": 0.00782,
+      "length_m": 0.031,
+      "drag_model": "G7",
+      "ballistic_coefficient": 0.243
+    },
+    "rifle": {
+      "muzzle_velocity_mps": 823.0,
+      "sight_height_m": 0.05,
+      "muzzle_height_m": 1.2,
+      "twist_rate_m_per_turn": 0.2032,
+      "twist_direction": "right"
+    },
+    "shot": {
+      "max_range_m": 300.0,
+      "muzzle_angle_rad": 0.001,
+      "aim_azimuth_rad": 0.0,
+      "shot_azimuth_rad": 0.0,
+      "shooting_angle_rad": 0.0,
+      "cant_angle_rad": 0.0,
+      "target_height_m": 1.25,
+      "ground_threshold_m": -100.0
+    },
+    "atmosphere": {
+      "altitude_m": 0.0,
+      "temperature_k": 293.15,
+      "pressure_pa": 100000.0,
+      "relative_humidity": 0.4
+    },
+    "wind": {
+      "segments": [
+        {
+          "until_distance_m": 100.0,
+          "speed_mps": 4.4704,
+          "direction_from_rad": 1.5707963267948966,
+          "vertical_speed_mps": 0.0
+        },
+        {
+          "until_distance_m": 200.0,
+          "speed_mps": 2.2352,
+          "direction_from_rad": 1.5707963267948966,
+          "vertical_speed_mps": 0.0
+        },
+        {
+          "until_distance_m": 300.0,
+          "speed_mps": 4.4704,
+          "direction_from_rad": 4.71238898038469,
+          "vertical_speed_mps": 0.0
+        }
+      ]
+    },
+    "solver": {
+      "method": "rk45",
+      "time_step_s": 0.001
+    },
+    "effects": {
+      "magnus": false,
+      "coriolis": false,
+      "enhanced_spin_drift": false
+    },
+    "sampling": {
+      "interval_m": 50.0
+    }
+  },
+  "assumptions": [],
+  "warnings": [
+    {
+      "code": "rk45_time_step_ignored",
+      "message": "Adaptive RK45 owns its time step; the explicitly supplied fixed time step is retained in resolved_request but ignored by integration.",
+      "path": "$.solver.time_step_s"
+    }
+  ],
+  "summary": {
+    "actual_range_m": 300.0,
+    "maximum_height_m": 1.233393299452102,
+    "time_of_flight_s": 0.4105253172425064,
+    "terminal_speed_mps": 649.3335403693281,
+    "terminal_energy_j": 2390.6650444973684,
+    "stability_factor": 4.095309067995591,
+    "termination": "max_range"
+  },
+  "samples": [
+    {
+      "distance_m": 0.0,
+      "time_s": 0.0,
+      "speed_mps": 823.0,
+      "energy_j": 3840.45543,
+      "drop_m": 0.050000000000000044,
+      "windage_m": 0.0,
+      "mach": 2.394233725500156,
+      "flags": []
+    },
+    {
+      "distance_m": 50.0,
+      "time_s": 0.061914005035338476,
+      "speed_mps": 792.4430043027635,
+      "energy_j": 3560.566738437769,
+      "drop_m": 0.018563264246371336,
+      "windage_m": -0.005188494768486727,
+      "mach": 2.3053387198521764,
+      "flags": []
+    },
+    {
+      "distance_m": 100.0,
+      "time_s": 0.12623699122357018,
+      "speed_mps": 762.5103310193263,
+      "energy_j": 3296.662767846518,
+      "drop_m": 0.026190296637507382,
+      "windage_m": -0.021145619779792936,
+      "mach": 2.2182599642390746,
+      "flags": []
+    },
+    {
+      "distance_m": 150.0,
+      "time_s": 0.19311448170281614,
+      "speed_mps": 733.2197338630413,
+      "energy_j": 3048.2553799754915,
+      "drop_m": 0.0761262082529699,
+      "windage_m": -0.04557930363880931,
+      "mach": 2.1330491069467095,
+      "flags": []
+    },
+    {
+      "distance_m": 200.0,
+      "time_s": 0.26267289533915167,
+      "speed_mps": 704.5789129878436,
+      "energy_j": 2814.7662910358345,
+      "drop_m": 0.17145636259659347,
+      "windage_m": -0.07600536395075948,
+      "mach": 2.049728548908548,
+      "flags": []
+    },
+    {
+      "distance_m": 250.0,
+      "time_s": 0.33509501403573483,
+      "speed_mps": 676.6179125086103,
+      "energy_j": 2595.792903320978,
+      "drop_m": 0.31641162789808475,
+      "windage_m": -0.10304192239807597,
+      "mach": 1.968385693080958,
+      "flags": []
+    },
+    {
+      "distance_m": 300.0,
+      "time_s": 0.4105253172425064,
+      "speed_mps": 649.3335403693281,
+      "energy_j": 2390.6650444973684,
+      "drop_m": 0.514781887428205,
+      "windage_m": -0.11663071689833285,
+      "mach": 1.8890112532814851,
+      "flags": [
+        "terminal"
+      ]
+    }
+  ]
+}
