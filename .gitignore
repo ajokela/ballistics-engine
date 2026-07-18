@@ -125,3 +125,4 @@ MIPS_BUILD_NOTES.md
 /pkg/
 /pkg-web/
 /pkg-nodejs/
+release-artifacts/
