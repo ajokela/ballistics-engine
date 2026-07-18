@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--profile`), each load zeroed independently at the shared `--zero-distance`, then run
   through identical wind/atmosphere. Table output shows per-load drop/drift/velocity per
   range; JSON adds energy, time of flight, zero angles, and per-row deltas vs load #1;
-  CSV emits one sanitized column group per load.
+  CSV emits one sanitized column group per load. Saved-profile loads carry their
+  velocity-BC segments and custom Cd(Mach) drag curves into both the zeroing and the
+  trajectory runs (tagged in the table legend and flagged in JSON) — the range-table
+  scalar-BC caveat does not apply to `compare`.
 
 ## [0.26.0] - 2026-07-17
 

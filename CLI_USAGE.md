@@ -979,9 +979,11 @@ ballistics compare --load "Factory:g1:0.475:168:2700" --profile my-match-load \
 Load-spec fields follow the session `--units`: `MASS` is grains (imperial) or grams
 (metric), `VELOCITY` fps or m/s, and the optional `DIAMETER` inches or mm (defaulting to
 .308 in / 7.82 mm). `DRAG` is `g1` or `g7`, and `NAME` may not contain `:`. Between 2 and
-8 loads are accepted, from `--load` and/or `--profile` in any combination (like
-`range-table`, a saved profile's `bc_segments`/`drag_curve` are not yet consumed here —
-the scalar BC is used).
+8 loads are accepted, from `--load` and/or `--profile` in any combination. A saved
+profile's velocity-BC segments and custom Cd(Mach) drag curve (e.g. from an `.a7p`
+import) ARE consumed here — they drive both the load's zeroing and its trajectory runs,
+and such loads are tagged `[BC segments]` / `[custom drag curve]` in the table legend
+(and flagged in JSON). Inline `--load` specs use the scalar BC.
 
 The table shows per-load drop, drift (both in the `--adjustment-unit`), and velocity at
 each range. `-o json` adds linear drop/drift, energy, time of flight, each load's zero
