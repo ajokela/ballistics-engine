@@ -1644,7 +1644,8 @@ enum Commands {
 
     /// Compare multiple loads side-by-side at the same conditions (MBA-735)
     Compare {
-        /// A load as NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER] (repeat 2-8 times).
+        /// A load as NAME:DRAG:BC:MASS:VELOCITY with an optional sixth :DIAMETER
+        /// field (repeat 2-8 times).
         /// DRAG is g1|g7; MASS is grains/grams, VELOCITY fps|m/s, DIAMETER in|mm
         /// per --units (diameter defaults to .308 in / 7.82 mm). NAME must not
         /// contain ':'. Mixable with --profile.
@@ -12853,7 +12854,7 @@ struct CompareLoad {
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 }
 
-/// Parse a `--load` spec: NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER] (MBA-735).
+/// Parse a `--load` spec: `NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]` (MBA-735).
 /// Follows the `--wind-segment` colon convention; all numbers are display units.
 fn parse_compare_load_spec(spec: &str, units: UnitSystem) -> Result<CompareLoad, Box<dyn Error>> {
     let parts: Vec<&str> = spec.split(':').collect();
