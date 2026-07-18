@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `powder` command (MBA-737): resolve the powder-temperature-adjusted muzzle velocity
+  without running a trajectory — linear fps-per-degree model or a measured
+  `--powder-temp-curve` (clamped interpolation, overrides linear), `--sweep
+  START:END:STEP` velocity ladders, optional muzzle energy via `-m/--mass`, and
+  table/json/csv output. Same command in the WASM terminal. The physics is one shared
+  implementation (`resolve_powder_adjusted_velocity`, now public with
+  `interpolate_powder_temp_curve`): the solver's inline powder resolution was extracted
+  to it, so the command prints exactly what the trajectory/lead solvers fly. NOTE:
+  `powder` always applies the linear model; `trajectory`/`lead` still gate theirs
+  behind `--use-powder-sensitivity` (a curve applies there unconditionally).
+- WASM terminal: `trajectory --plot` (MBA-1337) — the native terminal charts (braille
+  or ascii, drop + lateral drift vs range) render in the browser terminal;
+  `terminal_plot` moved into the library unchanged.
+- WASM terminal: full `true-velocity` command (MBA-1343) — single-observation truing
+  AND the multi-observation `--observed RANGE:DROP` joint MV+BC calibration, with
+  table/json/csv output character-identical to the native CLI (multi-obs JSON floats
+  may differ in the last ~3 of 17 significant digits across ISAs). The truing core
+  moved to a new `ballistics_engine::truing` module.
+- WASM terminal: `monte-carlo --wez` (MBA-1343) — the full Weapon Employment Zone
+  sweep (rect/circular targets, wind-call error in quadrature, seeded per-step MC,
+  variance attribution) with summary/statistics/full output byte-identical to native.
+  The WEZ compute moved to a new `ballistics_engine::wez` module; the per-step seed
+  (reproducibility contract) lives in the library.
+- Truing quality/robustness (MBA-1337): quality bands now judge a mil-equivalent RMS
+  so the verdict no longer changes with `--drop-unit`; identifiability diagnostics
+  differentiate in mil space; the MV-only convergence flag is reported instead of a
+  hardcoded `true`; exactly-determined fits (observations == fitted parameters) say so
+  instead of reading "excellent".
+- MCP server hardening (MBA-1337): fractional JSON-RPC ids rejected (integral floats
+  like `2.0` still accepted); `engine_info` enforces its advertised
+  `additionalProperties: false`; requests before `initialize` are rejected with
+  `-32002` (ping exempt).
+- `solve-json` v1: named cross-interface conformance fixtures (MBA-1309).
+- Docs: units-by-output-surface reference table in CLI_USAGE (native world-frame JSON
+  vs table/CSV deflection vs solve-json vs the WASM terminal's `drop_inches`/`drop_cm`
+  keys), plus the default-bore-height (60 in vs 1500 mm) and mover-ring unit notes.
 - `compare` command (MBA-735): side-by-side multi-load comparison. Repeatable
   `--load "NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]"` specs (2-8 loads, mixable with
   `--profile`), each load zeroed independently at the shared `--zero-distance`, then run
@@ -17,6 +53,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   velocity-BC segments and custom Cd(Mach) drag curves into both the zeroing and the
   trajectory runs (tagged in the table legend and flagged in JSON) — the range-table
   scalar-BC caveat does not apply to `compare`.
+
+### Changed
+- WASM terminal: the new `true-velocity` and `monte-carlo` handlers reject bare
+  (non-flag) tokens and value-less flags with clear errors, matching native clap —
+  previously such input was silently ignored, which in multi-observation truing could
+  fit fewer observations than the user supplied (MBA-1343 review).
+- Bin-only dependencies (clap, clap_complete, csv, dirs, strsim) moved behind a
+  default-on `cli` feature (MBA-1331); the `ballistics` binary declares
+  `required-features = ["cli"]`. Plain builds and `cargo install` are unchanged;
+  lib-only consumers can drop the five with `default-features = false`. NOTE any
+  `--no-default-features` build that needs the BINARY must add `--features cli` or the
+  bin target is silently skipped.
+- WEZ dominant-source labels are now the snake_case spellings (`wind_call`, `mv_sd`,
+  `other`) on every surface (MBA-1337); the summary table and statistics CSV
+  previously used display spellings ("wind call", "MV SD", "other/group"). The
+  `-o full` JSON contract is unchanged.
+
+### Fixed
+- WASM terminal: `--auto-zero` with a nonzero `--shooting-angle` no longer fails
+  ("Zero angle did not converge … not bracketed") or bakes the incline into the zero
+  (MBA-1344) — the zero solve now runs on a level range like the native CLI, so the
+  rifle's zero is independent of the shot's slope and cant.
+- The drag-table CSV fallback loader no longer silently loses the first data row of a
+  headerless file (a side effect of the old csv-crate headers mode), and tolerates
+  quoted fields, stray non-UTF-8 bytes, and bare-CR line endings (MBA-1331).
 
 ## [0.26.0] - 2026-07-17
 

@@ -16,11 +16,22 @@ use nalgebra::{Vector3, Vector6};
 use std::error::Error;
 use std::fmt;
 
-// Unit system for input/output
+/// Unit system for CLI-style inputs and outputs.
+///
+/// The single crate-wide unit-system selector, shared by the CLI binary
+/// (`--units`), the truing core ([`crate::truing`]) and the WEZ sweep core
+/// ([`crate::wez`]). It only selects how user-facing quantities are
+/// interpreted and displayed; the solver itself always works in SI.
+///
+/// Variant order (Metric first) is load-bearing for the CLI: clap lists
+/// `--units` possible values in declaration order.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum UnitSystem {
-    Imperial,
+    /// Metric units (velocity in m/s, mass in grams, distance in meters, diameter in mm, Celsius)
     Metric,
+    /// Imperial units (velocity in fps, mass in grains, distance in yards, diameter in inches, Fahrenheit)
+    Imperial,
 }
 
 // Output format for results

@@ -52,6 +52,10 @@ pub mod ffi;
 pub mod solve_json;
 pub mod solve_v1;
 pub mod terminal_plot;
+// MBA-1343: multi-observation velocity/BC truing core, shared by the CLI and the WASM terminal.
+pub mod truing;
+// MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
+pub mod wez;
 pub mod trajectory_observation;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
