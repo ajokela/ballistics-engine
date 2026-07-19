@@ -740,7 +740,7 @@ impl TruingForwardModel<'_> {
         }
 
         let velocity_ms = mv_fps * 0.3048;
-        let mass_kg = self.mass_gr * 0.0000647989;
+        let mass_kg = self.mass_gr * GRAINS_TO_KG;
         let diameter_m = self.diameter_in * 0.0254;
         let zero_m = self.zero_yd * 0.9144;
         let max_range_m = max_range_yd * 0.9144;
