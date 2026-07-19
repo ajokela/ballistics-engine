@@ -3478,8 +3478,24 @@ fn timestamp_string() -> String {
     format!("{}", secs)
 }
 
+/// Warning for drag-model strings the CLI silently coerces to G1. The native
+/// CLI supports G1/G7 only (DragModelArg); anything else — including families
+/// the library enum knows (G2/G5/G6/G8/GI/GS) and plain typos — became G1
+/// with no feedback until MBA-1386's fix-half added this warning.
+fn drag_model_arg_warning(s: &str) -> Option<String> {
+    match s.to_uppercase().as_str() {
+        "G1" | "G7" => None,
+        other => Some(format!(
+            "warning: drag model '{other}' is not supported by the CLI (G1/G7 only); using G1. Full-family support is tracked in MBA-1386."
+        )),
+    }
+}
+
 /// Parse the drag model string from a profile
 fn parse_drag_model_arg(s: &str) -> DragModelArg {
+    if let Some(w) = drag_model_arg_warning(s) {
+        eprintln!("{w}");
+    }
     match s.to_uppercase().as_str() {
         "G7" => DragModelArg::G7,
         _ => DragModelArg::G1,
@@ -13603,6 +13619,31 @@ mod adjustment_unit_tests {
     fn short_range_returns_zero() {
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Moa), 0.0);
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Mil), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod drag_model_arg_warning_tests {
+    use super::*;
+
+    #[test]
+    fn drag_model_arg_warning_flags_silent_g1_coercion() {
+        assert!(drag_model_arg_warning("g1").is_none());
+        assert!(drag_model_arg_warning("G7").is_none());
+        for s in ["g5", "G8", "banana"] {
+            let w = drag_model_arg_warning(s).expect("must warn");
+            assert!(w.contains("using G1"), "{w}");
+        }
+    }
+
+    #[test]
+    fn parse_drag_model_arg_still_coerces_to_g1_or_g7() {
+        // The warning is purely informational (stderr) — behavior is unchanged.
+        assert_eq!(parse_drag_model_arg("G7"), DragModelArg::G7);
+        assert_eq!(parse_drag_model_arg("g7"), DragModelArg::G7);
+        assert_eq!(parse_drag_model_arg("G1"), DragModelArg::G1);
+        assert_eq!(parse_drag_model_arg("G5"), DragModelArg::G1);
+        assert_eq!(parse_drag_model_arg("banana"), DragModelArg::G1);
     }
 }
 

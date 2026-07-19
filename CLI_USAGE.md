@@ -2160,6 +2160,7 @@ ignored by the local solver, so east and west gave identical output.
 - Full drag tables with Mach-indexed coefficients
 - Transonic corrections applied automatically
 - Standard drag tables are used without an automatic Reynolds multiplier; a low-Re helper remains available through the Rust API only
+- The native CLI's `--drag-model` accepts only `g1`/`g7`; anything else (a typo, or another family name) prints a `warning:` to stderr and silently uses G1. The browser terminal (ballistics.sh) additionally accepts `G2`/`G5`/`G6`/`G8`/`GI`/`GS`, of which `G2`/`G5`/`GI`/`GS` currently ship no dedicated table and print a `warning:` note that they use the G1 curve as an approximation (MBA-1386).
 
 ### BC Modeling
 - **BC Segmentation**: Velocity-dependent BC based on bullet type

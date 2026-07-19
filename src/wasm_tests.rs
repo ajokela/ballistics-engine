@@ -1748,4 +1748,20 @@ Impact Velocity: 2510 fps\n";
             );
         }
     }
+
+    /// MBA-1386 fix-half: G2/G5/GI/GS are valid `DragModel` variants but ship no
+    /// dedicated table, so the solver silently substitutes the G1 curve
+    /// (`get_drag_coefficient`, src/drag.rs). The WASM terminal must surface this
+    /// with a "using the G1 curve" note; G1/G7 (dedicated tables) must stay silent.
+    #[wasm_bindgen_test]
+    fn test_g5_reports_g1_fallback_note() {
+        let out = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300")
+            .unwrap();
+        assert!(out.contains("using the G1 curve"), "{}", out);
+        let clean = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g7 --max-range 300")
+            .unwrap();
+        assert!(!clean.contains("using the G1 curve"), "{}", clean);
+    }
 }
