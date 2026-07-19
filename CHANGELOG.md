@@ -5,6 +5,44 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.1] - 2026-07-19
+
+### Added
+- Truing experiment design (MBA-1346): new native `plan-truing` command and
+  `truing_plan` library API choose an exact-size, minimum-separation-compliant set of
+  target ranges from an explicit candidate list/grid. The deterministic
+  exhaustive/greedy-exchange optimizer reuses batched production-solver Jacobians,
+  reports sensitivity, conditioning, singular values, weak-axis uncertainty,
+  station information gain, and rejected/unreachable candidates, and returns an
+  honest MV-only recommendation when the available facility cannot identify BC.
+- Uncertainty-aware MV/BC truing (MBA-1353): opt-in known-1σ observation weighting,
+  per-reading sigma overrides, explicit independent MV/BC priors, a constrained
+  weighted joint MAP, local-Gaussian covariance/95% parameter intervals/correlation,
+  effective degrees of freedom, and propagated model/future-observation drop bands.
+  Approximation failures and weak/prior-dominated identification are structured and
+  visible; the legacy point-estimate path/schema remains unchanged when uncertainty
+  is not requested.
+
+### Fixed
+- Restored the MBA-1346/MBA-1353 truing analysis features (plan-truing command,
+  uncertainty-aware true-velocity, truing_plan/truing_uncertainty library
+  modules) whose implementation had not been committed; recovered and
+  validated against their surviving test suites (884-test baseline).
+- FFI: `ballistics_calculate_trajectory_with_drag_table` (and the zero-angle
+  variant) now reject custom drag tables longer than
+  `MAX_FFI_DRAG_TABLE_LEN` (4096 rows) instead of attempting unbounded
+  allocations from a caller-supplied length (MBA-1407).
+- Truing: the remaining drifted grain-to-kg literals (including the recovered predict_many_in_unit site) now use the canonical
+  `constants::GRAINS_TO_KG` (~1.5e-7 relative correction, invisible at output
+  precision; completes MBA-1327/MBA-1333) (MBA-1408).
+- WASM terminal: `--auto-zero` no longer inherits the shot's Coriolis
+  conditions (latitude/azimuth), matching the native CLI's zero solve
+  (fix-half of MBA-1384; zero-day opt-in flags remain future work).
+- Drag models: requesting a family without a dedicated table now warns
+  instead of silently using G1 — native CLI profile/CSV strings other than
+  G1/G7 warn on stderr; the browser terminal prints a note for G2/G5/GI/GS
+  (fix-half of MBA-1386; real tables remain future work).
+
 ## [0.27.0] - 2026-07-18
 
 ### Added

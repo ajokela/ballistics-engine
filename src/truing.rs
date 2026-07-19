@@ -10,7 +10,10 @@
 
 use std::error::Error;
 
+use serde::Serialize;
+
 use crate::cli_api::UnitSystem;
+use crate::constants::GRAINS_TO_KG;
 use crate::{
     AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel, TrajectorySolver,
     WindConditions,
@@ -21,7 +24,8 @@ use crate::{
 /// onto the engine's [`DragModel`] inside the solvers; unlike [`DragModel`] it
 /// deliberately offers only the two standard models the truing forward model
 /// supports.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum DragModelArg {
     G1,
@@ -32,7 +36,8 @@ pub enum DragModelArg {
 /// `true-velocity`'s multi-observation joint calibration (MBA-1316). The
 /// historical single-observation path is always MIL, so `mil` is the default and
 /// leaves that path byte-identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum DropUnit {
     /// Milliradians (angular)
@@ -134,7 +139,7 @@ pub(crate) fn solve_trajectory_drop(
 ) -> Result<(f64, f64), Box<dyn Error>> {
     // Convert to SI units
     let velocity_ms = velocity_fps * 0.3048;
-    let mass_kg = mass_gr * 0.0000647989;
+    let mass_kg = mass_gr * GRAINS_TO_KG;
     let diameter_m = diameter_in * 0.0254;
     let zero_m = zero_distance_yd * 0.9144;
     let range_m = range_yd * 0.9144;
@@ -486,6 +491,107 @@ pub struct TruingObservation {
     pub drop: f64,
 }
 
+/// Complete scalar-BC forward-model input used by the truing design and
+/// uncertainty APIs added in MBA-1346/MBA-1353.
+///
+/// All values use the truing core's historical imperial units.  A front end is
+/// expected to convert its display units once at the boundary.  V1 deliberately
+/// models one scalar G1/G7 coefficient: a velocity-banded BC schedule or custom
+/// Mach/Cd deck does not have a single BC parameter to identify and must not be
+/// silently reduced to one.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TruingModelInputsV1 {
+    /// Nominal muzzle velocity about which a plan is designed, in feet/second.
+    pub muzzle_velocity_fps: f64,
+    /// Nominal scalar ballistic coefficient about which a plan is designed.
+    pub ballistic_coefficient: f64,
+    pub drag_model: DragModelArg,
+    /// Bullet mass in grains.
+    pub mass_gr: f64,
+    /// Bullet diameter in inches.
+    pub diameter_in: f64,
+    /// Zero distance in yards.
+    pub zero_distance_yd: f64,
+    /// Sight height over bore in inches.
+    pub sight_height_in: f64,
+    /// Ambient temperature in degrees Fahrenheit.
+    pub temperature_f: f64,
+    /// Station pressure in inches of mercury.
+    pub pressure_inhg: f64,
+    /// Relative humidity in percent (0 through 100).
+    pub humidity_pct: f64,
+    /// Altitude in feet.
+    pub altitude_ft: f64,
+}
+
+impl TruingModelInputsV1 {
+    /// Validate the scalar-BC model before an expensive design or uncertainty
+    /// calculation.  These bounds mirror the existing truing solver where
+    /// applicable, while rejecting NaN/infinity at the library boundary.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.muzzle_velocity_fps.is_finite()
+            || !(TRUING_MV_MIN_FPS..=TRUING_MV_MAX_FPS).contains(&self.muzzle_velocity_fps)
+        {
+            return Err(format!(
+                "nominal muzzle velocity must be finite and within {TRUING_MV_MIN_FPS:.0}..={TRUING_MV_MAX_FPS:.0} fps"
+            ));
+        }
+        if !self.ballistic_coefficient.is_finite()
+            || !(TRUING_BC_MIN..=TRUING_BC_MAX).contains(&self.ballistic_coefficient)
+        {
+            return Err(format!(
+                "nominal ballistic coefficient must be finite and within {TRUING_BC_MIN:.2}..={TRUING_BC_MAX:.1}"
+            ));
+        }
+        for (name, value) in [
+            ("bullet mass", self.mass_gr),
+            ("bullet diameter", self.diameter_in),
+            ("zero distance", self.zero_distance_yd),
+            ("sight height", self.sight_height_in),
+            ("pressure", self.pressure_inhg),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("{name} must be positive and finite"));
+            }
+        }
+        if !self.temperature_f.is_finite() {
+            return Err("temperature must be finite".to_string());
+        }
+        if !self.humidity_pct.is_finite() || !(0.0..=100.0).contains(&self.humidity_pct) {
+            return Err("humidity must be finite and within 0..=100 percent".to_string());
+        }
+        if !self.altitude_ft.is_finite() {
+            return Err("altitude must be finite".to_string());
+        }
+        Ok(())
+    }
+
+    /// Borrow this owned public shape as the existing internal forward model.
+    /// The local `None` is intentional: V1 estimates one scalar BC and therefore
+    /// cannot accept a velocity-banded BC schedule.
+    pub(crate) fn with_forward_model<T>(
+        &self,
+        drop_unit: DropUnit,
+        f: impl FnOnce(&TruingForwardModel<'_>) -> T,
+    ) -> T {
+        let no_bc_segments = None;
+        let model = TruingForwardModel {
+            drag_model: self.drag_model,
+            mass_gr: self.mass_gr,
+            diameter_in: self.diameter_in,
+            zero_yd: self.zero_distance_yd,
+            sight_in: self.sight_height_in,
+            temp_f: self.temperature_f,
+            press_inhg: self.pressure_inhg,
+            humidity: self.humidity_pct,
+            alt_ft: self.altitude_ft,
+            bc_segments: &no_bc_segments,
+            drop_unit,
+        };
+        f(&model)
+    }
+}
+
 /// Parse an `--observed RANGE:DROP` token. RANGE is in the caller's distance
 /// units (yards imperial / meters metric) and is normalized to internal yards;
 /// DROP stays in the caller's drop unit. Returns a user-facing error string on
@@ -606,6 +712,114 @@ impl TruingForwardModel<'_> {
         Ok(unit.express_drop_m(drop_m, z_m))
     }
 
+    /// Predict several ranges from one zero solve and one trajectory integration.
+    /// `None` marks a candidate the trajectory did not physically reach (or an
+    /// invalid non-positive/non-finite candidate); other solver failures remain
+    /// errors because they invalidate the entire nominal/perturbed model.
+    ///
+    /// This is the high-throughput path for experiment design and predictive
+    /// bands.  It deliberately reproduces [`solve_trajectory_drop`]'s assembly
+    /// and interpolation, but integrates through the farthest candidate once.
+    pub(crate) fn predict_many_in_unit(
+        &self,
+        mv_fps: f64,
+        bc: f64,
+        ranges_yd: &[f64],
+        unit: DropUnit,
+    ) -> Result<Vec<Option<f64>>, Box<dyn Error>> {
+        if ranges_yd.is_empty() {
+            return Ok(Vec::new());
+        }
+        let max_range_yd = ranges_yd
+            .iter()
+            .copied()
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .fold(0.0_f64, f64::max);
+        if max_range_yd <= 0.0 {
+            return Ok(vec![None; ranges_yd.len()]);
+        }
+
+        let velocity_ms = mv_fps * 0.3048;
+        let mass_kg = self.mass_gr * GRAINS_TO_KG;
+        let diameter_m = self.diameter_in * 0.0254;
+        let zero_m = self.zero_yd * 0.9144;
+        let max_range_m = max_range_yd * 0.9144;
+        let sight_height_m = self.sight_in * 0.0254;
+        let altitude_m = self.alt_ft * 0.3048;
+        let temperature_c = (self.temp_f - 32.0) * 5.0 / 9.0;
+        let pressure_hpa = self.press_inhg * 33.8639;
+        let drag_model = match self.drag_model {
+            DragModelArg::G1 => DragModel::G1,
+            DragModelArg::G7 => DragModel::G7,
+        };
+
+        let mut inputs = BallisticInputs {
+            muzzle_velocity: velocity_ms,
+            bc_value: bc,
+            bc_type: drag_model,
+            bullet_mass: mass_kg,
+            bullet_diameter: diameter_m,
+            bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
+            sight_height: sight_height_m,
+            target_distance: max_range_m + 100.0,
+            use_bc_segments: self.bc_segments.is_some(),
+            bc_segments_data: self.bc_segments.clone(),
+            use_rk4: true,
+            muzzle_angle: 0.0,
+            ..Default::default()
+        };
+        let atmosphere = AtmosphericConditions {
+            temperature: temperature_c,
+            pressure: pressure_hpa,
+            humidity: self.humidity,
+            altitude: altitude_m,
+        };
+        let wind = WindConditions::default();
+        inputs.muzzle_angle = crate::calculate_zero_angle_with_conditions(
+            inputs.clone(),
+            zero_m,
+            sight_height_m,
+            wind.clone(),
+            atmosphere.clone(),
+        )?;
+
+        let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+        solver.set_max_range(max_range_m + 100.0);
+        solver.set_time_step(0.0001);
+        let result = solver.solve()?;
+
+        let predictions = ranges_yd
+            .iter()
+            .map(|range_yd| {
+                if !range_yd.is_finite() || *range_yd <= 0.0 {
+                    return None;
+                }
+                let range_m = *range_yd * 0.9144;
+                let idx = result.points.iter().position(|p| p.position.x >= range_m)?;
+                let (z_m, bullet_y) = if idx > 0 {
+                    let p0 = &result.points[idx - 1];
+                    let p1 = &result.points[idx];
+                    let span = p1.position.x - p0.position.x;
+                    if span.abs() < f64::EPSILON {
+                        (p1.position.x, p1.position.y)
+                    } else {
+                        let fraction = (range_m - p0.position.x) / span;
+                        (
+                            range_m,
+                            p0.position.y + fraction * (p1.position.y - p0.position.y),
+                        )
+                    }
+                } else {
+                    let p = &result.points[idx];
+                    (p.position.x, p.position.y)
+                };
+                let drop_m = sight_height_m - bullet_y;
+                Some(unit.express_drop_m(drop_m, z_m))
+            })
+            .collect();
+        Ok(predictions)
+    }
+
     /// Sum of squared residuals (predicted - observed) over all observations.
     pub fn cost(&self, mv: f64, bc: f64, obs: &[TruingObservation]) -> Result<f64, Box<dyn Error>> {
         let mut c = 0.0;
@@ -615,6 +829,70 @@ impl TruingForwardModel<'_> {
         }
         Ok(c)
     }
+}
+
+/// One finite-difference row of the truing forward model.  The planner and
+/// uncertainty engine deliberately share this helper with the point fitter so
+/// that experiment-design claims and posterior diagnostics describe the exact
+/// same physics and perturbation sizes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TruingJacobianRow {
+    pub predicted_drop: f64,
+    pub d_drop_d_mv: f64,
+    pub d_drop_d_bc: f64,
+}
+
+pub(crate) fn truing_jacobian_row(
+    model: &TruingForwardModel<'_>,
+    mv_fps: f64,
+    bc: f64,
+    range_yd: f64,
+    unit: DropUnit,
+) -> Result<TruingJacobianRow, Box<dyn Error>> {
+    let hmv = (mv_fps * 1e-3).max(0.5);
+    let hbc = (bc * 1e-3).max(1e-4);
+    let predicted_drop = model.predict_in_unit(mv_fps, bc, range_yd, unit)?;
+    let d_drop_d_mv = (model.predict_in_unit(mv_fps + hmv, bc, range_yd, unit)?
+        - model.predict_in_unit(mv_fps - hmv, bc, range_yd, unit)?)
+        / (2.0 * hmv);
+    let d_drop_d_bc = (model.predict_in_unit(mv_fps, bc + hbc, range_yd, unit)?
+        - model.predict_in_unit(mv_fps, bc - hbc, range_yd, unit)?)
+        / (2.0 * hbc);
+    Ok(TruingJacobianRow {
+        predicted_drop,
+        d_drop_d_mv,
+        d_drop_d_bc,
+    })
+}
+
+/// Batched form of [`truing_jacobian_row`].  Five integrations (nominal,
+/// MV+/-, BC+/-) cover every requested range.  A row is `None` if any of those
+/// trajectories cannot reach that candidate, preventing one-sided or silently
+/// fabricated sensitivity estimates.
+pub(crate) fn truing_jacobian_rows(
+    model: &TruingForwardModel<'_>,
+    mv_fps: f64,
+    bc: f64,
+    ranges_yd: &[f64],
+    unit: DropUnit,
+) -> Result<Vec<Option<TruingJacobianRow>>, Box<dyn Error>> {
+    let hmv = (mv_fps * 1e-3).max(0.5);
+    let hbc = (bc * 1e-3).max(1e-4);
+    let nominal = model.predict_many_in_unit(mv_fps, bc, ranges_yd, unit)?;
+    let mv_plus = model.predict_many_in_unit(mv_fps + hmv, bc, ranges_yd, unit)?;
+    let mv_minus = model.predict_many_in_unit(mv_fps - hmv, bc, ranges_yd, unit)?;
+    let bc_plus = model.predict_many_in_unit(mv_fps, bc + hbc, ranges_yd, unit)?;
+    let bc_minus = model.predict_many_in_unit(mv_fps, bc - hbc, ranges_yd, unit)?;
+
+    Ok((0..ranges_yd.len())
+        .map(|i| {
+            Some(TruingJacobianRow {
+                predicted_drop: nominal[i]?,
+                d_drop_d_mv: (mv_plus[i]? - mv_minus[i]?) / (2.0 * hmv),
+                d_drop_d_bc: (bc_plus[i]? - bc_minus[i]?) / (2.0 * hbc),
+            })
+        })
+        .collect())
 }
 
 /// One-parameter (muzzle velocity) least-squares fit with BC held fixed. Damped
@@ -677,8 +955,6 @@ pub(crate) fn truing_identifiability(
     mv: f64,
     bc: f64,
 ) -> Result<(f64, f64), Box<dyn Error>> {
-    let hmv = (mv * 1e-3).max(0.5);
-    let hbc = (bc * 1e-3).max(1e-4);
     let (mut n_mv, mut n_bc, mut cross) = (0.0, 0.0, 0.0);
     // Differentiate in mil space regardless of --drop-unit (MBA-1337 t1) so these
     // gate diagnostics do not shift with the display unit. (The operating point mv
@@ -686,15 +962,10 @@ pub(crate) fn truing_identifiability(
     // predict_in_unit's note.)
     let unit = DropUnit::Mil;
     for o in obs {
-        let jmv = (model.predict_in_unit(mv + hmv, bc, o.range_yd, unit)?
-            - model.predict_in_unit(mv - hmv, bc, o.range_yd, unit)?)
-            / (2.0 * hmv);
-        let jbc = (model.predict_in_unit(mv, bc + hbc, o.range_yd, unit)?
-            - model.predict_in_unit(mv, bc - hbc, o.range_yd, unit)?)
-            / (2.0 * hbc);
-        n_mv += jmv * jmv;
-        n_bc += jbc * jbc;
-        cross += jmv * jbc;
+        let row = truing_jacobian_row(model, mv, bc, o.range_yd, unit)?;
+        n_mv += row.d_drop_d_mv * row.d_drop_d_mv;
+        n_bc += row.d_drop_d_bc * row.d_drop_d_bc;
+        cross += row.d_drop_d_mv * row.d_drop_d_bc;
     }
     let norm_mv = n_mv.sqrt();
     let norm_bc = n_bc.sqrt();
@@ -737,19 +1008,14 @@ pub(crate) fn fit_truing_joint(
 
     for it in 0..TRUING_MAX_ITERS {
         iters = it + 1;
-        let hmv = (mv * 1e-3).max(0.5);
-        let hbc = (bc * 1e-3).max(1e-4);
         // Build J^T J (a00,a01,a11) and J^T r (g0,g1).
         let (mut a00, mut a01, mut a11) = (0.0, 0.0, 0.0);
         let (mut g0, mut g1) = (0.0, 0.0);
         for o in obs {
-            let r = model.predict(mv, bc, o.range_yd)? - o.drop;
-            let jmv = (model.predict(mv + hmv, bc, o.range_yd)?
-                - model.predict(mv - hmv, bc, o.range_yd)?)
-                / (2.0 * hmv);
-            let jbc = (model.predict(mv, bc + hbc, o.range_yd)?
-                - model.predict(mv, bc - hbc, o.range_yd)?)
-                / (2.0 * hbc);
+            let row = truing_jacobian_row(model, mv, bc, o.range_yd, model.drop_unit)?;
+            let r = row.predicted_drop - o.drop;
+            let jmv = row.d_drop_d_mv;
+            let jbc = row.d_drop_d_bc;
             a00 += jmv * jmv;
             a01 += jmv * jbc;
             a11 += jbc * jbc;

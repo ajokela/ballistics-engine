@@ -32,7 +32,15 @@ use ballistics_engine::cli_api::UnitSystem;
 use ballistics_engine::truing::{
     calculate_true_velocity_local, fallback_bullet_length_m, parse_truing_observation,
     run_multi_observation_truing_core, validate_truing_observations, DragModelArg, DropUnit,
-    MultiTruingReport, TruingObservation,
+    MultiTruingReport, TruingModelInputsV1, TruingObservation,
+};
+use ballistics_engine::truing_plan::{
+    plan_truing_experiment_v1, TruingExperimentPlanRequestV1, TruingExperimentPlanV1,
+    TruingPlanModeV1,
+};
+use ballistics_engine::truing_uncertainty::{
+    run_uncertainty_truing_v1, NormalPriorV1, TruingApproximationV1, TruingPredictionRequestV1, TruingPriorsV1,
+    UncertaintyTruingReportV1, UncertaintyTruingRequestV1, WeightedTruingObservationV1,
 };
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 use ballistics_engine::{
@@ -1088,6 +1096,35 @@ enum Commands {
         #[arg(long = "observed", value_name = "RANGE:DROP", action = clap::ArgAction::Append)]
         observed: Vec<String>,
 
+        /// Known one-standard-deviation error for an impact reading, in
+        /// --drop-unit. Supplying this enables uncertainty-aware joint MV/BC
+        /// truing; an optional third field in --observed (RANGE:DROP:SIGMA)
+        /// overrides it for that observation.
+        #[arg(long, value_name = "SIGMA")]
+        observation_sigma: Option<f64>,
+
+        /// Explicit normal prior for muzzle velocity, MEAN:SIGMA. Values follow
+        /// --units (fps for imperial, m/s for metric). Never inferred from
+        /// --chrono-velocity.
+        #[arg(long, value_name = "MEAN:SIGMA")]
+        mv_prior: Option<String>,
+
+        /// Explicit normal prior for the scalar ballistic coefficient,
+        /// MEAN:SIGMA (dimensionless).
+        #[arg(long, value_name = "MEAN:SIGMA")]
+        bc_prior: Option<String>,
+
+        /// Range at which to report a propagated model-drop interval. Repeatable;
+        /// follows --units (yards/meters).
+        #[arg(long, value_name = "RANGE", action = clap::ArgAction::Append)]
+        predict_range: Vec<f64>,
+
+        /// Optional one-standard-deviation error for a future impact reading, in
+        /// --drop-unit. Adds a future-observation band alongside the latent model
+        /// band at every --predict-range.
+        #[arg(long, value_name = "SIGMA")]
+        prediction_sigma: Option<f64>,
+
         /// Unit for --measured-drop and every --observed drop in multi-observation
         /// mode. Ignored in single-observation mode (which is always MIL).
         #[arg(long = "drop-unit", default_value = "mil")]
@@ -1185,6 +1222,99 @@ enum Commands {
         /// Bullet length in inches (for BC table lookup; estimated from diameter if not provided)
         #[arg(long)]
         bullet_length: Option<f64>,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Recommend target ranges for an identifiable MV + BC truing experiment
+    PlanTruing {
+        /// Load nominal load, rifle, and atmosphere values from a saved profile.
+        /// Explicit flags override profile values.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Nominal muzzle velocity (fps or m/s based on global --units)
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
+        velocity: Option<f64>,
+
+        /// Nominal scalar ballistic coefficient
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
+        bc: Option<f64>,
+
+        /// Scalar drag model (G1 or G7)
+        #[arg(long)]
+        drag_model: Option<DragModelArg>,
+
+        /// Bullet weight (grains or grams based on global --units)
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
+        mass: Option<f64>,
+
+        /// Bullet diameter (inches or millimeters based on global --units)
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
+        diameter: Option<f64>,
+
+        /// Comma-separated available target ranges in global --units
+        #[arg(
+            long,
+            value_name = "R1,R2,...",
+            value_delimiter = ',',
+            num_args = 1..,
+            conflicts_with = "range_grid",
+            required_unless_present = "range_grid"
+        )]
+        candidate_ranges: Vec<f64>,
+
+        /// Explicit candidate grid START:END:STEP in global --units
+        #[arg(
+            long,
+            value_name = "START:END:STEP",
+            conflicts_with = "candidate_ranges",
+            required_unless_present = "candidate_ranges"
+        )]
+        range_grid: Option<String>,
+
+        /// Number of impact observations to collect
+        #[arg(long, default_value_t = 3)]
+        observation_count: usize,
+
+        /// Required separation between selected target ranges in global --units
+        #[arg(long, default_value_t = 0.0, value_parser = f64_range(0.0, 100000.0))]
+        minimum_separation: f64,
+
+        /// Assumed independent one-standard-deviation impact-reading error in
+        /// --drop-unit
+        #[arg(long, value_parser = f64_range(f64::MIN_POSITIVE, 1000000.0))]
+        measurement_resolution: f64,
+
+        /// Unit used for the assumed impact-reading error and predicted drop
+        #[arg(long, default_value = "mil")]
+        drop_unit: DropUnit,
+
+        /// Zero distance in global --units
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        /// Sight height (inches or millimeters based on global --units)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on global --units)
+        #[arg(long)]
+        temperature: Option<f64>,
+
+        /// Pressure (inHg or hPa based on global --units)
+        #[arg(long)]
+        pressure: Option<f64>,
+
+        /// Relative humidity (0-100 percent)
+        #[arg(long, value_parser = f64_range(0.0, 100.0))]
+        humidity: Option<f64>,
+
+        /// Altitude (feet or meters based on global --units)
+        #[arg(long)]
+        altitude: Option<f64>,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -3348,8 +3478,24 @@ fn timestamp_string() -> String {
     format!("{}", secs)
 }
 
+/// Warning for drag-model strings the CLI silently coerces to G1. The native
+/// CLI supports G1/G7 only (DragModelArg); anything else — including families
+/// the library enum knows (G2/G5/G6/G8/GI/GS) and plain typos — became G1
+/// with no feedback until MBA-1386's fix-half added this warning.
+fn drag_model_arg_warning(s: &str) -> Option<String> {
+    match s.to_uppercase().as_str() {
+        "G1" | "G7" => None,
+        other => Some(format!(
+            "warning: drag model '{other}' is not supported by the CLI (G1/G7 only); using G1. Full-family support is tracked in MBA-1386."
+        )),
+    }
+}
+
 /// Parse the drag model string from a profile
 fn parse_drag_model_arg(s: &str) -> DragModelArg {
+    if let Some(w) = drag_model_arg_warning(s) {
+        eprintln!("{w}");
+    }
     match s.to_uppercase().as_str() {
         "G7" => DragModelArg::G7,
         _ => DragModelArg::G1,
@@ -5311,6 +5457,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             measured_drop,
             range,
             observed,
+            observation_sigma,
+            mv_prior,
+            bc_prior,
+            predict_range,
+            prediction_sigma,
             drop_unit,
             bc,
             drag_model,
@@ -5449,7 +5600,122 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(not(feature = "online"))]
             let use_local = true; // Always use local when online feature not available
 
-            if !observed.is_empty() {
+            let uncertainty_requested = observation_sigma.is_some()
+                || mv_prior.is_some()
+                || bc_prior.is_some()
+                || !predict_range.is_empty()
+                || prediction_sigma.is_some()
+                || observed.iter().any(|token| token.matches(':').count() == 2);
+
+            if uncertainty_requested {
+                let default_sigma = observation_sigma.ok_or(
+                    "--observation-sigma is required for uncertainty-aware truing (it supplies the primary observation's known 1-sigma error)",
+                )?;
+                if !default_sigma.is_finite() || default_sigma <= 0.0 {
+                    return Err("--observation-sigma must be positive and finite".into());
+                }
+                if observed.is_empty() {
+                    return Err(
+                        "uncertainty-aware joint MV+BC truing requires at least one --observed RANGE:DROP[:SIGMA] in addition to the primary observation"
+                            .into(),
+                    );
+                }
+                if bc_segments.as_ref().is_some_and(|segments| !segments.is_empty()) {
+                    return Err(
+                        "uncertainty-aware scalar-BC truing does not support velocity-banded BC tables; omit --bc-table-dir/--bc-table-auto or fit an explicit table scale model"
+                            .into(),
+                    );
+                }
+
+                let mut weighted_observations = Vec::with_capacity(observed.len() + 1);
+                weighted_observations.push(WeightedTruingObservationV1 {
+                    range_yd,
+                    drop: measured_drop,
+                    sigma: default_sigma,
+                });
+                for token in &observed {
+                    let (observation, sigma) =
+                        parse_uncertain_truing_observation(token, units, default_sigma)?;
+                    weighted_observations.push(WeightedTruingObservationV1 {
+                        range_yd: observation.range_yd,
+                        drop: observation.drop,
+                        sigma,
+                    });
+                }
+
+                let mv_prior = mv_prior
+                    .as_deref()
+                    .map(|token| {
+                        let (mean, sigma) = parse_normal_prior(token, "--mv-prior")?;
+                        let to_fps = match units {
+                            UnitSystem::Imperial => 1.0,
+                            UnitSystem::Metric => 1.0 / 0.3048,
+                        };
+                        Ok::<NormalPriorV1, String>(NormalPriorV1 {
+                            mean: mean * to_fps,
+                            sigma: sigma * to_fps,
+                        })
+                    })
+                    .transpose()?;
+                let bc_prior = bc_prior
+                    .as_deref()
+                    .map(|token| {
+                        let (mean, sigma) = parse_normal_prior(token, "--bc-prior")?;
+                        Ok::<NormalPriorV1, String>(NormalPriorV1 { mean, sigma })
+                    })
+                    .transpose()?;
+                if prediction_sigma.is_some_and(|sigma| !sigma.is_finite() || sigma <= 0.0) {
+                    return Err("--prediction-sigma must be positive and finite".into());
+                }
+                if prediction_sigma.is_some() && predict_range.is_empty() {
+                    return Err(
+                        "--prediction-sigma requires at least one --predict-range".into(),
+                    );
+                }
+                let predictions = predict_range
+                    .iter()
+                    .map(|range| TruingPredictionRequestV1 {
+                        range_yd: match units {
+                            UnitSystem::Imperial => *range,
+                            UnitSystem::Metric => *range / 0.9144,
+                        },
+                        future_observation_sigma: prediction_sigma,
+                    })
+                    .collect();
+                let initial_mv_fps = mv_prior.map_or(3000.0, |prior| prior.mean);
+                let model = TruingModelInputsV1 {
+                    muzzle_velocity_fps: initial_mv_fps,
+                    ballistic_coefficient: bc,
+                    drag_model,
+                    mass_gr: weight_gr,
+                    diameter_in: caliber_in,
+                    zero_distance_yd: zero_yd,
+                    sight_height_in: sight_in,
+                    temperature_f: temp_f,
+                    pressure_inhg: press_inhg,
+                    humidity_pct: humidity,
+                    altitude_ft: alt_ft,
+                };
+                model
+                    .validate()
+                    .map_err(|error| format!("invalid uncertainty-truing model: {error}"))?;
+                let request = UncertaintyTruingRequestV1 {
+                    model,
+                    drop_unit,
+                    observations: weighted_observations,
+                    priors: TruingPriorsV1 {
+                        muzzle_velocity_fps: mv_prior,
+                        ballistic_coefficient: bc_prior,
+                    },
+                    predictions,
+                };
+                eprintln!(
+                    "Fitting {} weighted observations (uncertainty-aware joint MV+BC MAP)...",
+                    request.observations.len()
+                );
+                let report = run_uncertainty_truing_v1(&request)?;
+                display_uncertainty_truing_result(&report, units, chrono_fps, output)?;
+            } else if !observed.is_empty() {
                 // MBA-1316: one or more --observed impacts -> joint MV+BC
                 // calibration via the real forward model (always computed
                 // locally; the online API only supports single-observation
@@ -5668,6 +5934,170 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        Commands::PlanTruing {
+            profile,
+            velocity,
+            bc,
+            drag_model,
+            mass,
+            diameter,
+            candidate_ranges,
+            range_grid,
+            observation_count,
+            minimum_separation,
+            measurement_resolution,
+            drop_unit,
+            zero_distance,
+            sight_height,
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            output,
+        } => {
+            let profile_data = profile
+                .as_deref()
+                .map(|name| load_profile_for_units(name, cli.units))
+                .transpose()?;
+            if let Some(profile) = &profile_data {
+                let has_segments = profile
+                    .bc_segments
+                    .as_ref()
+                    .is_some_and(|segments| !segments.is_empty())
+                    || profile.use_bc_segments.unwrap_or(false);
+                let has_custom_drag = profile
+                    .drag_curve
+                    .as_ref()
+                    .is_some_and(|curve| !curve.is_empty())
+                    || profile.drag_model.eq_ignore_ascii_case("custom");
+                if has_segments || has_custom_drag {
+                    return Err(format!(
+                        "profile '{}' uses {} and cannot be reduced to the scalar G1/G7 BC parameter designed by plan-truing; use a scalar-BC profile or define a separate drag-deck scale model",
+                        profile.name,
+                        if has_custom_drag {
+                            "a custom drag curve"
+                        } else {
+                            "velocity-banded BC values"
+                        }
+                    )
+                    .into());
+                }
+            }
+
+            let velocity = velocity
+                .or_else(|| profile_data.as_ref().map(|profile| profile.velocity))
+                .ok_or("--velocity is required unless --profile supplies it")?;
+            let bc = bc
+                .or_else(|| profile_data.as_ref().map(|profile| profile.bc))
+                .ok_or("--bc is required unless --profile supplies it")?;
+            let mass = mass
+                .or_else(|| profile_data.as_ref().map(|profile| profile.mass))
+                .ok_or("--mass is required unless --profile supplies it")?;
+            let diameter = diameter
+                .or_else(|| profile_data.as_ref().map(|profile| profile.diameter))
+                .ok_or("--diameter is required unless --profile supplies it")?;
+            let drag_model = drag_model
+                .or_else(|| {
+                    profile_data
+                        .as_ref()
+                        .map(|profile| parse_drag_model_arg(&profile.drag_model))
+                })
+                .unwrap_or(DragModelArg::G1);
+            let zero_distance = zero_distance
+                .or_else(|| {
+                    profile_data
+                        .as_ref()
+                        .and_then(|profile| profile.zero_distance.or(profile.auto_zero))
+                })
+                .unwrap_or(100.0);
+            let sight_height = sight_height
+                .or_else(|| {
+                    profile_data
+                        .as_ref()
+                        .and_then(|profile| profile.sight_height)
+                })
+                .unwrap_or(match cli.units {
+                    UnitSystem::Imperial => 2.0,
+                    UnitSystem::Metric => 50.0,
+                });
+            let temperature = UnitConverter::resolve_temperature(
+                temperature.or_else(|| {
+                    profile_data
+                        .as_ref()
+                        .map(|profile| profile.temperature)
+                }),
+                cli.units,
+            )?;
+            let pressure = UnitConverter::resolve_pressure(
+                pressure.or_else(|| profile_data.as_ref().map(|profile| profile.pressure)),
+                cli.units,
+            )?;
+            let humidity = humidity
+                .or_else(|| profile_data.as_ref().map(|profile| profile.humidity))
+                .unwrap_or(50.0);
+            let altitude = altitude
+                .or_else(|| profile_data.as_ref().map(|profile| profile.altitude))
+                .unwrap_or(0.0);
+
+            let candidate_ranges = match range_grid.as_deref() {
+                Some(grid) => parse_truing_range_grid(grid)?,
+                None => candidate_ranges,
+            };
+            let to_yards = |value: f64| match cli.units {
+                UnitSystem::Imperial => value,
+                UnitSystem::Metric => value / 0.9144,
+            };
+            let model = TruingModelInputsV1 {
+                muzzle_velocity_fps: match cli.units {
+                    UnitSystem::Imperial => velocity,
+                    UnitSystem::Metric => velocity / 0.3048,
+                },
+                ballistic_coefficient: bc,
+                drag_model,
+                mass_gr: match cli.units {
+                    UnitSystem::Imperial => mass,
+                    UnitSystem::Metric => mass / GRAMS_PER_GRAIN,
+                },
+                diameter_in: match cli.units {
+                    UnitSystem::Imperial => diameter,
+                    UnitSystem::Metric => diameter / 25.4,
+                },
+                zero_distance_yd: to_yards(zero_distance),
+                sight_height_in: match cli.units {
+                    UnitSystem::Imperial => sight_height,
+                    UnitSystem::Metric => sight_height / 25.4,
+                },
+                temperature_f: match cli.units {
+                    UnitSystem::Imperial => temperature,
+                    UnitSystem::Metric => temperature * 9.0 / 5.0 + 32.0,
+                },
+                pressure_inhg: match cli.units {
+                    UnitSystem::Imperial => pressure,
+                    UnitSystem::Metric => pressure / 33.8639,
+                },
+                humidity_pct: humidity,
+                altitude_ft: match cli.units {
+                    UnitSystem::Imperial => altitude,
+                    UnitSystem::Metric => altitude / 0.3048,
+                },
+            };
+            let request = TruingExperimentPlanRequestV1 {
+                model,
+                candidate_ranges_yd: candidate_ranges.into_iter().map(to_yards).collect(),
+                observation_count,
+                minimum_separation_yd: to_yards(minimum_separation),
+                measurement_sigma_1sd: measurement_resolution,
+                drop_unit,
+            };
+            eprintln!(
+                "Evaluating {} candidate ranges for a {}-station truing plan...",
+                request.candidate_ranges_yd.len(),
+                request.observation_count
+            );
+            let plan = plan_truing_experiment_v1(&request)?;
+            display_truing_experiment_plan(&plan, cli.units, output)?;
         }
 
         Commands::Mpbr {
@@ -9085,6 +9515,96 @@ fn display_true_velocity_result(
 // ballistics_engine::truing (MBA-1343) so the WASM terminal can reuse it.
 // Only the thin CLI wrapper and the rendering stay here.
 
+/// Parse an uncertainty-aware additional observation.  The optional third
+/// component is a per-observation 1-sigma override; otherwise `default_sigma`
+/// is used.  This parser is reached only when the opt-in uncertainty surface is
+/// active, leaving the legacy RANGE:DROP parser and its error contract intact.
+fn parse_uncertain_truing_observation(
+    token: &str,
+    units: UnitSystem,
+    default_sigma: f64,
+) -> Result<(TruingObservation, f64), String> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return Err(format!(
+            "invalid --observed '{token}': expected RANGE:DROP or RANGE:DROP:SIGMA"
+        ));
+    }
+    let base = format!("{}:{}", parts[0], parts[1]);
+    let observation = parse_truing_observation(&base, units)?;
+    let sigma = if parts.len() == 3 {
+        parts[2]
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("invalid --observed sigma '{}' in '{token}'", parts[2]))?
+    } else {
+        default_sigma
+    };
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return Err(format!(
+            "invalid --observed sigma in '{token}': sigma must be positive and finite"
+        ));
+    }
+    Ok((observation, sigma))
+}
+
+/// Parse an explicit normal prior token as `(mean, one_sigma)`.
+fn parse_normal_prior(token: &str, flag: &str) -> Result<(f64, f64), String> {
+    let (mean, sigma) = token
+        .split_once(':')
+        .ok_or_else(|| format!("{flag} expects MEAN:SIGMA"))?;
+    let mean = mean
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{flag} has an invalid mean in '{token}'"))?;
+    let sigma = sigma
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{flag} has an invalid sigma in '{token}'"))?;
+    if !mean.is_finite() {
+        return Err(format!("{flag} mean must be finite"));
+    }
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return Err(format!("{flag} sigma must be positive and finite"));
+    }
+    Ok((mean, sigma))
+}
+
+/// Expand the explicit `START:END:STEP` planner grid.  The grid is never
+/// inferred: the end is included only when it lies on a generated step (within
+/// floating-point tolerance), and the hard cap keeps accidental CLI input from
+/// launching an unbounded number of trajectory solves.
+fn parse_truing_range_grid(token: &str) -> Result<Vec<f64>, String> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!(
+            "--range-grid expects START:END:STEP (got '{token}')"
+        ));
+    }
+    let mut values = [0.0_f64; 3];
+    for (i, part) in parts.iter().enumerate() {
+        values[i] = part
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("--range-grid contains an invalid number in '{token}'"))?;
+    }
+    let [start, end, step] = values;
+    if !start.is_finite() || !end.is_finite() || !step.is_finite() {
+        return Err("--range-grid values must be finite".to_string());
+    }
+    if start <= 0.0 || end < start || step <= 0.0 {
+        return Err("--range-grid requires 0 < START <= END and STEP > 0".to_string());
+    }
+    let count = ((end - start) / step + 1e-12).floor() as usize + 1;
+    if count > 1_000 {
+        return Err(format!(
+            "--range-grid expands to {count} candidates; maximum is 1000"
+        ));
+    }
+    Ok((0..count).map(|i| start + i as f64 * step).collect())
+}
+
+
 /// Orchestrate the multi-observation joint MV+BC calibration and print the
 /// result. `measured_drop`/`range_yd` are the primary observation (drop already
 /// in `drop_unit`); `observed` holds the additional `RANGE:DROP` tokens.
@@ -9357,6 +9877,751 @@ fn display_multi_truing_result(
             eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
         }
     }
+}
+
+/// Convert a Rust enum's stable CamelCase variant name into the snake_case code
+/// used by the uncertainty JSON/CSV contracts.  Keeping this generic makes a
+/// newly added warning/failure code visible instead of silently dropping it.
+fn enum_variant_code(value: &impl std::fmt::Debug) -> String {
+    let name = format!("{value:?}");
+    let mut code = String::with_capacity(name.len() + 4);
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            code.push('_');
+        }
+        code.push(ch.to_ascii_lowercase());
+    }
+    code
+}
+
+/// Render MBA-1346's deterministic pre-shoot observation-range design.
+fn display_truing_experiment_plan(
+    plan: &TruingExperimentPlanV1,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    let range_scale = match units {
+        UnitSystem::Imperial => 1.0,
+        UnitSystem::Metric => 0.9144,
+    };
+    let range_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let range = |yards: f64| yards * range_scale;
+    let mode = match plan.mode {
+        TruingPlanModeV1::JointMvBc => "joint_mv_bc",
+        TruingPlanModeV1::MvOnly => "mv_only",
+    };
+
+    match output {
+        OutputFormat::Json => {
+            let selected: Vec<serde_json::Value> = plan
+                .selected_stations
+                .iter()
+                .map(|station| {
+                    serde_json::json!({
+                        "input_index": station.input_index,
+                        format!("range_{range_unit}"): range(station.range_yd),
+                        format!("predicted_drop_{}", plan.measurement_drop_unit): station.predicted_drop,
+                        "scaled_mv_sensitivity": station.scaled_mv_sensitivity,
+                        "scaled_bc_sensitivity": station.scaled_bc_sensitivity,
+                        "leave_one_out_information_gain_nats": station.leave_one_out_information_gain_nats,
+                    })
+                })
+                .collect();
+            let rejected: Vec<serde_json::Value> = plan
+                .rejected_candidates
+                .iter()
+                .map(|candidate| {
+                    serde_json::json!({
+                        "input_index": candidate.input_index,
+                        format!("range_{range_unit}"): if candidate.range_yd.is_finite() {
+                            serde_json::json!(range(candidate.range_yd))
+                        } else {
+                            serde_json::Value::Null
+                        },
+                        "reason": enum_variant_code(&candidate.reason),
+                        "detail": candidate.detail,
+                    })
+                })
+                .collect();
+            let info = &plan.information;
+            let value = serde_json::json!({
+                "schema_version": "truing-experiment-plan-v1",
+                "mode": mode,
+                "requested_observation_count": plan.requested_observation_count,
+                format!("minimum_separation_{range_unit}"): range(plan.minimum_separation_yd),
+                "measurement_model": {
+                    "sigma_1sd": plan.measurement_sigma_1sd,
+                    "drop_unit": plan.measurement_drop_unit,
+                    "assumption": "independent Gaussian impact-reading error at every station",
+                },
+                "selected_stations": selected,
+                format!("unselected_candidate_ranges_{range_unit}"): plan
+                    .unselected_candidate_ranges_yd
+                    .iter()
+                    .map(|value| range(*value))
+                    .collect::<Vec<_>>(),
+                "rejected_candidates": rejected,
+                "information": {
+                    "bc_sensitivity_ratio": info.sensitivity_ratio,
+                    "condition_number": info.condition_number,
+                    "minimum_singular_value": info.minimum_singular_value,
+                    "maximum_singular_value": info.maximum_singular_value,
+                    "weak_axis_fractional_sigma_1sd": info.weak_axis_fractional_sigma_1sd,
+                    "log_determinant": info.log_determinant,
+                    "expected_information_gain_nats": info.expected_information_gain_nats,
+                },
+                "optimizer": {
+                    "search_strategy": enum_variant_code(&plan.search_strategy),
+                    "eligible_candidate_count": plan.eligible_candidate_count,
+                    "raw_combination_count": plan.raw_combination_count,
+                    "evaluated_design_count": plan.evaluated_design_count,
+                },
+                "warnings": plan.warnings,
+                "legend": {
+                    "range_unit": range_unit,
+                    "drop_unit": plan.measurement_drop_unit,
+                    "scaled_sensitivity": "predicted drop change in declared observation sigmas for a unit fractional parameter change",
+                    "information_gain": "0.5 log det(I + F), where I is the disclosed identity reference information in fractional MV/BC coordinates; design score only",
+                },
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        OutputFormat::Csv => {
+            println!("plan_mode,measurement_sigma_1sd,measurement_drop_unit,requested_observation_count,minimum_separation_{range_unit},bc_sensitivity_ratio,condition_number,minimum_singular_value,maximum_singular_value,weak_axis_fractional_sigma_1sd,log_determinant,expected_information_gain_nats");
+            println!(
+                "{mode},{:.8},{},{},{:.8},{:.10},{},{:.10},{:.10},{},{},{:.10}",
+                plan.measurement_sigma_1sd,
+                plan.measurement_drop_unit,
+                plan.requested_observation_count,
+                range(plan.minimum_separation_yd),
+                plan.information.sensitivity_ratio,
+                plan.information
+                    .condition_number
+                    .map(|value| format!("{value:.10}"))
+                    .unwrap_or_default(),
+                plan.information.minimum_singular_value,
+                plan.information.maximum_singular_value,
+                plan.information
+                    .weak_axis_fractional_sigma_1sd
+                    .map(|value| format!("{value:.10}"))
+                    .unwrap_or_default(),
+                plan.information
+                    .log_determinant
+                    .map(|value| format!("{value:.10}"))
+                    .unwrap_or_default(),
+                plan.information.expected_information_gain_nats,
+            );
+            println!();
+            println!("range_{range_unit},status,predicted_drop_{},scaled_mv_sensitivity,scaled_bc_sensitivity,information_gain_nats,detail", plan.measurement_drop_unit);
+            for station in &plan.selected_stations {
+                println!(
+                    "{:.6},selected,{:.8},{:.8},{:.8},{:.8},",
+                    range(station.range_yd),
+                    station.predicted_drop,
+                    station.scaled_mv_sensitivity,
+                    station.scaled_bc_sensitivity,
+                    station.leave_one_out_information_gain_nats,
+                );
+            }
+            for candidate in &plan.unselected_candidate_ranges_yd {
+                println!("{:.6},eligible_not_selected,,,,,", range(*candidate));
+            }
+            for candidate in &plan.rejected_candidates {
+                let display_range = if candidate.range_yd.is_finite() {
+                    range(candidate.range_yd).to_string()
+                } else {
+                    String::new()
+                };
+                println!(
+                    "{},rejected:{},,,,,{}",
+                    display_range,
+                    enum_variant_code(&candidate.reason),
+                    candidate.detail.replace(',', ";")
+                );
+            }
+            if !plan.warnings.is_empty() {
+                println!();
+                println!("warning");
+                for warning in &plan.warnings {
+                    println!("{}", warning.replace(',', ";").replace('\n', " "));
+                }
+            }
+        }
+        OutputFormat::Table => {
+            println!();
+            println!("=== TRUING EXPERIMENT PLAN ===");
+            println!(
+                "  Recommendation: {}",
+                if plan.mode == TruingPlanModeV1::JointMvBc {
+                    "joint MV + BC"
+                } else {
+                    "MV only (available ranges do not identify BC)"
+                }
+            );
+            println!(
+                "  Measurement assumption: independent 1-sigma reading error = {:.4} {}",
+                plan.measurement_sigma_1sd, plan.measurement_drop_unit
+            );
+            println!(
+                "  Selected ranges: {} {range_unit}",
+                plan.selected_stations
+                    .iter()
+                    .map(|station| format!("{:.1}", range(station.range_yd)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            println!(
+                "  Constraints: {} stations, minimum separation {:.1} {range_unit}",
+                plan.requested_observation_count,
+                range(plan.minimum_separation_yd)
+            );
+            println!();
+            println!(
+                "  BC sensitivity ratio: {:.5}",
+                plan.information.sensitivity_ratio
+            );
+            println!(
+                "  Condition number: {}",
+                plan.information
+                    .condition_number
+                    .map(|value| format!("{value:.2}"))
+                    .unwrap_or_else(|| "unbounded".to_string())
+            );
+            println!(
+                "  Singular values: min {:.5}, max {:.5}; weak-axis fractional 1-sigma: {}",
+                plan.information.minimum_singular_value,
+                plan.information.maximum_singular_value,
+                plan.information
+                    .weak_axis_fractional_sigma_1sd
+                    .map(|value| format!("{value:.4}"))
+                    .unwrap_or_else(|| "unbounded".to_string())
+            );
+            println!();
+            println!(
+                "  {:>10}  {:>12}  {:>13}  {:>13}  {:>12}",
+                format!("Range ({range_unit})"),
+                format!("Drop ({})", plan.measurement_drop_unit),
+                "MV sensitivity",
+                "BC sensitivity",
+                "Info (nats)",
+            );
+            for station in &plan.selected_stations {
+                println!(
+                    "  {:>10.1}  {:>12.4}  {:>13.5}  {:>13.5}  {:>12.5}",
+                    range(station.range_yd),
+                    station.predicted_drop,
+                    station.scaled_mv_sensitivity,
+                    station.scaled_bc_sensitivity,
+                    station.leave_one_out_information_gain_nats,
+                );
+            }
+            println!();
+            println!(
+                "  Search: {} ({} of {} candidate sets evaluated)",
+                enum_variant_code(&plan.search_strategy),
+                plan.evaluated_design_count,
+                plan.raw_combination_count,
+            );
+            if !plan.rejected_candidates.is_empty() {
+                println!("  Rejected candidates:");
+                for candidate in &plan.rejected_candidates {
+                    let display_range = if candidate.range_yd.is_finite() {
+                        format!("{:.1} {range_unit}", range(candidate.range_yd))
+                    } else {
+                        "non-finite range".to_string()
+                    };
+                    println!(
+                        "    - {display_range}: {} ({})",
+                        enum_variant_code(&candidate.reason),
+                        candidate.detail
+                    );
+                }
+            }
+            if !plan.warnings.is_empty() {
+                println!("  Notes:");
+                for warning in &plan.warnings {
+                    println!("    - {warning}");
+                }
+            }
+            println!();
+        }
+        OutputFormat::Pdf => {
+            return Err("PDF output is not supported for truing experiment plans".into());
+        }
+    }
+    Ok(())
+}
+
+/// Render the opt-in MBA-1353 weighted MAP and local Gaussian approximation.
+/// The legacy renderer above is deliberately not reused or modified: callers
+/// reach this function only after explicitly declaring observation sigma.
+fn display_uncertainty_truing_result(
+    report: &UncertaintyTruingReportV1,
+    units: UnitSystem,
+    chrono_fps: Option<f64>,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    let velocity_scale = match units {
+        UnitSystem::Imperial => 1.0,
+        UnitSystem::Metric => 0.3048,
+    };
+    let velocity_unit = match units {
+        UnitSystem::Imperial => "fps",
+        UnitSystem::Metric => "m/s",
+    };
+    let range_scale = match units {
+        UnitSystem::Imperial => 1.0,
+        UnitSystem::Metric => 0.9144,
+    };
+    let range_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let drop_unit = report.drop_unit.label();
+    let velocity = |fps: f64| fps * velocity_scale;
+    let range = |yards: f64| yards * range_scale;
+
+    match output {
+        OutputFormat::Json => {
+            let observations: Vec<serde_json::Value> = report
+                .observations
+                .iter()
+                .map(|observation| {
+                    serde_json::json!({
+                        format!("range_{range_unit}"): range(observation.range_yd),
+                        format!("observed_drop_{drop_unit}"): observation.observed_drop,
+                        format!("sigma_1sd_{drop_unit}"): observation.sigma,
+                        format!("predicted_drop_{drop_unit}"): observation.predicted_drop,
+                        format!("residual_{drop_unit}"): observation.residual,
+                        "standardized_residual": observation.standardized_residual,
+                    })
+                })
+                .collect();
+            let priors = serde_json::json!({
+                "muzzle_velocity": report.priors.muzzle_velocity_fps.map(|prior| serde_json::json!({
+                    "mean": velocity(prior.mean),
+                    "sigma_1sd": velocity(prior.sigma),
+                    "unit": velocity_unit,
+                })),
+                "ballistic_coefficient": report.priors.ballistic_coefficient.map(|prior| serde_json::json!({
+                    "mean": prior.mean,
+                    "sigma_1sd": prior.sigma,
+                })),
+            });
+            let approximation = match &report.approximation {
+                TruingApproximationV1::Available(approximation) => {
+                    let mv_interval = approximation.muzzle_velocity_interval_95;
+                    let bc_interval = approximation.ballistic_coefficient_interval_95;
+                    serde_json::json!({
+                        "available": true,
+                        "method": "laplace_gauss_newton_known_sigma",
+                        "interval_probability": mv_interval.probability,
+                        "muzzle_velocity": {
+                            "estimate": velocity(mv_interval.estimate),
+                            "standard_deviation": velocity(mv_interval.standard_deviation),
+                            "lower": velocity(mv_interval.lower),
+                            "upper": velocity(mv_interval.upper),
+                            "unit": velocity_unit,
+                        },
+                        "ballistic_coefficient": {
+                            "estimate": bc_interval.estimate,
+                            "standard_deviation": bc_interval.standard_deviation,
+                            "lower": bc_interval.lower,
+                            "upper": bc_interval.upper,
+                        },
+                        "covariance": {
+                            format!("mv_variance_{velocity_unit}2"): approximation.covariance.mv_variance_fps2 * velocity_scale * velocity_scale,
+                            format!("mv_bc_covariance_{velocity_unit}"): approximation.covariance.mv_bc_covariance_fps * velocity_scale,
+                            "bc_variance": approximation.covariance.bc_variance,
+                        },
+                        "mv_bc_correlation": approximation.mv_bc_correlation,
+                        "scaled_information_condition_number": approximation.scaled_information_condition_number,
+                    })
+                }
+                TruingApproximationV1::Unavailable(failure) => serde_json::json!({
+                    "available": false,
+                    "method": "laplace_gauss_newton_known_sigma",
+                    "failure": {
+                        "code": enum_variant_code(&failure.code),
+                        "message": failure.message,
+                    },
+                }),
+            };
+            let predictive_bands: Vec<serde_json::Value> = report
+                .predictive_bands
+                .iter()
+                .map(|band| {
+                    let interval = |value: ballistics_engine::truing_uncertainty::GaussianIntervalV1| {
+                        serde_json::json!({
+                            "standard_deviation": value.standard_deviation,
+                            "lower": value.lower,
+                            "upper": value.upper,
+                            "probability": value.probability,
+                        })
+                    };
+                    serde_json::json!({
+                        format!("range_{range_unit}"): range(band.range_yd),
+                        format!("predicted_drop_{drop_unit}"): band.predicted_drop,
+                        "latent_model_drop_interval": band.latent_interval_95.map(interval),
+                        "future_observation_interval": band.future_observation_interval_95.map(interval),
+                    })
+                })
+                .collect();
+            let warnings: Vec<serde_json::Value> = report
+                .warnings
+                .iter()
+                .map(|warning| {
+                    serde_json::json!({
+                        "code": enum_variant_code(&warning.code),
+                        "message": warning.message,
+                    })
+                })
+                .collect();
+            let diagnostics = &report.diagnostics;
+            let mut value = serde_json::json!({
+                "schema_version": "truing-uncertainty-v1",
+                "mode": "joint_mv_bc_map",
+                "fitted_muzzle_velocity": velocity(report.map_muzzle_velocity_fps),
+                "velocity_unit": velocity_unit,
+                "fitted_bc": report.map_ballistic_coefficient,
+                "iterations": report.iterations,
+                "converged": report.converged,
+                "observations": observations,
+                "priors": priors,
+                "diagnostics": {
+                    "chi_square": diagnostics.chi_square,
+                    "prior_penalty": diagnostics.prior_penalty,
+                    "penalized_chi_square": diagnostics.penalized_chi_square,
+                    "effective_parameter_count": diagnostics.effective_parameter_count,
+                    "effective_degrees_of_freedom": diagnostics.effective_degrees_of_freedom,
+                    "reduced_chi_square": diagnostics.reduced_chi_square,
+                    "bc_sensitivity_ratio": diagnostics.bc_sensitivity_ratio,
+                    "data_condition_number": if diagnostics.data_condition_number.is_finite() {
+                        serde_json::json!(diagnostics.data_condition_number)
+                    } else {
+                        serde_json::Value::Null
+                    },
+                    "map_scaled_gradient_inf_norm": diagnostics.map_scaled_gradient_inf_norm,
+                    "map_convergence_criterion": diagnostics
+                        .map_convergence_criterion
+                        .map(|criterion| enum_variant_code(&criterion)),
+                    "map_objective_poll_radius": diagnostics.map_objective_poll_radius,
+                    "map_max_objective_poll_improvement": diagnostics
+                        .map_max_objective_poll_improvement,
+                    "map_objective_poll_evaluations": diagnostics
+                        .map_objective_poll_evaluations,
+                },
+                "approximation": approximation,
+                "predictive_bands": predictive_bands,
+                "warnings": warnings,
+                "legend": {
+                    "units": {
+                        "range": range_unit,
+                        "drop": drop_unit,
+                        "velocity": velocity_unit,
+                    },
+                    "observation_sigma": "absolute known one-standard-deviation reading error",
+                    "latent_model_drop_interval": "parameter uncertainty only",
+                    "future_observation_interval": "parameter uncertainty plus explicitly declared future reading error",
+                },
+            });
+            if let Some(chrono) = chrono_fps {
+                value["velocity_adjustment"] =
+                    serde_json::json!(velocity(report.map_muzzle_velocity_fps - chrono));
+                value["adjustment_percent"] = if chrono != 0.0 {
+                    serde_json::json!(
+                        (report.map_muzzle_velocity_fps - chrono) / chrono * 100.0
+                    )
+                } else {
+                    serde_json::Value::Null
+                };
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        OutputFormat::Csv => {
+            let convergence_criterion = report
+                .diagnostics
+                .map_convergence_criterion
+                .map(|criterion| enum_variant_code(&criterion))
+                .unwrap_or_default();
+            println!("range_{range_unit},observed_drop_{drop_unit},sigma_1sd_{drop_unit},predicted_drop_{drop_unit},residual_{drop_unit},standardized_residual");
+            for observation in &report.observations {
+                println!(
+                    "{:.6},{:.8},{:.8},{:.8},{:.8},{:.8}",
+                    range(observation.range_yd),
+                    observation.observed_drop,
+                    observation.sigma,
+                    observation.predicted_drop,
+                    observation.residual,
+                    observation.standardized_residual,
+                );
+            }
+            println!();
+            println!("fitted_muzzle_velocity_{velocity_unit},fitted_bc,chi_square,prior_penalty,penalized_chi_square,effective_parameter_count,effective_degrees_of_freedom,reduced_chi_square,bc_sensitivity_ratio,data_condition_number,converged,map_convergence_criterion,map_scaled_gradient_inf_norm,map_objective_poll_radius,map_max_objective_poll_improvement,map_objective_poll_evaluations");
+            println!(
+                "{:.8},{:.10},{:.8},{:.8},{:.8},{},{},{},{:.8},{},{},{},{:.10},{},{},{}",
+                velocity(report.map_muzzle_velocity_fps),
+                report.map_ballistic_coefficient,
+                report.diagnostics.chi_square,
+                report.diagnostics.prior_penalty,
+                report.diagnostics.penalized_chi_square,
+                report
+                    .diagnostics
+                    .effective_parameter_count
+                    .map(|value| format!("{value:.8}"))
+                    .unwrap_or_default(),
+                report
+                    .diagnostics
+                    .effective_degrees_of_freedom
+                    .map(|value| format!("{value:.8}"))
+                    .unwrap_or_default(),
+                report
+                    .diagnostics
+                    .reduced_chi_square
+                    .map(|value| format!("{value:.8}"))
+                    .unwrap_or_default(),
+                report.diagnostics.bc_sensitivity_ratio,
+                if report.diagnostics.data_condition_number.is_finite() {
+                    format!("{:.8}", report.diagnostics.data_condition_number)
+                } else {
+                    "inf".to_string()
+                },
+                report.converged,
+                convergence_criterion,
+                report.diagnostics.map_scaled_gradient_inf_norm,
+                report
+                    .diagnostics
+                    .map_objective_poll_radius
+                    .map(|value| format!("{value:.10}"))
+                    .unwrap_or_default(),
+                report
+                    .diagnostics
+                    .map_max_objective_poll_improvement
+                    .map(|value| format!("{value:.10}"))
+                    .unwrap_or_default(),
+                report.diagnostics.map_objective_poll_evaluations,
+            );
+            println!();
+            println!("prior_parameter,mean,sigma_1sd,unit");
+            if let Some(prior) = report.priors.muzzle_velocity_fps {
+                println!(
+                    "muzzle_velocity,{:.8},{:.8},{velocity_unit}",
+                    velocity(prior.mean),
+                    velocity(prior.sigma)
+                );
+            }
+            if let Some(prior) = report.priors.ballistic_coefficient {
+                println!(
+                    "ballistic_coefficient,{:.10},{:.10},dimensionless",
+                    prior.mean, prior.sigma
+                );
+            }
+            println!();
+            match &report.approximation {
+                TruingApproximationV1::Available(approximation) => {
+                    println!("parameter,estimate,standard_deviation,interval_95_lower,interval_95_upper,interval_probability,unit");
+                    let mv = approximation.muzzle_velocity_interval_95;
+                    let bc = approximation.ballistic_coefficient_interval_95;
+                    println!(
+                        "muzzle_velocity,{:.8},{:.8},{:.8},{:.8},{:.6},{velocity_unit}",
+                        velocity(mv.estimate),
+                        velocity(mv.standard_deviation),
+                        velocity(mv.lower),
+                        velocity(mv.upper),
+                        mv.probability,
+                    );
+                    println!(
+                        "ballistic_coefficient,{:.10},{:.10},{:.10},{:.10},{:.6},dimensionless",
+                        bc.estimate,
+                        bc.standard_deviation,
+                        bc.lower,
+                        bc.upper,
+                        bc.probability,
+                    );
+                    println!();
+                    println!("covariance_component,value");
+                    println!(
+                        "mv_variance_{velocity_unit}2,{:.12}",
+                        approximation.covariance.mv_variance_fps2
+                            * velocity_scale
+                            * velocity_scale
+                    );
+                    println!(
+                        "mv_bc_covariance_{velocity_unit},{:.12}",
+                        approximation.covariance.mv_bc_covariance_fps * velocity_scale
+                    );
+                    println!(
+                        "bc_variance,{:.12}",
+                        approximation.covariance.bc_variance
+                    );
+                    println!(
+                        "mv_bc_correlation,{:.12}",
+                        approximation.mv_bc_correlation
+                    );
+                    println!(
+                        "scaled_information_condition_number,{:.12}",
+                        approximation.scaled_information_condition_number
+                    );
+                }
+                TruingApproximationV1::Unavailable(failure) => {
+                    println!("approximation_failure_code,message");
+                    println!(
+                        "{},{}",
+                        enum_variant_code(&failure.code),
+                        failure.message.replace(',', ";").replace('\n', " ")
+                    );
+                }
+            }
+            if !report.predictive_bands.is_empty() {
+                println!();
+                println!("prediction_range_{range_unit},predicted_drop_{drop_unit},latent_lower_{drop_unit},latent_upper_{drop_unit},future_lower_{drop_unit},future_upper_{drop_unit}");
+                for band in &report.predictive_bands {
+                    println!(
+                        "{:.6},{:.8},{},{},{},{}",
+                        range(band.range_yd),
+                        band.predicted_drop,
+                        band.latent_interval_95
+                            .map(|interval| format!("{:.8}", interval.lower))
+                            .unwrap_or_default(),
+                        band.latent_interval_95
+                            .map(|interval| format!("{:.8}", interval.upper))
+                            .unwrap_or_default(),
+                        band.future_observation_interval_95
+                            .map(|interval| format!("{:.8}", interval.lower))
+                            .unwrap_or_default(),
+                        band.future_observation_interval_95
+                            .map(|interval| format!("{:.8}", interval.upper))
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            if !report.warnings.is_empty() {
+                println!();
+                println!("warning_code,message");
+                for warning in &report.warnings {
+                    println!(
+                        "{},{}",
+                        enum_variant_code(&warning.code),
+                        warning.message.replace(',', ";").replace('\n', " ")
+                    );
+                }
+            }
+        }
+        OutputFormat::Table => {
+            println!();
+            println!("=== UNCERTAINTY-AWARE MV + BC TRUING ===");
+            println!("  Method: weighted joint MAP + local Gaussian approximation");
+            println!("  Observation errors: absolute known 1-sigma ({drop_unit})");
+            println!();
+            println!(
+                "  MAP muzzle velocity: {:>10.2} {velocity_unit}",
+                velocity(report.map_muzzle_velocity_fps)
+            );
+            println!(
+                "  MAP ballistic coefficient: {:>8.5}",
+                report.map_ballistic_coefficient
+            );
+            match &report.approximation {
+                TruingApproximationV1::Available(approximation) => {
+                    let mv = approximation.muzzle_velocity_interval_95;
+                    let bc = approximation.ballistic_coefficient_interval_95;
+                    println!(
+                        "  MV 95% interval: [{:.2}, {:.2}] {velocity_unit} (SD {:.2})",
+                        velocity(mv.lower),
+                        velocity(mv.upper),
+                        velocity(mv.standard_deviation)
+                    );
+                    println!(
+                        "  BC 95% interval: [{:.5}, {:.5}] (SD {:.5})",
+                        bc.lower, bc.upper, bc.standard_deviation
+                    );
+                    println!(
+                        "  MV/BC correlation: {:+.5}",
+                        approximation.mv_bc_correlation
+                    );
+                }
+                TruingApproximationV1::Unavailable(failure) => {
+                    println!(
+                        "  Gaussian approximation: unavailable ({})",
+                        enum_variant_code(&failure.code)
+                    );
+                    println!("    {}", failure.message);
+                }
+            }
+            println!();
+            println!(
+                "  {:>10}  {:>12}  {:>9}  {:>12}  {:>10}",
+                format!("Range ({range_unit})"),
+                format!("Observed ({drop_unit})"),
+                "Sigma",
+                format!("Predicted ({drop_unit})"),
+                "Std resid",
+            );
+            for observation in &report.observations {
+                println!(
+                    "  {:>10.1}  {:>12.4}  {:>9.4}  {:>12.4}  {:>+10.3}",
+                    range(observation.range_yd),
+                    observation.observed_drop,
+                    observation.sigma,
+                    observation.predicted_drop,
+                    observation.standardized_residual,
+                );
+            }
+            println!();
+            println!(
+                "  Chi-square: {:.3}; effective DOF: {}; reduced chi-square: {}",
+                report.diagnostics.chi_square,
+                report
+                    .diagnostics
+                    .effective_degrees_of_freedom
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "unavailable".to_string()),
+                report
+                    .diagnostics
+                    .reduced_chi_square
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "unavailable".to_string()),
+            );
+            if !report.predictive_bands.is_empty() {
+                println!();
+                println!("  Predictive drop bands (95%):");
+                for band in &report.predictive_bands {
+                    let latent = band
+                        .latent_interval_95
+                        .map(|interval| format!("[{:.4}, {:.4}]", interval.lower, interval.upper))
+                        .unwrap_or_else(|| "unavailable".to_string());
+                    let future = band
+                        .future_observation_interval_95
+                        .map(|interval| format!("; future [{:.4}, {:.4}]", interval.lower, interval.upper))
+                        .unwrap_or_default();
+                    println!(
+                        "    {:>8.1} {range_unit}: mean {:.4} {drop_unit}; model {latent}{future}",
+                        range(band.range_yd),
+                        band.predicted_drop,
+                    );
+                }
+            }
+            if !report.warnings.is_empty() {
+                println!();
+                println!("  Warnings:");
+                for warning in &report.warnings {
+                    println!(
+                        "    - {}: {}",
+                        enum_variant_code(&warning.code),
+                        warning.message
+                    );
+                }
+            }
+            println!();
+        }
+        OutputFormat::Pdf => {
+            return Err("PDF output is not supported for uncertainty-aware truing".into());
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -12354,6 +13619,31 @@ mod adjustment_unit_tests {
     fn short_range_returns_zero() {
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Moa), 0.0);
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Mil), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod drag_model_arg_warning_tests {
+    use super::*;
+
+    #[test]
+    fn drag_model_arg_warning_flags_silent_g1_coercion() {
+        assert!(drag_model_arg_warning("g1").is_none());
+        assert!(drag_model_arg_warning("G7").is_none());
+        for s in ["g5", "G8", "banana"] {
+            let w = drag_model_arg_warning(s).expect("must warn");
+            assert!(w.contains("using G1"), "{w}");
+        }
+    }
+
+    #[test]
+    fn parse_drag_model_arg_still_coerces_to_g1_or_g7() {
+        // The warning is purely informational (stderr) — behavior is unchanged.
+        assert_eq!(parse_drag_model_arg("G7"), DragModelArg::G7);
+        assert_eq!(parse_drag_model_arg("g7"), DragModelArg::G7);
+        assert_eq!(parse_drag_model_arg("G1"), DragModelArg::G1);
+        assert_eq!(parse_drag_model_arg("G5"), DragModelArg::G1);
+        assert_eq!(parse_drag_model_arg("banana"), DragModelArg::G1);
     }
 }
 

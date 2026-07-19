@@ -378,6 +378,49 @@ Use case: A shooter measures 5.1 MIL of drop at 600 yards. Their chronograph sho
 
 **Joint velocity + BC truing.** With two or more `--observed RANGE:DROP` impacts spanning supersonic to transonic ranges, `true-velocity` fits *both* muzzle velocity and ballistic coefficient against the real trajectory solver. When the observation set is too short/closely-spaced to separate the two, it refuses the joint fit, trues velocity only, and says so — no false-precision BC. See [CLI_USAGE.md](CLI_USAGE.md#joint-mv--bc-calibration-multiple-observed-impacts) for details.
 
+**Plan the observations before shooting (MBA-1346).** `plan-truing` evaluates a
+discrete set of ranges with the same forward model and finite-difference Jacobian
+used by the fitter, then chooses an exact-size, minimum-separation-compliant design.
+It reports information gain, singular values, conditioning, rejected/unreachable
+candidates, and an explicit MV-only recommendation when the available facility
+cannot identify BC:
+
+```bash
+./ballistics plan-truing \
+  -v 2700 -b 0.475 --drag-model g1 -m 168 -d 0.308 \
+  --candidate-ranges 200,300,400,500,600,700,800,900 \
+  --observation-count 3 --minimum-separation 100 \
+  --measurement-resolution 0.03 --drop-unit mil
+```
+
+`--measurement-resolution` is the assumed independent **one-standard-deviation**
+impact-reading error, not a tolerance or extreme bound. A saved scalar G1/G7
+profile may replace the explicit load flags (`--profile NAME`); velocity-banded BC
+profiles and custom drag curves are rejected because they do not have one scalar BC
+parameter to identify.
+
+**Quantify what the observations actually learned (MBA-1353).** Add
+`--observation-sigma` to opt into a weighted joint MV/BC MAP fit and local Gaussian
+uncertainty report. A third `--observed RANGE:DROP:SIGMA` field overrides the default
+for one reading. Optional priors are always visible and explicit; predictive output
+separates uncertainty in the modeled drop from the wider interval for a future
+reading:
+
+```bash
+./ballistics true-velocity \
+  --range 500 --measured-drop 3.18 \
+  --observed 600:4.35:0.03 --observed 900:8.89:0.02 \
+  --observation-sigma 0.03 \
+  --bc 0.45 --drag-model g1 --mass 168 --diameter 0.308 \
+  --predict-range 1000 --prediction-sigma 0.03 --output json
+```
+
+The report includes MV/BC 95% intervals, covariance and correlation, chi-square,
+effective degrees of freedom, prior-domination/weak-identification warnings, and
+propagated drop bands. Declared sigmas are treated as absolute known errors, so the
+covariance is not rescaled by residual RMS. With no uncertainty flags, the existing
+point estimate and output schema are unchanged.
+
 ## Advanced Features
 
 ### Online Mode (API Integration)
