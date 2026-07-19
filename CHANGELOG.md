@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variant) now reject custom drag tables longer than
   `MAX_FFI_DRAG_TABLE_LEN` (4096 rows) instead of attempting unbounded
   allocations from a caller-supplied length (MBA-1407).
-- Truing: the last two drifted grain-to-kg literals now use the canonical
+- Truing: the remaining drifted grain-to-kg literals (including the recovered predict_many_in_unit site) now use the canonical
   `constants::GRAINS_TO_KG` (~1.5e-7 relative correction, invisible at output
   precision; completes MBA-1327/MBA-1333) (MBA-1408).
 - WASM terminal: `--auto-zero` no longer inherits the shot's Coriolis
