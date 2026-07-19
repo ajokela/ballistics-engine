@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.27.0] - 2026-07-18
 
 ### Added
+- Truing experiment design (MBA-1346): new native `plan-truing` command and
+  `truing_plan` library API choose an exact-size, minimum-separation-compliant set of
+  target ranges from an explicit candidate list/grid. The deterministic
+  exhaustive/greedy-exchange optimizer reuses batched production-solver Jacobians,
+  reports sensitivity, conditioning, singular values, weak-axis uncertainty,
+  station information gain, and rejected/unreachable candidates, and returns an
+  honest MV-only recommendation when the available facility cannot identify BC.
+- Uncertainty-aware MV/BC truing (MBA-1353): opt-in known-1σ observation weighting,
+  per-reading sigma overrides, explicit independent MV/BC priors, a constrained
+  weighted joint MAP, local-Gaussian covariance/95% parameter intervals/correlation,
+  effective degrees of freedom, and propagated model/future-observation drop bands.
+  Approximation failures and weak/prior-dominated identification are structured and
+  visible; the legacy point-estimate path/schema remains unchanged when uncertainty
+  is not requested.
 - `powder` command (MBA-737): resolve the powder-temperature-adjusted muzzle velocity
   without running a trajectory — linear fps-per-degree model or a measured
   `--powder-temp-curve` (clamped interpolation, overrides linear), `--sweep
