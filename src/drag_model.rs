@@ -26,6 +26,16 @@ impl DragModel {
             _ => None,
         }
     }
+
+    /// Families that are accepted but ship no dedicated table: the solver
+    /// silently substitutes the G1 curve (see get_drag_coefficient,
+    /// src/drag.rs). Real tables are tracked in MBA-1386.
+    pub fn is_g1_fallback(&self) -> bool {
+        matches!(
+            self,
+            DragModel::G2 | DragModel::G5 | DragModel::GI | DragModel::GS
+        )
+    }
 }
 
 impl std::fmt::Display for DragModel {
@@ -131,5 +141,15 @@ mod tests {
         assert_eq!(format!("{:?}", DragModel::G7), "G7");
         assert_eq!(format!("{:?}", DragModel::GI), "GI");
         assert_eq!(format!("{:?}", DragModel::GS), "GS");
+    }
+
+    #[test]
+    fn g1_fallback_families_are_flagged() {
+        for m in [DragModel::G2, DragModel::G5, DragModel::GI, DragModel::GS] {
+            assert!(m.is_g1_fallback(), "{m:?} ships no dedicated table");
+        }
+        for m in [DragModel::G1, DragModel::G6, DragModel::G7, DragModel::G8] {
+            assert!(!m.is_g1_fallback(), "{m:?} has a dedicated table");
+        }
     }
 }

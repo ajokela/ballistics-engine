@@ -54,6 +54,10 @@ pub mod solve_v1;
 pub mod terminal_plot;
 // MBA-1343: multi-observation velocity/BC truing core, shared by the CLI and the WASM terminal.
 pub mod truing;
+// MBA-1346: observation-range experiment design for identifiable MV/BC truing.
+pub mod truing_plan;
+// MBA-1353: opt-in uncertainty-aware joint MV/BC truing.
+pub mod truing_uncertainty;
 // MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
 pub mod wez;
 pub mod trajectory_observation;

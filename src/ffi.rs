@@ -14,6 +14,15 @@ use std::ptr;
 /// trajectory point per step. All in-repository FFI examples use values in `[0.1, 1.0]` ms.
 pub const MIN_FFI_STEP_SIZE_MS: c_double = 0.1;
 
+/// Maximum C-ABI custom drag-table row count.
+///
+/// `drag_table_from_raw` copies both caller arrays before validation; an unbounded
+/// `len` lets a single call request two multi-gigabyte allocations and abort the
+/// process (MBA-1407). Real Cd decks are two to three orders of magnitude smaller
+/// (the embedded G1/G7 references are under 100 rows; doppler exports run a few
+/// hundred), so 4096 is far above any legitimate deck.
+pub const MAX_FFI_DRAG_TABLE_LEN: c_int = 4096;
+
 // FFI-safe structures with C-compatible layouts
 
 #[repr(C)]
@@ -217,8 +226,9 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
 
 /// Build a validated [`crate::drag::DragTable`] from borrowed C arrays.
 ///
-/// Both arrays must contain `len` elements. The data is copied; the caller retains
-/// ownership. Returns `Err(())` for null pointers, `len < 2`, or any deck that fails
+/// Both arrays must contain `len` elements, with `len` in `[2, MAX_FFI_DRAG_TABLE_LEN]`.
+/// The data is copied; the caller retains ownership. Returns `Err(())` for null
+/// pointers, `len` outside that range, or any deck that fails
 /// [`crate::drag::DragTable::try_new`] validation (non-ascending Mach, non-positive
 /// or non-finite Cd). No error detail crosses the ABI, matching the null/NAN
 /// error convention of this module.
@@ -232,7 +242,7 @@ unsafe fn drag_table_from_raw(
     cd: *const c_double,
     len: c_int,
 ) -> Result<crate::drag::DragTable, ()> {
-    if mach.is_null() || cd.is_null() || len < 2 {
+    if mach.is_null() || cd.is_null() || !(2..=MAX_FFI_DRAG_TABLE_LEN).contains(&len) {
         return Err(());
     }
     let len = len as usize;
@@ -434,11 +444,12 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
 /// G-model + BC for drag: `bc_type`/`bc_value` are ignored, and the retardation
 /// denominator becomes the projectile's sectional density (mass and diameter in
 /// `inputs` must therefore be positive). Mach values must be strictly ascending
-/// with at least 2 points and finite positive Cd; outside the deck's Mach domain
-/// the nearest endpoint Cd is held.
+/// with `drag_table_len` in `[2, MAX_FFI_DRAG_TABLE_LEN]` and finite positive Cd;
+/// outside the deck's Mach domain the nearest endpoint Cd is held.
 ///
-/// Returns null for an invalid deck (null arrays, `drag_table_len < 2`, or failed
-/// validation), in addition to every failure mode of the base function.
+/// Returns null for an invalid deck (null arrays, `drag_table_len` outside
+/// `[2, MAX_FFI_DRAG_TABLE_LEN]`, or failed validation), in addition to every
+/// failure mode of the base function.
 ///
 /// # Safety
 ///
@@ -583,13 +594,14 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
 /// G-model + BC for drag: `bc_type`/`bc_value` are ignored, and the retardation
 /// denominator becomes the projectile's sectional density (mass and diameter in
 /// `inputs` must therefore be positive). Mach values must be strictly ascending
-/// with at least 2 points and finite positive Cd; outside the deck's Mach domain
-/// the nearest endpoint Cd is held. Pair this with
+/// with `drag_table_len` in `[2, MAX_FFI_DRAG_TABLE_LEN]` and finite positive Cd;
+/// outside the deck's Mach domain the nearest endpoint Cd is held. Pair this with
 /// [`ballistics_calculate_trajectory_with_drag_table`] using the same deck to fly
 /// the solved angle — the two exports share identical deck semantics.
 ///
-/// Returns NaN for an invalid deck (null arrays, `drag_table_len < 2`, or failed
-/// validation), in addition to every failure mode of the base function.
+/// Returns NaN for an invalid deck (null arrays, `drag_table_len` outside
+/// `[2, MAX_FFI_DRAG_TABLE_LEN]`, or failed validation), in addition to every
+/// failure mode of the base function.
 ///
 /// # Safety
 ///
@@ -1358,6 +1370,51 @@ mod tests {
                 inputs.sight_height
             );
             ballistics_free_trajectory_result(result);
+        }
+    }
+
+    #[test]
+    fn drag_table_len_above_cap_is_rejected() {
+        // A valid, monotonically increasing deck that is simply too long: the cap
+        // must reject it BEFORE the to_vec() copies, returning the null sentinel.
+        let n = (MAX_FFI_DRAG_TABLE_LEN + 1) as usize;
+        let mach: Vec<f64> = (0..n).map(|i| 0.01 + i as f64 * 0.001).collect();
+        let cd: Vec<f64> = vec![0.3; n];
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let r = ballistics_calculate_trajectory_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                mach.as_ptr(),
+                cd.as_ptr(),
+                n as c_int,
+            );
+            assert!(r.is_null(), "len {n} must be rejected by the cap");
+        }
+    }
+
+    #[test]
+    fn drag_table_len_at_cap_is_accepted() {
+        let n = MAX_FFI_DRAG_TABLE_LEN as usize;
+        let mach: Vec<f64> = (0..n).map(|i| 0.01 + i as f64 * 0.001).collect();
+        let cd: Vec<f64> = vec![0.3; n];
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let r = ballistics_calculate_trajectory_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                mach.as_ptr(),
+                cd.as_ptr(),
+                n as c_int,
+            );
+            assert!(!r.is_null(), "len == cap must be accepted");
+            ballistics_free_trajectory_result(r);
         }
     }
 
