@@ -11,6 +11,7 @@
 use std::error::Error;
 
 use crate::cli_api::UnitSystem;
+use crate::constants::GRAINS_TO_KG;
 use crate::{
     AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel, TrajectorySolver,
     WindConditions,
@@ -134,7 +135,7 @@ pub(crate) fn solve_trajectory_drop(
 ) -> Result<(f64, f64), Box<dyn Error>> {
     // Convert to SI units
     let velocity_ms = velocity_fps * 0.3048;
-    let mass_kg = mass_gr * 0.0000647989;
+    let mass_kg = mass_gr * GRAINS_TO_KG;
     let diameter_m = diameter_in * 0.0254;
     let zero_m = zero_distance_yd * 0.9144;
     let range_m = range_yd * 0.9144;
