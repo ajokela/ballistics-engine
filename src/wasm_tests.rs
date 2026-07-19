@@ -1764,4 +1764,75 @@ Impact Velocity: 2510 fps\n";
             .unwrap();
         assert!(!clean.contains("using the G1 curve"), "{}", clean);
     }
+
+    /// MBA-1386 review finding: the note above is gated to plain-text/`Table`
+    /// output at every call site so a JSON/CSV consumer never sees it prepended
+    /// to its payload — but nothing asserted that gating stays intact. A future
+    /// refactor that drops one of those `matches!(output_format, OutputFormat::Table)`
+    /// checks (or the early-return/output-mode branch that does the same job on
+    /// `lead`/`monte-carlo --wez`) would silently corrupt structured output and
+    /// nothing would fail. Drives every gated call site with the same g5 load
+    /// that trips the note in table output (`test_g5_reports_g1_fallback_note`
+    /// above) and asserts the note text is absent from each structured mode,
+    /// plus a cheap '{' / '[' lead-byte parseability smoke check on the JSON
+    /// payloads. A closing check confirms the g5 load still trips the note on
+    /// `monte-carlo --wez`'s own plain-text (`summary`) mode, so the structured-
+    /// mode absences above aren't vacuously true.
+    #[wasm_bindgen_test]
+    fn test_g1_fallback_note_absent_from_structured_outputs() {
+        let wasm = WasmBallistics::new();
+        const NOTE: &str = "using the G1 curve";
+
+        // --- trajectory: `-o json` / `-o csv` (handle_trajectory_command; the note
+        // is only prepended when matches!(output_format, OutputFormat::Table)). ---
+        let traj_json = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300 -o json",
+            )
+            .unwrap();
+        assert!(!traj_json.contains(NOTE), "{}", traj_json);
+        assert!(traj_json.trim_start().starts_with('{'), "{}", traj_json);
+
+        let traj_csv = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300 -o csv",
+            )
+            .unwrap();
+        assert!(!traj_csv.contains(NOTE), "{}", traj_csv);
+
+        // --- lead: `-o json` (handle_lead_command early-returns the JSON payload
+        // before the table-only note is prepended). ---
+        let lead_json = wasm
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 \
+                 --target-speed 10 --target-angle 0 --range 500 -o json",
+            )
+            .unwrap();
+        assert!(!lead_json.contains(NOTE), "{}", lead_json);
+        assert!(lead_json.trim_start().starts_with('{'), "{}", lead_json);
+
+        // --- monte-carlo --wez: `--output full` (JSON) / `--output statistics`
+        // (CSV) — run_monte_carlo_wez only ever prepends the note on its
+        // Summary/plain-text branch. ---
+        let wez_base = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --wez \
+                         --target-size 18x30 -n 100 --wez-start 200 --wez-end 400 --wez-step 100";
+        let wez_full = wasm
+            .run_command(&format!("{wez_base} --output full"))
+            .unwrap();
+        assert!(!wez_full.contains(NOTE), "{}", wez_full);
+        assert!(wez_full.trim_start().starts_with('{'), "{}", wez_full);
+
+        let wez_stats = wasm
+            .run_command(&format!("{wez_base} --output statistics"))
+            .unwrap();
+        assert!(!wez_stats.contains(NOTE), "{}", wez_stats);
+
+        // Sanity: the same g5 load must still trip the note on wez's plain-text
+        // `summary` mode, proving the structured-mode absences above are a real
+        // gate and not vacuous (g5 never reaching the fallback at all).
+        let wez_summary = wasm
+            .run_command(&format!("{wez_base} --output summary"))
+            .unwrap();
+        assert!(wez_summary.contains(NOTE), "{}", wez_summary);
+    }
 }
