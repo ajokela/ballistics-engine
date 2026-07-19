@@ -1470,6 +1470,31 @@ Impact Velocity: 2510 fps\n";
     }
 
     #[wasm_bindgen_test]
+    fn test_auto_zero_ignores_shot_coriolis() {
+        // Fix-half of MBA-1384: the zero is torn on a known range without Coriolis
+        // (native CLI behavior — its zero literal defaults enable_coriolis=false).
+        // Before the fix, auto-zero inherited the shot's Coriolis conditions and the
+        // browser terminal disagreed with the CLI on the rifle zero.
+        let cmd = |coriolis: &str| {
+            WasmBallistics::new()
+                .run_command(&format!(
+                    "trajectory -v 2650 -b 0.19 -m 77 -d 0.224 --drag-model g7 \
+                     --sight-height 2.48 --auto-zero 100 --max-range 1000 {coriolis}"
+                ))
+                .unwrap()
+        };
+        let plain = cmd("");
+        let coriolis = cmd("--enable-coriolis --latitude 45 --shot-direction 90");
+        let zero_line =
+            |s: &str| s.lines().find(|l| l.contains("Rifle zeroed")).map(str::to_string);
+        assert_eq!(
+            zero_line(&plain),
+            zero_line(&coriolis),
+            "rifle zero must not change with shot-day Coriolis conditions"
+        );
+    }
+
+    #[wasm_bindgen_test]
     fn test_trajectory_plot_appends_charts() {
         // MBA-1337 p3: --plot appends both charts after the table (table-only).
         let out = WasmBallistics::new()

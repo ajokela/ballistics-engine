@@ -1617,6 +1617,16 @@ impl WasmBallistics {
             // the zero, which is the wrong physics (Bero's PRS report).
             zero_inputs.shooting_angle = 0.0;
             zero_inputs.cant_angle = 0.0;
+            // Fix-half of MBA-1384: the native CLI zero solve never carries
+            // Coriolis — its zero_inputs literal ends in Default::default()
+            // (enable_coriolis=false, latitude=None, shot_azimuth=0), while this
+            // clone runs after the shot's Coriolis fields are set. Strip them so
+            // the terminal and the CLI agree on the rifle zero. Zero-day opt-in
+            // flags (--zero-latitude/--zero-azimuth) are the deferred feature
+            // half of MBA-1384.
+            zero_inputs.enable_coriolis = false;
+            zero_inputs.latitude = None;
+            zero_inputs.shot_azimuth = 0.0;
             let mut zero_atmosphere = atmosphere.clone();
             let mut zero_day_overridden = false;
             if let Some(zv) = zero_velocity {
