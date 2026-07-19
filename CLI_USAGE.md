@@ -1471,6 +1471,151 @@ field names (`range_yd`, `observed_drop_mil`, `predicted_drop_mil`,
 > `--bullet-length` are not exposed there (`--offline` is accepted as a no-op;
 > the terminal always calculates locally).
 
+#### Design an identifiable truing experiment (`plan-truing`)
+
+`plan-truing` answers the question *before* impacts are collected: which of the
+target distances actually available at this facility best separate muzzle
+velocity from a scalar BC? It uses the same trajectory solver and central
+finite-difference perturbations as `true-velocity`, and it never fabricates an
+observation or changes a saved profile.
+
+```bash
+# Explicit discrete target stations
+./ballistics plan-truing \
+  -v 2700 -b 0.475 --drag-model g1 -m 168 -d 0.308 \
+  --candidate-ranges 200,300,400,500,600,700,800,900 \
+  --observation-count 3 \
+  --minimum-separation 100 \
+  --measurement-resolution 0.03 \
+  --drop-unit mil
+
+# Or explicitly discretize an interval; this expands to 200,300,...,1000
+./ballistics plan-truing \
+  --profile 308-match \
+  --range-grid 200:1000:100 \
+  --observation-count 3 \
+  --minimum-separation 150 \
+  --measurement-resolution 0.05 \
+  --output json
+```
+
+Ranges and minimum separation follow the global `--units`. The candidate list
+and `--range-grid START:END:STEP` conflict: the interval is never silently
+discretized at an engine-chosen step. Every selected range is one of the
+declared candidates, the requested count is exact, and all selected pairs honor
+the minimum separation. For small candidate sets the optimizer exhaustively
+checks every feasible combination; large sets use deterministic greedy
+construction plus one-for-one exchange. Input order does not change the answer.
+
+`--measurement-resolution` means the independent **1σ standard deviation of one
+impact reading** in `--drop-unit` (`mil`, `moa`, or `in`). The report repeats this
+assumption and shows how the weak-axis fractional uncertainty scales at half and
+twice that sigma. The discrete design is also re-optimized at those two
+resolutions; if either assumption changes the selected station set, the report
+warns that the recommendation is resolution-sensitive instead of implying it is
+robust. It also reports:
+
+- the chosen stations and predicted nominal drop;
+- fractional MV and BC sensitivity at each station;
+- each selected station's leave-one-out information gain;
+- BC sensitivity ratio, condition number, singular values, log determinant, and
+  weak-axis fractional 1σ uncertainty;
+- eligible-but-unselected and rejected/unreachable candidates with reasons;
+- an explicit `mv_only` recommendation when the available ranges do not separate
+  MV from BC.
+
+The finite information-gain score is `0.5 log det(I + F)` in fractional MV/BC
+coordinates. Here `I` is a disclosed identity reference information matrix
+(unit reference covariance for fractional parameter changes), used only to make
+the experiment-design score finite. It is not a prior injected into subsequent
+truing; the unregularized singular values, determinant, and condition number are
+reported alongside it.
+
+Saved profiles are resolved by the native CLI; explicit load/atmosphere flags
+override their scalar values. V1 deliberately supports one scalar G1/G7 BC.
+The nominal design point must lie inside the joint truing bounds: 1000–5000 fps
+after unit conversion and scalar BC 0.05–2.0.
+Profiles with velocity-banded BC values or a custom Mach/Cd curve are rejected:
+varying a single BC in either model would be physically meaningless. Supporting
+a fitted scale for a complete drag deck is a different parameter model.
+
+#### Uncertainty-aware MV + BC truing
+
+The legacy joint fit is intentionally conservative: it reports a point estimate
+only when an identifiability gate passes, otherwise it holds BC fixed. For an
+explicit probabilistic analysis, declare the measurement errors:
+
+```bash
+./ballistics true-velocity \
+  --range 500 --measured-drop 3.179 \
+  --observed 600:4.349:0.03 \
+  --observed 900:8.891:0.02 \
+  --observation-sigma 0.03 \
+  --bc 0.45 --drag-model g1 --mass 168 --diameter 0.308 \
+  --predict-range 1000 \
+  --prediction-sigma 0.03 \
+  --output json
+```
+
+`--observation-sigma SIGMA` supplies the known absolute 1σ error for the primary
+`--range`/`--measured-drop` pair and the default for every additional impact.
+An optional third field in `--observed RANGE:DROP:SIGMA` overrides it for that
+reading. Drop and sigma use `--drop-unit`; range uses `--units`. All sigmas must
+be positive and finite. This is weighting, not shot dispersion inferred from the
+residuals: a reading with half the sigma receives four times the least-squares
+weight.
+
+Optional independent normal priors are explicit:
+
+```text
+--mv-prior MEAN:SIGMA     # fps or m/s according to --units
+--bc-prior MEAN:SIGMA     # dimensionless
+```
+
+No prior is inferred from the input BC, chronograph velocity, a saved profile, or
+the residual RMS. `--chrono-velocity` remains a display-only comparison. The MAP
+minimizes the weighted observation chi-square plus only the priors shown in the
+request. Because observation sigmas are declared as absolute known standard
+deviations, the local covariance is `(Jᵀ W J + prior precision)⁻¹`; it is **not**
+multiplied by residual variance.
+
+The scalar BC and every prior mean must lie within the constrained joint-fit
+bounds (MV 1000–5000 fps after conversion; BC 0.05–2.0). These bounds apply only
+to the opt-in uncertainty fit; the legacy point path retains its historical
+input contract.
+
+The v1 report contains:
+
+- the weighted joint MAP, per-observation sigma/residual/standardized residual;
+- MV and BC 95% local-Gaussian intervals, physical covariance, and correlation;
+- data/prior chi-square, effective fitted-parameter count, effective residual
+  degrees of freedom, and reduced chi-square when defined;
+- warnings for weak BC sensitivity, collinearity, prior domination, interval/bound
+  overlap, extrapolation, or an unavailable approximation;
+- a latent model-drop interval at every repeatable `--predict-range`;
+- when `--prediction-sigma` is supplied, a distinct, wider future-observation
+  interval that adds that declared reading error in quadrature.
+
+The approximation is Laplace/Gauss-Newton around a constrained MAP, not MCMC and
+not a claim that a multimodal posterior is Gaussian. If the optimizer is not at a
+verified stationary point, the information matrix is singular/non-finite, or the
+MAP lies on a parameter bound, the MAP and residuals remain available but the
+covariance/bands are replaced by a structured failure. Short, clustered ranges
+therefore produce broad/prior-dominated BC uncertainty or an explicit inability
+to approximate it, never a precise-looking fixed BC.
+
+The diagnostics state how the MAP was verified. `scaled_gradient` means the
+Gauss-Newton half-gradient met its scaled tolerance. If the production solver's
+fine numerical texture disagrees with that broad finite-difference stencil,
+`objective_mesh` means a deterministic eight-direction poll of the actual
+penalized chi-square found no improvement larger than `1e-8` down to a scaled
+`1e-7` mesh; its radius, largest observed improvement, and evaluation count are
+reported rather than hiding the alternate convergence criterion.
+
+This uncertainty surface currently runs in the native CLI and library. With no
+uncertainty flag, `true-velocity` takes the existing path unchanged: point
+estimates, table/CSV text, and JSON schema remain compatible.
+
 ## Output Formats
 
 ### Units by Output Surface
