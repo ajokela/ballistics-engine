@@ -221,7 +221,8 @@ pub fn parse_drg(text: &str) -> Result<ParsedDragCurve, String> {
             if larger > 0.0 && smaller / larger >= 0.8 {
                 return Err(
                     "ambiguous columns: both ascend with similar ranges; cannot determine \
-                     which is mach"
+                     which is mach - if you know the order, convert the file to a mach,cd \
+                     CSV to bypass detection"
                         .to_string(),
                 );
             }
