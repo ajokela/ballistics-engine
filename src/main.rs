@@ -498,8 +498,8 @@ enum Commands {
         #[arg(long)]
         use_bc_segments: bool,
 
-        /// Path to a custom drag deck: CSV with `mach,cd` per line (Hornady CDM / Lapua radar
-        /// style). Replaces the G-model + BC for drag; bc_value is ignored when set. Mach-keyed;
+        /// Path to a custom drag deck: CSV with `mach,cd` per line, or a vendor `.drg` file
+        /// (by extension; Hornady CDM / Lapua radar style). Replaces the G-model + BC for drag; bc_value is ignored when set. Mach-keyed;
         /// out-of-range Mach holds the nearest tabulated Cd.
         #[arg(long, value_name = "FILE")]
         drag_table: Option<PathBuf>,
@@ -886,7 +886,8 @@ enum Commands {
         #[arg(long)]
         target_radius: Option<f64>,
 
-        /// Path to a custom drag deck: CSV `mach,cd` per line. Replaces the G-model + BC for drag;
+        /// Path to a custom drag deck: CSV `mach,cd` per line, or a vendor `.drg` file (by
+        /// extension). Replaces the G-model + BC for drag;
         /// bc_value is ignored when set. Mach-keyed; out-of-range Mach holds the nearest tabulated Cd.
         #[arg(long, value_name = "FILE")]
         drag_table: Option<std::path::PathBuf>,
@@ -978,7 +979,8 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
-        /// Path to a custom drag deck: CSV `mach,cd` per line. Replaces the G-model + BC for drag;
+        /// Path to a custom drag deck: CSV `mach,cd` per line, or a vendor `.drg` file (by
+        /// extension). Replaces the G-model + BC for drag;
         /// bc_value is ignored when set. Mach-keyed; out-of-range Mach holds the nearest tabulated Cd.
         #[arg(long, value_name = "FILE")]
         drag_table: Option<std::path::PathBuf>,
