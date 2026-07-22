@@ -2453,7 +2453,7 @@ impl WasmBallistics {
             "mil" | "moa" | "smoa" | "iphy" => {}
             "clicks" => {
                 return Err(JsValue::from_str(
-                    "--adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)",
+                    "error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)",
                 ));
             }
             _ => {
