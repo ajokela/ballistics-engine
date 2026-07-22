@@ -1107,6 +1107,200 @@ Iterations: 0\n";
     }
 
     // -----------------------------------------------------------------------------
+    // MBA-1355: WASM terminal parity for smoa/iphy/clicks turret adjustment units
+    // (native CLI got these in main.rs; this brings `trajectory`'s Ring column and
+    // `lead`'s adjustment display up to the same surface). The real flag is
+    // `--adjustment-unit` (NOT `--units`, which selects imperial/metric).
+    // -----------------------------------------------------------------------------
+
+    /// Ring column accepts smoa/iphy (real constant-factor conversion, same
+    /// smoa_per_mil() ratio as moa/mil) and clicks (whole-integer rounding via a
+    /// resolved elevation click graduation) — mirroring native's Ring(smoa)/Ring(iphy)/
+    /// Ring(clicks) headers exactly (CLI_USAGE.md's documented "(mil)/(moa) convention
+    /// ... e.g. the mover Ring column reads Ring(clicks)"). A bare --adjustment-unit
+    /// clicks (no graduation from any source — WASM has no --profile) must fail fast,
+    /// naming --elevation-click-value.
+    #[wasm_bindgen_test]
+    fn test_units_smoa_and_clicks_accepted() {
+        let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --target-speed 3";
+
+        let smoa = WasmBallistics::new()
+            .run_command(&format!("{base} --adjustment-unit smoa"))
+            .unwrap();
+        assert!(smoa.contains("Ring(smoa)"), "{smoa}");
+
+        let iphy = WasmBallistics::new()
+            .run_command(&format!("{base} --adjustment-unit iphy"))
+            .unwrap();
+        assert!(iphy.contains("Ring(iphy)"), "{iphy}");
+        // smoa and iphy are numerically identical (both 3600 factor) — only the label differs.
+        let smoa_json = WasmBallistics::new()
+            .run_command(&format!("{base} --adjustment-unit smoa -o json"))
+            .unwrap();
+        let iphy_json = WasmBallistics::new()
+            .run_command(&format!("{base} --adjustment-unit iphy -o json"))
+            .unwrap();
+        assert_eq!(smoa_json, iphy_json, "smoa/iphy JSON is unit-in-name-only (mil-based fields)");
+
+        let clicks = WasmBallistics::new()
+            .run_command(&format!("{base} --adjustment-unit clicks --elevation-click-value 0.25moa"))
+            .unwrap();
+        assert!(clicks.contains("Ring(clicks)"), "{clicks}");
+        // Clicks cells are whole integers with no per-cell unit suffix (native's
+        // RingUnit::Clicks arm: `format!("{:>8}", clicks_for(...))`, no trailing label) —
+        // unlike the Factor arms, which append " mil"/" moa"/" smoa"/" iphy" per cell.
+        let last_ring_cell = clicks
+            .lines()
+            .filter(|l| l.contains('|') && !l.starts_with("Range") && !l.starts_with("---"))
+            .last()
+            .map(|l| l.rsplit('|').next().unwrap().trim().to_string())
+            .unwrap_or_default();
+        assert!(
+            last_ring_cell.parse::<i64>().is_ok(),
+            "clicks Ring cell must be a bare whole integer, got {last_ring_cell:?} in:\n{clicks}"
+        );
+
+        let missing = WasmBallistics::new()
+            .run_command(&format!("{base} --adjustment-unit clicks"))
+            .unwrap_err();
+        let msg = missing.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("--adjustment-unit clicks requires a turret elevation graduation"),
+            "{msg}"
+        );
+        assert!(msg.contains("--elevation-click-value"), "{msg}");
+    }
+
+    /// A malformed --elevation-click-value (missing unit suffix, non-positive
+    /// magnitude, etc.) surfaces parse_click_value's own error message, same parser
+    /// the native CLI uses (src/adjustment.rs, shared by both binaries).
+    #[wasm_bindgen_test]
+    fn clicks_rejects_malformed_elevation_click_value() {
+        let err = WasmBallistics::new()
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --target-speed 3 \
+                 --adjustment-unit clicks --elevation-click-value notaclick",
+            )
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(msg.contains("needs a unit suffix"), "{msg}");
+    }
+
+    /// --windage-click-value is validated even though the Ring column never displays
+    /// it (it always reuses the elevation graduation, same "accepted but inert"
+    /// contract native's come-ups documents for its own windage flag) — a typo'd
+    /// windage value must still error, not be silently ignored.
+    #[wasm_bindgen_test]
+    fn clicks_validates_windage_click_value_even_though_unused_by_ring() {
+        let err = WasmBallistics::new()
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --target-speed 3 \
+                 --adjustment-unit clicks --elevation-click-value 0.25moa \
+                 --windage-click-value bogus",
+            )
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(msg.contains("needs a unit suffix"), "{msg}");
+
+        // A well-formed windage value alongside elevation still resolves normally.
+        let ok = WasmBallistics::new()
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --target-speed 3 \
+                 --adjustment-unit clicks --elevation-click-value 0.25moa \
+                 --windage-click-value 0.1mil",
+            )
+            .unwrap();
+        assert!(ok.contains("Ring(clicks)"), "{ok}");
+    }
+
+    /// An unrecognized --adjustment-unit value lists all five accepted choices, not
+    /// just the pre-MBA-1355 mil/moa pair.
+    #[wasm_bindgen_test]
+    fn invalid_adjustment_unit_lists_all_five_choices() {
+        let err = WasmBallistics::new()
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --target-speed 3 \
+                 --adjustment-unit bogus",
+            )
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(msg.contains("mil, moa, smoa, iphy, or clicks"), "{msg}");
+    }
+
+    /// CSV/JSON ring fields stay mil-only regardless of --adjustment-unit (pre-existing
+    /// contract, unaffected by MBA-1355): ring_mil (csv) / mover_ring_mil (json) are
+    /// always in mil even when the table's Ring column is requesting clicks.
+    #[wasm_bindgen_test]
+    fn ring_csv_and_json_fields_stay_mil_only_under_clicks() {
+        let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --target-speed 3 \
+                    --adjustment-unit clicks --elevation-click-value 0.25moa";
+
+        let csv = WasmBallistics::new().run_command(&format!("{base} -o csv")).unwrap();
+        assert!(csv.contains("Ring(mil)"), "{csv}");
+
+        let json = WasmBallistics::new().run_command(&format!("{base} -o json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let points = json["trajectory"].as_array().expect("trajectory array");
+        assert!(points.iter().any(|p| p.get("mover_ring_mil").is_some()));
+    }
+
+    /// `lead` gains real smoa/iphy display (mirrors native handle_lead's
+    /// Smoa|Iphy => sol.lead_mil * smoa_per_mil() arm) but clicks stays out of scope —
+    /// only trajectory/come-ups ever resolve a real click count (WASM has no
+    /// come-ups command, so trajectory's Ring column is the only real-resolution site).
+    #[wasm_bindgen_test]
+    fn lead_accepts_smoa_and_iphy_with_real_values() {
+        let smoa_json = WasmBallistics::new()
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+                 --adjustment-unit smoa -o json",
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&smoa_json).unwrap();
+        let lead_mil = json["lead_mil"].as_f64().unwrap();
+        let lead_smoa = json["lead_smoa"].as_f64().unwrap();
+        assert!(
+            (lead_smoa - lead_mil * 3.6).abs() < 1e-6,
+            "lead_smoa must be lead_mil * 3.6 exactly: {lead_smoa} vs {}",
+            lead_mil * 3.6
+        );
+        assert_eq!(json["adjustment_unit"], "smoa");
+
+        let smoa_table = WasmBallistics::new()
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+                 --adjustment-unit smoa",
+            )
+            .unwrap();
+        assert!(smoa_table.contains("SMOA"), "{smoa_table}");
+
+        let iphy_table = WasmBallistics::new()
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+                 --adjustment-unit iphy",
+            )
+            .unwrap();
+        assert!(iphy_table.contains("IPHY"), "{iphy_table}");
+    }
+
+    /// `lead --adjustment-unit clicks` rejects with the exact out-of-scope text native
+    /// uses for every command outside trajectory/come-ups (reject_clicks_out_of_scope).
+    #[wasm_bindgen_test]
+    fn lead_rejects_clicks_out_of_scope() {
+        let err = WasmBallistics::new()
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+                 --adjustment-unit clicks",
+            )
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert_eq!(
+            msg,
+            "--adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
     // MBA-1328: custom Mach:Cd drag table, mirroring the BC5D bytes-loader pattern
     // (load_bc5d_table / has_bc5d_table above). loadDragTable(bytes) parses the SAME
     // CSV format native --drag-table accepts (DragTable::from_csv_str) and, once

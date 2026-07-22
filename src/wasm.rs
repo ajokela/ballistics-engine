@@ -62,6 +62,27 @@ impl OutputFormat {
     }
 }
 
+/// SMOA (a.k.a. IPHY) per MIL — the crate's locked MBA-724 dial-constant ratio
+/// (`adjustment::adjustment_factor(Smoa) / adjustment_factor(Mil)` == 3.6 exact).
+/// Mirrors native `main.rs`'s `smoa_per_mil()` helper so the WASM terminal's SMOA/IPHY
+/// figures agree with the native CLI bit-for-bit (MBA-1355).
+fn smoa_per_mil() -> f64 {
+    crate::adjustment::adjustment_factor(crate::adjustment::ClickBase::Smoa)
+        / crate::adjustment::adjustment_factor(crate::adjustment::ClickBase::Mil)
+}
+
+/// How the mover Ring table column (trajectory's `--target-speed`) turns its raw mil
+/// angle into a display value for the active `--adjustment-unit` (MBA-1355), mirroring
+/// native `main.rs`'s `RingUnit`: every unit except Clicks is a constant multiply on the
+/// mil angle; Clicks instead rounds to a whole click count via a resolved `ClickValue`
+/// (the elevation graduation — Ring isn't cleanly an elevation or windage axis, so it
+/// reuses elevation, same choice the native CLI's PDF dope card Drop column makes).
+#[derive(Debug, Clone, Copy)]
+enum RingDisplayUnit {
+    Factor(f64, &'static str),
+    Clicks(crate::adjustment::ClickValue),
+}
+
 /// Parse a `--powder-temp-curve` "TEMP:VEL,..." value into sorted SI
 /// `(temperature_c, velocity_m_s)` points — ONE parser shared by the trajectory and
 /// lead command handlers so their validation cannot drift (review fix M2: the two
@@ -934,6 +955,13 @@ impl WasmBallistics {
         // it too. Only the table reads it; CSV keeps ring_mil and JSON keeps
         // mover_ring_m/mover_ring_mil (unit-in-the-name contract).
         let mut adjustment_unit = "mil";
+        // MBA-1355: turret click graduations for `--adjustment-unit clicks`. Only
+        // elevation is ever consumed (the Ring column, like the native PDF dope card's
+        // Drop column, reuses the elevation graduation) — windage is parsed/validated
+        // for CLI-flag parity with native trajectory but is otherwise inert here (WASM's
+        // trajectory table has no PDF dope card / windage-driven column).
+        let mut elevation_click_value: Option<&str> = None;
+        let mut windage_click_value: Option<&str> = None;
 
         // Additional parameters
         let mut twist_rate: Option<f64> = None;
@@ -1211,6 +1239,18 @@ impl WasmBallistics {
                 "--adjustment-unit" => {
                     if i + 1 < args.len() {
                         adjustment_unit = args[i + 1];
+                        i += 1;
+                    }
+                }
+                "--elevation-click-value" => {
+                    if i + 1 < args.len() {
+                        elevation_click_value = Some(args[i + 1]);
+                        i += 1;
+                    }
+                }
+                "--windage-click-value" => {
+                    if i + 1 < args.len() {
+                        windage_click_value = Some(args[i + 1]);
                         i += 1;
                     }
                 }
@@ -1771,15 +1811,47 @@ impl WasmBallistics {
             UnitSystem::Metric => target_speed,
         };
         // Validate --adjustment-unit like handle_lead_command does; only the ring
-        // table column consumes it on this command.
+        // table column consumes it on this command. MBA-1355: smoa/iphy join
+        // mil/moa as constant-factor units; clicks needs a resolved elevation click
+        // graduation (--elevation-click-value or nothing else — WASM has no --profile),
+        // mirroring native's resolve_click_values/reject_clicks_out_of_scope split
+        // (trajectory is one of the two commands where clicks actually resolves).
         let adjustment_unit_lower = adjustment_unit.to_lowercase();
-        if adjustment_unit_lower != "mil" && adjustment_unit_lower != "moa" {
-            return Err(JsValue::from_str(&format!(
-                "Invalid --adjustment-unit '{}' (expected mil or moa)",
-                adjustment_unit
-            )));
-        }
-        let ring_in_moa = adjustment_unit_lower == "moa";
+        let ring_unit = match adjustment_unit_lower.as_str() {
+            "mil" => RingDisplayUnit::Factor(1.0, "mil"),
+            "moa" => RingDisplayUnit::Factor(
+                crate::moving_target::MOA_PER_UNIT_RATIO / crate::moving_target::MIL_PER_UNIT_RATIO,
+                "moa",
+            ),
+            // SMOA/IPHY are numerically identical (exact inches-per-hundred-yards); only
+            // the header/cell text differs, so they get their own labels but share the
+            // ratio, matching native's Ring(smoa)/Ring(iphy) treatment.
+            "smoa" => RingDisplayUnit::Factor(smoa_per_mil(), "smoa"),
+            "iphy" => RingDisplayUnit::Factor(smoa_per_mil(), "iphy"),
+            "clicks" => {
+                let elev_str = elevation_click_value.ok_or_else(|| {
+                    JsValue::from_str(
+                        "--adjustment-unit clicks requires a turret elevation graduation: pass \
+                         --elevation-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil)",
+                    )
+                })?;
+                let elevation = crate::adjustment::parse_click_value(elev_str)
+                    .map_err(|e| JsValue::from_str(&e))?;
+                // Windage is validated for CLI-flag parity with native (a typo'd
+                // --windage-click-value still errors here, same as native trajectory)
+                // but is otherwise inert — the Ring column always uses elevation.
+                if let Some(w) = windage_click_value {
+                    crate::adjustment::parse_click_value(w).map_err(|e| JsValue::from_str(&e))?;
+                }
+                RingDisplayUnit::Clicks(elevation)
+            }
+            _ => {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid --adjustment-unit '{}' (expected mil, moa, smoa, iphy, or clicks)",
+                    adjustment_unit
+                )));
+            }
+        };
 
         match solver.solve() {
             Ok(result) => {
@@ -1791,7 +1863,7 @@ impl WasmBallistics {
                         full,
                         inputs.muzzle_height + inputs.sight_height,
                         target_speed_mps,
-                        ring_in_moa,
+                        ring_unit,
                     ),
                     OutputFormat::Json => self.format_trajectory_json(
                         &result,
@@ -2371,12 +2443,25 @@ impl WasmBallistics {
         let target_speed = target_speed
             .ok_or_else(|| JsValue::from_str("--target-speed is required"))?;
 
+        // MBA-1355: smoa/iphy join mil/moa as real display units (mirrors native
+        // handle_lead's Smoa|Iphy match arm — sol.lead_mil * smoa_per_mil()). clicks is
+        // out-of-scope for `lead` — real click resolution only exists for
+        // trajectory/come-ups (native's `reject_clicks_out_of_scope`; WASM has no
+        // come-ups command, so only trajectory's Ring column resolves clicks).
         let adjustment_unit_lower = adjustment_unit.to_lowercase();
-        if adjustment_unit_lower != "mil" && adjustment_unit_lower != "moa" {
-            return Err(JsValue::from_str(&format!(
-                "Invalid --adjustment-unit '{}' (expected mil or moa)",
-                adjustment_unit
-            )));
+        match adjustment_unit_lower.as_str() {
+            "mil" | "moa" | "smoa" | "iphy" => {}
+            "clicks" => {
+                return Err(JsValue::from_str(
+                    "--adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)",
+                ));
+            }
+            _ => {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid --adjustment-unit '{}' (expected mil, moa, smoa, iphy, or clicks)",
+                    adjustment_unit
+                )));
+            }
         }
 
         let lead_output_lower = lead_output.to_lowercase();
@@ -2539,17 +2624,15 @@ impl WasmBallistics {
                     UnitSystem::Imperial => sol.corrected_range_m * 1.09361,
                     UnitSystem::Metric => sol.corrected_range_m,
                 };
-                // Requested --adjustment-unit is listed first; both MIL and MOA are always shown.
-                let lead_adj_line = if adjustment_unit_lower == "moa" {
-                    format!(
-                        "{:.2} MOA / {:.2} MIL",
-                        sol.lead_moa, sol.lead_mil
-                    )
-                } else {
-                    format!(
-                        "{:.2} MIL / {:.2} MOA",
-                        sol.lead_mil, sol.lead_moa
-                    )
+                // Requested --adjustment-unit is listed first; MIL is always shown second
+                // (MBA-1355: SMOA/IPHY join MOA as a requestable primary unit, sharing the
+                // native smoa_per_mil() conversion off sol.lead_mil).
+                let lead_smoa = sol.lead_mil * smoa_per_mil();
+                let lead_adj_line = match adjustment_unit_lower.as_str() {
+                    "moa" => format!("{:.2} MOA / {:.2} MIL", sol.lead_moa, sol.lead_mil),
+                    "smoa" => format!("{:.2} SMOA / {:.2} MIL", lead_smoa, sol.lead_mil),
+                    "iphy" => format!("{:.2} IPHY / {:.2} MIL", lead_smoa, sol.lead_mil),
+                    _ => format!("{:.2} MIL / {:.2} MOA", sol.lead_mil, sol.lead_moa),
                 };
 
                 if lead_output_lower == "json" {
@@ -2563,6 +2646,7 @@ impl WasmBallistics {
                         "lead": lead_disp,
                         "lead_mil": sol.lead_mil,
                         "lead_moa": sol.lead_moa,
+                        "lead_smoa": lead_smoa,
                         "intercept_range": intercept_disp,
                         "iterations": sol.iterations,
                         "adjustment_unit": adjustment_unit_lower,
@@ -3935,28 +4019,26 @@ impl WasmBallistics {
         full: bool,
         los_height_m: f64,
         target_speed_mps: f64,
-        ring_in_moa: bool,
+        ring_unit: RingDisplayUnit,
     ) -> String {
         // Mover ring (MBA-1325): additive "Ring" column, only when --target-speed > 0.
         let ring_enabled = target_speed_mps > 0.0;
-        // Ring cell angular unit honors --adjustment-unit (review fix M3). The MOA
-        // conversion uses the crate's locked printed-table dial constant (MBA-724):
-        // MOA_PER_UNIT_RATIO / MIL_PER_UNIT_RATIO == exactly 3.438 — deliberately NOT
-        // the exact-angle 3437.7467/1000 — matching the native ring table and every
-        // other MIL/MOA column pair this project prints.
-        let (ring_factor, ring_unit) = if ring_in_moa {
-            (
-                crate::moving_target::MOA_PER_UNIT_RATIO / crate::moving_target::MIL_PER_UNIT_RATIO,
-                "moa",
-            )
-        } else {
-            (1.0, "mil")
+        // MBA-1355: header carries the unit — Ring(mil)/Ring(moa)/Ring(smoa)/Ring(iphy)/
+        // Ring(clicks) — matching native's `ring_hdr` convention exactly (CLI_USAGE.md:
+        // "the header/column suffix follows the same (mil)/(moa) convention as every
+        // other unit — e.g. the mover Ring column reads Ring(clicks)").
+        let ring_hdr_unit = match ring_unit {
+            RingDisplayUnit::Factor(_, label) => label,
+            RingDisplayUnit::Clicks(_) => "clicks",
         };
         let mut output = String::new();
         output.push_str("Trajectory Calculation Results\n");
         output.push_str("==============================\n\n");
         if ring_enabled {
-            output.push_str("Range | Drop | Drift | Velocity | Energy | Time | Ring\n");
+            output.push_str(&format!(
+                "Range | Drop | Drift | Velocity | Energy | Time | Ring({})\n",
+                ring_hdr_unit
+            ));
             output.push_str("------|------|-------|----------|--------|------|------\n");
         } else {
             output.push_str("Range | Drop | Drift | Velocity | Energy | Time\n");
@@ -4040,7 +4122,17 @@ impl WasmBallistics {
                     let (_, ring_mil) =
                         mover_ring(target_speed_mps, point.time, point.position.x);
                     let ring_str = match ring_mil {
-                        Some(mil) => format!("{:.2} {}", mil * ring_factor, ring_unit),
+                        Some(mil) => match ring_unit {
+                            RingDisplayUnit::Factor(f, label) => format!("{:.2} {}", mil * f, label),
+                            // clicks_for(drop_yd, range_yd, click) only needs the
+                            // drop_yd/range_yd RATIO — passing (mil, 1000.0) reuses it
+                            // directly on an already-computed mil angle (ring_mil is
+                            // `ring_m / downrange_m * 1000`), same trick native's
+                            // RingUnit::Clicks arm uses (main.rs run_trajectory).
+                            RingDisplayUnit::Clicks(click) => {
+                                format!("{}", crate::adjustment::clicks_for(mil, 1000.0, &click))
+                            }
+                        },
                         None => "-".to_string(),
                     };
                     output.push_str(&format!(
@@ -4793,8 +4885,13 @@ Trajectory Command:
     --target-speed <SPEED>       Mover ring: per-point ring radius = speed x ToF
                                  (mph/m/s, 0-300; 0 = off). Adds a Ring column (table),
                                  mover_ring_m/mover_ring_mil (json), ring_mil (csv)
-    --adjustment-unit <UNIT>     Ring table column unit, mil or moa [default: mil]
-    
+    --adjustment-unit <UNIT>     Ring table column unit: mil/moa/smoa/iphy/clicks
+                                 [default: mil]
+    --elevation-click-value <S>  Turret elevation click graduation, e.g. 0.25moa or
+                                 0.1mil; required (once) when --adjustment-unit clicks
+    --windage-click-value <S>    Turret windage click graduation (accepted for CLI
+                                 parity; the Ring column always uses the elevation one)
+
   Environmental:
     --wind-speed <SPEED>         Wind speed (mph/m/s)
     --wind-direction <DIR>       Wind direction (deg; 0=headwind, 90=from right)
@@ -4983,7 +5080,8 @@ Lead Command:
                                   0=away, 90=left-to-right, 180=toward, 270=right-to-left;
                                   positive lead = hold in direction of travel
     --range <DIST>                Range to target (yards/meters) [default: 500]
-    --adjustment-unit <UNIT>      mil or moa [default: mil]
+    --adjustment-unit <UNIT>      mil/moa/smoa/iphy [default: mil] (clicks: trajectory
+                                  and come-ups only, MBA-1355)
     -o, --output <FORMAT>         Output format (table/json) [default: table]
 
   Time of flight is solved under the supplied wind/atmosphere (wind-aware lead);
