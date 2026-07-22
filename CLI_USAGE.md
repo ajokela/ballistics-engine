@@ -52,14 +52,11 @@ mover Ring) are displayed. Five values are accepted (MBA-724, MBA-1355):
 
 ### `clicks`: whole-click output
 
-`--adjustment-unit clicks` (referred to as "`--units clicks`" in this feature's error
-text below, MBA-1355's own shorthand for the setting — the flag itself is
-`--adjustment-unit`, same as every other value in the table above) rounds the angular
-adjustment to the nearest **whole turret click** instead of printing an angle —
-ties round away from zero, sign is preserved, and ranges under 1 yard/meter are defined
-as zero adjustment (same short-range guard as every other adjustment unit). It needs a
-**click graduation** — the angular size of one click on your turret — which has no
-default and must come from one of two places:
+`--adjustment-unit clicks` rounds the angular adjustment to the nearest **whole turret
+click** instead of printing an angle — ties round away from zero, sign is preserved, and
+ranges under 1 yard/meter are defined as zero adjustment (same short-range guard as
+every other adjustment unit). It needs a **click graduation** — the angular size of one
+click on your turret — which has no default and must come from one of two places:
 
 - **`--elevation-click-value <SIZE><UNIT>`** / **`--windage-click-value <SIZE><UNIT>`** —
   CLI flags, e.g. `--elevation-click-value 0.25moa` or `--elevation-click-value 0.1mil`.
@@ -88,7 +85,7 @@ error: --units clicks requires a turret elevation graduation: pass --elevation-c
 immediately, rather than silently falling back to another unit:
 
 ```
-error: --units clicks is currently supported for trajectory and come-ups only (MBA-1355)
+error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)
 ```
 
 Where clicks resolves, the header/column suffix follows the same `(mil)`/`(moa)`
