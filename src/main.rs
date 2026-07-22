@@ -803,12 +803,12 @@ enum Commands {
         #[arg(long, value_enum, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
 
-        /// Turret elevation click graduation for `--units clicks`, e.g. 0.1mil or
+        /// Turret elevation click graduation for `--adjustment-unit clicks`, e.g. 0.1mil or
         /// 0.25moa (falls back to the saved profile's elevation_click when omitted).
         #[arg(long)]
         elevation_click_value: Option<String>,
 
-        /// Turret windage click graduation for `--units clicks` (falls back to the
+        /// Turret windage click graduation for `--adjustment-unit clicks` (falls back to the
         /// resolved elevation graduation, then the saved profile's windage_click).
         #[arg(long)]
         windage_click_value: Option<String>,
@@ -1439,12 +1439,12 @@ enum Commands {
         #[arg(long, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
 
-        /// Turret elevation click graduation for `--units clicks`, e.g. 0.1mil or
+        /// Turret elevation click graduation for `--adjustment-unit clicks`, e.g. 0.1mil or
         /// 0.25moa (falls back to the saved profile's elevation_click when omitted).
         #[arg(long)]
         elevation_click_value: Option<String>,
 
-        /// Turret windage click graduation for `--units clicks` (accepted for parity
+        /// Turret windage click graduation for `--adjustment-unit clicks` (accepted for parity
         /// with `trajectory`; come-ups has no windage column to apply it to).
         #[arg(long)]
         windage_click_value: Option<String>,
@@ -2035,12 +2035,12 @@ enum ProfileAction {
         #[arg(long)]
         bullet_length: Option<f64>,
 
-        /// Turret elevation click graduation for `--units clicks` (MBA-1355), e.g. 0.1mil
+        /// Turret elevation click graduation for `--adjustment-unit clicks` (MBA-1355), e.g. 0.1mil
         /// or 0.25moa. Validated at save time so a profile can't store garbage.
         #[arg(long)]
         elevation_click: Option<String>,
 
-        /// Turret windage click graduation for `--units clicks` (MBA-1355); falls back to
+        /// Turret windage click graduation for `--adjustment-unit clicks` (MBA-1355); falls back to
         /// the elevation graduation when omitted, e.g. 0.1mil or 0.25moa.
         #[arg(long)]
         windage_click: Option<String>,
@@ -2215,14 +2215,14 @@ struct ProfileData {
     use_bc_segments: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bullet_length: Option<f64>,
-    /// Turret elevation click graduation for `--units clicks` (MBA-1355), e.g. "0.1mil" or
+    /// Turret elevation click graduation for `--adjustment-unit clicks` (MBA-1355), e.g. "0.1mil" or
     /// "0.25moa" — parsed by `parse_click_value` at both save-time (validation) and
     /// resolve-time (`resolve_click_values`). Unit-invariant (an angular graduation, not a
     /// linear measurement), so `converted_to` leaves it untouched — see the `bc_segments`/
     /// `drag_curve` comment below for why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     elevation_click: Option<String>,
-    /// Turret windage click graduation for `--units clicks` (MBA-1355). Falls back to the
+    /// Turret windage click graduation for `--adjustment-unit clicks` (MBA-1355). Falls back to the
     /// resolved elevation graduation when unset — see `resolve_click_values`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     windage_click: Option<String>,
@@ -2516,7 +2516,7 @@ struct TrajectoryConfig {
     // JSON keeps mover_ring_m/mover_ring_mil regardless: those carry the unit in the
     // name (the contract), the table is the human display surface.
     adjustment_unit: AdjustmentUnit,
-    // Resolved turret click graduations for `--units clicks` (MBA-1355): Some(...) iff
+    // Resolved turret click graduations for `--adjustment-unit clicks` (MBA-1355): Some(...) iff
     // adjustment_unit == Clicks (resolved once, eagerly, in the Trajectory command's
     // dispatch — see resolve_click_values); None for every other adjustment_unit. Drives
     // the mover Ring column and the PDF dope-card rows.
@@ -3559,7 +3559,7 @@ fn smoa_per_mil() -> f64 {
     adjustment_factor(ClickBase::Smoa) / adjustment_factor(ClickBase::Mil)
 }
 
-/// Resolves the per-axis turret click graduations for `--units clicks` (MBA-1355).
+/// Resolves the per-axis turret click graduations for `--adjustment-unit clicks` (MBA-1355).
 ///
 /// Precedence per axis: an explicit CLI flag beats the saved profile's field. Windage
 /// falls back to the resolved elevation graduation when neither `flag_wind` nor
@@ -3582,7 +3582,7 @@ fn resolve_click_values(
         .or_else(|| profile.and_then(|p| p.elevation_click.clone()));
     let Some(elev_str) = elev_str else {
         return Err(
-            "--units clicks requires a turret elevation graduation: pass \
+            "--adjustment-unit clicks requires a turret elevation graduation: pass \
              --elevation-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil), or save one on \
              the profile with `profile save --elevation-click`"
                 .to_string(),
@@ -3603,7 +3603,7 @@ fn resolve_click_values(
 
 /// Elevation/windage adjustment display value for one axis (MBA-1355): whole clicks
 /// (rounded via `clicks_for`) when a click graduation has been resolved for this axis
-/// (`--units clicks`), else the pre-existing `drop_to_adjustment` angular value. Shared by
+/// (`--adjustment-unit clicks`), else the pre-existing `drop_to_adjustment` angular value. Shared by
 /// the come-ups table and the trajectory PDF dope-card rows so both format Clicks
 /// identically.
 fn adjustment_display(
@@ -3618,7 +3618,7 @@ fn adjustment_display(
     }
 }
 
-/// `--units clicks` real click resolution exists only for `trajectory`/`come-ups`
+/// `--adjustment-unit clicks` real click resolution exists only for `trajectory`/`come-ups`
 /// (MBA-1355 Task 2 scope). Every other command that still reads `AdjustmentUnit` (wind
 /// card, lead/moving-target, range-table, compare) must reject it up front rather than
 /// silently falling back to MIL through the `debug_assert!`-guarded arms further down —
@@ -11447,7 +11447,7 @@ fn handle_come_ups(
     end: f64,
     step: f64,
     adjustment_unit: AdjustmentUnit,
-    // Resolved turret elevation click graduation for `--units clicks` (MBA-1355):
+    // Resolved turret elevation click graduation for `--adjustment-unit clicks` (MBA-1355):
     // Some(...) iff adjustment_unit == Clicks (resolved once, eagerly, in the ComeUps
     // command's dispatch — see resolve_click_values); None otherwise.
     elevation_click: Option<ClickValue>,
@@ -12052,7 +12052,7 @@ fn handle_lead(
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: `lead` (moving-target) is out of scope for `--units clicks` — reject
+    // MBA-1355: `lead` (moving-target) is out of scope for `--adjustment-unit clicks` — reject
     // before doing any work rather than silently falling back to MIL below.
     reject_clicks_out_of_scope(adjustment_unit);
     // Convert to metric
@@ -12392,7 +12392,7 @@ fn handle_wind_card(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: wind card is out of scope for `--units clicks` — reject before doing
+    // MBA-1355: wind card is out of scope for `--adjustment-unit clicks` — reject before doing
     // any work rather than silently falling back to MIL below.
     reject_clicks_out_of_scope(adjustment_unit);
     // Convert to metric
@@ -12857,7 +12857,7 @@ fn handle_range_table(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: range-table is out of scope for `--units clicks` — reject before doing
+    // MBA-1355: range-table is out of scope for `--adjustment-unit clicks` — reject before doing
     // any work rather than silently falling back to MIL below.
     reject_clicks_out_of_scope(adjustment_unit);
     // Convert to metric
@@ -13219,7 +13219,7 @@ fn handle_compare(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: compare is out of scope for `--units clicks` — reject before doing any
+    // MBA-1355: compare is out of scope for `--adjustment-unit clicks` — reject before doing any
     // work rather than silently falling back to MIL below.
     reject_clicks_out_of_scope(adjustment_unit);
     // Shared conditions in metric
