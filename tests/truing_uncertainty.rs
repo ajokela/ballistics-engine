@@ -450,6 +450,143 @@ fn clustered_short_range_no_prior_never_claims_narrow_bc_uncertainty() {
     }
 }
 
+/// MBA-1353: synthetic, well-conditioned Monte-Carlo interval calibration.
+///
+/// Truth is the shared `model()` fixture (MV 2700 fps, BC 0.475). Each trial
+/// perturbs the noise-free `nominal_drop()` predictions at the suite's
+/// well-conditioned `RANGES_YD` stations (200/300/600/900/1000 yd -- a mix of
+/// near and far ranges that separates MV from BC, unlike the short-range-only
+/// clusters exercised elsewhere in this file) with iid Gaussian noise and
+/// checks whether the resulting 95% intervals contain the true MV/BC. This
+/// closes MBA-1353's last acceptance criterion: synthetic well-conditioned
+/// cases contain known MV/BC at the advertised interval rate within
+/// simulation tolerance.
+///
+/// Requests are built with `request()`, i.e. `TruingPriorsV1::default()` --
+/// no priors -- so the intervals under test are entirely data-dominated.
+///
+/// The noise generator is a hand-rolled 64-bit LCG feeding Box-Muller, not the
+/// `rand` crate: coverage depends on a bit-for-bit reproducible noise sequence
+/// across every platform and Rust toolchain this crate is built with, and
+/// `rand`'s algorithm/output sequence is not a stability guarantee across its
+/// own crate versions (see the identical pattern used in the validation-gated
+/// `synthetic_gaussian_coverage_tracks_the_advertised_95_percent_level` below).
+///
+/// Runtime: ~150s single-threaded for the 40 fits at this seed; the harness
+/// runs it in parallel with the rest of this binary, so suite wall-time grows
+/// far less. This is the always-on smoke tier; the validation-gated sibling
+/// is the high-N rigorous tier.
+#[test]
+fn intervals_cover_the_true_parameters_at_the_advertised_rate() {
+    fn uniform_open(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (((*state >> 11) as f64) + 0.5) / ((1_u64 << 53) as f64)
+    }
+
+    fn normal_pair(state: &mut u64) -> (f64, f64) {
+        let radius = (-2.0 * uniform_open(state).ln()).sqrt();
+        let angle = 2.0 * std::f64::consts::PI * uniform_open(state);
+        (radius * angle.cos(), radius * angle.sin())
+    }
+
+    // sd = 0.05 mil: large enough that noise dominates solver/finite-difference
+    // error, small enough that the 5-station, near+far design stays
+    // well-conditioned (matches `nominal_drops()`'s planner sigma of 0.02 in
+    // spirit, but scaled up to make Monte-Carlo noise the dominant effect).
+    const SIGMA_MIL: f64 = 0.05;
+    const TRIALS: usize = 40;
+    let mut seed: u64 = 0x1353_2026_0722_c0de_u64;
+
+    let mut available_count = 0usize;
+    let mut mv_hits = 0usize;
+    let mut bc_hits = 0usize;
+    let mut mv_half_width_sum = 0.0_f64;
+    let mut bc_half_width_sum = 0.0_f64;
+
+    for trial in 0..TRIALS {
+        let mut noise = Vec::with_capacity(RANGES_YD.len());
+        while noise.len() < RANGES_YD.len() {
+            let (a, b) = normal_pair(&mut seed);
+            noise.push(a * SIGMA_MIL);
+            if noise.len() < RANGES_YD.len() {
+                noise.push(b * SIGMA_MIL);
+            }
+        }
+
+        let mut trial_request = request(&RANGES_YD, SIGMA_MIL, TruingPriorsV1::default());
+        for (observation, delta) in trial_request.observations.iter_mut().zip(&noise) {
+            observation.drop += *delta;
+        }
+
+        let report = run_uncertainty_truing_v1(&trial_request)
+            .unwrap_or_else(|error| panic!("coverage trial {trial} failed: {error}"));
+        let gaussian = match &report.approximation {
+            TruingApproximationV1::Available(gaussian) => {
+                available_count += 1;
+                gaussian
+            }
+            TruingApproximationV1::Unavailable(failure) => panic!(
+                "trial {trial} was expected to be well-conditioned but had no \
+                 Gaussian approximation: {failure:?}"
+            ),
+        };
+
+        let mv_interval = gaussian.muzzle_velocity_interval_95;
+        let bc_interval = gaussian.ballistic_coefficient_interval_95;
+        if mv_interval.lower <= model().muzzle_velocity_fps
+            && mv_interval.upper >= model().muzzle_velocity_fps
+        {
+            mv_hits += 1;
+        }
+        if bc_interval.lower <= model().ballistic_coefficient
+            && bc_interval.upper >= model().ballistic_coefficient
+        {
+            bc_hits += 1;
+        }
+        mv_half_width_sum += (mv_interval.upper - mv_interval.lower) / 2.0;
+        bc_half_width_sum += (bc_interval.upper - bc_interval.lower) / 2.0;
+    }
+
+    let mv_mean_half_width = mv_half_width_sum / TRIALS as f64;
+    let bc_mean_half_width = bc_half_width_sum / TRIALS as f64;
+    eprintln!(
+        "MBA-1353 coverage: available {available_count}/{TRIALS}, MV hits {mv_hits}/{TRIALS} \
+         (mean 95% half-width {mv_mean_half_width:.3} fps), BC hits {bc_hits}/{TRIALS} \
+         (mean 95% half-width {bc_mean_half_width:.5})"
+    );
+
+    // The 5-station near+far design is well-conditioned by construction: every
+    // trial must produce a Gaussian approximation.
+    assert_eq!(
+        available_count, TRIALS,
+        "expected every well-conditioned trial to yield a Gaussian approximation"
+    );
+
+    // Binomial tail bound: for n=40 independent trials at the advertised true
+    // coverage p=0.95, P(hits <= 32) = 7.115e-4 (exact binomial CDF). That is
+    // small enough to treat >= 33 as a stable, non-flaky floor: material
+    // undercoverage (e.g. p=0.85, where P(hits<=32) ~ 0.30) would fail
+    // reliably, while nominal p=0.95 sampling noise essentially never does.
+    assert!(mv_hits >= 33, "MV coverage {mv_hits}/{TRIALS} is too low");
+    assert!(bc_hits >= 33, "BC coverage {bc_hits}/{TRIALS} is too low");
+
+    // Guard against a degenerate "perfect coverage via absurdly wide
+    // intervals" pass. Bounds are pinned at ~2x the values measured for this
+    // exact committed seed (mean MV half-width 34.84 fps, mean BC half-width
+    // 0.02097): wide enough that fit-noise across toolchains cannot trip them,
+    // tight enough that intervals inflated ~2x would fail.
+    assert!(
+        mv_mean_half_width < 70.0,
+        "MV 95% interval implausibly wide on average: {mv_mean_half_width:.3} fps"
+    );
+    assert!(
+        bc_mean_half_width < 0.045,
+        "BC 95% interval implausibly wide on average: {bc_mean_half_width:.5}"
+    );
+}
+
 /// End-to-end coverage is intentionally in the opt-in validation suite: every
 /// replicate runs the real nonlinear trajectory and MAP solver.
 #[cfg(feature = "validation")]
