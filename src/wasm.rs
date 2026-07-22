@@ -730,13 +730,42 @@ impl WasmBallistics {
     ///
     /// Returns a short human-readable summary of the loaded table (point count + Mach
     /// range). Replaces any previously loaded table.
+    ///
+    /// MBA-1409: also accepts `.drg` vendor drag-curve text (the same format the native
+    /// `--drag-table` CLI accepts by `.drg` file extension) as a fallback. WASM has no
+    /// filesystem and thus no extension to dispatch on, so the bytes are tried as CSV first
+    /// (exactly as before this change); only on CSV failure, if the text
+    /// [`crate::drag_file::looks_like_drg`], it is retried through
+    /// [`crate::drag_file::parse_drg`]. If both fail, the returned error names both formats.
     #[wasm_bindgen(js_name = loadDragTable)]
     pub fn load_drag_table(&self, bytes: &[u8]) -> Result<String, JsValue> {
-        let csv = std::str::from_utf8(bytes).map_err(|e| {
+        let text = std::str::from_utf8(bytes).map_err(|e| {
             JsValue::from_str(&format!("Drag table bytes are not valid UTF-8: {}", e))
         })?;
-        let table = crate::drag::DragTable::from_csv_str(csv)
-            .map_err(|e| JsValue::from_str(&format!("Failed to parse drag table: {}", e)))?;
+        let table = match crate::drag::DragTable::from_csv_str(text) {
+            Ok(t) => t,
+            Err(csv_err) => {
+                if !crate::drag_file::looks_like_drg(text) {
+                    return Err(JsValue::from_str(&format!(
+                        "Failed to parse drag table as CSV ({csv_err}); text does not look like \
+                         a .drg file either"
+                    )));
+                }
+                match crate::drag_file::parse_drg(text) {
+                    Ok(curve) => {
+                        let (mach, cd): (Vec<f64>, Vec<f64>) = curve.points.into_iter().unzip();
+                        crate::drag::DragTable::try_new(mach, cd).map_err(|e| {
+                            JsValue::from_str(&format!("Failed to parse drag table: {}", e))
+                        })?
+                    }
+                    Err(drg_err) => {
+                        return Err(JsValue::from_str(&format!(
+                            "Failed to parse drag table as CSV ({csv_err}) or as .drg ({drg_err})"
+                        )));
+                    }
+                }
+            }
+        };
         let summary = format!(
             "Loaded drag table: {} points, Mach {:.3}-{:.3}",
             table.mach_values.len(),
@@ -4856,9 +4885,11 @@ Global Options:
 
 Host API (JavaScript, not a CLI flag):
   loadDragTable(bytes)   Load a custom Mach:Cd drag table (CSV, same format as native
-                         --drag-table). Once loaded, EVERY trajectory/zero/lead/monte-carlo
-                         run applies it automatically (no --use-* flag needed); -b/--bc is
-                         still accepted but ignored for drag while a table is active.
+                         --drag-table). Also accepts .drg vendor drag-curve text as a fallback
+                         when the bytes aren't valid CSV. Once loaded, EVERY
+                         trajectory/zero/lead/monte-carlo run applies it automatically (no
+                         --use-* flag needed); -b/--bc is still accepted but ignored for drag
+                         while a table is active.
   hasDragTable()         Report whether a drag table is currently loaded.
   clearDragTable()       Unload the drag table, reverting to G1/G7 + BC drag. Lets one
                          instance compare CDM vs G7: load -> solve -> clear -> solve.
