@@ -60,6 +60,9 @@ pub mod truing_plan;
 pub mod truing_uncertainty;
 // MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
 pub mod wez;
+// MBA-1355: turret adjustment-unit conversions (SMOA/IPHY/clicks) and click-value parsing,
+// shared by the CLI and the WASM terminal. No feature gate: must compile for wasm32.
+pub mod adjustment;
 pub mod trajectory_observation;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
