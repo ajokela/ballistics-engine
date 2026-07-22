@@ -24,13 +24,23 @@
 //!   garbage after data has started is a hard error, not silently skipped.
 //! - Fields are separated by a run of whitespace (space or tab — real vendor files use
 //!   tab) or by a single `,`/`;` delimiter.
-//! - Columns may appear as `(mach, cd)` *or* `(cd, mach)`: whichever column is strictly
-//!   ascending across every row is treated as mach. This is not merely a defensive
-//!   fallback — the real vendor sample inspected for this task uses `(cd, mach)` column
-//!   order, so this detection is load-bearing.
-//! - The decimal separator is `.` only. A line whose tokens look like decimal-comma
-//!   numbers (e.g. `"0,5"`) produces a dedicated error naming the problem, rather than a
-//!   generic parse failure or a comma-CSV misread.
+//! - Columns may appear as `(mach, cd)` *or* `(cd, mach)`. Column detection: if exactly
+//!   one column is strictly ascending across every row, that column is mach (this is not
+//!   merely a defensive fallback — some real vendor files use `(cd, mach)` column order,
+//!   so this detection is load-bearing). If *both* columns ascend — e.g. a `(cd, mach)`
+//!   file whose cd happens to be monotonic across a subsonic-only deck — the column with
+//!   the larger maximum value is mach: mach spans past `1.0` in real decks, while cd
+//!   stays well under `1.5`. If the two maxima are within 20% of each other, that's too
+//!   close to call, and parsing fails with a dedicated "ambiguous columns" error rather
+//!   than silently guessing. If neither column ascends, parsing fails with a dedicated
+//!   error naming the problem.
+//! - The decimal separator is `.` only. A line is only flagged as the decimal-comma
+//!   error if it splits into exactly two tokens and *both* look like decimal-comma
+//!   numbers (e.g. `"0,5 0,3"`); this produces a dedicated error naming the problem,
+//!   rather than a generic parse failure or a comma-CSV misread. A line where only one
+//!   token looks like a decimal-comma number — e.g. a header line mixing prose and a
+//!   comma-formatted number such as `"Density 1,225"` — is not treated as this error; it
+//!   is simply skipped like ordinary header text.
 //! - Row count must be in `2..=4096` (`4096` matches `ffi::MAX_FFI_DRAG_TABLE_LEN`, the
 //!   cap already enforced on the array-based FFI drag-table entry point).
 //! - `mach` must be finite and `>= 0` (the real vendor sample's first row is exactly
@@ -60,7 +70,10 @@ enum LineKind {
     /// to mach/cd — that happens once every row has been collected).
     Row(f64, f64),
     /// Looks like an attempted data row using a decimal comma (e.g. `"0,5 0,3"`) rather
-    /// than a decimal point. Always a hard error, even during header-skip.
+    /// than a decimal point: exactly two tokens, *both* comma-decimal-shaped. Always a
+    /// hard error, even during header-skip — unlike a merely-skippable header line that
+    /// happens to contain one comma-formatted number amid prose (only one token would be
+    /// comma-decimal-shaped there, which doesn't qualify).
     DecimalComma,
     /// Anything else: header/title/comment text, or (once data has started) garbage.
     Other,
@@ -78,7 +91,13 @@ fn try_two_tokens(tokens: &[&str]) -> Option<LineKind> {
     match (t0.parse::<f64>(), t1.parse::<f64>()) {
         (Ok(a), Ok(b)) => Some(LineKind::Row(a, b)),
         _ => {
-            if looks_like_comma_decimal(t0) || looks_like_comma_decimal(t1) {
+            // Both tokens must look like decimal-comma numbers before we call this an
+            // attempted (malformed) data row. If only one token looks comma-decimal-ish
+            // (e.g. a header line mixing prose with a comma-formatted number, such as
+            // "Density 1,225"), that's not a data row at all — leave it as `None` so the
+            // caller falls through to ordinary header/garbage handling instead of a hard
+            // decimal-comma error.
+            if looks_like_comma_decimal(t0) && looks_like_comma_decimal(t1) {
                 Some(LineKind::DecimalComma)
             } else {
                 None
@@ -179,17 +198,35 @@ pub fn parse_drg(text: &str) -> Result<ParsedDragCurve, String> {
     let col0: Vec<f64> = raw.iter().map(|&(_, a, _)| a).collect();
     let col1: Vec<f64> = raw.iter().map(|&(_, _, b)| b).collect();
 
-    // Whichever column is strictly ascending is mach. Real vendor files store (cd, mach)
-    // — column 0 is *not* mach there — so this detection must run for every file, not
-    // just as a defensive fallback.
-    let mach_is_col0 = if is_strictly_ascending(&col0) {
-        true
-    } else if is_strictly_ascending(&col1) {
-        false
-    } else {
-        return Err(
-            "neither column is strictly ascending; expected a mach column".to_string(),
-        );
+    // Column detection. Real vendor files store (cd, mach) — column 0 is *not* mach there
+    // — so this detection must run for every file, not just as a defensive fallback.
+    let col0_ascends = is_strictly_ascending(&col0);
+    let col1_ascends = is_strictly_ascending(&col1);
+    let mach_is_col0 = match (col0_ascends, col1_ascends) {
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => {
+            return Err(
+                "neither column is strictly ascending; expected a mach column".to_string(),
+            );
+        }
+        (true, true) => {
+            // Both columns ascend (e.g. a (cd, mach) file whose cd happens to be
+            // monotonic across a subsonic-only deck). Break the tie by magnitude: mach
+            // spans past 1.0 in real decks, cd stays well under ~1.5, so the column with
+            // the larger maximum is mach — unless the two maxima are too close to call.
+            let max0 = col0.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let max1 = col1.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let (larger, smaller) = if max0 >= max1 { (max0, max1) } else { (max1, max0) };
+            if larger > 0.0 && smaller / larger >= 0.8 {
+                return Err(
+                    "ambiguous columns: both ascend with similar ranges; cannot determine \
+                     which is mach"
+                        .to_string(),
+                );
+            }
+            max0 > max1
+        }
     };
 
     let mut points = Vec::with_capacity(raw.len());
@@ -293,10 +330,11 @@ mod tests {
 
     #[test]
     fn accepts_cd_mach_column_order_like_the_real_vendor_format() {
-        // Real Lapua .drg files store (cd, mach), tab-separated, single CRLF header line,
-        // mach starting at exactly 0.0 — none of this is vendor data, just the shape.
+        // Exercises column-order detection: some files store (cd, mach) rather than
+        // (mach, cd). Everything here — header text, field values, separators — is
+        // invented for this test; it shares no structure with any vendor file.
         let synth_cd_mach =
-            "CFM, Synthetic Test Bullet, .00900, .006710, .034900, Radar Data\r\n\
+            "synthetic reversed-column test deck, invented values\r\n\
              0.230\t0.000\r\n\
              0.210\t0.400\r\n\
              0.280\t0.900\r\n\
@@ -332,5 +370,45 @@ mod tests {
     fn looks_like_drg_is_false_for_empty_and_single_row() {
         assert!(!looks_like_drg(""));
         assert!(!looks_like_drg("t\n1.0 0.3\n"));
+    }
+
+    // --- Column tie-break when both columns strictly ascend (MBA-1409 review finding 2) ---
+
+    #[test]
+    fn both_ascend_larger_max_col1_rescues_subsonic_only_cd_mach_deck() {
+        // A (cd, mach) deck limited to the subsonic range can have a strictly ascending
+        // cd column too (col0 here: 0.20 -> 0.30). Column 1 still wins because its
+        // maximum (2.0) is far larger than column 0's (0.30) — mach spans past 1.0,
+        // cd doesn't.
+        let c = parse_drg("t\n0.20 0.5\n0.25 1.0\n0.30 2.0\n").unwrap();
+        assert_eq!(c.points, vec![(0.5, 0.20), (1.0, 0.25), (2.0, 0.30)]);
+    }
+
+    #[test]
+    fn both_ascend_larger_max_col0_is_mach() {
+        // Ordinary (mach, cd) order where cd also happens to ascend (0.20 -> 0.30).
+        // Column 0 wins because its maximum (2.0) is far larger than column 1's (0.30).
+        let c = parse_drg("t\n0.5 0.20\n1.0 0.25\n2.0 0.30\n").unwrap();
+        assert_eq!(c.points, vec![(0.5, 0.20), (1.0, 0.25), (2.0, 0.30)]);
+    }
+
+    #[test]
+    fn both_ascend_similar_maxima_is_ambiguous_error() {
+        // Both columns ascend and their maxima (1.0 vs 1.1) are within 20% of each
+        // other -- too close to call which one is mach.
+        let e = parse_drg("t\n0.5 0.6\n0.8 0.9\n1.0 1.1\n").unwrap_err();
+        assert!(e.contains("ambiguous"), "{e}");
+    }
+
+    // --- Header-phase decimal-comma false positive (MBA-1409 review finding 3) ---
+
+    #[test]
+    fn header_line_with_prose_and_comma_number_is_skipped_not_flagged_as_decimal_comma() {
+        // A header/metadata line mixing prose with a comma-formatted number (only one of
+        // its two tokens looks comma-decimal-shaped) must be treated as ordinary
+        // skippable header text, not misdiagnosed as an attempted decimal-comma data row.
+        let c = parse_drg("Density 1,225\n0.5 0.3\n1.0 0.31\n").unwrap();
+        assert_eq!(c.points, vec![(0.5, 0.3), (1.0, 0.31)]);
+        assert_eq!(c.name.as_deref(), Some("Density 1,225"));
     }
 }
