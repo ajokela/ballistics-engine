@@ -77,7 +77,7 @@ least one source** â€” clicks output has nowhere else to get a graduation from â
 with neither an elevation flag nor a profile elevation click fails fast:
 
 ```
-error: --units clicks requires a turret elevation graduation: pass --elevation-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil), or save one on the profile with `profile save --elevation-click`
+error: --adjustment-unit clicks requires a turret elevation graduation: pass --elevation-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil), or save one on the profile with `profile save --elevation-click`
 ```
 
 **Scope: `trajectory` and `come-ups` only.** Every other command that still accepts
