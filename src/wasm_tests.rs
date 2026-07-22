@@ -1541,6 +1541,69 @@ Impact Velocity: 2510 fps\n";
         assert!(monte_carlo.contains("Monte Carlo Simulation Results"));
     }
 
+    // -----------------------------------------------------------------------------
+    // MBA-1409: `loadDragTable` accepts `.drg` vendor drag-curve text as a fallback when the
+    // bytes don't parse as CSV. WASM has no filesystem and thus no file extension to key off
+    // (unlike native `--drag-table`, which dispatches on the `.drg`/other-extension split), so
+    // the fallback signal is `looks_like_drg(text)` on the CSV-parse-failure text itself.
+    // -----------------------------------------------------------------------------
+
+    /// A synthetic .drg deck (invented values; no vendor data) with a leading name/header line
+    /// and tab-separated (mach, cd) rows -- structurally like the real vendor format. Its points
+    /// are deliberately identical to `FLAT_CD_CSV` above so a solve can be compared byte-for-byte
+    /// against the plain-CSV path.
+    const DRG_TEXT_SAME_POINTS_AS_FLAT_CD_CSV: &str =
+        "SYNTH TEST DECK, invented values (MBA-1409 WASM test)\n\
+         0.00\t0.5\n\
+         0.50\t0.5\n\
+         1.00\t0.5\n\
+         1.50\t0.5\n\
+         2.00\t0.5\n\
+         3.00\t0.5\n";
+
+    #[wasm_bindgen_test]
+    fn test_load_drag_table_accepts_drg_text() {
+        let wasm = WasmBallistics::new();
+        let summary = wasm
+            .load_drag_table(DRG_TEXT_SAME_POINTS_AS_FLAT_CD_CSV.as_bytes())
+            .expect(".drg-shaped text should be accepted as a fallback");
+        assert!(wasm.has_drag_table());
+        assert!(summary.contains("6 points"), "got: {summary}");
+        assert!(summary.contains("0.000-3.000"), "got: {summary}");
+
+        // The .drg fallback must drive a trajectory run exactly as the CSV path does for the
+        // same underlying (mach, cd) points -- not merely "be accepted".
+        let command = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 -o json";
+        let via_drg = wasm.run_command(command).unwrap();
+
+        let via_csv = WasmBallistics::new();
+        via_csv.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+        let via_csv_out = via_csv.run_command(command).unwrap();
+
+        assert_eq!(
+            via_drg, via_csv_out,
+            ".drg-loaded and CSV-loaded identical-point tables must solve identically"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn test_load_drag_table_junk_error_names_both_formats() {
+        let wasm = WasmBallistics::new();
+        let err = wasm
+            .load_drag_table(b"this is not a drag table at all\nit is just some prose\n")
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.to_lowercase().contains("csv"),
+            "combined error should name the csv format, got: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("drg"),
+            "combined error should name the .drg format, got: {msg}"
+        );
+        assert!(!wasm.has_drag_table());
+    }
+
     /// MBA-1294(a): the auto-zero "Rifle zeroed at ..." banner is a table-only human header;
     /// JSON output must stay pure machine output (a text prefix makes it unparseable).
     #[wasm_bindgen_test]

@@ -63,6 +63,10 @@ pub mod wez;
 // MBA-1355: turret adjustment-unit conversions (SMOA/IPHY/clicks) and click-value parsing,
 // shared by the CLI and the WASM terminal. No feature gate: must compile for wasm32.
 pub mod adjustment;
+// MBA-1409: cleanroom `.drg` (Doppler drag-curve text file) parser, shared by the CLI and
+// the WASM terminal. No feature gate: must compile for wasm32; parses TEXT only (no
+// std::fs — file I/O stays in main.rs/wasm.rs).
+pub mod drag_file;
 pub mod trajectory_observation;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
