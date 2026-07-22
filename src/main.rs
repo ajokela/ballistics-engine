@@ -3773,9 +3773,35 @@ fn parse_bc_segment(s: &str, units: UnitSystem) -> Result<BCSegmentData, String>
     })
 }
 
+/// Load a user drag deck (`--drag-table <FILE>`) as a `Result`, dispatching by file extension
+/// (MBA-1409): a `.drg` extension (case-insensitive) is parsed with
+/// `ballistics_engine::drag_file::parse_drg` — the vendor Doppler-radar text format — and its
+/// points are validated into a `DragTable` via `try_new`; every other extension (including no
+/// extension), exactly as before this change, goes through the plain CSV path,
+/// `DragTable::from_file`. This is the single shared implementation behind every
+/// `--drag-table` call site (`trajectory`, `monte-carlo`, `zero`); kept separate from
+/// `load_drag_table_or_exit` (below) so it's unit-testable — that wrapper calls
+/// `std::process::exit` on error, which a test process can't safely do.
+fn load_drag_table(path: &std::path::Path) -> Result<ballistics_engine::drag::DragTable, String> {
+    let is_drg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("drg"));
+    if !is_drg {
+        return ballistics_engine::drag::DragTable::from_file(path);
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read drag table {}: {e}", path.display()))?;
+    let curve = ballistics_engine::drag_file::parse_drg(&text)
+        .map_err(|e| format!("{} (.drg format): {e}", path.display()))?;
+    let (mach, cd): (Vec<f64>, Vec<f64>) = curve.points.into_iter().unzip();
+    ballistics_engine::drag::DragTable::try_new(mach, cd)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Load a user drag deck for the CLI, exiting with a clear message on any validation error.
 fn load_drag_table_or_exit(path: &std::path::Path) -> ballistics_engine::drag::DragTable {
-    match ballistics_engine::drag::DragTable::from_file(path) {
+    match load_drag_table(path) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -14323,6 +14349,90 @@ mod profile_bc_segments_and_drag_curve_consumption_tests {
     fn drag_table_from_profile_rejects_degenerate_input() {
         let points = vec![ProfileDragPoint { mach: 0.5, cd: 0.23 }];
         assert!(drag_table_from_profile(&points).is_err());
+    }
+}
+
+/// MBA-1409: `--drag-table` extension dispatch. `load_drag_table` is the non-exiting shared
+/// implementation behind `load_drag_table_or_exit` (which additionally prints and calls
+/// `std::process::exit(1)` on error — not safely callable from a test process).
+#[cfg(test)]
+mod drg_extension_dispatch_tests {
+    use super::*;
+
+    /// A synthetic .drg deck: invented values only, but structurally representative of the
+    /// real vendor format (leading name/description line, tab-separated (mach, cd) rows).
+    const SYNTH_DRG: &str = "SYN-MBA1409, synthetic test deck (invented values)\n\
+                              0.50\t0.230\n\
+                              0.80\t0.210\n\
+                              1.00\t0.520\n\
+                              1.50\t0.400\n\
+                              2.50\t0.300\n";
+
+    /// Same "good deck" CSV content already established as a fixture in
+    /// tests/custom_drag_table_cli.rs — reused here (rather than inventing new CSV content) to
+    /// prove the plain-CSV dispatch path is unchanged by adding the `.drg` extension check.
+    const EXISTING_CSV_FIXTURE: &str = "mach,cd\n0.5,0.23\n1.0,0.40\n2.0,0.30\n3.0,0.26\n";
+
+    /// Writes `contents` to a uniquely-named temp file whose name ends in `suffix` (e.g.
+    /// `".drg"`, `".csv"`, or `""` for no extension at all) and returns its path.
+    fn write_temp(suffix: &str, contents: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mba1409_drg_dispatch_{}_{nonce}{suffix}",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn drg_extension_dispatches_to_the_drg_parser() {
+        let path = write_temp(".drg", SYNTH_DRG);
+        let table = load_drag_table(&path).expect("valid .drg file should load");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(table.mach_values, vec![0.50, 0.80, 1.00, 1.50, 2.50]);
+        assert_eq!(table.cd_values, vec![0.230, 0.210, 0.520, 0.400, 0.300]);
+    }
+
+    #[test]
+    fn drg_extension_is_case_insensitive() {
+        let path = write_temp(".DRG", SYNTH_DRG);
+        let table = load_drag_table(&path).expect("uppercase .DRG extension should load");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(table.mach_values.len(), 5);
+    }
+
+    #[test]
+    fn drg_file_with_csv_ish_garbage_errors_naming_the_line_number() {
+        let path = write_temp(".drg", "title\n0.5 0.3\nnot two numbers\n1.0 0.31\n");
+        let err = load_drag_table(&path).expect_err("garbage row should be rejected");
+        std::fs::remove_file(&path).ok();
+        assert!(
+            err.contains("line 3"),
+            "expected the parser's line number in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn csv_extension_behavior_is_unchanged() {
+        let path = write_temp(".csv", EXISTING_CSV_FIXTURE);
+        let table = load_drag_table(&path).expect("existing csv fixture should still load");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(table.mach_values, vec![0.5, 1.0, 2.0, 3.0]);
+        assert_eq!(table.cd_values, vec![0.23, 0.40, 0.30, 0.26]);
+    }
+
+    #[test]
+    fn no_extension_still_uses_the_csv_path() {
+        // A path with no extension at all must not be misrouted to the .drg parser.
+        let path = write_temp("", EXISTING_CSV_FIXTURE);
+        let table = load_drag_table(&path).expect("extensionless file should still parse as csv");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(table.mach_values, vec![0.5, 1.0, 2.0, 3.0]);
     }
 }
 

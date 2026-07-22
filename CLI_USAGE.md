@@ -151,6 +151,8 @@ Supply a measured or manufacturer-published drag curve — Hornady CDM data, a L
 - Cd must be finite and greater than 0.
 - **Mach-keyed only.** Velocity-keyed decks (e.g. raw Doppler output in fps/m/s) must be converted by you first: `mach = velocity / speed_of_sound` at the conditions the velocity was measured under.
 
+**`.drg` format:** `--drag-table` also accepts a file with a `.drg` extension (case-insensitive), a small vendor text format used to distribute Doppler-radar-measured drag curves (e.g. Lapua's free QuickTARGET Unlimited downloads). It tolerates a leading name/description line, tab/comma/semicolon-separated fields, and either `(mach, cd)` or `(cd, mach)` column order (detected automatically); any error names the file, the `.drg` format, and the offending line number. Dispatch is purely by file extension — a `.drg`-suffixed file is never parsed as CSV, and every other extension (including plain `.csv` or none) always goes through the CSV format above, unchanged. The engine ships no vendor drag curves of its own and cannot download them for you (licensing): obtain a `.drg` or CSV file from your manufacturer/measurement source yourself and point `--drag-table` at the local copy.
+
 **Worked example:**
 
 ```bash
@@ -184,7 +186,7 @@ Warning: shot Mach range [1.47, 2.42] extends beyond the drag table domain [0.80
 
 **Monte Carlo caveat:** when a custom drag table is active, `--bc-std` dispersion is a no-op — the table fixes Cd directly, so perturbing the (ignored) BC value has no effect on drag. Velocity, angle, and wind dispersion still vary normally.
 
-**WASM:** the browser/Node build has no filesystem, so `--drag-table <FILE>` isn't a CLI flag there. Instead, call `wasm.loadDragTable(bytes)` with the raw bytes of the same `mach,cd` CSV (parsed by the identical `DragTable::from_csv_str`) before running a command; `wasm.hasDragTable()` reports whether one is loaded. Once loaded, the table is applied automatically to every `trajectory`, `zero`, `lead`, and `monte-carlo` run — including `lead`, which has no native `--drag-table` flag of its own — until a new table replaces it. See `loadDragTable`'s doc comment in `src/wasm.rs` for the exact contract.
+**WASM:** the browser/Node build has no filesystem, so `--drag-table <FILE>` isn't a CLI flag there. Instead, call `wasm.loadDragTable(bytes)` with the raw bytes of the same `mach,cd` CSV (parsed by the identical `DragTable::from_csv_str`) before running a command; `wasm.hasDragTable()` reports whether one is loaded. With no file extension available to dispatch on, `loadDragTable` tries CSV first exactly as before, and only on CSV failure — if the text looks like a `.drg` deck — retries it through the same `.drg` parser the native CLI uses; if neither format parses, the error names both. Once loaded, the table is applied automatically to every `trajectory`, `zero`, `lead`, and `monte-carlo` run — including `lead`, which has no native `--drag-table` flag of its own — until a new table replaces it. See `loadDragTable`'s doc comment in `src/wasm.rs` for the exact contract.
 
 #### BC5D Correction Tables
 
