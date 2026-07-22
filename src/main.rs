@@ -17,6 +17,9 @@ mod mcp_command;
 #[cfg(feature = "pdf")]
 mod pdf_dope_card;
 mod solve_json_command;
+// MBA-1355: only the raw factor lookup is consumed here; Task 2 wires up
+// parse_click_value/clicks_for/ClickValue for the CLI's click-graduation flags.
+use ballistics_engine::adjustment::{adjustment_factor, ClickBase};
 use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
 use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
@@ -2098,13 +2101,20 @@ impl WindShearModelArg {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq)]
 enum AdjustmentUnit {
     /// Milliradians (1 MIL = 3.6 inches at 100 yards)
     #[default]
     Mil,
-    /// Minutes of Angle (1 MOA = 1.047 inches at 100 yards)
+    /// Minutes of Angle, true MOA (1 MOA = 1.047 inches at 100 yards)
     Moa,
+    /// Shooter's MOA (exactly 1 inch per 100 yards)
+    Smoa,
+    /// Inches per hundred yards (numerically identical to SMOA)
+    Iphy,
+    /// Whole turret clicks; requires an elevation click graduation
+    /// (--elevation-click-value or the profile's elevation_click)
+    Clicks,
 }
 
 /// Terminal chart renderer for `trajectory --plot` (MBA-1320). Bare `--plot` (no value)
@@ -3457,15 +3467,37 @@ fn render_import_report(report: &ImportReport) -> String {
     out
 }
 
-/// Convert drop to adjustment unit (MIL or MOA)
+/// Convert drop to adjustment unit (MIL, MOA, or SMOA/IPHY). `unit` maps onto the shared
+/// `ballistics_engine::adjustment` module's `ClickBase`/`adjustment_factor` (MBA-1355) so
+/// the CLI and the WASM terminal share one conversion table.
+///
+/// `AdjustmentUnit::Clicks` has no fixed factor of its own — clicks depend on a graduation
+/// (`ClickValue`) supplied separately — so callers MUST resolve clicks via `clicks_for()`
+/// before ever reaching this function with `unit == Clicks`. That arm exists only as a
+/// release-safe fallback (falls back to MIL) guarded by a `debug_assert!`.
 fn drop_to_adjustment(drop_yd: f64, range_yd: f64, unit: AdjustmentUnit) -> f64 {
     if range_yd < 1.0 {
         return 0.0;
     }
-    match unit {
-        AdjustmentUnit::Mil => (drop_yd / range_yd) * 1000.0,
-        AdjustmentUnit::Moa => (drop_yd / range_yd) * 3438.0,
-    }
+    let factor = match unit {
+        AdjustmentUnit::Mil => adjustment_factor(ClickBase::Mil),
+        AdjustmentUnit::Moa => adjustment_factor(ClickBase::Moa),
+        AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => adjustment_factor(ClickBase::Smoa),
+        AdjustmentUnit::Clicks => {
+            // Callers resolve clicks via clicks_for() BEFORE display; reaching this
+            // arm is a scoping bug. Fall back to MIL so release builds stay sane.
+            debug_assert!(false, "Clicks must be resolved via clicks_for()");
+            adjustment_factor(ClickBase::Mil)
+        }
+    };
+    (drop_yd / range_yd) * factor
+}
+
+/// SMOA/IPHY-per-MIL ratio (3600/1000 = 3.6, exact) for sites that already hold a
+/// mil-based value (e.g. `moving_target::LeadSolution::lead_mil`) and need to rescale it
+/// to SMOA/IPHY display units without recomputing from raw drop/range (MBA-1355).
+fn smoa_per_mil() -> f64 {
+    adjustment_factor(ClickBase::Smoa) / adjustment_factor(ClickBase::Mil)
 }
 
 /// Get a timestamp string without chrono
@@ -7327,6 +7359,14 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             ballistics_engine::moving_target::MOA_PER_UNIT_RATIO
                 / ballistics_engine::moving_target::MIL_PER_UNIT_RATIO,
         ),
+        // MBA-1355: SMOA/IPHY are numerically identical (exact inches-per-hundred-yards);
+        // only the header text differs, so they get their own labels but share the ratio.
+        AdjustmentUnit::Smoa => ("Ring(smoa)", smoa_per_mil()),
+        AdjustmentUnit::Iphy => ("Ring(iphy)", smoa_per_mil()),
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+            ("Ring(mil)", 1.0)
+        }
     };
 
     // MBA-1135: track whether the twist is a synthesized default (shooter omitted --twist-rate)
@@ -8214,6 +8254,12 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 unit_label: match pdf_meta.adjustment_unit {
                     AdjustmentUnit::Mil => "MIL".to_string(),
                     AdjustmentUnit::Moa => "MOA".to_string(),
+                    AdjustmentUnit::Smoa => "SMOA".to_string(),
+                    AdjustmentUnit::Iphy => "IPHY".to_string(),
+                    AdjustmentUnit::Clicks => {
+                        debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+                        "MIL".to_string()
+                    }
                 },
             };
 
@@ -11256,6 +11302,12 @@ fn handle_come_ups(
     let adj_label = match adjustment_unit {
         AdjustmentUnit::Mil => "MIL",
         AdjustmentUnit::Moa => "MOA",
+        AdjustmentUnit::Smoa => "SMOA",
+        AdjustmentUnit::Iphy => "IPHY",
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+            "MIL"
+        }
     };
 
     let (dist_unit, vel_unit, energy_unit) = match units {
@@ -11768,6 +11820,12 @@ fn handle_lead(
     let adj_label = match adjustment_unit {
         AdjustmentUnit::Mil => "MIL",
         AdjustmentUnit::Moa => "MOA",
+        AdjustmentUnit::Smoa => "SMOA",
+        AdjustmentUnit::Iphy => "IPHY",
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+            "MIL"
+        }
     };
     let (dist_unit, speed_unit) = match units {
         UnitSystem::Imperial => ("yd", "mph"),
@@ -11874,6 +11932,11 @@ fn handle_lead(
                         let lead_adj = match adjustment_unit {
                             AdjustmentUnit::Mil => sol.lead_mil,
                             AdjustmentUnit::Moa => sol.lead_moa,
+                            AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => sol.lead_mil * smoa_per_mil(),
+                            AdjustmentUnit::Clicks => {
+                                debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+                                sol.lead_mil
+                            }
                         };
                         let intercept_disp =
                             UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -11933,6 +11996,16 @@ fn handle_lead(
                             let lead_adj = match adjustment_unit {
                                 AdjustmentUnit::Mil => sol.lead_mil,
                                 AdjustmentUnit::Moa => sol.lead_moa,
+                                AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => {
+                                    sol.lead_mil * smoa_per_mil()
+                                }
+                                AdjustmentUnit::Clicks => {
+                                    debug_assert!(
+                                        false,
+                                        "Clicks must be resolved via clicks_for() before display"
+                                    );
+                                    sol.lead_mil
+                                }
                             };
                             let intercept_disp =
                                 UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -11969,6 +12042,16 @@ fn handle_lead(
                             let lead_adj = match adjustment_unit {
                                 AdjustmentUnit::Mil => sol.lead_mil,
                                 AdjustmentUnit::Moa => sol.lead_moa,
+                                AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => {
+                                    sol.lead_mil * smoa_per_mil()
+                                }
+                                AdjustmentUnit::Clicks => {
+                                    debug_assert!(
+                                        false,
+                                        "Clicks must be resolved via clicks_for() before display"
+                                    );
+                                    sol.lead_mil
+                                }
                             };
                             let intercept_disp =
                                 UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -12068,6 +12151,12 @@ fn handle_wind_card(
     let adj_label = match adjustment_unit {
         AdjustmentUnit::Mil => "MIL",
         AdjustmentUnit::Moa => "MOA",
+        AdjustmentUnit::Smoa => "SMOA",
+        AdjustmentUnit::Iphy => "IPHY",
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+            "MIL"
+        }
     };
 
     let (dist_unit, wind_unit) = match units {
@@ -12570,6 +12659,12 @@ fn handle_range_table(
     let adj_label = match adjustment_unit {
         AdjustmentUnit::Mil => "MIL",
         AdjustmentUnit::Moa => "MOA",
+        AdjustmentUnit::Smoa => "SMOA",
+        AdjustmentUnit::Iphy => "IPHY",
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+            "MIL"
+        }
     };
 
     let (dist_unit, vel_unit, energy_unit, drop_unit, wind_unit_label) = match units {
@@ -13000,6 +13095,12 @@ fn handle_compare(
     let adj_label = match adjustment_unit {
         AdjustmentUnit::Mil => "MIL",
         AdjustmentUnit::Moa => "MOA",
+        AdjustmentUnit::Smoa => "SMOA",
+        AdjustmentUnit::Iphy => "IPHY",
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
+            "MIL"
+        }
     };
     let (dist_unit, vel_unit, energy_unit, drop_unit, wind_unit_label) = match units {
         UnitSystem::Imperial => ("yd", "fps", "ft-lb", "in", "mph"),
@@ -13619,6 +13720,19 @@ mod adjustment_unit_tests {
     fn short_range_returns_zero() {
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Moa), 0.0);
         assert_eq!(drop_to_adjustment(1.0, 0.5, AdjustmentUnit::Mil), 0.0);
+    }
+
+    #[test]
+    fn smoa_iphy_conversion_is_inches_per_hundred_yards() {
+        // 3.6 inches of drop at 100 yd = 0.1 yd drop over 100 yd... use exact math:
+        // drop_yd/range_yd * 3600 == inches per 100 yd.
+        let v = drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Smoa);
+        assert!((v - 3.6).abs() < 1e-12, "0.1 yd @ 100 yd = 3.6 IPHY, got {v}");
+        let i = drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Iphy);
+        assert_eq!(v, i, "smoa and iphy are the same unit");
+        // sanity vs existing: TMOA value must be larger number x smaller unit
+        let t = drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Moa);
+        assert!(t < v && (v / t - 1.047).abs() < 0.005, "tmoa {t} vs smoa {v}");
     }
 }
 
