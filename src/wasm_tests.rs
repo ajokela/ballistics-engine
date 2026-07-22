@@ -1296,7 +1296,7 @@ Iterations: 0\n";
         let msg = err.as_string().unwrap_or_default();
         assert_eq!(
             msg,
-            "--adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)"
+            "error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)"
         );
     }
 
