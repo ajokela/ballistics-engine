@@ -3626,7 +3626,7 @@ fn adjustment_display(
 fn reject_clicks_out_of_scope(unit: AdjustmentUnit) {
     if matches!(unit, AdjustmentUnit::Clicks) {
         eprintln!(
-            "error: --units clicks is currently supported for trajectory and come-ups only (MBA-1355)"
+            "error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)"
         );
         std::process::exit(1);
     }
@@ -11657,18 +11657,28 @@ fn handle_come_ups(
                 "Come-Up Table (zero: {:.0} {}, {})",
                 zero_distance, dist_unit, adj_label
             );
-            println!("┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐");
+            // MBA-1355 Task 2 fix pass: the Drop column's border/data width grows with
+            // the adjustment label so "Drop (SMOA)"/"Drop (IPHY)" (4 chars) and
+            // "Drop (CLICKS)" (6 chars) no longer overflow the original 3-char-label
+            // (MIL/MOA) column. MIL/MOA keep the original 10-wide column exactly —
+            // `come_up_drop_label_width` floors at 3 — so `default_trajectory_header_is_stable`
+            // stays byte-identical.
+            let drop_label_w = come_up_drop_label_width(adj_label);
+            let drop_dashes = "─".repeat(drop_label_w + 7);
+            let ten = "─".repeat(10);
+            println!("┌{ten}┬{drop_dashes}┬{ten}┬{ten}┬{ten}┬{ten}┐");
             println!("{}", come_up_header_line(dist_unit, adj_label, vel_unit));
-            println!("├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤");
+            println!("├{ten}┼{drop_dashes}┼{ten}┼{ten}┼{ten}┼{ten}┤");
             // MBA-1355: clicks are whole numbers — the Drop/Come-Up columns drop the
             // 3-decimal formatting used by every angular unit so the table shows clean
             // integer click counts instead of e.g. "10.000".
             let is_clicks = matches!(adjustment_unit, AdjustmentUnit::Clicks);
+            let drop_field_w = drop_label_w + 6;
             for (i, r) in rows.iter().enumerate() {
                 let drop_str = if is_clicks {
-                    format!("{:>9.0}", r.drop_adj)
+                    format!("{:>drop_field_w$.0}", r.drop_adj)
                 } else {
-                    format!("{:>9.3}", r.drop_adj)
+                    format!("{:>drop_field_w$.3}", r.drop_adj)
                 };
                 let come_up_str = if i == 0 {
                     "    —     ".to_string()
@@ -11682,11 +11692,19 @@ fn handle_come_ups(
                     r.range, drop_str, come_up_str, r.velocity, r.energy, r.time
                 );
             }
-            println!("└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘");
+            println!("└{ten}┴{drop_dashes}┴{ten}┴{ten}┴{ten}┴{ten}┘");
         }
     }
 
     Ok(())
+}
+
+/// Width of the Drop column's `(LABEL)` slot: the original 3-char assumption (MIL/MOA)
+/// floors it, so those two keep the exact pre-existing 10-wide column; SMOA/IPHY (4
+/// chars) and CLICKS (6 chars) widen it so the label doesn't overflow the border
+/// (MBA-1355 Task 2 fix pass).
+fn come_up_drop_label_width(adj_label: &str) -> usize {
+    adj_label.len().max(3)
 }
 
 /// Come-ups Table header line, extracted so its exact text for the default unit can be
@@ -11694,9 +11712,10 @@ fn handle_come_ups(
 /// future Clicks-formatting change must not silently reformat the existing MIL/MOA/
 /// SMOA/IPHY header).
 fn come_up_header_line(dist_unit: &str, adj_label: &str, vel_unit: &str) -> String {
+    let w = come_up_drop_label_width(adj_label);
     format!(
-        "│Range ({:>2})|Drop ({:>3})|Come-Up   │ Vel ({:>3})│Energy    │ Time (s) │",
-        dist_unit, adj_label, vel_unit
+        "│Range ({:>2})|Drop ({:>w$})|Come-Up   │ Vel ({:>3})│Energy    │ Time (s) │",
+        dist_unit, adj_label, vel_unit, w = w
     )
 }
 
