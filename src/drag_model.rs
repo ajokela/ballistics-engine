@@ -1,5 +1,6 @@
 /// Drag model enum
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum DragModel {
     G1,
     G2,
@@ -28,14 +29,6 @@ impl DragModel {
             "RA4" => Some(DragModel::RA4),
             _ => None,
         }
-    }
-
-    /// Historically flagged families that shipped no dedicated table and fell back to the
-    /// G1 curve. As of MBA-1386 every `DragModel` variant has a real reference table, so this
-    /// always returns `false` now; retained for API compatibility until callers (e.g. the WASM
-    /// fallback-warning note) are retired.
-    pub fn is_g1_fallback(&self) -> bool {
-        false
     }
 }
 
@@ -156,24 +149,5 @@ mod tests {
         assert_eq!(format!("{:?}", DragModel::GI), "GI");
         assert_eq!(format!("{:?}", DragModel::GS), "GS");
         assert_eq!(format!("{:?}", DragModel::RA4), "RA4");
-    }
-
-    #[test]
-    fn no_family_reports_g1_fallback_anymore() {
-        // MBA-1386 shipped real reference tables for every family; none of them
-        // should still report itself as a G1 substitute.
-        for m in [
-            DragModel::G1,
-            DragModel::G2,
-            DragModel::G5,
-            DragModel::G6,
-            DragModel::G7,
-            DragModel::G8,
-            DragModel::GI,
-            DragModel::GS,
-            DragModel::RA4,
-        ] {
-            assert!(!m.is_g1_fallback(), "{m:?} has a dedicated table");
-        }
     }
 }

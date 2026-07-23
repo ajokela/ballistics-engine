@@ -164,11 +164,12 @@ fn rejects_malformed_specs_with_field_names() {
         "compare", "--load", "A:g7:0.243", "--load", LOAD_B, "--zero-distance", "100",
     ]));
     assert!(text.contains("NAME:DRAG:BC:MASS:VELOCITY"), "got: {text}");
-    // bad drag model
+    // bad drag model (MBA-1386: compare now accepts the full family, so the error
+    // names it rather than the old g1/g7-only message)
     let text = err_text(&out(&[
         "compare", "--load", "A:g9:0.2:170:2600", "--load", LOAD_B, "--zero-distance", "100",
     ]));
-    assert!(text.contains("must be g1 or g7"), "got: {text}");
+    assert!(text.contains("not a recognized drag model"), "got: {text}");
     // non-numeric BC
     let text = err_text(&out(&[
         "compare", "--load", "A:g7:abc:170:2600", "--load", LOAD_B, "--zero-distance", "100",

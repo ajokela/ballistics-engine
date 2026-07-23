@@ -1063,8 +1063,9 @@ ballistics compare --load "Factory:g1:0.475:168:2700" --profile my-match-load \
 
 Load-spec fields follow the session `--units`: `MASS` is grains (imperial) or grams
 (metric), `VELOCITY` fps or m/s, and the optional `DIAMETER` inches or mm (defaulting to
-.308 in / 7.82 mm). `DRAG` is `g1` or `g7`, and `NAME` may not contain `:`. Between 2 and
-8 loads are accepted, from `--load` and/or `--profile` in any combination. A saved
+.308 in / 7.82 mm). `DRAG` is any of `g1`/`g2`/`g5`/`g6`/`g7`/`g8`/`gi`/`gs`/`ra4`, and
+`NAME` may not contain `:`. Between 2 and 8 loads are accepted, from `--load` and/or
+`--profile` in any combination. A saved
 profile's velocity-BC segments and custom Cd(Mach) drag curve (e.g. from an `.a7p`
 import) ARE consumed here — they drive both the load's zeroing and its trajectory runs,
 and such loads are tagged `[BC segments]` / `[custom drag curve]` in the table legend
@@ -1889,7 +1890,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | -b, --bc | Ballistic coefficient | Required | - | - |
 | -m, --mass | Projectile mass | Required | grains | grams |
 | -d, --diameter | Projectile diameter | Required | inches | mm |
-| --drag-model | Drag model (g1/g7) | g1 | - | - |
+| --drag-model | Drag model (g1/g2/g5/g6/g7/g8/gi/gs/ra4) | g1 | - | - |
 | --auto-zero | Auto-zero distance | None | yards | meters |
 | --zero-velocity | Zero-day muzzle velocity (auto-zero only); overrides both powder models | shot-day velocity | fps | m/s |
 | --zero-temperature | Zero-day air temperature (auto-zero only); also resolves linear powder velocity unless `--zero-velocity` is set | shot-day temperature | °F | °C |
@@ -2246,12 +2247,28 @@ ignored by the local solver, so east and west gave identical output.
 ## Advanced Features
 
 ### Drag Models
-- **G1**: Standard projectile (most common)
-- **G7**: Boat-tail bullets (better for long range)
+`--drag-model` (`-d` on some commands) accepts the full standard-projectile family, every
+one backed by its own real Mach-indexed reference table (MBA-1386) — none of them fall
+back to another curve:
+
+- **G1**: Standard flat-base projectile (most common)
+- **G2**: Aberdeen J projectile
+- **G5**: Short 9° boat-tail
+- **G6**: Flat-base secant-ogive
+- **G7**: Long 7.5° boat-tail (better for long range)
+- **G8**: Flat-base 10° secant-ogive
+- **GI**: Blunt/flat-nose, flat base
+- **GS**: Round-nose sphere
+- **RA4**: British RA 1929 reference drag function (McCoy, *Modern Exterior Ballistics*)
 - Full drag tables with Mach-indexed coefficients
 - Transonic corrections applied automatically
 - Standard drag tables are used without an automatic Reynolds multiplier; a low-Re helper remains available through the Rust API only
-- The native CLI's `--drag-model` accepts only `g1`/`g7`; anything else (a typo, or another family name) prints a `warning:` to stderr and silently uses G1. The browser terminal (ballistics.sh) additionally accepts `G2`/`G5`/`G6`/`G8`/`GI`/`GS`, of which `G2`/`G5`/`GI`/`GS` currently ship no dedicated table and print a `warning:` note that they use the G1 curve as an approximation (MBA-1386).
+- An unrecognized `--drag-model` string (a typo, or a family the library doesn't know) still prints a `warning:` to stderr and falls back to G1 for that run.
+- `true-velocity` and `plan-truing`'s forward model is deliberately **G1/G7 only** — an
+  unsupported family on those two commands warns and coerces to G1, same as before.
+- **GL** (a lower-drag long-range family) is explicitly out of scope: its only public
+  source is velocity-domain data, which doesn't fit this engine's Mach-indexed table
+  format. Not planned unless a Mach-indexed source turns up.
 
 ### BC Modeling
 - **BC Segmentation**: Velocity-dependent BC based on bullet type
