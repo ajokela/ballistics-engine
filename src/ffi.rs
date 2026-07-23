@@ -32,7 +32,7 @@ pub struct FFIBallisticInputs {
     pub bc_value: c_double,                // ballistic coefficient
     pub bullet_mass: c_double,             // kg
     pub bullet_diameter: c_double,         // meters
-    pub bc_type: c_int,                    // 0=G1, 1=G7, etc.
+    pub bc_type: c_int,                    // 0=G1, 1=G7, 2=G2, 3=G5, 4=G6, 5=G8, 6=GI, 7=GS, 8=RA4 (MBA-1386; unrecognized -> G1)
     pub sight_height: c_double,            // meters
     pub target_distance: c_double,         // meters
     pub temperature: c_double,             // Celsius
@@ -177,6 +177,9 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
         5 => DragModel::G8,
         6 => DragModel::GI,
         7 => DragModel::GS,
+        // MBA-1386: additive slot for the new RA4 family. Existing callers passing
+        // 0-7 are unaffected; any other/unrecognized value still falls back to G1.
+        8 => DragModel::RA4,
         _ => DragModel::G1,
     };
     ballistic_inputs.sight_height = inputs.sight_height;
@@ -1011,6 +1014,41 @@ mod tests {
             std::mem::align_of::<FFIMonteCarloParams>(),
             std::mem::align_of::<LegacyFFIMonteCarloParams>()
         );
+    }
+
+    /// MBA-1386 scope addition: `bc_type` gains an additive numeric slot (8) for the
+    /// new RA4 family, appended after the existing 0-7 mapping (G1, G7, G2, G5, G6,
+    /// G8, GI, GS). No existing caller's value changes meaning; `8` is simply new,
+    /// and anything still outside 0-8 keeps falling back to G1.
+    #[test]
+    fn bc_type_8_maps_to_ra4() {
+        let mut inputs = valid_trajectory_inputs();
+        inputs.bc_type = 8;
+        assert_eq!(convert_inputs(&inputs).bc_type, DragModel::RA4);
+
+        // Every pre-existing code is unaffected by the addition.
+        let expected = [
+            (0, DragModel::G1),
+            (1, DragModel::G7),
+            (2, DragModel::G2),
+            (3, DragModel::G5),
+            (4, DragModel::G6),
+            (5, DragModel::G8),
+            (6, DragModel::GI),
+            (7, DragModel::GS),
+        ];
+        for (code, model) in expected {
+            let mut inputs = valid_trajectory_inputs();
+            inputs.bc_type = code;
+            assert_eq!(convert_inputs(&inputs).bc_type, model, "code {code}");
+        }
+
+        // Unrecognized codes (including ones above the new 8) still fall back to G1.
+        for code in [9, 42, -1] {
+            let mut inputs = valid_trajectory_inputs();
+            inputs.bc_type = code;
+            assert_eq!(convert_inputs(&inputs).bc_type, DragModel::G1, "code {code}");
+        }
     }
 
     #[test]

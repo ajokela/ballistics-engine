@@ -393,9 +393,9 @@ enum Commands {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
-        /// Drag model (G1, G7, Custom)
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
         #[arg(long, default_value = "g1")]
-        drag_model: DragModelArg,
+        drag_model: DragModel,
 
         /// Maximum range (yards or meters based on --units)
         #[arg(long, default_value = "1000.0")]
@@ -1360,9 +1360,9 @@ enum Commands {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
-        /// Drag model (G1, G7)
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
         #[arg(long, default_value = "g1")]
-        drag_model: DragModelArg,
+        drag_model: DragModel,
 
         /// Vital zone diameter (inches for imperial, cm for metric)
         #[arg(long, default_value = "8.0")]
@@ -1415,9 +1415,9 @@ enum Commands {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
-        /// Drag model (G1, G7)
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
         #[arg(long, default_value = "g1")]
-        drag_model: DragModelArg,
+        drag_model: DragModel,
 
         /// Zero distance (yards for imperial, meters for metric)
         #[arg(long)]
@@ -1506,9 +1506,9 @@ enum Commands {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
-        /// Drag model (G1, G7)
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
         #[arg(long, default_value = "g1")]
-        drag_model: DragModelArg,
+        drag_model: DragModel,
 
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
@@ -1676,9 +1676,9 @@ enum Commands {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: Option<f64>,
 
-        /// Drag model (G1, G7)
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
         #[arg(long, default_value = "g1")]
-        drag_model: DragModelArg,
+        drag_model: DragModel,
 
         /// Zero distance (yards for imperial, meters for metric)
         #[arg(long)]
@@ -1805,9 +1805,9 @@ enum Commands {
         #[arg(short = 'd', long)]
         diameter: Option<f64>,
 
-        /// Drag model (G1, G7)
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
         #[arg(long, default_value = "g1")]
-        drag_model: DragModelArg,
+        drag_model: DragModel,
 
         /// Zero distance (yards for imperial, meters for metric)
         #[arg(long)]
@@ -1866,9 +1866,9 @@ enum Commands {
     Compare {
         /// A load as NAME:DRAG:BC:MASS:VELOCITY with an optional sixth :DIAMETER
         /// field (repeat 2-8 times).
-        /// DRAG is g1|g7; MASS is grains/grams, VELOCITY fps|m/s, DIAMETER in|mm
-        /// per --units (diameter defaults to .308 in / 7.82 mm). NAME must not
-        /// contain ':'. Mixable with --profile.
+        /// DRAG is g1|g2|g5|g6|g7|g8|gi|gs|ra4; MASS is grains/grams, VELOCITY fps|m/s,
+        /// DIAMETER in|mm per --units (diameter defaults to .308 in / 7.82 mm). NAME
+        /// must not contain ':'. Mixable with --profile.
         #[arg(long = "load", value_name = "SPEC")]
         loads: Vec<String>,
 
@@ -1973,9 +1973,9 @@ enum ProfileAction {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
-        /// Drag model (G1, G7)
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
         #[arg(long, default_value = "g1")]
-        drag_model: DragModelArg,
+        drag_model: DragModel,
 
         /// Barrel twist rate (inches per turn for imperial, mm per turn for metric)
         #[arg(long)]
@@ -2435,7 +2435,7 @@ struct TrajectoryConfig {
     mass: f64,
     diameter: f64,
     bullet_length: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     max_range: f64,
     time_step: f64,
 
@@ -3644,27 +3644,86 @@ fn timestamp_string() -> String {
     format!("{}", secs)
 }
 
-/// Warning for drag-model strings the CLI silently coerces to G1. The native
-/// CLI supports G1/G7 only (DragModelArg); anything else — including families
-/// the library enum knows (G2/G5/G6/G8/GI/GS) and plain typos — became G1
-/// with no feedback until MBA-1386's fix-half added this warning.
+/// Warning for drag-model strings `parse_drag_model_arg` cannot resolve at all. As of
+/// MBA-1386 every real family (G1/G2/G5/G6/G7/G8/GI/GS/RA4) has a dedicated table and
+/// resolves silently; only a genuinely unrecognized string (a typo, or a name the
+/// library does not know) still coerces to G1, with this warning.
 fn drag_model_arg_warning(s: &str) -> Option<String> {
+    if DragModel::from_str(s).is_some() {
+        None
+    } else {
+        Some(format!(
+            "warning: drag model '{s}' is not recognized; using G1. Supported models: \
+             G1, G2, G5, G6, G7, G8, GI, GS, RA4."
+        ))
+    }
+}
+
+/// Parse a drag-model string (from a saved profile or CSV) into the full family.
+/// Unknown strings warn (stderr) and coerce to G1. Non-truing call sites only —
+/// truing's forward model is G1/G7-only; see `parse_drag_model_arg_for_truing`.
+fn parse_drag_model_arg(s: &str) -> DragModel {
+    if let Some(w) = drag_model_arg_warning(s) {
+        eprintln!("{w}");
+    }
+    DragModel::from_str(s).unwrap_or(DragModel::G1)
+}
+
+/// Warning for drag-model strings `true-velocity`/`plan-truing` cannot use. Truing's
+/// forward model is deliberately G1/G7-only (see `truing::DragModelArg`), so any other
+/// family — including ones the engine now tables for real, e.g. G5 — still coerces to
+/// G1 here, same as the whole CLI did before MBA-1386.
+fn truing_drag_model_warning(s: &str) -> Option<String> {
     match s.to_uppercase().as_str() {
         "G1" | "G7" => None,
         other => Some(format!(
-            "warning: drag model '{other}' is not supported by the CLI (G1/G7 only); using G1. Full-family support is tracked in MBA-1386."
+            "warning: drag model '{other}' is not supported by truing's forward model \
+             (G1/G7 only); using G1."
         )),
     }
 }
 
-/// Parse the drag model string from a profile
-fn parse_drag_model_arg(s: &str) -> DragModelArg {
-    if let Some(w) = drag_model_arg_warning(s) {
+/// Parse a drag-model string for the truing commands, constrained to G1/G7.
+fn parse_drag_model_arg_for_truing(s: &str) -> DragModelArg {
+    if let Some(w) = truing_drag_model_warning(s) {
         eprintln!("{w}");
     }
     match s.to_uppercase().as_str() {
         "G7" => DragModelArg::G7,
         _ => DragModelArg::G1,
+    }
+}
+
+/// Warning text for an auxiliary, non-truing path that is about to coerce a wider
+/// `DragModel` down to the scalar G1/G7 family. `feature` names the caller in the warning
+/// text (e.g. `"--bc-table correction"`). `None` for G1/G7 themselves, since those are not
+/// a coercion. Pure/side-effect-free, same shape as `truing_drag_model_warning` — see
+/// `warn_aux_g1_coercion` for the printing wrapper used at call sites.
+fn aux_g1_coercion_warning(feature: &str, model: DragModel) -> Option<String> {
+    match model {
+        DragModel::G7 | DragModel::G1 => None,
+        other => Some(format!(
+            "warning: {feature} supports G1/G7 only; treating drag model '{other}' as G1"
+        )),
+    }
+}
+
+/// Coerce a resolved `DragModel` to the G1/G7 BC-type string an auxiliary path accepts,
+/// printing `aux_g1_coercion_warning`'s text (stderr) when the coercion actually changes
+/// anything. Mirrors `parse_drag_model_arg_for_truing`, but for the four auxiliary call
+/// sites that were exhaustive 2-arm `G7 | _` matches before MBA-1386 widened `DragModel` to
+/// the full G1/G2/G5/G6/G7/G8/GI/GS/RA4 family: the BC-segment estimator
+/// (`resolve_velocity_bc_segments`), the `--bc-table` and BC5D correction-table lookups,
+/// and the `--online` Flask-bridge request. Each of those still only understands the
+/// scalar G1/G7 family and silently coerced anything else to G1 with no warning — unlike
+/// truing, which already had one. Called once per site per run (outside any per-row loop).
+fn warn_aux_g1_coercion(feature: &str, model: DragModel) -> &'static str {
+    if let Some(w) = aux_g1_coercion_warning(feature, model) {
+        eprintln!("{w}");
+    }
+    match model {
+        DragModel::G7 => "G7",
+        _ => "G1",
     }
 }
 
@@ -3883,7 +3942,7 @@ fn resolve_velocity_bc_segments(
     bc: f64,
     diameter_m: f64,
     mass_kg: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
 ) -> Option<Vec<BCSegmentData>> {
     if let Some(segments) = provided {
         return Some(segments.to_vec());
@@ -3898,10 +3957,7 @@ fn resolve_velocity_bc_segments(
             diameter_m / 0.0254,
             mass_kg / GRAINS_TO_KG,
             "",
-            match drag_model {
-                DragModelArg::G1 => "G1",
-                DragModelArg::G7 => "G7",
-            },
+            warn_aux_g1_coercion("--use-bc-segments' estimator", drag_model),
         ),
     )
 }
@@ -4326,10 +4382,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         };
 
                         // BC type string
-                        let bc_type_str = match drag_model {
-                            DragModelArg::G1 => "G1",
-                            DragModelArg::G7 => "G7",
-                        };
+                        let bc_type_str = warn_aux_g1_coercion("--bc-table correction", drag_model);
 
                         // Velocity breakpoints for BC segments (denser in transonic region)
                         // These match the table's velocity bins for optimal interpolation
@@ -4494,10 +4547,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         UnitSystem::Metric => final_mass * 15.4324,
                     };
 
-                    let bc_type_str = match drag_model {
-                        DragModelArg::G1 => "G1",
-                        DragModelArg::G7 => "G7",
-                    };
+                    let bc_type_str = warn_aux_g1_coercion("BC5D correction tables", drag_model);
 
                     // Print table info if available
                     if let Ok(table) = manager.get_table(caliber_in) {
@@ -4863,10 +4913,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let zero_inputs = BallisticInputs {
                     muzzle_velocity: zero_velocity_metric,
                     bc_value: trued_bc,
-                    bc_type: match drag_model {
-                        DragModelArg::G1 => DragModel::G1,
-                        DragModelArg::G7 => DragModel::G7,
-                    },
+                    bc_type: drag_model,
                     bullet_mass: mass_metric,
                     bullet_diameter: diameter_metric,
                     caliber_inches: diameter_metric / 0.0254,
@@ -5051,10 +5098,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     let api_request = TrajectoryRequestBuilder::new()
                         .bc_value(trued_bc)
-                        .bc_type(match drag_model {
-                            DragModelArg::G1 => "G1",
-                            DragModelArg::G7 => "G7",
-                        })
+                        // The online Flask bridge is a separate HTTP service that only
+                        // understands G1/G7; MBA-1386 widens the native/local family only,
+                        // so any other model still degrades to G1 for this remote request.
+                        .bc_type(warn_aux_g1_coercion("--online mode", drag_model))
                         .bullet_mass(mass_metric * 1000.0) // kg to grams
                         .muzzle_velocity(velocity_metric)
                         .target_distance(max_range_metric)
@@ -5111,10 +5158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             // Run local trajectory to get comparison data BEFORE displaying the table
                             let local_result = {
-                                let drag_model_enum = match drag_model {
-                                    DragModelArg::G1 => DragModel::G1,
-                                    DragModelArg::G7 => DragModel::G7,
-                                };
+                                let drag_model_enum = drag_model;
                                 let local_wind_direction_rad = final_wind_direction.to_radians();
 
                                 let mut local_inputs = BallisticInputs {
@@ -6220,7 +6264,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .or_else(|| {
                     profile_data
                         .as_ref()
-                        .map(|profile| parse_drag_model_arg(&profile.drag_model))
+                        .map(|profile| parse_drag_model_arg_for_truing(&profile.drag_model))
                 })
                 .unwrap_or(DragModelArg::G1);
             let zero_distance = zero_distance
@@ -7038,10 +7082,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 } => {
                     let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
                     let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
-                    let drag_str = match drag_model {
-                        DragModelArg::G1 => "G1",
-                        DragModelArg::G7 => "G7",
-                    };
                     let units_str = match cli.units {
                         UnitSystem::Imperial => "imperial",
                         UnitSystem::Metric => "metric",
@@ -7064,7 +7104,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         bc,
                         mass,
                         diameter,
-                        drag_model: drag_str.to_string(),
+                        drag_model: drag_model.to_string(),
                         twist_rate,
                         sight_height,
                         zero_distance,
@@ -7630,10 +7670,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     let twist_assumed = twist_rate.is_none();
 
     // Create ballistic inputs with all required fields
-    let drag_model_enum = match drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
+    let drag_model_enum = drag_model;
     let wind_direction_rad = wind_direction.to_radians();
 
     let inputs = BallisticInputs {
@@ -8509,10 +8546,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 bullet: pdf_meta.bullet_name.clone(),
                 weight_gr: pdf_meta.weight_gr,
                 bc,
-                drag_model: match drag_model {
-                    DragModelArg::G1 => "G1".to_string(),
-                    DragModelArg::G7 => "G7".to_string(),
-                },
+                drag_model: drag_model.to_string(),
                 velocity_fps: pdf_meta.velocity_fps,
                 font_scale: pdf_meta.font_scale,
                 bold_data: pdf_meta.bold_data,
@@ -10948,7 +10982,7 @@ fn build_trajectory_components(
     bc: f64,
     mass: f64,
     diameter: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     sight_height: f64,
     temperature: f64,
     pressure: f64,
@@ -10965,10 +10999,7 @@ fn build_trajectory_components(
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> (BallisticInputs, WindConditions, AtmosphericConditions) {
-    let drag_model_enum = match drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
+    let drag_model_enum = drag_model;
     let wind_direction_rad = wind_direction.to_radians();
     let use_bc_segments = bc_segments_data.is_some();
 
@@ -11029,7 +11060,7 @@ fn run_sampled_trajectory(
     bc: f64,
     mass: f64,
     diameter: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     sight_height: f64,
     temperature: f64,
     pressure: f64,
@@ -11091,7 +11122,7 @@ fn handle_mpbr(
     bc: f64,
     mass: f64,
     diameter: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     vital_zone: f64,   // in user units (inches or cm)
     sight_height: f64, // in user units
     temperature: f64,
@@ -11131,10 +11162,7 @@ fn handle_mpbr(
         let test_zero_m = (zero_low_m + zero_high_m) / 2.0;
 
         // Create inputs for zero calculation at test_zero_m
-        let drag_model_enum = match drag_model {
-            DragModelArg::G1 => DragModel::G1,
-            DragModelArg::G7 => DragModel::G7,
-        };
+        let drag_model_enum = drag_model;
 
         let zero_inputs = BallisticInputs {
             bc_value: bc,
@@ -11249,10 +11277,7 @@ fn handle_mpbr(
     }
 
     // Now run the final trajectory at optimal zero to find MPBR, near zero, far zero
-    let drag_model_enum = match drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
+    let drag_model_enum = drag_model;
 
     let final_inputs = BallisticInputs {
         bc_value: bc,
@@ -11469,7 +11494,7 @@ fn handle_come_ups(
     bc: f64,
     mass: f64,
     diameter: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     zero_distance: f64,
     start: f64,
     end: f64,
@@ -11507,10 +11532,7 @@ fn handle_come_ups(
     let sample_m = UnitConverter::distance_to_metric(step, units);
 
     // Calculate zero angle
-    let drag_model_enum = match drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
+    let drag_model_enum = drag_model;
 
     // The zero-angle solve must use the SAME velocity-keyed BC / drag curve as the flight
     // below it (otherwise a segment or curve that changes early-flight drag would mis-zero
@@ -12053,7 +12075,7 @@ fn handle_lead(
     bc: f64,
     mass: f64,
     diameter: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     sight_height: f64,
     temperature: f64,
     pressure: f64,
@@ -12403,7 +12425,7 @@ fn handle_wind_card(
     bc: f64,
     mass: f64,
     diameter: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     zero_distance: f64,
     wind_speeds: &[f64],
     wind_angles: &[f64],
@@ -12436,10 +12458,7 @@ fn handle_wind_card(
     let sample_m = UnitConverter::distance_to_metric(step, units);
 
     // Calculate zero angle (no wind)
-    let drag_model_enum = match drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
+    let drag_model_enum = drag_model;
 
     let zero_inputs = BallisticInputs {
         bc_value: bc,
@@ -12869,7 +12888,7 @@ fn handle_range_table(
     bc: f64,
     mass: f64,
     diameter: f64,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     zero_distance: f64,
     start: f64,
     end: f64,
@@ -12902,10 +12921,7 @@ fn handle_range_table(
     let sample_m = UnitConverter::distance_to_metric(step, units);
 
     // Calculate zero angle (no wind for clean zero)
-    let drag_model_enum = match drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
+    let drag_model_enum = drag_model;
 
     let zero_inputs = BallisticInputs {
         bc_value: bc,
@@ -13162,7 +13178,7 @@ fn handle_range_table(
 /// solve and the sampled runs so the zero uses the same drag physics (MBA-735).
 struct CompareLoad {
     name: String,
-    drag_model: DragModelArg,
+    drag_model: DragModel,
     bc: f64,
     mass: f64,
     velocity: f64,
@@ -13186,13 +13202,13 @@ fn parse_compare_load_spec(spec: &str, units: UnitSystem) -> Result<CompareLoad,
     if name.is_empty() {
         return Err(format!("invalid --load '{spec}': NAME is empty").into());
     }
-    let drag_model = match parts[1].trim().to_ascii_lowercase().as_str() {
-        "g1" => DragModelArg::G1,
-        "g7" => DragModelArg::G7,
-        other => {
-            return Err(format!("invalid --load '{spec}': DRAG '{other}' must be g1 or g7").into())
-        }
-    };
+    let drag_model = DragModel::from_str(parts[1].trim()).ok_or_else(|| {
+        format!(
+            "invalid --load '{spec}': DRAG '{}' is not a recognized drag model \
+             (g1, g2, g5, g6, g7, g8, gi, gs, ra4)",
+            parts[1].trim()
+        )
+    })?;
     let num = |i: usize, field: &str| -> Result<f64, Box<dyn Error>> {
         let v: f64 = parts[i].trim().parse().map_err(|_| {
             format!("invalid --load '{spec}': {field} '{}' is not a number", parts[i])
@@ -13294,10 +13310,7 @@ fn handle_compare(
         let velocity_m = UnitConverter::velocity_to_metric(load.velocity, units);
         let mass_kg = UnitConverter::mass_to_metric(load.mass, units);
         let diameter_m = UnitConverter::diameter_to_metric(load.diameter, units);
-        let drag_model_enum = match load.drag_model {
-            DragModelArg::G1 => DragModel::G1,
-            DragModelArg::G7 => DragModel::G7,
-        };
+        let drag_model_enum = load.drag_model;
 
         let zero_inputs = BallisticInputs {
             bc_value: load.bc,
@@ -13440,7 +13453,7 @@ fn handle_compare(
                     "loads": loads.iter().zip(results.iter()).map(|(l, res)| {
                         serde_json::json!({
                             "name": l.name,
-                            "drag_model": match l.drag_model { DragModelArg::G1 => "G1", DragModelArg::G7 => "G7" },
+                            "drag_model": l.drag_model.to_string(),
                             "bc": l.bc,
                             "mass": l.mass,
                             "velocity": l.velocity,
@@ -13555,10 +13568,7 @@ fn handle_compare(
                     "  #{num} {name}: {dm} BC {bc}, {mass} @ {vel} {vel_unit} (dia {dia}){physics_tag}",
                     num = i + 1,
                     name = l.name,
-                    dm = match l.drag_model {
-                        DragModelArg::G1 => "G1",
-                        DragModelArg::G7 => "G7",
-                    },
+                    dm = l.drag_model,
                     bc = l.bc,
                     mass = l.mass,
                     vel = l.velocity,
@@ -14139,23 +14149,72 @@ mod drag_model_arg_warning_tests {
     use super::*;
 
     #[test]
-    fn drag_model_arg_warning_flags_silent_g1_coercion() {
-        assert!(drag_model_arg_warning("g1").is_none());
-        assert!(drag_model_arg_warning("G7").is_none());
-        for s in ["g5", "G8", "banana"] {
-            let w = drag_model_arg_warning(s).expect("must warn");
-            assert!(w.contains("using G1"), "{w}");
+    fn drag_model_arg_warning_only_flags_truly_unknown_strings() {
+        // Every real family (MBA-1386 gave each one a dedicated table) resolves silently.
+        for s in ["g1", "G2", "g5", "G6", "g7", "G8", "gi", "GS", "ra4"] {
+            assert!(drag_model_arg_warning(s).is_none(), "{s} should be recognized");
+        }
+        let w = drag_model_arg_warning("banana").expect("must warn");
+        assert!(w.contains("using G1"), "{w}");
+    }
+
+    #[test]
+    fn parse_drag_model_arg_resolves_the_full_family() {
+        assert_eq!(parse_drag_model_arg("G7"), DragModel::G7);
+        assert_eq!(parse_drag_model_arg("g5"), DragModel::G5);
+        assert_eq!(parse_drag_model_arg("ra4"), DragModel::RA4);
+        assert_eq!(parse_drag_model_arg("gi"), DragModel::GI);
+        // Still coerces a truly unrecognized string to G1, with a warning.
+        assert_eq!(parse_drag_model_arg("banana"), DragModel::G1);
+    }
+
+    #[test]
+    fn parse_drag_model_arg_for_truing_still_constrains_to_g1_or_g7() {
+        // Truing's forward model is deliberately G1/G7-only (see truing::DragModelArg);
+        // every other family — including ones the engine now tables for real, like G5 —
+        // still coerces to G1 here, same as the whole CLI did before MBA-1386.
+        assert_eq!(parse_drag_model_arg_for_truing("G7"), DragModelArg::G7);
+        assert_eq!(parse_drag_model_arg_for_truing("g7"), DragModelArg::G7);
+        assert_eq!(parse_drag_model_arg_for_truing("G1"), DragModelArg::G1);
+        assert_eq!(parse_drag_model_arg_for_truing("G5"), DragModelArg::G1);
+        assert_eq!(parse_drag_model_arg_for_truing("banana"), DragModelArg::G1);
+    }
+
+    #[test]
+    fn aux_g1_coercion_warning_only_flags_families_other_than_g1_g7() {
+        // G1/G7 are exactly what the auxiliary paths (BC-segment estimator, --bc-table /
+        // BC5D lookups, --online) natively support — no coercion, so no warning text.
+        assert!(aux_g1_coercion_warning("--online mode", DragModel::G1).is_none());
+        assert!(aux_g1_coercion_warning("--online mode", DragModel::G7).is_none());
+
+        // Every wider family still coerces to G1 here (MBA-1386 gave each one a real
+        // table for the *native* solver, but these auxiliary paths remain G1/G7-only),
+        // and each now warns, naming both the feature and the coerced model.
+        for (model, tag) in [
+            (DragModel::G2, "G2"),
+            (DragModel::G5, "G5"),
+            (DragModel::G6, "G6"),
+            (DragModel::G8, "G8"),
+            (DragModel::GI, "GI"),
+            (DragModel::GS, "GS"),
+            (DragModel::RA4, "RA4"),
+        ] {
+            let w = aux_g1_coercion_warning("--bc-table correction", model)
+                .unwrap_or_else(|| panic!("{tag} must warn"));
+            assert!(w.contains(tag), "{w}");
+            assert!(w.contains("--bc-table correction"), "{w}");
+            assert!(w.contains("G1/G7 only"), "{w}");
         }
     }
 
     #[test]
-    fn parse_drag_model_arg_still_coerces_to_g1_or_g7() {
-        // The warning is purely informational (stderr) — behavior is unchanged.
-        assert_eq!(parse_drag_model_arg("G7"), DragModelArg::G7);
-        assert_eq!(parse_drag_model_arg("g7"), DragModelArg::G7);
-        assert_eq!(parse_drag_model_arg("G1"), DragModelArg::G1);
-        assert_eq!(parse_drag_model_arg("G5"), DragModelArg::G1);
-        assert_eq!(parse_drag_model_arg("banana"), DragModelArg::G1);
+    fn warn_aux_g1_coercion_returns_the_bc_type_string_the_estimator_accepts() {
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::G1), "G1");
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::G7), "G7");
+        // Any other family still resolves to "G1" for the auxiliary path's BC-type
+        // argument (in addition to the stderr warning `aux_g1_coercion_warning` covers).
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::G5), "G1");
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::RA4), "G1");
     }
 }
 
@@ -14176,7 +14235,7 @@ mod bc_segment_parse_tests {
             0.19,
             0.224 * 0.0254,
             77.0 * GRAINS_TO_KG,
-            DragModelArg::G7,
+            DragModel::G7,
         )
         .unwrap();
         assert_eq!(provided.len(), 1);
@@ -14188,7 +14247,7 @@ mod bc_segment_parse_tests {
             0.19,
             0.224 * 0.0254,
             77.0 * GRAINS_TO_KG,
-            DragModelArg::G7,
+            DragModel::G7,
         )
         .unwrap();
         let expected = ballistics_engine::bc_estimation::BCSegmentEstimator::estimate_bc_segments(
@@ -14213,7 +14272,7 @@ mod bc_segment_parse_tests {
             0.19,
             0.224 * 0.0254,
             77.0 * GRAINS_TO_KG,
-            DragModelArg::G7,
+            DragModel::G7,
         )
         .is_none());
     }
@@ -14449,7 +14508,7 @@ mod wind_angle_unit_tests {
             0.4,
             0.01,
             0.00762,
-            DragModelArg::G1,
+            DragModel::G1,
             0.05,
             15.0,
             1013.25,

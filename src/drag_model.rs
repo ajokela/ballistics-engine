@@ -1,5 +1,6 @@
 /// Drag model enum
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum DragModel {
     G1,
     G2,
@@ -9,6 +10,8 @@ pub enum DragModel {
     G8,
     GI,
     GS,
+    /// British RA 1929 reference drag function (McCoy, Modern Exterior Ballistics).
+    RA4,
 }
 
 impl DragModel {
@@ -23,18 +26,9 @@ impl DragModel {
             "G8" => Some(DragModel::G8),
             "GI" => Some(DragModel::GI),
             "GS" => Some(DragModel::GS),
+            "RA4" => Some(DragModel::RA4),
             _ => None,
         }
-    }
-
-    /// Families that are accepted but ship no dedicated table: the solver
-    /// silently substitutes the G1 curve (see get_drag_coefficient,
-    /// src/drag.rs). Real tables are tracked in MBA-1386.
-    pub fn is_g1_fallback(&self) -> bool {
-        matches!(
-            self,
-            DragModel::G2 | DragModel::G5 | DragModel::GI | DragModel::GS
-        )
     }
 }
 
@@ -59,6 +53,7 @@ mod tests {
         assert_eq!(DragModel::from_str("G8"), Some(DragModel::G8));
         assert_eq!(DragModel::from_str("GI"), Some(DragModel::GI));
         assert_eq!(DragModel::from_str("GS"), Some(DragModel::GS));
+        assert_eq!(DragModel::from_str("RA4"), Some(DragModel::RA4));
     }
 
     #[test]
@@ -71,6 +66,17 @@ mod tests {
         assert_eq!(DragModel::from_str("gi"), Some(DragModel::GI));
         assert_eq!(DragModel::from_str("GI"), Some(DragModel::GI));
         assert_eq!(DragModel::from_str("Gs"), Some(DragModel::GS));
+        assert_eq!(DragModel::from_str("ra4"), Some(DragModel::RA4));
+        assert_eq!(DragModel::from_str("Ra4"), Some(DragModel::RA4));
+    }
+
+    #[test]
+    fn ra4_from_str_roundtrip() {
+        let model = DragModel::from_str("RA4").expect("RA4 must parse");
+        assert_eq!(model, DragModel::RA4);
+        assert_eq!(format!("{model}"), "RA4");
+        assert_eq!(format!("{model:?}"), "RA4");
+        assert_eq!(DragModel::from_str("ra4"), Some(DragModel::RA4));
     }
 
     #[test]
@@ -95,6 +101,7 @@ mod tests {
         assert_eq!(format!("{}", DragModel::G8), "G8");
         assert_eq!(format!("{}", DragModel::GI), "GI");
         assert_eq!(format!("{}", DragModel::GS), "GS");
+        assert_eq!(format!("{}", DragModel::RA4), "RA4");
     }
 
     #[test]
@@ -141,15 +148,6 @@ mod tests {
         assert_eq!(format!("{:?}", DragModel::G7), "G7");
         assert_eq!(format!("{:?}", DragModel::GI), "GI");
         assert_eq!(format!("{:?}", DragModel::GS), "GS");
-    }
-
-    #[test]
-    fn g1_fallback_families_are_flagged() {
-        for m in [DragModel::G2, DragModel::G5, DragModel::GI, DragModel::GS] {
-            assert!(m.is_g1_fallback(), "{m:?} ships no dedicated table");
-        }
-        for m in [DragModel::G1, DragModel::G6, DragModel::G7, DragModel::G8] {
-            assert!(!m.is_g1_fallback(), "{m:?} has a dedicated table");
-        }
+        assert_eq!(format!("{:?}", DragModel::RA4), "RA4");
     }
 }

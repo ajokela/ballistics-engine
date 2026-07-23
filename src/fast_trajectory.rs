@@ -408,6 +408,7 @@ pub fn fast_integrate(
         DragModel::G8 => "G8",
         DragModel::GI => "GI",
         DragModel::GS => "GS",
+        DragModel::RA4 => "RA4",
     };
 
     // SI fallbacks for caliber/weight (SI-only MC callers may leave the imperial fields 0).
