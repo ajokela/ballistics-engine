@@ -504,6 +504,11 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         drag_table: Option<PathBuf>,
 
+        /// Whole-curve drag scale for a custom drag table (Hornady AFF / AB CDF style; 1.0 =
+        /// neutral, typical truing range 0.90-1.10). Requires --drag-table.
+        #[arg(long, value_name = "FACTOR")]
+        cd_scale: Option<f64>,
+
         /// Rifle cant in DEGREES, positive = clockwise from the shooter (top of scope tips
         /// right). Models "zeroed level, fired canted": POI moves right and low. 0 = level.
         #[arg(long, alias = "cant-angle", value_name = "DEGREES", default_value_t = 0.0)]
@@ -892,6 +897,11 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         drag_table: Option<std::path::PathBuf>,
 
+        /// Whole-curve drag scale for a custom drag table (Hornady AFF / AB CDF style; 1.0 =
+        /// neutral, typical truing range 0.90-1.10). Requires --drag-table.
+        #[arg(long, value_name = "FACTOR")]
+        cd_scale: Option<f64>,
+
         /// Rifle cant in DEGREES, positive = clockwise from the shooter (top of scope tips
         /// right). Models "zeroed level, fired canted": POI moves right and low. 0 = level.
         #[arg(long, alias = "cant-angle", value_name = "DEGREES", default_value_t = 0.0)]
@@ -984,6 +994,11 @@ enum Commands {
         /// bc_value is ignored when set. Mach-keyed; out-of-range Mach holds the nearest tabulated Cd.
         #[arg(long, value_name = "FILE")]
         drag_table: Option<std::path::PathBuf>,
+
+        /// Whole-curve drag scale for a custom drag table (Hornady AFF / AB CDF style; 1.0 =
+        /// neutral, typical truing range 0.90-1.10). Requires --drag-table.
+        #[arg(long, value_name = "FACTOR")]
+        cd_scale: Option<f64>,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -2474,6 +2489,9 @@ struct TrajectoryConfig {
     bc_segments_data: Option<Vec<BCSegmentData>>,
     // Custom drag deck (--drag-table), takes precedence over the G-model + BC when set.
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    // MBA-1356: whole-curve scale for the custom deck (1.0 = neutral). Only meaningful
+    // alongside custom_drag_table — see BallisticInputs::cd_scale.
+    cd_scale: f64,
 
     // Advanced physics toggles
     enable_magnus: bool,
@@ -3727,6 +3745,46 @@ fn warn_aux_g1_coercion(feature: &str, model: DragModel) -> &'static str {
     }
 }
 
+/// MBA-1356: nudge for a `--cd-scale` far outside the documented typical truing range
+/// (0.90-1.10). The engine's own gate (`require_positive` in `validate_for_solve`) only
+/// demands finite && > 0 — this is a softer, CLI-level "did you mean this?" check, not a
+/// second hard limit. `[0.5, 2.0]` is deliberately wide of the typical band. Pure/side-effect
+/// free, same shape as `aux_g1_coercion_warning` — see `resolve_cd_scale` for the call site
+/// that actually prints it.
+fn cd_scale_range_warning(value: f64) -> Option<String> {
+    if (0.5..=2.0).contains(&value) {
+        None
+    } else {
+        Some(format!(
+            "warning: --cd-scale {value} is far outside the typical truing range (0.90-1.10)"
+        ))
+    }
+}
+
+/// Resolve `--cd-scale` against whether a custom drag table (`--drag-table`) is present on
+/// this run. `--cd-scale` multiplies a *custom deck's* interpolated Cd (see
+/// `BallisticInputs::cd_scale`) — without a table there is nothing to multiply, and the flag
+/// almost certainly means the shooter wanted to true a scalar G1/G7 BC instead (`--bc-adjustment`,
+/// a different mechanism entirely). Returns the neutral engine default (`1.0`) when `--cd-scale`
+/// was omitted, or `Err` naming the pairing requirement when it was supplied without a table.
+/// Printing the out-of-range warning (stderr, once) is this function's side effect; whether to
+/// print the pairing error and exit is left to the call site (same split as
+/// `resolve_click_values`), which keeps this unit-testable for its `Ok`/`Err` resolution logic.
+fn resolve_cd_scale(cd_scale: Option<f64>, has_custom_drag_table: bool) -> Result<f64, String> {
+    match cd_scale {
+        Some(_) if !has_custom_drag_table => Err(
+            "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)".to_string(),
+        ),
+        Some(scale) => {
+            if let Some(w) = cd_scale_range_warning(scale) {
+                eprintln!("{w}");
+            }
+            Ok(scale)
+        }
+        None => Ok(1.0),
+    }
+}
+
 /// Parse a `--powder-temp-curve` value `"TEMP:VEL,TEMP:VEL,..."` into engine-canonical
 /// `(temperature_celsius, muzzle_velocity_m_s)` points, converting from the CLI display
 /// units. Points are sorted ascending by temperature; at least two distinct-temperature
@@ -4004,6 +4062,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ignore_ground_impact,
             use_bc_segments,
             drag_table,
+            cd_scale,
             cant,
             print_bc_segments,
             enable_magnus,
@@ -4863,6 +4922,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                      precedence and BC segments are ignored."
                 );
             }
+            // MBA-1356: --cd-scale requires --drag-table; validate before any solve.
+            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
 
             // Calculate zero angle if auto-zero is specified (from CLI or profile)
             let muzzle_angle = if let Some(zero_distance) = final_auto_zero {
@@ -4966,6 +5031,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     bc_segments_data: bc_segments_data.clone(),
                     use_cluster_bc,
                     custom_drag_table: custom_drag_table.clone(),
+                    cd_scale,
                     ..Default::default()
                 };
 
@@ -5038,6 +5104,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 use_cluster_bc,
                 bc_segments_data: bc_segments_data.clone(),
                 custom_drag_table: custom_drag_table.clone(),
+                cd_scale,
                 enable_magnus,
                 enable_coriolis,
                 enable_spin_drift,
@@ -5237,10 +5304,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     use_cluster_bc,
                                     bc_type_str: None,
                                     custom_drag_table: custom_drag_table.clone(),
-                                    // MBA-1356: --cd-scale is wired onto this struct in a
-                                    // follow-up task; the neutral default keeps today's output
-                                    // byte-identical until that flag lands.
-                                    cd_scale: 1.0,
+                                    cd_scale,
                                 };
 
                                 let local_wind = WindConditions {
@@ -5403,6 +5467,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             target_distance,
             target_radius,
             drag_table,
+            cd_scale,
             cant,
             wez,
             target_size,
@@ -5432,6 +5497,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
             // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
             let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
+            // MBA-1356: --cd-scale requires --drag-table; validate before any solve.
+            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
 
             if wez {
                 // MBA-1317: WEZ (Weapon Employment Zone) sweep mode.
@@ -5468,6 +5539,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     wez_end_metric,
                     wez_step_metric,
                     custom_drag_table,
+                    cd_scale,
                     cant,
                     output,
                     cli.units,
@@ -5491,6 +5563,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     target_distance_metric,
                     target_radius_metric,
                     custom_drag_table,
+                    cd_scale,
                     cant,
                     output,
                 )?;
@@ -5510,6 +5583,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             humidity,
             altitude,
             drag_table,
+            cd_scale,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
@@ -5538,6 +5612,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
             // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
             let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
+            // MBA-1356: --cd-scale requires --drag-table; validate before any solve.
+            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
 
             run_zero_calculation(
                 velocity_metric,
@@ -5552,6 +5632,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 humidity,
                 altitude_metric,
                 custom_drag_table,
+                cd_scale,
                 output,
                 cli.units,
             )?;
@@ -7600,6 +7681,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         use_cluster_bc,
         ref bc_segments_data,
         ref custom_drag_table,
+        cd_scale,
         enable_magnus,
         enable_coriolis,
         enable_spin_drift,
@@ -7774,9 +7856,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         // Optional data
         bc_type_str: None,
         custom_drag_table: custom_drag_table.clone(),
-        // MBA-1356: --cd-scale is wired onto this struct in a follow-up task; the neutral
-        // default keeps today's output byte-identical until that flag lands.
-        cd_scale: 1.0,
+        cd_scale,
     };
 
     // Set up wind conditions
@@ -8954,6 +9034,7 @@ fn run_monte_carlo_wez(
     wez_end: f64,
     wez_step: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    cd_scale: f64,
     cant: f64,
     output: MonteCarloOutput,
     units: UnitSystem,
@@ -8983,6 +9064,7 @@ fn run_monte_carlo_wez(
         // terminal's monte-carlo, which does expose --drag-model, passes it through).
         DragModel::G1,
         custom_drag_table,
+        cd_scale,
         cant,
     )?;
 
@@ -9037,6 +9119,7 @@ mod wez_tests {
             /* wez_end */ 300.0,
             /* wez_step */ 100.0,
             /* custom_drag_table */ None,
+            /* cd_scale */ 1.0,
             /* cant */ 0.0,
             MonteCarloOutput::Summary,
             UnitSystem::Metric,
@@ -9071,6 +9154,7 @@ fn run_monte_carlo(
     target_distance: Option<f64>,
     target_radius: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    cd_scale: f64,
     cant: f64,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
@@ -9090,6 +9174,7 @@ fn run_monte_carlo(
         muzzle_height: bore_height_metric,
         ground_threshold: 0.0,
         custom_drag_table,
+        cd_scale,
         cant_angle: cant.to_radians(),
         ..Default::default()
     };
@@ -9243,6 +9328,7 @@ fn run_zero_calculation(
     humidity: f64,
     altitude: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    cd_scale: f64,
     output: OutputFormat,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
@@ -9258,6 +9344,7 @@ fn run_zero_calculation(
         humidity,
         altitude,
         custom_drag_table,
+        cd_scale,
         ..Default::default()
     };
 
@@ -14222,6 +14309,54 @@ mod drag_model_arg_warning_tests {
         // argument (in addition to the stderr warning `aux_g1_coercion_warning` covers).
         assert_eq!(warn_aux_g1_coercion("test", DragModel::G5), "G1");
         assert_eq!(warn_aux_g1_coercion("test", DragModel::RA4), "G1");
+    }
+}
+
+/// MBA-1356: `--cd-scale` — the pairing requirement with `--drag-table` and the
+/// out-of-typical-range nudge, both shared by the trajectory/monte-carlo/zero commands.
+#[cfg(test)]
+mod cd_scale_tests {
+    use super::*;
+
+    #[test]
+    fn range_warning_is_none_inside_the_typical_truing_band() {
+        for v in [0.90, 1.0, 1.10, 0.5, 2.0] {
+            assert!(
+                cd_scale_range_warning(v).is_none(),
+                "cd_scale={v} is within [0.5, 2.0] and must not warn"
+            );
+        }
+    }
+
+    #[test]
+    fn range_warning_fires_outside_the_typical_truing_band() {
+        for v in [0.49, 2.01, 0.1, 5.0, 3.0] {
+            let w = cd_scale_range_warning(v)
+                .unwrap_or_else(|| panic!("cd_scale={v} must warn"));
+            assert!(w.contains("--cd-scale"), "{w}");
+            assert!(w.contains("typical truing range (0.90-1.10)"), "{w}");
+            assert!(w.contains(&format!("{v}")), "{w}");
+        }
+    }
+
+    #[test]
+    fn resolve_defaults_to_the_neutral_scale_when_omitted() {
+        assert_eq!(resolve_cd_scale(None, false), Ok(1.0));
+        assert_eq!(resolve_cd_scale(None, true), Ok(1.0));
+    }
+
+    #[test]
+    fn resolve_passes_through_the_scale_when_a_table_is_present() {
+        assert_eq!(resolve_cd_scale(Some(1.10), true), Ok(1.10));
+        assert_eq!(resolve_cd_scale(Some(3.0), true), Ok(3.0));
+    }
+
+    #[test]
+    fn resolve_errors_naming_the_pairing_requirement_without_a_table() {
+        let err = resolve_cd_scale(Some(1.10), false)
+            .expect_err("--cd-scale without a table must be rejected");
+        assert!(err.contains("--cd-scale requires --drag-table"), "{err}");
+        assert!(err.contains("--bc-adjustment"), "{err}");
     }
 }
 

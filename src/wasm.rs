@@ -202,6 +202,29 @@ fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
     }
 }
 
+/// MBA-1356: pairing-requirement text for `--cd-scale` without a loaded drag table, shared by
+/// every WASM terminal command that accepts it (trajectory/zero/monte-carlo). Identical to the
+/// native CLI's stderr text (src/main.rs `resolve_cd_scale`) — the only difference is delivery
+/// (`Err(JsValue)` here vs. `eprintln!` + exit there).
+const CD_SCALE_REQUIRES_DRAG_TABLE: &str =
+    "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)";
+
+/// MBA-1356: nudge for a `--cd-scale` far outside the documented typical truing range
+/// (0.90-1.10), mirroring the native CLI's `cd_scale_range_warning` (src/main.rs) text exactly.
+/// `None` inside `[0.5, 2.0]` — the engine's own gate (`require_positive` in
+/// `validate_for_solve`) already covers finite && > 0. The trailing `\n\n` matches the shape of
+/// the BC5D coercion warning (MBA-1386, bcdd213) since both are prepended, table-only, ahead of
+/// the run's normal output.
+fn cd_scale_range_warning(value: f64) -> Option<String> {
+    if (0.5..=2.0).contains(&value) {
+        None
+    } else {
+        Some(format!(
+            "warning: --cd-scale {value} is far outside the typical truing range (0.90-1.10)\n\n"
+        ))
+    }
+}
+
 /// Local mirror of the native CLI's `MonteCarloOutput` modes for the WEZ path
 /// (MBA-1343 Phase C). The WASM `-o` spellings map onto these in
 /// `run_monte_carlo_wez`.
@@ -901,6 +924,10 @@ impl WasmBallistics {
         let mut mass = default_mass;
         let mut diameter = default_diameter;
         let mut drag_model = "G1";
+        // MBA-1356: whole-curve drag scale for a custom drag table (see cd_scale_range_warning
+        // / CD_SCALE_REQUIRES_DRAG_TABLE above). None until parsed; resolved against
+        // self.drag_table once the arg-parse loop is done.
+        let mut cd_scale: Option<f64> = None;
         let mut max_range = if units == UnitSystem::Imperial {
             1000.0
         } else {
@@ -1063,6 +1090,16 @@ impl WasmBallistics {
                 "--drag-model" => {
                     if i + 1 < args.len() {
                         drag_model = args[i + 1];
+                        i += 1;
+                    }
+                }
+                "--cd-scale" => {
+                    if i + 1 < args.len() {
+                        cd_scale = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid cd-scale"))?,
+                        );
                         i += 1;
                     }
                 }
@@ -1466,6 +1503,15 @@ impl WasmBallistics {
         if let Some(table) = self.drag_table.borrow().as_ref() {
             inputs.custom_drag_table = Some(table.clone());
         }
+        // MBA-1356: --cd-scale requires a loaded drag table, mirroring the native CLI's
+        // --cd-scale/--drag-table pairing requirement. Validate before any solve.
+        if let Some(scale) = cd_scale {
+            if self.drag_table.borrow().is_none() {
+                return Err(JsValue::from_str(CD_SCALE_REQUIRES_DRAG_TABLE));
+            }
+            inputs.cd_scale = scale;
+        }
+        let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
         inputs.cant_angle = cant_angle_deg * std::f64::consts::PI / 180.0;
@@ -1909,10 +1955,11 @@ impl WasmBallistics {
                 // at ..." banner is table-only, exactly like the bc-segments and warning
                 // blocks below. Prepending it to a JSON/CSV payload makes it unparseable.
                 let mut combined = if matches!(output_format, OutputFormat::Table) {
-                    // MBA-1386: table-only, like every human-readable block here — the
-                    // BC5D coercion warning must never contaminate JSON/CSV payloads.
+                    // MBA-1386/MBA-1356: table-only, like every human-readable block here —
+                    // neither warning may contaminate JSON/CSV payloads.
                     format!(
-                        "{}{}{}",
+                        "{}{}{}{}",
+                        cd_scale_warning.as_deref().unwrap_or(""),
                         bc5d_coercion_warning.as_deref().unwrap_or(""),
                         zero_info,
                         output
@@ -2047,6 +2094,9 @@ impl WasmBallistics {
         // (silently ignored by the catch-all arm below). The SIGHT height IS honored: the zero
         // targets the line-of-sight height at the zero distance (see the calculate_zero call).
         let mut drag_model = "G1";
+        // MBA-1356: whole-curve drag scale for a custom drag table. None until parsed;
+        // resolved against self.drag_table once the arg-parse loop is done.
+        let mut cd_scale: Option<f64> = None;
 
         // Parse arguments
         let mut i = 0;
@@ -2106,6 +2156,16 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--cd-scale" => {
+                    if i + 1 < args.len() {
+                        cd_scale = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid cd-scale"))?,
+                        );
+                        i += 1;
+                    }
+                }
                 // --units/-u (+ its value) is consumed globally in run_command, which
                 // pre-scans it to set the unit system before dispatch. Skip it here so
                 // it isn't rejected as an unknown flag (this is what blocked metric input).
@@ -2159,6 +2219,15 @@ impl WasmBallistics {
         if let Some(table) = self.drag_table.borrow().as_ref() {
             inputs.custom_drag_table = Some(table.clone());
         }
+        // MBA-1356: --cd-scale requires a loaded drag table, mirroring the native CLI's
+        // --cd-scale/--drag-table pairing requirement. Validate before any solve.
+        if let Some(scale) = cd_scale {
+            if self.drag_table.borrow().is_none() {
+                return Err(JsValue::from_str(CD_SCALE_REQUIRES_DRAG_TABLE));
+            }
+            inputs.cd_scale = scale;
+        }
+        let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
 
         let target_distance_m = match units {
             UnitSystem::Imperial => target_distance * 0.9144,
@@ -2169,7 +2238,7 @@ impl WasmBallistics {
         // the CLI convention in every zero call. Previously 0.0, which solved a BORE-line zero and
         // ignored sight height entirely (off by the sight-height angle — ~2 MOA at 100 yd).
         let los_height = inputs.sight_height;
-        match calculate_zero_angle_with_conditions(
+        let result = match calculate_zero_angle_with_conditions(
             inputs,
             target_distance_m,
             los_height,
@@ -2181,7 +2250,7 @@ impl WasmBallistics {
                 let moa_adjustment = zero_degrees * 60.0;
                 let mrad_adjustment = zero_angle * 1000.0;
 
-                Ok(format!(
+                format!(
                     "Zero Calculation Results\n\
                      ========================\n\
                      Target Distance: {} {}\n\
@@ -2204,10 +2273,13 @@ impl WasmBallistics {
                     } else {
                         "mm"
                     }
-                ))
+                )
             }
-            Err(e) => Ok(format!("Error calculating zero: {}", e)),
-        }
+            Err(e) => format!("Error calculating zero: {}", e),
+        };
+        // MBA-1356: table-only prepend, same pattern as the trajectory/monte-carlo handlers —
+        // this command has no JSON/CSV output mode to protect from contamination.
+        Ok(format!("{}{}", cd_scale_warning.as_deref().unwrap_or(""), result))
     }
 
     fn handle_lead_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
@@ -2736,6 +2808,10 @@ impl WasmBallistics {
         let mut wind_speed_std: Option<f64> = None;
         let mut wind_direction_std = 0.0;
         let mut drag_model = "G1";
+        // MBA-1356: whole-curve drag scale for a custom drag table. None until parsed;
+        // resolved against self.drag_table once the arg-parse loop is done, shared by both
+        // the base and --wez dispatch below.
+        let mut cd_scale: Option<f64> = None;
         // MBA-1343 Phase C: WEZ (Weapon Employment Zone) sweep mode, mirroring the
         // native `monte-carlo --wez` flag set (MBA-1317). The wez-only flags are kept
         // as Options so using one without --wez can be rejected (native clap's
@@ -2830,6 +2906,14 @@ impl WasmBallistics {
                     drag_model = require_value(args, i)?;
                     i += 1;
                 }
+                "--cd-scale" => {
+                    cd_scale = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid cd-scale"))?,
+                    );
+                    i += 1;
+                }
                 "--wez" => {
                     wez = true;
                 }
@@ -2898,6 +2982,13 @@ impl WasmBallistics {
             i += 1;
         }
 
+        // MBA-1356: --cd-scale requires a loaded drag table, mirroring the native CLI's
+        // --cd-scale/--drag-table pairing requirement. Validate before any solve — shared by
+        // both the --wez and base dispatch below, since both read the same self.drag_table.
+        if cd_scale.is_some() && self.drag_table.borrow().is_none() {
+            return Err(JsValue::from_str(CD_SCALE_REQUIRES_DRAG_TABLE));
+        }
+
         // MBA-1343 Phase C: WEZ sweep mode. Mirrors the native dispatch
         // (Commands::MonteCarlo with `wez: true` in main.rs): convert to metric, run
         // the shared seeded compute (ballistics_engine::wez::compute_wez), and render
@@ -2922,6 +3013,7 @@ impl WasmBallistics {
                 wez_end,
                 wez_step,
                 drag_model,
+                cd_scale,
                 output,
             );
         }
@@ -3002,6 +3094,12 @@ impl WasmBallistics {
         if let Some(table) = self.drag_table.borrow().as_ref() {
             inputs.custom_drag_table = Some(table.clone());
         }
+        // MBA-1356: pairing already validated (before any solve, above); just apply. The
+        // warning is prepended to the result string below, table-only.
+        if let Some(scale) = cd_scale {
+            inputs.cd_scale = scale;
+        }
+        let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
         inputs.muzzle_height = 1.5;
         inputs.ground_threshold = 0.0;
@@ -3029,7 +3127,7 @@ impl WasmBallistics {
             target_distance: None,
         };
 
-        match run_monte_carlo_with_direction_std_dev(
+        let body = match run_monte_carlo_with_direction_std_dev(
             inputs,
             params,
             wind_direction_std * std::f64::consts::PI / 180.0,
@@ -3087,7 +3185,7 @@ impl WasmBallistics {
                     UnitSystem::Metric => velocity_std,
                 };
 
-                Ok(format!(
+                format!(
                     "Monte Carlo Simulation Results\n\
                      ==============================\n\
                      Simulations Run: {}\n\n\
@@ -3154,10 +3252,13 @@ impl WasmBallistics {
                             1.0
                         }),
                     velocity_unit,
-                ))
+                )
             }
-            Err(e) => Ok(format!("Error running Monte Carlo simulation: {}", e)),
-        }
+            Err(e) => format!("Error running Monte Carlo simulation: {}", e),
+        };
+        // MBA-1356: table-only prepend, same pattern as the trajectory handler — this
+        // command has no JSON/CSV output mode to protect from contamination.
+        Ok(format!("{}{}", cd_scale_warning.as_deref().unwrap_or(""), body))
     }
 
     /// Native `monte-carlo --wez` parity path (MBA-1343 Phase C): unit conversions
@@ -3189,6 +3290,7 @@ impl WasmBallistics {
         wez_end: Option<f64>,
         wez_step: Option<f64>,
         drag_model: &str,
+        cd_scale: Option<f64>,
         output: &str,
     ) -> Result<String, JsValue> {
         // Native clap defaults: --velocity-std 1.0, --wind-std 1.0, --wind-call-error
@@ -3255,6 +3357,11 @@ impl WasmBallistics {
         let drag_model = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
 
+        // MBA-1356: pairing already validated by the caller (handle_monte_carlo_command,
+        // before any solve); just resolve the value and the out-of-range nudge here.
+        let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
+        let cd_scale = cd_scale.unwrap_or(1.0);
+
         // Flags the WASM monte-carlo surface does not (yet) expose keep the native
         // defaults: base wind (--wind-speed / --wind-direction / --wind-vertical) and
         // --cant are all 0.
@@ -3280,14 +3387,21 @@ impl WasmBallistics {
             to_distance(wez_step),
             drag_model,
             custom_drag_table,
+            cd_scale,
             0.0, // cant
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         match output {
+            // JSON/CSV must stay pure machine output — the cd_scale nudge is table-only,
+            // same convention as every other prepended warning in this file.
             WezOutputMode::Full => format_wez_full(&result),
             WezOutputMode::Statistics => Ok(format_wez_statistics(&result, units)),
-            WezOutputMode::Summary => Ok(format_wez_summary(&result, units)),
+            WezOutputMode::Summary => Ok(format!(
+                "{}{}",
+                cd_scale_warning.as_deref().unwrap_or(""),
+                format_wez_summary(&result, units)
+            )),
         }
     }
 
@@ -4891,6 +5005,9 @@ Trajectory Command:
     -d, --diameter <DIA>         Diameter (inches/mm)
     -a, --angle <ANGLE>          Launch angle (degrees)
     --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
+    --cd-scale <FACTOR>          Whole-curve drag scale for a loaded drag table
+                                 (1.0 = neutral, typical 0.90-1.10). Requires a
+                                 drag table (loadDragTable)
     --max-range <RANGE>          Maximum range (yards/meters)
     -z, --auto-zero <DIST>       Auto-zero at distance
     -o, --output <FORMAT>        Output format (table/json/csv)
@@ -4968,6 +5085,9 @@ Zero Command:
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
     --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
+    --cd-scale <FACTOR>          Whole-curve drag scale for a loaded drag table
+                                 (1.0 = neutral, typical 0.90-1.10). Requires a
+                                 drag table (loadDragTable)
     --target-distance <DIST>     Target distance for zero
     --sight-height <HEIGHT>      Sight height above bore
 
@@ -4980,6 +5100,9 @@ Monte Carlo Command:
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
     --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
+    --cd-scale <FACTOR>          Whole-curve drag scale for a loaded drag table
+                                 (1.0 = neutral, typical 0.90-1.10). Requires a
+                                 drag table (loadDragTable)
     -n, --num-sims <N>           Number of simulations
     --velocity-std <STD>         Velocity std deviation
     --angle-std <STD>            Angle std deviation
