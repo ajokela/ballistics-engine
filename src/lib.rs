@@ -76,7 +76,6 @@ mod wasm_tests;
 pub mod atmosphere;
 pub mod constants;
 pub mod drag;
-mod drag_tables;
 pub mod wind;
 // MBA-153: Make wind_shear public for ballistics_rust wrapping
 pub mod wind_shear;
