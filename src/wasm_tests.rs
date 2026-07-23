@@ -1542,6 +1542,144 @@ Impact Velocity: 2510 fps\n";
     }
 
     // -----------------------------------------------------------------------------
+    // MBA-1356: `--cd-scale <FACTOR>` — whole-curve drag scale for a loaded custom drag table.
+    // WASM parity with the native CLI's `--cd-scale` on trajectory/zero/monte-carlo: same
+    // pairing requirement with a loaded table (Err(JsValue) here instead of exit(1)), same
+    // out-of-range nudge text, prepended table-only.
+    // -----------------------------------------------------------------------------
+
+    /// Without a loaded drag table, `--cd-scale` must be rejected before any solve, naming the
+    /// same pairing requirement text as the native CLI (MBA-1356 spec).
+    #[wasm_bindgen_test]
+    fn cd_scale_without_a_loaded_drag_table_errors_on_every_command() {
+        for command in [
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 --cd-scale 1.1",
+            "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300 --cd-scale 1.1",
+            "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 50 --cd-scale 1.1",
+        ] {
+            let err = WasmBallistics::new().run_command(command).unwrap_err();
+            let msg = err.as_string().unwrap_or_default();
+            assert_eq!(
+                msg,
+                "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)",
+                "command: {command}"
+            );
+        }
+    }
+
+    /// The same pairing requirement applies to the `--wez` sweep path (a separate compute
+    /// core, `crate::wez::compute_wez`, from the base monte-carlo path above).
+    #[wasm_bindgen_test]
+    fn cd_scale_without_a_loaded_drag_table_errors_on_wez() {
+        let err = WasmBallistics::new()
+            .run_command(
+                "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez --target-size 18x30 \
+                 -n 20 --wez-start 200 --wez-end 300 --wez-step 100 --cd-scale 1.1",
+            )
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert_eq!(
+            msg,
+            "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)"
+        );
+    }
+
+    /// With a table loaded, `--cd-scale` is accepted and actually shifts trajectory output
+    /// (the plumb-through smoke): a higher scale means more drag, so a `--cd-scale 1.1` run
+    /// must differ from the neutral `1.0` run of otherwise-identical args.
+    #[wasm_bindgen_test]
+    fn cd_scale_accepted_with_a_loaded_table_and_shifts_trajectory_output() {
+        let wasm = WasmBallistics::new();
+        wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+
+        let neutral = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 --cd-scale 1.0 -o json",
+            )
+            .unwrap();
+        let scaled = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 --cd-scale 1.1 -o json",
+            )
+            .unwrap();
+
+        assert_ne!(
+            neutral, scaled,
+            "--cd-scale 1.1 must change trajectory output relative to the neutral 1.0"
+        );
+
+        // Omitting --cd-scale entirely must be byte-identical to the explicit neutral 1.0 (the
+        // engine default), on the SAME loaded table.
+        let omitted = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 -o json")
+            .unwrap();
+        assert_eq!(
+            omitted, neutral,
+            "omitting --cd-scale must be byte-identical to an explicit --cd-scale 1.0"
+        );
+    }
+
+    /// Same shift, on `zero` and `monte-carlo` (the other two commands `--cd-scale` is wired
+    /// into), and on the WEZ sweep path — a separate compute core from the other three.
+    #[wasm_bindgen_test]
+    fn cd_scale_shifts_zero_and_monte_carlo_and_wez_output() {
+        let zero_cmd_neutral =
+            "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300 --cd-scale 1.0";
+        let zero_cmd_scaled =
+            "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300 --cd-scale 1.1";
+        let mc_cmd_neutral = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 50 --cd-scale 1.0";
+        let mc_cmd_scaled = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 50 --cd-scale 1.1";
+        let wez_cmd_neutral = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez \
+             --target-size 18x30 -n 20 --wez-start 200 --wez-end 300 --wez-step 100 \
+             --cd-scale 1.0";
+        let wez_cmd_scaled = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez \
+             --target-size 18x30 -n 20 --wez-start 200 --wez-end 300 --wez-step 100 \
+             --cd-scale 1.1";
+
+        for (neutral_cmd, scaled_cmd) in [
+            (zero_cmd_neutral, zero_cmd_scaled),
+            (mc_cmd_neutral, mc_cmd_scaled),
+            (wez_cmd_neutral, wez_cmd_scaled),
+        ] {
+            let wasm = WasmBallistics::new();
+            wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+            let neutral = wasm.run_command(neutral_cmd).unwrap();
+            let scaled = wasm.run_command(scaled_cmd).unwrap();
+            assert_ne!(
+                neutral, scaled,
+                "`{scaled_cmd}` must differ from `{neutral_cmd}`"
+            );
+        }
+    }
+
+    /// A `--cd-scale` far outside the typical truing range (outside `[0.5, 2.0]`) must still
+    /// solve successfully (the engine's own gate is only finite && > 0) but warn once, table-only
+    /// — the warning text must not appear in JSON output.
+    #[wasm_bindgen_test]
+    fn cd_scale_out_of_range_warns_table_only() {
+        let wasm = WasmBallistics::new();
+        wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+
+        let table_output = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 --cd-scale 3.0")
+            .unwrap();
+        assert!(
+            table_output.contains("--cd-scale 3 is far outside the typical truing range (0.90-1.10)"),
+            "got: {table_output}"
+        );
+
+        let json_output = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 --cd-scale 3.0 -o json",
+            )
+            .unwrap();
+        assert!(
+            !json_output.contains("far outside the typical truing range"),
+            "the range warning must never contaminate JSON output, got: {json_output}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
     // MBA-1409: `loadDragTable` accepts `.drg` vendor drag-curve text as a fallback when the
     // bytes don't parse as CSV. WASM has no filesystem and thus no file extension to key off
     // (unlike native `--drag-table`, which dispatches on the `.drg`/other-extension split), so

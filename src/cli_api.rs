@@ -5003,6 +5003,38 @@ mod cd_scale_tests {
         }
     }
 
+    /// `require_positive("cd_scale", ...)` is unconditional in `validate_for_solve` (see the
+    /// comment there) — it must reject an invalid scale even with NO custom drag table present,
+    /// not just on the deck path the other tests in this module exercise. Otherwise a caller
+    /// that sets an invalid `cd_scale` without ever touching `custom_drag_table` would slip
+    /// through unvalidated (the field would simply go unread on this path, but the validation
+    /// gate itself must not silently skip it).
+    #[test]
+    fn validate_for_solve_rejects_invalid_cd_scale_without_a_custom_drag_table() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let inputs = BallisticInputs {
+                bc_value: 0.5,
+                bc_type: crate::DragModel::G1,
+                bullet_mass: 0.0106,
+                bullet_diameter: 0.00782,
+                muzzle_velocity: 850.0,
+                cd_scale: bad,
+                ..BallisticInputs::default()
+            };
+            assert!(inputs.custom_drag_table.is_none(), "precondition: no custom deck");
+            let solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            assert!(
+                solver.solve().is_err(),
+                "cd_scale={bad} must be rejected by validate_for_solve even without a custom \
+                 drag table"
+            );
+        }
+    }
+
     /// cd_scale must be inert on the standard G-model/BC path (no custom_drag_table): the
     /// scale is read only inside the `custom_drag_table` branch, so a scale far from 1.0 must
     /// not perturb a plain G1/G7 solve at all.
