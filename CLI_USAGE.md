@@ -192,6 +192,24 @@ Warning: shot Mach range [1.47, 2.42] extends beyond the drag table domain [0.80
 
 **WASM:** the browser/Node build has no filesystem, so `--drag-table <FILE>` isn't a CLI flag there. Instead, call `wasm.loadDragTable(bytes)` with the raw bytes of the same `mach,cd` CSV (parsed by the identical `DragTable::from_csv_str`) before running a command; `wasm.hasDragTable()` reports whether one is loaded. With no file extension available to dispatch on, `loadDragTable` tries CSV first exactly as before, and only on CSV failure — if the text looks like a `.drg` deck — retries it through the same `.drg` parser the native CLI uses; if neither format parses, the error names both. Once loaded, the table is applied automatically to every `trajectory`, `zero`, `lead`, and `monte-carlo` run — including `lead`, which has no native `--drag-table` flag of its own — until a new table replaces it. See `loadDragTable`'s doc comment in `src/wasm.rs` for the exact contract.
 
+#### Whole-Curve Drag Scale (`--cd-scale`)
+
+For after-the-fact truing of a custom deck against chronograph/observed data, `--cd-scale <FACTOR>` multiplies every interpolated Cd by a constant factor — `Cd_used = table.interpolate(mach) * cd_scale` — the same mechanism a Hornady 4DOF "AFF" (Aerodynamic Fudge Factor) or an Applied Ballistics "CDF" (Cd Factor) applies to true a whole measured curve. This is distinct from `--bc-adjustment`, which trues a scalar BC on the G1/G7 path; a custom drag table has no BC to adjust, so `--cd-scale` is its equivalent. `1.0` is neutral (byte-identical to omitting the flag); the typical truing range is `0.90`-`1.10`. Works identically with both the CSV and `.drg` deck formats — it scales the interpolated Cd after either loader, so the source format doesn't matter.
+
+Available on `trajectory`, `zero`, and `monte-carlo` — the same trio as `--drag-table` — and **requires** it: supplying `--cd-scale` without `--drag-table` fails before any solve, naming `--bc-adjustment` as the G1/G7 alternative:
+
+```
+error: --cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)
+```
+
+A value far outside the typical truing range (outside `[0.5, 2.0]`) is still accepted — the engine's own gate is only finite and `> 0` — but warns once on stderr:
+
+```
+warning: --cd-scale 3 is far outside the typical truing range (0.90-1.10)
+```
+
+**WASM:** pass `--cd-scale <FACTOR>` as a terminal argument to `trajectory`, `zero`, or `monte-carlo` alongside a table loaded via `loadDragTable`; the pairing requirement and range warning are identical (the pairing failure surfaces as a rejected promise/`Err` instead of a process exit, and the range warning is prepended to the table-style output rather than printed to a separate stderr stream).
+
 #### BC5D Correction Tables
 
 BC5D (5-Dimensional BC Correction) tables provide ML-derived, velocity-dependent BC corrections for specific calibers. These tables capture how BC changes throughout the flight envelope based on weight, BC, muzzle velocity, current velocity, and drag model.

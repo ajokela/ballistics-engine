@@ -263,6 +263,9 @@ pub struct TrajectoryParams {
     pub bullet_length: f64, // meters (0.0 -> derivatives falls back to the 4.5-caliber heuristic)
     pub twist_rate: f64,    // inches per turn
     pub custom_drag_table: Option<crate::drag::DragTable>, // Custom Drag Model (CDM) data
+    /// MBA-1356: whole-curve scale for the custom deck (1.0 = neutral). Threaded so the
+    /// binding entry point (fast_integrate_with_segments) cannot silently drop it.
+    pub cd_scale: f64,
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
     pub use_bc_segments: bool, // Whether to use BC segment interpolation
     /// MBA-954: altitude (m, relative to launch) below which integration stops. -1000.0 is the
@@ -338,6 +341,7 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         use_cluster_bc: false,
         bullet_cluster: None,
         custom_drag_table: params.custom_drag_table.clone(),
+        cd_scale: params.cd_scale,
         bc_type_str: None,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
@@ -764,6 +768,7 @@ pub fn solve_trajectory_rust(
         bullet_length: 0.031496,
         twist_rate: 10.0,
         custom_drag_table: None, // No CDM for test function
+        cd_scale: 1.0,
         bc_segments: None,       // No BC segments for legacy function
         use_bc_segments: false,
         ground_threshold: -1000.0, // MBA-954: preserve the historical default
@@ -815,6 +820,7 @@ mod tests {
             is_twist_right: true,
             shooting_angle: 0.0,
             custom_drag_table: None,
+            cd_scale: 1.0,
             bc_segments: None,
             use_bc_segments: false,
             ground_threshold: -1000.0,
@@ -1269,6 +1275,7 @@ mod tests {
             is_twist_right: true,
             shooting_angle: 0.0,
             custom_drag_table: None,
+            cd_scale: 1.0,
             bc_segments: None,
             use_bc_segments: false,
             ground_threshold: -1000.0,

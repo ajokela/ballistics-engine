@@ -908,7 +908,9 @@ fn compute_derivatives(
         // (see BallisticInputs::custom_drag_denominator).
         let (drag_factor, retard_denom) = if let Some(ref table) = inputs.custom_drag_table {
             (
-                table.interpolate(mach),
+                // MBA-1357 colocation: the future Mach-keyed DSF table applies at this exact
+                // site; cd_scale is its degenerate single-band case.
+                table.interpolate(mach) * inputs.cd_scale,
                 inputs.custom_drag_denominator(bc_current),
             )
         } else {
@@ -1031,6 +1033,7 @@ pub fn fast_integrate_with_segments(
         bullet_diameter: inputs.bullet_diameter,
         bullet_length: inputs.bullet_length,
         twist_rate: inputs.twist_rate,
+        cd_scale: inputs.cd_scale,
         custom_drag_table: inputs.custom_drag_table.clone(),
         bc_segments: inputs.bc_segments.clone(),
         use_bc_segments: inputs.use_bc_segments,
@@ -2248,6 +2251,142 @@ mod tests {
         assert!(
             (litz_with_umbrella - litz_without_umbrella).norm() < 1e-12,
             "the legacy umbrella must not change Magnus suppression in Litz mode: without={litz_without_umbrella:?} with={litz_with_umbrella:?}"
+        );
+    }
+
+    /// MBA-1356: cd_scale — this module's custom-deck interpolation site.
+    fn deck_test_inputs(cd_scale: f64) -> BallisticInputs {
+        BallisticInputs {
+            bullet_mass: 0.0106,
+            bullet_diameter: 0.00782,
+            muzzle_velocity: 850.0,
+            custom_drag_table: Some(crate::drag::DragTable::new(
+                vec![0.5, 1.0, 2.0, 3.0],
+                vec![0.23, 0.40, 0.30, 0.26],
+            )),
+            cd_scale,
+            temperature: 15.0,
+            pressure: 1013.25,
+            ..BallisticInputs::default()
+        }
+    }
+
+    fn deck_accel_x(cd_scale: f64) -> f64 {
+        let inputs = deck_test_inputs(cd_scale);
+        compute_derivatives(
+            &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
+            &inputs,
+            &WindSock::new(vec![]),
+            FastAtmosphere::Standard {
+                base_density: 1.225,
+            },
+            &inputs.bc_type,
+            crate::transonic_drag::ProjectileShape::Spitzer,
+            inputs.bc_value,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )[3]
+    }
+
+    #[test]
+    fn cd_scale_default_is_one_and_absent_matches_explicit() {
+        assert_eq!(BallisticInputs::default().cd_scale, 1.0);
+
+        let omitted_inputs = BallisticInputs {
+            bullet_mass: 0.0106,
+            bullet_diameter: 0.00782,
+            muzzle_velocity: 850.0,
+            custom_drag_table: Some(crate::drag::DragTable::new(
+                vec![0.5, 1.0, 2.0, 3.0],
+                vec![0.23, 0.40, 0.30, 0.26],
+            )),
+            temperature: 15.0,
+            pressure: 1013.25,
+            ..BallisticInputs::default()
+        };
+        assert_eq!(omitted_inputs.cd_scale, 1.0);
+
+        let a_omitted = compute_derivatives(
+            &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
+            &omitted_inputs,
+            &WindSock::new(vec![]),
+            FastAtmosphere::Standard {
+                base_density: 1.225,
+            },
+            &omitted_inputs.bc_type,
+            crate::transonic_drag::ProjectileShape::Spitzer,
+            omitted_inputs.bc_value,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )[3];
+        let a_explicit = deck_accel_x(1.0);
+        assert_eq!(
+            a_omitted.to_bits(),
+            a_explicit.to_bits(),
+            "omitted cd_scale (Default) must be bit-identical to an explicit 1.0"
+        );
+    }
+
+    /// (b) Scale-direction test, fast_trajectory path: cd_scale=1.10 must add more drag
+    /// (a more negative x-acceleration) than 1.0; 0.90 must add less.
+    #[test]
+    fn cd_scale_direction_on_fast_trajectory_kernel() {
+        let baseline = deck_accel_x(1.0);
+        let scaled_up = deck_accel_x(1.10);
+        let scaled_down = deck_accel_x(0.90);
+
+        assert!(
+            scaled_up < baseline,
+            "cd_scale=1.10 must increase drag deceleration (more negative ax): \
+             base={baseline} up={scaled_up}"
+        );
+        assert!(
+            scaled_down > baseline,
+            "cd_scale=0.90 must decrease drag deceleration (less negative ax): \
+             base={baseline} down={scaled_down}"
+        );
+    }
+
+    /// cd_scale must be inert on the standard G-model/BC path (no custom_drag_table).
+    #[test]
+    fn cd_scale_is_inert_without_a_custom_drag_table() {
+        let make = |cd_scale: f64| BallisticInputs {
+            bc_value: 0.5,
+            bc_type: DragModel::G1,
+            temperature: 15.0,
+            pressure: 1013.25,
+            cd_scale,
+            ..BallisticInputs::default()
+        };
+        let accel = |cd_scale: f64| {
+            let inputs = make(cd_scale);
+            compute_derivatives(
+                &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
+                &inputs,
+                &WindSock::new(vec![]),
+                FastAtmosphere::Standard {
+                    base_density: 1.225,
+                },
+                &inputs.bc_type,
+                crate::transonic_drag::ProjectileShape::Spitzer,
+                inputs.bc_value,
+                false,
+                false,
+                None,
+                None,
+                None,
+            )[3]
+        };
+        assert_eq!(
+            accel(1.0).to_bits(),
+            accel(1.5).to_bits(),
+            "cd_scale must not affect the G-model/BC drag path"
         );
     }
 }
