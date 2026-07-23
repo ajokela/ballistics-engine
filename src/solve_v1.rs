@@ -326,6 +326,10 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
         enable_aerodynamic_jump: false,
         use_cluster_bc: false,
         custom_drag_table: None,
+        // MBA-1356: solve-json v1 has no custom-drag-table field (see the module doc — the
+        // public JSON contract deliberately does not expose custom decks), so cd_scale is
+        // always inert here; keep it at the neutral default.
+        cd_scale: 1.0,
         bc_type_str: None,
     };
 

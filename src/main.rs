@@ -5237,6 +5237,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     use_cluster_bc,
                                     bc_type_str: None,
                                     custom_drag_table: custom_drag_table.clone(),
+                                    // MBA-1356: --cd-scale is wired onto this struct in a
+                                    // follow-up task; the neutral default keeps today's output
+                                    // byte-identical until that flag lands.
+                                    cd_scale: 1.0,
                                 };
 
                                 let local_wind = WindConditions {
@@ -7770,6 +7774,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         // Optional data
         bc_type_str: None,
         custom_drag_table: custom_drag_table.clone(),
+        // MBA-1356: --cd-scale is wired onto this struct in a follow-up task; the neutral
+        // default keeps today's output byte-identical until that flag lands.
+        cd_scale: 1.0,
     };
 
     // Set up wind conditions

@@ -338,6 +338,14 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         use_cluster_bc: false,
         bullet_cluster: None,
         custom_drag_table: params.custom_drag_table.clone(),
+        // MBA-1356: `TrajectoryParams` (this fast/RK45 generic integrator, reached via
+        // `fast_trajectory::fast_integrate_with_segments` — the Python binding's entry point)
+        // does not yet carry a cd_scale of its own, so a custom deck on this path always solves
+        // at the neutral 1.0 scale. Not reachable from the CLI/FFI/WASM surfaces this ticket
+        // wires (those build a `BallisticInputs` directly and go through `TrajectorySolver` or
+        // the plain `fast_trajectory::fast_integrate`, both of which do honor `inputs.cd_scale`).
+        // Threading it through `TrajectoryParams` is left as follow-up if this path needs it.
+        cd_scale: 1.0,
         bc_type_str: None,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
