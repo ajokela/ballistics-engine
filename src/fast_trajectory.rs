@@ -1033,6 +1033,7 @@ pub fn fast_integrate_with_segments(
         bullet_diameter: inputs.bullet_diameter,
         bullet_length: inputs.bullet_length,
         twist_rate: inputs.twist_rate,
+        cd_scale: inputs.cd_scale,
         custom_drag_table: inputs.custom_drag_table.clone(),
         bc_segments: inputs.bc_segments.clone(),
         use_bc_segments: inputs.use_bc_segments,
