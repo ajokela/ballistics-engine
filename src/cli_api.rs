@@ -178,6 +178,14 @@ pub struct BallisticInputs {
 
     // Custom drag model support
     pub custom_drag_table: Option<crate::drag::DragTable>,
+    /// Whole-curve multiplier applied to the custom deck's interpolated Cd (MBA-1356):
+    /// `Cd_used = table.interpolate(mach) * cd_scale`. Meaningful only alongside
+    /// `custom_drag_table` — it is read at the three custom-deck interpolation sites in
+    /// cli_api.rs/derivatives.rs/fast_trajectory.rs and left untouched on the standard
+    /// G-model/BC path (those users true their drag via `--bc-adjustment` instead; scaling
+    /// a reference table too would double-count). Default `1.0` is neutral (byte-identical
+    /// to the pre-MBA-1356 behavior). Validated finite and > 0 by `validate_for_solve`.
+    pub cd_scale: f64,
 
     // Legacy field for compatibility
     pub bc_type_str: Option<String>,
@@ -327,6 +335,7 @@ impl Default for BallisticInputs {
 
             // Custom drag model support
             custom_drag_table: None,
+            cd_scale: 1.0,
 
             // Legacy field for compatibility
             bc_type_str: None,
@@ -980,6 +989,12 @@ impl TrajectorySolver {
         require_positive("bullet_mass", self.inputs.bullet_mass)?;
         require_positive("bullet_diameter", self.inputs.bullet_diameter)?;
         require_positive("muzzle_velocity", self.inputs.muzzle_velocity)?;
+        // MBA-1356: cd_scale multiplies the custom-deck Cd; a non-finite or non-positive value
+        // would zero/invert drag or poison integration with NaN. Required unconditionally (not
+        // gated on custom_drag_table) since the default (1.0) is always valid and a caller could
+        // set an invalid scale without ever setting a table. The [0.5, 2.0] "unusual" range is a
+        // CLI-level warning (Task 2), not a hard engine rule.
+        require_positive("cd_scale", self.inputs.cd_scale)?;
 
         require_finite("muzzle_angle", self.inputs.muzzle_angle)?;
         require_finite("azimuth_angle", self.inputs.azimuth_angle)?;
@@ -2982,7 +2997,9 @@ impl TrajectorySolver {
         // lookup, no transonic shape correction, no form factor. The supplied curve already
         // encodes the projectile's true drag, so applying those would distort/double-count it.
         if let Some(ref table) = self.inputs.custom_drag_table {
-            return table.interpolate(mach);
+            // MBA-1357 colocation: the future Mach-keyed DSF table applies at this exact site;
+            // cd_scale is its degenerate single-band case.
+            return table.interpolate(mach) * self.inputs.cd_scale;
         }
 
         // A published/measured BC already contains the projectile form factor (BC = SD / i).
@@ -4851,6 +4868,246 @@ mod custom_drag_table_validation_tests {
         };
         let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
         assert!(solver.solve().is_err());
+    }
+}
+
+/// MBA-1356: cd_scale — a whole-curve multiplier on the custom-deck Cd.
+#[cfg(test)]
+mod cd_scale_tests {
+    use super::*;
+
+    fn deck() -> crate::drag::DragTable {
+        crate::drag::DragTable::new(vec![0.5, 1.0, 2.0, 3.0], vec![0.23, 0.40, 0.30, 0.26])
+    }
+
+    fn deck_inputs(cd_scale: f64) -> BallisticInputs {
+        BallisticInputs {
+            bullet_mass: 0.0106,
+            bullet_diameter: 0.00782,
+            muzzle_velocity: 850.0,
+            custom_drag_table: Some(deck()),
+            cd_scale,
+            ..BallisticInputs::default()
+        }
+    }
+
+    #[test]
+    fn default_cd_scale_is_one() {
+        assert_eq!(BallisticInputs::default().cd_scale, 1.0);
+    }
+
+    /// (a) Default invariance: omitting `cd_scale` (picked up from `..Default::default()`)
+    /// must be byte-identical to explicitly setting `1.0`, on the custom-deck Cd itself.
+    #[test]
+    fn cd_scale_absent_is_byte_identical_to_explicit_one() {
+        let omitted = BallisticInputs {
+            bullet_mass: 0.0106,
+            bullet_diameter: 0.00782,
+            muzzle_velocity: 850.0,
+            custom_drag_table: Some(deck()),
+            ..BallisticInputs::default()
+        };
+        let explicit = BallisticInputs {
+            cd_scale: 1.0,
+            ..omitted.clone()
+        };
+
+        let solver_omitted =
+            TrajectorySolver::new(omitted, WindConditions::default(), AtmosphericConditions::default());
+        let solver_explicit =
+            TrajectorySolver::new(explicit, WindConditions::default(), AtmosphericConditions::default());
+
+        let cd_omitted = solver_omitted.calculate_drag_coefficient(700.0, 340.0);
+        let cd_explicit = solver_explicit.calculate_drag_coefficient(700.0, 340.0);
+        assert_eq!(
+            cd_omitted.to_bits(),
+            cd_explicit.to_bits(),
+            "default cd_scale must be bit-identical to an explicit 1.0"
+        );
+
+        // And a full custom-deck solve (the existing pre-MBA-1356 test surface) must still
+        // succeed unchanged with the field simply absent from the literal.
+        let result = solver_omitted.solve();
+        assert!(result.is_ok(), "existing custom-deck solves must pass unchanged");
+    }
+
+    /// The custom-deck interpolation site multiplies the deck's Cd by `cd_scale` exactly.
+    #[test]
+    fn cd_scale_multiplies_the_interpolated_cd_exactly() {
+        let velocity = 700.0;
+        let speed_of_sound = 340.0;
+        let mach = velocity / speed_of_sound;
+        let expected_unscaled = deck().interpolate(mach);
+
+        for &scale in &[0.90, 1.0, 1.10, 1.5] {
+            let solver = TrajectorySolver::new(
+                deck_inputs(scale),
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            let cd = solver.calculate_drag_coefficient(velocity, speed_of_sound);
+            assert!(
+                (cd - expected_unscaled * scale).abs() < 1e-12,
+                "scale={scale}: cd={cd} expected={}",
+                expected_unscaled * scale
+            );
+        }
+    }
+
+    /// (b) Scale-direction test, cli_api (RK4/RK45) solver path: a higher cd_scale means more
+    /// drag, so the solve loses more velocity (and correspondingly drops more) over the same
+    /// downrange distance; a lower cd_scale loses less.
+    #[test]
+    fn cd_scale_direction_on_cli_api_solver() {
+        let solve = |scale: f64| {
+            TrajectorySolver::new(
+                deck_inputs(scale),
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            )
+            .solve()
+            .expect("custom-deck solve should succeed")
+        };
+
+        let baseline = solve(1.0);
+        let scaled_up = solve(1.10);
+        let scaled_down = solve(0.90);
+
+        assert!(
+            scaled_up.impact_velocity < baseline.impact_velocity,
+            "cd_scale=1.10 must increase drag -> lower impact velocity: base={} up={}",
+            baseline.impact_velocity,
+            scaled_up.impact_velocity
+        );
+        assert!(
+            scaled_down.impact_velocity > baseline.impact_velocity,
+            "cd_scale=0.90 must decrease drag -> higher impact velocity: base={} down={}",
+            baseline.impact_velocity,
+            scaled_down.impact_velocity
+        );
+    }
+
+    /// (d) `validate_for_solve` rejects a non-finite or non-positive `cd_scale`.
+    #[test]
+    fn validate_for_solve_rejects_invalid_cd_scale() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let solver = TrajectorySolver::new(
+                deck_inputs(bad),
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            assert!(
+                solver.solve().is_err(),
+                "cd_scale={bad} must be rejected by validate_for_solve"
+            );
+        }
+    }
+
+    /// cd_scale must be inert on the standard G-model/BC path (no custom_drag_table): the
+    /// scale is read only inside the `custom_drag_table` branch, so a scale far from 1.0 must
+    /// not perturb a plain G1/G7 solve at all.
+    #[test]
+    fn cd_scale_is_inert_without_a_custom_drag_table() {
+        let make = |cd_scale: f64| BallisticInputs {
+            bc_value: 0.5,
+            bc_type: crate::DragModel::G1,
+            bullet_mass: 0.0106,
+            bullet_diameter: 0.00782,
+            muzzle_velocity: 850.0,
+            cd_scale,
+            ..BallisticInputs::default()
+        };
+        let solver_neutral = TrajectorySolver::new(
+            make(1.0),
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let solver_far = TrajectorySolver::new(
+            make(1.5),
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let cd_neutral = solver_neutral.calculate_drag_coefficient(700.0, 340.0);
+        let cd_far = solver_far.calculate_drag_coefficient(700.0, 340.0);
+        assert_eq!(
+            cd_neutral.to_bits(),
+            cd_far.to_bits(),
+            "cd_scale must not affect the G-model/BC drag path"
+        );
+    }
+
+    /// (c) Cross-solver consistency: cli_api (RK4/RK45), derivatives-driven, and fast_trajectory
+    /// all shift together (same relative direction) under cd_scale != 1.0 on the same deck.
+    #[test]
+    fn cd_scale_shifts_all_three_solver_paths_in_the_same_direction() {
+        // --- cli_api ---
+        let cli_solve = |scale: f64| {
+            TrajectorySolver::new(
+                deck_inputs(scale),
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            )
+            .solve()
+            .expect("cli_api custom-deck solve should succeed")
+        };
+        let cli_baseline = cli_solve(1.0);
+        let cli_scaled = cli_solve(1.10);
+        assert!(
+            cli_scaled.impact_velocity < cli_baseline.impact_velocity,
+            "cli_api: cd_scale=1.10 must lower impact velocity"
+        );
+
+        // --- derivatives (the RK4/RK45 generic integrator's kernel) ---
+        let derivatives_accel_x = |scale: f64| {
+            let inputs = deck_inputs(scale);
+            crate::derivatives::compute_derivatives(
+                nalgebra::Vector3::zeros(),
+                nalgebra::Vector3::new(700.0, 0.0, 0.0),
+                &inputs,
+                nalgebra::Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                inputs.bc_value,
+                None,
+                0.0,
+                None,
+            )[3]
+        };
+        let deriv_baseline = derivatives_accel_x(1.0);
+        let deriv_scaled = derivatives_accel_x(1.10);
+        assert!(
+            deriv_scaled < deriv_baseline,
+            "derivatives: cd_scale=1.10 must make x-acceleration more negative (more drag): \
+             base={deriv_baseline} scaled={deriv_scaled}"
+        );
+
+        // --- fast_trajectory (fast_integrate) ---
+        let fast_final_speed = |scale: f64| {
+            let inputs = deck_inputs(scale);
+            let wind_sock = crate::wind::WindSock::new(vec![]);
+            let params = crate::fast_trajectory::FastIntegrationParams {
+                horiz: 500.0,
+                vert: 0.0,
+                initial_state: [0.0, 0.0, 0.0, 850.0, 0.0, 0.0],
+                t_span: (0.0, 5.0),
+                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmo_sock: None,
+            };
+            let solution = crate::fast_trajectory::fast_integrate(&inputs, &wind_sock, params);
+            assert!(solution.success, "fast_integrate must succeed for scale={scale}");
+            let last = solution.t.len() - 1;
+            let (vx, vy, vz) = (
+                solution.y[3][last],
+                solution.y[4][last],
+                solution.y[5][last],
+            );
+            (vx * vx + vy * vy + vz * vz).sqrt()
+        };
+        let fast_baseline = fast_final_speed(1.0);
+        let fast_scaled = fast_final_speed(1.10);
+        assert!(
+            fast_scaled < fast_baseline,
+            "fast_trajectory: cd_scale=1.10 must lower final speed: base={fast_baseline} scaled={fast_scaled}"
+        );
     }
 }
 
