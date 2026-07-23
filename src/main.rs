@@ -3703,8 +3703,7 @@ fn aux_g1_coercion_warning(feature: &str, model: DragModel) -> Option<String> {
     match model {
         DragModel::G7 | DragModel::G1 => None,
         other => Some(format!(
-            "warning: {feature} supports G1/G7 only; treating drag model '{other}' as G1 \
-             for the estimate"
+            "warning: {feature} supports G1/G7 only; treating drag model '{other}' as G1"
         )),
     }
 }
