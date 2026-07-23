@@ -601,24 +601,69 @@ static G8_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
     }
 });
 
+/// G2 drag table — banded-based projectile (Aberdeen/BRL standard, as tabulated in McCoy,
+/// Modern Exterior Ballistics). High-resolution data baked in from data/g2.csv (MBA-1386);
+/// see that file's header for provenance.
+static G2_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
+    // 3-point fallback for the impossible parse-failure path only.
+    let fallback_data = [(0.0, 0.2303), (1.0, 0.3983), (5.0, 0.1648)];
+    parse_embedded_drag_table(include_str!("../data/g2.csv"), &fallback_data)
+});
+
+/// G5 drag table — short 7.5 caliber tangent ogive boat-tail (Aberdeen/BRL standard, as
+/// tabulated in McCoy, Modern Exterior Ballistics). High-resolution data baked in from
+/// data/g5.csv (MBA-1386); see that file's header for provenance.
+static G5_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
+    // 3-point fallback for the impossible parse-failure path only.
+    let fallback_data = [(0.0, 0.1710), (1.0, 0.3379), (5.0, 0.2280)];
+    parse_embedded_drag_table(include_str!("../data/g5.csv"), &fallback_data)
+});
+
+/// GI drag table — flat-based, 5.5 caliber tangent ogive (Aberdeen/BRL standard, as
+/// tabulated in McCoy, Modern Exterior Ballistics). High-resolution data baked in from
+/// data/gi.csv (MBA-1386); see that file's header for provenance.
+static GI_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
+    // 3-point fallback for the impossible parse-failure path only.
+    let fallback_data = [(0.0, 0.2282), (1.0, 0.4349), (5.0, 0.4082)];
+    parse_embedded_drag_table(include_str!("../data/gi.csv"), &fallback_data)
+});
+
+/// GS drag table — spherical (round-ball) projectile (Aberdeen/BRL standard, as tabulated in
+/// McCoy, Modern Exterior Ballistics). High-resolution data baked in from data/gs.csv
+/// (MBA-1386); see that file's header for provenance. Note the source table only extends to
+/// Mach 4.0 (not 5.0 like the other families).
+static GS_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
+    // 3-point fallback for the impossible parse-failure path only.
+    let fallback_data = [(0.0, 0.4662), (1.0, 0.8140), (4.0, 0.9280)];
+    parse_embedded_drag_table(include_str!("../data/gs.csv"), &fallback_data)
+});
+
+/// RA4 drag table — British RA 1929 reference function (as tabulated in McCoy, Modern
+/// Exterior Ballistics). High-resolution data baked in from data/ra4.csv (MBA-1386); see that
+/// file's header for provenance. Note the source table only extends to Mach 4.0 (not 5.0 like
+/// most of the G-family tables).
+static RA4_DRAG_TABLE: LazyLock<DragTable> = LazyLock::new(|| {
+    // 3-point fallback for the impossible parse-failure path only.
+    let fallback_data = [(0.0, 0.2283), (1.0, 0.3975), (4.0, 0.4969)];
+    parse_embedded_drag_table(include_str!("../data/ra4.csv"), &fallback_data)
+});
+
 /// Get drag coefficient for given Mach number and drag model.
 ///
-/// NOTE: only G1/G6/G7/G8 have dedicated tables. G2/G5/GI/GS currently fall back to the G1
-/// curve (no tables shipped yet), so callers requesting those models receive a G1
-/// approximation that is physically inaccurate (e.g. GS is the spherical/round-ball model).
-/// The fallback is made explicit below — rather than a silent `_` catch-all — so adding a new
-/// `DragModel` variant is a compile error until it is handled, and so the approximation is
-/// visible. Supplying real G2/G5/GI/GS tables is tracked separately.
+/// Every `DragModel` variant now has a dedicated high-resolution reference table (MBA-1386):
+/// G1/G6/G7/G8 (Aberdeen/BRL, MBA-939/156), G2/G5/GI/GS (Aberdeen/BRL, as tabulated in McCoy),
+/// and RA4 (British RA 1929 reference function).
 pub fn get_drag_coefficient(mach: f64, drag_model: &DragModel) -> f64 {
     match drag_model {
         DragModel::G1 => G1_DRAG_TABLE.interpolate(mach),
+        DragModel::G2 => G2_DRAG_TABLE.interpolate(mach),
+        DragModel::G5 => G5_DRAG_TABLE.interpolate(mach),
         DragModel::G6 => G6_DRAG_TABLE.interpolate(mach),
         DragModel::G7 => G7_DRAG_TABLE.interpolate(mach),
         DragModel::G8 => G8_DRAG_TABLE.interpolate(mach),
-        // No dedicated tables yet — approximate with the G1 curve (flagged, see note above).
-        DragModel::G2 | DragModel::G5 | DragModel::GI | DragModel::GS => {
-            G1_DRAG_TABLE.interpolate(mach)
-        }
+        DragModel::GI => GI_DRAG_TABLE.interpolate(mach),
+        DragModel::GS => GS_DRAG_TABLE.interpolate(mach),
+        DragModel::RA4 => RA4_DRAG_TABLE.interpolate(mach),
     }
 }
 
@@ -1161,6 +1206,180 @@ mod tests {
         let g7 = include_str!("../data/g7.csv");
         let t = DragTable::from_csv_str(g7).unwrap();
         assert!(t.mach_values.len() > 20);
+    }
+
+    // -- MBA-1386: real G2/G5/GI/GS reference tables + RA4 -----------------------------------
+
+    #[test]
+    fn test_g2_drag_coefficient_spot_values() {
+        // Exact values copied from data/g2.csv (JBM mcg2.txt).
+        for (mach, expected) in [(0.0, 0.2303), (0.70, 0.1702), (1.20, 0.4021), (5.0, 0.1648)] {
+            let cd = get_drag_coefficient(mach, &DragModel::G2);
+            assert!(
+                (cd - expected).abs() < 1e-6,
+                "G2 CD at Mach {mach}: expected {expected}, got {cd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_g5_drag_coefficient_spot_values() {
+        // Exact values copied from data/g5.csv (JBM mcg5.txt).
+        for (mach, expected) in [(0.0, 0.1710), (0.75, 0.1463), (1.0, 0.3379), (5.0, 0.2280)] {
+            let cd = get_drag_coefficient(mach, &DragModel::G5);
+            assert!(
+                (cd - expected).abs() < 1e-6,
+                "G5 CD at Mach {mach}: expected {expected}, got {cd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gi_drag_coefficient_spot_values() {
+        // Exact values copied from data/gi.csv (JBM mcgi.txt).
+        for (mach, expected) in [(0.0, 0.2282), (0.90, 0.3170), (1.20, 0.6279), (5.0, 0.4082)] {
+            let cd = get_drag_coefficient(mach, &DragModel::GI);
+            assert!(
+                (cd - expected).abs() < 1e-6,
+                "GI CD at Mach {mach}: expected {expected}, got {cd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gs_drag_coefficient_spot_values() {
+        // Exact values copied from data/gs.csv (JBM mcgs.txt). Table tops out at Mach 4.0.
+        for (mach, expected) in [(0.0, 0.4662), (0.60, 0.5260), (1.60, 1.0090), (4.0, 0.9280)] {
+            let cd = get_drag_coefficient(mach, &DragModel::GS);
+            assert!(
+                (cd - expected).abs() < 1e-6,
+                "GS CD at Mach {mach}: expected {expected}, got {cd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ra4_drag_coefficient_spot_values() {
+        // Exact values copied from data/ra4.csv (JBM ra4.txt). Table tops out at Mach 4.0.
+        for (mach, expected) in [(0.0, 0.2283), (0.70, 0.2288), (1.15, 0.5943), (4.0, 0.4969)] {
+            let cd = get_drag_coefficient(mach, &DragModel::RA4);
+            assert!(
+                (cd - expected).abs() < 1e-6,
+                "RA4 CD at Mach {mach}: expected {expected}, got {cd}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_family_tables_have_ascending_mach_and_positive_cd() {
+        // Structural check, via the public DragTable::from_csv_str loader (which enforces
+        // strictly-ascending Mach and positive Cd through try_new): every embedded reference
+        // table parses cleanly and has a sane point count.
+        let decks: [(&str, &str); 7] = [
+            ("G1", include_str!("../data/g1.csv")),
+            ("G2", include_str!("../data/g2.csv")),
+            ("G5", include_str!("../data/g5.csv")),
+            ("G7", include_str!("../data/g7.csv")),
+            ("GI", include_str!("../data/gi.csv")),
+            ("GS", include_str!("../data/gs.csv")),
+            ("RA4", include_str!("../data/ra4.csv")),
+        ];
+        for (name, csv) in decks {
+            let table =
+                DragTable::from_csv_str(csv).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
+            assert!(
+                table.mach_values.len() > 20,
+                "{name}: expected a high-resolution table, got {} points",
+                table.mach_values.len()
+            );
+            assert_eq!(table.mach_values[0], 0.0, "{name}: expected Mach axis to start at 0.0");
+        }
+
+        // Also sweep the full public get_drag_coefficient API across all 9 families (including
+        // the runtime-loaded G6/G8) and confirm Cd stays finite and positive everywhere.
+        let models = [
+            DragModel::G1,
+            DragModel::G2,
+            DragModel::G5,
+            DragModel::G6,
+            DragModel::G7,
+            DragModel::G8,
+            DragModel::GI,
+            DragModel::GS,
+            DragModel::RA4,
+        ];
+        for model in models {
+            for i in 0..=50 {
+                let mach = i as f64 * 0.1; // 0.0 ..= 5.0
+                let cd = get_drag_coefficient(mach, &model);
+                assert!(
+                    cd.is_finite() && cd > 0.0 && cd < 2.0,
+                    "{model:?} CD out of range at Mach {mach}: {cd}"
+                );
+            }
+        }
+    }
+
+    /// Interpolate the trajectory height (position.y) at a given downrange distance,
+    /// holding the nearest endpoint if the trajectory never reaches it. Mirrors the
+    /// interpolation TrajectorySolver uses internally for zero-angle trials.
+    fn interpolated_drop_at(points: &[crate::TrajectoryPoint], target_x_m: f64) -> f64 {
+        for (i, point) in points.iter().enumerate() {
+            if point.position.x >= target_x_m {
+                if i == 0 {
+                    return point.position.y;
+                }
+                let previous = &points[i - 1];
+                let span = point.position.x - previous.position.x;
+                if span.abs() < crate::constants::MIN_DIVISION_THRESHOLD {
+                    return point.position.y;
+                }
+                let fraction = (target_x_m - previous.position.x) / span;
+                return previous.position.y + fraction * (point.position.y - previous.position.y);
+            }
+        }
+        points.last().map(|p| p.position.y).unwrap_or(f64::NAN)
+    }
+
+    fn drop_at_500yd_m(model: DragModel) -> f64 {
+        let inputs = crate::BallisticInputs {
+            bc_type: model,
+            bc_value: 0.5,
+            ground_threshold: -1000.0,
+            ..Default::default()
+        };
+        let solver = crate::TrajectorySolver::new(
+            inputs,
+            crate::WindConditions::default(),
+            crate::AtmosphericConditions::default(),
+        );
+        let result = solver.solve().expect("solve should succeed");
+        assert!(result.max_range.is_finite());
+        assert!(result.impact_velocity.is_finite() && result.impact_velocity > 0.0);
+        assert!(!result.points.is_empty(), "{model:?}: solver produced no points");
+        let drop = interpolated_drop_at(&result.points, 457.2); // 500 yards
+        assert!(drop.is_finite(), "{model:?}: non-finite drop at 500yd");
+        drop
+    }
+
+    #[test]
+    fn mba1386_g2_g5_gi_gs_drop_differs_from_g1_now_that_fallback_is_gone() {
+        let g1_drop = drop_at_500yd_m(DragModel::G1);
+        for model in [DragModel::G2, DragModel::G5, DragModel::GI, DragModel::GS] {
+            let drop = drop_at_500yd_m(model);
+            assert!(
+                (drop - g1_drop).abs() > 0.01,
+                "{model:?} 500yd drop ({drop}) must differ from the G1 result ({g1_drop}) by \
+                 more than solver noise now that the real table is wired in"
+            );
+        }
+    }
+
+    #[test]
+    fn mba1386_ra4_solver_smoke() {
+        // RA4 never fell back to G1 (it's a new variant), so just prove it solves sanely.
+        let drop = drop_at_500yd_m(DragModel::RA4);
+        assert!(drop < 0.0, "500yd drop should be a fall below the muzzle line: {drop}");
     }
 }
 
