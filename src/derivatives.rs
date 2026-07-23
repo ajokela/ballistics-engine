@@ -379,7 +379,9 @@ pub fn compute_derivatives(
         // Cd_own / SD == Cd_ref / BC (see BallisticInputs::custom_drag_denominator).
         let (drag_factor, retard_denom) = match inputs.custom_drag_table {
             Some(ref table) => (
-                table.interpolate(mach),
+                // MBA-1357 colocation: the future Mach-keyed DSF table applies at this exact
+                // site; cd_scale is its degenerate single-band case.
+                table.interpolate(mach) * inputs.cd_scale,
                 inputs.custom_drag_denominator(bc_val),
             ),
             None => (drag_factor, bc_val),
@@ -1308,5 +1310,112 @@ mod tests {
         assert!((calculate_magnus_moment_coefficient(1.2) - 0.015).abs() < 0.001); // End of transonic
         assert!((calculate_magnus_moment_coefficient(2.0) - 0.01653).abs() < 0.001);
         // Supersonic
+    }
+
+    /// MBA-1356: cd_scale — this module's custom-deck interpolation site.
+    fn deck_test_inputs(cd_scale: f64) -> BallisticInputs {
+        BallisticInputs {
+            custom_drag_table: Some(crate::drag::DragTable::new(
+                vec![0.5, 1.0, 2.0, 3.0],
+                vec![0.23, 0.40, 0.30, 0.26],
+            )),
+            cd_scale,
+            ..create_test_inputs()
+        }
+    }
+
+    fn deck_accel_x(cd_scale: f64) -> f64 {
+        let inputs = deck_test_inputs(cd_scale);
+        compute_derivatives(
+            Vector3::zeros(),
+            Vector3::new(700.0, 0.0, 0.0),
+            &inputs,
+            Vector3::zeros(),
+            (1.225, 340.0, 0.0, 0.0),
+            inputs.bc_value,
+            None,
+            0.0,
+            None,
+        )[3]
+    }
+
+    #[test]
+    fn cd_scale_default_is_one_and_absent_matches_explicit() {
+        assert_eq!(BallisticInputs::default().cd_scale, 1.0);
+
+        let omitted = BallisticInputs {
+            custom_drag_table: Some(crate::drag::DragTable::new(
+                vec![0.5, 1.0, 2.0, 3.0],
+                vec![0.23, 0.40, 0.30, 0.26],
+            )),
+            ..create_test_inputs()
+        };
+        assert_eq!(omitted.cd_scale, 1.0);
+
+        let a_omitted = compute_derivatives(
+            Vector3::zeros(),
+            Vector3::new(700.0, 0.0, 0.0),
+            &omitted,
+            Vector3::zeros(),
+            (1.225, 340.0, 0.0, 0.0),
+            omitted.bc_value,
+            None,
+            0.0,
+            None,
+        );
+        let a_explicit = deck_accel_x(1.0);
+        assert_eq!(
+            a_omitted[3].to_bits(),
+            a_explicit.to_bits(),
+            "omitted cd_scale (Default) must be bit-identical to an explicit 1.0"
+        );
+    }
+
+    /// (b) Scale-direction test, derivatives-driven path: cd_scale=1.10 must add more drag
+    /// (a more negative x-acceleration) than 1.0; 0.90 must add less.
+    #[test]
+    fn cd_scale_direction_on_derivatives_kernel() {
+        let baseline = deck_accel_x(1.0);
+        let scaled_up = deck_accel_x(1.10);
+        let scaled_down = deck_accel_x(0.90);
+
+        assert!(
+            scaled_up < baseline,
+            "cd_scale=1.10 must increase drag deceleration (more negative ax): \
+             base={baseline} up={scaled_up}"
+        );
+        assert!(
+            scaled_down > baseline,
+            "cd_scale=0.90 must decrease drag deceleration (less negative ax): \
+             base={baseline} down={scaled_down}"
+        );
+    }
+
+    /// cd_scale must be inert on the standard G-model/BC path (no custom_drag_table).
+    #[test]
+    fn cd_scale_is_inert_without_a_custom_drag_table() {
+        let make = |cd_scale: f64| BallisticInputs {
+            cd_scale,
+            ..create_test_inputs()
+        };
+        let accel = |cd_scale: f64| {
+            let inputs = make(cd_scale);
+            compute_derivatives(
+                Vector3::zeros(),
+                Vector3::new(700.0, 0.0, 0.0),
+                &inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                inputs.bc_value,
+                None,
+                0.0,
+                None,
+            )[3]
+        };
+        assert_eq!(
+            accel(1.0).to_bits(),
+            accel(1.5).to_bits(),
+            "cd_scale must not affect the G-model/BC drag path"
+        );
     }
 }

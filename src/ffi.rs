@@ -256,7 +256,9 @@ unsafe fn drag_table_from_raw(
 
 /// Shared implementation for the trajectory exports. `custom_drag_table`, when
 /// present, replaces the G-model + BC drag (the deck's Cd is divided by sectional
-/// density — see `BallisticInputs::custom_drag_denominator`).
+/// density — see `BallisticInputs::custom_drag_denominator`). `cd_scale` multiplies the
+/// deck's interpolated Cd (MBA-1356); callers that don't expose a scale pass `1.0`
+/// (neutral, byte-identical to no scale). It is inert when `custom_drag_table` is `None`.
 unsafe fn calculate_trajectory_impl(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,
@@ -264,6 +266,7 @@ unsafe fn calculate_trajectory_impl(
     max_range: c_double,
     step_size: c_double,
     custom_drag_table: Option<crate::drag::DragTable>,
+    cd_scale: c_double,
 ) -> *mut FFITrajectoryResult {
     if inputs.is_null() {
         return ptr::null_mut();
@@ -275,6 +278,7 @@ unsafe fn calculate_trajectory_impl(
     let inputs = unsafe { &*inputs };
     let mut ballistic_inputs = convert_inputs(inputs);
     ballistic_inputs.custom_drag_table = custom_drag_table;
+    ballistic_inputs.cd_scale = cd_scale;
     let twist_rate_in = ballistic_inputs.twist_rate;
 
     let wind_conditions = if wind.is_null() {
@@ -439,7 +443,7 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
     max_range: c_double,
     step_size: c_double,
 ) -> *mut FFITrajectoryResult {
-    unsafe { calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, None) }
+    unsafe { calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, None, 1.0) }
 }
 
 /// [`ballistics_calculate_trajectory`] with a caller-supplied custom drag deck
@@ -478,7 +482,51 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table(
         Err(()) => return ptr::null_mut(),
     };
     unsafe {
-        calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, Some(table))
+        calculate_trajectory_impl(
+            inputs, wind, atmosphere, max_range, step_size, Some(table), 1.0,
+        )
+    }
+}
+
+/// [`ballistics_calculate_trajectory_with_drag_table`] with an additional whole-curve
+/// drag scale (MBA-1356): the deck's interpolated Cd is multiplied by `cd_scale` at the
+/// same site the base export uses, i.e. `Cd_used = table.interpolate(mach) * cd_scale`.
+/// `cd_scale = 1.0` is neutral and produces byte-identical output to
+/// [`ballistics_calculate_trajectory_with_drag_table`] on the same deck. Typical truing
+/// values are in `[0.90, 1.10]`; values outside that band are accepted here (the engine
+/// only rejects non-finite or non-positive) — an "unusually large" warning is a CLI-only
+/// concern (Task 2), not part of this frozen C ABI.
+///
+/// Returns null when `cd_scale` is not finite or not `> 0`, in addition to every failure
+/// mode of [`ballistics_calculate_trajectory_with_drag_table`] (matching that export's
+/// null sentinel for an invalid deck).
+///
+/// # Safety
+///
+/// Same contract as [`ballistics_calculate_trajectory_with_drag_table`].
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table_scaled(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    max_range: c_double,
+    step_size: c_double,
+    drag_mach: *const c_double,
+    drag_cd: *const c_double,
+    drag_table_len: c_int,
+    cd_scale: c_double,
+) -> *mut FFITrajectoryResult {
+    if !cd_scale.is_finite() || cd_scale <= 0.0 {
+        return ptr::null_mut();
+    }
+    let table = match unsafe { drag_table_from_raw(drag_mach, drag_cd, drag_table_len) } {
+        Ok(t) => t,
+        Err(()) => return ptr::null_mut(),
+    };
+    unsafe {
+        calculate_trajectory_impl(
+            inputs, wind, atmosphere, max_range, step_size, Some(table), cd_scale,
+        )
     }
 }
 
@@ -520,13 +568,15 @@ pub unsafe extern "C" fn ballistics_free_trajectory_result(result: *mut FFITraje
 /// present, replaces the G-model + BC drag (the deck's Cd is divided by sectional
 /// density — see `BallisticInputs::custom_drag_denominator`), matching the deck
 /// semantics of [`calculate_trajectory_impl`] so a zero solved with a deck and a
-/// trajectory flown with the same deck agree.
+/// trajectory flown with the same deck agree. `cd_scale` multiplies the deck's
+/// interpolated Cd (MBA-1356); callers that don't expose a scale pass `1.0` (neutral).
 unsafe fn calculate_zero_angle_impl(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,
     atmosphere: *const FFIAtmosphericConditions,
     zero_distance: c_double,
     custom_drag_table: Option<crate::drag::DragTable>,
+    cd_scale: c_double,
 ) -> c_double {
     if inputs.is_null() {
         return f64::NAN;
@@ -535,6 +585,7 @@ unsafe fn calculate_zero_angle_impl(
     let inputs = unsafe { &*inputs };
     let mut ballistic_inputs = convert_inputs(inputs);
     ballistic_inputs.custom_drag_table = custom_drag_table;
+    ballistic_inputs.cd_scale = cd_scale;
 
     let wind_conditions = if wind.is_null() {
         WindConditions::default()
@@ -589,7 +640,7 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
     atmosphere: *const FFIAtmosphericConditions,
     zero_distance: c_double,
 ) -> c_double {
-    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, None) }
+    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, None, 1.0) }
 }
 
 /// [`ballistics_calculate_zero_angle`] with a caller-supplied custom drag deck
@@ -627,7 +678,56 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table(
         Ok(t) => t,
         Err(()) => return f64::NAN,
     };
-    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, Some(table)) }
+    unsafe {
+        calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, Some(table), 1.0)
+    }
+}
+
+/// [`ballistics_calculate_zero_angle_with_drag_table`] with an additional whole-curve
+/// drag scale (MBA-1356): the deck's interpolated Cd is multiplied by `cd_scale` at the
+/// same site the base export uses, i.e. `Cd_used = table.interpolate(mach) * cd_scale`.
+/// `cd_scale = 1.0` is neutral and produces byte-identical output to
+/// [`ballistics_calculate_zero_angle_with_drag_table`] on the same deck. Pair this with
+/// [`ballistics_calculate_trajectory_with_drag_table_scaled`] using the same deck AND the
+/// same `cd_scale` to fly the solved angle. Typical truing values are in `[0.90, 1.10]`;
+/// values outside that band are accepted here (the engine only rejects non-finite or
+/// non-positive) — an "unusually large" warning is a CLI-only concern (Task 2).
+///
+/// Returns NaN when `cd_scale` is not finite or not `> 0`, in addition to every failure
+/// mode of [`ballistics_calculate_zero_angle_with_drag_table`] (matching that export's
+/// NaN sentinel for an invalid deck).
+///
+/// # Safety
+///
+/// Same contract as [`ballistics_calculate_zero_angle_with_drag_table`].
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table_scaled(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    zero_distance: c_double,
+    drag_mach: *const c_double,
+    drag_cd: *const c_double,
+    drag_table_len: c_int,
+    cd_scale: c_double,
+) -> c_double {
+    if !cd_scale.is_finite() || cd_scale <= 0.0 {
+        return f64::NAN;
+    }
+    let table = match unsafe { drag_table_from_raw(drag_mach, drag_cd, drag_table_len) } {
+        Ok(t) => t,
+        Err(()) => return f64::NAN,
+    };
+    unsafe {
+        calculate_zero_angle_impl(
+            inputs,
+            wind,
+            atmosphere,
+            zero_distance,
+            Some(table),
+            cd_scale,
+        )
+    }
 }
 
 // Simple trajectory calculation for quick results
@@ -1497,6 +1597,245 @@ mod tests {
             assert!(yb > ya + 0.01, "FFI updraft must raise the trajectory: no_wind={ya} updraft={yb}");
             ballistics_free_trajectory_result(a);
             ballistics_free_trajectory_result(b);
+        }
+    }
+
+    // --- MBA-1356: cd_scale `_scaled` FFI variants ---
+
+    #[test]
+    fn trajectory_scaled_at_one_matches_unscaled_export() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let unscaled = ballistics_calculate_trajectory_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            );
+            let scaled = ballistics_calculate_trajectory_with_drag_table_scaled(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+                1.0,
+            );
+            assert!(!unscaled.is_null() && !scaled.is_null());
+            assert_eq!(
+                (*unscaled).impact_velocity.to_bits(),
+                (*scaled).impact_velocity.to_bits(),
+                "cd_scale=1.0 must be byte-identical to the unscaled export: unscaled={} scaled={}",
+                (*unscaled).impact_velocity,
+                (*scaled).impact_velocity
+            );
+            ballistics_free_trajectory_result(unscaled);
+            ballistics_free_trajectory_result(scaled);
+        }
+    }
+
+    #[test]
+    fn trajectory_scaled_at_1_10_lowers_impact_velocity() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let baseline = ballistics_calculate_trajectory_with_drag_table_scaled(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+                1.0,
+            );
+            let scaled_up = ballistics_calculate_trajectory_with_drag_table_scaled(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+                1.10,
+            );
+            assert!(!baseline.is_null() && !scaled_up.is_null());
+            assert!(
+                (*scaled_up).impact_velocity < (*baseline).impact_velocity,
+                "cd_scale=1.10 must increase drag -> lower impact velocity: base={} scaled={}",
+                (*baseline).impact_velocity,
+                (*scaled_up).impact_velocity
+            );
+            ballistics_free_trajectory_result(baseline);
+            ballistics_free_trajectory_result(scaled_up);
+        }
+    }
+
+    #[test]
+    fn trajectory_scaled_rejects_invalid_cd_scale() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let r = ballistics_calculate_trajectory_with_drag_table_scaled(
+                    &inputs,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    300.0,
+                    1.0,
+                    DECK_MACH.as_ptr(),
+                    DECK_CD_LOW.as_ptr(),
+                    DECK_MACH.len() as c_int,
+                    bad,
+                );
+                assert!(r.is_null(), "cd_scale={bad} must be rejected (null sentinel)");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_angle_scaled_at_one_matches_unscaled_export() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let unscaled = ballistics_calculate_zero_angle_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            );
+            let scaled = ballistics_calculate_zero_angle_with_drag_table_scaled(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+                1.0,
+            );
+            assert!(unscaled.is_finite() && scaled.is_finite());
+            assert_eq!(
+                unscaled.to_bits(),
+                scaled.to_bits(),
+                "cd_scale=1.0 must be byte-identical to the unscaled export: unscaled={unscaled} scaled={scaled}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_angle_scaled_at_1_10_differs_from_baseline() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let baseline = ballistics_calculate_zero_angle_with_drag_table_scaled(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+                1.0,
+            );
+            let scaled_up = ballistics_calculate_zero_angle_with_drag_table_scaled(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+                1.10,
+            );
+            assert!(baseline.is_finite() && scaled_up.is_finite());
+            // More drag needs a steeper (larger) zero angle to still reach 100 m.
+            assert!(
+                scaled_up > baseline,
+                "cd_scale=1.10 must need a larger zero angle: base={baseline} scaled={scaled_up}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_angle_scaled_rejects_invalid_cd_scale() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let angle = ballistics_calculate_zero_angle_with_drag_table_scaled(
+                    &inputs,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    100.0,
+                    DECK_MACH.as_ptr(),
+                    DECK_CD_LOW.as_ptr(),
+                    DECK_MACH.len() as c_int,
+                    bad,
+                );
+                assert!(angle.is_nan(), "cd_scale={bad} must be rejected (NaN sentinel)");
+            }
+        }
+    }
+
+    /// Legacy exports must remain byte-identical: the same deck through the unscaled
+    /// export must be unaffected by the new cd_scale plumbing (a regression guard
+    /// alongside the pre-existing, untouched drag-table tests above).
+    #[test]
+    fn legacy_drag_table_exports_unaffected_by_cd_scale_plumbing() {
+        let inputs = valid_trajectory_inputs();
+        unsafe {
+            let a = ballistics_calculate_trajectory_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            );
+            let b = ballistics_calculate_trajectory_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                300.0,
+                1.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            );
+            assert!(!a.is_null() && !b.is_null());
+            assert_eq!((*a).impact_velocity.to_bits(), (*b).impact_velocity.to_bits());
+            ballistics_free_trajectory_result(a);
+            ballistics_free_trajectory_result(b);
+
+            let za = ballistics_calculate_zero_angle_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            );
+            let zb = ballistics_calculate_zero_angle_with_drag_table(
+                &inputs,
+                std::ptr::null(),
+                std::ptr::null(),
+                100.0,
+                DECK_MACH.as_ptr(),
+                DECK_CD_LOW.as_ptr(),
+                DECK_MACH.len() as c_int,
+            );
+            assert!(za.is_finite() && zb.is_finite());
+            assert_eq!(za.to_bits(), zb.to_bits());
         }
     }
 }

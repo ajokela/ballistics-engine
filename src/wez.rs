@@ -501,6 +501,8 @@ pub struct WezResult {
 ///   [`DragModel::G7`]); ignored for drag whenever `custom_drag_table` is set.
 /// * `custom_drag_table` — optional Mach-keyed Cd deck replacing the G-model +
 ///   BC drag entirely.
+/// * `cd_scale` — whole-curve multiplier on `custom_drag_table`'s interpolated Cd (MBA-1356);
+///   `1.0` = neutral. Inert when `custom_drag_table` is `None`.
 /// * `cant` — rifle cant, DEGREES, positive = clockwise from the shooter.
 ///
 /// A fixed, distinct seed per range step (`0x57_45_5A_00 ^ step_index`) keeps a sweep
@@ -531,6 +533,7 @@ pub fn compute_wez(
     wez_step: f64,
     drag_model: DragModel,
     custom_drag_table: Option<DragTable>,
+    cd_scale: f64,
     cant: f64,
 ) -> Result<WezResult, Box<dyn Error>> {
     if !(wez_step > 0.0 && wez_step.is_finite()) {
@@ -552,6 +555,7 @@ pub fn compute_wez(
         muzzle_height: bore_height_metric,
         ground_threshold: 0.0,
         custom_drag_table,
+        cd_scale,
         cant_angle: cant.to_radians(),
         ..Default::default()
     };
