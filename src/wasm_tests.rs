@@ -2006,90 +2006,43 @@ Impact Velocity: 2510 fps\n";
         }
     }
 
-    /// MBA-1386 fix-half: G2/G5/GI/GS are valid `DragModel` variants but ship no
-    /// dedicated table, so the solver silently substitutes the G1 curve
-    /// (`get_drag_coefficient`, src/drag.rs). The WASM terminal must surface this
-    /// with a "using the G1 curve" note; G1/G7 (dedicated tables) must stay silent.
+    /// MBA-1386: every `DragModel` family — including G2/G5/GI/GS and the new RA4 —
+    /// now has a real reference table (src/drag.rs); none of them fall back to G1
+    /// anymore, so the fix-half "using the G1 curve" note this test used to check
+    /// for is gone (`g1_fallback_note`/`is_g1_fallback` were retired). This
+    /// replaces that check with proof g5 actually solves with its own table: no
+    /// fallback text anywhere in the output, and its result differs from a g1 run
+    /// under identical inputs (a silent G1 alias would make them identical).
     #[wasm_bindgen_test]
-    fn test_g5_reports_g1_fallback_note() {
-        let out = WasmBallistics::new()
+    fn test_g5_solves_with_its_own_real_table() {
+        let g5 = WasmBallistics::new()
             .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300")
             .unwrap();
-        assert!(out.contains("using the G1 curve"), "{}", out);
-        let clean = WasmBallistics::new()
-            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g7 --max-range 300")
+        assert!(!g5.contains("using the G1 curve"), "{}", g5);
+        let g1 = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g1 --max-range 300")
             .unwrap();
-        assert!(!clean.contains("using the G1 curve"), "{}", clean);
+        assert!(!g1.contains("using the G1 curve"), "{}", g1);
+        assert_ne!(g5, g1, "g5 must apply its own drag table, not silently alias g1");
     }
 
-    /// MBA-1386 review finding: the note above is gated to plain-text/`Table`
-    /// output at every call site so a JSON/CSV consumer never sees it prepended
-    /// to its payload — but nothing asserted that gating stays intact. A future
-    /// refactor that drops one of those `matches!(output_format, OutputFormat::Table)`
-    /// checks (or the early-return/output-mode branch that does the same job on
-    /// `lead`/`monte-carlo --wez`) would silently corrupt structured output and
-    /// nothing would fail. Drives every gated call site with the same g5 load
-    /// that trips the note in table output (`test_g5_reports_g1_fallback_note`
-    /// above) and asserts the note text is absent from each structured mode,
-    /// plus a cheap '{' / '[' lead-byte parseability smoke check on the JSON
-    /// payloads. A closing check confirms the g5 load still trips the note on
-    /// `monte-carlo --wez`'s own plain-text (`summary`) mode, so the structured-
-    /// mode absences above aren't vacuously true.
+    /// MBA-1386: RA4 (McCoy's British RA 1929 reference drag function) is the new
+    /// ninth `DragModel` family. The WASM terminal's `--drag-model` parsing already
+    /// goes through the shared `DragModel::from_str`, so `ra4` must be accepted and
+    /// solve like any other family, with no fallback text in the output.
     #[wasm_bindgen_test]
-    fn test_g1_fallback_note_absent_from_structured_outputs() {
-        let wasm = WasmBallistics::new();
-        const NOTE: &str = "using the G1 curve";
-
-        // --- trajectory: `-o json` / `-o csv` (handle_trajectory_command; the note
-        // is only prepended when matches!(output_format, OutputFormat::Table)). ---
-        let traj_json = wasm
-            .run_command(
-                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300 -o json",
-            )
+    fn test_ra4_drag_model_accepted_and_solves() {
+        let out = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model ra4 --max-range 300")
             .unwrap();
-        assert!(!traj_json.contains(NOTE), "{}", traj_json);
-        assert!(traj_json.trim_start().starts_with('{'), "{}", traj_json);
-
-        let traj_csv = wasm
-            .run_command(
-                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300 -o csv",
-            )
-            .unwrap();
-        assert!(!traj_csv.contains(NOTE), "{}", traj_csv);
-
-        // --- lead: `-o json` (handle_lead_command early-returns the JSON payload
-        // before the table-only note is prepended). ---
-        let lead_json = wasm
-            .run_command(
-                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 \
-                 --target-speed 10 --target-angle 0 --range 500 -o json",
-            )
-            .unwrap();
-        assert!(!lead_json.contains(NOTE), "{}", lead_json);
-        assert!(lead_json.trim_start().starts_with('{'), "{}", lead_json);
-
-        // --- monte-carlo --wez: `--output full` (JSON) / `--output statistics`
-        // (CSV) — run_monte_carlo_wez only ever prepends the note on its
-        // Summary/plain-text branch. ---
-        let wez_base = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --wez \
-                         --target-size 18x30 -n 100 --wez-start 200 --wez-end 400 --wez-step 100";
-        let wez_full = wasm
-            .run_command(&format!("{wez_base} --output full"))
-            .unwrap();
-        assert!(!wez_full.contains(NOTE), "{}", wez_full);
-        assert!(wez_full.trim_start().starts_with('{'), "{}", wez_full);
-
-        let wez_stats = wasm
-            .run_command(&format!("{wez_base} --output statistics"))
-            .unwrap();
-        assert!(!wez_stats.contains(NOTE), "{}", wez_stats);
-
-        // Sanity: the same g5 load must still trip the note on wez's plain-text
-        // `summary` mode, proving the structured-mode absences above are a real
-        // gate and not vacuous (g5 never reaching the fallback at all).
-        let wez_summary = wasm
-            .run_command(&format!("{wez_base} --output summary"))
-            .unwrap();
-        assert!(wez_summary.contains(NOTE), "{}", wez_summary);
+        assert!(!out.contains("using the G1 curve"), "{}", out);
+        assert!(out.contains("Range"), "expected a trajectory table, got: {}", out);
     }
+
+    // MBA-1386: `test_g1_fallback_note_absent_from_structured_outputs` (formerly here)
+    // guarded the table-only gating of the retired `g1_fallback_note` machinery across
+    // trajectory/lead/monte-carlo --wez's JSON/CSV/table branches. That machinery no
+    // longer exists (every family has a real table, so there is nothing left to gate),
+    // so the test is deleted rather than adapted — there is no fallback note in any
+    // output mode to assert absent.
 }

@@ -186,20 +186,6 @@ fn engine_units(units: UnitSystem) -> crate::cli_api::UnitSystem {
     }
 }
 
-/// Note prepended to command output when the requested drag family has no
-/// dedicated table and the solver substitutes the G1 curve (fix-half of
-/// MBA-1386). Must stay a plain "warning:" line — ballistics.sh chart parsers
-/// key on the table header and "Range Statistics:" sections, never on notes.
-fn g1_fallback_note(model: &DragModel) -> String {
-    if model.is_g1_fallback() {
-        format!(
-            "warning: {model:?} has no dedicated drag table; using the G1 curve as an approximation (real tables tracked in MBA-1386)\n\n"
-        )
-    } else {
-        String::new()
-    }
-}
-
 /// Fetch the value token for the value-taking flag at `args[i]`, or error when the
 /// command line ends right after the flag. Mirrors native clap's "a value is
 /// required" failure; the hand-rolled parsers previously skipped such a dangling
@@ -1584,6 +1570,7 @@ impl WasmBallistics {
             });
         }
 
+        let mut bc5d_coercion_warning: Option<String> = None;
         if !manual_bc_segments.is_empty() {
             // Manual segments win; imply --use-bc-segments so they're applied.
             inputs.bc_segments_data = Some(manual_bc_segments);
@@ -1596,6 +1583,16 @@ impl WasmBallistics {
                     UnitSystem::Imperial => (mass, velocity),
                     UnitSystem::Metric => (mass * GRAINS_PER_GRAM, velocity * 3.280839895),
                 };
+                // MBA-1386: generate_segment_schedule types anything non-G7 as G1
+                // (bc_table_5d.rs); surface the coercion like the native aux paths do.
+                if !drag_model.eq_ignore_ascii_case("g1") && !drag_model.eq_ignore_ascii_case("g7")
+                {
+                    bc5d_coercion_warning = Some(format!(
+                        "warning: BC5D correction tables support G1/G7 only; treating drag \
+                         model '{}' as G1\n\n",
+                        drag_model.to_uppercase()
+                    ));
+                }
                 if let Some(schedule) =
                     table.generate_segment_schedule(bc, drag_model, weight_grains, muzzle_fps)
                 {
@@ -1912,7 +1909,14 @@ impl WasmBallistics {
                 // at ..." banner is table-only, exactly like the bc-segments and warning
                 // blocks below. Prepending it to a JSON/CSV payload makes it unparseable.
                 let mut combined = if matches!(output_format, OutputFormat::Table) {
-                    format!("{}{}", zero_info, output)
+                    // MBA-1386: table-only, like every human-readable block here — the
+                    // BC5D coercion warning must never contaminate JSON/CSV payloads.
+                    format!(
+                        "{}{}{}",
+                        bc5d_coercion_warning.as_deref().unwrap_or(""),
+                        zero_info,
+                        output
+                    )
                 } else {
                     output
                 };
@@ -1966,11 +1970,6 @@ impl WasmBallistics {
                         combined = format!("{}{}", warning, combined);
                     }
                 }
-                // G1-fallback note (MBA-1386): table-only, like the warning above —
-                // prepending to a JSON/CSV payload would make it unparseable.
-                if matches!(output_format, OutputFormat::Table) {
-                    combined = format!("{}{}", g1_fallback_note(&drag_model_parsed), combined);
-                }
                 Ok(combined)
             }
             Err(e) => {
@@ -1978,7 +1977,6 @@ impl WasmBallistics {
                 if let Some(warning) = &muzzle_height_warning {
                     combined = format!("{}{}", warning, combined);
                 }
-                combined = format!("{}{}", g1_fallback_note(&drag_model_parsed), combined);
                 Ok(combined)
             }
         }
@@ -2171,9 +2169,6 @@ impl WasmBallistics {
         // the CLI convention in every zero call. Previously 0.0, which solved a BORE-line zero and
         // ignored sight height entirely (off by the sight-height angle — ~2 MOA at 100 yd).
         let los_height = inputs.sight_height;
-        // G1-fallback note (MBA-1386): `zero` has a single (plain-text) output shape, so no
-        // format gating is needed here, unlike `trajectory`'s table/JSON/CSV split.
-        let g1_note = g1_fallback_note(&drag_model_parsed);
         match calculate_zero_angle_with_conditions(
             inputs,
             target_distance_m,
@@ -2187,7 +2182,7 @@ impl WasmBallistics {
                 let mrad_adjustment = zero_angle * 1000.0;
 
                 Ok(format!(
-                    "{g1_note}Zero Calculation Results\n\
+                    "Zero Calculation Results\n\
                      ========================\n\
                      Target Distance: {} {}\n\
                      Zero Angle: {:.4}°\n\
@@ -2211,7 +2206,7 @@ impl WasmBallistics {
                     }
                 ))
             }
-            Err(e) => Ok(format!("{g1_note}Error calculating zero: {}", e)),
+            Err(e) => Ok(format!("Error calculating zero: {}", e)),
         }
     }
 
@@ -2684,11 +2679,8 @@ impl WasmBallistics {
                         .unwrap_or_else(|_| "Error formatting JSON".to_string()));
                 }
 
-                // G1-fallback note (MBA-1386): table-only, mirroring the JSON early-return
-                // above — prepending to the JSON payload would make it unparseable.
-                let g1_note = g1_fallback_note(&drag_model_parsed);
                 Ok(format!(
-                    "{g1_note}Moving-Target Lead\n\
+                    "Moving-Target Lead\n\
                      ===================\n\
                      Target: {:.1} {} at {:.0}\u{b0} \
                      (0=away, 90=left-to-right, 180=toward, 270=right-to-left;\n\
@@ -3001,7 +2993,7 @@ impl WasmBallistics {
         // Honor --drag-model (mirrors the trajectory/zero handlers); previously the Monte
         // Carlo path silently always used the G1 default even when G7 was intended.
         let drag_model_parsed = DragModel::from_str(drag_model)
-            .ok_or_else(|| JsValue::from_str("Invalid drag model (expected G1 or G7)"))?;
+            .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
         inputs.bc_type = drag_model_parsed;
         // Custom drag table (MBA-1328): see handle_trajectory_command for the rationale —
         // applied unconditionally, no gate flag, mirrors native --drag-table on `monte-carlo`.
@@ -3037,10 +3029,6 @@ impl WasmBallistics {
             target_distance: None,
         };
 
-        // G1-fallback note (MBA-1386): the base (non-WEZ) monte-carlo path has a single
-        // plain-text output shape (see the "summary"/"table" gate above), so no format
-        // gating is needed here.
-        let g1_note = g1_fallback_note(&drag_model_parsed);
         match run_monte_carlo_with_direction_std_dev(
             inputs,
             params,
@@ -3100,7 +3088,7 @@ impl WasmBallistics {
                 };
 
                 Ok(format!(
-                    "{g1_note}Monte Carlo Simulation Results\n\
+                    "Monte Carlo Simulation Results\n\
                      ==============================\n\
                      Simulations Run: {}\n\n\
                      Range Statistics:\n\
@@ -3168,7 +3156,7 @@ impl WasmBallistics {
                     velocity_unit,
                 ))
             }
-            Err(e) => Ok(format!("{g1_note}Error running Monte Carlo simulation: {}", e)),
+            Err(e) => Ok(format!("Error running Monte Carlo simulation: {}", e)),
         }
     }
 
@@ -3265,11 +3253,7 @@ impl WasmBallistics {
         // --drag-model (a WASM-surface extension; the native `monte-carlo` has no such
         // flag and always sweeps G1). Same validation/message as the base path below.
         let drag_model = DragModel::from_str(drag_model)
-            .ok_or_else(|| JsValue::from_str("Invalid drag model (expected G1 or G7)"))?;
-        // G1-fallback note (MBA-1386): only the Summary mode is plain text (Full is JSON,
-        // Statistics is CSV — both must stay pure machine output, mirroring the base
-        // monte-carlo/trajectory handlers' format gating).
-        let g1_note = g1_fallback_note(&drag_model);
+            .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
 
         // Flags the WASM monte-carlo surface does not (yet) expose keep the native
         // defaults: base wind (--wind-speed / --wind-direction / --wind-vertical) and
@@ -3303,7 +3287,7 @@ impl WasmBallistics {
         match output {
             WezOutputMode::Full => format_wez_full(&result),
             WezOutputMode::Statistics => Ok(format_wez_statistics(&result, units)),
-            WezOutputMode::Summary => Ok(format!("{g1_note}{}", format_wez_summary(&result, units))),
+            WezOutputMode::Summary => Ok(format_wez_summary(&result, units)),
         }
     }
 
@@ -4891,8 +4875,9 @@ Host API (JavaScript, not a CLI flag):
                          --use-* flag needed); -b/--bc is still accepted but ignored for drag
                          while a table is active.
   hasDragTable()         Report whether a drag table is currently loaded.
-  clearDragTable()       Unload the drag table, reverting to G1/G7 + BC drag. Lets one
-                         instance compare CDM vs G7: load -> solve -> clear -> solve.
+  clearDragTable()       Unload the drag table, reverting to the selected --drag-model +
+                         BC drag. Lets one instance compare CDM vs G7: load -> solve ->
+                         clear -> solve.
   loadBc5dTable(bytes)   Load a BC5D correction table (see --use-bc-segments below).
   hasBc5dTable()         Report whether a BC5D table is currently loaded.
 
@@ -4905,7 +4890,7 @@ Trajectory Command:
     -m, --mass <MASS>            Mass (grains/grams)
     -d, --diameter <DIA>         Diameter (inches/mm)
     -a, --angle <ANGLE>          Launch angle (degrees)
-    --drag-model <MODEL>         Drag model (G1/G7)
+    --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
     --max-range <RANGE>          Maximum range (yards/meters)
     -z, --auto-zero <DIST>       Auto-zero at distance
     -o, --output <FORMAT>        Output format (table/json/csv)
@@ -4982,7 +4967,7 @@ Zero Command:
     -b, --bc <BC>                Ballistic coefficient
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
-    --drag-model <MODEL>         Drag model (G1/G7)
+    --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
     --target-distance <DIST>     Target distance for zero
     --sight-height <HEIGHT>      Sight height above bore
 
@@ -4994,7 +4979,7 @@ Monte Carlo Command:
     -b, --bc <BC>                Base BC
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
-    --drag-model <MODEL>         Drag model (G1/G7)
+    --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
     -n, --num-sims <N>           Number of simulations
     --velocity-std <STD>         Velocity std deviation
     --angle-std <STD>            Angle std deviation
@@ -5091,7 +5076,7 @@ Lead Command:
     -b, --bc <BC>                 Ballistic coefficient
     -m, --mass <MASS>             Mass (grains/grams)
     -d, --diameter <DIA>          Diameter (inches/mm)
-    --drag-model <MODEL>          Drag model (G1/G7)
+    --drag-model <MODEL>          Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
     --sight-height <HEIGHT>       Sight height above bore (inches/mm)
     --temperature <T>             Air temperature (°F/°C) [default: 15°C standard]
     --pressure <P>                Barometric pressure (inHg/hPa) [default: 1013.25 hPa]
