@@ -1570,6 +1570,7 @@ impl WasmBallistics {
             });
         }
 
+        let mut bc5d_coercion_warning: Option<String> = None;
         if !manual_bc_segments.is_empty() {
             // Manual segments win; imply --use-bc-segments so they're applied.
             inputs.bc_segments_data = Some(manual_bc_segments);
@@ -1582,6 +1583,16 @@ impl WasmBallistics {
                     UnitSystem::Imperial => (mass, velocity),
                     UnitSystem::Metric => (mass * GRAINS_PER_GRAM, velocity * 3.280839895),
                 };
+                // MBA-1386: generate_segment_schedule types anything non-G7 as G1
+                // (bc_table_5d.rs); surface the coercion like the native aux paths do.
+                if !drag_model.eq_ignore_ascii_case("g1") && !drag_model.eq_ignore_ascii_case("g7")
+                {
+                    bc5d_coercion_warning = Some(format!(
+                        "warning: BC5D correction tables support G1/G7 only; treating drag \
+                         model '{}' as G1\n\n",
+                        drag_model.to_uppercase()
+                    ));
+                }
                 if let Some(schedule) =
                     table.generate_segment_schedule(bc, drag_model, weight_grains, muzzle_fps)
                 {
@@ -1898,7 +1909,14 @@ impl WasmBallistics {
                 // at ..." banner is table-only, exactly like the bc-segments and warning
                 // blocks below. Prepending it to a JSON/CSV payload makes it unparseable.
                 let mut combined = if matches!(output_format, OutputFormat::Table) {
-                    format!("{}{}", zero_info, output)
+                    // MBA-1386: table-only, like every human-readable block here — the
+                    // BC5D coercion warning must never contaminate JSON/CSV payloads.
+                    format!(
+                        "{}{}{}",
+                        bc5d_coercion_warning.as_deref().unwrap_or(""),
+                        zero_info,
+                        output
+                    )
                 } else {
                     output
                 };
