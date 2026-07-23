@@ -3694,6 +3694,40 @@ fn parse_drag_model_arg_for_truing(s: &str) -> DragModelArg {
     }
 }
 
+/// Warning text for an auxiliary, non-truing path that is about to coerce a wider
+/// `DragModel` down to the scalar G1/G7 family. `feature` names the caller in the warning
+/// text (e.g. `"--bc-table correction"`). `None` for G1/G7 themselves, since those are not
+/// a coercion. Pure/side-effect-free, same shape as `truing_drag_model_warning` — see
+/// `warn_aux_g1_coercion` for the printing wrapper used at call sites.
+fn aux_g1_coercion_warning(feature: &str, model: DragModel) -> Option<String> {
+    match model {
+        DragModel::G7 | DragModel::G1 => None,
+        other => Some(format!(
+            "warning: {feature} supports G1/G7 only; treating drag model '{other}' as G1 \
+             for the estimate"
+        )),
+    }
+}
+
+/// Coerce a resolved `DragModel` to the G1/G7 BC-type string an auxiliary path accepts,
+/// printing `aux_g1_coercion_warning`'s text (stderr) when the coercion actually changes
+/// anything. Mirrors `parse_drag_model_arg_for_truing`, but for the four auxiliary call
+/// sites that were exhaustive 2-arm `G7 | _` matches before MBA-1386 widened `DragModel` to
+/// the full G1/G2/G5/G6/G7/G8/GI/GS/RA4 family: the BC-segment estimator
+/// (`resolve_velocity_bc_segments`), the `--bc-table` and BC5D correction-table lookups,
+/// and the `--online` Flask-bridge request. Each of those still only understands the
+/// scalar G1/G7 family and silently coerced anything else to G1 with no warning — unlike
+/// truing, which already had one. Called once per site per run (outside any per-row loop).
+fn warn_aux_g1_coercion(feature: &str, model: DragModel) -> &'static str {
+    if let Some(w) = aux_g1_coercion_warning(feature, model) {
+        eprintln!("{w}");
+    }
+    match model {
+        DragModel::G7 => "G7",
+        _ => "G1",
+    }
+}
+
 /// Parse a `--powder-temp-curve` value `"TEMP:VEL,TEMP:VEL,..."` into engine-canonical
 /// `(temperature_celsius, muzzle_velocity_m_s)` points, converting from the CLI display
 /// units. Points are sorted ascending by temperature; at least two distinct-temperature
@@ -3924,10 +3958,7 @@ fn resolve_velocity_bc_segments(
             diameter_m / 0.0254,
             mass_kg / GRAINS_TO_KG,
             "",
-            match drag_model {
-                DragModel::G7 => "G7",
-                _ => "G1",
-            },
+            warn_aux_g1_coercion("--use-bc-segments' estimator", drag_model),
         ),
     )
 }
@@ -4352,10 +4383,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         };
 
                         // BC type string
-                        let bc_type_str = match drag_model {
-                            DragModel::G7 => "G7",
-                            _ => "G1",
-                        };
+                        let bc_type_str = warn_aux_g1_coercion("--bc-table correction", drag_model);
 
                         // Velocity breakpoints for BC segments (denser in transonic region)
                         // These match the table's velocity bins for optimal interpolation
@@ -4520,10 +4548,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         UnitSystem::Metric => final_mass * 15.4324,
                     };
 
-                    let bc_type_str = match drag_model {
-                        DragModel::G7 => "G7",
-                        _ => "G1",
-                    };
+                    let bc_type_str = warn_aux_g1_coercion("BC5D correction tables", drag_model);
 
                     // Print table info if available
                     if let Ok(table) = manager.get_table(caliber_in) {
@@ -5074,14 +5099,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     let api_request = TrajectoryRequestBuilder::new()
                         .bc_value(trued_bc)
-                        .bc_type(match drag_model {
-                            // The online Flask bridge is a separate HTTP service that
-                            // only understands G1/G7; MBA-1386 widens the native/local
-                            // family only, so any other model still degrades to G1 for
-                            // this specific remote request.
-                            DragModel::G7 => "G7",
-                            _ => "G1",
-                        })
+                        // The online Flask bridge is a separate HTTP service that only
+                        // understands G1/G7; MBA-1386 widens the native/local family only,
+                        // so any other model still degrades to G1 for this remote request.
+                        .bc_type(warn_aux_g1_coercion("--online mode", drag_model))
                         .bullet_mass(mass_metric * 1000.0) // kg to grams
                         .muzzle_velocity(velocity_metric)
                         .target_distance(max_range_metric)
@@ -14158,6 +14179,43 @@ mod drag_model_arg_warning_tests {
         assert_eq!(parse_drag_model_arg_for_truing("G1"), DragModelArg::G1);
         assert_eq!(parse_drag_model_arg_for_truing("G5"), DragModelArg::G1);
         assert_eq!(parse_drag_model_arg_for_truing("banana"), DragModelArg::G1);
+    }
+
+    #[test]
+    fn aux_g1_coercion_warning_only_flags_families_other_than_g1_g7() {
+        // G1/G7 are exactly what the auxiliary paths (BC-segment estimator, --bc-table /
+        // BC5D lookups, --online) natively support — no coercion, so no warning text.
+        assert!(aux_g1_coercion_warning("--online mode", DragModel::G1).is_none());
+        assert!(aux_g1_coercion_warning("--online mode", DragModel::G7).is_none());
+
+        // Every wider family still coerces to G1 here (MBA-1386 gave each one a real
+        // table for the *native* solver, but these auxiliary paths remain G1/G7-only),
+        // and each now warns, naming both the feature and the coerced model.
+        for (model, tag) in [
+            (DragModel::G2, "G2"),
+            (DragModel::G5, "G5"),
+            (DragModel::G6, "G6"),
+            (DragModel::G8, "G8"),
+            (DragModel::GI, "GI"),
+            (DragModel::GS, "GS"),
+            (DragModel::RA4, "RA4"),
+        ] {
+            let w = aux_g1_coercion_warning("--bc-table correction", model)
+                .unwrap_or_else(|| panic!("{tag} must warn"));
+            assert!(w.contains(tag), "{w}");
+            assert!(w.contains("--bc-table correction"), "{w}");
+            assert!(w.contains("G1/G7 only"), "{w}");
+        }
+    }
+
+    #[test]
+    fn warn_aux_g1_coercion_returns_the_bc_type_string_the_estimator_accepts() {
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::G1), "G1");
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::G7), "G7");
+        // Any other family still resolves to "G1" for the auxiliary path's BC-type
+        // argument (in addition to the stderr warning `aux_g1_coercion_warning` covers).
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::G5), "G1");
+        assert_eq!(warn_aux_g1_coercion("test", DragModel::RA4), "G1");
     }
 }
 

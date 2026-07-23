@@ -140,6 +140,10 @@ Calculate ballistic trajectories with advanced physics modeling:
   --auto-zero 600
 ```
 
+`--use-bc-segments`' automatic characteristic-based estimator (used when no explicit
+`--bc-segment`/`--bc-table-dir` schedule is supplied) is **G1/G7 only** — a wider drag
+model warns and is treated as G1 for the estimate, same as `true-velocity`/`plan-truing`.
+
 ### Custom Drag Tables
 
 Supply a measured or manufacturer-published drag curve — Hornady CDM data, a Lapua/Doppler-radar-derived deck, or your own — instead of relying on a G1/G7 reference curve plus a single BC value. Available via `--drag-table <FILE>` on the `trajectory`, `zero`, and `monte-carlo` subcommands.
@@ -230,6 +234,10 @@ Warning: No BC5D table available for caliber 0.375 (9.5mm)
          Available calibers: .224, .243, .264, .277, .284, .308, .338
          Continuing without BC5D correction table.
 ```
+
+Both correction-table lookups — the single-file `--bc-table` correction and the
+caliber-specific `--bc-table-dir`/BC5D tables above — are **G1/G7 only**: a wider drag
+model warns and is treated as G1 for the lookup, same as `true-velocity`/`plan-truing`.
 
 #### BC and Velocity Truing
 
@@ -2009,6 +2017,10 @@ When using `--online`, calculations are routed through the Flask API for ML-enha
 | --weather-zone-interpolation | Zone interpolation (linear/cubic/step) | linear |
 
 **Note:** Weather features require `--latitude`, `--longitude`, and `--shot-direction`. Negative values need equals format: `--longitude=-115.2`
+
+`--online` (and `--compare`, which builds the same remote request) routes through the
+Flask API, a separate HTTP service that is **G1/G7 only** — a wider drag model warns and
+is treated as G1 for that remote request, same as `true-velocity`/`plan-truing`.
 
 ### BC5D Table Parameters
 
