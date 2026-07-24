@@ -58,6 +58,10 @@ pub mod truing;
 pub mod truing_plan;
 // MBA-1353: opt-in uncertainty-aware joint MV/BC truing.
 pub mod truing_uncertainty;
+// MBA-1357: Mach-keyed DSF (drop-scale-factor) truing table — a drop-only post-processing
+// correction applied to a solved TrajectoryResult. No feature gate: must compile for wasm32;
+// fs-free (profile persistence lives in main.rs).
+pub mod truing_dsf;
 // MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
 pub mod wez;
 // MBA-1355: turret adjustment-unit conversions (SMOA/IPHY/clicks) and click-value parsing,

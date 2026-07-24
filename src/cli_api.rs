@@ -2997,8 +2997,10 @@ impl TrajectorySolver {
         // lookup, no transonic shape correction, no form factor. The supplied curve already
         // encodes the projectile's true drag, so applying those would distort/double-count it.
         if let Some(ref table) = self.inputs.custom_drag_table {
-            // MBA-1357 colocation: the future Mach-keyed DSF table applies at this exact site;
-            // cd_scale is its degenerate single-band case.
+            // MBA-1357: cd_scale is a single whole-curve drag multiplier applied here, at the
+            // Cd lookup site. The Mach-keyed DSF table (truing_dsf.rs) is a SEPARATE, drop-only
+            // post-processing correction applied to a solved TrajectoryResult's points after
+            // integration finishes — it never touches this Cd/drag-force computation.
             return table.interpolate(mach) * self.inputs.cd_scale;
         }
 

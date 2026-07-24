@@ -379,8 +379,10 @@ pub fn compute_derivatives(
         // Cd_own / SD == Cd_ref / BC (see BallisticInputs::custom_drag_denominator).
         let (drag_factor, retard_denom) = match inputs.custom_drag_table {
             Some(ref table) => (
-                // MBA-1357 colocation: the future Mach-keyed DSF table applies at this exact
-                // site; cd_scale is its degenerate single-band case.
+                // MBA-1357: cd_scale is a single whole-curve drag multiplier applied here, at
+                // the Cd lookup site. The Mach-keyed DSF table (truing_dsf.rs) is a SEPARATE,
+                // drop-only post-processing correction applied to a solved TrajectoryResult's
+                // points after integration finishes — it never touches this drag computation.
                 table.interpolate(mach) * inputs.cd_scale,
                 inputs.custom_drag_denominator(bc_val),
             ),
