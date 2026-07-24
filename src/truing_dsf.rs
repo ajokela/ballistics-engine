@@ -137,7 +137,7 @@ fn lerp(x0: f64, y0: f64, x1: f64, y1: f64, x: f64) -> f64 {
 
 impl DsfTable {
     /// Validate, cap-check, and sort a bulk set of points (e.g. deserialized from a saved
-    /// profile). Rejects any point failing [`validate_point`] and rejects more than
+    /// profile). Rejects any point failing validation (see [`DsfPoint`] bounds) and rejects more than
     /// [`DSF_MAX_POINTS`] points outright. Does NOT dedupe near-Mach points against each
     /// other — that supersede behavior is [`DsfTable::upsert`]'s job; a caller assembling
     /// points one at a time should use `upsert`, not construct a `Vec` with near-duplicates
