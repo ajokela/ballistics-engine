@@ -421,6 +421,40 @@ propagated drop bands. Declared sigmas are treated as absolute known errors, so 
 covariance is not rescaled by residual RMS. With no uncertainty flags, the existing
 point estimate and output schema are unchanged.
 
+### DSF (Drop-Scale-Factor) Truing
+
+Second stage of the Applied Ballistics-style two-stage truing workflow (MBA-1357).
+Once `true-velocity` has fixed the supersonic (Mach > 1.2) muzzle velocity/BC, the
+drop discrepancies that grow through the transonic region and into subsonic flight are
+no longer fixable by a single MV correction — the residual is a slowly-varying function
+of Mach. `dsf` records observed-drop/predicted-drop ratios at specific Mach <= 1.2
+ranges and keys them, one saved profile at a time, to a Mach-indexed table:
+
+```bash
+# Stage 1: true the muzzle velocity from a supersonic-range drop reading (as above).
+./ballistics true-velocity \
+  --measured-drop 3.2 --range 500 \
+  --bc 0.475 --mass 168 --diameter 0.308 \
+  --offline
+
+# Stage 2: record a subsonic/transonic drop observation on the trued, saved profile.
+./ballistics dsf --saved-profile my-rifle --range 900 --observed-drop 5.1mil
+```
+
+`dsf` takes no ballistic parameters of its own — it solves the named saved profile's
+own trajectory (no CLI overrides) and derives everything else from `--range` and
+`--observed-drop` (`mil`, `moa`, or `in`, no separator between number and unit). An
+observation whose target-range Mach exceeds 1.2 is rejected outright, pointing back to
+`true-velocity`. Up to 6 distinct Mach-keyed points accumulate per profile; a new point
+within 0.05 Mach of an existing one supersedes it (announced on stdout); a 7th distinct
+point is rejected, naming `--clear-dsf` to make room. `trajectory --saved-profile` and
+`come-ups --profile` then auto-apply the table as a **drop-only** correction — velocity,
+energy, and time of flight are byte-identical to the untrued solve — printing a
+table-output-only note; JSON/CSV carry the corrected drop numbers with no equivalent
+text. `profile save NAME ... --clear-dsf` removes an existing table. See
+[CLI_USAGE.md](CLI_USAGE.md#dsf-drop-scale-factor-truing) for the full staging-gate
+reference.
+
 ## Advanced Features
 
 ### Online Mode (API Integration)
