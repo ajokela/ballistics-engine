@@ -234,7 +234,8 @@ impl DsfTable {
 }
 
 /// Apply a DSF table to an already-solved trajectory, IN PLACE, scaling only each
-/// point's drop below the line of sight.
+/// point's drop below the line of sight — in BOTH `result.points` and, when present,
+/// `result.sampled_points`.
 ///
 /// For each `point` in `result.points`:
 /// 1. Per-point Mach is `point.velocity_magnitude / result.station_speed_of_sound_mps` —
@@ -254,10 +255,27 @@ impl DsfTable {
 /// 3. `point.position.y` is rewritten so that the (possibly rescaled) drop is
 ///    `drop * table.factor_at(mach)`.
 ///
+/// `result.sampled_points` (populated when `--sample-trajectory` is requested; read by
+/// the Table's "Sampled Trajectory" section, CSV `--full`, and the PDF dope card — the
+/// PDF dope card *always* requires sampling) is a SEPARATE `Vec<TrajectorySample>` from
+/// `points` and was, until MBA-1357 Task 2's review (Critical #2), left untouched by this
+/// function — those outputs silently rendered untrued drops even with an active DSF
+/// table. Each `TrajectorySample` already stores its drop directly as `drop_m` (the same
+/// `LOS - actual` sign convention derived from `points` above — see
+/// `trajectory_sampling.rs`'s `sample_trajectory` doc comment), so no position
+/// reconstruction is needed: `sample.drop_m` is simply multiplied by
+/// `table.factor_at(mach)`, with `mach` computed from `sample.velocity_mps` via the
+/// identical frozen `station_speed_of_sound_mps` divisor used for `points` above. This
+/// mirrors `run_sampled_trajectory`'s (come-ups' own sampled-trajectory path, `main.rs`)
+/// hand-rolled version of the same transform, so both paths now agree. `None` stays
+/// `None` — nothing to scale.
+///
 /// Nothing else is touched: `position.x` (downrange), `position.z` (windage/lateral),
 /// `velocity_magnitude`, `kinetic_energy`, and `time` are byte-identical to their
-/// pre-call values, as are every top-level scalar on `result` itself (`time_of_flight`,
-/// `impact_velocity`, `impact_energy`, `max_range`, `max_height`, ...).
+/// pre-call values on `points`; `distance_m`, `wind_drift_m`, `velocity_mps`,
+/// `energy_j`, `time_s`, and `flags` are byte-identical on `sampled_points`; every
+/// top-level scalar on `result` itself (`time_of_flight`, `impact_velocity`,
+/// `impact_energy`, `max_range`, `max_height`, ...) is untouched too.
 pub fn apply_dsf(result: &mut TrajectoryResult, table: &DsfTable) {
     let line_of_sight_height_m = result.line_of_sight_height_m;
     let station_speed_of_sound_mps = result.station_speed_of_sound_mps;
@@ -272,6 +290,17 @@ pub fn apply_dsf(result: &mut TrajectoryResult, table: &DsfTable) {
         let drop = line_of_sight_height_m - point.position.y;
         point.position.y = line_of_sight_height_m - drop * factor;
     }
+
+    if let Some(samples) = result.sampled_points.as_mut() {
+        for sample in samples.iter_mut() {
+            let mach = if station_speed_of_sound_mps > 0.0 {
+                sample.velocity_mps / station_speed_of_sound_mps
+            } else {
+                0.0
+            };
+            sample.drop_m *= table.factor_at(mach);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +308,7 @@ mod tests {
     use super::*;
     use crate::cli_api::{TrajectoryPoint};
     use crate::trajectory_observation::TrajectoryTermination;
+    use crate::trajectory_sampling::{TrajectoryFlag, TrajectorySample};
     use nalgebra::Vector3;
 
     fn pt(mach: f64, dsf: f64) -> DsfPoint {
@@ -450,6 +480,25 @@ mod tests {
         }
     }
 
+    fn trajectory_sample(
+        distance_m: f64,
+        drop_m: f64,
+        wind_drift_m: f64,
+        velocity_mps: f64,
+        time_s: f64,
+        flags: Vec<TrajectoryFlag>,
+    ) -> TrajectorySample {
+        TrajectorySample {
+            distance_m,
+            drop_m,
+            wind_drift_m,
+            velocity_mps,
+            energy_j: 0.5 * 0.01 * velocity_mps * velocity_mps,
+            time_s,
+            flags,
+        }
+    }
+
     fn fixture_result(points: Vec<TrajectoryPoint>) -> TrajectoryResult {
         TrajectoryResult {
             max_range: 500.0,
@@ -483,7 +532,17 @@ mod tests {
             // mach 0.5: below the lowest key -> flat-clamped factor.
             trajectory_point(1.0, 500.0, -1.0, 2.0, 0.5 * sos),
         ];
-        let original = fixture_result(points);
+        let mut original = fixture_result(points);
+        // MBA-1357 Task 2 review, Critical #2: sampled_points is a SEPARATE array from
+        // `points` and must be scaled too (same Mach coverage: 1.3/0.9/0.5, so the same
+        // expected_factors below apply to both).
+        original.sampled_points = Some(vec![
+            // drop_m values chosen to match the drop_before values the points loop below
+            // derives (los - y): 0.0, 0.03, 1.05 — so the same expected_factors apply.
+            trajectory_sample(0.0, 0.0, 0.0, 1.3 * sos, 0.0, vec![]),
+            trajectory_sample(250.0, 0.03, 1.0, 0.9 * sos, 0.5, vec![TrajectoryFlag::MachTransition]),
+            trajectory_sample(500.0, 1.05, 2.0, 0.5 * sos, 1.0, vec![TrajectoryFlag::Apex]),
+        ]);
         let table = DsfTable::from_points(vec![pt(0.8, 1.2), pt(1.0, 1.05)]).unwrap();
 
         let mut scaled = original.clone();
@@ -537,6 +596,51 @@ mod tests {
         }
         // The untouched (mach >= 1.2) point's position.y must be exactly unchanged.
         assert_eq!(original.points[0].position.y, scaled.points[0].position.y);
+
+        // Critical #2: sampled_points scales the SAME way, and every other field on
+        // each sample is byte-identical.
+        let orig_samples = original.sampled_points.as_ref().unwrap();
+        let scaled_samples = scaled.sampled_points.as_ref().unwrap();
+        assert_eq!(orig_samples.len(), scaled_samples.len());
+        for (i, (orig, new)) in orig_samples.iter().zip(scaled_samples.iter()).enumerate() {
+            assert_eq!(orig.distance_m, new.distance_m, "sample {i}: distance_m must be byte-identical");
+            assert_eq!(
+                orig.wind_drift_m, new.wind_drift_m,
+                "sample {i}: wind_drift_m must be byte-identical"
+            );
+            assert_eq!(
+                orig.velocity_mps, new.velocity_mps,
+                "sample {i}: velocity_mps must be byte-identical"
+            );
+            assert_eq!(orig.energy_j, new.energy_j, "sample {i}: energy_j must be byte-identical");
+            assert_eq!(orig.time_s, new.time_s, "sample {i}: time_s must be byte-identical");
+            assert_eq!(orig.flags, new.flags, "sample {i}: flags must be byte-identical");
+
+            let expected_drop = orig.drop_m * expected_factors[i];
+            assert!(
+                (new.drop_m - expected_drop).abs() < 1e-9,
+                "sample {i}: expected scaled drop_m {expected_drop}, got {}",
+                new.drop_m
+            );
+        }
+        // The untouched (mach >= 1.2) sample's drop_m must be exactly unchanged.
+        assert_eq!(orig_samples[0].drop_m, scaled_samples[0].drop_m);
+    }
+
+    #[test]
+    fn apply_dsf_leaves_sampled_points_none_when_absent() {
+        // Same non-empty table as the invariant test above, but sampled_points is None
+        // (e.g. a solve without --sample-trajectory) — apply_dsf must not panic or
+        // conjure a Some, it must stay None.
+        let points = vec![trajectory_point(0.5, 250.0, 0.02, 1.0, 0.9 * 340.0)];
+        let original = fixture_result(points);
+        assert!(original.sampled_points.is_none());
+        let table = DsfTable::from_points(vec![pt(0.8, 1.2), pt(1.0, 1.05)]).unwrap();
+
+        let mut scaled = original.clone();
+        apply_dsf(&mut scaled, &table);
+
+        assert!(scaled.sampled_points.is_none(), "None must stay None");
     }
 
     #[test]

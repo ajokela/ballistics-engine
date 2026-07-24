@@ -1502,7 +1502,7 @@ solves the named saved profile's own trajectory (same physics `trajectory
      warning: no DSF point in the transonic band (Mach 1.2-0.9); transonic drops remain uncorrected
      ```
 4. The point is added to the profile's table (up to 6 distinct points): a new point
-   within 0.05 Mach of an existing one **supersedes** it (reported on stderr); a 7th
+   within 0.05 Mach of an existing one **supersedes** it (reported on stdout); a 7th
    distinct point is rejected, naming the 6-point cap and `--clear-dsf` to make room.
 5. The profile is saved and the resulting table is printed.
 

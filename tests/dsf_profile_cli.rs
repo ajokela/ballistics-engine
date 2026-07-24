@@ -77,6 +77,22 @@ fn full_trajectory_json(home: &std::path::Path, name: &str, max_range: f64, outp
         .expect("spawn trajectory")
 }
 
+/// `trajectory --saved-profile NAME --sample-trajectory --full -o csv`: the PDF dope
+/// card's data source and the Table's "Sampled Trajectory" section both read
+/// `TrajectoryResult.sampled_points`, the SAME field this CSV path renders — a separate
+/// array from `.points` (used by `full_trajectory_json` above), and the one Critical #2
+/// found `apply_dsf` was silently skipping.
+fn full_trajectory_csv_sampled(home: &std::path::Path, name: &str, max_range: f64) -> Output {
+    cli()
+        .env("HOME", home)
+        .args(["trajectory", "--saved-profile", name])
+        .arg("--max-range")
+        .arg(max_range.to_string())
+        .args(["--sample-trajectory", "-o", "csv", "--full"])
+        .output()
+        .expect("spawn trajectory sampled csv")
+}
+
 fn parse_json(out: &Output) -> serde_json::Value {
     serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("invalid JSON ({e}): {}", String::from_utf8_lossy(&out.stdout)))
@@ -139,8 +155,9 @@ fn dsf_verb_derives_saves_and_trajectory_auto_applies() {
     assert!(dsf_out.status.success(), "{}", String::from_utf8_lossy(&dsf_out.stderr));
     let dsf_stdout = String::from_utf8_lossy(&dsf_out.stdout);
     assert!(dsf_stdout.contains("DSF table for 'dsf-roundtrip'"), "{dsf_stdout}");
-    let dsf_stderr = String::from_utf8_lossy(&dsf_out.stderr);
-    assert!(dsf_stderr.contains("Added DSF point"), "{dsf_stderr}");
+    // MBA-1357 Task 2 review, Important #1: the add/supersede announcement belongs on
+    // stdout (the plan: "say so on stdout"), not stderr.
+    assert!(dsf_stdout.contains("Added DSF point"), "{dsf_stdout}");
 
     // Saved profile now carries dsf_points with the expected ratio.
     let saved = profile_json(&home, "dsf-roundtrip");
@@ -239,6 +256,83 @@ fn dsf_verb_derives_saves_and_trajectory_auto_applies() {
         .expect("spawn trajectory table post-clear");
     assert!(table_out2.status.success());
     assert!(!String::from_utf8_lossy(&table_out2.stdout).contains("DSF table active"));
+}
+
+/// MBA-1357 Task 2 review, Critical #2: `apply_dsf` only rescaled `TrajectoryResult.points`,
+/// never `sampled_points` — the array `--sample-trajectory` (Table's "Sampled Trajectory"
+/// section, CSV `--full`, and the PDF dope card, which *always* requires sampling) reads.
+/// Confirmed live pre-fix: with an active DSF table, sampled CSV rows were byte-identical
+/// to the no-DSF baseline. This proves the sampled/CSV path now bends too.
+#[test]
+fn dsf_auto_apply_bends_sampled_trajectory_csv_rows() {
+    let home = tempfile_dir();
+    let save = save_test_profile(&home, "dsf-sampled");
+    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+
+    let baseline_out = full_trajectory_csv_sampled(&home, "dsf-sampled", 1500.0);
+    assert!(baseline_out.status.success(), "{}", String::from_utf8_lossy(&baseline_out.stderr));
+    let baseline_csv = String::from_utf8_lossy(&baseline_out.stdout).into_owned();
+    let mut lines = baseline_csv.lines();
+    let header = lines.next().expect("csv header");
+    assert!(header.starts_with("distance_yd,drop_in,drift_in,velocity_fps"), "{header}");
+
+    // Pick a subsonic (< 1000 fps), already-below-LOS (positive drop) sampled row to
+    // derive a DSF point from, same approach as pick_subsonic_point for the JSON path.
+    let (range_yd, predicted_drop_in) = lines
+        .clone()
+        .find_map(|line| {
+            let cols: Vec<&str> = line.split(',').collect();
+            let vel: f64 = cols.get(3)?.parse().ok()?;
+            let drop: f64 = cols.get(1)?.parse().ok()?;
+            if vel < 1000.0 && drop > 0.0 {
+                Some((cols[0].parse::<f64>().ok()?, drop))
+            } else {
+                None
+            }
+        })
+        .expect("no subsonic, below-LOS sampled row found");
+
+    let observed_drop_in = predicted_drop_in * 1.3;
+    let dsf_out = cli()
+        .env("HOME", &home)
+        .args(["dsf", "--saved-profile", "dsf-sampled"])
+        .arg("--range")
+        .arg(format!("{range_yd:.2}"))
+        .arg("--observed-drop")
+        .arg(format!("{observed_drop_in:.4}in"))
+        .output()
+        .expect("spawn dsf");
+    assert!(dsf_out.status.success(), "{}", String::from_utf8_lossy(&dsf_out.stderr));
+
+    let corrected_out = full_trajectory_csv_sampled(&home, "dsf-sampled", 1500.0);
+    assert!(corrected_out.status.success());
+    let corrected_csv = String::from_utf8_lossy(&corrected_out.stdout).into_owned();
+    let mut corrected_lines = corrected_csv.lines();
+    assert_eq!(corrected_lines.next(), Some(header), "csv header must be unchanged");
+
+    let mut any_drop_changed = false;
+    for (base_line, corr_line) in baseline_csv.lines().skip(1).zip(corrected_lines) {
+        let base_cols: Vec<&str> = base_line.split(',').collect();
+        let corr_cols: Vec<&str> = corr_line.split(',').collect();
+        // distance, velocity, energy, time (indices 0, 3, 4, 5) are the drop-only
+        // invariant's untouched fields; drift (2) is untouched too.
+        assert_eq!(base_cols[0], corr_cols[0], "distance must be byte-identical");
+        assert_eq!(base_cols[2], corr_cols[2], "drift must be byte-identical");
+        assert_eq!(base_cols[3], corr_cols[3], "velocity must be byte-identical");
+        assert_eq!(base_cols[4], corr_cols[4], "energy must be byte-identical");
+        assert_eq!(base_cols[5], corr_cols[5], "time must be byte-identical");
+
+        let base_drop: f64 = base_cols[1].parse().unwrap();
+        let corr_drop: f64 = corr_cols[1].parse().unwrap();
+        if (base_drop - corr_drop).abs() > 1e-6 {
+            any_drop_changed = true;
+        }
+    }
+    assert!(
+        any_drop_changed,
+        "at least one sampled row's drop must change after DSF auto-apply \
+         (pre-fix this CSV was byte-identical to the no-DSF baseline): \n{corrected_csv}"
+    );
 }
 
 #[test]
@@ -361,6 +455,57 @@ fn supersonic_observation_is_rejected_with_exact_error_and_not_saved() {
     // The rejected observation must not have been saved (profile still has no dsf_points).
     let saved = profile_json(&home, "dsf-supersonic");
     assert!(saved.get("dsf_points").is_none(), "{saved}");
+}
+
+/// MBA-1357 Task 2 review, Critical #1: the 90%-of-solved-range warning must require
+/// BOTH (a) the observation being beyond the trajectory's Mach-1.0 crossing and (b)
+/// beyond 90% of the trajectory's OWN solved max range — not merely "close to however
+/// far we chose to solve". `save_test_profile`'s load (v=1300 fps, BC 0.4, .308/168gr,
+/// 300 yd zero) solves (with no `--max-range` of its own — `dsf` has none — the solve
+/// envelope defaults to the profile's own configured max range, 1000 yd, same as
+/// `trajectory --saved-profile`) to a natural ground-impact stop around 403 yd, and
+/// crosses Mach 1.0 around 165 yd. Before the fix, the solve envelope was sized to
+/// `--range * 1.05`, so `range / solved_max` was always in [0.952, 1.0] — this warning
+/// fired unconditionally, including at the 340 yd mid-range point below.
+#[test]
+fn beyond_90pct_warning_requires_both_gates_not_just_range_ratio() {
+    let home = tempfile_dir();
+    let save = save_test_profile(&home, "dsf-90pct-gate");
+    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+
+    // Mid-range: subsonic (well past the ~165 yd Mach-1 crossing) but well under 90% of
+    // the profile's own solved max range (~403 yd -> 90% ~= 363 yd). Must NOT warn.
+    let mid = cli()
+        .env("HOME", &home)
+        .args([
+            "dsf", "--saved-profile", "dsf-90pct-gate", "--range", "340", "--observed-drop",
+            "20.7in",
+        ])
+        .output()
+        .expect("spawn dsf mid-range");
+    assert!(mid.status.success(), "{}", String::from_utf8_lossy(&mid.stderr));
+    let mid_stderr = String::from_utf8_lossy(&mid.stderr);
+    assert!(
+        !mid_stderr.contains("beyond 90%"),
+        "mid-range subsonic observation on a long-range profile must NOT warn: {mid_stderr}"
+    );
+
+    // Beyond 90% of the same profile's solved max range (and still subsonic, past the
+    // crossing). Must warn.
+    let far = cli()
+        .env("HOME", &home)
+        .args([
+            "dsf", "--saved-profile", "dsf-90pct-gate", "--range", "380", "--observed-drop",
+            "50.6in",
+        ])
+        .output()
+        .expect("spawn dsf near-envelope");
+    assert!(far.status.success(), "{}", String::from_utf8_lossy(&far.stderr));
+    let far_stderr = String::from_utf8_lossy(&far.stderr);
+    assert!(
+        far_stderr.contains("beyond 90%"),
+        "observation beyond 90% of the solved range must warn: {far_stderr}"
+    );
 }
 
 #[test]
