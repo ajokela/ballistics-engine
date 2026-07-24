@@ -5,6 +5,60 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-07-24
+
+### Breaking
+- `wez::compute_wez` gained a positional `cd_scale` parameter (MBA-1356).
+- `TrajectoryParams` gained a required `cd_scale` field — external constructors
+  must set it (`1.0` = previous behavior) (MBA-1356).
+- `BallisticInputs` gained a public `cd_scale` field, breaking exhaustive
+  struct literals (soften with `..Default::default()`) (MBA-1356).
+
+### Added
+- Turret adjustment units (MBA-1355): `--adjustment-unit smoa|iphy|clicks` on
+  trajectory/come-ups (native + browser terminal), suffixed click graduations
+  (`0.25moa`, `0.1mil` — bare numbers are an error), whole-click display
+  rounding (ties away from zero), unit-suffixed column headers, new
+  `adjustment` library module. Follow-up for remaining commands and per-axis
+  units: MBA-1410.
+- `.drg` drag-file support (MBA-1409): `--drag-table` on trajectory,
+  monte-carlo, and zero accepts QuickTARGET-style `.drg` decks; `(cd, mach)`
+  vs `(mach, cd)` column order is auto-detected, with a hard "ambiguous
+  columns" error (and CSV workaround hint) when detection cannot decide.
+- Real G2, G5, GI, and GS reference drag tables plus the new RA4 model
+  (MBA-1386): the native CLI now accepts the full nine-family `--drag-model`
+  set; FFI adds additive `bc_type` slot 8 for RA4; six new stderr warnings
+  cover the remaining G1/G7-only auxiliary lookups. This retires 0.27.1's
+  G1-fallback notes ("real tables remain future work" no longer applies).
+- `--cd-scale` whole-curve drag multiplier for custom decks (MBA-1356) on
+  trajectory, monte-carlo, and zero (native + browser terminal), with a
+  [0.5, 2.0] plausibility warning and a pairing error without `--drag-table`;
+  FFI adds additive `_scaled` export variants.
+- Mach-keyed DSF truing table (MBA-1357): new `dsf` verb derives drop-scale
+  factors from observed drops (staging gates steer supersonic observations to
+  muzzle-velocity truing first), stores up to six points per saved profile
+  (supersede within 0.05 Mach, `profile save --clear-dsf` to reset), and
+  trajectory/come-ups auto-apply the table as a strictly drop-only
+  post-processing correction (velocity/energy/time outputs unchanged;
+  table-format-only "DSF table active" note). New `truing_dsf` library
+  module; profile field is additive (older profiles load unchanged). Browser
+  terminal parity is tracked as MBA-1411.
+
+### Changed
+- Numeric shift: `-d g2|g5|gi|gs` now solve against the real reference tables
+  (previously a G1 approximation) — affects library, browser terminal, and
+  FFI consumers using those families (MBA-1386).
+- Numeric shift: profile/CSV `drag_model` strings `G6`/`G8`, previously
+  warn-coerced to G1 on the native CLI, now run real G6/G8 physics
+  (MBA-1386).
+- Numeric shift: velocity-band BC transitions are smoothstep-blended at band
+  boundaries (margin = min(50 fps, 25% of the narrower adjacent band)), so
+  banded-BC trajectories are continuous across band edges; mid-band values
+  are unchanged (MBA-1404).
+- Come-ups lead column emits a `lead_smoa` JSON key and the Ring header
+  carries its unit (`Ring(mil)`) under the default and `--target-speed`
+  paths (MBA-1355).
+
 ## [0.27.1] - 2026-07-19
 
 ### Added
