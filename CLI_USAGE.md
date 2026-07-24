@@ -364,6 +364,22 @@ a profile with multi-BC/CUSTOM data still works there, but only via its
 scalar `bc`/`drag_model` fallback. `profile show` prints a summary line
 (row/point count and range) for whichever of the two is present.
 
+**DSF (drop-scale-factor) table (MBA-1357).** A profile can also carry `dsf_points`, a
+Mach-keyed table of drop corrections accumulated by the `dsf` command (see
+[DSF Truing](#dsf-drop-scale-factor-truing) below) — `None`/absent for a profile with no
+DSF calibration. `profile show` renders it, one line per point:
+```
+DSF table (2 points, Mach 0.65-0.95):
+  Mach 0.65  DSF 1.0820
+  Mach 0.95  DSF 1.0310
+```
+`profile save NAME ... --clear-dsf` removes an existing table; without `--clear-dsf`,
+re-saving a profile (e.g. to tweak an unrelated field) carries its DSF table forward
+unchanged — `profile save` has no flags of its own to express DSF points, so silently
+dropping them on every unrelated edit would be hostile. `trajectory --saved-profile` and
+`come-ups --profile` automatically apply a profile's DSF table to the solved drop and
+print a table-output-only note; see [DSF Truing](#dsf-drop-scale-factor-truing).
+
 **Turret click graduations (MBA-1355).** `profile save` also accepts
 `--elevation-click <SIZE><UNIT>` and `--windage-click <SIZE><UNIT>` (e.g. `0.1mil` or
 `0.25moa`), stored as the profile's `elevation_click`/`windage_click` fields and shown by
@@ -1428,6 +1444,79 @@ Iterations:            12
 Final Error:           0.001 MIL
 Calculated Drop:       5.10 MIL
 ```
+
+### DSF (Drop-Scale-Factor) Truing
+
+`dsf` is the second stage of Applied Ballistics' two-stage truing workflow (MBA-1357).
+Once `true-velocity` has fixed the supersonic muzzle velocity/BC against a chronograph
+and a supersonic (Mach > 1.2) observed drop, drop discrepancies that grow through the
+transonic region and into the subsonic regime are no longer fixable by a single MV
+correction — the residual is a slowly-varying function of Mach. `dsf` records a handful
+of *observed drop / predicted drop* ratios at specific (Mach <= 1.2) ranges and stores
+them, keyed by Mach, on a saved profile; `trajectory --saved-profile` and
+`come-ups --profile` then scale predicted drop by the nearest table entry automatically.
+
+Unlike every other command, `dsf` takes **no ballistic parameters of its own** — it
+solves the named saved profile's own trajectory (same physics `trajectory
+--saved-profile NAME` would fly with no other flags) and derives everything else from
+`--range` and `--observed-drop`.
+
+```bash
+# Record an observed 5.1 mil drop at 900 yards on a profile already MV-trued.
+./ballistics dsf --saved-profile my-rifle --range 900 --observed-drop 5.1mil
+
+# Same, drop given in MOA or linear inches instead.
+./ballistics dsf --saved-profile my-rifle --range 900 --observed-drop 17.4moa
+./ballistics dsf --saved-profile my-rifle --range 1000 --observed-drop 42.0in
+```
+
+#### DSF Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--saved-profile` | Saved profile to solve, calibrate, and write the point back to | Required |
+| `--range` | Range at which the drop was observed (yards imperial, meters metric) | Required |
+| `--observed-drop` | Observed drop, value and unit with NO separator: `mil`, `moa`, or `in` (e.g. `5.1mil`, `17.4moa`, `42.0in`) | Required |
+
+#### How a point is derived
+
+1. Solves the saved profile's trajectory and finds the predicted drop and Mach number at
+   `--range` (Mach = velocity ÷ the solver's station speed of sound — the same divisor
+   `apply_dsf` uses later, so a point derived here lands back on the identical Mach when
+   applied).
+2. `dsf = observed / predicted`, expressed in the same unit `--observed-drop` used.
+3. **Staging gates:**
+   - An observation whose target-range Mach is **> 1.2** is rejected outright — that's
+     `true-velocity`'s territory, not DSF's:
+     ```
+     error: observation is supersonic (Mach 1.35); calibrate muzzle velocity first (true-velocity), then collect DSF points at Mach <= 1.2
+     ```
+   - A warning (not fatal) when the observation range is beyond 90% of the trajectory's
+     solved max range — the solution's reliability degrades past this point:
+     ```
+     warning: observation at 950 yd is beyond 90% of the solved range; solution reliability degrades past this point
+     ```
+   - A warning (not fatal) when the table's highest-Mach point still sits below Mach 0.9
+     — nothing in the table covers the 0.9-1.2 transonic band:
+     ```
+     warning: no DSF point in the transonic band (Mach 1.2-0.9); transonic drops remain uncorrected
+     ```
+4. The point is added to the profile's table (up to 6 distinct points): a new point
+   within 0.05 Mach of an existing one **supersedes** it (reported on stderr); a 7th
+   distinct point is rejected, naming the 6-point cap and `--clear-dsf` to make room.
+5. The profile is saved and the resulting table is printed.
+
+#### Auto-apply
+
+`trajectory --saved-profile NAME` and `come-ups --profile NAME` automatically apply a
+profile's DSF table to every solved point's drop (byte-identical velocity/energy/time of
+flight/windage — this is a **drop-only** correction) and, for **table output only**,
+print:
+```
+DSF table active (2 points, Mach 0.65-0.95)
+```
+JSON and CSV output carry the corrected drop numbers too, but get no equivalent text or
+extra top-level field — the note above is purely a human-facing display detail.
 
 ### MCP Server (`mcp`)
 

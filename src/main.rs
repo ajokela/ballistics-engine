@@ -37,6 +37,9 @@ use ballistics_engine::truing::{
     run_multi_observation_truing_core, validate_truing_observations, DragModelArg, DropUnit,
     MultiTruingReport, TruingModelInputsV1, TruingObservation,
 };
+use ballistics_engine::truing_dsf::{
+    apply_dsf, DsfPoint, DsfTable, UpsertOutcome, DSF_MACH_CEILING,
+};
 use ballistics_engine::truing_plan::{
     plan_truing_experiment_v1, TruingExperimentPlanRequestV1, TruingExperimentPlanV1,
     TruingPlanModeV1,
@@ -1499,6 +1502,32 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Derive a Mach-keyed drop-scale-factor (DSF) point from an observed drop, and save it
+    /// to a profile's DSF table (MBA-1357).
+    ///
+    /// Second stage of Applied Ballistics' two-stage truing workflow: after `true-velocity`
+    /// fixes the supersonic muzzle velocity/BC against a chronograph and a supersonic
+    /// observed drop (Mach above 1.2), `dsf` records transonic/subsonic drop corrections
+    /// one observed range at a time. Solves the saved profile's own trajectory (no other
+    /// CLI overrides — everything comes from the profile), predicts the drop at `--range`,
+    /// and sets `dsf = observed / predicted` at that range's Mach. Up to 6 points; a new
+    /// point within 0.05 Mach of an existing one supersedes it. Rejects a supersonic
+    /// observation (Mach above 1.2) outright — that belongs to `true-velocity`, not here.
+    Dsf {
+        /// Saved profile to solve, calibrate, and write the DSF point back to.
+        #[arg(long, value_name = "NAME")]
+        saved_profile: String,
+
+        /// Range at which the drop was observed (yards for imperial, meters for metric).
+        #[arg(long)]
+        range: f64,
+
+        /// Observed drop, suffixed with its unit: mil, moa, or in (e.g. 5.1mil, 17.4moa,
+        /// 42.0in). No separator between the number and the unit.
+        #[arg(long, value_name = "VALUEUNIT")]
+        observed_drop: String,
+    },
+
     /// Moving-target lead table (hold in the direction of target travel)
     Lead {
         /// Load parameters from saved profile
@@ -2061,6 +2090,13 @@ enum ProfileAction {
         /// the elevation graduation when omitted, e.g. 0.1mil or 0.25moa.
         #[arg(long)]
         windage_click: Option<String>,
+
+        /// Remove this profile's DSF (drop-scale-factor) table, if any (MBA-1357). Without
+        /// this flag, re-saving an existing profile carries its DSF table forward
+        /// unchanged — `profile save` otherwise has no way to express "keep the DSF
+        /// calibration, just update these other fields".
+        #[arg(long)]
+        clear_dsf: bool,
     },
 
     /// Import a profile from a third-party file (.a7p — ArcherBC2 format)
@@ -2274,6 +2310,14 @@ struct ProfileData {
     /// silently running physics under a fabricated coefficient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     drag_curve: Option<Vec<ProfileDragPoint>>,
+    /// Mach-keyed drop-scale-factor table (MBA-1357), accumulated one point at a time by
+    /// the `dsf` verb. `None` for every profile with no DSF calibration yet — including
+    /// every profile saved before this field existed, which loads clean and solves
+    /// untrued (same `#[serde(default)]` forward-compat pattern as `bc_segments`/
+    /// `drag_curve` above: an old reader that predates this field silently drops it on
+    /// re-save, degrading to untrued drop with no error).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dsf_points: Option<Vec<DsfPoint>>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -2545,6 +2589,12 @@ struct TrajectoryConfig {
 
     // PDF metadata
     pdf_metadata: Option<PdfMetadata>,
+
+    // MBA-1357: saved profile's DSF (drop-scale-factor) table, already validated. `Some`
+    // only when --saved-profile pointed at a profile carrying dsf_points. run_trajectory
+    // applies it (drop-only correction) to every output format and prints a table-only
+    // note; see apply_dsf's doc comment for the drop-only invariant.
+    dsf_table: Option<DsfTable>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2848,8 +2898,8 @@ impl ProfileData {
             )
         });
 
-        // `bc_segments`, `drag_curve`, `elevation_click`, and `windage_click` are
-        // INTENTIONALLY left untouched here — do not "complete" this by adding a
+        // `bc_segments`, `drag_curve`, `elevation_click`, `windage_click`, and `dsf_points`
+        // are INTENTIONALLY left untouched here — do not "complete" this by adding a
         // conversion pass for them:
         //   * `ProfileBcSegment::velocity_mps` is pinned to SI regardless of `units` (see its
         //     doc comment), so there is nothing to convert.
@@ -2858,6 +2908,8 @@ impl ProfileData {
         //   * `elevation_click`/`windage_click` (MBA-1355) are angular turret graduations
         //     (mil/moa/smoa/iphy, chosen by their own suffix), not linear distances, so
         //     imperial/metric has no bearing on them.
+        //   * `DsfPoint`'s `mach` and `dsf` (MBA-1357) are both dimensionless ratios, same
+        //     as the drag curve above.
         // Converting them would silently rescale physically meaningful data (e.g. treating an
         // m/s breakpoint as if it were fps) rather than fix anything.
         self.units = match target {
@@ -3512,6 +3564,8 @@ fn map_a7p_to_profile(
         windage_click: None,
         bc_segments,
         drag_curve,
+        // .a7p carries no DSF concept; that's the `dsf` verb's job post-import.
+        dsf_points: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -4020,6 +4074,316 @@ fn resolve_velocity_bc_segments(
     )
 }
 
+// ============================================================================
+// DSF (drop-scale-factor) table support (MBA-1357)
+// ============================================================================
+
+/// `"{n} points, Mach {lo:.2}-{hi:.2}"` summary of a DSF table's points, shared by the
+/// `dsf` verb's own confirmation output, `profile show`, and the `trajectory`/`come-ups`
+/// auto-apply note. `points` must be non-empty (both call sites only reach this behind a
+/// `Some(dsf_points)`/non-empty check) — an empty slice reports Mach 0.00-0.00 rather than
+/// panicking.
+fn dsf_table_summary(points: &[DsfPoint]) -> String {
+    let lo = points.first().map(|p| p.mach).unwrap_or(0.0);
+    let hi = points.last().map(|p| p.mach).unwrap_or(0.0);
+    format!("{} points, Mach {:.2}-{:.2}", points.len(), lo, hi)
+}
+
+/// Parse a `--observed-drop` token: a numeric value immediately followed by its unit
+/// suffix, no separator — `mil`, `moa`, or `in` (e.g. "5.1mil", "17.4moa", "42.0in").
+/// Reuses [`DropUnit`]'s three-unit vocabulary (the same units `true-velocity`'s
+/// `--drop-unit`/`--observed` accept, via a separate flag rather than a suffix — see
+/// `parse_truing_observation`).
+fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
+    let t = s.trim().to_ascii_lowercase();
+    let (num, unit) = if let Some(n) = t.strip_suffix("mil") {
+        (n, DropUnit::Mil)
+    } else if let Some(n) = t.strip_suffix("moa") {
+        (n, DropUnit::Moa)
+    } else if let Some(n) = t.strip_suffix("in") {
+        (n, DropUnit::In)
+    } else {
+        return Err(format!(
+            "--observed-drop '{s}' needs a unit suffix: mil, moa, or in (e.g. 5.1mil, 17.4moa, 42.0in)"
+        ));
+    };
+    let value: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("--observed-drop '{s}' has an invalid number '{num}'"))?;
+    if !value.is_finite() {
+        return Err(format!("--observed-drop '{s}' must be a finite number"));
+    }
+    Ok((value, unit))
+}
+
+/// Linearly interpolate `(position.y, velocity_magnitude)` at horizontal distance
+/// `target_dist_m` from a solved trajectory's points (`position.x` = downrange). Mirrors
+/// `cli_api::fit_value_at`'s interpolation (private to that module), but resolves both
+/// quantities from the same bracketing pair in one pass since the `dsf` verb needs drop
+/// AND Mach at the identical range. `None` if the trajectory never reaches `target_dist_m`.
+fn interpolate_position_and_velocity(
+    points: &[ballistics_engine::cli_api::TrajectoryPoint],
+    target_dist_m: f64,
+) -> Option<(f64, f64)> {
+    for i in 0..points.len() {
+        if points[i].position.x >= target_dist_m {
+            if i == 0 {
+                return Some((points[0].position.y, points[0].velocity_magnitude));
+            }
+            let p1 = &points[i - 1];
+            let p2 = &points[i];
+            let dx = p2.position.x - p1.position.x;
+            if dx.abs() < 1e-9 {
+                return Some((p2.position.y, p2.velocity_magnitude));
+            }
+            let t = (target_dist_m - p1.position.x) / dx;
+            let y = p1.position.y + t * (p2.position.y - p1.position.y);
+            let v = p1.velocity_magnitude + t * (p2.velocity_magnitude - p1.velocity_magnitude);
+            return Some((y, v));
+        }
+    }
+    None
+}
+
+/// Solve a saved profile's OWN trajectory for the `dsf` command's derivation step, using
+/// only the profile's stored fields — no CLI overrides, since `dsf` exposes none of the
+/// physics flags (`--saved-profile`/`--range`/`--observed-drop` are its entire surface).
+/// This mirrors the subset of `trajectory --saved-profile NAME` (with no other flags)
+/// reachable from [`ProfileData`] alone: the same baseline `trajectory`/`come-ups` auto-
+/// apply corrects later, so the derived DSF point's "predicted drop" needs to match it.
+/// Advanced physics toggles absent from `ProfileData` (Magnus/Coriolis/spin-drift/
+/// aerodynamic-jump/wind-shear/pitch-damping/precession/powder-sensitivity/cd_scale) are
+/// off/neutral here, same as every other profile-only command (`come-ups`, `lead`, `mpbr`).
+///
+/// `profile` must already be converted to `units` (i.e. loaded via
+/// `load_profile_for_units`). `max_range_m` should exceed the target observation range so
+/// the solved points bracket it (a short solve, e.g. ground impact before the requested
+/// range, is reported by the caller via [`interpolate_position_and_velocity`] returning
+/// `None`, not by this function).
+fn solve_profile_for_dsf(
+    profile: &ProfileData,
+    units: UnitSystem,
+    max_range_m: f64,
+) -> Result<ballistics_engine::cli_api::TrajectoryResult, Box<dyn Error>> {
+    let velocity_m = UnitConverter::velocity_to_metric(profile.velocity, units);
+    let mass_kg = UnitConverter::mass_to_metric(profile.mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(profile.diameter, units);
+    let drag_model = parse_drag_model_arg(&profile.drag_model);
+
+    let bullet_length_m = profile
+        .bullet_length
+        .map(|l| match units {
+            UnitSystem::Imperial => l * 0.0254,
+            UnitSystem::Metric => l * 0.001,
+        })
+        .unwrap_or_else(|| fallback_bullet_length_m(diameter_m, mass_kg));
+
+    // Same defaults `trajectory --saved-profile`/`come-ups --profile` fall back to when a
+    // profile doesn't carry the field.
+    let sight_height_default = match units {
+        UnitSystem::Imperial => 2.0,
+        UnitSystem::Metric => 50.0,
+    };
+    let sight_height_m = UnitConverter::sight_height_to_metric(
+        profile.sight_height.unwrap_or(sight_height_default),
+        units,
+    );
+    // Saved profiles predate MBA-1339's unified --bore-height flag and never stored one;
+    // use the same default `trajectory --saved-profile` falls back to (60 in / 1500 mm).
+    let bore_height_default_display = match units {
+        UnitSystem::Imperial => 60.0,
+        UnitSystem::Metric => 1500.0,
+    };
+    let bore_height_m = match units {
+        UnitSystem::Imperial => bore_height_default_display * 0.0254,
+        UnitSystem::Metric => bore_height_default_display * 0.001,
+    };
+
+    let temperature_c = UnitConverter::temperature_to_metric(profile.temperature, units);
+    let pressure_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
+    // NOTE: matches run_trajectory's own convention — the same raw (0-100) value feeds
+    // both AtmosphericConditions.humidity (percent) and BallisticInputs.humidity below,
+    // despite the latter's doc comment describing a 0-1 fraction. This is pre-existing
+    // behavior this helper deliberately replicates rather than "fixes" (see run_trajectory).
+    let humidity = profile.humidity;
+    let altitude_m = UnitConverter::altitude_to_metric(profile.altitude, units);
+
+    let wind_speed_m = profile
+        .wind_speed
+        .map(|w| UnitConverter::wind_to_metric(w, units))
+        .unwrap_or(0.0);
+    let wind_direction_rad = profile.wind_direction.unwrap_or(0.0).to_radians();
+    let shooting_angle_rad = profile.shooting_angle.unwrap_or(0.0).to_radians();
+
+    // --twist-rate is inches/turn in imperial, mm/turn in metric; BallisticInputs always
+    // wants inches/turn (MBA-970 convention, same as the Trajectory command's own resolution).
+    let twist_rate_in = profile.twist_rate.map(|t| match units {
+        UnitSystem::Imperial => t,
+        UnitSystem::Metric => t / 25.4,
+    });
+    let twist_right = profile.twist_right.unwrap_or(true);
+
+    let bc_segments_data = profile
+        .bc_segments
+        .as_ref()
+        .map(|rows| bc_segments_from_profile(rows));
+    let custom_drag_table = profile
+        .drag_curve
+        .as_ref()
+        .map(|pts| drag_table_from_profile(pts))
+        .transpose()
+        .map_err(|e| format!("saved profile's drag curve is invalid: {e}"))?;
+    let use_bc_segments = profile.use_bc_segments.unwrap_or(false) || bc_segments_data.is_some();
+
+    let wind = WindConditions {
+        speed: wind_speed_m,
+        direction: wind_direction_rad,
+        vertical_speed: 0.0,
+    };
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        altitude: altitude_m,
+    };
+
+    let mut inputs = BallisticInputs {
+        bc_value: profile.bc,
+        bc_type: drag_model,
+        bullet_mass: mass_kg,
+        muzzle_velocity: velocity_m,
+        bullet_diameter: diameter_m,
+        bullet_length: bullet_length_m,
+
+        muzzle_angle: 0.0,
+        target_distance: max_range_m,
+        azimuth_angle: 0.0,
+        shot_azimuth: 0.0,
+        shooting_angle: shooting_angle_rad,
+        cant_angle: 0.0,
+        sight_height: sight_height_m,
+        muzzle_height: bore_height_m,
+        target_height: 0.0,
+        // Ground-impact detection ON (0.0), matching run_trajectory's default (Default::default()
+        // otherwise leaves this at -100.0 = effectively disabled) — `dsf` has no
+        // --ignore-ground-impact flag.
+        ground_threshold: 0.0,
+
+        altitude: altitude_m,
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        latitude: None,
+
+        wind_speed: wind_speed_m,
+        wind_angle: wind_direction_rad,
+
+        twist_rate: twist_rate_in.unwrap_or_else(|| {
+            ballistics_engine::stability::default_twist_inches(diameter_m, mass_kg, velocity_m)
+        }),
+        is_twist_right: twist_right,
+        caliber_inches: diameter_m / 0.0254,
+        weight_grains: mass_kg / GRAINS_TO_KG,
+        manufacturer: None,
+        bullet_model: None,
+        bullet_id: None,
+        bullet_cluster: None,
+
+        use_rk4: true,
+        use_adaptive_rk45: true,
+
+        enable_advanced_effects: false,
+        enable_magnus: false,
+        enable_coriolis: false,
+        use_powder_sensitivity: false,
+        powder_temp_sensitivity: 0.0,
+        powder_temp: 0.0,
+        powder_temp_curve: None,
+        powder_curve_temp_c: None,
+        tipoff_yaw: 0.0,
+        tipoff_decay_distance: 50.0,
+
+        use_bc_segments,
+        bc_segments: None,
+        bc_segments_data,
+        use_enhanced_spin_drift: false,
+        use_form_factor: false,
+        enable_wind_shear: false,
+        wind_shear_model: "none".to_string(),
+        enable_trajectory_sampling: false,
+        sample_interval: 0.0,
+        enable_pitch_damping: false,
+        enable_precession_nutation: false,
+        enable_aerodynamic_jump: false,
+        use_cluster_bc: false,
+
+        custom_drag_table,
+        cd_scale: 1.0,
+
+        bc_type_str: None,
+    };
+
+    // Zero angle: profile.auto_zero, falling back to profile.zero_distance — matching
+    // `trajectory --saved-profile`'s own `final_auto_zero` resolution — else flat (0.0),
+    // same as a bare `trajectory --saved-profile NAME` with no --auto-zero.
+    if let Some(zero_distance_display) = profile.auto_zero.or(profile.zero_distance) {
+        let zero_distance_m = UnitConverter::distance_to_metric(zero_distance_display, units);
+        inputs.muzzle_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+            inputs.clone(),
+            zero_distance_m,
+            bore_height_m + sight_height_m,
+            wind.clone(),
+            atmosphere.clone(),
+        )?;
+    }
+
+    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    solver.set_max_range(max_range_m);
+    solver.set_time_step(0.001);
+    Ok(solver.solve()?)
+}
+
+/// Exact text for the `dsf` verb's supersonic-observation rejection gate: the target
+/// range's predicted Mach is at or above [`DSF_MACH_CEILING`] (1.2) — that's MV-truing
+/// territory (`true-velocity`), not the DSF table's domain.
+fn dsf_supersonic_error(mach: f64) -> String {
+    format!(
+        "error: observation is supersonic (Mach {mach:.2}); calibrate muzzle velocity first \
+         (true-velocity), then collect DSF points at Mach <= 1.2"
+    )
+}
+
+/// Whether an observation range is beyond 90% of the trajectory's solved max range —
+/// past this point the solution's reliability degrades (short-range extrapolation of a
+/// trajectory that terminated, e.g., at ground impact just past the observation).
+fn dsf_observation_beyond_90pct(range_m: f64, solved_max_range_m: f64) -> bool {
+    solved_max_range_m > 0.0 && range_m > 0.9 * solved_max_range_m
+}
+
+/// Exact text for the "observation beyond 90% of the solved range" warning.
+/// `range_display`/`dist_unit` are in the CLI's active `--units` (yd/imperial, m/metric).
+fn dsf_beyond_90pct_warning(range_display: f64, dist_unit: &str) -> String {
+    format!(
+        "warning: observation at {range_display:.0} {dist_unit} is beyond 90% of the solved \
+         range; solution reliability degrades past this point"
+    )
+}
+
+/// Whether a DSF table's highest-Mach point sits below Mach 0.9 — since [`DsfTable`] sorts
+/// ascending by Mach and every point is < [`DSF_MACH_CEILING`] (1.2) by construction, the
+/// highest point being < 0.9 already means nothing in the table covers the 0.9-1.2
+/// transonic band.
+fn dsf_table_missing_transonic_coverage(points: &[DsfPoint]) -> bool {
+    points.last().map(|p| p.mach < 0.9).unwrap_or(true)
+}
+
+/// Exact text for the "no DSF point in the transonic band" warning.
+fn dsf_transonic_gap_warning() -> String {
+    "warning: no DSF point in the transonic band (Mach 1.2-0.9); transonic drops remain uncorrected"
+        .to_string()
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
@@ -4159,6 +4523,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(ref sp) = saved_profile_data {
                 eprintln!("Loaded saved profile '{}'", sp.name);
             }
+
+            // MBA-1357: resolve the saved profile's DSF table (if any) eagerly too, so a
+            // corrupted/hand-edited table fails fast rather than after a full solve below.
+            let dsf_table: Option<DsfTable> = saved_profile_data
+                .as_ref()
+                .and_then(|p| p.dsf_points.clone())
+                .map(|points| {
+                    DsfTable::from_points(points).unwrap_or_else(|e| {
+                        eprintln!("error: saved profile's DSF table is invalid: {e}");
+                        std::process::exit(1);
+                    })
+                });
 
             // MBA-1355: resolve turret click graduations FIRST, eagerly — before any of
             // the Ring column / PDF dope card display work below — so a missing
@@ -5132,6 +5508,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 elevation_click,
                 windage_click,
                 pdf_metadata: pdf_metadata.clone(),
+                dsf_table: dsf_table.clone(),
             };
 
             // Online mode handling
@@ -6612,6 +6989,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 })
             });
+            // MBA-1357: saved profile's DSF table, if any (come-ups has no --drag-table-style
+            // flag of its own for this either — a saved profile is the only source).
+            let dsf_table: Option<DsfTable> = profile_data
+                .as_ref()
+                .and_then(|p| p.dsf_points.clone())
+                .map(|points| {
+                    DsfTable::from_points(points).unwrap_or_else(|e| {
+                        eprintln!("error: saved profile's DSF table is invalid: {e}");
+                        std::process::exit(1);
+                    })
+                });
 
             handle_come_ups(
                 final_velocity,
@@ -6636,7 +7024,119 @@ fn main() -> Result<(), Box<dyn Error>> {
                 output,
                 bc_segments_data,
                 custom_drag_table,
+                dsf_table,
             )?;
+        }
+
+        Commands::Dsf {
+            saved_profile,
+            range,
+            observed_drop,
+        } => {
+            let (observed_value, drop_unit) = parse_observed_drop(&observed_drop)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+
+            if !range.is_finite() || range <= 0.0 {
+                eprintln!("error: --range must be a positive, finite distance");
+                std::process::exit(1);
+            }
+
+            let mut profile = load_profile_for_units(&saved_profile, cli.units).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            });
+
+            let dist_unit = match cli.units {
+                UnitSystem::Imperial => "yd",
+                UnitSystem::Metric => "m",
+            };
+
+            let range_m = UnitConverter::distance_to_metric(range, cli.units);
+            // 5% headroom so the solved points bracket the requested range even when it
+            // lands exactly on (rather than short of) a natural stopping point.
+            let solve_max_range_m = range_m * 1.05;
+
+            let result = solve_profile_for_dsf(&profile, cli.units, solve_max_range_m)?;
+
+            let (position_y, velocity_mag) =
+                interpolate_position_and_velocity(&result.points, range_m).unwrap_or_else(|| {
+                    let solved_range_display =
+                        UnitConverter::distance_from_metric(result.max_range, cli.units);
+                    eprintln!(
+                        "error: saved profile '{}' trajectory does not reach {range:.0} {dist_unit} \
+                         (solved to {solved_range_display:.0} {dist_unit})",
+                        profile.name
+                    );
+                    std::process::exit(1);
+                });
+
+            let predicted_drop_m = result.line_of_sight_height_m - position_y;
+            let mach = if result.station_speed_of_sound_mps > 0.0 {
+                velocity_mag / result.station_speed_of_sound_mps
+            } else {
+                0.0
+            };
+
+            // Gate 1: reject a supersonic observation outright — that's true-velocity's job.
+            if mach > DSF_MACH_CEILING {
+                eprintln!("{}", dsf_supersonic_error(mach));
+                std::process::exit(1);
+            }
+
+            // Gate 2: warn when the observation is beyond 90% of the solved max range.
+            if dsf_observation_beyond_90pct(range_m, result.max_range) {
+                eprintln!("{}", dsf_beyond_90pct_warning(range, dist_unit));
+            }
+
+            let predicted_value = drop_unit.express_drop_m(predicted_drop_m, range_m);
+            if !predicted_value.is_finite() || predicted_value == 0.0 {
+                eprintln!(
+                    "error: predicted drop at {range:.0} {dist_unit} is zero or non-finite; \
+                     cannot compute a DSF ratio"
+                );
+                std::process::exit(1);
+            }
+            let dsf = observed_value / predicted_value;
+
+            let mut table =
+                DsfTable::from_points(profile.dsf_points.clone().unwrap_or_default())
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: saved profile's existing DSF table is invalid: {e}");
+                        std::process::exit(1);
+                    });
+
+            match table.upsert(DsfPoint { mach, dsf }) {
+                Ok(UpsertOutcome::Appended) => {
+                    eprintln!("Added DSF point: Mach {mach:.2} -> DSF {dsf:.4}");
+                }
+                Ok(UpsertOutcome::Replaced { old }) => {
+                    eprintln!(
+                        "Superseded DSF point (Mach {:.2} -> DSF {:.4}) with Mach {mach:.2} -> DSF {dsf:.4}",
+                        old.mach, old.dsf
+                    );
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+
+            // Gate 3: table-wide transonic-band coverage warning (post-upsert state).
+            if dsf_table_missing_transonic_coverage(table.points()) {
+                eprintln!("{}", dsf_transonic_gap_warning());
+            }
+
+            profile.dsf_points = Some(table.points().to_vec());
+            let path = save_profile(&profile)?;
+            eprintln!("Profile '{}' saved to {:?}", profile.name, path);
+
+            println!("DSF table for '{}' ({}):", profile.name, dsf_table_summary(table.points()));
+            for p in table.points() {
+                println!("  Mach {:.2}  DSF {:.4}", p.mach, p.dsf);
+            }
         }
 
         Commands::Lead {
@@ -7164,12 +7664,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                     bullet_length,
                     elevation_click,
                     windage_click,
+                    clear_dsf,
                 } => {
                     let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
                     let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
                     let units_str = match cli.units {
                         UnitSystem::Imperial => "imperial",
                         UnitSystem::Metric => "metric",
+                    };
+
+                    // MBA-1357: `profile save` re-saving an existing profile is otherwise a
+                    // full overwrite from the given flags (see `bc_segments`/`drag_curve`
+                    // above, which are always reset to None here) — but a DSF table isn't
+                    // something this command can express at all, so silently dropping it on
+                    // every unrelated edit would be hostile. Carry it forward unless
+                    // `--clear-dsf` asked to drop it.
+                    let carried_dsf_points = if clear_dsf {
+                        None
+                    } else {
+                        load_profile(&name).ok().and_then(|p| p.dsf_points)
                     };
 
                     // MBA-1355: validate click graduations at save time so a saved profile
@@ -7214,6 +7727,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // `.a7p` import (see map_a7p_to_profile).
                         bc_segments: None,
                         drag_curve: None,
+                        dsf_points: carried_dsf_points,
                     };
 
                     let path = save_profile(&profile)?;
@@ -7453,6 +7967,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if profile.units == "metric" { "m" } else { "ft" }
                     );
                     println!("╚════════════════════════════════════════╝");
+
+                    // MBA-1357: DSF (drop-scale-factor) table, one line per point. Printed
+                    // outside the fixed-width box above since the row count varies (1-6).
+                    if let Some(ref points) = profile.dsf_points {
+                        println!();
+                        println!("DSF table ({}):", dsf_table_summary(points));
+                        for p in points {
+                            println!("  Mach {:.2}  DSF {:.4}", p.mach, p.dsf);
+                        }
+                    }
                 }
 
                 ProfileAction::Delete { name } => {
@@ -7709,6 +8233,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         elevation_click,
         windage_click,
         ref pdf_metadata,
+        ref dsf_table,
     } = *config;
 
     // Mover ring (MBA-1325): a per-point Ring column/field, additive across table/JSON/CSV,
@@ -7916,7 +8441,15 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     }
 
     // Solve trajectory
-    let result = solver.solve()?;
+    let mut result = solver.solve()?;
+
+    // MBA-1357: apply the saved profile's DSF table (if any), IN PLACE, before any output
+    // format below reads `result` — this is a drop-only correction (see apply_dsf's doc
+    // comment for the invariant: velocity/energy/TOF/windage untouched), so it must run
+    // identically ahead of JSON/CSV/Table/PDF rather than only for one format.
+    if let Some(table) = dsf_table.as_ref() {
+        apply_dsf(&mut result, table);
+    }
 
     // MBA-1285: when a custom drag table is in play, warn (best-effort, stderr) if the
     // shot's Mach range runs outside the table's measured domain. The engine already
@@ -8342,6 +8875,14 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                      estimate — Sg shown is not an evaluated stability verdict.",
                     twist_note
                 );
+            }
+
+            // MBA-1357: table-output-only note that a saved profile's DSF table was applied
+            // (the drop above is already corrected). JSON/CSV get no equivalent text or
+            // top-level field — see apply_dsf's call above, which already ran for every
+            // output format; this is purely a display note for the human-facing table.
+            if let Some(table) = dsf_table.as_ref() {
+                println!("DSF table active ({})", dsf_table_summary(table.points()));
             }
 
             // Report termination. A run that ran out the integration time cap
@@ -11168,6 +11709,10 @@ fn run_sampled_trajectory(
     // MBA-1323 Phase 2: see build_trajectory_components's doc comment on these two.
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    // MBA-1357: saved profile's DSF table, already validated by the caller. `None` for
+    // every call site except come-ups (the only sampled-trajectory command with a DSF
+    // auto-apply story so far).
+    dsf_table: Option<&DsfTable>,
 ) -> Result<Vec<trajectory_sampling::TrajectorySample>, Box<dyn Error>> {
     let (mut inputs, wind, atmosphere) = build_trajectory_components(
         velocity,
@@ -11194,7 +11739,26 @@ fn run_sampled_trajectory(
     solver.set_time_step(0.001);
     let result = solver.solve()?;
 
-    Ok(result.sampled_points.unwrap_or_default())
+    let mut samples = result.sampled_points.unwrap_or_default();
+    // MBA-1357: drop-only correction, same convention as apply_dsf — TrajectorySample's
+    // `drop_m` uses the identical `LOS - actual` sign (see sample_trajectory's own doc
+    // comment in trajectory_sampling.rs), so scaling it directly by the DSF factor is
+    // the exact per-point transform apply_dsf performs on a full TrajectoryResult.
+    // Per-point Mach uses the SAME frozen station speed of sound divisor apply_dsf uses
+    // (velocity_mps / station_speed_of_sound_mps), not a per-altitude recompute.
+    if let Some(table) = dsf_table {
+        let station_sos = result.station_speed_of_sound_mps;
+        for s in samples.iter_mut() {
+            let mach = if station_sos > 0.0 {
+                s.velocity_mps / station_sos
+            } else {
+                0.0
+            };
+            s.drop_m *= table.factor_at(mach);
+        }
+    }
+
+    Ok(samples)
 }
 
 /// Resolve bullet parameters: CLI arg overrides profile value
@@ -11312,6 +11876,7 @@ fn handle_mpbr(
             // Phase 2 follow-up) — see CLI_USAGE.md's a7p import section.
             None,
             None,
+            None,
         ) {
             Ok(s) => s,
             Err(_) => {
@@ -11416,6 +11981,7 @@ fn handle_mpbr(
         best_zero_m * 2.0,
         UnitConverter::distance_to_metric(1.0, UnitSystem::Imperial),
         final_zero_angle,
+        None,
         None,
         None,
     )?;
@@ -11611,6 +12177,9 @@ fn handle_come_ups(
     // resolved to engine shapes by the caller. See build_trajectory_components's doc comment.
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    // MBA-1357: saved profile's DSF table, already validated by the caller. `Some` only
+    // when --profile pointed at a profile carrying dsf_points.
+    dsf_table: Option<DsfTable>,
 ) -> Result<(), Box<dyn Error>> {
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
@@ -11680,6 +12249,7 @@ fn handle_come_ups(
         zero_angle,
         bc_segments_data,
         custom_drag_table,
+        dsf_table.as_ref(),
     )?;
 
     // Build output rows at the requested range intervals
@@ -11837,6 +12407,14 @@ fn handle_come_ups(
                 );
             }
             println!("└{ten}┴{drop_dashes}┴{ten}┴{ten}┴{ten}┴{ten}┘");
+
+            // MBA-1357: table-output-only note that a saved profile's DSF table was
+            // applied — the Drop/Come-Up columns above already reflect it (scaled inside
+            // run_sampled_trajectory, for every output format). JSON/CSV get no
+            // equivalent text or top-level field (purity rule).
+            if let Some(table) = dsf_table.as_ref() {
+                println!("DSF table active ({})", dsf_table_summary(table.points()));
+            }
         }
     }
 
@@ -12642,6 +13220,7 @@ fn handle_wind_card(
                 // (MBA-1323 Phase 2 follow-up) — see CLI_USAGE.md's a7p import section.
                 None,
                 None,
+                None,
             )?;
 
             for (ri, &range_display) in ranges.iter().enumerate() {
@@ -13065,6 +13644,7 @@ fn handle_range_table(
         zero_angle,
         None,
         None,
+        None,
     )?;
 
     // Run trajectory WITHOUT wind (for pure drop)
@@ -13084,6 +13664,7 @@ fn handle_range_table(
         end_m * 1.1,
         sample_m,
         zero_angle,
+        None,
         None,
         None,
     )?;
@@ -13448,6 +14029,7 @@ fn handle_compare(
             zero_angle,
             load.bc_segments_data.clone(),
             load.custom_drag_table.clone(),
+            None,
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
         let no_wind_samples = run_sampled_trajectory(
@@ -13468,6 +14050,7 @@ fn handle_compare(
             zero_angle,
             load.bc_segments_data.clone(),
             load.custom_drag_table.clone(),
+            None,
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
 
@@ -13747,6 +14330,7 @@ mod profile_unit_tests {
             windage_click: None,
             bc_segments: None,
             drag_curve: None,
+            dsf_points: None,
         }
     }
 
@@ -14666,5 +15250,167 @@ mod wind_angle_unit_tests {
 
         assert!((inputs.wind_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
         assert_eq!(inputs.wind_angle.to_bits(), wind.direction.to_bits());
+    }
+}
+
+#[cfg(test)]
+mod dsf_cli_tests {
+    use super::*;
+
+    // ---- parse_observed_drop ----
+
+    #[test]
+    fn parse_observed_drop_accepts_all_three_suffixes() {
+        let (v, u) = parse_observed_drop("5.1mil").unwrap();
+        assert!((v - 5.1).abs() < 1e-12);
+        assert_eq!(u, DropUnit::Mil);
+
+        let (v, u) = parse_observed_drop("17.4moa").unwrap();
+        assert!((v - 17.4).abs() < 1e-12);
+        assert_eq!(u, DropUnit::Moa);
+
+        let (v, u) = parse_observed_drop("42.0in").unwrap();
+        assert!((v - 42.0).abs() < 1e-12);
+        assert_eq!(u, DropUnit::In);
+    }
+
+    #[test]
+    fn parse_observed_drop_is_case_insensitive_and_trims_whitespace() {
+        let (v, u) = parse_observed_drop("  5.1MIL  ").unwrap();
+        assert!((v - 5.1).abs() < 1e-12);
+        assert_eq!(u, DropUnit::Mil);
+    }
+
+    #[test]
+    fn parse_observed_drop_rejects_missing_suffix() {
+        let e = parse_observed_drop("5.1").unwrap_err();
+        assert!(e.contains("mil") && e.contains("moa") && e.contains("in"), "{e}");
+    }
+
+    #[test]
+    fn parse_observed_drop_rejects_garbage_number() {
+        for bad in ["mil", "abcmil", "", "5.1.2moa"] {
+            assert!(parse_observed_drop(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn parse_observed_drop_rejects_non_finite() {
+        assert!(parse_observed_drop("nanmil").is_err());
+        assert!(parse_observed_drop("infmoa").is_err());
+    }
+
+    // ---- gate/warning helper texts (unit-testable pure functions) ----
+
+    #[test]
+    fn supersonic_error_text_is_exact() {
+        let msg = dsf_supersonic_error(1.35);
+        assert_eq!(
+            msg,
+            "error: observation is supersonic (Mach 1.35); calibrate muzzle velocity first \
+             (true-velocity), then collect DSF points at Mach <= 1.2"
+        );
+    }
+
+    #[test]
+    fn beyond_90pct_warning_text_is_exact() {
+        let msg = dsf_beyond_90pct_warning(950.0, "yd");
+        assert_eq!(
+            msg,
+            "warning: observation at 950 yd is beyond 90% of the solved range; solution \
+             reliability degrades past this point"
+        );
+    }
+
+    #[test]
+    fn beyond_90pct_warning_text_uses_metric_unit_label() {
+        let msg = dsf_beyond_90pct_warning(500.0, "m");
+        assert_eq!(
+            msg,
+            "warning: observation at 500 m is beyond 90% of the solved range; solution \
+             reliability degrades past this point"
+        );
+    }
+
+    #[test]
+    fn transonic_gap_warning_text_is_exact() {
+        assert_eq!(
+            dsf_transonic_gap_warning(),
+            "warning: no DSF point in the transonic band (Mach 1.2-0.9); transonic drops \
+             remain uncorrected"
+        );
+    }
+
+    // ---- gate boolean logic ----
+
+    #[test]
+    fn observation_beyond_90pct_boundary() {
+        assert!(!dsf_observation_beyond_90pct(899.9, 1000.0));
+        assert!(!dsf_observation_beyond_90pct(900.0, 1000.0)); // exactly 90%: not beyond
+        assert!(dsf_observation_beyond_90pct(900.1, 1000.0));
+        assert!(dsf_observation_beyond_90pct(1000.0, 1000.0));
+        assert!(!dsf_observation_beyond_90pct(500.0, 0.0)); // degenerate solved range
+    }
+
+    #[test]
+    fn transonic_coverage_gate_checks_highest_point_only() {
+        assert!(dsf_table_missing_transonic_coverage(&[]));
+        assert!(dsf_table_missing_transonic_coverage(&[DsfPoint {
+            mach: 0.5,
+            dsf: 1.1
+        }]));
+        assert!(!dsf_table_missing_transonic_coverage(&[
+            DsfPoint { mach: 0.5, dsf: 1.1 },
+            DsfPoint { mach: 0.95, dsf: 1.05 },
+        ]));
+        // Exactly at the 0.9 boundary counts as covered (< 0.9 is the gate, not <=).
+        assert!(!dsf_table_missing_transonic_coverage(&[DsfPoint {
+            mach: 0.9,
+            dsf: 1.0
+        }]));
+    }
+
+    // ---- dsf_table_summary ----
+
+    #[test]
+    fn table_summary_formats_count_and_mach_span() {
+        let points = vec![
+            DsfPoint { mach: 0.6, dsf: 1.1 },
+            DsfPoint { mach: 0.85, dsf: 1.02 },
+        ];
+        assert_eq!(dsf_table_summary(&points), "2 points, Mach 0.60-0.85");
+    }
+
+    // ---- interpolate_position_and_velocity ----
+
+    fn pt(x: f64, y: f64, v: f64) -> ballistics_engine::cli_api::TrajectoryPoint {
+        ballistics_engine::cli_api::TrajectoryPoint {
+            time: 0.0,
+            position: nalgebra::Vector3::new(x, y, 0.0),
+            velocity_magnitude: v,
+            kinetic_energy: 0.0,
+        }
+    }
+
+    #[test]
+    fn interpolates_linearly_between_bracketing_points() {
+        let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
+        let (y, v) = interpolate_position_and_velocity(&points, 50.0).unwrap();
+        assert!((y - 0.75).abs() < 1e-9);
+        assert!((v - 750.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interpolation_returns_none_past_the_last_point() {
+        let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
+        assert!(interpolate_position_and_velocity(&points, 200.0).is_none());
+    }
+
+    #[test]
+    fn interpolation_at_or_before_the_first_point_returns_its_own_values() {
+        let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
+        let (y, v) = interpolate_position_and_velocity(&points, 0.0).unwrap();
+        assert_eq!(y, 1.0);
+        assert_eq!(v, 800.0);
     }
 }
