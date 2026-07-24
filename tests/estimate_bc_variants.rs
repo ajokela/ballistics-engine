@@ -311,3 +311,65 @@ fn cli_estimate_bc_both_models_json() {
     );
     assert!(g1 > g7, "G1 BC ({g1}) should exceed G7 BC ({g7})");
 }
+
+/// 0.28.1 sweep: BC-fit reporting used to label anything past G1/G7 with a generic "G?"
+/// wildcard. `--drag-model` now accepts any single family (MBA-1386 widened `DragModel` to
+/// the full G1/G2/G5/G6/G7/G8/GI/GS/RA4 set), and the report must name the ACTUAL family --
+/// covering an RA4 and a G5 case, both of which used to fall into the wildcard.
+#[test]
+fn cli_estimate_bc_names_the_actual_family_not_a_wildcard() {
+    for model in ["RA4", "G5"] {
+        let out = Command::new(cli())
+            .args([
+                "estimate-bc",
+                "-v",
+                "2650",
+                "-m",
+                "77",
+                "-d",
+                "0.224",
+                "--data",
+                "300,29.0;500,89.9;700,204.6",
+                "--drag-model",
+                model,
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("run estimate-bc");
+        assert!(
+            out.status.success(),
+            "{model}: estimate-bc should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+        let variants = json["variants"].as_array().expect("variants array");
+        assert_eq!(variants.len(), 1, "{model}: a single family should yield one variant");
+        assert_eq!(
+            variants[0]["drag_model"], model,
+            "{model}: must be labeled by its actual family, not a wildcard: {json}"
+        );
+
+        // Table output must show the same name, not "G?".
+        let table_out = Command::new(cli())
+            .args([
+                "estimate-bc",
+                "-v",
+                "2650",
+                "-m",
+                "77",
+                "-d",
+                "0.224",
+                "--data",
+                "300,29.0;500,89.9;700,204.6",
+                "--drag-model",
+                model,
+            ])
+            .output()
+            .expect("run estimate-bc (table)");
+        assert!(table_out.status.success(), "{model}: table run should succeed");
+        let table = String::from_utf8_lossy(&table_out.stdout);
+        assert!(!table.contains("G?"), "{model}: table must not contain the G? wildcard: {table}");
+        assert!(table.contains(model), "{model}: table must name the family: {table}");
+    }
+}

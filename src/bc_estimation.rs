@@ -1,4 +1,37 @@
 use crate::BCSegmentData;
+use std::cell::RefCell;
+
+thread_local! {
+    /// 0.28.1 sweep perf hoist: `transition_boundaries` is pure over `segments`, but is
+    /// otherwise re-derived (sorting the table and allocating both a boundaries `Vec` and a
+    /// sorted-reference `Vec`) on EVERY [`velocity_segment_bc`] call. That function sits in
+    /// the RK4/derivative hot path (`derivatives::get_bc_for_velocity`'s fast path) and is
+    /// called several times per integration step, thousands of times per trajectory, with
+    /// the exact same `segments` table for the whole solve -- MBA-955 already established
+    /// this precedent (pre-populate once, don't rebuild per step) for the sibling BC
+    /// estimation path in this same call chain. Cache the boundaries for the last-seen
+    /// `segments` content per thread and reuse them while unchanged, instead of
+    /// re-sorting/re-allocating on every call. Content (not pointer) keyed, so it stays
+    /// correct even if a `Vec`'s address happens to be reused across distinct solves; a
+    /// changed table (a new trajectory, or Monte Carlo redrawing BC) just recomputes.
+    static BOUNDARY_CACHE: RefCell<Option<CachedBoundaries>> = const { RefCell::new(None) };
+}
+
+/// One thread's memoized boundary set: the `segments` content it was computed from, and the
+/// `(boundary_velocity, margin)` pairs `velocity_segment_bc` blends across.
+type CachedBoundaries = (Vec<BCSegmentData>, Vec<(f64, f64)>);
+
+/// Bit-exact equality for the fields `transition_boundaries` depends on (order-sensitive:
+/// the cache must miss on a reordered table even though `transition_boundaries` internally
+/// sorts, since a differently-ordered `segments` slice is still a different cache key here).
+fn segments_bitwise_eq(a: &[BCSegmentData], b: &[BCSegmentData]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.velocity_min.to_bits() == y.velocity_min.to_bits()
+                && x.velocity_max.to_bits() == y.velocity_max.to_bits()
+                && x.bc_value.to_bits() == y.bc_value.to_bits()
+        })
+}
 
 /// Resolve a velocity-keyed BC table without assuming segment order.
 ///
@@ -26,31 +59,43 @@ pub(crate) fn velocity_segment_bc(
         return raw_velocity_segment_bc(velocity_fps, segments, fallback_bc);
     }
 
-    for (boundary, margin) in transition_boundaries(segments) {
-        if margin <= 0.0 {
-            // Degenerate (zero/negative-width) adjacent band: no blend, keep the hard step.
-            continue;
+    BOUNDARY_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let stale = match &*cache {
+            Some((cached_segments, _)) => !segments_bitwise_eq(cached_segments, segments),
+            None => true,
+        };
+        if stale {
+            *cache = Some((segments.to_vec(), transition_boundaries(segments)));
         }
-        let half = margin / 2.0;
-        let lo_v = boundary - half;
-        let hi_v = boundary + half;
-        if velocity_fps < lo_v || velocity_fps > hi_v {
-            continue;
+        let boundaries = &cache.as_ref().unwrap().1;
+
+        for &(boundary, margin) in boundaries {
+            if margin <= 0.0 {
+                // Degenerate (zero/negative-width) adjacent band: no blend, keep the hard step.
+                continue;
+            }
+            let half = margin / 2.0;
+            let lo_v = boundary - half;
+            let hi_v = boundary + half;
+            if velocity_fps < lo_v || velocity_fps > hi_v {
+                continue;
+            }
+
+            let lo = raw_velocity_segment_bc(lo_v, segments, fallback_bc);
+            let hi = raw_velocity_segment_bc(hi_v, segments, fallback_bc);
+            if lo == hi {
+                // Nothing actually jumps here (e.g. a continuous coverage-clamp edge): stay
+                // flat rather than run smoothstep algebra that would return the same value.
+                return lo;
+            }
+
+            let t = ((velocity_fps - lo_v) / margin).clamp(0.0, 1.0);
+            return lo + smoothstep(t) * (hi - lo);
         }
 
-        let lo = raw_velocity_segment_bc(lo_v, segments, fallback_bc);
-        let hi = raw_velocity_segment_bc(hi_v, segments, fallback_bc);
-        if lo == hi {
-            // Nothing actually jumps here (e.g. a continuous coverage-clamp edge): stay flat
-            // rather than run smoothstep algebra that would return the same value anyway.
-            return lo;
-        }
-
-        let t = ((velocity_fps - lo_v) / margin).clamp(0.0, 1.0);
-        return lo + smoothstep(t) * (hi - lo);
-    }
-
-    raw_velocity_segment_bc(velocity_fps, segments, fallback_bc)
+        raw_velocity_segment_bc(velocity_fps, segments, fallback_bc)
+    })
 }
 
 /// The pre-MBA-1404 step/clamp lookup, unchanged. Also used by [`velocity_segment_bc`] to
@@ -856,6 +901,50 @@ mod tests {
                 velocity_segment_bc(v, &ascending, 0.9),
                 velocity_segment_bc(v, &descending, 0.9),
                 "order must not affect the blended result at v={v}"
+            );
+        }
+    }
+
+    /// 0.28.1 sweep: `velocity_segment_bc` now caches `transition_boundaries` per thread
+    /// (keyed on `segments`' content) instead of rebuilding it every call, since it sits in
+    /// the RK4 derivative hot path and previously reallocated on every single evaluation.
+    /// Interleaving calls against two DIFFERENT tables on the same thread (as a caller
+    /// alternating trajectories, or a Monte Carlo run redrawing BC, would do) must still
+    /// give each table its own byte-identical answer -- proving the cache actually
+    /// invalidates on a table change rather than serving a stale boundary set.
+    #[test]
+    fn cache_gives_each_distinct_table_its_own_byte_identical_answer_when_interleaved() {
+        let table_a = vec![
+            BCSegmentData { velocity_min: 0.0, velocity_max: 1000.0, bc_value: 0.25 },
+            BCSegmentData { velocity_min: 1000.0, velocity_max: 2000.0, bc_value: 0.75 },
+        ];
+        let table_b = vec![
+            BCSegmentData { velocity_min: 0.0, velocity_max: 900.0, bc_value: 0.40 },
+            BCSegmentData { velocity_min: 900.0, velocity_max: 1800.0, bc_value: 0.60 },
+        ];
+
+        // Reference: each table queried in isolation (fresh cache state going in).
+        let probes = [200.0, 975.0, 999.0, 1000.0, 1001.0, 1025.0, 1800.0];
+        let expected_a: Vec<u64> = probes
+            .iter()
+            .map(|&v| velocity_segment_bc(v, &table_a, 0.9).to_bits())
+            .collect();
+        let expected_b: Vec<u64> = probes
+            .iter()
+            .map(|&v| velocity_segment_bc(v, &table_b, 0.9).to_bits())
+            .collect();
+
+        // Now interleave: A, B, A, B, ... forcing a cache invalidation on every call.
+        for (i, &v) in probes.iter().enumerate() {
+            assert_eq!(
+                velocity_segment_bc(v, &table_a, 0.9).to_bits(),
+                expected_a[i],
+                "table A must be unaffected by interleaved table B calls (v={v})"
+            );
+            assert_eq!(
+                velocity_segment_bc(v, &table_b, 0.9).to_bits(),
+                expected_b[i],
+                "table B must be unaffected by interleaved table A calls (v={v})"
             );
         }
     }

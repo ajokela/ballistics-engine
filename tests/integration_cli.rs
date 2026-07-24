@@ -327,6 +327,42 @@ fn bc_tool_help_matches_selected_unit_convention() {
     }
 }
 
+/// 0.28.1 sweep: `generate-bc-segments --drag-model` silently typed any non-G1/G7 family
+/// (RA4/G2/G5/G6/G8/GI/GS) as G1 with no warning -- the one auxiliary G1/G7-coercion call
+/// site `warn_aux_g1_coercion` (MBA-1386) didn't yet cover. A family it actually understands
+/// (G1/G7) must stay silent; a coerced family must warn exactly once and name itself.
+#[test]
+fn generate_bc_segments_warns_once_on_g1_g7_coercion() {
+    let silent = ["G1", "G7"];
+    for model in silent {
+        let output = Command::new(get_cli_binary())
+            .args(["generate-bc-segments", "-b", "0.475", "-m", "168", "-d", "0.308", "--drag-model", model])
+            .output()
+            .expect("Failed to execute command");
+        assert!(output.status.success(), "{model}: {}", String::from_utf8_lossy(&output.stderr));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("supports G1/G7 only"), "{model} must not warn: {stderr}");
+    }
+
+    for (model, expected_name) in [("G5", "G5"), ("RA4", "RA4"), ("GI", "GI")] {
+        let output = Command::new(get_cli_binary())
+            .args(["generate-bc-segments", "-b", "0.475", "-m", "168", "-d", "0.308", "--drag-model", model])
+            .output()
+            .expect("Failed to execute command");
+        assert!(output.status.success(), "{model}: {}", String::from_utf8_lossy(&output.stderr));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = format!(
+            "warning: generate-bc-segments supports G1/G7 only; treating drag model '{expected_name}' as G1"
+        );
+        assert_eq!(
+            stderr.matches("supports G1/G7 only").count(),
+            1,
+            "{model} must warn exactly once: {stderr}"
+        );
+        assert!(stderr.contains(&expected), "{model}: {stderr}");
+    }
+}
+
 #[test]
 fn test_cli_invalid_command() {
     let output = Command::new(get_cli_binary())

@@ -1545,11 +1545,14 @@ Impact Velocity: 2510 fps\n";
     // MBA-1356: `--cd-scale <FACTOR>` — whole-curve drag scale for a loaded custom drag table.
     // WASM parity with the native CLI's `--cd-scale` on trajectory/zero/monte-carlo: same
     // pairing requirement with a loaded table (Err(JsValue) here instead of exit(1)), same
-    // out-of-range nudge text, prepended table-only.
+    // out-of-range nudge text, prepended table-only. 0.28.1 sweep: unlike native (whose
+    // `trajectory` has a `--bc-adjustment` flag to suggest), the WASM terminal has no
+    // `--bc-adjustment` flag on ANY surface, so its pairing text never suggests one.
     // -----------------------------------------------------------------------------
 
-    /// Without a loaded drag table, `--cd-scale` must be rejected before any solve, naming the
-    /// same pairing requirement text as the native CLI (MBA-1356 spec).
+    /// Without a loaded drag table, `--cd-scale` must be rejected before any solve. Unlike
+    /// native's `trajectory` pairing error, this never suggests `--bc-adjustment` -- the
+    /// WASM terminal has no such flag on any surface (0.28.1 sweep).
     #[wasm_bindgen_test]
     fn cd_scale_without_a_loaded_drag_table_errors_on_every_command() {
         for command in [
@@ -1561,7 +1564,7 @@ Impact Velocity: 2510 fps\n";
             let msg = err.as_string().unwrap_or_default();
             assert_eq!(
                 msg,
-                "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)",
+                "--cd-scale requires --drag-table",
                 "command: {command}"
             );
         }
@@ -1578,10 +1581,7 @@ Impact Velocity: 2510 fps\n";
             )
             .unwrap_err();
         let msg = err.as_string().unwrap_or_default();
-        assert_eq!(
-            msg,
-            "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)"
-        );
+        assert_eq!(msg, "--cd-scale requires --drag-table");
     }
 
     /// With a table loaded, `--cd-scale` is accepted and actually shifts trajectory output
@@ -2183,4 +2183,116 @@ Impact Velocity: 2510 fps\n";
     // longer exists (every family has a real table, so there is nothing left to gate),
     // so the test is deleted rather than adapted — there is no fallback note in any
     // output mode to assert absent.
+
+    /// Serialize a minimal single-cell BC5D table into the v2 `.bin` byte layout so the
+    /// coercion-warning tests below can exercise `loadBc5dTable` without an external file.
+    /// Mirrors `bc_table_5d.rs`'s own (private-to-its-module) `serialize_test_table` test
+    /// helper — duplicated here rather than shared since that one lives inside a `mod tests`
+    /// this file cannot reach.
+    fn synthetic_bc5d_bytes(correction: f32) -> Vec<u8> {
+        let weight_bins = [168.0f32];
+        let bc_bins = [0.4f32];
+        let muzzle_vel_bins = [2500.0f32];
+        let current_vel_bins = [2000.0f32];
+        let data = [correction];
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"BC5D");
+        out.extend_from_slice(&2u32.to_le_bytes()); // version
+        out.extend_from_slice(&0.308f32.to_le_bytes()); // caliber
+        out.extend_from_slice(&0u32.to_le_bytes()); // flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // padding
+        out.extend_from_slice(&(weight_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(bc_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(muzzle_vel_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(current_vel_bins.len() as u32).to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes()); // num_drag_types
+        out.extend_from_slice(&0u64.to_le_bytes()); // timestamp
+
+        let mut checksum_data = Vec::new();
+        for v in weight_bins
+            .iter()
+            .chain(&bc_bins)
+            .chain(&muzzle_vel_bins)
+            .chain(&current_vel_bins)
+            .chain(&data)
+        {
+            checksum_data.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&crate::bc_table_5d::crc32_ieee(&checksum_data).to_le_bytes());
+
+        let mut api = [0u8; 16];
+        api[..4].copy_from_slice(b"test");
+        out.extend_from_slice(&api);
+        out.extend_from_slice(&[0u8; 12]); // reserved
+
+        for v in weight_bins
+            .iter()
+            .chain(&bc_bins)
+            .chain(&muzzle_vel_bins)
+            .chain(&current_vel_bins)
+            .chain(&data)
+        {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    /// 0.28.1 sweep: the BC5D G1/G7-coercion warning (MBA-1386, bcdd213) was only carried
+    /// by the `Ok` arm of `match solver.solve()` in `handle_trajectory_command`; a solve
+    /// that succeeds must show it in the table (and never in JSON/CSV).
+    #[wasm_bindgen_test]
+    fn bc5d_coercion_warning_survives_a_successful_solve() {
+        let wasm = WasmBallistics::new();
+        wasm.load_bc5d_table(&synthetic_bc5d_bytes(0.9)).unwrap();
+        let table = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --use-bc-segments \
+                 --max-range 300",
+            )
+            .unwrap();
+        assert!(
+            table.contains("BC5D correction tables support G1/G7 only"),
+            "{table}"
+        );
+        assert!(table.contains("treating drag model 'G5' as G1"), "{table}");
+
+        let json = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --use-bc-segments \
+                 --max-range 300 -o json",
+            )
+            .unwrap();
+        assert!(!json.contains("BC5D correction tables"), "{json}");
+    }
+
+    /// The same warning must survive the `Err` arm too: a solve that fails (here, an
+    /// invalid `--bc` rejected by `validate_for_solve`) still computed the coercion warning
+    /// up front, but the `Err` arm was dropping it on the floor instead of carrying it like
+    /// the `Ok` arm does. Table-only, same as every warning in this formatter.
+    #[wasm_bindgen_test]
+    fn bc5d_coercion_warning_survives_a_failed_solve() {
+        let wasm = WasmBallistics::new();
+        wasm.load_bc5d_table(&synthetic_bc5d_bytes(0.9)).unwrap();
+        let table = wasm
+            .run_command(
+                "trajectory -v 2700 -b -1 -m 168 -d 0.308 --drag-model g5 --use-bc-segments \
+                 --max-range 300",
+            )
+            .unwrap();
+        assert!(
+            table.contains("BC5D correction tables support G1/G7 only"),
+            "{table}"
+        );
+        assert!(table.contains("Error:"), "{table}");
+
+        let json = wasm
+            .run_command(
+                "trajectory -v 2700 -b -1 -m 168 -d 0.308 --drag-model g5 --use-bc-segments \
+                 --max-range 300 -o json",
+            )
+            .unwrap();
+        assert!(!json.contains("BC5D correction tables"), "{json}");
+        assert!(json.contains("Error:"), "{json}");
+    }
 }
