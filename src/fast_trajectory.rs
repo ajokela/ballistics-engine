@@ -1580,6 +1580,10 @@ mod tests {
             },
         ];
 
+        // MBA-1404: every one of these query points is >25 fps (half the 50 fps-capped
+        // margin on all three 1000 fps-wide bands) away from the nearest boundary/coverage
+        // edge, so none of them fall inside a smoothstep blend window -- values are
+        // unchanged from the pre-MBA-1404 step behavior.
         assert_eq!(velocity_segment_bc(500.0, &segments, 0.5), 0.5);
         assert_eq!(velocity_segment_bc(1500.0, &segments, 0.5), 0.52);
         assert_eq!(velocity_segment_bc(2500.0, &segments, 0.5), 0.55);
@@ -1645,6 +1649,8 @@ mod tests {
     #[test]
     fn test_bc_segments_boundary_conditions() {
         // Test with single segment
+        // MBA-1404: a single-segment table has no adjacent band to blend against, so this
+        // stays byte-identical to the pre-MBA-1404 step/clamp lookup everywhere.
         let single_segment = vec![BCSegmentData {
             velocity_min: 1000.0,
             velocity_max: 2000.0,
@@ -1657,6 +1663,7 @@ mod tests {
 
         // Test with exact boundary values
         // Half-open bands make a shared boundary belong to the band that starts there.
+        // A ends at 999, B starts at 1000: a 1 fps interior gap falls back to bc=0.7.
         let segments = vec![
             BCSegmentData {
                 velocity_min: 0.0,
@@ -1670,10 +1677,24 @@ mod tests {
             },
         ];
 
-        assert_eq!(velocity_segment_bc(1000.0, &segments, 0.7), 0.50); // At second segment start
-        assert_eq!(velocity_segment_bc(0.0, &segments, 0.7), 0.45); // At min
-        assert_eq!(velocity_segment_bc(998.999, &segments, 0.7), 0.45); // Just below exclusive max
-        assert_eq!(velocity_segment_bc(999.0, &segments, 0.7), 0.7); // Gap starts at exclusive max
+        // MBA-1404: the 1 fps gap caps both of its edges' margins to
+        // min(50, 0.25*1) = 0.25 fps (half-margin 0.125 fps either side of 999 and 1000).
+        // v=1000.0 is now the gap-entry boundary's exact center (t=0.5): it blends halfway
+        // between the gap's fallback (0.7) and band B (0.50) instead of hard-stepping to
+        // band B alone. This is a deliberate, exact-value update -- not a loosened
+        // tolerance -- and would fail against the old step behavior (0.50).
+        assert_eq!(velocity_segment_bc(1000.0, &segments, 0.7), 0.6); // At second segment start (blended)
+        // v=0.0 is the coverage-entry boundary's center, but that edge is a no-op blend:
+        // the clamp below band A returns the same value band A itself would, so this stays
+        // exactly flat and is unchanged from before MBA-1404.
+        assert_eq!(velocity_segment_bc(0.0, &segments, 0.7), 0.45); // At min (coverage edge: still flat, no jump to smooth)
+        // v=998.999 is inside the gap-exit boundary's [998.875, 999.125] margin window
+        // (t=0.496), partway through the smoothstep blend from band A (0.45) toward the
+        // gap's fallback (0.7).
+        assert_eq!(velocity_segment_bc(998.999, &segments, 0.7), 0.5735000320000354); // Just below exclusive max (blending toward the gap)
+        // v=999.0 is the gap-exit boundary's exact center (t=0.5): halfway between band A
+        // (0.45) and the fallback (0.7), not the old hard fallback value (0.7) alone.
+        assert_eq!(velocity_segment_bc(999.0, &segments, 0.7), 0.575); // Gap starts at exclusive max (blended)
     }
 
     #[test]
@@ -1691,6 +1712,9 @@ mod tests {
                 bc_value: 0.8,
             },
         ];
+        // MBA-1404: v=999.5 is dead center of the 1 fps gap, 0.5 fps from each edge --
+        // comfortably outside either edge's +/-0.125 fps blend margin (min(50, 0.25*1)) --
+        // so this stays exactly the fallback, unchanged from before MBA-1404.
         assert_eq!(
             velocity_segment_bc(999.5, &ascending_with_gap, fallback_bc),
             fallback_bc,
@@ -1699,6 +1723,8 @@ mod tests {
 
         let mut descending = ascending_with_gap.clone();
         descending.reverse();
+        // MBA-1404: -100/2500 are far outside the +/-25 fps coverage-entry/exit margins
+        // (min(50, 0.25*999) and min(50, 0.25*1000)), so these clamps are unchanged too.
         assert_eq!(
             velocity_segment_bc(-100.0, &descending, fallback_bc),
             0.6,
@@ -1715,6 +1741,8 @@ mod tests {
     fn test_bc_segments_empty_fallback() {
         let empty_segments: Vec<BCSegmentData> = vec![];
 
+        // MBA-1404: an empty table has no adjacent bands to blend against, so this stays
+        // byte-identical to the pre-MBA-1404 behavior (always the fallback).
         // With empty segments, should return fallback value
         let result = velocity_segment_bc(1500.0, &empty_segments, 0.73);
         assert_eq!(result, 0.73); // Caller-provided fallback value

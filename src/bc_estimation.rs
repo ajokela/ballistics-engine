@@ -5,11 +5,57 @@ use crate::BCSegmentData;
 /// Bands are half-open (`velocity_min <= v < velocity_max`), so a shared boundary belongs to
 /// the upper band. Below/above global coverage, clamp to the lowest/highest-velocity band;
 /// an interior coverage gap or empty table uses the caller's projectile-specific scalar BC.
+///
+/// MBA-1404: away from a transition this is byte-identical to the original step/clamp
+/// lookup (see [`raw_velocity_segment_bc`], preserved verbatim). Near every discontinuity
+/// class the raw lookup can produce -- an interior band-to-band boundary, either edge of an
+/// interior band-to-fallback gap, or a global coverage entry/exit edge (below the lowest
+/// band's `velocity_min`, above the highest band's `velocity_max`) -- this instead blends
+/// across a small velocity margin centered on the boundary with a Hermite smoothstep
+/// (`3t^2 - 2t^3`), so an integrator sampling BC every step does not see an instantaneous
+/// drag-coefficient jolt exactly at a band edge. Tables with fewer than two segments have no
+/// adjacent band to blend against and return the raw value unchanged.
 pub(crate) fn velocity_segment_bc(
     velocity_fps: f64,
     segments: &[BCSegmentData],
     fallback_bc: f64,
 ) -> f64 {
+    if segments.len() < 2 {
+        // No adjacent band to blend against: single-band and empty tables stay exactly the
+        // pre-MBA-1404 behavior.
+        return raw_velocity_segment_bc(velocity_fps, segments, fallback_bc);
+    }
+
+    for (boundary, margin) in transition_boundaries(segments) {
+        if margin <= 0.0 {
+            // Degenerate (zero/negative-width) adjacent band: no blend, keep the hard step.
+            continue;
+        }
+        let half = margin / 2.0;
+        let lo_v = boundary - half;
+        let hi_v = boundary + half;
+        if velocity_fps < lo_v || velocity_fps > hi_v {
+            continue;
+        }
+
+        let lo = raw_velocity_segment_bc(lo_v, segments, fallback_bc);
+        let hi = raw_velocity_segment_bc(hi_v, segments, fallback_bc);
+        if lo == hi {
+            // Nothing actually jumps here (e.g. a continuous coverage-clamp edge): stay flat
+            // rather than run smoothstep algebra that would return the same value anyway.
+            return lo;
+        }
+
+        let t = ((velocity_fps - lo_v) / margin).clamp(0.0, 1.0);
+        return lo + smoothstep(t) * (hi - lo);
+    }
+
+    raw_velocity_segment_bc(velocity_fps, segments, fallback_bc)
+}
+
+/// The pre-MBA-1404 step/clamp lookup, unchanged. Also used by [`velocity_segment_bc`] to
+/// sample the value on each side of a boundary when building a blend.
+fn raw_velocity_segment_bc(velocity_fps: f64, segments: &[BCSegmentData], fallback_bc: f64) -> f64 {
     if let Some(segment) = segments.iter().find(|segment| {
         velocity_fps >= segment.velocity_min && velocity_fps < segment.velocity_max
     }) {
@@ -35,6 +81,82 @@ pub(crate) fn velocity_segment_bc(
     }
 
     fallback_bc
+}
+
+/// Every velocity at which [`raw_velocity_segment_bc`] can jump, paired with the margin to
+/// blend across (`0.0` means "no blend": a degenerate/zero-width adjacent band). Order of
+/// `segments` does not matter -- the boundaries are derived from a `velocity_min`-sorted
+/// copy, so ascending- and descending-stored tables produce identical boundaries.
+///
+/// Discontinuity classes (see `velocity_segment_bc`'s doc comment): interior band-to-band
+/// boundaries, the two edges of every interior band-to-fallback gap, and the two global
+/// coverage entry/exit edges.
+fn transition_boundaries(segments: &[BCSegmentData]) -> Vec<(f64, f64)> {
+    let width = |s: &BCSegmentData| (s.velocity_max - s.velocity_min).max(0.0);
+
+    let mut sorted: Vec<&BCSegmentData> = segments.iter().collect();
+    sorted.sort_by(|a, b| a.velocity_min.total_cmp(&b.velocity_min));
+
+    let mut boundaries = Vec::with_capacity(sorted.len() * 2 + 2);
+
+    // Coverage entry: below the lowest-velocity_min band. The clamp region above has no
+    // finite width, so the margin is driven entirely by the lowest band's own width.
+    if let Some(first) = sorted.first() {
+        boundaries.push((first.velocity_min, smoothing_margin(width(first))));
+    }
+    // Coverage exit: above the highest-velocity_max band. Mirrors raw()'s own "highest"
+    // selection (max by `velocity_max`), which need not be `sorted.last()` for a
+    // malformed/overlapping table.
+    if let Some(highest) = segments
+        .iter()
+        .max_by(|a, b| a.velocity_max.total_cmp(&b.velocity_max))
+    {
+        boundaries.push((highest.velocity_max, smoothing_margin(width(highest))));
+    }
+
+    for pair in sorted.windows(2) {
+        let (left, right) = (pair[0], pair[1]);
+        if right.velocity_min > left.velocity_max {
+            // Interior band-to-fallback gap: two edges, each capped by the gap's own width
+            // in addition to its bordering band's width, so a narrow gap never lets the
+            // blend eat into the band on the far side of it.
+            let gap_width = right.velocity_min - left.velocity_max;
+            boundaries.push((
+                left.velocity_max,
+                smoothing_margin(width(left).min(gap_width)),
+            ));
+            boundaries.push((
+                right.velocity_min,
+                smoothing_margin(gap_width.min(width(right))),
+            ));
+        } else if right.velocity_min == left.velocity_max {
+            // Contiguous band-to-band boundary.
+            boundaries.push((
+                left.velocity_max,
+                smoothing_margin(width(left).min(width(right))),
+            ));
+        }
+        // Overlapping bands (right.velocity_min < left.velocity_max) are already an
+        // ambiguous shape for raw()'s first-match lookup and aren't produced by any current
+        // caller; MBA-1404 does not add blending for that out-of-scope configuration.
+    }
+
+    boundaries
+}
+
+/// `min(50.0 fps, 0.25 * narrower_adjacent_width)`; `0.0` (no blend) for a zero/negative
+/// width, which is how a degenerate adjacent band disables blending at its boundaries.
+fn smoothing_margin(narrower_adjacent_width: f64) -> f64 {
+    if narrower_adjacent_width <= 0.0 {
+        return 0.0;
+    }
+    (0.25 * narrower_adjacent_width).min(50.0)
+}
+
+/// Hermite smoothstep, `3t^2 - 2t^3`, clamped to `[0, 1]`.
+fn smoothstep(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Bullet type classification based on model name
@@ -632,5 +754,243 @@ mod tests {
             ),
             BulletType::Unknown
         );
+    }
+
+    // MBA-1404: smoothstep continuity battery for `velocity_segment_bc`. Bands used here
+    // pick bc_values that are exact binary fractions (0.25/0.5/0.75/etc.) wherever a test
+    // hand-derives the blended midpoint, so assertions can use `assert_eq!` rather than an
+    // epsilon tolerance.
+
+    #[test]
+    fn margin_caps_at_50_fps_for_wide_adjacent_bands() {
+        // 0.25 * 1000 = 250, well above the 50 fps cap.
+        assert_eq!(smoothing_margin(1000.0), 50.0);
+        assert_eq!(smoothing_margin(200.0), 50.0); // 0.25*200 == 50, right at the cap edge
+    }
+
+    #[test]
+    fn margin_uses_25_percent_rule_for_narrow_adjacent_bands() {
+        // 0.25 * 40 = 10, under the 50 fps cap, so the 25% rule governs.
+        assert_eq!(smoothing_margin(40.0), 10.0);
+        assert_eq!(smoothing_margin(4.0), 1.0);
+    }
+
+    #[test]
+    fn margin_is_zero_for_degenerate_widths() {
+        assert_eq!(smoothing_margin(0.0), 0.0);
+        assert_eq!(smoothing_margin(-5.0), 0.0); // defensive: malformed negative width
+    }
+
+    #[test]
+    fn smoothstep_is_centered_and_matches_hermite_formula() {
+        assert_eq!(smoothstep(0.0), 0.0);
+        assert_eq!(smoothstep(1.0), 1.0);
+        assert_eq!(smoothstep(0.5), 0.5); // 3*0.25 - 2*0.125 = 0.75 - 0.25 = 0.5
+        // Out-of-range t is clamped rather than extrapolated.
+        assert_eq!(smoothstep(-1.0), 0.0);
+        assert_eq!(smoothstep(2.0), 1.0);
+    }
+
+    #[test]
+    fn ascending_band_boundary_blends_symmetrically_around_the_boundary() {
+        // Two contiguous 1000 fps-wide bands: margin = min(50, 0.25*1000) = 50, half = 25.
+        let segments = vec![
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 1000.0,
+                bc_value: 0.25,
+            },
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.75,
+            },
+        ];
+
+        // Deep mid-band: exactly flat, bit-identical to the plain band value.
+        assert_eq!(velocity_segment_bc(200.0, &segments, 0.9).to_bits(), 0.25f64.to_bits());
+        assert_eq!(velocity_segment_bc(1800.0, &segments, 0.9).to_bits(), 0.75f64.to_bits());
+
+        // Exactly at the boundary (t = 0.5): the midpoint of the two band values.
+        assert_eq!(velocity_segment_bc(1000.0, &segments, 0.9), 0.5);
+
+        // At the low edge of the margin window (t = 0): matches the lower band exactly.
+        assert_eq!(
+            velocity_segment_bc(975.0, &segments, 0.9).to_bits(),
+            0.25f64.to_bits()
+        );
+        // At the high edge of the margin window (t = 1): matches the upper band exactly.
+        assert_eq!(
+            velocity_segment_bc(1025.0, &segments, 0.9).to_bits(),
+            0.75f64.to_bits()
+        );
+
+        // Strictly inside the window: strictly between the two band values (monotonic).
+        let just_below = velocity_segment_bc(999.0, &segments, 0.9);
+        let just_above = velocity_segment_bc(1001.0, &segments, 0.9);
+        assert!(just_below > 0.25 && just_below < 0.5);
+        assert!(just_above > 0.5 && just_above < 0.75);
+    }
+
+    #[test]
+    fn descending_stored_order_matches_ascending_boundary_blend() {
+        // Same table as above, stored high-to-low: the helper's semantics are documented as
+        // order-independent, and MBA-1404 must not break that for the new blend either.
+        let ascending = vec![
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 1000.0,
+                bc_value: 0.25,
+            },
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.75,
+            },
+        ];
+        let mut descending = ascending.clone();
+        descending.reverse();
+
+        for v in [200.0, 975.0, 999.0, 1000.0, 1001.0, 1025.0, 1800.0] {
+            assert_eq!(
+                velocity_segment_bc(v, &ascending, 0.9),
+                velocity_segment_bc(v, &descending, 0.9),
+                "order must not affect the blended result at v={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn gapped_table_blends_both_edges_of_the_fallback_gap_and_stays_flat_mid_gap() {
+        // Band widths 1000 each; gap from 1000 to 1200 (width 200). Exit-edge margin =
+        // min(50, 0.25*min(1000,200)) = 50; entry-edge margin = min(50, 0.25*min(200,1000)) = 50.
+        let segments = vec![
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 1000.0,
+                bc_value: 0.25,
+            },
+            BCSegmentData {
+                velocity_min: 1200.0,
+                velocity_max: 2200.0,
+                bc_value: 0.75,
+            },
+        ];
+        let fallback = 0.5; // exact binary fraction: keeps the blend math exact here too.
+
+        // Deep mid-gap: exactly the fallback, untouched by either edge's margin.
+        assert_eq!(
+            velocity_segment_bc(1100.0, &segments, fallback).to_bits(),
+            fallback.to_bits()
+        );
+
+        // Exit edge (band -> gap) at v=1000: t=0.5 blend between the band value and fallback.
+        assert_eq!(velocity_segment_bc(1000.0, &segments, fallback), 0.375); // (0.25+0.5)/2
+
+        // Entry edge (gap -> band) at v=1200: t=0.5 blend between fallback and the band value.
+        assert_eq!(velocity_segment_bc(1200.0, &segments, fallback), 0.625); // (0.5+0.75)/2
+
+        // Just outside each margin window: exactly flat again.
+        assert_eq!(
+            velocity_segment_bc(974.0, &segments, fallback).to_bits(),
+            0.25f64.to_bits()
+        );
+        assert_eq!(
+            velocity_segment_bc(1226.0, &segments, fallback).to_bits(),
+            0.75f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn single_segment_table_never_blends_and_is_byte_identical_to_the_raw_lookup() {
+        let single = vec![BCSegmentData {
+            velocity_min: 1000.0,
+            velocity_max: 2000.0,
+            bc_value: 0.5,
+        }];
+
+        for v in [-1e6, 500.0, 1000.0, 1500.0, 1999.999, 2000.0, 1e6] {
+            assert_eq!(
+                velocity_segment_bc(v, &single, 0.9).to_bits(),
+                raw_velocity_segment_bc(v, &single, 0.9).to_bits(),
+                "single-band tables must never blend (v={v})"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_table_never_blends_and_always_returns_the_fallback_exactly() {
+        let empty: Vec<BCSegmentData> = vec![];
+        for v in [-1e6, 0.0, 500.0, 1e6] {
+            assert_eq!(velocity_segment_bc(v, &empty, 0.73).to_bits(), 0.73f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn zero_width_adjacent_band_disables_blending_at_its_boundaries() {
+        // The middle "band" is degenerate (velocity_min == velocity_max), so it can never be
+        // matched directly, but it still touches both of its neighbors' boundaries -- both of
+        // those boundaries must fall back to the hard step (margin 0), matching the pre-MBA-1404
+        // raw lookup exactly, rather than average toward the unmatchable degenerate value.
+        let segments = vec![
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 1000.0,
+                bc_value: 0.5,
+            },
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 1000.0,
+                bc_value: 0.9,
+            },
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.6,
+            },
+        ];
+
+        for v in [999.0, 999.99, 1000.0, 1000.01, 1001.0] {
+            assert_eq!(
+                velocity_segment_bc(v, &segments, 0.99).to_bits(),
+                raw_velocity_segment_bc(v, &segments, 0.99).to_bits(),
+                "a degenerate adjacent band must disable blending, not average toward it (v={v})"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_entry_and_exit_edges_stay_flat_since_the_clamp_matches_the_bordering_band() {
+        // Below the lowest band and above the highest band, the raw lookup clamps to that
+        // same band's own value, so the "coverage entry/exit" boundary is a no-op blend
+        // (lo == hi): it must be exactly flat, not just close, all the way up to (and past)
+        // the boundary's own margin window.
+        let segments = vec![
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.25,
+            },
+            BCSegmentData {
+                velocity_min: 2000.0,
+                velocity_max: 3000.0,
+                bc_value: 0.75,
+            },
+        ];
+
+        for v in [-1e6, -100.0, 999.0, 1000.0, 1001.0] {
+            assert_eq!(
+                velocity_segment_bc(v, &segments, 0.5).to_bits(),
+                0.25f64.to_bits(),
+                "below-coverage clamp must stay exactly flat (v={v})"
+            );
+        }
+        for v in [2999.0, 3000.0, 3001.0, 1e6] {
+            assert_eq!(
+                velocity_segment_bc(v, &segments, 0.5).to_bits(),
+                0.75f64.to_bits(),
+                "above-coverage clamp must stay exactly flat (v={v})"
+            );
+        }
     }
 }
