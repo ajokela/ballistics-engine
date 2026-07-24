@@ -704,6 +704,23 @@ pub struct TrajectorySolver {
     atmo_sock: Option<crate::atmosphere::AtmoSock>,
 }
 
+/// Which frame a zero solve's `target_height_m` lives in (MBA-1412).
+///
+/// `SightLine`: the classic zero contract — the height is sight geometry (typically the sight
+/// height) and the rifle zeroes LEVEL, per the MBA-1286 doctrine that a zero is a property of a
+/// level rifle; `shooting_angle` applies to the subsequent shot only. Used by
+/// `calculate_zero_angle_with_conditions` and every legacy surface behind it (bindings, WASM,
+/// FFI, CLI).
+///
+/// `WorldVertical`: solve-json v1's documented contract (docs/SOLVE_JSON_V1.md) — the height is
+/// an absolute world-vertical height above the ground datum; inclined zeroing projects the
+/// shot-frame trajectory into the world frame (MBA-1302 behavior, unchanged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ZeroTargetFrame {
+    SightLine,
+    WorldVertical,
+}
+
 impl TrajectorySolver {
     pub fn new(
         inputs: BallisticInputs,
@@ -807,8 +824,9 @@ impl TrajectorySolver {
         &mut self,
         target_distance_m: f64,
         target_height_m: f64,
+        frame: ZeroTargetFrame,
     ) -> Result<f64, BallisticsError> {
-        let angle = self.find_zero_angle(target_distance_m, target_height_m)?;
+        let angle = self.find_zero_angle(target_distance_m, target_height_m, frame)?;
         self.inputs.muzzle_angle = angle;
         Ok(angle)
     }
@@ -817,6 +835,7 @@ impl TrajectorySolver {
         &self,
         target_distance_m: f64,
         target_height_m: f64,
+        frame: ZeroTargetFrame,
     ) -> Result<f64, BallisticsError> {
         // Binary search for the angle that hits the target. Use only positive angles to ensure a
         // proper upward ballistic arc.
@@ -826,8 +845,8 @@ impl TrajectorySolver {
         let max_iterations = 60;
 
         // MBA-194: validate the initial bracket before starting the binary search.
-        let low_height = self.zero_trial_height_at(low_angle, target_distance_m)?;
-        let high_height = self.zero_trial_height_at(high_angle, target_distance_m)?;
+        let low_height = self.zero_trial_height_at(low_angle, target_distance_m, frame)?;
+        let high_height = self.zero_trial_height_at(high_angle, target_distance_m, frame)?;
 
         match (low_height, high_height) {
             (Some(low_height), Some(high_height)) => {
@@ -843,7 +862,7 @@ impl TrajectorySolver {
                     for multiplier in [2.0, 3.0, 4.0] {
                         let new_high = (high_angle * multiplier).min(0.785);
                         if let Ok(Some(height)) =
-                            self.zero_trial_height_at(new_high, target_distance_m)
+                            self.zero_trial_height_at(new_high, target_distance_m, frame)
                         {
                             if height - target_height_m > 0.0 {
                                 high_angle = new_high;
@@ -880,7 +899,7 @@ impl TrajectorySolver {
 
         for _ in 0..max_iterations {
             let mid_angle = (low_angle + high_angle) / 2.0;
-            match self.zero_trial_height_at(mid_angle, target_distance_m)? {
+            match self.zero_trial_height_at(mid_angle, target_distance_m, frame)? {
                 Some(height) => {
                     let error = height - target_height_m;
                     // MBA-193: height accuracy is the primary convergence criterion. At 0.1 mm,
@@ -922,6 +941,7 @@ impl TrajectorySolver {
         &self,
         angle_rad: f64,
         target_distance_m: f64,
+        frame: ZeroTargetFrame,
     ) -> Result<Option<f64>, BallisticsError> {
         let mut trial = self.clone();
         trial.inputs.muzzle_angle = angle_rad;
@@ -931,6 +951,15 @@ impl TrajectorySolver {
         // MBA-1286: a zero is a property of a level rifle's sight geometry. Cant is applied only
         // to the subsequent shot.
         trial.inputs.cant_angle = 0.0;
+        // MBA-1412: in the SightLine contract the incline is likewise a shot-time condition,
+        // not sight geometry. MBA-1302 left it in the trial while shot_frame_altitude lifted
+        // heights into the gravity frame, adding d*sin(shooting_angle) (~9 m at 5.71 deg /
+        // 100 yd) against a sight-frame target height, so no inclined legacy caller could
+        // bracket. Zero level; shoot inclined. solve-json v1's WorldVertical contract keeps
+        // the MBA-1302 projection (its callers supply world-frame heights).
+        if frame == ZeroTargetFrame::SightLine {
+            trial.inputs.shooting_angle = 0.0;
+        }
         trial.set_max_range(target_distance_m * 2.0);
         let result = trial.solve()?;
 
@@ -3456,7 +3485,7 @@ pub fn calculate_zero_angle_with_conditions(
     atmosphere: AtmosphericConditions,
 ) -> Result<f64, BallisticsError> {
     let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
-    solver.calculate_and_set_zero_angle(target_distance, target_height)
+    solver.calculate_and_set_zero_angle(target_distance, target_height, ZeroTargetFrame::SightLine)
 }
 
 /// What a BC estimate is fit against.
@@ -3870,6 +3899,42 @@ mod mba1302_solver_seam_tests {
     }
 
     #[test]
+    fn inclined_shot_zeroes_like_a_level_rifle() {
+        // MBA-1412: since MBA-1302, zero_trial_height_at converted trial heights into the
+        // gravity frame (shot_frame_altitude adds d*sin(shooting_angle) ~ 9 m at 5.71deg /
+        // 100 yd) while find_zero_angle compared against a sight-frame target height, so ANY
+        // inclined shot failed to bracket. A zero is a property of a level rifle's sight
+        // geometry (same doctrine as MBA-1286's cant handling): the trial must solve level.
+        const ZERO_DISTANCE_M: f64 = 91.44; // 100 yd
+        const SIGHT_HEIGHT_M: f64 = 0.0381; // 1.5 in
+
+        let mut inputs = BallisticInputs::default();
+        inputs.bc_value = 0.5;
+        inputs.bullet_mass = 150.0 * 0.06479891 / 1000.0;
+        inputs.muzzle_velocity = 2700.0 * 0.3048;
+        inputs.sight_height = SIGHT_HEIGHT_M;
+
+        let mut level = inputs.clone();
+        level.shooting_angle = 0.0;
+        let level_angle = TrajectorySolver::new(level, Default::default(), Default::default())
+            .find_zero_angle(ZERO_DISTANCE_M, SIGHT_HEIGHT_M, ZeroTargetFrame::SightLine)
+            .expect("level zero must solve");
+
+        let mut inclined = inputs;
+        inclined.shooting_angle = 5.71_f64.to_radians();
+        let inclined_angle =
+            TrajectorySolver::new(inclined, Default::default(), Default::default())
+                .find_zero_angle(ZERO_DISTANCE_M, SIGHT_HEIGHT_M, ZeroTargetFrame::SightLine)
+                .expect("MBA-1412: a 5.71 deg incline at a 100 yd zero must be solvable");
+
+        assert!(
+            (inclined_angle - level_angle).abs() < 1e-9,
+            "zeroing is level-rifle sight geometry; incline must not move the solved zero: \
+             level={level_angle}, inclined={inclined_angle}"
+        );
+    }
+
+    #[test]
     fn configured_zero_keeps_segments_method_and_time_step_then_sets_base_angle() {
         const TARGET_DISTANCE_M: f64 = 150.0;
         const TARGET_HEIGHT_M: f64 = 0.05;
@@ -3878,13 +3943,13 @@ mod mba1302_solver_seam_tests {
         // zeroing step observable, while remaining stable and physically meaningful.
         let mut segmented = configured_euler_zero(-10.0, 0.02);
         let coarse_height = segmented
-            .zero_trial_height_at(0.0, TARGET_DISTANCE_M)
+            .zero_trial_height_at(0.0, TARGET_DISTANCE_M, ZeroTargetFrame::SightLine)
             .expect("coarse configured trial")
             .expect("coarse trial reaches target");
         let mut fine = segmented.clone();
         fine.set_time_step(0.001);
         let fine_height = fine
-            .zero_trial_height_at(0.0, TARGET_DISTANCE_M)
+            .zero_trial_height_at(0.0, TARGET_DISTANCE_M, ZeroTargetFrame::SightLine)
             .expect("fine configured trial")
             .expect("fine trial reaches target");
         assert!(
@@ -3893,7 +3958,7 @@ mod mba1302_solver_seam_tests {
         );
 
         let segmented_angle = segmented
-            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M)
+            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M, ZeroTargetFrame::SightLine)
             .expect("segmented zero");
         assert_eq!(
             segmented.inputs.muzzle_angle.to_bits(),
@@ -3908,7 +3973,7 @@ mod mba1302_solver_seam_tests {
             StationAtmosphereResolution::Authoritative
         );
         let zero_height = segmented
-            .zero_trial_height_at(segmented_angle, TARGET_DISTANCE_M)
+            .zero_trial_height_at(segmented_angle, TARGET_DISTANCE_M, ZeroTargetFrame::SightLine)
             .expect("verify segmented zero")
             .expect("zeroed trial reaches target");
         assert!(
@@ -3918,7 +3983,7 @@ mod mba1302_solver_seam_tests {
 
         let mut calm = configured_euler_zero(0.0, 0.02);
         let calm_angle = calm
-            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M)
+            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M, ZeroTargetFrame::SightLine)
             .expect("calm zero");
         assert!(
             (segmented_angle - calm_angle).abs() > 1e-5,

@@ -101,7 +101,11 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
 
     if let Some(distance_m) = zero_distance_m {
         let effective_angle = solver
-            .calculate_and_set_zero_angle(distance_m, target_height_m)
+            .calculate_and_set_zero_angle(
+                distance_m,
+                target_height_m,
+                crate::cli_api::ZeroTargetFrame::WorldVertical,
+            )
             .map_err(solve_failed)?;
         if !effective_angle.is_finite() {
             return Err(solve_failed_message(
