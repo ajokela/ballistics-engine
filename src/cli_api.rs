@@ -3908,11 +3908,13 @@ mod mba1302_solver_seam_tests {
         const ZERO_DISTANCE_M: f64 = 91.44; // 100 yd
         const SIGHT_HEIGHT_M: f64 = 0.0381; // 1.5 in
 
-        let mut inputs = BallisticInputs::default();
-        inputs.bc_value = 0.5;
-        inputs.bullet_mass = 150.0 * 0.06479891 / 1000.0;
-        inputs.muzzle_velocity = 2700.0 * 0.3048;
-        inputs.sight_height = SIGHT_HEIGHT_M;
+        let inputs = BallisticInputs {
+            bc_value: 0.5,
+            bullet_mass: 150.0 * 0.06479891 / 1000.0,
+            muzzle_velocity: 2700.0 * 0.3048,
+            sight_height: SIGHT_HEIGHT_M,
+            ..Default::default()
+        };
 
         let mut level = inputs.clone();
         level.shooting_angle = 0.0;
