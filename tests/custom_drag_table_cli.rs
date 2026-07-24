@@ -140,6 +140,9 @@ fn cli_cd_scale_requires_drag_table_errors() {
 }
 
 /// Same pairing requirement on `monte-carlo` and `zero` — `--cd-scale` is not trajectory-only.
+/// Neither subcommand has a `--bc-adjustment` flag (only `trajectory` does), so unlike the
+/// `trajectory` pairing error above, theirs must NOT suggest a flag the surface doesn't
+/// accept (0.28.1 sweep).
 #[test]
 fn cli_cd_scale_requires_drag_table_errors_on_monte_carlo_and_zero() {
     let bin = env!("CARGO_BIN_EXE_ballistics");
@@ -163,10 +166,14 @@ fn cli_cd_scale_requires_drag_table_errors_on_monte_carlo_and_zero() {
         .output()
         .unwrap();
     assert!(!mc_out.status.success(), "monte-carlo: must fail");
+    let mc_stderr = String::from_utf8_lossy(&mc_out.stderr);
     assert!(
-        String::from_utf8_lossy(&mc_out.stderr).contains("--cd-scale requires --drag-table"),
-        "monte-carlo stderr:\n{}",
-        String::from_utf8_lossy(&mc_out.stderr)
+        mc_stderr.contains("--cd-scale requires --drag-table"),
+        "monte-carlo stderr:\n{mc_stderr}"
+    );
+    assert!(
+        !mc_stderr.contains("--bc-adjustment"),
+        "monte-carlo has no --bc-adjustment flag to suggest: {mc_stderr}"
     );
 
     let zero_out = Command::new(bin)
@@ -188,10 +195,14 @@ fn cli_cd_scale_requires_drag_table_errors_on_monte_carlo_and_zero() {
         .output()
         .unwrap();
     assert!(!zero_out.status.success(), "zero: must fail");
+    let zero_stderr = String::from_utf8_lossy(&zero_out.stderr);
     assert!(
-        String::from_utf8_lossy(&zero_out.stderr).contains("--cd-scale requires --drag-table"),
-        "zero stderr:\n{}",
-        String::from_utf8_lossy(&zero_out.stderr)
+        zero_stderr.contains("--cd-scale requires --drag-table"),
+        "zero stderr:\n{zero_stderr}"
+    );
+    assert!(
+        !zero_stderr.contains("--bc-adjustment"),
+        "zero has no --bc-adjustment flag to suggest: {zero_stderr}"
     );
 }
 

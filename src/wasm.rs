@@ -203,11 +203,11 @@ fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
 }
 
 /// MBA-1356: pairing-requirement text for `--cd-scale` without a loaded drag table, shared by
-/// every WASM terminal command that accepts it (trajectory/zero/monte-carlo). Identical to the
-/// native CLI's stderr text (src/main.rs `resolve_cd_scale`) — the only difference is delivery
-/// (`Err(JsValue)` here vs. `eprintln!` + exit there).
-const CD_SCALE_REQUIRES_DRAG_TABLE: &str =
-    "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)";
+/// every WASM terminal command that accepts it (trajectory/zero/monte-carlo). Mirrors the
+/// native CLI's `resolve_cd_scale` text — except the WASM terminal has no `--bc-adjustment`
+/// flag on ANY surface (unlike native, where `trajectory` has one), so unlike native's
+/// text this never suggests it (0.28.1 sweep: surface-accurate suggestions only).
+const CD_SCALE_REQUIRES_DRAG_TABLE: &str = "--cd-scale requires --drag-table";
 
 /// MBA-1356: nudge for a `--cd-scale` far outside the documented typical truing range
 /// (0.90-1.10), mirroring the native CLI's `cd_scale_range_warning` (src/main.rs) text exactly.
@@ -2021,6 +2021,14 @@ impl WasmBallistics {
             }
             Err(e) => {
                 let mut combined = format!("Error: {}", e);
+                // MBA-1386 (0.28.1 sweep): the Ok arm above prepends bc5d_coercion_warning
+                // (table-only, like every other human-readable block here); the Err arm was
+                // dropping it entirely instead of carrying it the same way.
+                if let Some(warning) = &bc5d_coercion_warning {
+                    if matches!(output_format, OutputFormat::Table) {
+                        combined = format!("{}{}", warning, combined);
+                    }
+                }
                 if let Some(warning) = &muzzle_height_warning {
                     combined = format!("{}{}", warning, combined);
                 }
@@ -3959,17 +3967,21 @@ impl WasmBallistics {
                 .to_string());
         }
 
-        // Select drag models to estimate.
+        // Select drag models to estimate. `both`/`all` fits G1 + G7; any other recognized
+        // family name (MBA-1386 widened DragModel past the scalar G1/G7 pair) fits just
+        // that one family, matching the native CLI's `parse_drag_models`.
         let models: Vec<DragModel> = match drag_model_str.as_str() {
-            "g1" => vec![DragModel::G1],
-            "g7" => vec![DragModel::G7],
             "both" | "all" | "g1,g7" | "g1g7" => vec![DragModel::G1, DragModel::G7],
-            other => {
-                return Err(JsValue::from_str(&format!(
-                    "Unknown --drag-model '{}'; use g1, g7, or both.",
-                    other
-                )))
-            }
+            other => match DragModel::from_str(other) {
+                Some(model) => vec![model],
+                None => {
+                    return Err(JsValue::from_str(&format!(
+                        "Unknown --drag-model '{}'; use g1, g7, both, or a specific drag family \
+                         (g2, g5, g6, g8, gi, gs, ra4).",
+                        other
+                    )))
+                }
+            },
         };
 
         // Convert scalar inputs to metric.
@@ -4110,11 +4122,9 @@ impl WasmBallistics {
                         UnitSystem::Metric => (est.rms_error, "m/s"),
                     },
                 };
-                let model_name = match model {
-                    DragModel::G7 => "G7",
-                    DragModel::G1 => "G1",
-                    _ => "G?",
-                };
+                // 0.28.1 sweep: label every family by its actual name (DragModel's Display
+                // is exactly its variant name), not a generic "G?" for anything past G1/G7.
+                let model_name = model.to_string();
                 let basis = match mode {
                     BcFitMode::Drop => "drop",
                     BcFitMode::Velocity => "velocity",

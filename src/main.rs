@@ -3824,11 +3824,23 @@ fn cd_scale_range_warning(value: f64) -> Option<String> {
 /// Printing the out-of-range warning (stderr, once) is this function's side effect; whether to
 /// print the pairing error and exit is left to the call site (same split as
 /// `resolve_click_values`), which keeps this unit-testable for its `Ok`/`Err` resolution logic.
-fn resolve_cd_scale(cd_scale: Option<f64>, has_custom_drag_table: bool) -> Result<f64, String> {
+///
+/// `has_bc_adjustment` names whether the CALLING subcommand actually has a `--bc-adjustment`
+/// flag to suggest -- `Trajectory` does, but `MonteCarlo` and `Zero` do not, so the pairing
+/// error must not point the shooter at a flag that surface doesn't accept.
+fn resolve_cd_scale(
+    cd_scale: Option<f64>,
+    has_custom_drag_table: bool,
+    has_bc_adjustment: bool,
+) -> Result<f64, String> {
     match cd_scale {
-        Some(_) if !has_custom_drag_table => Err(
-            "--cd-scale requires --drag-table (for G1/G7 use --bc-adjustment instead)".to_string(),
-        ),
+        Some(_) if !has_custom_drag_table => {
+            let mut msg = "--cd-scale requires --drag-table".to_string();
+            if has_bc_adjustment {
+                msg.push_str(" (for G1/G7 use --bc-adjustment instead)");
+            }
+            Err(msg)
+        }
         Some(scale) => {
             if let Some(w) = cd_scale_range_warning(scale) {
                 eprintln!("{w}");
@@ -5368,8 +5380,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                      precedence and BC segments are ignored."
                 );
             }
-            // MBA-1356: --cd-scale requires --drag-table; validate before any solve.
-            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some())
+            // MBA-1356: --cd-scale requires --drag-table; validate before any solve. This
+            // surface (Trajectory) has --bc-adjustment, so the pairing error may suggest it.
+            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some(), true)
                 .unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -5944,8 +5957,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
             // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
             let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
-            // MBA-1356: --cd-scale requires --drag-table; validate before any solve.
-            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some())
+            // MBA-1356: --cd-scale requires --drag-table; validate before any solve. MonteCarlo
+            // has no --bc-adjustment flag, so the pairing error must not suggest one (0.28.1).
+            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some(), false)
                 .unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -6059,8 +6073,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
             // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
             let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
-            // MBA-1356: --cd-scale requires --drag-table; validate before any solve.
-            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some())
+            // MBA-1356: --cd-scale requires --drag-table; validate before any solve. Zero has
+            // no --bc-adjustment flag, so the pairing error must not suggest one (0.28.1).
+            let cd_scale = resolve_cd_scale(cd_scale, custom_drag_table.is_some(), false)
                 .unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -10132,6 +10147,17 @@ fn run_bc_segment_generation(
     let weight_grains = mass / GRAINS_TO_KG;
     let caliber_inches = diameter / 0.0254;
 
+    // 0.28.1 sweep: `estimate_bc_segments` only understands G1/G7 (anything else is
+    // silently typed as G1 -- see its `eq_ignore_ascii_case("G7")` check), same family of
+    // coercion as the `--bc-table`/BC5D/`--online`/`--use-bc-segments` auxiliary paths
+    // `warn_aux_g1_coercion` already covers (MBA-1386). This was the one aux site still
+    // missing the warning. An unparseable `--drag-model` string is left alone here -- it
+    // already fell through to G1 silently before this fix, and warning about it is a
+    // separate concern from the *family-coercion* warning this call adds.
+    if let Some(parsed) = DragModel::from_str(drag_model) {
+        warn_aux_g1_coercion("generate-bc-segments", parsed);
+    }
+
     // Generate BC segments
     let segments = BCSegmentEstimator::estimate_bc_segments(
         bc,
@@ -10251,13 +10277,21 @@ fn parse_data_pairs(s: &str) -> Result<Vec<(f64, f64)>, Box<dyn Error>> {
     Ok(out)
 }
 
-/// Parse the `--drag-model` selector into the list of drag models to estimate.
+/// Parse the `--drag-model` selector into the list of drag models to estimate. Accepts
+/// `both`/`all` (G1 + G7) or any single drag-model family name (MBA-1386 widened
+/// `DragModel` past the scalar G1/G7 pair to the full G1/G2/G5/G6/G7/G8/GI/GS/RA4 family --
+/// the BC-fit path fits and reports any of them individually, not just G1/G7).
 fn parse_drag_models(s: &str) -> Result<Vec<DragModel>, Box<dyn Error>> {
-    match s.trim().to_lowercase().as_str() {
-        "g1" => Ok(vec![DragModel::G1]),
-        "g7" => Ok(vec![DragModel::G7]),
+    let trimmed = s.trim();
+    match trimmed.to_lowercase().as_str() {
         "both" | "all" | "g1,g7" | "g1g7" => Ok(vec![DragModel::G1, DragModel::G7]),
-        other => Err(format!("Unknown --drag-model '{}'; use g1, g7, or both.", other).into()),
+        other => DragModel::from_str(other).map(|m| vec![m]).ok_or_else(|| {
+            format!(
+                "Unknown --drag-model '{}'; use g1, g7, both, or a specific drag family (g2, g5, g6, g8, gi, gs, ra4).",
+                other
+            )
+            .into()
+        }),
     }
 }
 
@@ -10352,11 +10386,10 @@ fn run_bc_estimation_multi(
         }
     }
 
-    let model_name = |m: DragModel| match m {
-        DragModel::G7 => "G7",
-        DragModel::G1 => "G1",
-        _ => "G?",
-    };
+    // 0.28.1 sweep: every DragModel family (including RA4/G2/G5/GI/GS) now has a real
+    // fit/report path -- label it by its actual name (DragModel's Display is exactly its
+    // variant name) instead of collapsing anything past G1/G7 into a generic "G?".
+    let model_name = |m: DragModel| m.to_string();
     let basis_name = |mode: BcFitMode| match mode {
         BcFitMode::Drop => "drop",
         BcFitMode::Velocity => "velocity",
@@ -15014,22 +15047,37 @@ mod cd_scale_tests {
 
     #[test]
     fn resolve_defaults_to_the_neutral_scale_when_omitted() {
-        assert_eq!(resolve_cd_scale(None, false), Ok(1.0));
-        assert_eq!(resolve_cd_scale(None, true), Ok(1.0));
+        assert_eq!(resolve_cd_scale(None, false, true), Ok(1.0));
+        assert_eq!(resolve_cd_scale(None, true, true), Ok(1.0));
     }
 
     #[test]
     fn resolve_passes_through_the_scale_when_a_table_is_present() {
-        assert_eq!(resolve_cd_scale(Some(1.10), true), Ok(1.10));
-        assert_eq!(resolve_cd_scale(Some(3.0), true), Ok(3.0));
+        assert_eq!(resolve_cd_scale(Some(1.10), true, true), Ok(1.10));
+        assert_eq!(resolve_cd_scale(Some(3.0), true, true), Ok(3.0));
     }
 
     #[test]
     fn resolve_errors_naming_the_pairing_requirement_without_a_table() {
-        let err = resolve_cd_scale(Some(1.10), false)
+        let err = resolve_cd_scale(Some(1.10), false, true)
             .expect_err("--cd-scale without a table must be rejected");
         assert!(err.contains("--cd-scale requires --drag-table"), "{err}");
         assert!(err.contains("--bc-adjustment"), "{err}");
+    }
+
+    /// 0.28.1 sweep: MonteCarlo and Zero have no `--bc-adjustment` flag at all -- the
+    /// pairing error must not send a shooter looking for a flag that surface doesn't
+    /// accept. `has_bc_adjustment = false` must drop the suggestion entirely rather than
+    /// print it unconditionally.
+    #[test]
+    fn resolve_omits_the_bc_adjustment_suggestion_on_a_surface_without_it() {
+        let err = resolve_cd_scale(Some(1.10), false, false)
+            .expect_err("--cd-scale without a table must be rejected");
+        assert!(err.contains("--cd-scale requires --drag-table"), "{err}");
+        assert!(
+            !err.contains("--bc-adjustment"),
+            "surface has no --bc-adjustment flag to suggest: {err}"
+        );
     }
 }
 
