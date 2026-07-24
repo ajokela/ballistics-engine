@@ -244,7 +244,10 @@ impl DsfTable {
 ///    next to `resolved_atmosphere()` in `cli_api.rs`'s integration loops). The engine
 ///    does NOT store a re-derived per-altitude local speed of sound on `TrajectoryPoint`
 ///    itself, so this is "the way the solver does it", not a sea-level constant and not a
-///    new per-point atmosphere recompute.
+///    new per-point atmosphere recompute. It is also the same divisor the truing
+///    observation path uses to derive an observation's Mach (`trajectory_observation.rs`),
+///    so a DSF point keyed at derivation time lands back on the identical Mach at
+///    application time — a per-point local recompute here would skew the two apart.
 /// 2. `drop = result.line_of_sight_height_m - point.position.y` (drop below the
 ///    horizontal line of sight, in the solver's ground-referenced frame — the same
 ///    `drop_offset - y` convention `cli_api::fit_value_at` uses for BC-fit drop curves).
@@ -499,10 +502,26 @@ mod tests {
             assert_eq!(orig.position.x, new.position.x, "downrange must be byte-identical");
             assert_eq!(orig.position.z, new.position.z, "windage must be byte-identical");
         }
-        // Top-level scalars are untouched too.
+        // Top-level fields are untouched too — every one of them.
+        assert_eq!(original.max_range, scaled.max_range);
+        assert_eq!(original.max_height, scaled.max_height);
         assert_eq!(original.time_of_flight, scaled.time_of_flight);
         assert_eq!(original.impact_velocity, scaled.impact_velocity);
         assert_eq!(original.impact_energy, scaled.impact_energy);
+        assert_eq!(original.projectile_mass_kg, scaled.projectile_mass_kg);
+        assert_eq!(original.line_of_sight_height_m, scaled.line_of_sight_height_m);
+        assert_eq!(
+            original.station_speed_of_sound_mps,
+            scaled.station_speed_of_sound_mps
+        );
+        assert_eq!(original.termination, scaled.termination);
+        assert_eq!(original.min_pitch_damping, scaled.min_pitch_damping);
+        assert_eq!(original.transonic_mach, scaled.transonic_mach);
+        assert_eq!(original.max_yaw_angle, scaled.max_yaw_angle);
+        assert_eq!(original.max_precession_angle, scaled.max_precession_angle);
+        // AerodynamicJumpComponents has no PartialEq; the fixture carries None and
+        // apply_dsf must leave it that way.
+        assert!(original.aerodynamic_jump.is_none() && scaled.aerodynamic_jump.is_none());
 
         let los = original.line_of_sight_height_m;
         let mach_09_factor = 1.2 + (1.05 - 1.2) * 0.5; // mach 0.9: halfway between the two keys
