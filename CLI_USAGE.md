@@ -244,6 +244,36 @@ warning: --bc-reference army-standard-metro has no effect together with a custom
 
 **FFI:** `FFIBallisticInputs` is an ABI-frozen `repr(C)` struct for iOS/Android consumers and gains no new field. Instead, call the standalone `ballistics_bc_for_reference_standard(bc, reference_standard)` (`reference_standard`: `0` = ICAO, `1` = Army Standard Metro) once on a raw BC value and write the result into `FFIBallisticInputs.bc_value` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged. This is a pure addition to the C ABI — existing callers that never call the new function are unaffected and need no recompile.
 
+#### Pressure Reference: Absolute vs. QNH (`--pressure-type`)
+
+A barometric pressure reading can mean two different physical quantities, and mixing them up is a classic source of vertical error: **station pressure** (the actual air pressure at the shooter's altitude) versus **QNH** (a sea-level-corrected altimeter setting — the kind of "barometer" value read off a weather report or METAR, which has been artificially inflated to what the pressure WOULD be at sea level). Kestrel, AB Mobile, Shooter, JBM, and Hornady 4DOF all let the user declare which one they are entering; this engine's `--pressure` previously only supported station pressure, so a QNH value entered at a real altitude silently over-stated air density and under-stated drop.
+
+`--pressure-type <absolute|qnh>` declares which one `--pressure` is. `absolute` is the default and is a complete no-op — omitting the flag, or passing `--pressure-type absolute` explicitly, is byte-identical to every run before this flag existed. `qnh` reduces the declared pressure to station pressure at `--altitude` via the ICAO inverse-barometric formula, the exact inverse of the standard-atmosphere formula this engine already uses for altitude-derived pressure:
+
+```
+station = QNH * (1 - 0.0065 * altitude_m / 288.15) ^ 5.25588
+```
+
+```bash
+# A weather report gives 30.31 inHg (1026.5 hPa) QNH at a 5,000 ft (1524 m) firing position.
+# Entered as absolute (the historical default) this over-states density; entered as qnh it is
+# correctly reduced to ~25.35 inHg (~858.6 hPa) station pressure before the solve runs.
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --altitude 5000 --pressure 30.31 --pressure-type qnh
+```
+
+An omitted `--pressure` is unaffected by `--pressure-type`: the sea-level standard default (29.92 inHg / 1013.25 hPa) reduces to precisely the same ICAO-standard station pressure at any altitude under either mode, so there is nothing to reduce.
+
+Available on `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, and `profile save` (stored in the saved profile so it round-trips with the profile; profiles saved before this flag existed omit the key and load as `absolute`).
+
+**Not yet available** on `estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, or `compare` — these subcommands still treat `--pressure` as absolute station pressure only. This is a tracked follow-up, not an oversight.
+
+**WASM:** pass `--pressure-type <absolute|qnh>` (and `--zero-pressure-type` for the auto-zero override) as a terminal argument to `trajectory`; behavior matches native exactly (same reduction formula, same Authoritative-constructor bypass of the legacy default-sentinel heuristic).
+
+**Monte Carlo / FFI:** the engine's `BallisticInputs.pressure` and `FFIAtmosphericConditions.pressure` fields have always meant absolute station pressure and continue to. `FFIAtmosphericConditions` is an ABI-frozen `repr(C)` struct with no new field. A QNH-aware FFI caller should call the standalone `ballistics_reduce_qnh_pressure(qnh_hpa, altitude_m)` once and write the result into `FFIAtmosphericConditions.pressure` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged — a pure addition to the C ABI requiring no recompile for existing callers.
+
+**solve-json v1:** `atmosphere.pressure_reference` (`"absolute"` or `"qnh"`) mirrors `--pressure-type`; see [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#pressure_reference-mba-1397). A QNH reduction is recorded in the response's `assumptions` with code `qnh_reduced_to_station_pressure`.
+
 #### BC5D Correction Tables
 
 BC5D (5-Dimensional BC Correction) tables provide ML-derived, velocity-dependent BC corrections for specific calibers. These tables capture how BC changes throughout the flight envelope based on weight, BC, muzzle velocity, current velocity, and drag model.
@@ -2092,6 +2122,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --zero-velocity | Zero-day muzzle velocity (auto-zero only); overrides both powder models | shot-day velocity | fps | m/s |
 | --zero-temperature | Zero-day air temperature (auto-zero only); also resolves linear powder velocity unless `--zero-velocity` is set | shot-day temperature | °F | °C |
 | --zero-pressure | Zero-day barometric pressure (auto-zero only) | shot-day pressure | inHg | hPa |
+| --zero-pressure-type | Whether `--zero-pressure` is absolute or QNH (auto-zero only); see [Pressure Reference](#pressure-reference-absolute-vs-qnh---pressure-type) | shot-day `--pressure-type` | - | - |
 | --zero-humidity | Zero-day relative humidity (auto-zero only) | shot-day humidity | percent | percent |
 | --zero-altitude | Zero-day altitude (auto-zero only) | shot-day altitude | feet | meters |
 | --zero-powder-temp | Zero-day powder temp for the curve lookup (auto-zero only); otherwise uses explicit --zero-temperature, or inherits shot-day --powder-temp when zero temperature is unchanged. --zero-velocity still wins | zero air / inherited shot powder | °F | °C |
@@ -2108,6 +2139,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --wind-segment | Downrange wind segment `SPEED:ANGLE:UNTIL_DISTANCE[:VERTICAL]` (repeatable); VERTICAL is always m/s regardless of `--units` | — | mph & yd | m/s & m |
 | --temperature | Temperature | 59 | °F | °C |
 | --pressure | Barometric pressure | 29.92 | inHg | hPa |
+| --pressure-type | Whether `--pressure` is absolute station pressure or a QNH altimeter setting; see [Pressure Reference](#pressure-reference-absolute-vs-qnh---pressure-type). Also on `zero`, `profile save` | absolute | - | - |
 | --humidity | Relative humidity | 50 | % | % |
 | --altitude | Altitude | 0 | feet | meters |
 | --use-bc-segments | Enable BC segmentation | false | - | - |

@@ -264,13 +264,27 @@ pub struct AtmosphereV1 {
     )]
     pub temperature_k: Option<f64>,
     /// Authoritative station pressure, or `None` to resolve ICAO standard pressure at
-    /// `altitude_m`.
+    /// `altitude_m`. Interpreted per `pressure_reference` (MBA-1397): `absolute` (the
+    /// default) means this value already IS station pressure; `qnh` means it is a
+    /// sea-level-corrected altimeter setting that must be reduced to station pressure at
+    /// `altitude_m` before use.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
     pub pressure_pa: Option<f64>,
+    /// Whether `pressure_pa` is absolute station pressure or a sea-level-corrected altimeter
+    /// setting (QNH, MBA-1397). `None` (the omitted-field default, and every request from
+    /// before this field existed) means [`PressureReferenceV1::Absolute`] — byte-identical to
+    /// pre-MBA-1397 behavior. Has no effect when `pressure_pa` is omitted: an omitted pressure
+    /// resolves to the ICAO standard station pressure either way.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub pressure_reference: Option<PressureReferenceV1>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -283,6 +297,17 @@ pub struct AtmosphereV1 {
         deserialize_with = "deserialize_present"
     )]
     pub latitude_rad: Option<f64>,
+}
+
+/// Whether an `AtmosphereV1.pressure_pa` value is absolute station pressure or a sea-level-
+/// corrected altimeter setting (QNH) that must be reduced to station pressure before use
+/// (MBA-1397). Mirrors [`crate::atmosphere::PressureReferenceMode`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureReferenceV1 {
+    #[default]
+    Absolute,
+    Qnh,
 }
 
 /// Constant or downrange-segmented wind.

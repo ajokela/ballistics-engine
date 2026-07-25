@@ -849,7 +849,14 @@ impl TrajectorySolver {
     /// Construct a solver from station temperature and pressure that a presence-aware service
     /// has already resolved. Unlike [`Self::new`], exact sea-level standard values remain
     /// authoritative at nonzero altitude rather than acting as legacy omission sentinels.
-    pub(crate) fn new_with_resolved_station_atmosphere(
+    ///
+    /// `pub` (MBA-1397; was `pub(crate)`): a QNH-aware caller (native CLI, WASM) that has
+    /// already reduced a declared altimeter setting to station pressure via
+    /// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`] needs this
+    /// constructor too, and those callers live in a different crate (`src/main.rs` is a
+    /// separate binary crate over the library). Widening visibility only, no signature
+    /// change: every existing `pub(crate)` caller is unaffected.
+    pub fn new_with_resolved_station_atmosphere(
         inputs: BallisticInputs,
         wind: WindConditions,
         atmosphere: AtmosphericConditions,
@@ -3647,6 +3654,22 @@ pub fn calculate_zero_angle_with_conditions(
     solver.calculate_and_set_zero_angle(target_distance, target_height, ZeroTargetFrame::SightLine)
 }
 
+/// [`calculate_zero_angle_with_conditions`] for a presence-aware caller that has already
+/// resolved station temperature/pressure (MBA-1397; e.g. reduced a declared QNH via
+/// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`]). Unlike the base
+/// function, `atmosphere`'s temperature/pressure are trusted as-is and never re-interpreted
+/// through the legacy default-sentinel heuristic.
+pub fn calculate_zero_angle_with_resolved_conditions(
+    inputs: BallisticInputs,
+    target_distance: f64,
+    target_height: f64,
+    wind: WindConditions,
+    atmosphere: AtmosphericConditions,
+) -> Result<f64, BallisticsError> {
+    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
+    solver.calculate_and_set_zero_angle(target_distance, target_height, ZeroTargetFrame::SightLine)
+}
+
 /// What a BC estimate is fit against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BcFitMode {
@@ -4023,6 +4046,73 @@ mod mba1302_solver_seam_tests {
             (authoritative_density - legacy_density).abs() > 0.1,
             "explicit standard values at altitude must differ from ICAO-at-altitude: explicit={authoritative_density}, ICAO={legacy_density}"
         );
+    }
+
+    /// MBA-1397: the CLI/WASM `--pressure-type` mechanism precomputes station conditions via
+    /// `atmosphere::resolve_station_conditions_with_pressure_mode` and constructs the solver
+    /// with `new_with_resolved_station_atmosphere` UNCONDITIONALLY (not only for `Qnh`), to
+    /// avoid re-deriving through the legacy sentinel a second time. This must be bit-for-bit
+    /// equivalent to the historical `TrajectorySolver::new` (LegacyDefaultSentinels) path for
+    /// every NON-ambiguous input -- i.e. for `PressureReferenceMode::Absolute`, precomputing
+    /// and using the Authoritative constructor must reproduce `TrajectorySolver::new` exactly,
+    /// which is the bit-level guarantee the CLI/WASM byte-identical-output tests rely on.
+    #[test]
+    fn precomputed_absolute_resolution_via_authoritative_matches_legacy_new() {
+        for (temperature, pressure, altitude) in [
+            (15.0, 1013.25, 0.0),   // sea-level default
+            (15.0, 1013.25, 2000.0), // sentinel: omitted-pressure-at-altitude
+            (-5.0, 850.0, 2000.0),  // explicit non-default station values
+            (22.0, 950.0, 500.0),
+        ] {
+            let atmosphere = AtmosphericConditions {
+                temperature,
+                pressure,
+                humidity: 50.0,
+                altitude,
+            };
+            let legacy = TrajectorySolver::new(
+                BallisticInputs::default(),
+                WindConditions::default(),
+                atmosphere.clone(),
+            );
+
+            let (resolved_temp_c, resolved_pressure_hpa) =
+                crate::atmosphere::resolve_station_conditions_with_pressure_mode(
+                    temperature,
+                    pressure,
+                    altitude,
+                    crate::atmosphere::PressureReferenceMode::Absolute,
+                );
+            let precomputed_atmosphere = AtmosphericConditions {
+                temperature: resolved_temp_c,
+                pressure: resolved_pressure_hpa,
+                humidity: 50.0,
+                altitude,
+            };
+            let precomputed = TrajectorySolver::new_with_resolved_station_atmosphere(
+                BallisticInputs::default(),
+                WindConditions::default(),
+                precomputed_atmosphere,
+            );
+
+            let (legacy_density, legacy_sos, legacy_temp_c, legacy_pressure_hpa) =
+                legacy.resolved_atmosphere();
+            let (pre_density, pre_sos, pre_temp_c, pre_pressure_hpa) =
+                precomputed.resolved_atmosphere();
+
+            assert_eq!(
+                legacy_temp_c.to_bits(),
+                pre_temp_c.to_bits(),
+                "temperature=({temperature}, {pressure}, {altitude})"
+            );
+            assert_eq!(
+                legacy_pressure_hpa.to_bits(),
+                pre_pressure_hpa.to_bits(),
+                "pressure=({temperature}, {pressure}, {altitude})"
+            );
+            assert_eq!(legacy_density.to_bits(), pre_density.to_bits());
+            assert_eq!(legacy_sos.to_bits(), pre_sos.to_bits());
+        }
     }
 
     fn configured_euler_zero(vertical_wind_mps: f64, time_step_s: f64) -> TrajectorySolver {

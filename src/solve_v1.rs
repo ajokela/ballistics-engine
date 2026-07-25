@@ -5,13 +5,14 @@
 //! filesystem access, network access, profile lookup, or terminal output.
 
 use crate::solve_json::{
-    AtmosphereV1, DragModelV1, EffectsV1, ProjectileV1, ResolvedAtmosphereV1,
-    ResolvedConstantWindV1, ResolvedEffectsV1, ResolvedProjectileV1, ResolvedRifleV1,
-    ResolvedSamplingV1, ResolvedSegmentedWindV1, ResolvedShotV1, ResolvedSolveRequestV1,
-    ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, RifleV1, SampleFlagV1, SamplingV1,
-    SchemaVersionV1, ShotV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveErrorV1, SolveNoticeV1,
-    SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SolverMethodV1, SolverV1, SuccessStatusV1,
-    TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    AtmosphereV1, DragModelV1, EffectsV1, PressureReferenceV1, ProjectileV1,
+    ResolvedAtmosphereV1, ResolvedConstantWindV1, ResolvedEffectsV1, ResolvedProjectileV1,
+    ResolvedRifleV1, ResolvedSamplingV1, ResolvedSegmentedWindV1, ResolvedShotV1,
+    ResolvedSolveRequestV1, ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, RifleV1,
+    SampleFlagV1, SamplingV1, SchemaVersionV1, ShotV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
+    SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SolverMethodV1,
+    SolverV1, SuccessStatusV1, TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1, WindV1,
+    MAX_SOLVE_JSON_SAMPLES_V1,
 };
 use crate::trajectory_observation::{
     TrajectoryObservation, TrajectoryObservationError, TrajectoryObservationFlag,
@@ -47,6 +48,9 @@ pub const ASSUMPTION_DEFAULT_APPLIED: &str = "default_applied";
 pub const ASSUMPTION_ICAO_STANDARD_TEMPERATURE: &str = "icao_standard_temperature";
 /// Stable assumption code emitted when station pressure is resolved from ICAO atmosphere.
 pub const ASSUMPTION_ICAO_STANDARD_PRESSURE: &str = "icao_standard_pressure";
+/// Stable assumption code emitted when an explicit `pressure_reference: "qnh"` pressure is
+/// reduced to station pressure (MBA-1397).
+pub const ASSUMPTION_QNH_REDUCED_TO_STATION_PRESSURE: &str = "qnh_reduced_to_station_pressure";
 /// Stable assumption code emitted when projectile length is inferred from mass and diameter.
 pub const ASSUMPTION_ESTIMATED_PROJECTILE_LENGTH: &str = "estimated_projectile_length";
 
@@ -635,6 +639,28 @@ fn resolve_atmosphere(
         }
     };
     let pressure_pa = match atmosphere.pressure_pa {
+        // MBA-1397: an explicit pressure declared as a QNH (sea-level-corrected altimeter
+        // setting) is reduced to station pressure at `altitude_m` before use. `Absolute`
+        // (including the omitted-field default) is a pure passthrough -- byte-identical to
+        // pre-MBA-1397 behavior for every request that never sets `pressure_reference`.
+        Some(value)
+            if atmosphere.pressure_reference == Some(PressureReferenceV1::Qnh) =>
+        {
+            let qnh_hpa = value / PASCALS_PER_HECTOPASCAL;
+            let station_hpa =
+                crate::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
+            let station_pa = station_hpa * PASCALS_PER_HECTOPASCAL;
+            assumptions.push(notice(
+                ASSUMPTION_QNH_REDUCED_TO_STATION_PRESSURE,
+                format!(
+                    "Station pressure was declared as a QNH (sea-level-corrected altimeter \
+                     setting) of {value:.6} Pa; reduced to station pressure {station_pa:.12} Pa \
+                     at {altitude_m:.6} m via the ICAO inverse-barometric formula."
+                ),
+                "$.atmosphere.pressure_pa",
+            ));
+            station_pa
+        }
         Some(value) => value,
         None => {
             assumptions.push(notice(
@@ -1287,6 +1313,90 @@ mod tests {
             .iter()
             .any(|notice| notice.code == ASSUMPTION_ICAO_STANDARD_TEMPERATURE
                 || notice.code == ASSUMPTION_ICAO_STANDARD_PRESSURE));
+    }
+
+    /// MBA-1397: `pressure_reference: "qnh"` reduces an explicit pressure to station pressure
+    /// and records the reduction as an assumption instead of treating it as authoritative
+    /// as-is.
+    #[test]
+    fn qnh_pressure_reference_reduces_to_station_pressure_and_is_noted() {
+        let mut request = minimal_request();
+        request.atmosphere.altitude_m = Some(1_500.0);
+        request.atmosphere.pressure_pa = Some(103_000.0); // 1030.0 hPa QNH
+        request.atmosphere.pressure_reference = Some(PressureReferenceV1::Qnh);
+
+        let prepared = prepare_request(&request).expect("valid QNH request");
+        let expected_station_hpa =
+            crate::atmosphere::reduce_qnh_to_station_pressure(1030.0, 1_500.0);
+        assert!((prepared.atmosphere.pressure - expected_station_hpa).abs() < 1e-9);
+        assert!(
+            (prepared.resolved_request.atmosphere.pressure_pa - expected_station_hpa * 100.0)
+                .abs()
+                < 1e-6
+        );
+        // Strictly lower than the raw QNH -- proves the reduction actually happened.
+        assert!(prepared.resolved_request.atmosphere.pressure_pa < 103_000.0);
+
+        assert!(prepared
+            .assumptions
+            .iter()
+            .any(|notice| notice.code == ASSUMPTION_QNH_REDUCED_TO_STATION_PRESSURE
+                && notice.path.as_deref() == Some("$.atmosphere.pressure_pa")));
+        // Must NOT also emit the omitted-pressure notice: this is a present, explicit value.
+        assert!(!prepared
+            .assumptions
+            .iter()
+            .any(|notice| notice.code == ASSUMPTION_ICAO_STANDARD_PRESSURE));
+    }
+
+    /// `pressure_reference: "qnh"` with `pressure_pa` OMITTED must be byte-identical to the
+    /// absolute default: an omitted pressure always resolves to the ICAO standard station
+    /// pressure regardless of the declared reference (mathematically the same result as
+    /// reducing a QNH of exactly the ICAO sea-level standard).
+    #[test]
+    fn qnh_pressure_reference_with_omitted_pressure_matches_absolute_default() {
+        let mut request = minimal_request();
+        request.atmosphere.altitude_m = Some(1_500.0);
+        request.atmosphere.pressure_reference = Some(PressureReferenceV1::Qnh);
+
+        let prepared = prepare_request(&request).expect("valid request");
+
+        let mut absolute_request = minimal_request();
+        absolute_request.atmosphere.altitude_m = Some(1_500.0);
+        let absolute_prepared = prepare_request(&absolute_request).expect("valid request");
+
+        assert_eq!(
+            prepared.resolved_request.atmosphere.pressure_pa,
+            absolute_prepared.resolved_request.atmosphere.pressure_pa
+        );
+        assert!(prepared
+            .assumptions
+            .iter()
+            .any(|notice| notice.code == ASSUMPTION_ICAO_STANDARD_PRESSURE));
+        assert!(!prepared
+            .assumptions
+            .iter()
+            .any(|notice| notice.code == ASSUMPTION_QNH_REDUCED_TO_STATION_PRESSURE));
+    }
+
+    /// `pressure_reference` absent entirely (every request before MBA-1397) must be
+    /// byte-identical to `Some(Absolute)` -- the default variant is a pure passthrough.
+    #[test]
+    fn absent_pressure_reference_matches_explicit_absolute() {
+        let mut request = minimal_request();
+        request.atmosphere.altitude_m = Some(1_500.0);
+        request.atmosphere.pressure_pa = Some(90_000.0);
+
+        let mut explicit_absolute = request.clone();
+        explicit_absolute.atmosphere.pressure_reference = Some(PressureReferenceV1::Absolute);
+
+        let prepared = prepare_request(&request).expect("valid request");
+        let prepared_explicit = prepare_request(&explicit_absolute).expect("valid request");
+        assert_eq!(
+            prepared.resolved_request.atmosphere.pressure_pa,
+            prepared_explicit.resolved_request.atmosphere.pressure_pa
+        );
+        assert_eq!(prepared.resolved_request.atmosphere.pressure_pa, 90_000.0);
     }
 
     #[test]

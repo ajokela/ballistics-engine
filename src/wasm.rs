@@ -2,12 +2,13 @@
 use serde_json;
 use wasm_bindgen::prelude::*;
 
+use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureReferenceMode};
 use crate::bc_table_5d::Bc5dTable;
 use crate::cli_api::{
-    calculate_zero_angle_with_conditions, estimate_bc_fit, run_monte_carlo_with_direction_std_dev,
-    AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcFitMode,
-    BcReferenceStandard, MonteCarloParams, TrajectorySolver, WindConditions,
-    BC_REFERENCE_STANDARD_INERT_WARNING,
+    calculate_zero_angle_with_conditions, calculate_zero_angle_with_resolved_conditions,
+    estimate_bc_fit, run_monte_carlo_with_direction_std_dev, AtmosphericConditions,
+    BallisticInputs as InternalBallisticInputs, BcFitMode, BcReferenceStandard, MonteCarloParams,
+    TrajectorySolver, WindConditions, BC_REFERENCE_STANDARD_INERT_WARNING,
 };
 use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
@@ -24,6 +25,18 @@ fn parse_bc_reference_arg(s: &str) -> Result<BcReferenceStandard, JsValue> {
         "army-standard-metro" => Ok(BcReferenceStandard::ArmyStandardMetro),
         other => Err(JsValue::from_str(&format!(
             "Invalid --bc-reference '{other}' (expected 'icao' or 'army-standard-metro')"
+        ))),
+    }
+}
+
+/// Parse `--pressure-type`/`--zero-pressure-type`'s value (MBA-1397). Mirrors the native
+/// CLI's `clap::ValueEnum` spelling ("absolute", "qnh"), case-insensitively.
+fn parse_pressure_type_arg(s: &str) -> Result<PressureReferenceMode, JsValue> {
+    match s.to_ascii_lowercase().as_str() {
+        "absolute" => Ok(PressureReferenceMode::Absolute),
+        "qnh" => Ok(PressureReferenceMode::Qnh),
+        other => Err(JsValue::from_str(&format!(
+            "Invalid --pressure-type '{other}' (expected 'absolute' or 'qnh')"
         ))),
     }
 }
@@ -1061,6 +1074,10 @@ impl WasmBallistics {
         let mut dsf_point_strs: Vec<String> = Vec::new();
         let mut temperature = default_temp;
         let mut pressure = default_pressure;
+        // MBA-1397: whether `pressure`/`zero_pressure` are absolute station pressure or a
+        // sea-level-corrected altimeter setting (QNH) needing reduction before use.
+        let mut pressure_type = PressureReferenceMode::Absolute;
+        let mut zero_pressure_type: Option<PressureReferenceMode> = None;
         let mut humidity = 50.0;
         let mut altitude = 0.0;
         let mut output_format = OutputFormat::Table;
@@ -1299,6 +1316,12 @@ impl WasmBallistics {
                         pressure = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid pressure"))?;
+                        i += 1;
+                    }
+                }
+                "--pressure-type" => {
+                    if i + 1 < args.len() {
+                        pressure_type = parse_pressure_type_arg(args[i + 1])?;
                         i += 1;
                     }
                 }
@@ -1542,6 +1565,12 @@ impl WasmBallistics {
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid zero pressure"))?,
                         );
+                        i += 1;
+                    }
+                }
+                "--zero-pressure-type" => {
+                    if i + 1 < args.len() {
+                        zero_pressure_type = Some(parse_pressure_type_arg(args[i + 1])?);
                         i += 1;
                     }
                 }
@@ -1958,13 +1987,41 @@ impl WasmBallistics {
                 zero_inputs.powder_curve_temp_c = None;
             }
 
-            match calculate_zero_angle_with_conditions(
-                zero_inputs.clone(),
-                zero_distance_m,
-                zero_inputs.muzzle_height + zero_inputs.sight_height, // Zero crosses the line of sight (matches CLI)
-                wind.clone(),
-                zero_atmosphere.clone(),
-            ) {
+            // MBA-1397: an explicit --zero-pressure-type wins; otherwise the zero day shares
+            // the shot day's mode (mirrors "omitting all --zero-* flags reuses the shot-day
+            // values" for the numeric fields above).
+            let zero_pressure_type_resolved = zero_pressure_type.unwrap_or(pressure_type);
+            let zero_target_height =
+                zero_inputs.muzzle_height + zero_inputs.sight_height; // Zero crosses the line of sight (matches CLI)
+            let zero_solve_result = match zero_pressure_type_resolved {
+                PressureReferenceMode::Absolute => calculate_zero_angle_with_conditions(
+                    zero_inputs.clone(),
+                    zero_distance_m,
+                    zero_target_height,
+                    wind.clone(),
+                    zero_atmosphere.clone(),
+                ),
+                PressureReferenceMode::Qnh => {
+                    let (resolved_temp_c, resolved_pressure_hpa) =
+                        resolve_station_conditions_with_pressure_mode(
+                            zero_atmosphere.temperature,
+                            zero_atmosphere.pressure,
+                            zero_atmosphere.altitude,
+                            PressureReferenceMode::Qnh,
+                        );
+                    let mut resolved_zero_atmosphere = zero_atmosphere.clone();
+                    resolved_zero_atmosphere.temperature = resolved_temp_c;
+                    resolved_zero_atmosphere.pressure = resolved_pressure_hpa;
+                    calculate_zero_angle_with_resolved_conditions(
+                        zero_inputs.clone(),
+                        zero_distance_m,
+                        zero_target_height,
+                        wind.clone(),
+                        resolved_zero_atmosphere,
+                    )
+                }
+            };
+            match zero_solve_result {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
                     let moa_adjustment = zero_angle * 180.0 / std::f64::consts::PI * 60.0;
@@ -1992,8 +2049,32 @@ impl WasmBallistics {
             }
         }
 
-        // Create solver and calculate
-        let mut solver = TrajectorySolver::new(inputs.clone(), wind, atmosphere);
+        // Create solver and calculate. MBA-1397: Absolute is byte-identical to today
+        // (unchanged constructor); Qnh reduces the declared altimeter setting to station
+        // pressure and uses the Authoritative constructor so it is never re-interpreted
+        // through the legacy default-sentinel heuristic.
+        let mut solver = match pressure_type {
+            PressureReferenceMode::Absolute => {
+                TrajectorySolver::new(inputs.clone(), wind, atmosphere)
+            }
+            PressureReferenceMode::Qnh => {
+                let (resolved_temp_c, resolved_pressure_hpa) =
+                    resolve_station_conditions_with_pressure_mode(
+                        atmosphere.temperature,
+                        atmosphere.pressure,
+                        atmosphere.altitude,
+                        PressureReferenceMode::Qnh,
+                    );
+                let mut resolved_atmosphere = atmosphere.clone();
+                resolved_atmosphere.temperature = resolved_temp_c;
+                resolved_atmosphere.pressure = resolved_pressure_hpa;
+                TrajectorySolver::new_with_resolved_station_atmosphere(
+                    inputs.clone(),
+                    wind,
+                    resolved_atmosphere,
+                )
+            }
+        };
         let max_range_m = match units {
             UnitSystem::Imperial => max_range * 0.9144, // yards to meters
             UnitSystem::Metric => max_range,

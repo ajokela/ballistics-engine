@@ -2770,4 +2770,72 @@ Impact Velocity: 2510 fps\n";
             "the range warning must never contaminate JSON output: {json_output}"
         );
     }
+
+    // ---- MBA-1397: --pressure-type <absolute|qnh> / --zero-pressure-type ------------------
+
+    const QNH_TRAJECTORY_BASE: &str = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+         --units metric --max-range 300 --ignore-ground-impact --altitude 1500 \
+         --pressure 1030.0 -o json";
+
+    #[wasm_bindgen_test]
+    fn trajectory_omitted_pressure_type_is_identical_to_explicit_absolute() {
+        let wasm = WasmBallistics::new();
+        let omitted = wasm.run_command(QNH_TRAJECTORY_BASE).unwrap();
+        let explicit = wasm
+            .run_command(&format!("{QNH_TRAJECTORY_BASE} --pressure-type absolute"))
+            .unwrap();
+        assert_eq!(
+            omitted, explicit,
+            "omitted --pressure-type must be byte-identical to --pressure-type absolute"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_qnh_mode_yields_a_higher_impact_velocity_than_absolute() {
+        let wasm = WasmBallistics::new();
+        let absolute_out = wasm.run_command(QNH_TRAJECTORY_BASE).unwrap();
+        let qnh_out = wasm
+            .run_command(&format!("{QNH_TRAJECTORY_BASE} --pressure-type qnh"))
+            .unwrap();
+        let absolute: serde_json::Value = serde_json::from_str(&absolute_out).unwrap();
+        let qnh: serde_json::Value = serde_json::from_str(&qnh_out).unwrap();
+        let v_absolute = absolute["impact_velocity"].as_f64().unwrap();
+        let v_qnh = qnh["impact_velocity"].as_f64().unwrap();
+        assert!(
+            v_qnh > v_absolute + 10.0,
+            "QNH-reduced (lower) pressure must retain velocity better than treating the same \
+             reading as absolute station pressure: absolute={v_absolute} qnh={v_qnh}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn zero_omitted_pressure_type_is_identical_to_explicit_absolute() {
+        let wasm = WasmBallistics::new();
+        let base = "zero -v 2700 -b 0.475 -m 168 -d 0.308 --units metric \
+             --target-distance 300 --altitude 1500 --pressure 1030.0 -o json";
+        let omitted = wasm.run_command(base).unwrap();
+        let explicit = wasm
+            .run_command(&format!("{base} --pressure-type absolute"))
+            .unwrap();
+        assert_eq!(
+            omitted, explicit,
+            "omitted --pressure-type must be byte-identical to --pressure-type absolute on zero"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_auto_zero_omitted_zero_pressure_type_is_identical_to_explicit_absolute() {
+        let wasm = WasmBallistics::new();
+        let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --units metric \
+             --max-range 300 --ignore-ground-impact --altitude 1500 --pressure 1013.25 \
+             --auto-zero 300 --zero-pressure 1030.0 -o json";
+        let omitted = wasm.run_command(base).unwrap();
+        let explicit = wasm
+            .run_command(&format!("{base} --zero-pressure-type absolute"))
+            .unwrap();
+        assert_eq!(
+            omitted, explicit,
+            "omitted --zero-pressure-type must be byte-identical to --zero-pressure-type absolute"
+        );
+    }
 }

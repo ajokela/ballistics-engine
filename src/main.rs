@@ -50,6 +50,9 @@ use ballistics_engine::truing_uncertainty::{
     UncertaintyTruingReportV1, UncertaintyTruingRequestV1, WeightedTruingObservationV1,
 };
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
+use ballistics_engine::atmosphere::{
+    resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
+};
 use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs,
     BcReferenceStandard, DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
@@ -466,6 +469,18 @@ enum Commands {
         #[arg(long)]
         pressure: Option<f64>,
 
+        /// Whether --pressure is absolute station pressure (default) or a sea-level-corrected
+        /// altimeter setting (QNH / weather-report "barometer" value, MBA-1397). `qnh` is
+        /// reduced to station pressure at --altitude via the ICAO inverse-barometric formula
+        /// before use; `absolute` is today's behavior unchanged. Entering a QNH value as
+        /// `absolute` (the historical default) at a real altitude over-states air density and
+        /// under-states drop. No default_value (like --bc-reference): an explicit flag always
+        /// wins, otherwise a `--saved-profile`'s stored mode applies, defaulting to absolute
+        /// when neither is present -- byte-identical to every profile saved before this field
+        /// existed.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
+
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
@@ -700,6 +715,13 @@ enum Commands {
         /// Zero-day barometric pressure for --auto-zero (inHg imperial / hPa metric)
         #[arg(long)]
         zero_pressure: Option<f64>,
+
+        /// Whether --zero-pressure is absolute station pressure or a sea-level-corrected
+        /// altimeter setting (QNH), mirroring --pressure-type (MBA-1397). Defaults to the
+        /// shot-day --pressure-type when --zero-pressure-type is not given, matching the
+        /// "omitting all --zero-* flags reuses the shot-day values" contract above.
+        #[arg(long, value_enum)]
+        zero_pressure_type: Option<PressureReferenceMode>,
 
         /// Zero-day relative humidity for --auto-zero (percent, 0-100)
         #[arg(long, value_parser = f64_range(0.0, 100.0))]
@@ -1016,6 +1038,12 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+
+        /// Whether --pressure is absolute station pressure (default) or a sea-level-corrected
+        /// altimeter setting (QNH / weather-report "barometer" value, MBA-1397). See
+        /// `trajectory --pressure-type` for the full explanation.
+        #[arg(long, value_enum, default_value = "absolute")]
+        pressure_type: PressureReferenceMode,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -2089,6 +2117,12 @@ enum ProfileAction {
         #[arg(long)]
         pressure: Option<f64>,
 
+        /// Whether the saved `pressure` is absolute station pressure (default) or a
+        /// sea-level-corrected altimeter setting (QNH, MBA-1397). See
+        /// `trajectory --pressure-type` for the full explanation.
+        #[arg(long, value_enum, default_value = "absolute")]
+        pressure_type: PressureReferenceMode,
+
         /// Default humidity
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
@@ -2376,6 +2410,15 @@ struct ProfileData {
     /// so `converted_to` leaves it untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bc_reference: Option<String>,
+    /// Whether `pressure` is absolute station pressure or a sea-level-corrected altimeter
+    /// setting (QNH), mirroring `bc_reference` (MBA-1397): `None` (the omitted-field default,
+    /// and every profile saved before this field existed) or `"absolute"` mean absolute;
+    /// `"qnh"` declares a QNH pressure that must be reduced to station pressure before use.
+    /// Parsed by `parse_pressure_reference_profile_field`, written by
+    /// `pressure_reference_profile_field` (which never writes `"absolute"` -- it stays the
+    /// omitted default so an untouched profile round-trips with no new key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pressure_reference: Option<String>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -2561,6 +2604,9 @@ struct TrajectoryConfig {
     // Environment (metric)
     temperature: f64,
     pressure: f64,
+    // Whether `pressure` is absolute station pressure or a sea-level-corrected altimeter
+    // setting (QNH) that must be reduced before use (MBA-1397).
+    pressure_type: PressureReferenceMode,
     humidity: f64,
     altitude: f64,
 
@@ -3632,6 +3678,10 @@ fn map_a7p_to_profile(
         // ICAO-referenced (the omitted-field default) unless the user later edits the
         // saved profile with `--bc-reference`.
         bc_reference: None,
+        // .a7p carries no QNH/pressure-reference concept; `air_pressure_hpa` is treated as
+        // absolute station pressure (the omitted-field default) unless the user later edits
+        // the saved profile with `--pressure-type`.
+        pressure_reference: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -3833,6 +3883,37 @@ fn bc_reference_profile_field(value: BcReferenceStandard) -> Option<String> {
     match value {
         BcReferenceStandard::Icao => None,
         BcReferenceStandard::ArmyStandardMetro => Some("army-standard-metro".to_string()),
+    }
+}
+
+/// Parse a stored profile's `pressure_reference` field (MBA-1397) into the engine enum.
+/// Accepts the same lowercase spelling `--pressure-type`/`clap::ValueEnum` produce
+/// ("absolute", "qnh"), case-insensitively. `None`/empty defaults to `Absolute` -- byte-
+/// identical to every profile saved before this field existed.
+fn parse_pressure_reference_profile_field(
+    value: Option<&str>,
+) -> Result<PressureReferenceMode, String> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(PressureReferenceMode::Absolute),
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "absolute" => Ok(PressureReferenceMode::Absolute),
+            "qnh" => Ok(PressureReferenceMode::Qnh),
+            other => Err(format!(
+                "invalid pressure_reference '{other}' (expected 'absolute' or 'qnh')"
+            )),
+        },
+    }
+}
+
+/// Spelling `ProfileData.pressure_reference` stores for a resolved [`PressureReferenceMode`]
+/// (MBA-1397) -- the inverse of [`parse_pressure_reference_profile_field`]. `Absolute` is
+/// never written out: it is the omitted-field default, so a profile saved without ever
+/// touching `--pressure-type` round-trips with no new key (matches the pre-MBA-1397 file
+/// shape byte-for-byte).
+fn pressure_reference_profile_field(value: PressureReferenceMode) -> Option<String> {
+    match value {
+        PressureReferenceMode::Absolute => None,
+        PressureReferenceMode::Qnh => Some("qnh".to_string()),
     }
 }
 
@@ -4638,6 +4719,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             bc_segment,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             output,
@@ -4686,6 +4768,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             zero_velocity,
             zero_temperature,
             zero_pressure,
+            zero_pressure_type,
             zero_humidity,
             zero_altitude,
             zero_powder_temp,
@@ -4898,6 +4981,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &["PRESSURE", "PRESSURE(HPA OR INHG)"],
                     std_pressure,
                 ),
+            };
+            // MBA-1397: an explicit --pressure-type always wins; otherwise inherit a saved
+            // profile's stored reference (defaults to Absolute when neither is present —
+            // byte-identical to every run before this flag existed).
+            let final_pressure_type = match pressure_type {
+                Some(v) => v,
+                None => parse_pressure_reference_profile_field(
+                    saved_profile_data.as_ref().and_then(|p| p.pressure_reference.as_deref()),
+                )?,
             };
             let final_humidity = if humidity != 50.0 {
                 humidity
@@ -5580,6 +5672,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Some(p) => UnitConverter::pressure_to_metric(p, cli.units),
                     None => pressure_metric,
                 };
+                // MBA-1397: an explicit --zero-pressure-type wins; otherwise the zero day
+                // shares the shot day's mode (matches "omitting all --zero-* flags reuses the
+                // shot-day values" for the numeric pressure above).
+                let zero_pressure_type_resolved = zero_pressure_type.unwrap_or(final_pressure_type);
                 let zero_humidity_value = zero_humidity.unwrap_or(final_humidity);
                 let zero_altitude_metric = match zero_altitude {
                     Some(a) => UnitConverter::altitude_to_metric(a, cli.units),
@@ -5669,21 +5765,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                     direction: final_wind_direction.to_radians(),
                     vertical_speed: wind_vertical_metric,
                 };
-                let zero_atmosphere = AtmosphericConditions {
-                    temperature: zero_temperature_metric,
-                    pressure: zero_pressure_metric,
-                    humidity: zero_humidity_value,
-                    altitude: zero_altitude_metric,
-                };
 
                 // Target height is the line of sight's ground-referenced height.
-                let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
-                    zero_inputs,
-                    zero_distance_metric,
-                    bore_height_metric + sight_height_metric,
-                    zero_wind,
-                    zero_atmosphere,
-                )?;
+                // MBA-1397: with pressure_type == Absolute (default), this is byte-identical
+                // to pre-MBA-1397 behavior -- same atmosphere fields, same solver entry point.
+                // With Qnh, the zero-day QNH is reduced to station pressure BEFORE the solver
+                // sees it, via the presence-aware Authoritative constructor, so it is never
+                // re-interpreted through the legacy default-sentinel heuristic.
+                let zero_angle = match zero_pressure_type_resolved {
+                    PressureReferenceMode::Absolute => {
+                        let zero_atmosphere = AtmosphericConditions {
+                            temperature: zero_temperature_metric,
+                            pressure: zero_pressure_metric,
+                            humidity: zero_humidity_value,
+                            altitude: zero_altitude_metric,
+                        };
+                        ballistics_engine::calculate_zero_angle_with_conditions(
+                            zero_inputs,
+                            zero_distance_metric,
+                            bore_height_metric + sight_height_metric,
+                            zero_wind,
+                            zero_atmosphere,
+                        )?
+                    }
+                    PressureReferenceMode::Qnh => {
+                        let (resolved_temp_c, resolved_pressure_hpa) =
+                            resolve_station_conditions_with_pressure_mode(
+                                zero_temperature_metric,
+                                zero_pressure_metric,
+                                zero_altitude_metric,
+                                PressureReferenceMode::Qnh,
+                            );
+                        let zero_atmosphere = AtmosphericConditions {
+                            temperature: resolved_temp_c,
+                            pressure: resolved_pressure_hpa,
+                            humidity: zero_humidity_value,
+                            altitude: zero_altitude_metric,
+                        };
+                        ballistics_engine::calculate_zero_angle_with_resolved_conditions(
+                            zero_inputs,
+                            zero_distance_metric,
+                            bore_height_metric + sight_height_metric,
+                            zero_wind,
+                            zero_atmosphere,
+                        )?
+                    }
+                };
 
                 // Convert to degrees for the trajectory function
                 zero_angle.to_degrees()
@@ -5716,6 +5843,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 time_step,
                 temperature: temperature_metric,
                 pressure: pressure_metric,
+                pressure_type: final_pressure_type,
                 humidity: final_humidity,
                 altitude: altitude_metric,
                 wind_speed: wind_speed_metric,
@@ -6232,6 +6360,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             drag_table,
@@ -6291,6 +6420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 sight_height_metric,
                 temperature_metric,
                 pressure_metric,
+                pressure_type,
                 humidity,
                 altitude_metric,
                 custom_drag_table,
@@ -7973,6 +8103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     zero_distance,
                     temperature,
                     pressure,
+                    pressure_type,
                     humidity,
                     altitude,
                     bullet_name,
@@ -8050,6 +8181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         drag_curve: None,
                         dsf_points: carried_dsf_points,
                         bc_reference: bc_reference_profile_field(bc_reference),
+                        pressure_reference: pressure_reference_profile_field(pressure_type),
                     };
 
                     let path = save_profile(&profile)?;
@@ -8510,6 +8642,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         time_step,
         temperature,
         pressure,
+        pressure_type,
         humidity,
         altitude,
         wind_speed,
@@ -8715,16 +8848,35 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         vertical_speed: wind_vertical,
     };
 
-    // Set up atmospheric conditions
-    let atmosphere = AtmosphericConditions {
+    // MBA-1397: resolve station temperature/pressure once, honoring pressure_type. Absolute is
+    // byte-identical to the legacy default-sentinel resolution TrajectorySolver::new performs
+    // internally (same underlying functions, same inputs); Qnh reduces a declared altimeter
+    // setting to station pressure. Reused below for the solver, the custom-drag-table
+    // Mach-range warning, and the stability summary, so all three agree with what the
+    // trajectory actually flew under.
+    let (resolved_temperature, resolved_pressure) = resolve_station_conditions_with_pressure_mode(
         temperature,
         pressure,
+        altitude,
+        pressure_type,
+    );
+
+    // Set up atmospheric conditions
+    let atmosphere = AtmosphericConditions {
+        temperature: resolved_temperature,
+        pressure: resolved_pressure,
         humidity,
         altitude,
     };
 
-    // Create solver
-    let mut solver = TrajectorySolver::new(inputs.clone(), wind, atmosphere.clone());
+    // Create solver. Authoritative: `atmosphere` above is already fully resolved (including
+    // the QNH reduction, when applicable), so it is trusted as-is rather than re-derived
+    // through the legacy default-sentinel heuristic a second time.
+    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(
+        inputs.clone(),
+        wind,
+        atmosphere.clone(),
+    );
     solver.set_max_range(max_range);
     solver.set_time_step(time_step);
 
@@ -8781,8 +8933,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     if let Some(table) = custom_drag_table.as_ref() {
         let (_, sos) = ballistics_engine::atmosphere::calculate_atmosphere(
             altitude,
-            Some(temperature),
-            Some(pressure),
+            Some(resolved_temperature),
+            Some(resolved_pressure),
             humidity,
         );
         if sos.is_finite() && sos > 0.0 {
@@ -8812,15 +8964,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
     // Calculate stability coefficient if twist rate is provided
     let stability = if effective_twist_rate > 0.0 {
-        let (resolved_temp_c, resolved_pressure_hpa) =
-            ballistics_engine::atmosphere::resolve_station_conditions(
-                temperature,
-                pressure,
-                altitude,
-            );
         ballistics_engine::stability::compute_stability_coefficient(
             &inputs,
-            (altitude, resolved_temp_c, resolved_pressure_hpa, 1.0),
+            (altitude, resolved_temperature, resolved_pressure, 1.0),
         )
     } else {
         0.0
@@ -10196,6 +10342,7 @@ fn run_zero_calculation(
     sight_height: f64,
     temperature: f64,
     pressure: f64,
+    pressure_type: PressureReferenceMode,
     humidity: f64,
     altitude: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
@@ -10220,10 +10367,21 @@ fn run_zero_calculation(
         ..Default::default()
     };
 
-    // Set up atmospheric conditions
-    let atmosphere = AtmosphericConditions {
+    // MBA-1397: resolve station temperature/pressure once, honoring pressure_type. Absolute is
+    // byte-identical to the legacy default-sentinel resolution TrajectorySolver::new performs
+    // internally; Qnh reduces a declared altimeter setting to station pressure. Reused for both
+    // the zero-angle solve and the follow-up trajectory solve below, so they agree.
+    let (resolved_temperature, resolved_pressure) = resolve_station_conditions_with_pressure_mode(
         temperature,
         pressure,
+        altitude,
+        pressure_type,
+    );
+
+    // Set up atmospheric conditions
+    let atmosphere = AtmosphericConditions {
+        temperature: resolved_temperature,
+        pressure: resolved_pressure,
         humidity,
         altitude,
     };
@@ -10232,8 +10390,9 @@ fn run_zero_calculation(
     // sight at y = sight_height; target_height is an offset at the target.
     let los_target_height = sight_height + target_height;
 
-    // Calculate zero angle with atmospheric conditions
-    let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+    // Calculate zero angle with atmospheric conditions. Authoritative: `atmosphere` above is
+    // already fully resolved, so it is trusted as-is rather than re-derived a second time.
+    let zero_angle = ballistics_engine::calculate_zero_angle_with_resolved_conditions(
         inputs.clone(),
         target_distance,
         los_target_height,
@@ -10245,7 +10404,11 @@ fn run_zero_calculation(
     let mut zeroed_inputs = inputs;
     zeroed_inputs.muzzle_angle = zero_angle;
 
-    let mut solver = TrajectorySolver::new(zeroed_inputs, Default::default(), atmosphere);
+    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(
+        zeroed_inputs,
+        Default::default(),
+        atmosphere,
+    );
     solver.set_max_range(target_distance * 3.0);
     let trajectory = solver.solve()?;
 
@@ -14740,6 +14903,7 @@ mod profile_unit_tests {
             drag_curve: None,
             dsf_points: None,
             bc_reference: None,
+            pressure_reference: None,
         }
     }
 
@@ -14916,6 +15080,62 @@ mod profile_unit_tests {
     fn parse_bc_reference_profile_field_rejects_garbage() {
         assert!(parse_bc_reference_profile_field(Some("metro")).is_err());
         assert!(parse_bc_reference_profile_field(Some("ICAO")).is_ok()); // case-insensitive
+    }
+
+    /// MBA-1397: a profile saved before `pressure_reference` existed (no key at all) must
+    /// still deserialize cleanly, defaulting to Absolute, and must NOT gain the key on
+    /// re-save — same forward-compat contract as `bc_reference` above.
+    #[test]
+    fn profile_without_pressure_reference_key_round_trips_as_absolute() {
+        let phase1_json = r#"{
+            "name": "pre-mba-1397",
+            "velocity": 2700.0,
+            "bc": 0.475,
+            "mass": 175.0,
+            "diameter": 0.308,
+            "drag_model": "G7",
+            "units": "imperial",
+            "temperature": 59.0,
+            "pressure": 29.92,
+            "humidity": 50.0,
+            "altitude": 0.0
+        }"#;
+        let profile: ProfileData = serde_json::from_str(phase1_json).unwrap();
+        assert_eq!(profile.pressure_reference, None);
+        assert_eq!(
+            parse_pressure_reference_profile_field(profile.pressure_reference.as_deref())
+                .unwrap(),
+            PressureReferenceMode::Absolute
+        );
+
+        let reserialized = serde_json::to_string(&profile).unwrap();
+        assert!(!reserialized.contains("pressure_reference"));
+    }
+
+    /// A profile that DOES declare `pressure_reference: "qnh"` must round-trip through
+    /// save/load with the declared mode intact.
+    #[test]
+    fn profile_with_qnh_pressure_reference_round_trips() {
+        let profile = ProfileData {
+            pressure_reference: Some("qnh".to_string()),
+            ..metric_profile()
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("qnh"));
+
+        let reloaded: ProfileData = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.pressure_reference.as_deref(), Some("qnh"));
+        assert_eq!(
+            parse_pressure_reference_profile_field(reloaded.pressure_reference.as_deref())
+                .unwrap(),
+            PressureReferenceMode::Qnh
+        );
+    }
+
+    #[test]
+    fn parse_pressure_reference_profile_field_rejects_garbage() {
+        assert!(parse_pressure_reference_profile_field(Some("barometric")).is_err());
+        assert!(parse_pressure_reference_profile_field(Some("QNH")).is_ok()); // case-insensitive
     }
 
     #[test]

@@ -1083,6 +1083,34 @@ pub extern "C" fn ballistics_bc_for_reference_standard(
     }
 }
 
+/// Reduce a sea-level-corrected altimeter setting (QNH, in hPa) to the station pressure at
+/// `altitude_m` (MBA-1397; see [`crate::atmosphere::reduce_qnh_to_station_pressure`] for the
+/// formula). `FFIAtmosphericConditions.pressure` has always meant absolute station pressure,
+/// and remains a frozen `repr(C)` struct enforced by an ABI regression test with no room to
+/// add a pressure-reference-mode field, so this is a standalone pure conversion instead of a
+/// struct setter — exactly the same pattern as [`ballistics_bc_for_reference_standard`]: call
+/// it once on a caller-declared QNH reading before writing the result into
+/// `FFIAtmosphericConditions.pressure`, then use every existing
+/// `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*`
+/// export completely unchanged — every one of them reads `pressure` as absolute station
+/// pressure already, so feeding it an already-reduced value is a pure addition to the ABI,
+/// not a modification. No existing caller that never calls this function is affected, and no
+/// recompile is required for callers that don't opt into QNH support.
+///
+/// A non-finite `qnh_hpa` or `altitude_m` is returned unchanged (this function performs no
+/// validation; the existing per-export input checks still apply to whatever ends up in
+/// `FFIAtmosphericConditions.pressure`).
+#[no_mangle]
+pub extern "C" fn ballistics_reduce_qnh_pressure(
+    qnh_hpa: c_double,
+    altitude_m: c_double,
+) -> c_double {
+    if !qnh_hpa.is_finite() || !altitude_m.is_finite() {
+        return qnh_hpa;
+    }
+    crate::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m)
+}
+
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
@@ -1907,5 +1935,135 @@ mod tests {
         assert_eq!(converted, bc * crate::constants::ASM_TO_ICAO_BC);
         // Smaller BC == more drag under this engine's ICAO-calibrated retardation math.
         assert!(converted < bc);
+    }
+
+    // ---- MBA-1397: ballistics_reduce_qnh_pressure + FFIAtmosphericConditions.pressure ---
+
+    #[test]
+    fn reduce_qnh_pressure_matches_the_library_function_and_lowers_pressure() {
+        let reduced = ballistics_reduce_qnh_pressure(1030.0, 1500.0);
+        assert_eq!(
+            reduced,
+            crate::atmosphere::reduce_qnh_to_station_pressure(1030.0, 1500.0)
+        );
+        assert!(reduced < 1030.0);
+    }
+
+    #[test]
+    fn reduce_qnh_pressure_passes_through_non_finite_inputs() {
+        assert!(ballistics_reduce_qnh_pressure(f64::NAN, 1500.0).is_nan());
+        assert_eq!(ballistics_reduce_qnh_pressure(1030.0, f64::INFINITY), 1030.0);
+    }
+
+    /// The FFI trajectory/Monte Carlo exports have always treated
+    /// `FFIAtmosphericConditions.pressure` as absolute station pressure. A caller declaring a
+    /// QNH (sea-level-corrected altimeter setting) reading MUST reduce it with
+    /// `ballistics_reduce_qnh_pressure` before writing `pressure` -- this proves the reduced
+    /// value actually reaches the solve (a materially different, and correct -- flatter,
+    /// less-drop -- trajectory than feeding the raw, unreduced QNH straight through, which
+    /// would silently over-state air density).
+    #[test]
+    fn ffi_trajectory_uses_the_reduced_pressure_not_the_raw_qnh() {
+        let inputs = valid_trajectory_inputs();
+        let altitude_m = 1500.0;
+        let qnh_hpa = 1030.0;
+        let reduced = ballistics_reduce_qnh_pressure(qnh_hpa, altitude_m);
+        assert!(reduced < qnh_hpa);
+
+        let atmo_reduced = FFIAtmosphericConditions {
+            temperature: 15.0,
+            pressure: reduced,
+            humidity: 50.0,
+            altitude: altitude_m,
+        };
+        let atmo_raw_qnh = FFIAtmosphericConditions {
+            temperature: 15.0,
+            pressure: qnh_hpa,
+            humidity: 50.0,
+            altitude: altitude_m,
+        };
+
+        unsafe {
+            let a = ballistics_calculate_trajectory(
+                &inputs,
+                std::ptr::null(),
+                &atmo_reduced,
+                400.0,
+                1.0,
+            );
+            let b = ballistics_calculate_trajectory(
+                &inputs,
+                std::ptr::null(),
+                &atmo_raw_qnh,
+                400.0,
+                1.0,
+            );
+            assert!(!a.is_null() && !b.is_null());
+            let drop_a = std::slice::from_raw_parts((*a).points, (*a).point_count as usize)
+                .last()
+                .unwrap()
+                .position_y;
+            let drop_b = std::slice::from_raw_parts((*b).points, (*b).point_count as usize)
+                .last()
+                .unwrap()
+                .position_y;
+            assert!(
+                (drop_a - drop_b).abs() > 1e-6,
+                "reduced vs. raw-QNH pressure must produce materially different trajectories: \
+                 {drop_a} vs {drop_b}"
+            );
+            ballistics_free_trajectory_result(a);
+            ballistics_free_trajectory_result(b);
+        }
+    }
+
+    /// Same proof as above, for the Monte Carlo FFI path (`ballistics_monte_carlo`), which
+    /// reads `FFIAtmosphericConditions.pressure` into `BallisticInputs.pressure` directly
+    /// (`ballistics_monte_carlo_impl`) before running the shared `run_monte_carlo_*` core.
+    #[test]
+    fn ffi_monte_carlo_uses_the_reduced_pressure_not_the_raw_qnh() {
+        let inputs = valid_trajectory_inputs();
+        let altitude_m = 1500.0;
+        let qnh_hpa = 1030.0;
+        let reduced = ballistics_reduce_qnh_pressure(qnh_hpa, altitude_m);
+
+        let atmo_reduced = FFIAtmosphericConditions {
+            temperature: 15.0,
+            pressure: reduced,
+            humidity: 50.0,
+            altitude: altitude_m,
+        };
+        let atmo_raw_qnh = FFIAtmosphericConditions {
+            temperature: 15.0,
+            pressure: qnh_hpa,
+            humidity: 50.0,
+            altitude: altitude_m,
+        };
+        let params = FFIMonteCarloParams {
+            num_simulations: 200,
+            velocity_std_dev: 1.0,
+            angle_std_dev: 0.0,
+            bc_std_dev: 0.0,
+            wind_speed_std_dev: 0.0,
+            target_distance: f64::NAN,
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 0.0,
+        };
+
+        unsafe {
+            let a = ballistics_monte_carlo(&inputs, &atmo_reduced, &params);
+            let b = ballistics_monte_carlo(&inputs, &atmo_raw_qnh, &params);
+            assert!(!a.is_null() && !b.is_null());
+            assert!(
+                ((*a).mean_range - (*b).mean_range).abs() > 0.5,
+                "reduced vs. raw-QNH pressure must change MC mean range materially: \
+                 {} vs {}",
+                (*a).mean_range,
+                (*b).mean_range
+            );
+            ballistics_free_monte_carlo_results(a);
+            ballistics_free_monte_carlo_results(b);
+        }
     }
 }

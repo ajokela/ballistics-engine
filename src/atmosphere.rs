@@ -184,13 +184,116 @@ pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Optio
 
 /// Return the station temperature and pressure that [`calculate_atmosphere`] will use after
 /// applying the default-at-altitude resolution rules.
+///
+/// A thin, byte-identical delegate to
+/// [`resolve_station_conditions_with_pressure_mode`] at [`PressureReferenceMode::Absolute`]
+/// (MBA-1397) — kept as a separate name/signature so no existing caller needs to change.
 pub fn resolve_station_conditions(
     temperature_c: f64,
     pressure_hpa: f64,
     altitude_m: f64,
 ) -> (f64, f64) {
+    resolve_station_conditions_with_pressure_mode(
+        temperature_c,
+        pressure_hpa,
+        altitude_m,
+        PressureReferenceMode::Absolute,
+    )
+}
+
+/// Whether a station-pressure input is already absolute (station) pressure, or a sea-level-
+/// corrected altimeter setting (QNH / "barometer" reading) that must be reduced to station
+/// pressure at the shooter's altitude before use (MBA-1397).
+///
+/// Kestrel, AB Mobile, Shooter, JBM, and Hornady 4DOF all let the user declare which one they
+/// are entering. Previously this engine only supported [`Absolute`](Self::Absolute) — an
+/// entered sea-level-corrected barometer/METAR value at a real altitude was silently treated
+/// as station pressure, over-stating air density and under-stating drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+pub enum PressureReferenceMode {
+    /// The input is already absolute station pressure — today's meaning, and the default, so
+    /// every existing caller that never sets this is byte-identical to pre-MBA-1397 behavior.
+    #[default]
+    Absolute,
+    /// The input is a sea-level-corrected altimeter setting (QNH) and must be reduced to
+    /// station pressure at the target altitude via [`reduce_qnh_to_station_pressure`].
+    Qnh,
+}
+
+/// Reduce a sea-level-corrected altimeter setting (QNH) to the station pressure at
+/// `altitude_m` (MBA-1397), using the inverse of the ICAO troposphere barometric formula:
+///
+/// `station = QNH * (1 + L*h/T0)^(-g/(L*R))`
+///
+/// which, for the troposphere's published lapse rate `L` and sea-level temperature `T0`, is
+/// exactly the standard ICAO Doc 7488 / NOAA altimeter-setting reduction
+/// `station = QNH * (1 - 0.0065*h/288.15)^5.25588`.
+///
+/// Reuses the SAME troposphere layer (`ICAO_LAYERS[0]`) and physical constants
+/// (`G_ACCEL_MPS2`, `R_AIR`) that `calculate_icao_standard_atmosphere` (private to this crate)
+/// uses for its own non-isothermal-layer pressure formula, rather than re-hardcoding the
+/// lapse rate / sea-level temperature / exponent a second time — this is that same formula,
+/// solved for a caller-given sea-level pressure instead of the fixed 1013.25 hPa standard.
+/// `altitude_m` is clamped and converted to geopotential height exactly like
+/// `calculate_icao_standard_atmosphere`, so a QNH of exactly 1013.25 hPa reduces to precisely
+/// the ICAO standard station pressure at every altitude (this is what makes the
+/// omitted-pressure default byte-identical under either [`PressureReferenceMode`]).
+///
+/// The reduction is only physically meaningful within the troposphere (the altitude range
+/// real shooting takes place in); it is not re-derived per-layer for higher altitudes.
+pub fn reduce_qnh_to_station_pressure(qnh_hpa: f64, altitude_m: f64) -> f64 {
+    let geometric_altitude = altitude_m.clamp(MIN_GEOMETRIC_ALTITUDE_M, MAX_GEOMETRIC_ALTITUDE_M);
+    let geopotential_height = geometric_to_geopotential_height_m(geometric_altitude).clamp(
+        MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M,
+        MAX_STANDARD_GEOPOTENTIAL_HEIGHT_M,
+    );
+    let layer = &ICAO_LAYERS[0]; // troposphere: the only layer the altimeter-setting reduction covers
+    let temp_ratio = 1.0 + layer.lapse_rate * geopotential_height / layer.base_temperature;
+    let exponent = -G_ACCEL_MPS2 / (layer.lapse_rate * R_AIR);
+    qnh_hpa * temp_ratio.powf(exponent)
+}
+
+/// Mode-aware counterpart of [`resolve_station_pressure`] (MBA-1397). Does NOT change that
+/// function's signature or behavior — [`PressureReferenceMode::Absolute`] is a pure
+/// passthrough to it — so this is a new function alongside the original, not a replacement.
+///
+/// [`PressureReferenceMode::Qnh`] reduces `pressure_hpa` (interpreted as a QNH) to station
+/// pressure via [`reduce_qnh_to_station_pressure`] and returns it as `Some(..)`
+/// UNCONDITIONALLY, bypassing the default-sentinel ambiguity `resolve_station_pressure` must
+/// use to infer omission from a bare `f64`. This matters: a QNH the caller explicitly declared
+/// should never be silently re-interpreted as an omitted default merely because the REDUCED
+/// number happens to land within the sentinel's tolerance of the 1013.25 hPa sea-level
+/// constant (a real, reachable case — e.g. a high-pressure day's QNH reducing to ~1013 hPa at
+/// a few hundred meters of elevation).
+pub fn resolve_station_pressure_with_mode(
+    pressure_hpa: f64,
+    altitude_m: f64,
+    mode: PressureReferenceMode,
+) -> Option<f64> {
+    match mode {
+        PressureReferenceMode::Absolute => resolve_station_pressure(pressure_hpa, altitude_m),
+        PressureReferenceMode::Qnh => {
+            Some(reduce_qnh_to_station_pressure(pressure_hpa, altitude_m))
+        }
+    }
+}
+
+/// Mode-aware counterpart of [`resolve_station_conditions`] (MBA-1397): identical for
+/// [`PressureReferenceMode::Absolute`] (byte-identical delegate — [`resolve_station_conditions`]
+/// itself now forwards here), and reduces an explicit QNH pressure to station pressure via
+/// [`resolve_station_pressure_with_mode`] for [`PressureReferenceMode::Qnh`] before applying
+/// the same standard-atmosphere fallback used when either input is left at its sea-level
+/// default.
+pub fn resolve_station_conditions_with_pressure_mode(
+    temperature_c: f64,
+    pressure_hpa: f64,
+    altitude_m: f64,
+    pressure_mode: PressureReferenceMode,
+) -> (f64, f64) {
     let temp_override = resolve_station_temperature(temperature_c, altitude_m);
-    let press_override = resolve_station_pressure(pressure_hpa, altitude_m);
+    let press_override =
+        resolve_station_pressure_with_mode(pressure_hpa, altitude_m, pressure_mode);
     let (std_temp_k, std_pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
     let temp_c = temp_override.unwrap_or(std_temp_k - 273.15);
     let pressure_hpa = press_override.unwrap_or(std_pressure_pa / 100.0);
@@ -1020,6 +1123,128 @@ mod tests {
         assert_eq!(resolve_station_pressure(850.0, 2000.0), Some(850.0));
         // At/near sea level the default is used directly (no derivation needed).
         assert_eq!(resolve_station_pressure(1013.25, 0.0), Some(1013.25));
+    }
+
+    #[test]
+    fn qnh_reduction_matches_hand_computed_value_at_nonzero_altitude() {
+        // Hand-computed (Python, double precision) from the ICAO inverse-barometric formula:
+        // station = 1030.0 * (1 - 0.0065*1500/288.15)^5.255875601466713 = 859.5753123926447 hPa.
+        let reduced = reduce_qnh_to_station_pressure(1030.0, 1500.0);
+        assert!(
+            (reduced - 859.575_312_392_644_7).abs() < 1e-9,
+            "reduced={reduced}"
+        );
+        // The reduction must strictly lower the pressure versus the raw QNH input.
+        assert!(reduced < 1030.0);
+    }
+
+    #[test]
+    fn qnh_reduction_is_identity_at_sea_level() {
+        // At h=0 the geopotential height is 0, so the ratio is exactly 1.0 and QNH passes
+        // through unchanged (bit-exact: 1.0f64.powf(x) == 1.0).
+        assert_eq!(reduce_qnh_to_station_pressure(1030.0, 0.0), 1030.0);
+        assert_eq!(reduce_qnh_to_station_pressure(950.5, 0.0), 950.5);
+    }
+
+    #[test]
+    fn qnh_sea_level_standard_matches_icao_standard_atmosphere_at_every_altitude() {
+        // A QNH of exactly 1013.25 hPa (the sea-level standard) must reduce to precisely the
+        // ICAO standard station pressure at any altitude -- this is what keeps the omitted-
+        // pressure default byte-identical whether the caller declares Absolute or Qnh.
+        for altitude_m in [0.0, 500.0, 2000.0, 4500.0] {
+            let (_, std_pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
+            let reduced = reduce_qnh_to_station_pressure(1013.25, altitude_m);
+            assert!(
+                (reduced - std_pressure_pa / 100.0).abs() < 1e-9,
+                "altitude={altitude_m} reduced={reduced} std={}",
+                std_pressure_pa / 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_station_pressure_with_mode_absolute_matches_resolve_station_pressure() {
+        // PressureReferenceMode::Absolute must be byte-identical to resolve_station_pressure
+        // for every case that function's own contract test exercises.
+        for (pressure_hpa, altitude_m) in
+            [(1013.25, 2000.0), (1013.21, 2000.0), (850.0, 2000.0), (1013.25, 0.0)]
+        {
+            assert_eq!(
+                resolve_station_pressure_with_mode(
+                    pressure_hpa,
+                    altitude_m,
+                    PressureReferenceMode::Absolute
+                ),
+                resolve_station_pressure(pressure_hpa, altitude_m)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_station_pressure_with_mode_qnh_bypasses_the_default_sentinel() {
+        // Constructed so the REDUCED value coincidentally lands within the absolute-mode
+        // sentinel's +/-0.5 hPa tolerance of 1013.25 hPa at a real (>1 m) altitude -- exactly
+        // the case that would silently discard an explicit reading under the old,
+        // mode-blind resolve_station_pressure.
+        let qnh = 1030.0;
+        let altitude_m = 138.078_300_203_223_02;
+        let reduced = reduce_qnh_to_station_pressure(qnh, altitude_m);
+        assert!(
+            (reduced - 1013.25).abs() < 0.5,
+            "test fixture must land inside the sentinel band; reduced={reduced}"
+        );
+
+        // Qnh mode must still return Some(reduced) -- never None -- regardless of the
+        // coincidence, and must equal the reduction, not a derived-from-altitude value.
+        assert_eq!(
+            resolve_station_pressure_with_mode(qnh, altitude_m, PressureReferenceMode::Qnh),
+            Some(reduced)
+        );
+
+        // Sanity: the OLD absolute-mode function, given that same reduced number directly,
+        // WOULD have discarded it (returned None, deriving ICAO-standard pressure instead) --
+        // demonstrating why Qnh mode must never be routed back through the plain sentinel
+        // check on its output.
+        assert_eq!(resolve_station_pressure(reduced, altitude_m), None);
+        let (_, std_pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
+        assert!(
+            (std_pressure_pa / 100.0 - reduced).abs() > 10.0,
+            "fixture must show the sentinel misfire actually changes the answer materially"
+        );
+    }
+
+    #[test]
+    fn resolve_station_conditions_with_pressure_mode_absolute_matches_resolve_station_conditions()
+    {
+        for (temp_c, pressure_hpa, altitude_m) in
+            [(15.0, 1013.25, 2000.0), (-5.0, 850.0, 2000.0), (15.0, 1013.25, 0.0)]
+        {
+            assert_eq!(
+                resolve_station_conditions_with_pressure_mode(
+                    temp_c,
+                    pressure_hpa,
+                    altitude_m,
+                    PressureReferenceMode::Absolute
+                ),
+                resolve_station_conditions(temp_c, pressure_hpa, altitude_m)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_station_conditions_with_pressure_mode_qnh_reduces_pressure_only() {
+        // -5.0 C is not the sea-level default sentinel (15.0 C), so it stays authoritative --
+        // isolating that only the pressure resolution differs between the two modes.
+        let (temp_c, pressure_hpa) = resolve_station_conditions_with_pressure_mode(
+            -5.0,
+            1030.0,
+            1500.0,
+            PressureReferenceMode::Qnh,
+        );
+        // Temperature resolution is untouched by pressure mode: an explicit, non-default
+        // temperature stays authoritative exactly as resolve_station_conditions would give.
+        assert_eq!(temp_c, -5.0);
+        assert!((pressure_hpa - 859.575_312_392_644_7).abs() < 1e-9);
     }
 
     #[test]
