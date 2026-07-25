@@ -228,7 +228,11 @@ pub enum PressureReferenceMode {
 ///
 /// which, for the troposphere's published lapse rate `L` and sea-level temperature `T0`, is
 /// exactly the standard ICAO Doc 7488 / NOAA altimeter-setting reduction
-/// `station = QNH * (1 - 0.0065*h/288.15)^5.25588`.
+/// `station = QNH * (1 - 0.0065*h/288.15)^5.25588`, where `h` is GEOPOTENTIAL height, not
+/// the geometric altitude the caller supplies — this function converts the one to the other
+/// first (`geometric_to_geopotential_height_m`), as ISA requires. Substituting geometric
+/// altitude directly into that expression reproduces the reduction only to about 0.04 hPa
+/// at 1500 m, which is why the worked values below are not what the bare formula gives.
 ///
 /// Reuses the SAME troposphere layer (`ICAO_LAYERS[0]`) and physical constants
 /// (`G_ACCEL_MPS2`, `R_AIR`) that `calculate_icao_standard_atmosphere` (private to this crate)
@@ -1127,8 +1131,14 @@ mod tests {
 
     #[test]
     fn qnh_reduction_matches_hand_computed_value_at_nonzero_altitude() {
-        // Hand-computed (Python, double precision) from the ICAO inverse-barometric formula:
-        // station = 1030.0 * (1 - 0.0065*1500/288.15)^5.255875601466713 = 859.5753123926447 hPa.
+        // Hand-computed (Python, double precision) from the ICAO inverse-barometric formula.
+        // NOTE the geopotential step — 1500 m geometric is 1499.646 m geopotential, and it is
+        // the geopotential height that enters the exponent:
+        //   h_geo   = 6356766*1500/(6356766+1500)                    = 1499.6461... m
+        //   station = 1030.0 * (1 - 0.0065*h_geo/288.15)^5.255875601466713
+        //           = 859.5753123926447 hPa
+        // Feeding the raw 1500 m in instead yields 859.5378567 hPa, so a reader checking this
+        // pin against the bare formula would wrongly conclude the implementation is off.
         let reduced = reduce_qnh_to_station_pressure(1030.0, 1500.0);
         assert!(
             (reduced - 859.575_312_392_644_7).abs() < 1e-9,

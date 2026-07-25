@@ -251,13 +251,19 @@ A barometric pressure reading can mean two different physical quantities, and mi
 `--pressure-type <absolute|qnh>` declares which one `--pressure` is. `absolute` is the default and is a complete no-op — omitting the flag, or passing `--pressure-type absolute` explicitly, is byte-identical to every run before this flag existed. `qnh` reduces the declared pressure to station pressure at `--altitude` via the ICAO inverse-barometric formula, the exact inverse of the standard-atmosphere formula this engine already uses for altitude-derived pressure:
 
 ```
-station = QNH * (1 - 0.0065 * altitude_m / 288.15) ^ 5.25588
+station = QNH * (1 - 0.0065 * h_geopotential_m / 288.15) ^ 5.25588
 ```
+
+`h_geopotential_m` is the geopotential height ISA is defined against, not the geometric
+altitude you type in; the engine converts before applying the formula. The difference is
+small (1500 m geometric is 1499.65 m geopotential, worth about 0.04 hPa) but it is why
+substituting your `--altitude` straight into the expression above will not reproduce the
+engine's number exactly.
 
 ```bash
 # A weather report gives 30.31 inHg (1026.5 hPa) QNH at a 5,000 ft (1524 m) firing position.
 # Entered as absolute (the historical default) this over-states density; entered as qnh it is
-# correctly reduced to ~25.35 inHg (~858.6 hPa) station pressure before the solve runs.
+# correctly reduced to ~25.22 inHg (~854.1 hPa) station pressure before the solve runs.
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
   --altitude 5000 --pressure 30.31 --pressure-type qnh
 ```
