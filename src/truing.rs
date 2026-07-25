@@ -1144,6 +1144,14 @@ pub struct MultiTruingReport {
     /// reached — names the range checked in the "no MV window" report note
     /// when `mach_1_2_distance_m` is `None` (MBA-1405 Task 2).
     pub window_solved_range_m: f64,
+    /// Mach number at the first trajectory point of the fixed-envelope re-solve
+    /// (`points[0].velocity_magnitude / station_speed_of_sound_mps`, the same
+    /// convention `apply_dsf`/`truing_dsf` use for per-point Mach). Distinguishes,
+    /// when `mach_1_2_distance_m` is `None`, a load that is still supersonic at
+    /// the end of the window envelope (muzzle Mach >= 1.2) from one that launches
+    /// below Mach 1.2 and never crosses downward at all (muzzle Mach < 1.2) — the
+    /// two have opposite report text (MBA-1405 Task 2 fix pass).
+    pub muzzle_mach: f64,
 }
 
 /// Orchestrate the multi-observation joint MV+BC calibration and build the
@@ -1294,7 +1302,7 @@ pub fn run_multi_observation_truing_core(
     // MBA-1405 Task 2: one extra solve at the finally fitted (mv, bc), out to a
     // fixed generous envelope independent of the observation set, purely to read
     // off the downward Mach-1.2 crossing for the MV-calibration window report line.
-    let (mach_1_2_distance_m, window_solved_range_m) =
+    let (mach_1_2_distance_m, window_solved_range_m, muzzle_mach) =
         truing_mv_window_mach_1_2_crossing(&model, fitted_mv, fitted_bc)?;
 
     let report = MultiTruingReport {
@@ -1314,6 +1322,7 @@ pub fn run_multi_observation_truing_core(
         reason,
         mach_1_2_distance_m,
         window_solved_range_m,
+        muzzle_mach,
     };
 
     Ok(report)
@@ -1328,15 +1337,20 @@ const MV_WINDOW_SOLVE_MAX_RANGE_YD: f64 = 3000.0;
 
 /// Re-solve the finally fitted `(mv, bc)` load out to [`MV_WINDOW_SOLVE_MAX_RANGE_YD`]
 /// to read off the downward Mach-1.2 crossing distance (meters) for the MV-calibration
-/// window (MBA-1405 Task 2). Returns `(mach_1_2_distance_m, solved_max_range_m)`; the
-/// second element lets the report's "no MV window" note name the range actually
-/// checked rather than the nominal envelope (relevant if the solve terminates early,
-/// e.g. ground impact).
+/// window (MBA-1405 Task 2). Returns `(mach_1_2_distance_m, solved_max_range_m,
+/// muzzle_mach)`; the second element lets the report's "no MV window" note name the
+/// range actually checked rather than the nominal envelope (relevant if the solve
+/// terminates early, e.g. ground impact). The third element is the Mach number at the
+/// first trajectory point (`points[0].velocity_magnitude / station_speed_of_sound_mps`,
+/// the same convention `truing_dsf::apply_dsf` uses) — it lets the caller distinguish,
+/// when `mach_1_2_distance_m` is `None`, "still supersonic through the whole envelope"
+/// (muzzle Mach >= 1.2) from "never reaches Mach 1.2 at all" (muzzle Mach < 1.2), which
+/// need opposite report text (MBA-1405 Task 2 fix pass).
 fn truing_mv_window_mach_1_2_crossing(
     model: &TruingForwardModel<'_>,
     mv_fps: f64,
     bc: f64,
-) -> Result<(Option<f64>, f64), Box<dyn Error>> {
+) -> Result<(Option<f64>, f64, f64), Box<dyn Error>> {
     let result = solve_truing_trajectory(
         mv_fps,
         bc,
@@ -1352,7 +1366,14 @@ fn truing_mv_window_mach_1_2_crossing(
         model.alt_ft,
         model.bc_segments,
     )?;
-    Ok((result.mach_1_2_distance_m, result.max_range))
+    let muzzle_mach = result.points.first().map_or(0.0, |p| {
+        if result.station_speed_of_sound_mps > 0.0 {
+            p.velocity_magnitude / result.station_speed_of_sound_mps
+        } else {
+            0.0
+        }
+    });
+    Ok((result.mach_1_2_distance_m, result.max_range, muzzle_mach))
 }
 
 /// RMS of residuals at a candidate `(mv, bc)`.

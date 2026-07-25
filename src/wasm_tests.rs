@@ -2063,6 +2063,51 @@ Impact Velocity: 2510 fps\n";
         assert!(!out.contains("MV-calibration window:"), "{out}");
     }
 
+    /// MBA-1405 Task 2 fix pass: the OTHER "no MV window" cause — a load that
+    /// launches BELOW Mach 1.2 and so never crosses downward at all (as opposed to
+    /// `true_velocity_multi_observation_no_window_note_matches_native` above, which
+    /// is still supersonic through the whole window envelope). These two causes
+    /// need opposite report text; this pins the never-supersonic branch byte-parity
+    /// with native (same fixture/pin as
+    /// `tests/truing_multi_obs.rs::no_mv_window_note_for_a_never_supersonic_fixture`).
+    #[wasm_bindgen_test]
+    fn true_velocity_multi_observation_never_supersonic_note_matches_native() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 100.0 --measured-drop 1.834371 --observed \
+                 400.0:17.880184 --bc 0.3 -m 220 -d 0.308 --zero-distance 25 \
+                 --chrono-velocity 1050",
+            )
+            .unwrap();
+        assert!(
+            out.contains(
+                "note: no MV window: trajectory never reaches Mach 1.2; calibrate muzzle \
+                 velocity with a chronograph, then collect DSF points"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("MV-calibration window:"), "{out}");
+        assert!(!out.contains("supersonic through"), "{out}");
+    }
+
+    /// JSON purity for the never-supersonic branch too — still additive-only null
+    /// fields, no note text of either flavor (matches the native CLI exactly).
+    #[wasm_bindgen_test]
+    fn true_velocity_multi_observation_never_supersonic_json_window_fields_null() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 100.0 --measured-drop 1.834371 --observed \
+                 400.0:17.880184 --bc 0.3 -m 220 -d 0.308 --zero-distance 25 \
+                 --chrono-velocity 1050 -o json",
+            )
+            .unwrap();
+        assert!(!out.to_lowercase().contains("calibration window"), "{out}");
+        assert!(!out.to_lowercase().contains("mach 1.2"), "{out}");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(v["mv_window_start_m"].is_null(), "{v}");
+        assert!(v["mv_window_end_m"].is_null(), "{v}");
+    }
+
     /// JSON additive-only purity: the window fields are present and numeric for the
     /// transonic fixture, and no note text ever leaks into JSON (matches the native
     /// CLI's JSON purity rule exactly).
