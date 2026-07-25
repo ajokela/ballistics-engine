@@ -576,3 +576,77 @@ fn come_ups_auto_applies_the_dsf_table_with_a_table_only_note() {
     assert!(csv.status.success());
     assert!(!String::from_utf8_lossy(&csv.stdout).to_lowercase().contains("dsf"));
 }
+
+// -----------------------------------------------------------------------------
+// MBA-1405 Task 2: the `dsf` verb's validity-window note (stdout, always — `dsf`
+// has no `--output` flag, so it is always the "table path"). Uses the solve the
+// verb already performs (`solve_profile_for_dsf`'s `TrajectoryResult`) — no extra
+// trajectory solve.
+// -----------------------------------------------------------------------------
+
+/// `save_test_profile`'s load (v=1300 fps, BC 0.4, .308/168gr, 300 yd zero) goes
+/// supersonic-to-subsonic well inside its own solved range, so
+/// `TrajectoryResult::mach_0_9_distance_m` is `Some` and the verb must print the
+/// "at or beyond" window note. The 307.6 yd figure is a deterministic pin (90% of
+/// this exact profile's downward Mach-0.9 crossing) — a real physics regression, not
+/// a hand-picked constant.
+#[test]
+fn dsf_window_note_reports_the_start_of_the_subsonic_window() {
+    let home = tempfile_dir();
+    let save = save_test_profile(&home, "dsf-window-some");
+    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+
+    let out = cli()
+        .env("HOME", &home)
+        .args([
+            "dsf", "--saved-profile", "dsf-window-some", "--range", "340", "--observed-drop",
+            "20.7in",
+        ])
+        .output()
+        .expect("spawn dsf");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("note: DSF window: at or beyond 307.6 yd (90% of the Mach 0.9 distance)"),
+        "{stdout}"
+    );
+}
+
+/// A profile launched already subsonic (900 fps; standard-atmosphere Mach 1 is ~1116
+/// fps, so this starts at Mach ~0.81) never records a downward Mach-0.9 CROSSING —
+/// `MachTransitionTracker::record_downward_crossings` only fires on a transition from
+/// at-or-above the threshold to below it, and this load never starts above 0.9. So
+/// `mach_0_9_distance_m` stays `None` and the verb must print the "no subsonic
+/// window" note instead.
+#[test]
+fn dsf_window_note_reports_no_subsonic_window_for_an_always_subsonic_load() {
+    let home = tempfile_dir();
+    let save = cli()
+        .env("HOME", &home)
+        .args([
+            "profile", "save", "dsf-window-none", "-v", "900", "-b", "0.4", "-m", "168", "-d",
+            "0.308", "--drag-model", "g1", "--zero-distance", "100", "--sight-height", "2.0",
+        ])
+        .output()
+        .expect("spawn profile save");
+    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+
+    let out = cli()
+        .env("HOME", &home)
+        .args([
+            "dsf", "--saved-profile", "dsf-window-none", "--range", "150", "--observed-drop",
+            "1.5mil",
+        ])
+        .output()
+        .expect("spawn dsf");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("note: no subsonic window inside the solved range"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("note: DSF window: at or beyond"),
+        "must not print the Some-branch note: {stdout}"
+    );
+}

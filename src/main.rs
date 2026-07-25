@@ -33,9 +33,10 @@ use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN};
 use ballistics_engine::cli_api::UnitSystem;
 use ballistics_engine::truing::{
-    calculate_true_velocity_local, fallback_bullet_length_m, parse_truing_observation,
-    run_multi_observation_truing_core, validate_truing_observations, DragModelArg, DropUnit,
-    MultiTruingReport, TruingModelInputsV1, TruingObservation,
+    calculate_true_velocity_local, dsf_window_start, fallback_bullet_length_m,
+    mv_calibration_window, parse_truing_observation, run_multi_observation_truing_core,
+    validate_truing_observations, DragModelArg, DropUnit, MultiTruingReport, TruingModelInputsV1,
+    TruingObservation,
 };
 use ballistics_engine::truing_dsf::{
     apply_dsf, DsfPoint, DsfTable, UpsertOutcome, DSF_MACH_CEILING,
@@ -7233,6 +7234,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("{}", dsf_transonic_gap_warning());
             }
 
+            // MBA-1405 Task 2: DSF validity window note (stdout — `dsf` has no --output
+            // flag, so this is always the "table path"). Uses the solve already
+            // performed above (`result`); no extra trajectory solve needed.
+            match dsf_window_start(result.mach_0_9_distance_m) {
+                Some(start_m) => {
+                    let start_display = UnitConverter::distance_from_metric(start_m, cli.units);
+                    println!(
+                        "note: DSF window: at or beyond {start_display:.1} {dist_unit} (90% of \
+                         the Mach 0.9 distance)"
+                    );
+                }
+                None => {
+                    println!("note: no subsonic window inside the solved range");
+                }
+            }
+
             profile.dsf_points = Some(table.points().to_vec());
             let path = save_profile(&profile)?;
             eprintln!("Profile '{}' saved to {:?}", profile.name, path);
@@ -10816,6 +10833,28 @@ fn display_multi_truing_result(
         None => (None, None),
     };
 
+    // MBA-1405 Task 2: the MV-calibration window (90-100% of the downward Mach 1.2
+    // crossing) and its per-observation out-of-window warning. The warning is a
+    // stderr diagnostic independent of --output, so it fires once here regardless
+    // of which branch below actually renders; the window itself is otherwise
+    // table-only (see the `OutputFormat::Table` arm) and JSON gets only the
+    // additive numeric fields, never this warning text (purity rule).
+    let mv_window = mv_calibration_window(report.mach_1_2_distance_m);
+    if let Some((lo_m, hi_m)) = mv_window {
+        let lo = UnitConverter::distance_from_metric(lo_m, units);
+        let hi = UnitConverter::distance_from_metric(hi_m, units);
+        for o in &report.observations {
+            let range_m = o.range_yd * 0.9144;
+            if range_m < lo_m || range_m > hi_m {
+                let r = range_display(o.range_yd);
+                eprintln!(
+                    "warning: observation at {r:.1} is outside the MV-calibration window \
+                     ({lo:.1}-{hi:.1}); MV fits from this range are weakly identified"
+                );
+            }
+        }
+    }
+
     match output {
         OutputFormat::Json => {
             let obs_json: Vec<serde_json::Value> = report
@@ -10867,6 +10906,18 @@ fn display_multi_truing_result(
             if let Some(pct) = adj_pct {
                 json_output["adjustment_percent"] = serde_json::json!(pct);
             }
+            // MBA-1405 Task 2: additive-only fields (meters, unit-invariant); null when
+            // the trajectory never crosses Mach 1.2. No note text ever accompanies these
+            // in JSON (purity rule) — the human-readable window/no-window lines are
+            // table-only, above.
+            json_output["mv_window_start_m"] = match mv_window {
+                Some((lo_m, _)) => serde_json::json!(lo_m),
+                None => serde_json::Value::Null,
+            };
+            json_output["mv_window_end_m"] = match mv_window {
+                Some((_, hi_m)) => serde_json::json!(hi_m),
+                None => serde_json::Value::Null,
+            };
             match serde_json::to_string_pretty(&json_output) {
                 Ok(s) => println!("{s}"),
                 Err(e) => eprintln!("Error serializing JSON: {e}"),
@@ -10971,6 +11022,25 @@ fn display_multi_truing_result(
                     "inf".to_string()
                 }
             );
+            // MBA-1405 Task 2: MV-calibration window / no-window note, table only.
+            match mv_window {
+                Some((lo_m, hi_m)) => {
+                    let lo = UnitConverter::distance_from_metric(lo_m, units);
+                    let hi = UnitConverter::distance_from_metric(hi_m, units);
+                    println!(
+                        "  MV-calibration window: {lo:.1}-{hi:.1} {range_unit} (90-100% of the Mach 1.2 distance)"
+                    );
+                }
+                None => {
+                    let max_display =
+                        UnitConverter::distance_from_metric(report.window_solved_range_m, units);
+                    println!(
+                        "  note: no MV window: trajectory is supersonic through {max_display:.1} \
+                         {range_unit}; MV is identifiable at any range"
+                    );
+                }
+            }
+            println!("  for optimal observation ranges run: ballistics plan-truing");
             println!();
         }
         OutputFormat::Pdf => {

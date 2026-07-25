@@ -450,3 +450,169 @@ fn metric_units_range_in_meters() {
     let mv_ms = v["fitted_muzzle_velocity"].as_f64().unwrap();
     assert!((mv_ms - 823.0).abs() < 20.0, "mv_ms={mv_ms}");
 }
+
+// -----------------------------------------------------------------------------
+// MBA-1405 Task 2: the MV-calibration window (90-100% of the downward Mach 1.2
+// crossing of the finally fitted load) — table line, no-window note, the
+// per-observation out-of-window stderr warning, the cross-reference to
+// `plan-truing`, and additive-only JSON purity.
+//
+// The transonic fixture below is the same 300/600/900 joint fit
+// `src/wasm_tests.rs`'s `true_velocity_multi_observation_matches_native_joint_fit`
+// pins to a 2514.5 fps fitted MV — reused here (not regenerated via
+// `forward_drop_mil`) so the window figures are pinned against an already-stable,
+// cross-surface-verified fit rather than a fresh derivation.
+// -----------------------------------------------------------------------------
+
+const TRANSONIC_FIXTURE_ARGS: &[&str] = &[
+    "true-velocity",
+    "--range",
+    "300",
+    "--measured-drop",
+    "1.8",
+    "--observed",
+    "600:5.1",
+    "--observed",
+    "900:10.9",
+    "--bc",
+    "0.475",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "--zero-distance",
+    "100",
+    "--chrono-velocity",
+    "2700",
+];
+
+/// A very high BC / high velocity load whose downward Mach 1.2 crossing sits well
+/// beyond the fixed 3000 yd envelope the window re-solve uses — deliberately
+/// unrealistic (BC 2.0), chosen purely to exercise the "no window" branch.
+const FULLY_SUPERSONIC_FIXTURE_ARGS: &[&str] = &[
+    "true-velocity",
+    "--range",
+    "300",
+    "--measured-drop",
+    "0.3",
+    "--observed",
+    "600:0.65",
+    "--bc",
+    "2.0",
+    "-m",
+    "750",
+    "-d",
+    "0.510",
+    "--zero-distance",
+    "300",
+    "--chrono-velocity",
+    "3300",
+];
+
+#[test]
+fn mv_calibration_window_line_appears_for_a_transonic_fixture() {
+    let out = run_true_velocity(TRANSONIC_FIXTURE_ARGS);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("MV-calibration window: 656.7-729.7 yd (90-100% of the Mach 1.2 distance)"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn no_mv_window_note_for_a_fully_supersonic_fixture() {
+    let out = run_true_velocity(FULLY_SUPERSONIC_FIXTURE_ARGS);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "note: no MV window: trajectory is supersonic through 3109.4 yd; MV is identifiable at any range"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("MV-calibration window:"), "{stdout}");
+}
+
+/// Every one of the transonic fixture's three observations (300/600/900 yd) sits
+/// outside its pinned 656.7-729.7 yd window, so all three must warn on stderr.
+#[test]
+fn out_of_window_observations_warn_on_stderr() {
+    let out = run_true_velocity(TRANSONIC_FIXTURE_ARGS);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for r in ["300.0", "600.0", "900.0"] {
+        assert!(
+            stderr.contains(&format!(
+                "warning: observation at {r} is outside the MV-calibration window \
+                 (656.7-729.7); MV fits from this range are weakly identified"
+            )),
+            "missing warning for {r}: {stderr}"
+        );
+    }
+}
+
+/// The no-window fixture has no window to be outside of — the warning loop must
+/// not fire at all.
+#[test]
+fn no_out_of_window_warning_when_there_is_no_window() {
+    let out = run_true_velocity(FULLY_SUPERSONIC_FIXTURE_ARGS);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("MV-calibration window"), "{stderr}");
+}
+
+#[test]
+fn plan_truing_cross_reference_line_appears_exactly_once() {
+    let out = run_true_velocity(TRANSONIC_FIXTURE_ARGS);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let needle = "for optimal observation ranges run: ballistics plan-truing";
+    assert_eq!(
+        stdout.matches(needle).count(),
+        1,
+        "cross-reference line must appear exactly once: {stdout}"
+    );
+}
+
+#[test]
+fn json_gets_additive_window_fields_only_never_note_text() {
+    let mut json_args: Vec<&str> = TRANSONIC_FIXTURE_ARGS.to_vec();
+    json_args.extend(["--output", "json"]);
+    let out = run_true_velocity(&json_args);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let raw = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !raw.to_lowercase().contains("calibration window"),
+        "JSON must carry no note text: {raw}"
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let lo = v["mv_window_start_m"].as_f64().expect("mv_window_start_m present and numeric");
+    let hi = v["mv_window_end_m"].as_f64().expect("mv_window_end_m present and numeric");
+    assert!(lo > 0.0 && hi > lo, "lo={lo} hi={hi}");
+    // 656.7-729.7 yd pinned above, in meters (yd * 0.9144).
+    assert!((lo - 656.7 * 0.9144).abs() < 0.5, "lo={lo}");
+    assert!((hi - 729.7 * 0.9144).abs() < 0.5, "hi={hi}");
+}
+
+#[test]
+fn json_window_fields_are_null_when_there_is_no_window() {
+    let mut json_args: Vec<&str> = FULLY_SUPERSONIC_FIXTURE_ARGS.to_vec();
+    json_args.extend(["--output", "json"]);
+    let out = run_true_velocity(&json_args);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["mv_window_start_m"].is_null(), "{v}");
+    assert!(v["mv_window_end_m"].is_null(), "{v}");
+}
+
+#[test]
+fn csv_output_carries_no_window_note_text() {
+    let mut csv_args: Vec<&str> = TRANSONIC_FIXTURE_ARGS.to_vec();
+    csv_args.extend(["--output", "csv"]);
+    let out = run_true_velocity(&csv_args);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.to_lowercase().contains("calibration window"), "{stdout}");
+    assert!(!stdout.to_lowercase().contains("mv is identifiable"), "{stdout}");
+}

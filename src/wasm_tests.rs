@@ -2018,6 +2018,86 @@ Impact Velocity: 2510 fps\n";
         assert!(out.contains("2514.5"), "{}", out);
     }
 
+    /// MBA-1405 Task 2: the MV-calibration window table line is byte-parity with
+    /// the native CLI's `display_multi_truing_result` (same 300/600/900 fixture,
+    /// same pinned 656.7-729.7 yd window — see
+    /// `tests/truing_multi_obs.rs::mv_calibration_window_line_appears_for_a_transonic_fixture`
+    /// for the native-side pin this mirrors) — plus the "run plan-truing"
+    /// cross-reference line, always present in table mode.
+    #[wasm_bindgen_test]
+    fn true_velocity_multi_observation_mv_window_line_matches_native() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
+                 --observed 900:10.9 --bc 0.475 -m 168 -d 0.308 --zero-distance 100 \
+                 --chrono-velocity 2700",
+            )
+            .unwrap();
+        assert!(
+            out.contains("MV-calibration window: 656.7-729.7 yd (90-100% of the Mach 1.2 distance)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("for optimal observation ranges run: ballistics plan-truing"),
+            "{out}"
+        );
+    }
+
+    /// The "no MV window" note, table only — mirrors the native CLI's fully
+    /// supersonic branch (same fixture/pin as
+    /// `tests/truing_multi_obs.rs::no_mv_window_note_for_a_fully_supersonic_fixture`).
+    #[wasm_bindgen_test]
+    fn true_velocity_multi_observation_no_window_note_matches_native() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 300 --measured-drop 0.3 --observed 600:0.65 \
+                 --bc 2.0 -m 750 -d 0.510 --zero-distance 300 --chrono-velocity 3300",
+            )
+            .unwrap();
+        assert!(
+            out.contains(
+                "note: no MV window: trajectory is supersonic through 3109.4 yd; MV is identifiable at any range"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("MV-calibration window:"), "{out}");
+    }
+
+    /// JSON additive-only purity: the window fields are present and numeric for the
+    /// transonic fixture, and no note text ever leaks into JSON (matches the native
+    /// CLI's JSON purity rule exactly).
+    #[wasm_bindgen_test]
+    fn true_velocity_multi_observation_json_has_additive_window_fields_only() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
+                 --observed 900:10.9 --bc 0.475 -m 168 -d 0.308 --zero-distance 100 \
+                 --chrono-velocity 2700 -o json",
+            )
+            .unwrap();
+        assert!(!out.to_lowercase().contains("calibration window"), "{out}");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+        let lo = v["mv_window_start_m"].as_f64().expect("mv_window_start_m present");
+        let hi = v["mv_window_end_m"].as_f64().expect("mv_window_end_m present");
+        assert!((lo - 656.7 * 0.9144).abs() < 0.5, "lo={lo}");
+        assert!((hi - 729.7 * 0.9144).abs() < 0.5, "hi={hi}");
+    }
+
+    /// JSON window fields are `null` (not absent, not a note string) when there is
+    /// no window — mirrors the native CLI exactly.
+    #[wasm_bindgen_test]
+    fn true_velocity_multi_observation_json_window_fields_null_when_absent() {
+        let out = WasmBallistics::new()
+            .run_command(
+                "true-velocity --range 300 --measured-drop 0.3 --observed 600:0.65 \
+                 --bc 2.0 -m 750 -d 0.510 --zero-distance 300 --chrono-velocity 3300 -o json",
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(v["mv_window_start_m"].is_null(), "{v}");
+        assert!(v["mv_window_end_m"].is_null(), "{v}");
+    }
+
     /// WEZ summary parity: the seeded sweep (fixed per-step seed in the shared core)
     /// is deterministic, so the sims/step banner and the 200 yd P(hit) row must
     /// match the native binary's output for identical args verbatim.
