@@ -208,7 +208,7 @@ A value far outside the typical truing range (outside `[0.5, 2.0]`) is still acc
 warning: --cd-scale 3 is far outside the typical truing range (0.90-1.10)
 ```
 
-**WASM:** pass `--cd-scale <FACTOR>` as a terminal argument to `trajectory`, `zero`, or `monte-carlo` alongside a table loaded via `loadDragTable`; the pairing requirement and range warning are identical (the pairing failure surfaces as a rejected promise/`Err` instead of a process exit, and the range warning is prepended to the table-style output rather than printed to a separate stderr stream).
+**WASM:** pass `--cd-scale <FACTOR>` as a terminal argument to `trajectory`, `zero`, or `monte-carlo` alongside a table loaded via `loadDragTable`; the pairing requirement and range warning are identical (the pairing failure surfaces as a rejected promise/`Err` instead of a process exit, and the range warning is prepended to the table-style output rather than printed to a separate stderr stream). `lead` also accepts `--cd-scale` in the WASM terminal (MBA-1411) — since it already applies a loaded table unconditionally (see the drag-table note above), a table trued via `--cd-scale` elsewhere needs the same scale here or its truing is lost; native `lead` has no `--drag-table`/`--cd-scale` of its own, so this is WASM-only, like the drag-table application itself.
 
 #### BC5D Correction Tables
 
@@ -1527,6 +1527,12 @@ DSF table active (2 points, Mach 0.65-0.95)
 ```
 JSON and CSV output carry the corrected drop numbers too, but get no equivalent text or
 extra top-level field — the note above is purely a human-facing display detail.
+
+> The WASM terminal (ballistics.sh) supports DSF truing on `trajectory` too, but has no
+> saved-profile storage to carry a table between calls — pass it per call instead with
+> one or more repeatable `--dsf-point MACH:DSF` flags (e.g. `--dsf-point 0.65:1.082
+> --dsf-point 0.95:1.031`), up to 6. Validation and the auto-apply/note behavior are
+> identical to the native CLI's saved-profile path above (MBA-1411).
 
 ### MCP Server (`mcp`)
 

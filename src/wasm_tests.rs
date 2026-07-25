@@ -2420,4 +2420,308 @@ Impact Velocity: 2510 fps\n";
         assert!(!json.contains("BC5D correction tables"), "{json}");
         assert!(json.contains("Error:"), "{json}");
     }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1411: `--dsf-point <MACH:DSF>` on `trajectory` — per-call parity with the
+    // native CLI's saved-profile-carried DSF (drop-scale-factor) table (MBA-1357). WASM
+    // has no profile storage, so the table is a repeatable per-call argument instead
+    // (mirrors the MBA-1343 per-call pattern). Parsing/format errors are this command's
+    // own; bounds/cap validation (0 < mach < 1.2, 0.5 < dsf < 2.0, <= 6 points) is NOT
+    // reimplemented — `DsfTable::from_points`'s error text IS the user-facing error,
+    // identical to native.
+    // -----------------------------------------------------------------------------
+
+    /// A malformed `MACH:DSF` token (wrong field count) is rejected with a message naming
+    /// the bad token, before any solve.
+    #[wasm_bindgen_test]
+    fn dsf_point_bad_token_errors() {
+        let err = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --dsf-point abc")
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("--dsf-point expects MACH:DSF") && msg.contains("'abc'"),
+            "{msg}"
+        );
+    }
+
+    /// A non-numeric MACH or DSF field is rejected naming which field and the offending
+    /// token, before any solve.
+    #[wasm_bindgen_test]
+    fn dsf_point_non_numeric_fields_error() {
+        let wasm = WasmBallistics::new();
+        let err = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --dsf-point x:1.0")
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("--dsf-point: invalid MACH in 'x:1.0'"),
+            "{msg}"
+        );
+
+        let err = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --dsf-point 0.5:x")
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("--dsf-point: invalid DSF in '0.5:x'"),
+            "{msg}"
+        );
+    }
+
+    /// A Mach at/above the DSF ceiling (1.2 — MV-truing territory, not DSF's) surfaces
+    /// `DsfTable::from_points`'s own error text verbatim, not a WASM-specific rewording.
+    #[wasm_bindgen_test]
+    fn dsf_point_out_of_range_mach_uses_engine_error_text() {
+        let err = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --dsf-point 1.5:1.1")
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("DSF point Mach 1.5 is out of range") && msg.contains("0 < mach < 1.2"),
+            "{msg}"
+        );
+    }
+
+    /// A DSF ratio outside `(0.5, 2.0)` likewise surfaces the engine's own error text.
+    #[wasm_bindgen_test]
+    fn dsf_point_out_of_range_dsf_uses_engine_error_text() {
+        let err = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --dsf-point 0.5:3.0")
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("DSF value 3 is out of range") && msg.contains("0.5 < dsf < 2"),
+            "{msg}"
+        );
+    }
+
+    /// More than 6 distinct `--dsf-point` occurrences hits `DsfTable::from_points`'s cap,
+    /// naming the 6-point limit — the WASM parser does not reimplement this check.
+    #[wasm_bindgen_test]
+    fn dsf_point_more_than_six_uses_engine_cap_error() {
+        let err = WasmBallistics::new()
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+                 --dsf-point 0.1:1.0 --dsf-point 0.2:1.0 --dsf-point 0.3:1.0 \
+                 --dsf-point 0.4:1.0 --dsf-point 0.5:1.0 --dsf-point 0.6:1.0 \
+                 --dsf-point 0.7:1.0",
+            )
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("DSF table supports at most 6 points") && msg.contains("got 7"),
+            "{msg}"
+        );
+    }
+
+    /// Drop-only invariant through the WASM command path (mirrors
+    /// `tests/dsf_workflow.rs`'s end-to-end beat): an active DSF table changes drop and
+    /// nothing else — velocity/energy/time/range/drift stay byte-identical, and the point
+    /// objects' key sets are unchanged (no new field, matching the native purity rule).
+    /// `--max-range 1500 --ignore-ground-impact` gets a .308/168gr/2700fps/0.475 G1 shot
+    /// well down into the transonic/subsonic band (crosses Mach 1.2 around 860 yd, Mach
+    /// 1.0 around 1090 yd — verified against the native CLI's own JSON at the same inputs)
+    /// so the DSF point at Mach 0.9 has real points to correct.
+    #[wasm_bindgen_test]
+    fn dsf_point_applies_drop_only_correction() {
+        let wasm = WasmBallistics::new();
+        let base_cmd = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1500 \
+             --ignore-ground-impact -o json";
+        let dsf_cmd = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1500 \
+             --ignore-ground-impact --dsf-point 0.9:1.3 -o json";
+
+        let baseline = wasm.run_command(base_cmd).unwrap();
+        let corrected = wasm.run_command(dsf_cmd).unwrap();
+        assert_ne!(
+            baseline, corrected,
+            "an active DSF table must change trajectory JSON output"
+        );
+
+        let base_json: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        let corr_json: serde_json::Value = serde_json::from_str(&corrected).unwrap();
+
+        // Drop-only: the summary block (max_range/max_height/time_of_flight/impact
+        // velocity) never reaches DSF at all.
+        assert_eq!(
+            base_json["summary"], corr_json["summary"],
+            "summary must stay identical"
+        );
+        assert_eq!(
+            base_json["legend"], corr_json["legend"],
+            "legend must stay identical"
+        );
+
+        let base_points = base_json["trajectory"].as_array().unwrap();
+        let corr_points = corr_json["trajectory"].as_array().unwrap();
+        assert!(!base_points.is_empty(), "expected a non-empty trajectory");
+        assert_eq!(base_points.len(), corr_points.len());
+        let mut any_drop_changed = false;
+        for (bp, cp) in base_points.iter().zip(corr_points.iter()) {
+            assert_eq!(
+                bp["range_yards"], cp["range_yards"],
+                "range must stay identical"
+            );
+            assert_eq!(
+                bp["drift_inches"], cp["drift_inches"],
+                "drift must stay identical"
+            );
+            assert_eq!(
+                bp["velocity_fps"], cp["velocity_fps"],
+                "velocity must stay identical"
+            );
+            assert_eq!(
+                bp["energy_ftlb"], cp["energy_ftlb"],
+                "energy must stay identical"
+            );
+            assert_eq!(
+                bp["time_seconds"], cp["time_seconds"],
+                "time must stay identical"
+            );
+            // No new field: DSF is a pure value correction, not an additive one.
+            let bp_keys: std::collections::BTreeSet<_> = bp.as_object().unwrap().keys().collect();
+            let cp_keys: std::collections::BTreeSet<_> = cp.as_object().unwrap().keys().collect();
+            assert_eq!(bp_keys, cp_keys, "point key set must stay identical");
+
+            let bd = bp["drop_inches"].as_f64().unwrap();
+            let cd = cp["drop_inches"].as_f64().unwrap();
+            if (bd - cd).abs() > 1e-9 {
+                any_drop_changed = true;
+            }
+        }
+        assert!(
+            any_drop_changed,
+            "at least one point's drop must change under an active DSF table"
+        );
+    }
+
+    /// The "DSF table active (...)" note appears in table output only, with the same
+    /// wording native main.rs prints for a saved profile's table — and never leaks into
+    /// JSON, which also keeps an unchanged key set (additive-field purity, same rule the
+    /// cd_scale/bc5d warnings above already follow).
+    #[wasm_bindgen_test]
+    fn dsf_point_note_is_table_output_only() {
+        let wasm = WasmBallistics::new();
+        let table = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1500 \
+                 --ignore-ground-impact --dsf-point 0.9:1.3",
+            )
+            .unwrap();
+        assert!(
+            table.contains("DSF table active (1 points, Mach 0.90-0.90)"),
+            "{table}"
+        );
+
+        let json_without = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1500 \
+                 --ignore-ground-impact -o json",
+            )
+            .unwrap();
+        let json_with = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 1500 \
+                 --ignore-ground-impact --dsf-point 0.9:1.3 -o json",
+            )
+            .unwrap();
+        assert!(
+            !json_with.contains("DSF table active"),
+            "note text must never leak into JSON: {json_with}"
+        );
+
+        // Unchanged top-level key set between the two JSON payloads (only values differ).
+        let without_json: serde_json::Value = serde_json::from_str(&json_without).unwrap();
+        let with_json: serde_json::Value = serde_json::from_str(&json_with).unwrap();
+        let without_keys: std::collections::BTreeSet<_> =
+            without_json.as_object().unwrap().keys().collect();
+        let with_keys: std::collections::BTreeSet<_> =
+            with_json.as_object().unwrap().keys().collect();
+        assert_eq!(without_keys, with_keys, "top-level JSON key set must stay identical");
+    }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1411 (carried from the MBA-1356 review, "WASM lead untrued-curve gap"):
+    // `lead` already applies a loaded custom drag table unconditionally, but never wired
+    // up `--cd-scale` alongside it, unlike trajectory/zero/monte-carlo — a table trued
+    // via `--cd-scale` on those commands would silently revert to its untrued curve on
+    // `lead`. This section pins the fix: same pairing requirement, same shift, same
+    // table-only warning as the existing cd_scale tests above.
+    // -----------------------------------------------------------------------------
+
+    /// Without a loaded drag table, `lead --cd-scale` is rejected before any solve —
+    /// same pairing requirement, same error text as trajectory/zero/monte-carlo.
+    #[wasm_bindgen_test]
+    fn lead_cd_scale_without_a_loaded_drag_table_errors() {
+        let err = WasmBallistics::new()
+            .run_command(
+                "lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 --cd-scale 1.1",
+            )
+            .unwrap_err();
+        let msg = err.as_string().unwrap_or_default();
+        assert_eq!(msg, "--cd-scale requires --drag-table");
+    }
+
+    /// With a table loaded, `--cd-scale` is accepted and actually shifts `lead`'s output
+    /// (more drag changes time of flight, which changes the lead) — the plumb-through
+    /// smoke, mirroring `cd_scale_accepted_with_a_loaded_table_and_shifts_trajectory_output`.
+    #[wasm_bindgen_test]
+    fn lead_cd_scale_accepted_with_a_loaded_table_and_shifts_output() {
+        let wasm = WasmBallistics::new();
+        wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+
+        let neutral = wasm
+            .run_command(
+                "lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 --cd-scale 1.0 \
+                 -o json",
+            )
+            .unwrap();
+        let scaled = wasm
+            .run_command(
+                "lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 --cd-scale 1.1 \
+                 -o json",
+            )
+            .unwrap();
+        assert_ne!(
+            neutral, scaled,
+            "--cd-scale 1.1 must change lead output relative to the neutral 1.0"
+        );
+
+        let omitted = wasm
+            .run_command("lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 -o json")
+            .unwrap();
+        assert_eq!(
+            omitted, neutral,
+            "omitting --cd-scale must be byte-identical to an explicit --cd-scale 1.0"
+        );
+    }
+
+    /// A `--cd-scale` far outside the typical truing range warns once, table-only — the
+    /// warning must never contaminate `lead`'s JSON output.
+    #[wasm_bindgen_test]
+    fn lead_cd_scale_out_of_range_warns_table_only() {
+        let wasm = WasmBallistics::new();
+        wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
+
+        let table_output = wasm
+            .run_command(
+                "lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 --cd-scale 3.0",
+            )
+            .unwrap();
+        assert!(
+            table_output.contains("--cd-scale 3 is far outside the typical truing range (0.90-1.10)"),
+            "{table_output}"
+        );
+
+        let json_output = wasm
+            .run_command(
+                "lead -v 2700 -m 168 -d 0.308 --target-speed 10 --range 300 --cd-scale 3.0 \
+                 -o json",
+            )
+            .unwrap();
+        assert!(
+            !json_output.contains("far outside the typical truing range"),
+            "the range warning must never contaminate JSON output: {json_output}"
+        );
+    }
 }
