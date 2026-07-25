@@ -3938,7 +3938,10 @@ fn adjustment_unit_noop_warning(
     target_speed: f64,
     is_pdf: bool,
 ) -> Option<String> {
-    if is_pdf || target_speed != 0.0 || unit == AdjustmentUnit::Mil {
+    // `> 0.0` rather than `!= 0.0` so this reads the same as the browser terminal's guard
+    // (wasm.rs) and stays correct if a negative ever reaches here; clap's range parser
+    // rejects negatives today, so the two forms are equivalent in practice.
+    if is_pdf || target_speed > 0.0 || unit == AdjustmentUnit::Mil {
         None
     } else {
         Some(
