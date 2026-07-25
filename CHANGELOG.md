@@ -5,6 +5,45 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1] - 2026-07-25
+
+### Fixed
+- Inclined zero solves work again (MBA-1412): since 0.25.0, any nonzero
+  `shooting_angle` made `calculate_zero_angle_with_conditions` (and every
+  surface behind it — bindings, browser terminal, FFI, CLI) fail with "Zero
+  angle did not converge". Zeroing now solves a level rifle (`SightLine`
+  contract, matching the cant doctrine); solve-json v1's documented
+  world-vertical zero contract is unchanged (`WorldVertical`).
+- Browser-terminal `lead` honors `--cd-scale` on loaded custom drag decks
+  (previously applied the deck but silently ignored the scale) (MBA-1411).
+- Browser-terminal BC5D coercion warnings survive the solve error path
+  (previously lost on failures).
+- `generate-bc-segments` warns (once) when a non-G1/G7 family is coerced to
+  G1, matching the other auxiliary lookups.
+- BC-fit reporting labels the actual drag family (G2/G5/GI/GS/RA4) instead of
+  a `G?` wildcard, and `estimate-bc --drag-model` accepts (and documents) any
+  single family.
+- The `--cd-scale` pairing error only suggests `--bc-adjustment` on commands
+  that have that flag.
+
+### Added
+- Truing validity windows (MBA-1405): the truing report prints the
+  MV-calibration window (90-100% of the Mach 1.2 crossing distance), warns
+  per observation outside it, prints cause-aware notes when no window exists
+  (supersonic throughout vs never supersonic), and cross-references
+  `plan-truing`; the `dsf` verb prints the DSF window (at or beyond 90% of
+  the Mach 0.9 crossing). Browser terminal in byte-parity lockstep; truing
+  JSON gains additive `mv_window_start_m`/`mv_window_end_m` (null when
+  absent). `TrajectoryResult` gains additive labeled crossing fields
+  (`mach_1_2_distance_m`/`mach_1_0_distance_m`/`mach_0_9_distance_m`).
+- Browser-terminal DSF parity (MBA-1411): repeatable `--dsf-point MACH:DSF`
+  on `trajectory` passes a per-call table (no profile storage in the
+  terminal), validated by the engine, applied drop-only with the native note.
+
+### Performance
+- Velocity-band BC transition boundaries are computed once per segment table
+  instead of per integration step (no numeric change).
+
 ## [0.28.0] - 2026-07-24
 
 ### Breaking
