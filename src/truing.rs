@@ -1316,3 +1316,76 @@ pub(crate) fn truing_quality_line(
         format!("MV-only fit, {quality}: RMS residual {rms:.3} {unit} (BC held fixed){nonconv}")
     }
 }
+
+/// Fraction of the downward Mach 1.2 crossing distance that bounds the near edge of the MV
+/// (muzzle-velocity) calibration window (MBA-1405): observations closer than this fraction of
+/// the crossing are considered too far from the transonic region to usefully calibrate MV.
+#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
+const MV_CALIBRATION_WINDOW_START_FRACTION: f64 = 0.90;
+
+/// Fraction of the downward Mach 0.9 crossing distance at which the DSF (drag-scale-factor)
+/// window is considered to start (MBA-1405): DSF observations nearer the muzzle than this are
+/// still comfortably supersonic/transonic and not representative of the DSF-correction regime.
+#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
+const DSF_WINDOW_START_FRACTION: f64 = 0.90;
+
+/// The MV (muzzle-velocity) calibration validity window: `(start_m, end_m)`, where `end_m` is
+/// the downward Mach 1.2 crossing distance and `start_m` is 90% of it. `None` when the
+/// trajectory never crosses Mach 1.2 (nothing to bound the window with) — mirrors
+/// `TrajectoryResult::mach_1_2_distance_m`'s own `None` case, MBA-1405.
+#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
+pub(crate) fn mv_calibration_window(mach_1_2_distance_m: Option<f64>) -> Option<(f64, f64)> {
+    let d = mach_1_2_distance_m?;
+    Some((MV_CALIBRATION_WINDOW_START_FRACTION * d, d))
+}
+
+/// The downrange distance (m) at which the DSF (drag-scale-factor) window starts: 90% of the
+/// downward Mach 0.9 crossing distance. `None` when the trajectory never crosses Mach 0.9 —
+/// mirrors `TrajectoryResult::mach_0_9_distance_m`'s own `None` case, MBA-1405.
+#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
+pub(crate) fn dsf_window_start(mach_0_9_distance_m: Option<f64>) -> Option<f64> {
+    Some(DSF_WINDOW_START_FRACTION * mach_0_9_distance_m?)
+}
+
+#[cfg(test)]
+mod window_helper_tests {
+    use super::*;
+
+    #[test]
+    fn mv_calibration_window_is_90_to_100_percent_of_the_1_2_crossing() {
+        assert_eq!(mv_calibration_window(Some(1000.0)), Some((900.0, 1000.0)));
+        assert_eq!(mv_calibration_window(Some(671.7257336844475)), Some((0.9 * 671.7257336844475, 671.7257336844475)));
+    }
+
+    #[test]
+    fn mv_calibration_window_passes_through_none() {
+        assert_eq!(mv_calibration_window(None), None);
+    }
+
+    #[test]
+    fn dsf_window_start_is_90_percent_of_the_0_9_crossing() {
+        assert_eq!(dsf_window_start(Some(1000.0)), Some(900.0));
+        assert_eq!(dsf_window_start(Some(806.5709746782849)), Some(0.9 * 806.5709746782849));
+    }
+
+    #[test]
+    fn dsf_window_start_passes_through_none() {
+        assert_eq!(dsf_window_start(None), None);
+    }
+
+    #[test]
+    fn mv_calibration_window_exact_arithmetic_at_a_representative_distance() {
+        // Exact f64 arithmetic check (not just structural equality): 0.90 * 500.0 = 450.0
+        // has an exact binary representation, so this pins the literal formula, not just
+        // its shape.
+        let (start, end) = mv_calibration_window(Some(500.0)).expect("Some");
+        assert_eq!(start.to_bits(), 450.0_f64.to_bits());
+        assert_eq!(end.to_bits(), 500.0_f64.to_bits());
+    }
+
+    #[test]
+    fn dsf_window_start_exact_arithmetic_at_a_representative_distance() {
+        let start = dsf_window_start(Some(500.0)).expect("Some");
+        assert_eq!(start.to_bits(), 450.0_f64.to_bits());
+    }
+}

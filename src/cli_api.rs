@@ -551,6 +551,23 @@ pub struct TrajectoryResult {
     // MBA-959: aerodynamic-jump components applied at the muzzle (None unless
     // enable_aerodynamic_jump). EXPERIMENTAL.
     pub aerodynamic_jump: Option<crate::aerodynamic_jump::AerodynamicJumpComponents>,
+    /// Downrange distance (m) of the downward Mach 1.2 crossing (station speed of sound),
+    /// populated identically by all three solver paths (Euler/RK4/RK45). `None` if the
+    /// trajectory never crosses 1.2 while descending (e.g. launched already below 1.2, or the
+    /// solve terminates while still above it). MBA-1405: feeds `mv_calibration_window`.
+    pub mach_1_2_distance_m: Option<f64>,
+    /// Downrange distance (m) of the downward Mach 1.0 crossing. `None` if the trajectory
+    /// never goes subsonic within the solve. MBA-1405: the far edge of the MV calibration
+    /// window (`mv_calibration_window`) is this distance.
+    pub mach_1_0_distance_m: Option<f64>,
+    /// Downrange distance (m) of the downward Mach 0.9 crossing. `None` if the trajectory
+    /// never crosses 0.9 while descending. MBA-1405: feeds `dsf_window_start`. NOTE: unlike
+    /// the 1.2/1.0 crossings, this one is intentionally NOT reflected in the historical flat
+    /// `transonic_distances` Vec threaded through
+    /// [`crate::trajectory_sampling::TrajectoryData`] — existing consumers of that Vec
+    /// interpret it strictly as `{1.2, 1.0}`, so this field is the only place the 0.9
+    /// crossing is recorded.
+    pub mach_0_9_distance_m: Option<f64>,
 }
 
 const RK45_TOLERANCE: f64 = 1e-6;
@@ -602,11 +619,34 @@ struct Rk45AcceptedStep {
     error: f64,
 }
 
+/// Tracks the downward (decelerating) Mach crossings of a solved trajectory.
+///
+/// `record_downward_crossings` is called once per integration step from all three solver
+/// paths (Euler/RK4/RK45). It both (a) appends to the historical flat `distances` Vec — used
+/// unchanged by [`crate::trajectory_sampling`] to flag sampled points — and (b) records each
+/// threshold's exact crossing distance on `self`, for callers that want the labeled value
+/// directly (MBA-1405) rather than positionally decoding the flat Vec.
+///
+/// IMPORTANT: only the historical 1.2/1.0 thresholds are appended to `distances`. The 0.9
+/// threshold added for MBA-1405 is recorded ONLY on `self.mach_0_9_distance_m` — existing
+/// consumers of the flat Vec interpret it strictly as `{mach_1_2, mach_1_0}` (in that order,
+/// when present), so appending a third entry would silently corrupt their positional
+/// assumptions.
 #[derive(Default)]
 struct MachTransitionTracker {
     previous_mach: Option<f64>,
     crossed_transonic: bool,
     crossed_subsonic: bool,
+    crossed_narrow: bool,
+    /// Downrange distance (m) of the downward Mach 1.2 crossing, once seen. Mirrors the first
+    /// flat-Vec entry.
+    mach_1_2_distance_m: Option<f64>,
+    /// Downrange distance (m) of the downward Mach 1.0 crossing, once seen. Mirrors the second
+    /// flat-Vec entry.
+    mach_1_0_distance_m: Option<f64>,
+    /// Downrange distance (m) of the downward Mach 0.9 crossing, once seen. NOT reflected in
+    /// the flat Vec (see struct docs).
+    mach_0_9_distance_m: Option<f64>,
 }
 
 impl MachTransitionTracker {
@@ -620,10 +660,17 @@ impl MachTransitionTracker {
             if !self.crossed_transonic && previous_mach >= 1.2 && mach < 1.2 {
                 self.crossed_transonic = true;
                 distances.push(downrange_m);
+                self.mach_1_2_distance_m = Some(downrange_m);
             }
             if !self.crossed_subsonic && previous_mach >= 1.0 && mach < 1.0 {
                 self.crossed_subsonic = true;
                 distances.push(downrange_m);
+                self.mach_1_0_distance_m = Some(downrange_m);
+            }
+            if !self.crossed_narrow && previous_mach >= 0.9 && mach < 0.9 {
+                self.crossed_narrow = true;
+                // Intentionally NOT pushed to `distances` — see struct docs.
+                self.mach_0_9_distance_m = Some(downrange_m);
             }
         }
         self.previous_mach = Some(mach);
@@ -1956,6 +2003,9 @@ impl TrajectorySolver {
                     })
                     .collect(),
                 transonic_distances, // populated above at each Mach-threshold crossing
+                mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
+                mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
+                mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
             };
 
             // For LOS calculation in ground-referenced coordinates:
@@ -2013,6 +2063,9 @@ impl TrajectorySolver {
                 None
             },
             aerodynamic_jump: aj_components,
+            mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
+            mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
+            mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
         })
     }
 
@@ -2241,6 +2294,9 @@ impl TrajectorySolver {
                     })
                     .collect(),
                 transonic_distances, // populated above at each Mach-threshold crossing
+                mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
+                mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
+                mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
             };
 
             // For LOS calculation in ground-referenced coordinates:
@@ -2298,6 +2354,9 @@ impl TrajectorySolver {
                 None
             },
             aerodynamic_jump: aj_components,
+            mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
+            mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
+            mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
         })
     }
 
@@ -2496,6 +2555,9 @@ impl TrajectorySolver {
                     })
                     .collect(),
                 transonic_distances, // populated at each Mach-threshold crossing
+                mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
+                mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
+                mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
             };
 
             // For LOS calculation in ground-referenced coordinates:
@@ -2552,6 +2614,9 @@ impl TrajectorySolver {
                 None
             },
             aerodynamic_jump: aj_components,
+            mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
+            mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
+            mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
         })
     }
 
@@ -4025,6 +4090,9 @@ mod result_sanity_tests {
             max_yaw_angle: None,
             max_precession_angle: None,
             aerodynamic_jump: None,
+            mach_1_2_distance_m: None,
+            mach_1_0_distance_m: None,
+            mach_0_9_distance_m: None,
         }
     }
 
@@ -6175,6 +6243,65 @@ mod coriolis_direction_tests {
     }
 
     #[test]
+    fn mach_transition_tracker_labels_0_9_without_touching_the_flat_vec() {
+        // MBA-1405: the tracker gains a third (0.9) threshold, but it must NEVER be appended
+        // to the flat `distances` Vec — only its own labeled field. Reuses the exact input
+        // sequences pinned by `mach_transition_tracker_requires_a_downward_crossing` above (the
+        // pre-change flat-Vec behavior for those sequences) and additionally asserts the
+        // labeled fields.
+        fn record(mach_values: &[f64]) -> (Vec<f64>, MachTransitionTracker) {
+            let mut tracker = MachTransitionTracker::default();
+            let mut distances = Vec::new();
+            for (index, mach) in mach_values.iter().copied().enumerate() {
+                tracker.record_downward_crossings(mach, index as f64 * 10.0, &mut distances);
+            }
+            (distances, tracker)
+        }
+
+        // Already at/below 1.2 and 1.0 at the muzzle (never crosses those downward from
+        // above), but DOES cross 0.9 downward at x=10 (previous_mach 0.9 >= 0.9, mach 0.8 < 0.9).
+        let (distances, tracker) = record(&[0.9, 0.8, 0.7]);
+        assert!(distances.is_empty()); // flat Vec unchanged (pinned pre-change value)
+        assert_eq!(tracker.mach_1_2_distance_m, None);
+        assert_eq!(tracker.mach_1_0_distance_m, None);
+        assert_eq!(tracker.mach_0_9_distance_m, Some(10.0));
+
+        // Crosses 1.0 only (never reaches 1.2 from above, never reaches 0.9).
+        let (distances, tracker) = record(&[1.1, 1.05, 0.99]);
+        assert_eq!(distances, vec![20.0]);
+        assert_eq!(tracker.mach_1_2_distance_m, None);
+        assert_eq!(tracker.mach_1_0_distance_m, Some(20.0));
+        assert_eq!(tracker.mach_0_9_distance_m, None);
+
+        // Crosses 1.2 then 1.0, never reaches 0.9 (lowest sample is 0.99).
+        let (distances, tracker) = record(&[1.2, 1.19, 1.0, 0.99]);
+        assert_eq!(distances, vec![10.0, 30.0]); // flat Vec unchanged
+        assert_eq!(tracker.mach_1_2_distance_m, Some(10.0));
+        assert_eq!(tracker.mach_1_0_distance_m, Some(30.0));
+        assert_eq!(tracker.mach_0_9_distance_m, None);
+
+        // Crosses 1.2, then 1.0, then 0.9 — the flat Vec must be EXACTLY {20.0, 30.0} as
+        // before (0.9 crossing at x=50.0 must NOT appear in it).
+        let (distances, tracker) = record(&[0.9, 1.3, 1.1, 0.9, 1.3, 0.8]);
+        assert_eq!(distances, vec![20.0, 30.0]); // flat Vec unchanged (pinned pre-change value)
+        assert_eq!(tracker.mach_1_2_distance_m, Some(20.0));
+        assert_eq!(tracker.mach_1_0_distance_m, Some(30.0));
+        assert_eq!(tracker.mach_0_9_distance_m, Some(50.0));
+        assert!(
+            tracker.mach_1_2_distance_m < tracker.mach_1_0_distance_m
+                && tracker.mach_1_0_distance_m < tracker.mach_0_9_distance_m,
+            "labeled crossings must be strictly increasing downrange"
+        );
+
+        // NAN resets tracking exactly as before; no labels set either.
+        let (distances, tracker) = record(&[1.3, f64::NAN, 1.1]);
+        assert!(distances.is_empty());
+        assert_eq!(tracker.mach_1_2_distance_m, None);
+        assert_eq!(tracker.mach_1_0_distance_m, None);
+        assert_eq!(tracker.mach_0_9_distance_m, None);
+    }
+
+    #[test]
     fn humidity_percent_converts_and_clamps() {
         // MBA-722: BallisticInputs.humidity is a 0-1 fraction; the helper yields 0-100 percent.
         let mut i = BallisticInputs {
@@ -6246,6 +6373,106 @@ mod coriolis_direction_tests {
             "E-W vertical separation ({:.6} m) should be physically meaningful, not FP noise",
             east - west
         );
+    }
+
+    /// MBA-1405: labeled Mach-crossing distances on `TrajectoryResult`, pinned exactly against
+    /// a capture of the (pre-change) flat `transonic_distances` Vec taken from this same
+    /// muzzle_velocity=850/bc=0.2 G7/angle=0.03/max_range=2000 scenario, for all three solver
+    /// paths. Because `MachTransitionTracker::record_downward_crossings` writes the labeled
+    /// field and pushes to the flat Vec from the SAME `downrange_m` value at the SAME crossing,
+    /// these pinned labels ARE the flat-Vec content for the 1.2/1.0 thresholds — proving the
+    /// flat Vec is untouched by the 0.9 addition.
+    #[test]
+    fn labeled_mach_crossings_match_pinned_pre_change_flat_vec_across_solvers() {
+        // (solver_name, use_rk4, use_adaptive_rk45, expected mach_1_2, expected mach_1_0)
+        let cases = [
+            ("Euler", false, false, 670.9878683238721_f64, 805.5274119916264_f64),
+            ("RK4", true, false, 671.7257336844475_f64, 805.933409072171_f64),
+            ("RK45", true, true, 672.4905711917901_f64, 806.5709746782849_f64),
+        ];
+
+        for (solver_name, use_rk4, use_adaptive_rk45, expected_1_2, expected_1_0) in cases {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 850.0,
+                bc_value: 0.2,
+                bc_type: DragModel::G7,
+                muzzle_angle: 0.03,
+                use_rk4,
+                use_adaptive_rk45,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(2000.0);
+            let result = solver.solve().expect("solve should succeed");
+
+            assert_eq!(
+                result.mach_1_2_distance_m,
+                Some(expected_1_2),
+                "{solver_name}: mach_1_2_distance_m must match the pinned pre-change flat-Vec value"
+            );
+            assert_eq!(
+                result.mach_1_0_distance_m,
+                Some(expected_1_0),
+                "{solver_name}: mach_1_0_distance_m must match the pinned pre-change flat-Vec value"
+            );
+
+            let mach_1_2 = result.mach_1_2_distance_m.expect("crosses 1.2");
+            let mach_1_0 = result.mach_1_0_distance_m.expect("crosses 1.0");
+            let mach_0_9 = result
+                .mach_0_9_distance_m
+                .expect("this trajectory also goes past 0.9 within 2000 m");
+            assert!(
+                mach_1_2 < mach_1_0 && mach_1_0 < mach_0_9,
+                "{solver_name}: labeled crossings must be strictly increasing downrange \
+                 (1.2={mach_1_2}, 1.0={mach_1_0}, 0.9={mach_0_9})"
+            );
+        }
+    }
+
+    /// A trajectory that terminates while still well above Mach 1.2 must leave all three
+    /// labeled crossings `None` (there is nothing to cross), across all three solver paths.
+    #[test]
+    fn labeled_mach_crossings_are_none_for_a_fully_supersonic_trajectory() {
+        for (solver_name, use_rk4, use_adaptive_rk45) in [
+            ("Euler", false, false),
+            ("RK4", true, false),
+            ("RK45", true, true),
+        ] {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 850.0,
+                bc_value: 0.2,
+                bc_type: DragModel::G7,
+                muzzle_angle: 0.03,
+                use_rk4,
+                use_adaptive_rk45,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            // Well short of the ~671 m downward 1.2 crossing measured for this load.
+            solver.set_max_range(200.0);
+            let result = solver.solve().expect("solve should succeed");
+
+            assert_eq!(
+                result.mach_1_2_distance_m, None,
+                "{solver_name}: must not report a 1.2 crossing that never happens"
+            );
+            assert_eq!(
+                result.mach_1_0_distance_m, None,
+                "{solver_name}: must not report a 1.0 crossing that never happens"
+            );
+            assert_eq!(
+                result.mach_0_9_distance_m, None,
+                "{solver_name}: must not report a 0.9 crossing that never happens"
+            );
+        }
     }
 }
 

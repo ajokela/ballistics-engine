@@ -115,7 +115,20 @@ pub struct TrajectoryData {
     pub times: Vec<f64>,
     pub positions: Vec<Vector3<f64>>,  // [x, y, z] positions
     pub velocities: Vec<Vector3<f64>>, // [vx, vy, vz] velocities
-    pub transonic_distances: Vec<f64>, // Distances where mach transitions occur
+    /// Downward Mach 1.2-then-1.0 crossing distances (m), in that order when present. Used to
+    /// flag sampled points with a Mach-transition marker. Historical shape — do not append
+    /// the 0.9 crossing here; it is carried only by `mach_0_9_distance_m` below (MBA-1405).
+    pub transonic_distances: Vec<f64>,
+    /// Downrange distance (m) of the downward Mach 1.2 crossing, mirroring
+    /// [`crate::cli_api::TrajectoryResult::mach_1_2_distance_m`]. `None` if never crossed.
+    pub mach_1_2_distance_m: Option<f64>,
+    /// Downrange distance (m) of the downward Mach 1.0 crossing, mirroring
+    /// [`crate::cli_api::TrajectoryResult::mach_1_0_distance_m`]. `None` if never crossed.
+    pub mach_1_0_distance_m: Option<f64>,
+    /// Downrange distance (m) of the downward Mach 0.9 crossing, mirroring
+    /// [`crate::cli_api::TrajectoryResult::mach_0_9_distance_m`]. `None` if never crossed.
+    /// NOT included in `transonic_distances` (see its docs).
+    pub mach_0_9_distance_m: Option<f64>,
 }
 
 /// Output data for trajectory sampling
@@ -434,6 +447,9 @@ mod tests {
                     Vector3::new(700.0, 0.0, 0.0),
                 ],
                 transonic_distances: vec![],
+                mach_1_2_distance_m: None,
+                mach_1_0_distance_m: None,
+                mach_0_9_distance_m: None,
             },
             TrajectoryOutputs {
                 target_distance_horiz_m: max_dist,
@@ -621,6 +637,9 @@ mod tests {
                 Vector3::new(1.0, 0.0, 90.0),
             ],
             transonic_distances: vec![150.0],
+            mach_1_2_distance_m: None,
+            mach_1_0_distance_m: Some(150.0),
+            mach_0_9_distance_m: None,
         };
 
         let outputs = TrajectoryOutputs {
@@ -658,6 +677,9 @@ mod tests {
             positions: vec![Vector3::zeros(), Vector3::new(100.0, 0.0, 0.0)],
             velocities: vec![Vector3::new(800.0, 0.0, 0.0), Vector3::new(700.0, 0.0, 0.0)],
             transonic_distances: vec![],
+            mach_1_2_distance_m: None,
+            mach_1_0_distance_m: None,
+            mach_0_9_distance_m: None,
         };
         let outputs = TrajectoryOutputs {
             target_distance_horiz_m: 100.0,
