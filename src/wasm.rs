@@ -5222,7 +5222,7 @@ Trajectory Command:
     --bc-segment <VMIN:VMAX:BC>  Manual velocity-keyed BC segment (repeatable; fps/m/s per --units)
     --print-bc-segments          Print the active BC segment ladder (velocity/Mach span + BC)
                                  applied to this run, or a note when none are active
-    --dsf-point <MACH:DSF>        Drop-scale-factor truing point (repeatable; up to 6). Scales
+    --dsf-point <MACH:DSF>       Drop-scale-factor truing point (repeatable; up to 6). Scales
                                  predicted drop by DSF at MACH (0 < MACH < 1.2, 0.5 < DSF < 2.0)
                                  — WASM has no saved profile, so pass the table per call
                                  (native CLI equivalent: a saved profile's `dsf` table)
