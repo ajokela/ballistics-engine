@@ -1532,7 +1532,10 @@ extra top-level field — the note above is purely a human-facing display detail
 > saved-profile storage to carry a table between calls — pass it per call instead with
 > one or more repeatable `--dsf-point MACH:DSF` flags (e.g. `--dsf-point 0.65:1.082
 > --dsf-point 0.95:1.031`), up to 6. Validation and the auto-apply/note behavior are
-> identical to the native CLI's saved-profile path above (MBA-1411).
+> identical to the native CLI's saved-profile path above (MBA-1411). One difference from the
+> native `dsf` verb: per-call points are NOT merged — the native verb supersedes points within
+> 0.05 Mach of each other, but `--dsf-point` passes your list through as-is, so keep the Mach
+> keys distinct.
 
 ### MCP Server (`mcp`)
 
