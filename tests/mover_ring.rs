@@ -496,3 +496,29 @@ fn json_output_never_carries_the_warning_text() {
     );
     serde_json::from_str::<Value>(&stdout).expect("stdout must remain parseable JSON");
 }
+
+#[test]
+fn inert_unit_warning_precedes_the_click_graduation_error() {
+    // MBA-1414 review: `--adjustment-unit clicks` with neither a mover ring nor a turret
+    // graduation hits two independent complaints. The no-op warning is emitted BEFORE the
+    // graduation check exits, so the user learns the flag was inert on this run even though
+    // the run then dies on the missing graduation. Pin the ordering — placing the warning
+    // after the fail-fast would silently drop it for exactly this case.
+    let mut args = NOOP_BASE.to_vec();
+    args.extend(["--adjustment-unit", "clicks"]);
+    let out = Command::new(get_cli_binary()).args(&args).output().expect("run");
+
+    assert!(!out.status.success(), "a missing click graduation must still fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    let warn_at = stderr
+        .find("--adjustment-unit only affects")
+        .expect("the inert-flag warning must still be emitted, got: {stderr}");
+    let err_at = stderr
+        .find("requires a turret elevation graduation")
+        .expect("the graduation error must still be emitted");
+    assert!(
+        warn_at < err_at,
+        "the warning must precede the fatal graduation error, got: {stderr}"
+    );
+}
