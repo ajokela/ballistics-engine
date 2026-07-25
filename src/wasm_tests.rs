@@ -2838,4 +2838,94 @@ Impact Velocity: 2510 fps\n";
             "omitted --zero-pressure-type must be byte-identical to --zero-pressure-type absolute"
         );
     }
+
+    // ---- MBA-1366: --density-altitude -----------------------------------------------------
+
+    const DA_TRAJECTORY_BASE: &str = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+         --units metric --max-range 500 --ignore-ground-impact -o json";
+
+    #[wasm_bindgen_test]
+    fn trajectory_without_density_altitude_is_unaffected_by_the_new_flag_existing() {
+        // The mere existence of --density-altitude parsing must not change output for a run
+        // that never references it -- omitting it twice must be byte-identical.
+        let wasm = WasmBallistics::new();
+        let a = wasm.run_command(DA_TRAJECTORY_BASE).unwrap();
+        let b = wasm.run_command(DA_TRAJECTORY_BASE).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_density_altitude_yields_lower_impact_velocity_than_sea_level() {
+        let wasm = WasmBallistics::new();
+        let sea_level = wasm.run_command(DA_TRAJECTORY_BASE).unwrap();
+        let with_da = wasm
+            .run_command(&format!("{DA_TRAJECTORY_BASE} --density-altitude 2000"))
+            .unwrap();
+        let sea_level: serde_json::Value = serde_json::from_str(&sea_level).unwrap();
+        let with_da: serde_json::Value = serde_json::from_str(&with_da).unwrap();
+        let v_sea = sea_level["impact_velocity"].as_f64().unwrap();
+        let v_da = with_da["impact_velocity"].as_f64().unwrap();
+        // Thinner air at altitude -> less drag -> higher retained velocity.
+        assert!(
+            v_da > v_sea,
+            "density altitude must thin the air relative to sea level: sea={v_sea} da={v_da}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_density_altitude_supersedes_altitude_and_pressure() {
+        let wasm = WasmBallistics::new();
+        let da_only = wasm
+            .run_command(&format!("{DA_TRAJECTORY_BASE} --density-altitude 2000"))
+            .unwrap();
+        let da_with_overrides = wasm
+            .run_command(&format!(
+                "{DA_TRAJECTORY_BASE} --density-altitude 2000 --altitude 50 --pressure 1013.25"
+            ))
+            .unwrap();
+        assert_eq!(
+            da_only, da_with_overrides,
+            "--density-altitude must supersede --altitude/--pressure entirely"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_density_altitude_supersedes_pressure_type_and_notes_it_table_only() {
+        let wasm = WasmBallistics::new();
+        let table_base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --units metric \
+             --max-range 500 --ignore-ground-impact --density-altitude 2000 --pressure 1030.0 \
+             --pressure-type qnh";
+        let out = wasm.run_command(table_base).unwrap();
+        assert!(
+            out.contains("--density-altitude supersedes --pressure/--pressure-type"),
+            "table output must carry the supersede note (WASM has no visible stderr): {out}"
+        );
+
+        // JSON output must stay pure machine output -- no note text.
+        let json_out = wasm
+            .run_command(&format!("{table_base} -o json"))
+            .unwrap();
+        assert!(
+            !json_out.contains("supersedes"),
+            "JSON output must never be contaminated with the human-readable note: {json_out}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_explicit_temperature_overrides_isa_default_under_density_altitude() {
+        let wasm = WasmBallistics::new();
+        let default_temp = wasm
+            .run_command(&format!("{DA_TRAJECTORY_BASE} --density-altitude 3000"))
+            .unwrap();
+        let explicit_temp = wasm
+            .run_command(&format!(
+                "{DA_TRAJECTORY_BASE} --density-altitude 3000 --temperature 35"
+            ))
+            .unwrap();
+        assert_ne!(
+            default_temp, explicit_temp,
+            "an explicit --temperature must change the resolved atmosphere under \
+             --density-altitude"
+        );
+    }
 }

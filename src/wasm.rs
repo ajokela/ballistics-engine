@@ -1080,6 +1080,17 @@ impl WasmBallistics {
         let mut zero_pressure_type: Option<PressureReferenceMode> = None;
         let mut humidity = 50.0;
         let mut altitude = 0.0;
+        // MBA-1366: density altitude (feet imperial / meters metric), supersedes
+        // altitude/pressure/pressure_type when given -- see the `--density-altitude` parse arm
+        // below and the native CLI's `--density-altitude` doc comment for the full precedence.
+        let mut density_altitude: Option<f64> = None;
+        // Unlike native's clap `Option<f64>`, `pressure`/`pressure_type` above are plain values
+        // with no way to tell "explicitly passed" from "left at default" -- track it explicitly
+        // (same pattern as `adjustment_unit_supplied` below) so the density-altitude-supersedes
+        // warning can fire only when the caller actually passed one of them.
+        let mut pressure_supplied = false;
+        let mut pressure_type_supplied = false;
+        let mut temperature_supplied = false;
         let mut output_format = OutputFormat::Table;
         let mut full = false;
         // MBA-1337 p3: native --plot parity. None = no chart; Some(style) appends the
@@ -1308,6 +1319,7 @@ impl WasmBallistics {
                         temperature = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid temperature"))?;
+                        temperature_supplied = true;
                         i += 1;
                     }
                 }
@@ -1316,12 +1328,14 @@ impl WasmBallistics {
                         pressure = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid pressure"))?;
+                        pressure_supplied = true;
                         i += 1;
                     }
                 }
                 "--pressure-type" => {
                     if i + 1 < args.len() {
                         pressure_type = parse_pressure_type_arg(args[i + 1])?;
+                        pressure_type_supplied = true;
                         i += 1;
                     }
                 }
@@ -1338,6 +1352,16 @@ impl WasmBallistics {
                         altitude = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                        i += 1;
+                    }
+                }
+                "--density-altitude" => {
+                    if i + 1 < args.len() {
+                        density_altitude = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid density altitude"))?,
+                        );
                         i += 1;
                     }
                 }
@@ -1895,6 +1919,42 @@ impl WasmBallistics {
         inputs.humidity = (humidity / 100.0).clamp(0.0, 1.0);
         inputs.altitude = atmosphere.altitude;
 
+        // MBA-1366: --density-altitude supersedes altitude/pressure/pressure-type entirely,
+        // back-solving an ISA-equivalent atmosphere (NOT the direct-density bypass) exactly
+        // like the native CLI's --density-altitude. An explicit --temperature still wins over
+        // the ISA-at-density-altitude default; density is honored either way (see
+        // `atmosphere::resolve_atmosphere_for_density_altitude`'s doc comment).
+        let mut density_altitude_active = false;
+        let mut density_altitude_warning: Option<String> = None;
+        if let Some(da) = density_altitude {
+            let da_m = match units {
+                UnitSystem::Imperial => da * 0.3048,
+                UnitSystem::Metric => da,
+            };
+            let explicit_temp_c = temperature_supplied.then_some(atmosphere.temperature);
+            let (da_altitude_m, da_temp_c, da_pressure_hpa) =
+                crate::atmosphere::resolve_atmosphere_for_density_altitude(
+                    da_m,
+                    explicit_temp_c,
+                );
+            atmosphere.temperature = da_temp_c;
+            atmosphere.pressure = da_pressure_hpa;
+            atmosphere.altitude = da_altitude_m;
+            inputs.temperature = da_temp_c;
+            inputs.pressure = da_pressure_hpa;
+            inputs.altitude = da_altitude_m;
+            density_altitude_active = true;
+            if pressure_supplied || pressure_type_supplied {
+                // MBA-1414 precedent: the browser terminal has no visible stderr, so this rides
+                // the table-only warning block instead of an eprintln!.
+                density_altitude_warning = Some(
+                    "note: --density-altitude supersedes --pressure/--pressure-type (station \
+                     pressure is derived from density altitude instead)\n\n"
+                        .to_string(),
+                );
+            }
+        }
+
         // Handle auto-zero if specified
         let mut zero_info = String::new();
         if let Some(zero_distance) = auto_zero {
@@ -2052,27 +2112,36 @@ impl WasmBallistics {
         // Create solver and calculate. MBA-1397: Absolute is byte-identical to today
         // (unchanged constructor); Qnh reduces the declared altimeter setting to station
         // pressure and uses the Authoritative constructor so it is never re-interpreted
-        // through the legacy default-sentinel heuristic.
-        let mut solver = match pressure_type {
-            PressureReferenceMode::Absolute => {
-                TrajectorySolver::new(inputs.clone(), wind, atmosphere)
-            }
-            PressureReferenceMode::Qnh => {
-                let (resolved_temp_c, resolved_pressure_hpa) =
-                    resolve_station_conditions_with_pressure_mode(
-                        atmosphere.temperature,
-                        atmosphere.pressure,
-                        atmosphere.altitude,
-                        PressureReferenceMode::Qnh,
-                    );
-                let mut resolved_atmosphere = atmosphere.clone();
-                resolved_atmosphere.temperature = resolved_temp_c;
-                resolved_atmosphere.pressure = resolved_pressure_hpa;
-                TrajectorySolver::new_with_resolved_station_atmosphere(
-                    inputs.clone(),
-                    wind,
-                    resolved_atmosphere,
-                )
+        // through the legacy default-sentinel heuristic. MBA-1366: density altitude is
+        // ALREADY fully resolved above (`resolve_atmosphere_for_density_altitude`) and must
+        // use the Authoritative constructor unconditionally too — routing it through the
+        // Absolute branch's legacy `TrajectorySolver::new` would re-derive it through that
+        // same default-sentinel heuristic a second time, risking a misfire exactly like the
+        // QNH case above (see the comment where `density_altitude_active` is set).
+        let mut solver = if density_altitude_active {
+            TrajectorySolver::new_with_resolved_station_atmosphere(inputs.clone(), wind, atmosphere)
+        } else {
+            match pressure_type {
+                PressureReferenceMode::Absolute => {
+                    TrajectorySolver::new(inputs.clone(), wind, atmosphere)
+                }
+                PressureReferenceMode::Qnh => {
+                    let (resolved_temp_c, resolved_pressure_hpa) =
+                        resolve_station_conditions_with_pressure_mode(
+                            atmosphere.temperature,
+                            atmosphere.pressure,
+                            atmosphere.altitude,
+                            PressureReferenceMode::Qnh,
+                        );
+                    let mut resolved_atmosphere = atmosphere.clone();
+                    resolved_atmosphere.temperature = resolved_temp_c;
+                    resolved_atmosphere.pressure = resolved_pressure_hpa;
+                    TrajectorySolver::new_with_resolved_station_atmosphere(
+                        inputs.clone(),
+                        wind,
+                        resolved_atmosphere,
+                    )
+                }
             }
         };
         let max_range_m = match units {
@@ -2206,9 +2275,10 @@ impl WasmBallistics {
                     // MBA-1386/MBA-1356: table-only, like every human-readable block here —
                     // neither warning may contaminate JSON/CSV payloads.
                     format!(
-                        "{}{}{}{}{}{}",
+                        "{}{}{}{}{}{}{}",
                         cd_scale_warning.as_deref().unwrap_or(""),
                         bc_reference_warning.as_deref().unwrap_or(""),
+                        density_altitude_warning.as_deref().unwrap_or(""),
                         bc5d_coercion_warning.as_deref().unwrap_or(""),
                         adjustment_unit_noop_warning.unwrap_or(""),
                         zero_info,

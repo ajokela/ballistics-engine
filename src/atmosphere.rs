@@ -304,6 +304,119 @@ pub fn resolve_station_conditions_with_pressure_mode(
     (temp_c, pressure_hpa)
 }
 
+// ---------------------------------------------------------------------------------------
+// MBA-1366: density altitude as a direct atmosphere input
+// ---------------------------------------------------------------------------------------
+
+/// NWS/FAA published pressure-altitude constants. Duplicated here (not imported) because the
+/// forward density-altitude formula this inverts,
+/// `pdf_dope_card::calculate_density_altitude(_altitude_ft, pressure_inhg, temp_f)`, lives in
+/// the `ballistics` BINARY crate's CLI-only `pdf_dope_card` module (`src/pdf_dope_card.rs`) —
+/// this LIBRARY crate has no dependency on it and cannot call it. `src/main.rs`'s
+/// `density_altitude_round_trips_through_the_dope_card_formula` test is the cross-crate proof
+/// that the two stay numerically consistent; these constants must match that function's
+/// literals exactly (145_366.45, 0.190_284, 3.57, 59.0, and the "120 ft/degC" correction) for
+/// that round trip to hold.
+const DA_NWS_SEA_LEVEL_HPA: f64 = 1013.25;
+const DA_NWS_PRESSURE_ALT_FT: f64 = 145_366.45;
+const DA_NWS_EXPONENT: f64 = 0.190_284;
+const DA_NWS_SEA_LEVEL_TEMP_F: f64 = 59.0;
+const DA_NWS_LAPSE_F_PER_1000FT: f64 = 3.57;
+const DA_FT_TO_M: f64 = 0.3048;
+
+/// Back-solve an ISA-equivalent station altitude/temperature/pressure from a directly-declared
+/// density altitude (MBA-1366) — the single-value atmosphere entry mode Shooter, Nosler, AB
+/// Analytics, Ballistic AE, and TRASOL all support as an alternative to altitude + pressure +
+/// temperature.
+///
+/// This is the exact algebraic inverse of the published NWS/FAA density-altitude model this
+/// engine already uses to REPORT density altitude
+/// (`pdf_dope_card::calculate_density_altitude`):
+///
+/// ```text
+/// pressure_alt_ft = 145366.45 * (1 - (station_hpa / 1013.25)^0.190284)
+/// isa_temp_f      = 59.0 - pressure_alt_ft / 1000.0 * 3.57
+/// density_alt_ft  = pressure_alt_ft + (120*5/9) * (station_temp_f - isa_temp_f)
+/// ```
+///
+/// Solved for `station_hpa` given a target `density_alt_ft` and a station temperature `K = 120
+/// * 5/9` is the "120 ft per °C" density-altitude correction rule, expressed in ft per °F):
+///
+/// ```text
+/// pressure_alt_ft = (density_alt_ft - K*(station_temp_f - 59.0)) / (1 + K*3.57/1000.0)
+/// station_hpa     = 1013.25 * (1 - pressure_alt_ft/145366.45)^(1/0.190284)
+/// ```
+///
+/// # Temperature precedence (MBA-1366)
+/// * `explicit_temperature_c == None`: ISA-at-density-altitude is the default. Algebraically
+///   this collapses `pressure_alt_ft` to EXACTLY `density_alt_ft`: the correction term above is
+///   zero by construction whenever the station temperature equals the ISA temperature at that
+///   pressure altitude, which is self-consistently true when temperature is left at ISA — i.e.
+///   omitting an explicit temperature is equivalent to typing `--altitude <density_altitude>`
+///   with no `--temperature`/`--pressure` override.
+/// * `explicit_temperature_c == Some(t)`: `t` wins outright (returned unchanged as
+///   `temperature_c`, never re-derived) and the station pressure is re-solved so the resulting
+///   density altitude still reproduces the input exactly — density is honored either way; only
+///   the implied pressure (and therefore station altitude) differs from the ISA-default case.
+///
+/// # Height convention
+/// The NWS/FAA formula being inverted performs no geopotential correction — it treats its
+/// altitude as a plain height, exactly like `pdf_dope_card::calculate_density_altitude` does
+/// (whose own `_altitude_ft` parameter is unused and undocumented as geometric-vs-geopotential
+/// for that reason). Consistent with that, the `altitude_m` this returns is GEOMETRIC altitude
+/// — the same convention every other engine altitude input uses (`--altitude`,
+/// [`AtmosphericConditions::altitude`](crate::cli_api::AtmosphericConditions::altitude)) —
+/// rather than being run through `geometric_to_geopotential_height_m` a second time here; that
+/// conversion is `calculate_icao_standard_atmosphere`'s job (both private to this crate — see
+/// their doc comments elsewhere in this file), applied once this altitude re-enters the normal
+/// altitude-lapse pipeline (this is what "back-solve an ISA-equivalent atmosphere" means —
+/// unlike [`get_direct_atmosphere`], which would freeze speed of sound and bypass that pipeline
+/// entirely).
+///
+/// # Interaction with [`PressureReferenceMode`] (QNH)
+/// Density altitude supersedes pressure outright — callers must not also run a declared
+/// `--pressure`/QNH value through [`resolve_station_pressure_with_mode`] when a density
+/// altitude is present; see the CLI/WASM call sites, which emit a note to that effect.
+///
+/// # Returns
+/// `(altitude_m, temperature_c, pressure_hpa)`, meant to be written directly into
+/// [`crate::cli_api::AtmosphericConditions`] (and the paired `BallisticInputs` environment
+/// fields, so powder-temperature sensitivity and the moist speed of sound both see the real
+/// resolved temperature) via the Authoritative
+/// (`TrajectorySolver::new_with_resolved_station_atmosphere`) constructor.
+pub fn resolve_atmosphere_for_density_altitude(
+    density_altitude_m: f64,
+    explicit_temperature_c: Option<f64>,
+) -> (f64, f64, f64) {
+    let density_altitude_ft = density_altitude_m / DA_FT_TO_M;
+    const K: f64 = 120.0 * 5.0 / 9.0; // ft of density-altitude correction per °F station-vs-ISA delta
+
+    let (pressure_alt_ft, temperature_c) = match explicit_temperature_c {
+        Some(temp_c) => {
+            let temp_f = temp_c * 9.0 / 5.0 + 32.0;
+            let denom = 1.0 + K * DA_NWS_LAPSE_F_PER_1000FT / 1000.0;
+            let pressure_alt_ft =
+                (density_altitude_ft - K * (temp_f - DA_NWS_SEA_LEVEL_TEMP_F)) / denom;
+            (pressure_alt_ft, temp_c)
+        }
+        None => {
+            // ISA-at-DA default: the correction term vanishes by construction (see doc
+            // comment above), so the pressure altitude IS the density altitude exactly.
+            let pressure_alt_ft = density_altitude_ft;
+            let isa_temp_f =
+                DA_NWS_SEA_LEVEL_TEMP_F - pressure_alt_ft / 1000.0 * DA_NWS_LAPSE_F_PER_1000FT;
+            let isa_temp_c = (isa_temp_f - 32.0) * 5.0 / 9.0;
+            (pressure_alt_ft, isa_temp_c)
+        }
+    };
+
+    let pressure_hpa = DA_NWS_SEA_LEVEL_HPA
+        * (1.0 - pressure_alt_ft / DA_NWS_PRESSURE_ALT_FT).powf(1.0 / DA_NWS_EXPONENT);
+    let altitude_m = pressure_alt_ft * DA_FT_TO_M;
+
+    (altitude_m, temperature_c, pressure_hpa)
+}
+
 /// Enhanced atmospheric calculation with ICAO Standard Atmosphere.
 ///
 /// # Arguments
@@ -1471,5 +1584,119 @@ mod tests {
         ]);
         // NaN can't be ordered; deterministically use the nearest (first) zone rather than panic.
         assert_eq!(sock.atmo_for_range(f64::NAN), (30.0, 1010.0, 80.0));
+    }
+
+    // ---- MBA-1366: density altitude as a direct atmosphere input ----
+
+    /// With no explicit temperature, the resolved altitude must equal the input density
+    /// altitude EXACTLY (this is the algebraic identity documented on
+    /// `resolve_atmosphere_for_density_altitude`: the correction term vanishes when station
+    /// temperature is left at ISA).
+    #[test]
+    fn density_altitude_default_temp_pressure_alt_equals_density_alt() {
+        for da_ft in [0.0_f64, 1000.0, 3000.0, 7500.0, -500.0] {
+            let da_m = da_ft * DA_FT_TO_M;
+            let (altitude_m, temp_c, pressure_hpa) =
+                resolve_atmosphere_for_density_altitude(da_m, None);
+            assert!(
+                (altitude_m - da_m).abs() < 1e-6,
+                "da_ft={da_ft}: altitude_m {altitude_m} should equal da_m {da_m}"
+            );
+            // Sanity: pressure must be a plausible station pressure (strictly decreasing with DA).
+            assert!(pressure_hpa > 0.0 && pressure_hpa < 1100.0);
+            assert!(temp_c.is_finite());
+        }
+        // At DA=0 the result must be exactly the sea-level ISA reference.
+        let (alt0, temp0, press0) = resolve_atmosphere_for_density_altitude(0.0, None);
+        assert!(alt0.abs() < 1e-9);
+        assert!((temp0 - 15.0).abs() < 1e-6);
+        assert!((press0 - 1013.25).abs() < 1e-6);
+    }
+
+    /// Higher density altitude at the ISA default must yield a lower station pressure (thinner
+    /// air), matching the physical meaning of density altitude.
+    #[test]
+    fn density_altitude_pressure_decreases_monotonically() {
+        let (_, _, p0) = resolve_atmosphere_for_density_altitude(0.0, None);
+        let (_, _, p1) = resolve_atmosphere_for_density_altitude(1000.0, None);
+        let (_, _, p2) = resolve_atmosphere_for_density_altitude(3000.0, None);
+        assert!(p1 < p0);
+        assert!(p2 < p1);
+    }
+
+    /// An explicit temperature must be honored EXACTLY (never re-derived), while the implied
+    /// pressure altitude (and therefore the resolved altitude/pressure) differs from the
+    /// ISA-default case -- proving density is still honored (a different pressure/altitude
+    /// combination that reproduces the SAME density altitude at the warmer/colder temperature).
+    #[test]
+    fn density_altitude_explicit_temperature_overrides_isa_default_but_honors_density() {
+        let da_m = 1000.0 * DA_FT_TO_M;
+        let (default_alt_m, default_temp_c, default_pressure_hpa) =
+            resolve_atmosphere_for_density_altitude(da_m, None);
+
+        // A HOTTER-than-ISA explicit station temperature at the same density altitude implies a
+        // LOWER pressure altitude: hot (less dense) air already accounts for some of the
+        // "thinness" that defines the density altitude, so less physical elevation is needed to
+        // reach the rest of it (equivalently: the correction term subtracts from DA before the
+        // pressure inversion, since a warmer station reads MORE dense-feeling per unit of actual
+        // elevation than ISA does).
+        let hot_temp_c = default_temp_c + 20.0;
+        let (hot_alt_m, hot_temp_out, hot_pressure_hpa) =
+            resolve_atmosphere_for_density_altitude(da_m, Some(hot_temp_c));
+        assert_eq!(hot_temp_out, hot_temp_c, "explicit temperature must be honored exactly");
+        assert!(
+            hot_alt_m < default_alt_m,
+            "hotter station temp at same DA should imply a lower pressure altitude: \
+             hot={hot_alt_m} default={default_alt_m}"
+        );
+        assert!(hot_pressure_hpa > default_pressure_hpa);
+
+        // A COLDER-than-ISA explicit temperature implies a HIGHER pressure altitude.
+        let cold_temp_c = default_temp_c - 20.0;
+        let (cold_alt_m, cold_temp_out, cold_pressure_hpa) =
+            resolve_atmosphere_for_density_altitude(da_m, Some(cold_temp_c));
+        assert_eq!(cold_temp_out, cold_temp_c);
+        assert!(cold_alt_m > default_alt_m);
+        assert!(cold_pressure_hpa < default_pressure_hpa);
+    }
+
+    /// Round trip using ONLY this crate's own math (the forward NWS pressure-altitude formula,
+    /// re-derived independently in the test rather than reusing the production function) -- an
+    /// implementation-independent algebraic sanity check. The REAL cross-crate round trip
+    /// against the production `pdf_dope_card::calculate_density_altitude` forward function
+    /// lives in `src/main.rs` (that function is CLI-binary-only and unreachable from this
+    /// library crate).
+    #[test]
+    fn density_altitude_round_trips_through_hand_derived_forward_formula() {
+        fn forward_density_altitude_ft(pressure_hpa: f64, temp_c: f64) -> f64 {
+            let pressure_alt_ft =
+                145_366.45 * (1.0 - (pressure_hpa / 1013.25).powf(0.190_284));
+            let isa_temp_f = 59.0 - (pressure_alt_ft / 1000.0) * 3.57;
+            let temp_f = temp_c * 9.0 / 5.0 + 32.0;
+            pressure_alt_ft + (120.0 * 5.0 / 9.0) * (temp_f - isa_temp_f)
+        }
+
+        for da_ft in [0.0_f64, 500.0, 2500.0, 6000.0] {
+            let da_m = da_ft * DA_FT_TO_M;
+            // Default (ISA-at-DA) branch.
+            let (_, temp_c, pressure_hpa) = resolve_atmosphere_for_density_altitude(da_m, None);
+            let round_tripped_ft = forward_density_altitude_ft(pressure_hpa, temp_c);
+            assert!(
+                (round_tripped_ft - da_ft).abs() < 1e-6,
+                "da_ft={da_ft}: round-tripped {round_tripped_ft} (temp_c={temp_c}, pressure_hpa={pressure_hpa})"
+            );
+
+            // Explicit-temperature branch.
+            let explicit_temp_c = 25.0;
+            let (_, temp_out, pressure_hpa_explicit) =
+                resolve_atmosphere_for_density_altitude(da_m, Some(explicit_temp_c));
+            assert_eq!(temp_out, explicit_temp_c);
+            let round_tripped_explicit_ft =
+                forward_density_altitude_ft(pressure_hpa_explicit, temp_out);
+            assert!(
+                (round_tripped_explicit_ft - da_ft).abs() < 1e-6,
+                "da_ft={da_ft} (explicit {explicit_temp_c}C): round-tripped {round_tripped_explicit_ft}"
+            );
+        }
     }
 }

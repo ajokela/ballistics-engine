@@ -1111,6 +1111,73 @@ pub extern "C" fn ballistics_reduce_qnh_pressure(
     crate::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m)
 }
 
+/// Sentinel `explicit_temperature_c` value meaning "no explicit temperature override" for the
+/// `ballistics_density_altitude_*` exports below (MBA-1366) — same NaN-means-absent convention
+/// [`FFIBallisticInputs::latitude`] already uses. Any NaN bit pattern is accepted (checked via
+/// `is_nan()`, not equality), matching that precedent.
+pub const FFI_NO_EXPLICIT_TEMPERATURE: c_double = f64::NAN;
+
+/// Back-solve the station TEMPERATURE (Celsius) an ISA-equivalent atmosphere at
+/// `density_altitude_m` implies (MBA-1366; see
+/// [`crate::atmosphere::resolve_atmosphere_for_density_altitude`] for the full derivation).
+///
+/// `FFIAtmosphericConditions` is an ABI-frozen `repr(C)` struct (the same iOS-consumer contract
+/// enforced by a regression test as [`ballistics_reduce_qnh_pressure`]/
+/// [`ballistics_bc_for_reference_standard`]) with no room for a density-altitude field, so this
+/// is a standalone pure conversion — call it (and its two companions below) once on a declared
+/// density altitude, then write the three results into `FFIAtmosphericConditions.temperature`/
+/// `.pressure`/`.altitude` before calling any existing `ballistics_calculate_trajectory*`/
+/// `ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged — a pure
+/// addition to the C ABI requiring no recompile for existing callers.
+///
+/// `explicit_temperature_c`: pass [`FFI_NO_EXPLICIT_TEMPERATURE`] (NaN) for the ISA-at-density-
+/// altitude default, or a real Celsius value to have it honored exactly (density is still
+/// honored either way — only the implied pressure/altitude differ; see the Rust doc comment).
+/// A non-finite `density_altitude_m` returns NaN for all three exports (there is no plausible
+/// station value to fall back to, unlike the QNH/BC conversions above, which return their input
+/// unchanged).
+#[no_mangle]
+pub extern "C" fn ballistics_density_altitude_temperature_c(
+    density_altitude_m: c_double,
+    explicit_temperature_c: c_double,
+) -> c_double {
+    if !density_altitude_m.is_finite() {
+        return f64::NAN;
+    }
+    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
+    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).1
+}
+
+/// Companion to [`ballistics_density_altitude_temperature_c`]: the back-solved station PRESSURE
+/// (hPa) for the same `(density_altitude_m, explicit_temperature_c)` pair.
+#[no_mangle]
+pub extern "C" fn ballistics_density_altitude_pressure_hpa(
+    density_altitude_m: c_double,
+    explicit_temperature_c: c_double,
+) -> c_double {
+    if !density_altitude_m.is_finite() {
+        return f64::NAN;
+    }
+    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
+    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).2
+}
+
+/// Companion to [`ballistics_density_altitude_temperature_c`]: the back-solved station ALTITUDE
+/// (meters, geometric) for the same `(density_altitude_m, explicit_temperature_c)` pair. This is
+/// NOT necessarily equal to `density_altitude_m` — it only is when `explicit_temperature_c` is
+/// [`FFI_NO_EXPLICIT_TEMPERATURE`] (see the Rust doc comment's algebraic identity).
+#[no_mangle]
+pub extern "C" fn ballistics_density_altitude_altitude_m(
+    density_altitude_m: c_double,
+    explicit_temperature_c: c_double,
+) -> c_double {
+    if !density_altitude_m.is_finite() {
+        return f64::NAN;
+    }
+    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
+    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).0
+}
+
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
@@ -2064,6 +2131,130 @@ mod tests {
             );
             ballistics_free_monte_carlo_results(a);
             ballistics_free_monte_carlo_results(b);
+        }
+    }
+
+    // ---- MBA-1366: ballistics_density_altitude_* + FFIAtmosphericConditions parity --------
+
+    #[test]
+    fn density_altitude_ffi_exports_match_the_library_function() {
+        let da_m = 1000.0 * 0.3048;
+        let expected = crate::atmosphere::resolve_atmosphere_for_density_altitude(da_m, None);
+        assert_eq!(
+            ballistics_density_altitude_altitude_m(da_m, FFI_NO_EXPLICIT_TEMPERATURE),
+            expected.0
+        );
+        assert_eq!(
+            ballistics_density_altitude_temperature_c(da_m, FFI_NO_EXPLICIT_TEMPERATURE),
+            expected.1
+        );
+        assert_eq!(
+            ballistics_density_altitude_pressure_hpa(da_m, FFI_NO_EXPLICIT_TEMPERATURE),
+            expected.2
+        );
+
+        // With no explicit temperature the resolved altitude must equal the input exactly.
+        assert!((ballistics_density_altitude_altitude_m(da_m, FFI_NO_EXPLICIT_TEMPERATURE) - da_m).abs() < 1e-6);
+    }
+
+    #[test]
+    fn density_altitude_ffi_explicit_temperature_is_honored_exactly() {
+        let da_m = 500.0;
+        let explicit_temp_c = 30.0;
+        let expected =
+            crate::atmosphere::resolve_atmosphere_for_density_altitude(da_m, Some(explicit_temp_c));
+        assert_eq!(
+            ballistics_density_altitude_temperature_c(da_m, explicit_temp_c),
+            explicit_temp_c
+        );
+        assert_eq!(
+            ballistics_density_altitude_temperature_c(da_m, explicit_temp_c),
+            expected.1
+        );
+        assert_eq!(
+            ballistics_density_altitude_pressure_hpa(da_m, explicit_temp_c),
+            expected.2
+        );
+        assert_eq!(
+            ballistics_density_altitude_altitude_m(da_m, explicit_temp_c),
+            expected.0
+        );
+    }
+
+    #[test]
+    fn density_altitude_ffi_non_finite_input_returns_nan() {
+        assert!(
+            ballistics_density_altitude_temperature_c(f64::INFINITY, FFI_NO_EXPLICIT_TEMPERATURE)
+                .is_nan()
+        );
+        assert!(
+            ballistics_density_altitude_pressure_hpa(f64::NAN, FFI_NO_EXPLICIT_TEMPERATURE).is_nan()
+        );
+        assert!(
+            ballistics_density_altitude_altitude_m(f64::NEG_INFINITY, FFI_NO_EXPLICIT_TEMPERATURE)
+                .is_nan()
+        );
+    }
+
+    /// Same proof shape as the QNH FFI tests above: writing the density-altitude-derived
+    /// station values into `FFIAtmosphericConditions` before an existing trajectory export
+    /// reaches the solve (a materially different, lower-density trajectory at a higher DA than
+    /// at sea level, exactly like the QNH-vs-absolute divergence proof).
+    #[test]
+    fn ffi_trajectory_uses_the_density_altitude_derived_station_values() {
+        let inputs = valid_trajectory_inputs();
+        let da_m = 3000.0 * 0.3048; // 3000 ft density altitude
+        let altitude_m =
+            ballistics_density_altitude_altitude_m(da_m, FFI_NO_EXPLICIT_TEMPERATURE);
+        let temperature_c =
+            ballistics_density_altitude_temperature_c(da_m, FFI_NO_EXPLICIT_TEMPERATURE);
+        let pressure_hpa =
+            ballistics_density_altitude_pressure_hpa(da_m, FFI_NO_EXPLICIT_TEMPERATURE);
+
+        let atmo_da = FFIAtmosphericConditions {
+            temperature: temperature_c,
+            pressure: pressure_hpa,
+            humidity: 50.0,
+            altitude: altitude_m,
+        };
+        let atmo_sea_level = FFIAtmosphericConditions {
+            temperature: 15.0,
+            pressure: 1013.25,
+            humidity: 50.0,
+            altitude: 0.0,
+        };
+
+        unsafe {
+            let a = ballistics_calculate_trajectory(
+                &inputs,
+                std::ptr::null(),
+                &atmo_da,
+                400.0,
+                1.0,
+            );
+            let b = ballistics_calculate_trajectory(
+                &inputs,
+                std::ptr::null(),
+                &atmo_sea_level,
+                400.0,
+                1.0,
+            );
+            assert!(!a.is_null() && !b.is_null());
+            let drop_a = std::slice::from_raw_parts((*a).points, (*a).point_count as usize)
+                .last()
+                .unwrap()
+                .position_y;
+            let drop_b = std::slice::from_raw_parts((*b).points, (*b).point_count as usize)
+                .last()
+                .unwrap()
+                .position_y;
+            assert!(
+                (drop_a - drop_b).abs() > 1e-6,
+                "density-altitude-derived vs sea-level atmosphere must produce materially \
+                 different trajectories: {drop_a} vs {drop_b}"
+            );
+            ballistics_free_trajectory_result(a);
+            ballistics_free_trajectory_result(b);
         }
     }
 }
