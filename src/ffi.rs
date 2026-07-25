@@ -1045,6 +1045,44 @@ pub unsafe extern "C" fn ballistics_free_monte_carlo_results(results: *mut FFIMo
     }
 }
 
+/// Which standard atmosphere a `bc` value passed to [`ballistics_bc_for_reference_standard`]
+/// is referenced to (MBA-1365). `0` = ICAO (the default every other export in this module
+/// assumes), `1` = Army Standard Metro (some vendor-published BCs, notably many
+/// Sierra/Hornady/Barnes bullets). Any other value is treated as `0` (ICAO), matching the
+/// permissive unrecognized-value convention `convert_inputs` already uses for `bc_type`.
+pub const FFI_BC_REFERENCE_ICAO: c_int = 0;
+pub const FFI_BC_REFERENCE_ARMY_STANDARD_METRO: c_int = 1;
+
+/// Convert a ballistic coefficient declared under `reference_standard` to the ICAO-referenced
+/// value every `FFIBallisticInputs.bc_value` in this module expects (MBA-1365).
+///
+/// `FFIBallisticInputs` is an ABI-frozen `repr(C)` struct (an iOS-consumer contract enforced
+/// by a regression test) with no room to add a reference-standard field, so this is a
+/// standalone pure conversion instead of a struct setter: call it once on a raw BC before
+/// writing the result into `FFIBallisticInputs.bc_value`, then use every existing
+/// `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*`
+/// export completely unchanged. `reference_standard == FFI_BC_REFERENCE_ICAO` (`0`) is a
+/// no-op, so every existing caller that never calls this function is unaffected — this is a
+/// pure addition to the ABI, not a modification, so no recompile is required unless a caller
+/// opts into the new symbol.
+///
+/// `reference_standard == FFI_BC_REFERENCE_ARMY_STANDARD_METRO` (`1`) multiplies by
+/// [`crate::constants::ASM_TO_ICAO_BC`], the same constant and the same single multiply
+/// [`crate::cli_api::TrajectorySolver::new`] applies for the CLI/WASM/Rust-native surfaces.
+/// A non-finite `bc` is returned unchanged (this function performs no validation; the
+/// existing `bc_value must be finite and greater than zero` solve-time check still applies).
+#[no_mangle]
+pub extern "C" fn ballistics_bc_for_reference_standard(
+    bc: c_double,
+    reference_standard: c_int,
+) -> c_double {
+    if reference_standard == FFI_BC_REFERENCE_ARMY_STANDARD_METRO {
+        bc * crate::constants::ASM_TO_ICAO_BC
+    } else {
+        bc
+    }
+}
+
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
@@ -1837,5 +1875,37 @@ mod tests {
             assert!(za.is_finite() && zb.is_finite());
             assert_eq!(za.to_bits(), zb.to_bits());
         }
+    }
+
+    // ---- MBA-1365: ballistics_bc_for_reference_standard --------------------------------
+
+    #[test]
+    fn bc_for_reference_standard_icao_is_a_byte_identical_no_op() {
+        let bc = 0.475;
+        assert_eq!(
+            ballistics_bc_for_reference_standard(bc, FFI_BC_REFERENCE_ICAO).to_bits(),
+            bc.to_bits()
+        );
+    }
+
+    #[test]
+    fn bc_for_reference_standard_unrecognized_value_falls_back_to_icao() {
+        // Mirrors convert_inputs' permissive unrecognized-bc_type convention: an unknown
+        // reference_standard is treated as ICAO (0), not rejected.
+        let bc = 0.475;
+        assert_eq!(
+            ballistics_bc_for_reference_standard(bc, 99).to_bits(),
+            bc.to_bits()
+        );
+    }
+
+    #[test]
+    fn bc_for_reference_standard_army_standard_metro_applies_the_documented_ratio() {
+        let bc = 0.475;
+        let converted =
+            ballistics_bc_for_reference_standard(bc, FFI_BC_REFERENCE_ARMY_STANDARD_METRO);
+        assert_eq!(converted, bc * crate::constants::ASM_TO_ICAO_BC);
+        // Smaller BC == more drag under this engine's ICAO-calibrated retardation math.
+        assert!(converted < bc);
     }
 }

@@ -286,6 +286,14 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
     let mut inputs = BallisticInputs {
         bc_value: params.bc,
         bc_type: params.drag_model,
+        // This generic RK4/RK45 kernel is fed a raw `TrajectoryParams.bc` that its callers
+        // (fast_trajectory::fast_integrate_with_segments) read directly from
+        // `BallisticInputs.bc_value` WITHOUT going through `TrajectorySolver::new` — the
+        // single normalization boundary for MBA-1365. Any ASM-reference conversion is
+        // therefore the caller's responsibility before populating `TrajectoryParams`;
+        // this constant-for-the-whole-integration struct always reports ICAO (a no-op)
+        // since it takes no reference-standard input of its own.
+        bc_reference_standard: crate::cli_api::BcReferenceStandard::Icao,
         bullet_mass: params.mass_kg, // kg
         muzzle_velocity: muzzle_velocity_mps,
         bullet_diameter: params.bullet_diameter, // MBA-717: real geometry, not placeholders

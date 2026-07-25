@@ -5,14 +5,28 @@ use wasm_bindgen::prelude::*;
 use crate::bc_table_5d::Bc5dTable;
 use crate::cli_api::{
     calculate_zero_angle_with_conditions, estimate_bc_fit, run_monte_carlo_with_direction_std_dev,
-    AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcFitMode, MonteCarloParams,
-    TrajectorySolver, WindConditions,
+    AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcFitMode,
+    BcReferenceStandard, MonteCarloParams, TrajectorySolver, WindConditions,
+    BC_REFERENCE_STANDARD_INERT_WARNING,
 };
 use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
 use crate::moving_target::{calculate_lead, mover_ring};
 use crate::truing_dsf::{apply_dsf, DsfPoint, DsfTable};
 use std::cell::RefCell;
+
+/// Parse `--bc-reference`'s value (MBA-1365). Mirrors the native CLI's `clap::ValueEnum`
+/// spelling ("icao", "army-standard-metro"), case-insensitively, since the WASM terminal
+/// hand-parses its own argv rather than using clap.
+fn parse_bc_reference_arg(s: &str) -> Result<BcReferenceStandard, JsValue> {
+    match s.to_ascii_lowercase().as_str() {
+        "icao" => Ok(BcReferenceStandard::Icao),
+        "army-standard-metro" => Ok(BcReferenceStandard::ArmyStandardMetro),
+        other => Err(JsValue::from_str(&format!(
+            "Invalid --bc-reference '{other}' (expected 'icao' or 'army-standard-metro')"
+        ))),
+    }
+}
 
 #[wasm_bindgen]
 pub struct WasmBallistics {
@@ -1013,6 +1027,10 @@ impl WasmBallistics {
         let mut velocity = default_velocity;
         let mut angle = 0.0;
         let mut bc = 0.475;
+        // MBA-1365: which standard atmosphere `bc` is referenced to. `Icao` is a no-op —
+        // applied exactly once, in `TrajectorySolver::new`, byte-identical to today when
+        // this flag is never passed.
+        let mut bc_reference_standard = BcReferenceStandard::Icao;
         let mut mass = default_mass;
         let mut diameter = default_diameter;
         let mut drag_model = "G1";
@@ -1169,6 +1187,12 @@ impl WasmBallistics {
                         bc = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid BC"))?;
+                        i += 1;
+                    }
+                }
+                "--bc-reference" => {
+                    if i + 1 < args.len() {
+                        bc_reference_standard = parse_bc_reference_arg(args[i + 1])?;
                         i += 1;
                     }
                 }
@@ -1605,6 +1629,7 @@ impl WasmBallistics {
         }
 
         inputs.bc_value = bc;
+        inputs.bc_reference_standard = bc_reference_standard;
         let drag_model_parsed = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
         inputs.bc_type = drag_model_parsed;
@@ -1624,6 +1649,13 @@ impl WasmBallistics {
             inputs.cd_scale = scale;
         }
         let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
+        // MBA-1365: --bc-reference army-standard-metro has no effect once a custom drag
+        // table replaces the BC-based retardation model entirely. The browser terminal has
+        // no visible stderr (MBA-1414 precedent), so this rides the same pre-table warning
+        // text block as `cd_scale_warning` instead of an `eprintln!`.
+        let bc_reference_warning = inputs
+            .bc_reference_standard_inert_warning()
+            .map(|w| format!("{w}\n\n"));
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0; // degrees to radians
         inputs.shooting_angle = shooting_angle * std::f64::consts::PI / 180.0;
         inputs.cant_angle = cant_angle_deg * std::f64::consts::PI / 180.0;
@@ -2093,8 +2125,9 @@ impl WasmBallistics {
                     // MBA-1386/MBA-1356: table-only, like every human-readable block here —
                     // neither warning may contaminate JSON/CSV payloads.
                     format!(
-                        "{}{}{}{}{}",
+                        "{}{}{}{}{}{}",
                         cd_scale_warning.as_deref().unwrap_or(""),
+                        bc_reference_warning.as_deref().unwrap_or(""),
                         bc5d_coercion_warning.as_deref().unwrap_or(""),
                         adjustment_unit_noop_warning.unwrap_or(""),
                         zero_info,
@@ -2234,6 +2267,7 @@ impl WasmBallistics {
 
         let mut velocity = default_velocity;
         let mut bc = 0.475;
+        let mut bc_reference_standard = BcReferenceStandard::Icao;
         let mut mass = default_mass;
         let mut diameter = default_diameter;
         let mut target_distance = if units == UnitSystem::Imperial {
@@ -2272,6 +2306,12 @@ impl WasmBallistics {
                         bc = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid BC"))?;
+                        i += 1;
+                    }
+                }
+                "--bc-reference" => {
+                    if i + 1 < args.len() {
+                        bc_reference_standard = parse_bc_reference_arg(args[i + 1])?;
                         i += 1;
                     }
                 }
@@ -2368,6 +2408,7 @@ impl WasmBallistics {
         }
 
         inputs.bc_value = bc;
+        inputs.bc_reference_standard = bc_reference_standard;
         let drag_model_parsed = DragModel::from_str(drag_model)
             .ok_or_else(|| JsValue::from_str("Invalid drag model"))?;
         inputs.bc_type = drag_model_parsed;
@@ -2385,6 +2426,11 @@ impl WasmBallistics {
             inputs.cd_scale = scale;
         }
         let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
+        // MBA-1365: table-only, same rationale as handle_trajectory_command (no visible
+        // stderr in the browser terminal).
+        let bc_reference_warning = inputs
+            .bc_reference_standard_inert_warning()
+            .map(|w| format!("{w}\n\n"));
 
         let target_distance_m = match units {
             UnitSystem::Imperial => target_distance * 0.9144,
@@ -2436,7 +2482,12 @@ impl WasmBallistics {
         };
         // MBA-1356: table-only prepend, same pattern as the trajectory/monte-carlo handlers —
         // this command has no JSON/CSV output mode to protect from contamination.
-        Ok(format!("{}{}", cd_scale_warning.as_deref().unwrap_or(""), result))
+        Ok(format!(
+            "{}{}{}",
+            cd_scale_warning.as_deref().unwrap_or(""),
+            bc_reference_warning.as_deref().unwrap_or(""),
+            result
+        ))
     }
 
     fn handle_lead_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
@@ -2982,6 +3033,7 @@ impl WasmBallistics {
         let mut velocity = default_velocity;
         let mut angle = 0.0;
         let mut bc = 0.475;
+        let mut bc_reference_standard = BcReferenceStandard::Icao;
         let mut mass = default_mass;
         let mut diameter = default_diameter;
         let mut num_sims = 1000;
@@ -3034,6 +3086,10 @@ impl WasmBallistics {
                     bc = require_value(args, i)?
                         .parse()
                         .map_err(|_| JsValue::from_str("Invalid BC"))?;
+                    i += 1;
+                }
+                "--bc-reference" => {
+                    bc_reference_standard = parse_bc_reference_arg(require_value(args, i)?)?;
                     i += 1;
                 }
                 "-m" | "--mass" => {
@@ -3187,6 +3243,7 @@ impl WasmBallistics {
                 velocity,
                 angle,
                 bc,
+                bc_reference_standard,
                 mass,
                 diameter,
                 num_sims,
@@ -3270,6 +3327,7 @@ impl WasmBallistics {
         }
 
         inputs.bc_value = bc;
+        inputs.bc_reference_standard = bc_reference_standard;
         // Honor --drag-model (mirrors the trajectory/zero handlers); previously the Monte
         // Carlo path silently always used the G1 default even when G7 was intended.
         let drag_model_parsed = DragModel::from_str(drag_model)
@@ -3288,6 +3346,10 @@ impl WasmBallistics {
             inputs.cd_scale = scale;
         }
         let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
+        // MBA-1365: table-only, same rationale as handle_trajectory_command.
+        let bc_reference_warning = inputs
+            .bc_reference_standard_inert_warning()
+            .map(|w| format!("{w}\n\n"));
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
         inputs.muzzle_height = 1.5;
         inputs.ground_threshold = 0.0;
@@ -3446,7 +3508,12 @@ impl WasmBallistics {
         };
         // MBA-1356: table-only prepend, same pattern as the trajectory handler — this
         // command has no JSON/CSV output mode to protect from contamination.
-        Ok(format!("{}{}", cd_scale_warning.as_deref().unwrap_or(""), body))
+        Ok(format!(
+            "{}{}{}",
+            cd_scale_warning.as_deref().unwrap_or(""),
+            bc_reference_warning.as_deref().unwrap_or(""),
+            body
+        ))
     }
 
     /// Native `monte-carlo --wez` parity path (MBA-1343 Phase C): unit conversions
@@ -3464,6 +3531,7 @@ impl WasmBallistics {
         velocity: f64,
         angle: f64,
         bc: f64,
+        bc_reference_standard: BcReferenceStandard,
         mass: f64,
         diameter: f64,
         num_sims: usize,
@@ -3549,6 +3617,27 @@ impl WasmBallistics {
         // before any solve); just resolve the value and the out-of-range nudge here.
         let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
         let cd_scale = cd_scale.unwrap_or(1.0);
+        // MBA-1365: table-only, same rationale as handle_trajectory_command. `compute_wez`
+        // has no `BallisticInputs` to ask, so check the same two primitives directly.
+        let bc_reference_warning = if custom_drag_table.is_some()
+            && matches!(bc_reference_standard, BcReferenceStandard::ArmyStandardMetro)
+        {
+            Some(format!("{BC_REFERENCE_STANDARD_INERT_WARNING}\n\n"))
+        } else {
+            None
+        };
+
+        // MBA-1365: `compute_wez` owns its own solve plumbing (no `BcReferenceStandard`
+        // field), so apply the one ASM->ICAO multiply here instead — to both the mean and
+        // its std dev, linear-equivalent to converting every sampled BC downstream.
+        let bc_metric = match bc_reference_standard {
+            BcReferenceStandard::Icao => bc,
+            BcReferenceStandard::ArmyStandardMetro => bc * crate::constants::ASM_TO_ICAO_BC,
+        };
+        let bc_std_metric = match bc_reference_standard {
+            BcReferenceStandard::Icao => bc_std,
+            BcReferenceStandard::ArmyStandardMetro => bc_std * crate::constants::ASM_TO_ICAO_BC,
+        };
 
         // Flags the WASM monte-carlo surface does not (yet) expose keep the native
         // defaults: base wind (--wind-speed / --wind-direction / --wind-vertical) and
@@ -3556,13 +3645,13 @@ impl WasmBallistics {
         let result = crate::wez::compute_wez(
             velocity_metric,
             angle,
-            bc,
+            bc_metric,
             mass_metric,
             diameter_metric,
             num_sims,
             velocity_std_metric,
             angle_std,
-            bc_std,
+            bc_std_metric,
             to_wind(wind_speed_std),
             wind_direction_std,
             0.0, // wind_speed
@@ -3586,8 +3675,9 @@ impl WasmBallistics {
             WezOutputMode::Full => format_wez_full(&result),
             WezOutputMode::Statistics => Ok(format_wez_statistics(&result, units)),
             WezOutputMode::Summary => Ok(format!(
-                "{}{}",
+                "{}{}{}",
                 cd_scale_warning.as_deref().unwrap_or(""),
+                bc_reference_warning.as_deref().unwrap_or(""),
                 format_wez_summary(&result, units)
             )),
         }

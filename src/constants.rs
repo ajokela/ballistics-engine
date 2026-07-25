@@ -19,15 +19,45 @@ pub const DEFAULT_POWDER_REFERENCE_TEMP_C: f64 =
 /// Standard air density at sea level (kg/m³)
 pub const STANDARD_AIR_DENSITY: f64 = 1.225;
 
+/// Standard sea-level air density under the ICAO Standard Atmosphere (lb/ft^3).
+///
+/// This is the density basis for [`CD_TO_RETARD`] below — see its doc comment. Most
+/// modern published ballistic coefficients (this engine's own retardation formula
+/// included) are referenced to this density.
+pub const ICAO_DENSITY_LB_FT3: f64 = 0.076474;
+
+/// Standard sea-level air density under the (older) Army Standard Metro atmosphere
+/// (lb/ft^3).
+///
+/// Many published Sierra/Hornady/Barnes ballistic coefficients are referenced to THIS
+/// density instead of [`ICAO_DENSITY_LB_FT3`] — quoting the same physical drag at a
+/// ~1.8% different reference air density. Not used by this engine's retardation math
+/// directly (which is calibrated to the ICAO figure via [`CD_TO_RETARD`]); it exists so
+/// [`ASM_TO_ICAO_BC`] can convert an ASM-referenced BC to the ICAO-referenced value the
+/// engine expects (`BallisticInputs::bc_reference_standard`, MBA-1365).
+pub const ASM_DENSITY_LB_FT3: f64 = 0.075126;
+
+/// Multiplier that converts an Army-Standard-Metro-referenced BC to the ICAO-referenced
+/// value this engine's retardation formula expects (MBA-1365):
+///
+/// `BC_icao = ASM_TO_ICAO_BC * BC_asm`
+///
+/// A denser reference atmosphere implies a numerically SMALLER published BC for the same
+/// physical bullet (the same real drag is attributed to a "worse" — smaller — BC when the
+/// assumed air is denser), so this ratio is `ASM_DENSITY_LB_FT3 / ICAO_DENSITY_LB_FT3`
+/// (< 1), not its reciprocal. Evaluates to 0.98237 to 5 decimal places (asserted by a
+/// unit test in `cli_api.rs`).
+pub const ASM_TO_ICAO_BC: f64 = ASM_DENSITY_LB_FT3 / ICAO_DENSITY_LB_FT3;
+
 /// Cd-to-retardation conversion for ICAO-referenced BCs.
 ///
 /// Exact imperial retardation form for density normalized to ICAO sea-level air
-/// (1.225 kg/m^3 / 0.076474 lb/ft^3):
+/// (1.225 kg/m^3 / [`ICAO_DENSITY_LB_FT3`]):
 ///
 /// `a_ft/s^2 = Cd * v_fps^2 * (rho / 1.225) * CD_TO_RETARD / BC`
 ///
 /// The older `0.000683 * 0.30` value is the Army Standard Metro constant and is
-/// only consistent with a 0.075126 lb/ft^3 density reference.
+/// only consistent with an [`ASM_DENSITY_LB_FT3`] density reference.
 pub const CD_TO_RETARD: f64 = 2.08551e-4;
 
 /// Conversion factor: grains to kilograms

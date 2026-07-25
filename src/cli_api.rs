@@ -42,6 +42,44 @@ pub enum OutputFormat {
     Csv,
 }
 
+/// Which standard atmosphere a ballistic coefficient's numeric value is referenced to
+/// (MBA-1365).
+///
+/// A BC is not a pure property of the bullet — it also encodes an assumed reference air
+/// density. This engine's retardation constant ([`crate::constants::CD_TO_RETARD`]) is
+/// calibrated against the ICAO Standard Atmosphere's sea-level density
+/// ([`crate::constants::ICAO_DENSITY_LB_FT3`]), which most modern published BCs already
+/// assume. Some vendors (notably Sierra, Hornady, and Barnes for many bullets) instead
+/// publish BCs referenced to the older, denser Army Standard Metro atmosphere
+/// ([`crate::constants::ASM_DENSITY_LB_FT3`]). Feeding an ASM-referenced BC into this
+/// engine as if it were ICAO-referenced under-predicts drag by about 1.8% — declaring
+/// `ArmyStandardMetro` here corrects for that exactly once, at input normalization (see
+/// [`crate::constants::ASM_TO_ICAO_BC`] and `TrajectorySolver::new`).
+///
+/// Does not apply when a custom drag table (`BallisticInputs::custom_drag_table`) is
+/// active: that path divides by sectional density, not a BC value, so no BC reference
+/// conversion is physically meaningful there (see
+/// `BallisticInputs::bc_reference_standard_inert_warning`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+pub enum BcReferenceStandard {
+    /// The ICAO Standard Atmosphere reference density — matches this engine's
+    /// retardation constant. The default; byte-identical to pre-MBA-1365 behavior.
+    #[default]
+    Icao,
+    /// The (older) Army Standard Metro reference density used by some vendor-published
+    /// BCs (e.g. many Sierra/Hornady/Barnes bullets).
+    ArmyStandardMetro,
+}
+
+/// Shared text for the MBA-1365 "`--bc-reference army-standard-metro` is inert" warning —
+/// single source of truth for every surface that can trigger it (native CLI, WASM,
+/// [`BallisticInputs::bc_reference_standard_inert_warning`]) so the wording can't drift.
+pub const BC_REFERENCE_STANDARD_INERT_WARNING: &str =
+    "warning: --bc-reference army-standard-metro has no effect together with a custom drag \
+     table (--drag-table): the deck's Cd is divided by sectional density, not a BC value, so \
+     no BC-reference conversion applies";
+
 // Error type for CLI operations
 #[derive(Debug)]
 pub struct BallisticsError {
@@ -78,6 +116,11 @@ pub struct BallisticInputs {
     // Core ballistics parameters (using intuitive names)
     pub bc_value: f64,        // Ballistic coefficient (G1, G7, etc.)
     pub bc_type: DragModel,   // Drag model (G1, G7, G8, etc.)
+    /// Which standard atmosphere `bc_value`/`bc_segments`/`bc_segments_data` are
+    /// referenced to (MBA-1365). `Icao` (the default) is a no-op; `ArmyStandardMetro`
+    /// is converted to the ICAO reference exactly once, in `TrajectorySolver::new`,
+    /// before any retardation math runs. See [`BcReferenceStandard`].
+    pub bc_reference_standard: BcReferenceStandard,
     pub bullet_mass: f64,     // kg
     pub muzzle_velocity: f64, // m/s
     pub bullet_diameter: f64, // meters
@@ -249,6 +292,26 @@ impl BallisticInputs {
             }
         }
     }
+
+    /// Whether a declared `bc_reference_standard` is inert on this configuration
+    /// (MBA-1365), and if so, the message explaining why.
+    ///
+    /// A custom drag table (`custom_drag_table`) supplies the projectile's actual Cd and
+    /// divides by sectional density, not by a BC value (see `custom_drag_denominator`),
+    /// so an `ArmyStandardMetro` reference has no physical effect once a table is active.
+    /// Pure and side-effect-free — same shape as `main.rs`'s `adjustment_unit_noop_warning`
+    /// (MBA-1414) — so each surface decides how to surface it: the native CLI prints it to
+    /// stderr once per run, while the WASM browser terminal (no visible stderr) splices it
+    /// into its table-output text instead.
+    pub fn bc_reference_standard_inert_warning(&self) -> Option<&'static str> {
+        if self.custom_drag_table.is_some()
+            && matches!(self.bc_reference_standard, BcReferenceStandard::ArmyStandardMetro)
+        {
+            Some(BC_REFERENCE_STANDARD_INERT_WARNING)
+        } else {
+            None
+        }
+    }
 }
 
 impl Default for BallisticInputs {
@@ -263,6 +326,7 @@ impl Default for BallisticInputs {
             // Core ballistics parameters
             bc_value: bc,
             bc_type,
+            bc_reference_standard: BcReferenceStandard::Icao,
             bullet_mass: mass_kg,
             muzzle_velocity: 800.0,
             bullet_diameter: diameter_m,
@@ -804,6 +868,36 @@ impl TrajectorySolver {
         atmosphere: AtmosphericConditions,
         station_atmosphere_resolution: StationAtmosphereResolution,
     ) -> Self {
+        // MBA-1365: normalize a declared Army-Standard-Metro BC reference to the ICAO
+        // reference this engine's retardation constant (CD_TO_RETARD) is calibrated
+        // against, exactly once, here — before any retardation math runs. Every BC
+        // representation on these inputs (the scalar, explicit Mach segments, and
+        // velocity segments) is a real BC and gets the same treatment, so every surface
+        // built through this constructor (CLI, WASM, FFI, Monte Carlo sampling,
+        // estimate-bc/zero fitting — all of which construct a `TrajectorySolver` rather
+        // than reading `bc_value` directly) inherits the conversion with zero duplicated
+        // math. `Icao` (the default) takes this branch never, so existing callers that
+        // never set the field are byte-identical to pre-MBA-1365 behavior. A custom drag
+        // table divides by sectional density, not a BC value, so the conversion is
+        // physically inert there — see `BallisticInputs::bc_reference_standard_inert_warning`,
+        // which callers surface at their own display sites (native stderr / WASM table text).
+        if matches!(
+            inputs.bc_reference_standard,
+            BcReferenceStandard::ArmyStandardMetro
+        ) {
+            inputs.bc_value *= crate::constants::ASM_TO_ICAO_BC;
+            if let Some(segments) = inputs.bc_segments.as_mut() {
+                for (_mach, bc) in segments.iter_mut() {
+                    *bc *= crate::constants::ASM_TO_ICAO_BC;
+                }
+            }
+            if let Some(segments) = inputs.bc_segments_data.as_mut() {
+                for segment in segments.iter_mut() {
+                    segment.bc_value *= crate::constants::ASM_TO_ICAO_BC;
+                }
+            }
+        }
+
         // Compute derived fields from base units
         inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
         inputs.weight_grains = inputs.bullet_mass / crate::constants::GRAINS_TO_KG;
@@ -6663,5 +6757,407 @@ mod vertical_wind_tests {
             s.solve().is_err(),
             "NaN wind.vertical_speed must be rejected by validate_for_solve"
         );
+    }
+}
+
+/// MBA-1365: declare whether a BC is ICAO- or Army-Standard-Metro-referenced.
+#[cfg(test)]
+mod bc_reference_standard_tests {
+    use super::*;
+
+    fn base_inputs() -> BallisticInputs {
+        BallisticInputs {
+            muzzle_velocity: 800.0,
+            bc_value: 0.5,
+            bc_type: DragModel::G7,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            bullet_length: 0.0309,
+            sight_height: 0.05,
+            twist_rate: 10.0,
+            use_rk4: true,
+            ..BallisticInputs::default()
+        }
+    }
+
+    /// Interpolate trajectory height (McCoy Y) and speed at downrange distance `x`.
+    fn y_and_speed_at(result: &TrajectoryResult, x: f64) -> (f64, f64) {
+        let pts = &result.points;
+        for i in 1..pts.len() {
+            if pts[i].position.x >= x {
+                let (p1, p2) = (&pts[i - 1], &pts[i]);
+                let dx = p2.position.x - p1.position.x;
+                let t = if dx.abs() < 1e-12 {
+                    0.0
+                } else {
+                    (x - p1.position.x) / dx
+                };
+                return (
+                    p1.position.y + t * (p2.position.y - p1.position.y),
+                    p1.velocity_magnitude + t * (p2.velocity_magnitude - p1.velocity_magnitude),
+                );
+            }
+        }
+        panic!("trajectory never reached {x} m");
+    }
+
+    // ---- The constant itself -----------------------------------------------------------
+
+    #[test]
+    fn asm_to_icao_ratio_matches_documented_value() {
+        assert!(
+            (crate::constants::ASM_TO_ICAO_BC - 0.98237).abs() < 1e-5,
+            "ASM_TO_ICAO_BC = {} must equal 0.98237 to 5 decimal places",
+            crate::constants::ASM_TO_ICAO_BC
+        );
+        // Derived from the two named densities, not a bare literal. (The ratio being < 1.0
+        // — a denser reference atmosphere implying a numerically smaller ICAO-equivalent
+        // BC — is already established by the 0.98237 check above; a bare `assert!` on a
+        // const-only comparison here would be compiled away, so it isn't repeated.)
+        assert_eq!(
+            crate::constants::ASM_TO_ICAO_BC,
+            crate::constants::ASM_DENSITY_LB_FT3 / crate::constants::ICAO_DENSITY_LB_FT3
+        );
+    }
+
+    // ---- Default / byte-identical --------------------------------------------------------
+
+    #[test]
+    fn default_bc_reference_standard_is_icao() {
+        assert_eq!(
+            BallisticInputs::default().bc_reference_standard,
+            BcReferenceStandard::Icao
+        );
+    }
+
+    /// RED (pre-MBA-1365) would not compile at all — there was no field to normalize.
+    /// GREEN: with the field defaulted to `Icao`, `TrajectorySolver::new` must never
+    /// touch `bc_value` — bit-for-bit, not just approximately — so every existing
+    /// caller that never sets this field is byte-identical to today.
+    #[test]
+    fn icao_reference_leaves_bc_value_bit_identical() {
+        let raw_bc: f64 = 0.4372911; // an arbitrary, non-round value
+        let inputs = BallisticInputs {
+            bc_value: raw_bc,
+            bc_reference_standard: BcReferenceStandard::Icao,
+            ..base_inputs()
+        };
+        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        assert_eq!(solver.inputs.bc_value.to_bits(), raw_bc.to_bits());
+    }
+
+    #[test]
+    fn default_inputs_solve_is_unaffected_by_the_new_field_existing() {
+        // A solve built entirely from BallisticInputs::default() (which now carries
+        // bc_reference_standard: Icao) must match a solve of an equivalent struct that
+        // never mentions the field at all in its literal (relying on ..default()).
+        let a = TrajectorySolver::new(base_inputs(), WindConditions::default(), AtmosphericConditions::default())
+            .solve()
+            .expect("solve a");
+        let b = TrajectorySolver::new(
+            BallisticInputs { ..base_inputs() },
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        )
+        .solve()
+        .expect("solve b");
+        assert_eq!(a.impact_velocity.to_bits(), b.impact_velocity.to_bits());
+        assert_eq!(a.max_range.to_bits(), b.max_range.to_bits());
+    }
+
+    // ---- ArmyStandardMetro normalization --------------------------------------------------
+
+    #[test]
+    fn army_standard_metro_scales_bc_value_by_exactly_the_derived_ratio() {
+        let raw_bc = 0.5;
+        let inputs = BallisticInputs {
+            bc_value: raw_bc,
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            ..base_inputs()
+        };
+        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        assert_eq!(
+            solver.inputs.bc_value,
+            raw_bc * crate::constants::ASM_TO_ICAO_BC
+        );
+    }
+
+    #[test]
+    fn army_standard_metro_scales_mach_keyed_bc_segments() {
+        let inputs = BallisticInputs {
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            bc_segments: Some(vec![(0.5, 0.40), (1.5, 0.30)]),
+            ..base_inputs()
+        };
+        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let segments = solver.inputs.bc_segments.as_ref().expect("segments");
+        assert_eq!(segments[0], (0.5, 0.40 * crate::constants::ASM_TO_ICAO_BC));
+        assert_eq!(segments[1], (1.5, 0.30 * crate::constants::ASM_TO_ICAO_BC));
+    }
+
+    #[test]
+    fn army_standard_metro_scales_velocity_keyed_bc_segments_data() {
+        let inputs = BallisticInputs {
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            bc_segments_data: Some(vec![
+                crate::BCSegmentData {
+                    velocity_min: 0.0,
+                    velocity_max: 500.0,
+                    bc_value: 0.40,
+                },
+                crate::BCSegmentData {
+                    velocity_min: 500.0,
+                    velocity_max: 900.0,
+                    bc_value: 0.45,
+                },
+            ]),
+            ..base_inputs()
+        };
+        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let segments = solver.inputs.bc_segments_data.as_ref().expect("segments");
+        assert_eq!(segments[0].bc_value, 0.40 * crate::constants::ASM_TO_ICAO_BC);
+        assert_eq!(segments[1].bc_value, 0.45 * crate::constants::ASM_TO_ICAO_BC);
+        // Non-BC fields must be untouched.
+        assert_eq!(segments[0].velocity_min, 0.0);
+        assert_eq!(segments[1].velocity_max, 900.0);
+    }
+
+    /// Empirically verify the drag DIRECTION (not just the arithmetic): declaring the
+    /// SAME raw BC number as Army-Standard-Metro must produce MORE drop and LOWER
+    /// remaining velocity downrange than declaring it ICAO, because the normalized
+    /// (smaller) BC feeds MORE drag into the ICAO-calibrated retardation formula.
+    #[test]
+    fn army_standard_metro_moves_impact_in_the_more_drag_direction() {
+        let solve_at = |standard: BcReferenceStandard| {
+            let inputs = BallisticInputs {
+                bc_value: 0.475,
+                bc_reference_standard: standard,
+                ..base_inputs()
+            };
+            let mut solver =
+                TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+            solver.set_max_range(500.0);
+            solver.solve().expect("solve")
+        };
+
+        let icao = solve_at(BcReferenceStandard::Icao);
+        let asm = solve_at(BcReferenceStandard::ArmyStandardMetro);
+
+        let (y_icao, v_icao) = y_and_speed_at(&icao, 400.0);
+        let (y_asm, v_asm) = y_and_speed_at(&asm, 400.0);
+
+        assert!(
+            y_asm < y_icao,
+            "ArmyStandardMetro must drop MORE (lower y) at 400m than Icao for the same raw \
+             bc_value: icao_y={y_icao}, asm_y={y_asm}"
+        );
+        assert!(
+            v_asm < v_icao,
+            "ArmyStandardMetro must retain LESS velocity at 400m than Icao for the same raw \
+             bc_value: icao_v={v_icao}, asm_v={v_asm}"
+        );
+    }
+
+    // ---- Downstream inheritance: Monte Carlo ----------------------------------------------
+
+    /// Monte Carlo must inherit the exact same normalization with zero duplicated math:
+    /// with every std-dev pinned to 0 (so every sample is deterministically the base
+    /// input, unperturbed), a single-sample MC run must match a plain direct solve of the
+    /// identical base inputs bit-for-bit.
+    #[test]
+    fn monte_carlo_inherits_the_normalized_bc_reference() {
+        let base_inputs_asm = BallisticInputs {
+            bc_value: 0.475,
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            ..base_inputs()
+        };
+        let wind = WindConditions::default();
+
+        // Match run_monte_carlo_with_wind_and_direction_std_dev_using_rng's own
+        // solver_max_range derivation exactly (target_hint.max(1000.0) * 2.0, with
+        // target_hint = base_inputs.target_distance since MonteCarloParams.target_distance
+        // is None below) — otherwise the two solves integrate to different caps and a
+        // level, non-ground-impacting shot legitimately reports a different max_range.
+        let mut direct_solver =
+            TrajectorySolver::new(base_inputs_asm.clone(), wind.clone(), AtmosphericConditions::default());
+        direct_solver.set_max_range(base_inputs_asm.target_distance.max(1000.0) * 2.0);
+        let direct = direct_solver.solve().expect("direct solve");
+
+        let mc_params = MonteCarloParams {
+            num_simulations: 1,
+            velocity_std_dev: 0.0,
+            angle_std_dev: 0.0,
+            bc_std_dev: 0.0,
+            wind_speed_std_dev: 0.0,
+            target_distance: None,
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 0.0,
+        };
+        let mc = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            base_inputs_asm,
+            wind,
+            mc_params,
+            0.0,
+            42,
+        )
+        .expect("monte carlo");
+
+        assert_eq!(mc.ranges.len(), 1);
+        assert_eq!(
+            mc.ranges[0].to_bits(),
+            direct.max_range.to_bits(),
+            "a zero-dispersion single MC sample must match a plain solve of the same \
+             ASM-referenced inputs bit-for-bit"
+        );
+        assert_eq!(
+            mc.impact_velocities[0].to_bits(),
+            direct.impact_velocity.to_bits()
+        );
+    }
+
+    // ---- Downstream inheritance: estimate-bc fitting --------------------------------------
+
+    /// `estimate_bc_fit` always builds its internal search trials from
+    /// `BallisticInputs { ..Default::default() }`, which defaults to `Icao` — so a fitted
+    /// BC is always ICAO-referenced regardless of any other configuration in the process.
+    /// Prove it by generating synthetic drop data from a KNOWN Icao-referenced bc_value and
+    /// confirming the fit recovers that same value (not an ASM-shifted one).
+    #[test]
+    fn estimate_bc_fit_recovers_an_icao_referenced_bc() {
+        let known_bc = 0.475;
+        let velocity = 800.0;
+        let mass = 0.0109;
+        let diameter = 0.00782;
+        let atmosphere = AtmosphericConditions::default();
+
+        let synth_inputs = BallisticInputs {
+            muzzle_velocity: velocity,
+            bc_value: known_bc,
+            bc_type: DragModel::G7,
+            bullet_mass: mass,
+            bullet_diameter: diameter,
+            bullet_length: 0.0309,
+            sight_height: 0.05,
+            twist_rate: 10.0,
+            use_rk4: true,
+            bc_reference_standard: BcReferenceStandard::Icao,
+            ..BallisticInputs::default()
+        };
+        let mut solver = TrajectorySolver::new(synth_inputs, WindConditions::default(), atmosphere.clone());
+        solver.set_max_range(500.0);
+        let trajectory = solver.solve().expect("synthetic solve");
+
+        let points: Vec<(f64, f64)> = [100.0, 200.0, 300.0, 400.0]
+            .iter()
+            .map(|&d| {
+                let (y, _) = {
+                    let pts = &trajectory.points;
+                    let mut found = None;
+                    for i in 1..pts.len() {
+                        if pts[i].position.x >= d {
+                            let (p1, p2) = (&pts[i - 1], &pts[i]);
+                            let dx = p2.position.x - p1.position.x;
+                            let t = if dx.abs() < 1e-12 {
+                                0.0
+                            } else {
+                                (d - p1.position.x) / dx
+                            };
+                            found = Some((
+                                p1.position.y + t * (p2.position.y - p1.position.y),
+                                0.0,
+                            ));
+                            break;
+                        }
+                    }
+                    found.expect("trajectory reached observation distance")
+                };
+                (d, -y) // drop is positive-down
+            })
+            .collect();
+
+        let estimate = estimate_bc_fit(
+            velocity,
+            mass,
+            diameter,
+            &points,
+            DragModel::G7,
+            BcFitMode::Drop,
+            atmosphere,
+            None,
+            0.05,
+        )
+        .expect("fit should converge");
+
+        assert!(
+            (estimate.bc - known_bc).abs() < 0.02,
+            "fit should recover the known ICAO-referenced bc={known_bc}, got {}",
+            estimate.bc
+        );
+    }
+
+    // ---- Custom drag table: documented inert behavior -------------------------------------
+
+    #[test]
+    fn custom_drag_table_makes_bc_reference_standard_numerically_inert() {
+        let table = crate::drag::DragTable::try_new(vec![0.5, 1.0, 2.0, 3.0], vec![0.3, 0.4, 0.3, 0.2])
+            .expect("valid table");
+
+        let solve_with = |standard: BcReferenceStandard| {
+            let inputs = BallisticInputs {
+                bc_value: 0.5, // irrelevant once a custom drag table is active
+                bc_reference_standard: standard,
+                custom_drag_table: Some(table.clone()),
+                ..base_inputs()
+            };
+            let mut solver =
+                TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+            solver.set_max_range(500.0);
+            solver.solve().expect("solve")
+        };
+
+        let icao = solve_with(BcReferenceStandard::Icao);
+        let asm = solve_with(BcReferenceStandard::ArmyStandardMetro);
+
+        assert_eq!(
+            icao.impact_velocity.to_bits(),
+            asm.impact_velocity.to_bits(),
+            "a custom drag table must make bc_reference_standard fully inert"
+        );
+        assert_eq!(icao.max_range.to_bits(), asm.max_range.to_bits());
+    }
+
+    #[test]
+    fn custom_drag_table_inert_warning_fires_only_for_army_standard_metro_with_a_table() {
+        let table = crate::drag::DragTable::try_new(vec![0.5, 1.0, 2.0], vec![0.3, 0.4, 0.3])
+            .expect("valid table");
+
+        // No table: never warns, regardless of the declared standard.
+        let no_table_icao = base_inputs();
+        assert!(no_table_icao.bc_reference_standard_inert_warning().is_none());
+        let no_table_asm = BallisticInputs {
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            ..base_inputs()
+        };
+        assert!(no_table_asm.bc_reference_standard_inert_warning().is_none());
+
+        // Table + Icao: no conversion was ever going to apply, so no warning either.
+        let table_icao = BallisticInputs {
+            custom_drag_table: Some(table.clone()),
+            ..base_inputs()
+        };
+        assert!(table_icao.bc_reference_standard_inert_warning().is_none());
+
+        // Table + ArmyStandardMetro: the one case that is actually inert -> warn.
+        let table_asm = BallisticInputs {
+            custom_drag_table: Some(table),
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            ..base_inputs()
+        };
+        let warning = table_asm
+            .bc_reference_standard_inert_warning()
+            .expect("must warn");
+        assert!(warning.contains("--bc-reference"));
+        assert!(warning.contains("--drag-table"));
     }
 }

@@ -274,6 +274,10 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
     let inputs = BallisticInputs {
         bc_value: resolved_request.projectile.ballistic_coefficient,
         bc_type: drag_model_to_engine(resolved_request.projectile.drag_model),
+        // solve-json v1 (docs/SOLVE_JSON_V1.md) has no BC-reference-standard field yet;
+        // every published BC in that contract is treated as ICAO-referenced (MBA-1365
+        // is a CLI/WASM/FFI/profile feature, not a v1 JSON schema change).
+        bc_reference_standard: crate::cli_api::BcReferenceStandard::Icao,
         bullet_mass: resolved_request.projectile.mass_kg,
         muzzle_velocity: resolved_request.rifle.muzzle_velocity_mps,
         bullet_diameter: resolved_request.projectile.diameter_m,

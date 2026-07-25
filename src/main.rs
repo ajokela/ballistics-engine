@@ -51,8 +51,8 @@ use ballistics_engine::truing_uncertainty::{
 };
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 use ballistics_engine::{
-    trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel,
-    MonteCarloParams, TrajectorySolver, WindConditions,
+    trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs,
+    BcReferenceStandard, DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -388,6 +388,18 @@ enum Commands {
         /// BC adjustment factor (multiplier for truing, e.g., 0.85 = 85% of stated BC)
         #[arg(long, default_value = "1.0")]
         bc_adjustment: f64,
+
+        /// Which standard atmosphere --bc / a saved profile's BC is referenced to
+        /// (MBA-1365). Most published BCs (and this engine's own retardation math)
+        /// assume ICAO; some vendors (notably Sierra, Hornady, and Barnes for many
+        /// bullets) instead publish BCs referenced to the older, denser Army Standard
+        /// Metro atmosphere, which under-predicts drag by about 1.8% if fed in
+        /// unconverted. Has no effect together with --drag-table: that path divides by
+        /// sectional density, not a BC, so no reference conversion is meaningful there.
+        /// A BC produced by estimate-bc/true-velocity is always ICAO-referenced — do not
+        /// pass army-standard-metro for a fitted value or it will be double-converted.
+        #[arg(long, value_enum)]
+        bc_reference: Option<BcReferenceStandard>,
 
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
@@ -839,6 +851,15 @@ enum Commands {
         #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
+        /// Which standard atmosphere --bc is referenced to (MBA-1365). Most published
+        /// BCs (and this engine's own retardation math) assume ICAO; some vendors
+        /// (notably Sierra, Hornady, and Barnes for many bullets) instead publish BCs
+        /// referenced to the older, denser Army Standard Metro atmosphere, which
+        /// under-predicts drag by about 1.8% if fed in unconverted. Has no effect
+        /// together with --drag-table.
+        #[arg(long, value_enum, default_value = "icao")]
+        bc_reference: BcReferenceStandard,
+
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
@@ -959,6 +980,15 @@ enum Commands {
         #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
+        /// Which standard atmosphere --bc is referenced to (MBA-1365). Most published
+        /// BCs (and this engine's own retardation math) assume ICAO; some vendors
+        /// (notably Sierra, Hornady, and Barnes for many bullets) instead publish BCs
+        /// referenced to the older, denser Army Standard Metro atmosphere, which
+        /// under-predicts drag by about 1.8% if fed in unconverted. Has no effect
+        /// together with --drag-table.
+        #[arg(long, value_enum, default_value = "icao")]
+        bc_reference: BcReferenceStandard,
+
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
@@ -1011,7 +1041,12 @@ enum Commands {
         output: OutputFormat,
     },
 
-    /// Estimate BC from trajectory data (drop and/or velocity), for G1, G7, or both
+    /// Estimate BC from trajectory data (drop and/or velocity), for G1, G7, or both.
+    ///
+    /// MBA-1365: the fitted BC this command reports is always ICAO-referenced (it is
+    /// searched under this engine's own ICAO-calibrated retardation math) — do not pass
+    /// it back in with `--bc-reference army-standard-metro` on `trajectory`/`monte-carlo`/
+    /// `zero`/`profile save`, or it will be double-converted.
     EstimateBC {
         /// Initial velocity (fps for imperial, m/s for metric)
         #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
@@ -2012,6 +2047,16 @@ enum ProfileAction {
         #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
         bc: f64,
 
+        /// Which standard atmosphere `--bc` is referenced to (MBA-1365). Most published
+        /// BCs (and this engine's own retardation math) assume ICAO; some vendors
+        /// (notably Sierra, Hornady, and Barnes for many bullets) instead publish BCs
+        /// referenced to the older, denser Army Standard Metro atmosphere, which reads
+        /// about 1.8% too little drag if fed in unconverted. Has no effect together with
+        /// a custom drag table (imported via `.a7p`) — that path divides by sectional
+        /// density, not a BC, so no reference conversion is meaningful there.
+        #[arg(long, value_enum, default_value = "icao")]
+        bc_reference: BcReferenceStandard,
+
         /// Mass (grains for imperial, grams for metric)
         #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
         mass: f64,
@@ -2321,6 +2366,16 @@ struct ProfileData {
     /// re-save, degrading to untrued drop with no error).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dsf_points: Option<Vec<DsfPoint>>,
+    /// Which standard atmosphere `bc`/`bc_segments` are referenced to (MBA-1365): `None`
+    /// (the omitted-field default, and every profile saved before this field existed) or
+    /// `"icao"` mean ICAO; `"army-standard-metro"` declares the older Army Standard Metro
+    /// reference some vendor-published BCs use instead. Parsed by
+    /// `parse_bc_reference_profile_field`, written by `bc_reference_profile_field` (which
+    /// never writes `"icao"` — it stays the omitted default so an untouched profile
+    /// round-trips with no new key). Unit-invariant, like `bc_segments`/`drag_curve` above,
+    /// so `converted_to` leaves it untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bc_reference: Option<String>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -2494,6 +2549,8 @@ struct TrajectoryConfig {
     velocity: f64,
     angle: f64,
     bc: f64,
+    // Which standard atmosphere `bc` is referenced to (MBA-1365). `Icao` is a no-op.
+    bc_reference_standard: BcReferenceStandard,
     mass: f64,
     diameter: f64,
     bullet_length: f64,
@@ -2901,9 +2958,9 @@ impl ProfileData {
             )
         });
 
-        // `bc_segments`, `drag_curve`, `elevation_click`, `windage_click`, and `dsf_points`
-        // are INTENTIONALLY left untouched here — do not "complete" this by adding a
-        // conversion pass for them:
+        // `bc_segments`, `drag_curve`, `elevation_click`, `windage_click`, `dsf_points`, and
+        // `bc_reference` are INTENTIONALLY left untouched here — do not "complete" this by
+        // adding a conversion pass for them:
         //   * `ProfileBcSegment::velocity_mps` is pinned to SI regardless of `units` (see its
         //     doc comment), so there is nothing to convert.
         //   * `ProfileDragPoint`'s `mach` and `cd` are both dimensionless, so there is nothing
@@ -2913,6 +2970,8 @@ impl ProfileData {
         //     imperial/metric has no bearing on them.
         //   * `DsfPoint`'s `mach` and `dsf` (MBA-1357) are both dimensionless ratios, same
         //     as the drag curve above.
+        //   * `bc_reference` (MBA-1365) names a reference ATMOSPHERE, not a linear/angular
+        //     display quantity — imperial/metric has no bearing on it either.
         // Converting them would silently rescale physically meaningful data (e.g. treating an
         // m/s breakpoint as if it were fps) rather than fix anything.
         self.units = match target {
@@ -3569,6 +3628,10 @@ fn map_a7p_to_profile(
         drag_curve,
         // .a7p carries no DSF concept; that's the `dsf` verb's job post-import.
         dsf_points: None,
+        // .a7p carries no BC-reference-standard concept; imported BCs are treated as
+        // ICAO-referenced (the omitted-field default) unless the user later edits the
+        // saved profile with `--bc-reference`.
+        bc_reference: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -3742,6 +3805,50 @@ fn parse_drag_model_arg(s: &str) -> DragModel {
         eprintln!("{w}");
     }
     DragModel::from_str(s).unwrap_or(DragModel::G1)
+}
+
+/// Parse a stored profile's `bc_reference` field (MBA-1365) into the engine enum. Accepts
+/// the same lowercase-with-hyphens spelling `--bc-reference`/`clap::ValueEnum` produce
+/// ("icao", "army-standard-metro"), case-insensitively. `None`/empty defaults to ICAO —
+/// byte-identical to every profile saved before this field existed.
+fn parse_bc_reference_profile_field(value: Option<&str>) -> Result<BcReferenceStandard, String> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(BcReferenceStandard::Icao),
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "icao" => Ok(BcReferenceStandard::Icao),
+            "army-standard-metro" => Ok(BcReferenceStandard::ArmyStandardMetro),
+            other => Err(format!(
+                "invalid bc_reference '{other}' (expected 'icao' or 'army-standard-metro')"
+            )),
+        },
+    }
+}
+
+/// Spelling `ProfileData.bc_reference` stores for a resolved [`BcReferenceStandard`]
+/// (MBA-1365) — the inverse of [`parse_bc_reference_profile_field`]. ICAO is never
+/// written out: it is the omitted-field default, so a profile saved without ever
+/// touching `--bc-reference` round-trips with no new key (matches the pre-MBA-1365 file
+/// shape byte-for-byte).
+fn bc_reference_profile_field(value: BcReferenceStandard) -> Option<String> {
+    match value {
+        BcReferenceStandard::Icao => None,
+        BcReferenceStandard::ArmyStandardMetro => Some("army-standard-metro".to_string()),
+    }
+}
+
+/// Pre-apply the MBA-1365 ASM->ICAO BC conversion for call sites that take a raw `bc: f64`
+/// and have no `BcReferenceStandard` field to carry through to `TrajectorySolver::new` (the
+/// single normalization boundary every other surface uses). Currently only the WEZ sweep
+/// (`compute_wez`), which owns its own independent solve plumbing. Exactly the same
+/// constant `TrajectorySolver::new` applies, so this is one multiply, not a second one —
+/// `compute_wez` always builds inputs at the `Icao` default, so nothing downstream repeats it.
+fn resolve_bc_for_reference_standard(bc: f64, standard: BcReferenceStandard) -> f64 {
+    match standard {
+        BcReferenceStandard::Icao => bc,
+        BcReferenceStandard::ArmyStandardMetro => {
+            bc * ballistics_engine::constants::ASM_TO_ICAO_BC
+        }
+    }
 }
 
 /// Warning for drag-model strings `true-velocity`/`plan-truing` cannot use. Truing's
@@ -4287,9 +4394,12 @@ fn solve_profile_for_dsf(
         altitude: altitude_m,
     };
 
+    let bc_reference_standard =
+        parse_bc_reference_profile_field(profile.bc_reference.as_deref())?;
     let mut inputs = BallisticInputs {
         bc_value: profile.bc,
         bc_type: drag_model,
+        bc_reference_standard,
         bullet_mass: mass_kg,
         muzzle_velocity: velocity_m,
         bullet_diameter: diameter_m,
@@ -4512,6 +4622,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             angle,
             bc,
             bc_adjustment,
+            bc_reference,
             mass,
             diameter,
             drag_model,
@@ -4723,6 +4834,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
                 .or_else(|| saved_profile_data.as_ref().map(|p| p.bc))
                 .unwrap_or(0.5);
+            // MBA-1365: an explicit --bc-reference always wins; otherwise inherit a saved
+            // profile's stored reference (defaults to ICAO when neither is present —
+            // byte-identical to every run before this flag existed).
+            let bc_reference_standard = match bc_reference {
+                Some(v) => v,
+                None => parse_bc_reference_profile_field(
+                    saved_profile_data.as_ref().and_then(|p| p.bc_reference.as_deref()),
+                )?,
+            };
             let final_bc_adj = if bc_adjustment != 1.0 {
                 bc_adjustment
             } else {
@@ -5426,6 +5546,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 });
 
+            // MBA-1365: --bc-reference army-standard-metro has no effect once a custom
+            // drag table replaces the BC-based retardation model entirely.
+            if custom_drag_table.is_some()
+                && matches!(bc_reference_standard, BcReferenceStandard::ArmyStandardMetro)
+            {
+                eprintln!("{}", ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING);
+            }
+
             // Calculate zero angle if auto-zero is specified (from CLI or profile)
             let muzzle_angle = if let Some(zero_distance) = final_auto_zero {
                 let zero_distance_metric =
@@ -5476,6 +5604,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     muzzle_velocity: zero_velocity_metric,
                     bc_value: trued_bc,
                     bc_type: drag_model,
+                    bc_reference_standard,
                     bullet_mass: mass_metric,
                     bullet_diameter: diameter_metric,
                     caliber_inches: diameter_metric / 0.0254,
@@ -5570,6 +5699,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 velocity: velocity_metric,
                 angle: muzzle_angle,
                 bc: trued_bc,
+                bc_reference_standard,
                 mass: mass_metric,
                 diameter: diameter_metric,
                 bullet_length: bullet_length
@@ -5729,6 +5859,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 let mut local_inputs = BallisticInputs {
                                     bc_value: trued_bc,
                                     bc_type: drag_model_enum,
+                                    bc_reference_standard,
                                     bullet_mass: mass_metric,
                                     muzzle_velocity: velocity_metric,
                                     bullet_diameter: diameter_metric,
@@ -5951,6 +6082,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             velocity,
             angle,
             bc,
+            bc_reference,
             mass,
             diameter,
             num_sims,
@@ -6003,6 +6135,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 });
 
+            // MBA-1365: --bc-reference army-standard-metro has no effect once a custom
+            // drag table replaces the BC-based retardation model entirely.
+            if custom_drag_table.is_some()
+                && matches!(bc_reference, BcReferenceStandard::ArmyStandardMetro)
+            {
+                eprintln!("{}", ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING);
+            }
+
             if wez {
                 // MBA-1317: WEZ (Weapon Employment Zone) sweep mode.
                 let target_size_spec = target_size
@@ -6017,16 +6157,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let wez_end_metric = UnitConverter::distance_to_metric(wez_end, cli.units);
                 let wez_step_metric = UnitConverter::distance_to_metric(wez_step, cli.units);
 
+                // MBA-1365: `compute_wez` owns its own solve plumbing and has no
+                // `BcReferenceStandard` field to carry the conversion through, so apply the
+                // one ASM->ICAO multiply here instead — to both the mean and its std dev,
+                // which is linear-equivalent to converting every sampled BC downstream
+                // (k*(bc + std*z) == k*bc + (k*std)*z).
+                let bc_wez = resolve_bc_for_reference_standard(bc, bc_reference);
+                let bc_std_wez = resolve_bc_for_reference_standard(bc_std, bc_reference);
+
                 run_monte_carlo_wez(
                     velocity_metric,
                     angle,
-                    bc,
+                    bc_wez,
                     mass_metric,
                     diameter_metric,
                     num_sims,
                     velocity_std_metric,
                     angle_std,
-                    bc_std,
+                    bc_std_wez,
                     wind_std_metric,
                     wind_direction_std,
                     wind_speed_metric,
@@ -6048,6 +6196,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     velocity_metric,
                     angle,
                     bc,
+                    bc_reference,
                     mass_metric,
                     diameter_metric,
                     num_sims,
@@ -6072,6 +6221,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Zero {
             velocity,
             bc,
+            bc_reference,
             mass,
             diameter,
             target_distance,
@@ -6119,9 +6269,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 });
 
+            // MBA-1365: --bc-reference army-standard-metro has no effect once a custom
+            // drag table replaces the BC-based retardation model entirely.
+            if custom_drag_table.is_some()
+                && matches!(bc_reference, BcReferenceStandard::ArmyStandardMetro)
+            {
+                eprintln!("{}", ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING);
+            }
+
             run_zero_calculation(
                 velocity_metric,
                 bc,
+                bc_reference,
                 mass_metric,
                 diameter_metric,
                 target_distance_metric,
@@ -7802,6 +7961,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     name,
                     velocity,
                     bc,
+                    bc_reference,
                     mass,
                     diameter,
                     drag_model,
@@ -7886,6 +8046,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         bc_segments: None,
                         drag_curve: None,
                         dsf_points: carried_dsf_points,
+                        bc_reference: bc_reference_profile_field(bc_reference),
                     };
 
                     let path = save_profile(&profile)?;
@@ -8337,6 +8498,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         velocity,
         angle,
         bc,
+        bc_reference_standard,
         mass,
         diameter,
         bullet_length,
@@ -8446,6 +8608,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         // Core ballistics parameters
         bc_value: bc,
         bc_type: drag_model_enum,
+        bc_reference_standard,
         bullet_mass: mass,
         muzzle_velocity: velocity,
         bullet_diameter: diameter,
@@ -9839,6 +10002,7 @@ fn run_monte_carlo(
     velocity: f64,
     angle: f64,
     bc: f64,
+    bc_reference_standard: BcReferenceStandard,
     mass: f64,
     diameter: f64,
     num_sims: usize,
@@ -9863,11 +10027,15 @@ fn run_monte_carlo(
     // cap. Without this, "Mean Range" reports the ~1000 m cap rather than the ground-impact range.
     let bore_height_metric = 1.5_f64;
     // The base inputs are what each Monte Carlo sample perturbs, so the drag table must be set
-    // here for the deck to apply to every simulated shot (MBA-1285).
+    // here for the deck to apply to every simulated shot (MBA-1285). MBA-1365:
+    // `bc_reference_standard` rides the same base_inputs into every per-sample
+    // `TrajectorySolver::new` call inside `run_monte_carlo_with_wind_and_direction_std_dev`,
+    // so the ASM->ICAO conversion is inherited by every simulation with no separate code path.
     let base_inputs = BallisticInputs {
         muzzle_velocity: velocity,
         muzzle_angle: angle.to_radians(),
         bc_value: bc,
+        bc_reference_standard,
         bullet_mass: mass,
         bullet_diameter: diameter,
         muzzle_height: bore_height_metric,
@@ -10017,6 +10185,7 @@ fn run_monte_carlo(
 fn run_zero_calculation(
     velocity: f64,
     bc: f64,
+    bc_reference_standard: BcReferenceStandard,
     mass: f64,
     diameter: f64,
     target_distance: f64,
@@ -10035,6 +10204,7 @@ fn run_zero_calculation(
     let inputs = BallisticInputs {
         muzzle_velocity: velocity,
         bc_value: bc,
+        bc_reference_standard,
         bullet_mass: mass,
         bullet_diameter: diameter,
         sight_height,
@@ -14566,6 +14736,7 @@ mod profile_unit_tests {
             bc_segments: None,
             drag_curve: None,
             dsf_points: None,
+            bc_reference: None,
         }
     }
 
@@ -14688,6 +14859,60 @@ mod profile_unit_tests {
         let reserialized = serde_json::to_string(&profile).unwrap();
         assert!(!reserialized.contains("bc_segments"));
         assert!(!reserialized.contains("drag_curve"));
+    }
+
+    /// MBA-1365: a profile saved before `bc_reference` existed (no key at all) must still
+    /// deserialize cleanly, defaulting to ICAO, and must NOT gain the key on re-save —
+    /// same forward-compat contract as `bc_segments`/`drag_curve` above.
+    #[test]
+    fn profile_without_bc_reference_key_round_trips_as_icao() {
+        let phase1_json = r#"{
+            "name": "pre-mba-1365",
+            "velocity": 2700.0,
+            "bc": 0.475,
+            "mass": 175.0,
+            "diameter": 0.308,
+            "drag_model": "G7",
+            "units": "imperial",
+            "temperature": 59.0,
+            "pressure": 29.92,
+            "humidity": 50.0,
+            "altitude": 0.0
+        }"#;
+        let profile: ProfileData = serde_json::from_str(phase1_json).unwrap();
+        assert_eq!(profile.bc_reference, None);
+        assert_eq!(
+            parse_bc_reference_profile_field(profile.bc_reference.as_deref()).unwrap(),
+            BcReferenceStandard::Icao
+        );
+
+        let reserialized = serde_json::to_string(&profile).unwrap();
+        assert!(!reserialized.contains("bc_reference"));
+    }
+
+    /// A profile that DOES declare `bc_reference: "army-standard-metro"` must round-trip
+    /// through save/load with the declared standard intact.
+    #[test]
+    fn profile_with_army_standard_metro_bc_reference_round_trips() {
+        let profile = ProfileData {
+            bc_reference: Some("army-standard-metro".to_string()),
+            ..metric_profile()
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("army-standard-metro"));
+
+        let reloaded: ProfileData = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.bc_reference.as_deref(), Some("army-standard-metro"));
+        assert_eq!(
+            parse_bc_reference_profile_field(reloaded.bc_reference.as_deref()).unwrap(),
+            BcReferenceStandard::ArmyStandardMetro
+        );
+    }
+
+    #[test]
+    fn parse_bc_reference_profile_field_rejects_garbage() {
+        assert!(parse_bc_reference_profile_field(Some("metro")).is_err());
+        assert!(parse_bc_reference_profile_field(Some("ICAO")).is_ok()); // case-insensitive
     }
 
     #[test]
