@@ -50,6 +50,14 @@ mover Ring) are displayed. Five values are accepted (MBA-724, MBA-1355):
 | `iphy` | Inches per hundred yards | numerically identical to `smoa` — same conversion, different header text |
 | `clicks` | Whole turret clicks | see below — requires a click graduation, not a fixed factor |
 
+Which columns the unit reaches depends on the command. `come-ups` and the other sweep
+tables always print dial columns, so it always applies there. On `trajectory` it reaches
+only two places — the PDF dope card's Drop/Wind/Lead columns (`-o pdf`) and the mover
+Ring column (`--target-speed`) — so a `trajectory` run with neither leaves the printed
+table byte-identical. Since 0.28.2 that case warns on stderr rather than passing
+silently; the browser terminal warns in the table output (it has no PDF card and no
+stderr).
+
 ### `clicks`: whole-click output
 
 `--adjustment-unit clicks` rounds the angular adjustment to the nearest **whole turret

@@ -1092,6 +1092,12 @@ impl WasmBallistics {
         // it too. Only the table reads it; CSV keeps ring_mil and JSON keeps
         // mover_ring_m/mover_ring_mil (unit-in-the-name contract).
         let mut adjustment_unit = "mil";
+        // MBA-1414: tracks whether --adjustment-unit was actually typed on this call.
+        // Unlike native's clap `default_value` (where an explicit `mil` is
+        // indistinguishable from never passing the flag, so native skips warning on mil),
+        // this manual parser can tell "flag present" exactly regardless of value — so the
+        // no-target-speed warning below keys off presence alone.
+        let mut adjustment_unit_supplied = false;
         // MBA-1355: turret click graduations for `--adjustment-unit clicks`. Only
         // elevation is ever consumed (the Ring column, like the native PDF dope card's
         // Drop column, reuses the elevation graduation) — windage is parsed/validated
@@ -1392,6 +1398,7 @@ impl WasmBallistics {
                 "--adjustment-unit" => {
                     if i + 1 < args.len() {
                         adjustment_unit = args[i + 1];
+                        adjustment_unit_supplied = true;
                         i += 1;
                     }
                 }
@@ -1987,6 +1994,19 @@ impl WasmBallistics {
             UnitSystem::Imperial => target_speed * 0.44704, // mph to m/s
             UnitSystem::Metric => target_speed,
         };
+        // MBA-1414: the unit reaches only the Ring column here, and that column exists
+        // only for a nonzero --target-speed. The browser terminal has no PDF dope card
+        // (the native CLI's other consumer of the unit) and no stderr, so this rides the
+        // table-only warning block below with the rest of the human-readable text.
+        let adjustment_unit_noop_warning: Option<&str> =
+            if adjustment_unit_supplied && target_speed <= 0.0 {
+                Some(
+                    "warning: --adjustment-unit only affects the mover Ring column; \
+                     add --target-speed to see it\n",
+                )
+            } else {
+                None
+            };
         // Validate --adjustment-unit like handle_lead_command does; only the ring
         // table column consumes it on this command. MBA-1355: smoa/iphy join
         // mil/moa as constant-factor units; clicks needs a resolved elevation click
@@ -2073,9 +2093,10 @@ impl WasmBallistics {
                     // MBA-1386/MBA-1356: table-only, like every human-readable block here —
                     // neither warning may contaminate JSON/CSV payloads.
                     format!(
-                        "{}{}{}{}",
+                        "{}{}{}{}{}",
                         cd_scale_warning.as_deref().unwrap_or(""),
                         bc5d_coercion_warning.as_deref().unwrap_or(""),
+                        adjustment_unit_noop_warning.unwrap_or(""),
                         zero_info,
                         output
                     )
@@ -5188,7 +5209,8 @@ Trajectory Command:
                                  (mph/m/s, 0-300; 0 = off). Adds a Ring column (table),
                                  mover_ring_m/mover_ring_mil (json), ring_mil (csv)
     --adjustment-unit <UNIT>     Ring table column unit: mil/moa/smoa/iphy/clicks
-                                 [default: mil]
+                                 [default: mil]. Needs --target-speed — the Ring
+                                 column is the only thing it changes here
     --elevation-click-value <S>  Turret elevation click graduation, e.g. 0.25moa or
                                  0.1mil; required (once) when --adjustment-unit clicks
     --windage-click-value <S>    Turret windage click graduation (accepted for CLI

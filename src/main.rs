@@ -804,11 +804,13 @@ enum Commands {
         #[arg(long)]
         bold_data: bool,
 
-        /// Angular unit for the PDF dope card's Drop/Wind/Lead columns AND the
-        /// --target-speed mover Ring table column (mil, moa, smoa, iphy, or clicks).
-        /// CSV/JSON ring fields stay mil/meters — their names carry the unit contract.
-        /// `clicks` requires --elevation-click-value (or a saved profile's
-        /// elevation_click) and formats whole turret clicks instead of an angle.
+        /// Angular unit (mil, moa, smoa, iphy, or clicks) applied ONLY to the PDF dope
+        /// card's Drop/Wind/Lead columns (-o pdf) and the --target-speed mover Ring table
+        /// column -- it has no effect on the plain table/JSON/CSV output otherwise, and a
+        /// warning is printed if neither of those is in play. CSV/JSON ring fields stay
+        /// mil/meters — their names carry the unit contract. `clicks` requires
+        /// --elevation-click-value (or a saved profile's elevation_click) and formats
+        /// whole turret clicks instead of an angle.
         #[arg(long, value_enum, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
 
@@ -3816,6 +3818,30 @@ fn cd_scale_range_warning(value: f64) -> Option<String> {
     }
 }
 
+/// MBA-1414: `--adjustment-unit` only ever changes two things: the `--target-speed` mover
+/// Ring table column, and the PDF dope card's Drop/Wind/Lead columns. Without a nonzero
+/// `--target-speed` AND without `-o pdf`, the flag is a silent no-op -- the plain table is
+/// always rendered in mil regardless. Mil is excluded even in that case because it is also
+/// the `default_value`, so an explicit `--adjustment-unit mil` is indistinguishable from
+/// never having passed the flag at all; warning there would fire on the common case for
+/// nothing. Pure/side-effect-free, same shape as `cd_scale_range_warning` -- see the
+/// Trajectory arm for the call site that actually prints it.
+fn adjustment_unit_noop_warning(
+    unit: AdjustmentUnit,
+    target_speed: f64,
+    is_pdf: bool,
+) -> Option<String> {
+    if is_pdf || target_speed != 0.0 || unit == AdjustmentUnit::Mil {
+        None
+    } else {
+        Some(
+            "warning: --adjustment-unit only affects the mover Ring column and the PDF dope \
+             card; add --target-speed or use -o pdf to see it"
+                .to_string(),
+        )
+    }
+}
+
 /// Resolve `--cd-scale` against whether a custom drag table (`--drag-table`) is present on
 /// this run. `--cd-scale` multiplies a *custom deck's* interpolated Cd (see
 /// `BallisticInputs::cd_scale`) — without a table there is nothing to multiply, and the flag
@@ -4618,6 +4644,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         std::process::exit(1);
                     })
                 });
+
+            // MBA-1414: the unit reaches only the Ring column and the PDF dope card, so
+            // say so when this run has neither — otherwise the flag (and the graduation
+            // resolved just below) silently changes nothing.
+            if let Some(w) = adjustment_unit_noop_warning(
+                adjustment_unit,
+                target_speed,
+                matches!(output, OutputFormat::Pdf),
+            ) {
+                eprintln!("{w}");
+            }
 
             // MBA-1355: resolve turret click graduations FIRST, eagerly — before any of
             // the Ring column / PDF dope card display work below — so a missing
@@ -15154,6 +15191,46 @@ mod cd_scale_tests {
             !err.contains("--bc-adjustment"),
             "surface has no --bc-adjustment flag to suggest: {err}"
         );
+    }
+}
+
+/// MBA-1414: `--adjustment-unit` reaches only the mover Ring column and the PDF dope
+/// card, so a run with neither gets told the flag changed nothing.
+#[cfg(test)]
+mod adjustment_unit_noop_tests {
+    use super::*;
+
+    #[test]
+    fn warns_for_a_non_default_unit_with_no_ring_and_no_pdf() {
+        for unit in [
+            AdjustmentUnit::Moa,
+            AdjustmentUnit::Smoa,
+            AdjustmentUnit::Iphy,
+            AdjustmentUnit::Clicks,
+        ] {
+            let warning = adjustment_unit_noop_warning(unit, 0.0, false)
+                .unwrap_or_else(|| panic!("{unit:?} without --target-speed or -o pdf must warn"));
+            assert!(warning.contains("--adjustment-unit"), "{warning}");
+            assert!(warning.contains("--target-speed"), "{warning}");
+            assert!(warning.contains("-o pdf"), "{warning}");
+        }
+    }
+
+    #[test]
+    fn silent_when_the_ring_column_or_the_dope_card_consumes_the_unit() {
+        // A mover ring is requested: the Ring column renders in the chosen unit.
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Moa, 10.0, false).is_none());
+        // PDF dope card: Drop/Wind/Lead columns render in the chosen unit even with no ring.
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Moa, 0.0, true).is_none());
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Clicks, 0.0, true).is_none());
+    }
+
+    #[test]
+    fn silent_for_the_default_unit() {
+        // `mil` is clap's `default_value`, so an explicit `--adjustment-unit mil` cannot be
+        // told apart from never passing the flag — warning there would fire on the common
+        // case for nothing.
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Mil, 0.0, false).is_none());
     }
 }
 
