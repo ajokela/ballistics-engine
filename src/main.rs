@@ -3940,6 +3940,14 @@ fn bc_reference_profile_field(value: BcReferenceStandard) -> Option<String> {
 /// Accepts the same lowercase spelling `--pressure-type`/`clap::ValueEnum` produce
 /// ("absolute", "qnh"), case-insensitively. `None`/empty defaults to `Absolute` -- byte-
 /// identical to every profile saved before this field existed.
+///
+/// Currently unused at the solve sites: `trajectory --saved-profile` deliberately does NOT
+/// inherit a stored pressure mode, because it does not load the stored pressure VALUE either
+/// and a mode applied to someone else's value is silently wrong (see the `final_pressure_type`
+/// comment). `profile save` still records the field, and its round-trip tests still exercise
+/// this parser, so it is kept rather than deleted -- wiring the profile atmosphere fields as a
+/// set is the follow-up (MBA-1417) that makes it live again.
+#[allow(dead_code)]
 fn parse_pressure_reference_profile_field(
     value: Option<&str>,
 ) -> Result<PressureReferenceMode, String> {
@@ -5033,15 +5041,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std_pressure,
                 ),
             };
-            // MBA-1397: an explicit --pressure-type always wins; otherwise inherit a saved
-            // profile's stored reference (defaults to Absolute when neither is present —
-            // byte-identical to every run before this flag existed).
-            let final_pressure_type = match pressure_type {
-                Some(v) => v,
-                None => parse_pressure_reference_profile_field(
-                    saved_profile_data.as_ref().and_then(|p| p.pressure_reference.as_deref()),
-                )?,
-            };
+            // MBA-1397 + MBA-1366 review: a pressure MODE describes one specific pressure
+            // VALUE, so it must never be inherited apart from it. `trajectory --saved-profile`
+            // does not load a profile's stored temperature/pressure/altitude/humidity (a
+            // pre-existing gap these fields all share), so inheriting only the stored
+            // `pressure_reference` applied a `qnh` mode to whatever pressure the run actually
+            // used — a CLI-supplied absolute station reading got silently reduced a second
+            // time. Measured at 300 yd: 2299.49 fps inherited vs 2222.86 fps correct, a 77 fps
+            // error from a flag the user set once, on a different day, for a different value.
+            // Until the profile atmosphere fields are wired as a set, the mode stays with its
+            // value: only an explicit --pressure-type is honored here.
+            let final_pressure_type = pressure_type.unwrap_or(PressureReferenceMode::Absolute);
             let final_humidity = if humidity != 50.0 {
                 humidity
             } else {

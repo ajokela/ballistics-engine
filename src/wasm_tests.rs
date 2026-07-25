@@ -1679,6 +1679,31 @@ Impact Velocity: 2510 fps\n";
         );
     }
 
+    /// MBA-1366 review, Important #1: `--density-altitude` derives an ABSOLUTE station
+    /// pressure, so the declared `--pressure-type` no longer describes it. The shot-day
+    /// atmosphere was reset correctly but the mode was not, leaving the zero-day solve to
+    /// inherit a stale `Qnh` and reduce an already-absolute pressure a second time (~7%
+    /// pressure error at 2000 ft DA — shot day right, zero day silently wrong). Native
+    /// always reset the mode; the browser terminal did not mirror it.
+    #[wasm_bindgen_test]
+    fn density_altitude_supersedes_the_pressure_mode_on_the_zero_day_too() {
+        let wasm = WasmBallistics::new();
+        const BASE: &str = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 500 \
+                            --density-altitude 2000 --auto-zero 100 -o json";
+
+        // Declaring a QNH pressure alongside --density-altitude must change nothing at all:
+        // density altitude supersedes both the value and the mode, on both solves.
+        let with_qnh = wasm
+            .run_command(&format!("{BASE} --pressure 1030 --pressure-type qnh"))
+            .unwrap();
+        let da_only = wasm.run_command(BASE).unwrap();
+        assert_eq!(
+            with_qnh, da_only,
+            "--density-altitude must fully supersede --pressure/--pressure-type; a residual \
+             mode would re-reduce the derived absolute pressure on the zero-day solve"
+        );
+    }
+
     /// MBA-1414: on the browser terminal `--adjustment-unit` reaches only the mover Ring
     /// column, which exists only for a nonzero `--target-speed`. A tester set it, got a
     /// byte-identical table and no signal at all — so the inert case now says so, table-only.
