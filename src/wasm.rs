@@ -376,6 +376,14 @@ fn format_multi_truing_result(
         None => (None, None),
     };
 
+    // MBA-1405 Task 2: MV-calibration window (90-100% of the downward Mach 1.2
+    // crossing) — same additive JSON fields and table lines as the native CLI's
+    // `display_multi_truing_result`. The native out-of-window WARNING is a stderr
+    // diagnostic with no WASM equivalent (this terminal has no stderr channel and
+    // never reproduces native's stderr text — see the "Fitting N observations..."
+    // progress line, also absent here), so it is deliberately not mirrored.
+    let mv_window = crate::truing::mv_calibration_window(report.mach_1_2_distance_m);
+
     let mut out = String::new();
     match output {
         OutputFormat::Json => {
@@ -428,6 +436,17 @@ fn format_multi_truing_result(
             if let Some(pct) = adj_pct {
                 json_output["adjustment_percent"] = serde_json::json!(pct);
             }
+            // MBA-1405 Task 2: additive-only fields (meters, unit-invariant); null when
+            // the trajectory never crosses Mach 1.2 — no note text ever accompanies
+            // these in JSON (purity rule), matching the native CLI's JSON exactly.
+            json_output["mv_window_start_m"] = match mv_window {
+                Some((lo_m, _)) => serde_json::json!(lo_m),
+                None => serde_json::Value::Null,
+            };
+            json_output["mv_window_end_m"] = match mv_window {
+                Some((_, hi_m)) => serde_json::json!(hi_m),
+                None => serde_json::Value::Null,
+            };
             // Native prints a serialization error to stderr and leaves stdout empty;
             // the returned string mirrors stdout exactly either way.
             if let Ok(s) = serde_json::to_string_pretty(&json_output) {
@@ -541,6 +560,25 @@ fn format_multi_truing_result(
                     "inf".to_string()
                 }
             ));
+            // MBA-1405 Task 2: MV-calibration window / no-window note, table only —
+            // mirrors the native CLI's `display_multi_truing_result` exactly.
+            match mv_window {
+                Some((lo_m, hi_m)) => {
+                    let lo = distance_from_metric(lo_m, units);
+                    let hi = distance_from_metric(hi_m, units);
+                    out.push_str(&format!(
+                        "  MV-calibration window: {lo:.1}-{hi:.1} {range_unit} (90-100% of the Mach 1.2 distance)\n"
+                    ));
+                }
+                None => {
+                    let max_display = distance_from_metric(report.window_solved_range_m, units);
+                    out.push_str(&format!(
+                        "  note: no MV window: trajectory is supersonic through {max_display:.1} \
+                         {range_unit}; MV is identifiable at any range\n"
+                    ));
+                }
+            }
+            out.push_str("  for optimal observation ranges run: ballistics plan-truing\n");
             out.push('\n');
         }
     }

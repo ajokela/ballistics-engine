@@ -101,27 +101,17 @@ pub fn fallback_bullet_length_m(diameter_m: f64, mass_kg: f64) -> f64 {
     }
 }
 
-/// Shared forward-model core for velocity/BC truing (MBA-1316).
-///
-/// Solves the real trajectory for the given `(velocity_fps, bc)` candidate under
-/// the supplied load/atmosphere and returns `(drop_m, z_m)` where `drop_m` is the
-/// linear vertical distance below the line of sight (positive = below LOS) at the
-/// target range and `z_m` is the horizontal distance actually reached (~range_m).
-/// Callers convert to MIL / MOA / inches as needed. This is the exact assembly
-/// the single-observation binary search has always used, factored out so the
-/// multi-observation joint fit reuses identical physics.
-///
-/// When `interpolate` is false the returned point is the first trajectory sample
-/// at or past the target range (the historical behaviour). When true, the drop
-/// and horizontal distance are linearly interpolated to land exactly on the
-/// target range, removing the ~v*dt spatial quantization that otherwise
-/// stair-steps the cost surface — essential for the multi-observation joint fit,
-/// whose finite-difference Jacobian would otherwise be dominated by that noise.
+/// Shared solver assembly for the truing forward model (MBA-1316; extracted from
+/// [`solve_trajectory_drop`] for MBA-1405 so a second caller can read off the full
+/// [`crate::TrajectoryResult`] — e.g. its labeled Mach crossings — instead of just
+/// the drop/range pair. SI conversion, base [`BallisticInputs`], zero-angle solve,
+/// and `max_range`/`time_step` are all identical to what `solve_trajectory_drop`
+/// has always used, so both callers stay physically identical.
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments preserve the existing velocity-truing compatibility helper"
 )]
-pub(crate) fn solve_trajectory_drop(
+fn solve_truing_trajectory(
     velocity_fps: f64,
     bc: f64,
     drag_model: DragModelArg,
@@ -135,8 +125,7 @@ pub(crate) fn solve_trajectory_drop(
     humidity: f64,
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
-    interpolate: bool,
-) -> Result<(f64, f64), Box<dyn Error>> {
+) -> Result<crate::TrajectoryResult, Box<dyn Error>> {
     // Convert to SI units
     let velocity_ms = velocity_fps * 0.3048;
     let mass_kg = mass_gr * GRAINS_TO_KG;
@@ -201,7 +190,63 @@ pub(crate) fn solve_trajectory_drop(
     solver.set_max_range(range_m + 100.0);
     solver.set_time_step(0.0001);
 
-    let result = solver.solve()?;
+    Ok(solver.solve()?)
+}
+
+/// Shared forward-model core for velocity/BC truing (MBA-1316).
+///
+/// Solves the real trajectory for the given `(velocity_fps, bc)` candidate under
+/// the supplied load/atmosphere and returns `(drop_m, z_m)` where `drop_m` is the
+/// linear vertical distance below the line of sight (positive = below LOS) at the
+/// target range and `z_m` is the horizontal distance actually reached (~range_m).
+/// Callers convert to MIL / MOA / inches as needed. This is the exact assembly
+/// the single-observation binary search has always used, factored out so the
+/// multi-observation joint fit reuses identical physics.
+///
+/// When `interpolate` is false the returned point is the first trajectory sample
+/// at or past the target range (the historical behaviour). When true, the drop
+/// and horizontal distance are linearly interpolated to land exactly on the
+/// target range, removing the ~v*dt spatial quantization that otherwise
+/// stair-steps the cost surface — essential for the multi-observation joint fit,
+/// whose finite-difference Jacobian would otherwise be dominated by that noise.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing velocity-truing compatibility helper"
+)]
+pub(crate) fn solve_trajectory_drop(
+    velocity_fps: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_distance_yd: f64,
+    range_yd: f64,
+    sight_height_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    interpolate: bool,
+) -> Result<(f64, f64), Box<dyn Error>> {
+    let range_m = range_yd * 0.9144;
+    let sight_height_m = sight_height_in * 0.0254;
+
+    let result = solve_truing_trajectory(
+        velocity_fps,
+        bc,
+        drag_model,
+        mass_gr,
+        diameter_in,
+        zero_distance_yd,
+        range_yd,
+        sight_height_in,
+        temperature_f,
+        pressure_inhg,
+        humidity,
+        altitude_ft,
+        bc_segments,
+    )?;
 
     // Find the first point at or past the target range.
     let idx = result
@@ -1087,6 +1132,18 @@ pub struct MultiTruingReport {
     pub condition_number: f64,
     pub quality: String,
     pub reason: String,
+    /// Downward Mach-1.2 crossing distance (meters) for the finally fitted
+    /// (`fitted_mv_fps`, `fitted_bc`) load, re-solved out to a fixed 3000 yd
+    /// envelope independent of the observation set (the window describes the
+    /// load, not wherever the caller happened to shoot). Feeds
+    /// [`mv_calibration_window`] for the MV-calibration window report line
+    /// (MBA-1405 Task 2). `None` when the trajectory never crosses within that
+    /// envelope.
+    pub mach_1_2_distance_m: Option<f64>,
+    /// The downrange distance (meters) the fixed-envelope re-solve actually
+    /// reached — names the range checked in the "no MV window" report note
+    /// when `mach_1_2_distance_m` is `None` (MBA-1405 Task 2).
+    pub window_solved_range_m: f64,
 }
 
 /// Orchestrate the multi-observation joint MV+BC calibration and build the
@@ -1234,6 +1291,12 @@ pub fn run_multi_observation_truing_core(
         observations.len(),
     );
 
+    // MBA-1405 Task 2: one extra solve at the finally fitted (mv, bc), out to a
+    // fixed generous envelope independent of the observation set, purely to read
+    // off the downward Mach-1.2 crossing for the MV-calibration window report line.
+    let (mach_1_2_distance_m, window_solved_range_m) =
+        truing_mv_window_mach_1_2_crossing(&model, fitted_mv, fitted_bc)?;
+
     let report = MultiTruingReport {
         fitted_mv_fps: fitted_mv,
         fitted_bc,
@@ -1249,9 +1312,47 @@ pub fn run_multi_observation_truing_core(
         condition_number,
         quality,
         reason,
+        mach_1_2_distance_m,
+        window_solved_range_m,
     };
 
     Ok(report)
+}
+
+/// Downrange envelope (yards) for the extra solve [`truing_mv_window_mach_1_2_crossing`]
+/// runs to locate the downward Mach-1.2 crossing for the MV-calibration window report
+/// line (MBA-1405 Task 2): generous enough to cover essentially every practical
+/// small-arms transonic transition, independent of wherever the caller's own
+/// observations happen to sit — the window describes the load, not the observation set.
+const MV_WINDOW_SOLVE_MAX_RANGE_YD: f64 = 3000.0;
+
+/// Re-solve the finally fitted `(mv, bc)` load out to [`MV_WINDOW_SOLVE_MAX_RANGE_YD`]
+/// to read off the downward Mach-1.2 crossing distance (meters) for the MV-calibration
+/// window (MBA-1405 Task 2). Returns `(mach_1_2_distance_m, solved_max_range_m)`; the
+/// second element lets the report's "no MV window" note name the range actually
+/// checked rather than the nominal envelope (relevant if the solve terminates early,
+/// e.g. ground impact).
+fn truing_mv_window_mach_1_2_crossing(
+    model: &TruingForwardModel<'_>,
+    mv_fps: f64,
+    bc: f64,
+) -> Result<(Option<f64>, f64), Box<dyn Error>> {
+    let result = solve_truing_trajectory(
+        mv_fps,
+        bc,
+        model.drag_model,
+        model.mass_gr,
+        model.diameter_in,
+        model.zero_yd,
+        MV_WINDOW_SOLVE_MAX_RANGE_YD,
+        model.sight_in,
+        model.temp_f,
+        model.press_inhg,
+        model.humidity,
+        model.alt_ft,
+        model.bc_segments,
+    )?;
+    Ok((result.mach_1_2_distance_m, result.max_range))
 }
 
 /// RMS of residuals at a candidate `(mv, bc)`.
@@ -1320,30 +1421,29 @@ pub(crate) fn truing_quality_line(
 /// Fraction of the downward Mach 1.2 crossing distance that bounds the near edge of the MV
 /// (muzzle-velocity) calibration window (MBA-1405): observations closer than this fraction of
 /// the crossing are considered too far from the transonic region to usefully calibrate MV.
-#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
 const MV_CALIBRATION_WINDOW_START_FRACTION: f64 = 0.90;
 
 /// Fraction of the downward Mach 0.9 crossing distance at which the DSF (drag-scale-factor)
 /// window is considered to start (MBA-1405): DSF observations nearer the muzzle than this are
 /// still comfortably supersonic/transonic and not representative of the DSF-correction regime.
-#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
 const DSF_WINDOW_START_FRACTION: f64 = 0.90;
 
 /// The MV (muzzle-velocity) calibration validity window: `(start_m, end_m)`, where `end_m` is
 /// the downward Mach 1.2 crossing distance and `start_m` is 90% of it. `None` when the
 /// trajectory never crosses Mach 1.2 (nothing to bound the window with) — mirrors
-/// `TrajectoryResult::mach_1_2_distance_m`'s own `None` case, MBA-1405.
-#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
-pub(crate) fn mv_calibration_window(mach_1_2_distance_m: Option<f64>) -> Option<(f64, f64)> {
+/// `TrajectoryResult::mach_1_2_distance_m`'s own `None` case, MBA-1405. `pub` (not
+/// `pub(crate)`): consumed by the native CLI (`main.rs`) and the WASM terminal
+/// (`wasm.rs`), both separate crates from this lib (MBA-1405 Task 2).
+pub fn mv_calibration_window(mach_1_2_distance_m: Option<f64>) -> Option<(f64, f64)> {
     let d = mach_1_2_distance_m?;
     Some((MV_CALIBRATION_WINDOW_START_FRACTION * d, d))
 }
 
 /// The downrange distance (m) at which the DSF (drag-scale-factor) window starts: 90% of the
 /// downward Mach 0.9 crossing distance. `None` when the trajectory never crosses Mach 0.9 —
-/// mirrors `TrajectoryResult::mach_0_9_distance_m`'s own `None` case, MBA-1405.
-#[allow(dead_code)] // consumed by MBA-1405 Task 2 (window rendering)
-pub(crate) fn dsf_window_start(mach_0_9_distance_m: Option<f64>) -> Option<f64> {
+/// mirrors `TrajectoryResult::mach_0_9_distance_m`'s own `None` case, MBA-1405. `pub`: consumed
+/// by the native CLI's `dsf` verb (MBA-1405 Task 2).
+pub fn dsf_window_start(mach_0_9_distance_m: Option<f64>) -> Option<f64> {
     Some(DSF_WINDOW_START_FRACTION * mach_0_9_distance_m?)
 }
 

@@ -1501,6 +1501,16 @@ solves the named saved profile's own trajectory (same physics `trajectory
      ```
      warning: no DSF point in the transonic band (Mach 1.2-0.9); transonic drops remain uncorrected
      ```
+   - A note (stdout, always) naming the DSF *validity window* — at or beyond 90% of the
+     trajectory's downward Mach 0.9 crossing — using the same solve `dsf` already
+     performed above:
+     ```
+     note: DSF window: at or beyond 620.4 yd (90% of the Mach 0.9 distance)
+     ```
+     or, if the trajectory never goes subsonic within the solved range:
+     ```
+     note: no subsonic window inside the solved range
+     ```
 4. The point is added to the profile's table (up to 6 distinct points): a new point
    within 0.05 Mach of an existing one **supersedes** it (reported on stdout); a 7th
    distinct point is rejected, naming the 6-point cap and `--clear-dsf` to make room.
@@ -1635,7 +1645,26 @@ Example output:
 
   Joint MV+BC fit, excellent: RMS residual 0.018 mil, conditioning 148
   Diagnostics: BC sensitivity ratio 0.3013, conditioning 148
+  MV-calibration window: 656.7-729.7 yd (90-100% of the Mach 1.2 distance)
+  for optimal observation ranges run: ballistics plan-truing
 ```
+
+**MV-calibration window.** The finally fitted load is re-solved (independent of
+the observation set) to find where it crosses downward through Mach 1.2 — the
+90-100% span of that distance is the range band where a drop residual most
+cleanly identifies muzzle velocity. Table output only. If the trajectory never
+goes transonic within a generous fixed envelope, a different note prints
+instead:
+```
+note: no MV window: trajectory is supersonic through 3109.4 yd; MV is identifiable at any range
+```
+Any observation outside the window gets a per-observation warning on stderr
+(regardless of `-o`):
+```
+warning: observation at 300.0 is outside the MV-calibration window (656.7-729.7); MV fits from this range are weakly identified
+```
+See [`plan-truing`](#design-an-identifiable-truing-experiment-plan-truing) below
+for choosing observation ranges up front instead of diagnosing them after the fact.
 
 **Identifiability / honest refusal.** Before fitting BC, the command measures how
 strongly the observation set constrains it: a *BC sensitivity ratio* (relative
@@ -1663,6 +1692,9 @@ a longer-range / transonic observation.
 identifiability diagnostics, and a self-describing `legend` with unit-labelled
 field names (`range_yd`, `observed_drop_mil`, `predicted_drop_mil`,
 `residual_mil`, `rms_residual_mil`, `fitted_muzzle_velocity` + `velocity_unit`).
+It also carries the MV-calibration window as two additive fields,
+`mv_window_start_m` / `mv_window_end_m` (meters, `null` when there is no
+window) — JSON/CSV never get the note text above, only these numbers.
 
 > With zero `--observed` flags the command behaves exactly as the classic
 > single-observation velocity truing described above.
