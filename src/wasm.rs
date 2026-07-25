@@ -570,12 +570,18 @@ fn format_multi_truing_result(
                         "  MV-calibration window: {lo:.1}-{hi:.1} {range_unit} (90-100% of the Mach 1.2 distance)\n"
                     ));
                 }
-                None => {
+                None if report.muzzle_mach >= 1.2 => {
                     let max_display = distance_from_metric(report.window_solved_range_m, units);
                     out.push_str(&format!(
                         "  note: no MV window: trajectory is supersonic through {max_display:.1} \
                          {range_unit}; MV is identifiable at any range\n"
                     ));
+                }
+                None => {
+                    out.push_str(
+                        "  note: no MV window: trajectory never reaches Mach 1.2; calibrate \
+                         muzzle velocity with a chronograph, then collect DSF points\n",
+                    );
                 }
             }
             out.push_str("  for optimal observation ranges run: ballistics plan-truing\n");

@@ -1653,10 +1653,16 @@ Example output:
 the observation set) to find where it crosses downward through Mach 1.2 — the
 90-100% span of that distance is the range band where a drop residual most
 cleanly identifies muzzle velocity. Table output only. If the trajectory never
-goes transonic within a generous fixed envelope, a different note prints
-instead:
+crosses downward through Mach 1.2 within a generous fixed envelope, a note
+prints instead, and its text depends on *why* there is no crossing. A load
+still supersonic at the end of the envelope prints:
 ```
 note: no MV window: trajectory is supersonic through 3109.4 yd; MV is identifiable at any range
+```
+A load that launches below Mach 1.2 (e.g. a subsonic/suppressed build) and so
+never crosses downward at all prints a different note instead:
+```
+note: no MV window: trajectory never reaches Mach 1.2; calibrate muzzle velocity with a chronograph, then collect DSF points
 ```
 Any observation outside the window gets a per-observation warning on stderr
 (regardless of `-o`):

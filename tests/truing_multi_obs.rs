@@ -616,3 +616,99 @@ fn csv_output_carries_no_window_note_text() {
     assert!(!stdout.to_lowercase().contains("calibration window"), "{stdout}");
     assert!(!stdout.to_lowercase().contains("mv is identifiable"), "{stdout}");
 }
+
+// -----------------------------------------------------------------------------
+// MBA-1405 Task 2 fix pass: `mach_1_2_distance_m == None` has two opposite
+// physical causes and the report text must distinguish them (task-2-review.md
+// Important finding). `FULLY_SUPERSONIC_FIXTURE_ARGS` above covers the load
+// that is STILL supersonic through the whole 3000 yd window envelope. The
+// fixture below is the opposite: a load that launches BELOW Mach 1.2 (muzzle
+// Mach ~0.94 at std atm 59 F, speed of sound ~1116 fps -> ~1050 fps muzzle
+// velocity) and so never crosses downward through Mach 1.2 at all — the
+// `MachTransitionTracker` only records a *downward* crossing, so this case
+// also yields `mach_1_2_distance_m == None`, but for the opposite reason.
+// -----------------------------------------------------------------------------
+
+/// A subsonic (e.g. suppressed .300 BLK-class) load, self-consistent via the
+/// shared `forward_drop_mil` forward model, sighted in and observed at short
+/// suppressed-carbine ranges.
+fn never_supersonic_load() -> Load {
+    Load {
+        mv_fps: 1050.0,
+        bc: 0.300,
+        mass_gr: 220.0,
+        diameter_in: 0.308,
+        zero_yd: 25.0,
+        sight_in: 2.0,
+    }
+}
+
+/// Assemble `true-velocity` CLI args for `never_supersonic_load()` observed at
+/// 50/100 yd, with `extra` appended verbatim (e.g. `["--output", "json"]`).
+fn never_supersonic_fixture_args(extra: &[&str]) -> Vec<String> {
+    let load = never_supersonic_load();
+    let ranges = [100.0, 400.0];
+    let drops: Vec<(f64, f64)> =
+        ranges.iter().map(|&r| (r, forward_drop_mil(&load, r))).collect();
+    let mut args: Vec<String> = vec![
+        "true-velocity".into(),
+        "--range".into(),
+        format!("{:.1}", drops[0].0),
+        "--measured-drop".into(),
+        format!("{:.6}", drops[0].1),
+        "--observed".into(),
+        format!("{:.1}:{:.6}", drops[1].0, drops[1].1),
+        "--bc".into(),
+        format!("{}", load.bc),
+        "-m".into(),
+        format!("{}", load.mass_gr),
+        "-d".into(),
+        format!("{}", load.diameter_in),
+        "--zero-distance".into(),
+        format!("{}", load.zero_yd),
+        "--chrono-velocity".into(),
+        format!("{}", load.mv_fps),
+    ];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args
+}
+
+/// Live repro of the review's Important finding: a never-supersonic load must
+/// print the NEW "never reaches Mach 1.2" note, not the old "supersonic
+/// through" text (which is physically false for this load — it was never
+/// supersonic at any point).
+#[test]
+fn no_mv_window_note_for_a_never_supersonic_fixture() {
+    let args = never_supersonic_fixture_args(&[]);
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_true_velocity(&refs);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "note: no MV window: trajectory never reaches Mach 1.2; calibrate muzzle \
+             velocity with a chronograph, then collect DSF points"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("MV-calibration window:"), "{stdout}");
+    assert!(!stdout.contains("supersonic through"), "{stdout}");
+}
+
+/// JSON purity holds for the never-supersonic cause too: still additive-only
+/// null fields, no note text of either flavor.
+#[test]
+fn json_window_fields_are_null_for_a_never_supersonic_fixture() {
+    let args = never_supersonic_fixture_args(&["--output", "json"]);
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run_true_velocity(&refs);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let raw = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !raw.to_lowercase().contains("calibration window") && !raw.to_lowercase().contains("mach 1.2"),
+        "JSON must carry no note text: {raw}"
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["mv_window_start_m"].is_null(), "{v}");
+    assert!(v["mv_window_end_m"].is_null(), "{v}");
+}
