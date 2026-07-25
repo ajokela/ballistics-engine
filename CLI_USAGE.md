@@ -218,6 +218,32 @@ warning: --cd-scale 3 is far outside the typical truing range (0.90-1.10)
 
 **WASM:** pass `--cd-scale <FACTOR>` as a terminal argument to `trajectory`, `zero`, or `monte-carlo` alongside a table loaded via `loadDragTable`; the pairing requirement and range warning are identical (the pairing failure surfaces as a rejected promise/`Err` instead of a process exit, and the range warning is prepended to the table-style output rather than printed to a separate stderr stream). `lead` also accepts `--cd-scale` in the WASM terminal (MBA-1411) — since it already applies a loaded table unconditionally (see the drag-table note above), a table trued via `--cd-scale` elsewhere needs the same scale here or its truing is lost; native `lead` has no `--drag-table`/`--cd-scale` of its own, so this is WASM-only, like the drag-table application itself.
 
+#### BC Reference Standard (`--bc-reference`)
+
+A published ballistic coefficient is not a pure property of the bullet — it also encodes an assumed reference air density. This engine's retardation math is calibrated to the **ICAO Standard Atmosphere** (the basis for `CD_TO_RETARD`), which most modern published BCs already assume. Some vendors — notably Sierra, Hornady, and Barnes for many bullets — instead publish BCs referenced to the older, denser **Army Standard Metro** atmosphere. Feeding an Army-Standard-Metro BC into this engine as if it were ICAO under-predicts drag by about 1.8%.
+
+`--bc-reference <icao|army-standard-metro>` declares which one `--bc` (and any BC segments) is referenced to. `icao` is the default and is a complete no-op — omitting the flag, or passing `--bc-reference icao` explicitly, is byte-identical to every run before this flag existed. `army-standard-metro` multiplies the declared BC by a fixed ratio derived from the two reference densities (`ASM_DENSITY_LB_FT3 / ICAO_DENSITY_LB_FT3 ≈ 0.98237`) exactly once, at input normalization, before any retardation math runs — so the conversion applies uniformly to a scalar `--bc`, `--bc-segment` entries, Monte Carlo BC sampling, and a `zero`/`trajectory` auto-zero solve, with no risk of it being applied twice or missed on one code path.
+
+```bash
+# Sierra's published G1 BC for this bullet (0.475) is Army-Standard-Metro-referenced.
+# The engine internally solves with 0.475 * 0.98237 ≈ 0.4666.
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --bc-reference army-standard-metro
+```
+
+Available on `trajectory`, `zero`, `monte-carlo`, and `profile save` (stored in the saved profile so it round-trips with the profile; profiles saved before this flag existed omit the key and load as `icao`).
+
+**No effect together with `--drag-table`:** a custom drag deck supplies the projectile's actual Cd and divides by sectional density, not by a BC value, so there is no BC to reference-convert. Combining `--bc-reference army-standard-metro` with `--drag-table` is accepted (not an error) but warns once:
+
+```
+warning: --bc-reference army-standard-metro has no effect together with a custom drag table (--drag-table): the deck's Cd is divided by sectional density, not a BC value, so no BC-reference conversion applies
+```
+
+**`estimate-bc` outputs are always ICAO-referenced.** The fitted BC that `estimate-bc` (and any truing built on it) reports is searched directly against this engine's own ICAO-calibrated retardation math — it is never itself declared Army-Standard-Metro internally. Do not pass a fitted value back in with `--bc-reference army-standard-metro` on a later `trajectory`/`monte-carlo`/`zero`/`profile save` — that would double-convert it (dividing out the correction an ICAO-referenced value never needed).
+
+**WASM:** pass `--bc-reference <icao|army-standard-metro>` as a terminal argument to `trajectory`, `zero`, or `monte-carlo`; behavior matches native exactly (same one-time normalization site), except the inert-with-`--drag-table` warning has no visible stderr in the browser terminal, so it is prepended to the table-style output text instead (same convention as the `--cd-scale` range warning above).
+
+**FFI:** `FFIBallisticInputs` is an ABI-frozen `repr(C)` struct for iOS/Android consumers and gains no new field. Instead, call the standalone `ballistics_bc_for_reference_standard(bc, reference_standard)` (`reference_standard`: `0` = ICAO, `1` = Army Standard Metro) once on a raw BC value and write the result into `FFIBallisticInputs.bc_value` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged. This is a pure addition to the C ABI — existing callers that never call the new function are unaffected and need no recompile.
+
 #### BC5D Correction Tables
 
 BC5D (5-Dimensional BC Correction) tables provide ML-derived, velocity-dependent BC corrections for specific calibers. These tables capture how BC changes throughout the flight envelope based on weight, BC, muzzle velocity, current velocity, and drag model.
@@ -2058,6 +2084,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | -v, --velocity | Muzzle velocity | Required | fps | m/s |
 | -a, --angle | Launch angle | 0.0° | degrees | degrees |
 | -b, --bc | Ballistic coefficient | Required | - | - |
+| --bc-reference | BC reference standard (icao/army-standard-metro); see [BC Reference Standard](#bc-reference-standard---bc-reference). Also on `zero`, `monte-carlo`, `profile save` | icao | - | - |
 | -m, --mass | Projectile mass | Required | grains | grams |
 | -d, --diameter | Projectile diameter | Required | inches | mm |
 | --drag-model | Drag model (g1/g2/g5/g6/g7/g8/gi/gs/ra4) | g1 | - | - |
