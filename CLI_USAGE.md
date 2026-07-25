@@ -280,6 +280,43 @@ Available on `trajectory` (`--pressure-type`, plus an independent `--zero-pressu
 
 **solve-json v1:** `atmosphere.pressure_reference` (`"absolute"` or `"qnh"`) mirrors `--pressure-type`; see [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#pressure_reference-mba-1397). A QNH reduction is recorded in the response's `assumptions` with code `qnh_reduced_to_station_pressure`.
 
+#### Density Altitude as a Direct Input (`--density-altitude`)
+
+Shooter, Nosler, AB Analytics, Ballistic AE, and TRASOL all let a shooter carry conditions in the field as a single **density altitude** value instead of separately dialing in altitude, pressure, and temperature — it is how many US shooters actually record a day's conditions. `--density-altitude` accepts that same single value (feet imperial / meters metric, like `--altitude`).
+
+**This is NOT the direct-density bypass.** `--density-altitude` back-solves an ISA-equivalent station altitude/temperature/pressure and feeds them through the exact same altitude-lapse pipeline every other atmosphere input uses — Mach number, the lapse rate, and downrange-segmented atmosphere (`--wind-segment`'s atmosphere analogue) all behave normally as the shot climbs or falls. Feeding density directly (bypassing that pipeline) would freeze the speed of sound for the whole flight, which is why that path is never used here.
+
+The inverse is the exact algebraic inverse of the published NWS/FAA pressure-altitude model this engine already uses to REPORT density altitude on the PDF dope card:
+
+```
+pressure_alt_ft = 145366.45 * (1 - (station_hpa / 1013.25)^0.190284)
+isa_temp_f      = 59.0 - pressure_alt_ft / 1000.0 * 3.57
+density_alt_ft  = pressure_alt_ft + (120*5/9) * (station_temp_f - isa_temp_f)
+```
+
+solved for `station_hpa` given a target density altitude and a station temperature. This model performs no geopotential correction (unlike the ICAO/QNH formula above) — the altitude it returns is treated as GEOMETRIC altitude, the same convention as `--altitude` everywhere else in this engine.
+
+**Precedence** (shares this rule with `--pressure-type` above — read together):
+- `--density-altitude` **supersedes `--altitude` and `--pressure`/`--pressure-type` entirely**. A `--location`/CSV `DA`/`DENSITY_ALTITUDE` column is used only when the flag itself is omitted (same CLI-wins-over-CSV rule as every other environmental field).
+- The resulting temperature defaults to the **ISA temperature at that density altitude** — algebraically this makes the back-solved station altitude equal the density altitude exactly (see the round-trip test `density_altitude_default_temp_pressure_alt_equals_density_alt` in `src/atmosphere.rs`).
+- An **explicit `--temperature` wins outright** over that default, because real consumers need a real air temperature (powder-temperature sensitivity and the moist speed of sound both read the resolved temperature). The station pressure is then re-solved so the SAME density altitude is still reproduced at the real temperature — density is honored either way; only the implied pressure/altitude differ.
+- A `--pressure`/`--pressure-type` given ALONGSIDE `--density-altitude` is ignored outright (a note is printed to stderr, or folded into the table-only warning block in WASM, per the same convention `--bc-reference`'s inert-with-`--drag-table` warning uses).
+
+```bash
+# A shooter's Kestrel reads 3000 ft density altitude on a warm day; they also know the real
+# air temperature (95 F / 35 C) for correct powder-temperature sensitivity.
+./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --density-altitude 3000 --temperature 95
+```
+
+**BC reference standard (MBA-1365) interaction:** independent. `--bc-reference` converts the BC value itself (`inputs.bc_value`); `--density-altitude` resolves the atmosphere (`AtmosphericConditions`/`BallisticInputs.altitude`/`.temperature`/`.pressure`). Neither reads the other's fields, so any combination of the two flags composes exactly as if applied separately.
+
+Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` columns) and `profile save --density-altitude` (stored for round-trip parity, alongside the pre-existing `temperature`/`pressure`/`altitude`/`humidity` profile fields — like those, `trajectory --saved-profile` does not read any of them back today; only `--location`/CSV feeds shot-day atmosphere there). **Not yet available** on `zero` or any of the subcommands `--pressure-type` also excludes (`estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`) — tracked alongside that same follow-up.
+
+**WASM:** pass `--density-altitude <value>` as a terminal argument to `trajectory`; behavior matches native exactly (same back-solve, same Authoritative-constructor bypass of the legacy default-sentinel heuristic — including when `--density-altitude` is combined with `--pressure-type`).
+
+**FFI:** `FFIAtmosphericConditions` is the same ABI-frozen `repr(C)` struct as above, with no new field. A density-altitude-aware FFI caller calls three standalone conversions once — `ballistics_density_altitude_altitude_m`, `ballistics_density_altitude_temperature_c`, `ballistics_density_altitude_pressure_hpa` (all `(density_altitude_m, explicit_temperature_c)`, where `explicit_temperature_c = NAN` means the ISA-at-DA default) — and writes the three results into `FFIAtmosphericConditions.altitude`/`.temperature`/`.pressure` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged. A pure addition to the C ABI; no recompile is required for existing callers (only for a caller that wants to opt into density-altitude support).
+
 #### BC5D Correction Tables
 
 BC5D (5-Dimensional BC Correction) tables provide ML-derived, velocity-dependent BC corrections for specific calibers. These tables capture how BC changes throughout the flight envelope based on weight, BC, muzzle velocity, current velocity, and drag model.
@@ -364,6 +401,8 @@ LOCATION_NAME,ALTITUDE,PRESSURE,TARGET_TEMP
 KF_LR,2506,27.29,32
 Home_Range,500,29.92,70
 ```
+
+A `DA` or `DENSITY_ALTITUDE` column is also recognized (MBA-1366) and, when present, supersedes that row's `ALTITUDE`/`PRESSURE` exactly like the `--density-altitude` flag — see [Density Altitude](#density-altitude-as-a-direct-input---density-altitude) for the full precedence (an explicit `--density-altitude`/`--altitude`/`--pressure` CLI flag still overrides the CSV row).
 
 **Usage:**
 ```bash
@@ -2148,6 +2187,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --pressure-type | Whether `--pressure` is absolute station pressure or a QNH altimeter setting; see [Pressure Reference](#pressure-reference-absolute-vs-qnh---pressure-type). Also on `zero`, `profile save` | absolute | - | - |
 | --humidity | Relative humidity | 50 | % | % |
 | --altitude | Altitude | 0 | feet | meters |
+| --density-altitude | Density altitude; supersedes `--altitude`/`--pressure`/`--pressure-type` entirely, see [Density Altitude](#density-altitude-as-a-direct-input---density-altitude). Also on `profile save` | — (unset) | feet | meters |
 | --use-bc-segments | Enable BC segmentation | false | - | - |
 | --bc-segment | Manual velocity-keyed BC segment `VMIN:VMAX:BC` (repeatable) | — | fps | m/s |
 | --print-bc-segments | Print the BC5D-generated segment ladder as ready-to-paste `--bc-segment` arguments (requires `--bc-table-dir`) | false | fps | m/s |

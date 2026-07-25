@@ -489,6 +489,21 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
+        /// Density altitude (feet imperial / meters metric based on --units; MBA-1366): the
+        /// single-value atmosphere entry mode Shooter, Nosler, AB Analytics, Ballistic AE, and
+        /// TRASOL all support as an alternative to entering altitude + pressure + temperature
+        /// separately. When given, it SUPERSEDES `--altitude` and `--pressure`/`--pressure-type`
+        /// entirely: an ISA-equivalent station altitude/pressure is back-solved from it (NOT
+        /// the direct-density bypass — Mach, lapse-rate, and segmented-atmosphere behavior are
+        /// all preserved). The resulting temperature defaults to the ISA temperature at that
+        /// density altitude, UNLESS an explicit `--temperature` is also given, in which case the
+        /// real temperature wins (needed for correct powder-temperature sensitivity and moist
+        /// speed of sound) and the implied pressure is re-solved so the density altitude is
+        /// still reproduced exactly. A `--location`/CSV `DA`/`DENSITY_ALTITUDE` column is used
+        /// when this flag is omitted.
+        #[arg(long, allow_hyphen_values = true)]
+        density_altitude: Option<f64>,
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
@@ -2131,6 +2146,15 @@ enum ProfileAction {
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
+        /// Default density altitude (feet imperial / meters metric; MBA-1366). See
+        /// `trajectory --density-altitude` for the full precedence rule. Stored in the saved
+        /// profile alongside `temperature`/`pressure`/`altitude`/`humidity` — like those
+        /// fields, `trajectory --saved-profile` does not currently read any of them back (only
+        /// `--location`/CSV feeds shot-day atmosphere there); this is for round-trip storage
+        /// parity, not a new saved-profile atmosphere source.
+        #[arg(long, allow_hyphen_values = true)]
+        density_altitude: Option<f64>,
+
         /// Bullet name/description
         #[arg(long)]
         bullet_name: Option<String>,
@@ -2419,6 +2443,14 @@ struct ProfileData {
     /// omitted default so an untouched profile round-trips with no new key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pressure_reference: Option<String>,
+    /// Density altitude (MBA-1366), feet imperial / meters metric per `units` (same convention
+    /// as `altitude`). `None` (the omitted-field default, and every profile saved before this
+    /// field existed) means no density-altitude override is stored; a saved value supersedes
+    /// `altitude`/`pressure` when the profile is loaded (see `trajectory`'s
+    /// `--density-altitude` for the full precedence rule). `converted_to` rescales it exactly
+    /// like `altitude` since it shares the same feet/meters convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    density_altitude: Option<f64>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -2609,6 +2641,14 @@ struct TrajectoryConfig {
     pressure_type: PressureReferenceMode,
     humidity: f64,
     altitude: f64,
+    // MBA-1366: true when `--density-altitude` (or a CSV DA/DENSITY_ALTITUDE column) already
+    // fully resolved `temperature`/`pressure`/`altitude` above via
+    // `atmosphere::resolve_atmosphere_for_density_altitude`. `run_trajectory` uses this to skip
+    // re-deriving through `resolve_station_conditions_with_pressure_mode` a second time — that
+    // function's default-sentinel heuristic (used to detect an OMITTED --pressure/--temperature)
+    // could otherwise misinterpret an already-resolved DA value that happens to land near the
+    // sea-level standard as "omitted" and silently re-derive it from `altitude` instead.
+    density_altitude_active: bool,
 
     // Wind (metric)
     wind_speed: f64,
@@ -2988,6 +3028,12 @@ impl ProfileData {
             UnitConverter::altitude_to_metric(self.altitude, source),
             target,
         );
+        self.density_altitude = self.density_altitude.map(|value| {
+            UnitConverter::altitude_from_metric(
+                UnitConverter::altitude_to_metric(value, source),
+                target,
+            )
+        });
         self.wind_speed = self.wind_speed.map(|value| {
             UnitConverter::wind_from_metric(UnitConverter::wind_to_metric(value, source), target)
         });
@@ -3682,6 +3728,10 @@ fn map_a7p_to_profile(
         // absolute station pressure (the omitted-field default) unless the user later edits
         // the saved profile with `--pressure-type`.
         pressure_reference: None,
+        // .a7p carries no density-altitude concept; the imported temperature/pressure/altitude
+        // are used as-is unless the user later edits the saved profile with
+        // `--density-altitude`.
+        density_altitude: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -4722,6 +4772,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             pressure_type,
             humidity,
             altitude,
+            density_altitude,
             output,
             full,
             plot,
@@ -5005,6 +5056,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                     csv_get_f64(&profile_data, &["ZERO_ALT"], 0.0),
                 )
             };
+
+            // MBA-1366: --density-altitude supersedes --altitude and --pressure/--pressure-type
+            // entirely (a CLI flag always wins over a --location/CSV DA/DENSITY_ALTITUDE column,
+            // matching every other CSV-backed field above). An explicit --temperature still wins
+            // over the ISA-at-density-altitude default; density is honored either way (see
+            // `atmosphere::resolve_atmosphere_for_density_altitude`'s doc comment for the
+            // back-solve). Values here are in DISPLAY units (feet/meters per --units), like
+            // final_altitude above; the actual back-solve runs in metric further down.
+            let final_density_altitude: Option<f64> = match density_altitude {
+                Some(da) => Some(da),
+                None => {
+                    let da_csv = csv_get_f64(&location_data, &["DA", "DENSITY_ALTITUDE"], f64::NAN);
+                    (!da_csv.is_nan()).then_some(da_csv)
+                }
+            };
+            if final_density_altitude.is_some() && (pressure.is_some() || pressure_type.is_some())
+            {
+                eprintln!(
+                    "note: --density-altitude supersedes --pressure/--pressure-type (station \
+                     pressure is derived from density altitude instead)"
+                );
+            }
+            let (final_temperature, final_pressure, final_altitude, final_pressure_type) =
+                match final_density_altitude {
+                    Some(da_display) => {
+                        let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
+                        // "Explicit temperature" for DA precedence means a real --temperature
+                        // flag, not a CSV/profile-derived fallback (final_temperature above may
+                        // already reflect one of those, so gate on the raw Option instead).
+                        let explicit_temp_c = temperature.map(|_| {
+                            UnitConverter::temperature_to_metric(final_temperature, cli.units)
+                        });
+                        let (da_altitude_m, da_temp_c, da_pressure_hpa) =
+                            ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
+                                da_m,
+                                explicit_temp_c,
+                            );
+                        (
+                            UnitConverter::temperature_from_metric(da_temp_c, cli.units),
+                            UnitConverter::pressure_from_metric(da_pressure_hpa, cli.units),
+                            UnitConverter::altitude_from_metric(da_altitude_m, cli.units),
+                            PressureReferenceMode::Absolute,
+                        )
+                    }
+                    None => (final_temperature, final_pressure, final_altitude, final_pressure_type),
+                };
 
             // Get zero range: CLI --auto-zero overrides profile ZERO_RANGE
             let final_auto_zero: Option<f64> = auto_zero.or_else(|| {
@@ -5846,6 +5943,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 pressure_type: final_pressure_type,
                 humidity: final_humidity,
                 altitude: altitude_metric,
+                density_altitude_active: final_density_altitude.is_some(),
                 wind_speed: wind_speed_metric,
                 wind_direction: final_wind_direction,
                 wind_vertical: wind_vertical_metric,
@@ -8106,6 +8204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     pressure_type,
                     humidity,
                     altitude,
+                    density_altitude,
                     bullet_name,
                     wind_speed,
                     wind_direction,
@@ -8182,6 +8281,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         dsf_points: carried_dsf_points,
                         bc_reference: bc_reference_profile_field(bc_reference),
                         pressure_reference: pressure_reference_profile_field(pressure_type),
+                        density_altitude,
                     };
 
                     let path = save_profile(&profile)?;
@@ -8645,6 +8745,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         pressure_type,
         humidity,
         altitude,
+        density_altitude_active,
         wind_speed,
         wind_direction,
         wind_vertical,
@@ -8854,12 +8955,19 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // setting to station pressure. Reused below for the solver, the custom-drag-table
     // Mach-range warning, and the stability summary, so all three agree with what the
     // trajectory actually flew under.
-    let (resolved_temperature, resolved_pressure) = resolve_station_conditions_with_pressure_mode(
-        temperature,
-        pressure,
-        altitude,
-        pressure_type,
-    );
+    //
+    // MBA-1366: when `--density-altitude` (or a CSV DA/DENSITY_ALTITUDE column) was used,
+    // `temperature`/`pressure` are ALREADY the fully-resolved station values (the CLI dispatch
+    // computed them via `atmosphere::resolve_atmosphere_for_density_altitude` before this
+    // function ever ran) — skip re-deriving through the default-sentinel heuristic a second
+    // time, which could otherwise misinterpret an already-resolved value that happens to land
+    // near the sea-level standard as "omitted" and silently re-derive it from `altitude`
+    // instead (the same class of bug the QNH Authoritative bypass above exists to prevent).
+    let (resolved_temperature, resolved_pressure) = if density_altitude_active {
+        (temperature, pressure)
+    } else {
+        resolve_station_conditions_with_pressure_mode(temperature, pressure, altitude, pressure_type)
+    };
 
     // Set up atmospheric conditions
     let atmosphere = AtmosphericConditions {
@@ -14868,6 +14976,68 @@ fn handle_compare(
     Ok(())
 }
 
+/// MBA-1366: the cross-crate proof that `atmosphere::resolve_atmosphere_for_density_altitude`
+/// (library) is the exact algebraic inverse of `pdf_dope_card::calculate_density_altitude`
+/// (this CLI-binary-only module) -- the strongest correctness check available, per the task
+/// brief: a density altitude fed into the inverse function, then that function's OWN output fed
+/// back through the FORWARD function this engine already ships to REPORT density altitude, must
+/// reproduce the original number.
+#[cfg(all(test, feature = "pdf"))]
+mod density_altitude_round_trip_tests {
+    use ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude;
+    use crate::pdf_dope_card::calculate_density_altitude;
+
+    const FT_TO_M: f64 = 0.3048;
+
+    #[test]
+    fn density_altitude_round_trips_through_the_dope_card_formula_default_temperature() {
+        for da_ft in [0.0_f64, 500.0, 1500.0, 3000.0, 6000.0, 9000.0] {
+            let da_m = da_ft * FT_TO_M;
+            let (_altitude_m, temp_c, pressure_hpa) =
+                resolve_atmosphere_for_density_altitude(da_m, None);
+
+            let temp_f = temp_c * 9.0 / 5.0 + 32.0;
+            let pressure_inhg = pressure_hpa / 33.863_886_666_667; // matches pdf_dope_card::INHG_TO_HPA exactly
+            // calculate_density_altitude's own `_altitude_ft` parameter is unused (its DA model
+            // depends only on pressure and temperature) -- pass a deliberately wrong value (a
+            // large negative sentinel) to prove that at the same time.
+            let round_tripped_ft = calculate_density_altitude(-999_999.0, pressure_inhg, temp_f);
+
+            assert!(
+                (round_tripped_ft - da_ft).abs() < 1e-6,
+                "da_ft={da_ft}: round-tripped {round_tripped_ft} (temp_c={temp_c}, \
+                 pressure_hpa={pressure_hpa})"
+            );
+        }
+    }
+
+    #[test]
+    fn density_altitude_round_trips_through_the_dope_card_formula_explicit_temperature() {
+        for da_ft in [0.0_f64, 1000.0, 4000.0, 8000.0] {
+            for explicit_temp_c in [-10.0_f64, 0.0, 25.0, 40.0] {
+                let da_m = da_ft * FT_TO_M;
+                let (_altitude_m, temp_c, pressure_hpa) =
+                    resolve_atmosphere_for_density_altitude(da_m, Some(explicit_temp_c));
+                assert_eq!(
+                    temp_c, explicit_temp_c,
+                    "explicit temperature must be honored exactly"
+                );
+
+                let temp_f = temp_c * 9.0 / 5.0 + 32.0;
+                let pressure_inhg = pressure_hpa / 33.863_886_666_667; // matches pdf_dope_card::INHG_TO_HPA exactly
+                let round_tripped_ft =
+                    calculate_density_altitude(0.0, pressure_inhg, temp_f);
+
+                assert!(
+                    (round_tripped_ft - da_ft).abs() < 1e-6,
+                    "da_ft={da_ft} explicit_temp_c={explicit_temp_c}: round-tripped \
+                     {round_tripped_ft} (pressure_hpa={pressure_hpa})"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod profile_unit_tests {
     use super::*;
@@ -14904,6 +15074,7 @@ mod profile_unit_tests {
             dsf_points: None,
             bc_reference: None,
             pressure_reference: None,
+            density_altitude: None,
         }
     }
 
@@ -15136,6 +15307,58 @@ mod profile_unit_tests {
     fn parse_pressure_reference_profile_field_rejects_garbage() {
         assert!(parse_pressure_reference_profile_field(Some("barometric")).is_err());
         assert!(parse_pressure_reference_profile_field(Some("QNH")).is_ok()); // case-insensitive
+    }
+
+    /// MBA-1366: a profile saved before `density_altitude` existed (no key at all) must still
+    /// deserialize cleanly as `None`, and must NOT gain the key on re-save — same forward-compat
+    /// contract as `bc_reference`/`pressure_reference` above.
+    #[test]
+    fn profile_without_density_altitude_key_round_trips_as_none() {
+        let phase1_json = r#"{
+            "name": "pre-mba-1366",
+            "velocity": 2700.0,
+            "bc": 0.475,
+            "mass": 175.0,
+            "diameter": 0.308,
+            "drag_model": "G7",
+            "units": "imperial",
+            "temperature": 59.0,
+            "pressure": 29.92,
+            "humidity": 50.0,
+            "altitude": 0.0
+        }"#;
+        let profile: ProfileData = serde_json::from_str(phase1_json).unwrap();
+        assert_eq!(profile.density_altitude, None);
+
+        let reserialized = serde_json::to_string(&profile).unwrap();
+        assert!(!reserialized.contains("density_altitude"));
+    }
+
+    /// A profile that DOES declare `density_altitude` must round-trip through save/load, and
+    /// `converted_to` must rescale it exactly like `altitude` (same feet/meters convention).
+    #[test]
+    fn profile_with_density_altitude_round_trips_and_converts_like_altitude() {
+        let profile = ProfileData {
+            density_altitude: Some(3000.0), // feet (this fixture's units are imperial-derived)
+            units: "imperial".to_string(),
+            altitude: 1000.0,
+            ..metric_profile()
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("density_altitude"));
+
+        let reloaded: ProfileData = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.density_altitude, Some(3000.0));
+
+        let metric = reloaded.converted_to(UnitSystem::Metric).unwrap();
+        let expected_altitude_m = 1000.0 * 0.3048;
+        let expected_da_m = 3000.0 * 0.3048;
+        assert!((metric.altitude - expected_altitude_m).abs() < 1e-9);
+        assert!(
+            (metric.density_altitude.unwrap() - expected_da_m).abs() < 1e-9,
+            "density_altitude must convert like altitude: got {:?}",
+            metric.density_altitude
+        );
     }
 
     #[test]
