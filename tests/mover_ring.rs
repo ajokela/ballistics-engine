@@ -522,3 +522,57 @@ fn inert_unit_warning_precedes_the_click_graduation_error() {
         "the warning must precede the fatal graduation error, got: {stderr}"
     );
 }
+
+#[test]
+fn a_saved_profiles_pressure_mode_does_not_hijack_a_cli_supplied_pressure() {
+    // MBA-1366 review, Important #2: `trajectory --saved-profile` does not load a profile's
+    // stored pressure VALUE, so inheriting its stored pressure MODE applied `qnh` to whatever
+    // pressure the run actually used. A user who saved a profile once with --pressure-type qnh
+    // then typed an absolute station reading got it silently reduced a second time: measured
+    // 2299.49 fps vs the correct 2222.86 fps at 300 yd, a 77 fps error. A mode must travel
+    // with its value or not at all.
+    let home = std::env::temp_dir().join(format!(
+        "ballistics-profile-mode-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&home).expect("temp home");
+
+    let save = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "profile", "save", "modetest", "--velocity", "2700", "--bc", "0.475", "--mass",
+            "168", "--diameter", "0.308", "--pressure", "30.41", "--pressure-type", "qnh",
+        ])
+        .output()
+        .expect("profile save");
+    assert!(save.status.success(), "save failed: {}", String::from_utf8_lossy(&save.stderr));
+
+    let run = |extra: &[&str]| -> String {
+        let mut args = vec![
+            "trajectory", "--saved-profile", "modetest", "--altitude", "5000", "--pressure",
+            "25.20", "--max-range", "300",
+        ];
+        args.extend_from_slice(extra);
+        let out = Command::new(get_cli_binary())
+            .env("HOME", &home)
+            .args(&args)
+            .output()
+            .expect("trajectory");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let inherited = run(&[]);
+    let explicit_absolute = run(&["--pressure-type", "absolute"]);
+    let explicit_qnh = run(&["--pressure-type", "qnh"]);
+
+    assert_eq!(
+        inherited, explicit_absolute,
+        "a stored profile mode must not be applied to a CLI-supplied pressure"
+    );
+    assert_ne!(
+        explicit_qnh, explicit_absolute,
+        "sanity: an EXPLICIT --pressure-type qnh must still reduce the pressure"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

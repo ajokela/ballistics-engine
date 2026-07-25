@@ -1944,6 +1944,14 @@ impl WasmBallistics {
             inputs.pressure = da_pressure_hpa;
             inputs.altitude = da_altitude_m;
             density_altitude_active = true;
+            // The pressure just derived from density altitude IS absolute station pressure, so
+            // the declared mode no longer describes it. Native does the same reset (main.rs's
+            // `final_pressure_type` becomes `Absolute` in its density-altitude arm). Without
+            // this, `--density-altitude X --pressure-type qnh --auto-zero Y` leaves the stale
+            // `Qnh` mode for the zero-day solve below to inherit, which reduces an already
+            // absolute pressure a second time (~7% error at 2000 ft DA) — shot day correct,
+            // zero day silently wrong.
+            pressure_type = PressureReferenceMode::Absolute;
             if pressure_supplied || pressure_type_supplied {
                 // MBA-1414 precedent: the browser terminal has no visible stderr, so this rides
                 // the table-only warning block instead of an eprintln!.
