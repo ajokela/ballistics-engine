@@ -1679,6 +1679,52 @@ Impact Velocity: 2510 fps\n";
         );
     }
 
+    /// MBA-1414: on the browser terminal `--adjustment-unit` reaches only the mover Ring
+    /// column, which exists only for a nonzero `--target-speed`. A tester set it, got a
+    /// byte-identical table and no signal at all — so the inert case now says so, table-only.
+    #[wasm_bindgen_test]
+    fn inert_adjustment_unit_warns_table_only() {
+        let wasm = WasmBallistics::new();
+        const BASE: &str = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300";
+
+        // Supplied with no mover ring: warn, and leave the table below it unchanged.
+        let inert = wasm
+            .run_command(&format!("{BASE} --adjustment-unit moa"))
+            .unwrap();
+        assert!(
+            inert.contains("--adjustment-unit only affects the mover Ring column"),
+            "got: {inert}"
+        );
+
+        // A mover ring consumes the unit: no warning, and the column carries it.
+        let with_ring = wasm
+            .run_command(&format!("{BASE} --adjustment-unit moa --target-speed 10"))
+            .unwrap();
+        assert!(
+            !with_ring.contains("--adjustment-unit only affects"),
+            "a rendered Ring column means the flag did something: {with_ring}"
+        );
+        assert!(with_ring.contains("Ring(moa)"), "got: {with_ring}");
+
+        // Never supplied: silence (the default unit is not a user choice we can detect).
+        let untouched = wasm.run_command(BASE).unwrap();
+        assert!(
+            !untouched.contains("--adjustment-unit only affects"),
+            "an unsupplied flag must not warn: {untouched}"
+        );
+
+        // Machine formats stay pure.
+        for fmt in ["json", "csv"] {
+            let machine = wasm
+                .run_command(&format!("{BASE} --adjustment-unit moa -o {fmt}"))
+                .unwrap();
+            assert!(
+                !machine.contains("--adjustment-unit only affects"),
+                "the warning must never contaminate {fmt} output, got: {machine}"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------------
     // MBA-1409: `loadDragTable` accepts `.drg` vendor drag-curve text as a fallback when the
     // bytes don't parse as CSV. WASM has no filesystem and thus no file extension to key off

@@ -421,3 +421,78 @@ fn table_ring_column_honors_moa_adjustment_unit() {
         "Ring(mil) cell must match the JSON mover_ring_mil, 2dp-rounded"
     );
 }
+
+// ---------------------------------------------------------------------------------
+// MBA-1414: --adjustment-unit reaches only the Ring column and the PDF dope card, so a
+// run with neither says so on stderr instead of silently ignoring the flag. Reported by
+// a tester who set `--adjustment-unit clicks` and saw a byte-identical table.
+// ---------------------------------------------------------------------------------
+
+fn run_capturing_stderr(args: &[&str]) -> (String, String) {
+    let out = Command::new(get_cli_binary())
+        .args(args)
+        .output()
+        .expect("run");
+    (
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+const NOOP_BASE: &[&str] = &[
+    "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--max-range", "300",
+];
+
+#[test]
+fn inert_adjustment_unit_warns_once_and_leaves_stdout_untouched() {
+    let mut warned = NOOP_BASE.to_vec();
+    warned.extend(["--adjustment-unit", "moa"]);
+    let (warned_stdout, stderr) = run_capturing_stderr(&warned);
+
+    let hits = stderr.matches("--adjustment-unit only affects").count();
+    assert_eq!(hits, 1, "expected exactly one warning, got {hits}: {stderr}");
+    assert!(stderr.contains("--target-speed"), "{stderr}");
+
+    // The warning is advice, not a behavior change: stdout must be byte-identical to the
+    // same run without the flag (which is the whole reason the flag looked broken).
+    let (plain_stdout, plain_stderr) = run_capturing_stderr(NOOP_BASE);
+    assert_eq!(
+        warned_stdout, plain_stdout,
+        "an inert --adjustment-unit must not alter stdout"
+    );
+    assert!(
+        !plain_stderr.contains("--adjustment-unit only affects"),
+        "the default unit must not warn: {plain_stderr}"
+    );
+}
+
+#[test]
+fn adjustment_unit_is_silent_when_the_ring_column_renders_it() {
+    let mut with_ring = NOOP_BASE.to_vec();
+    with_ring.extend(["--adjustment-unit", "moa", "--target-speed", "10", "--full"]);
+    let (stdout, stderr) = run_capturing_stderr(&with_ring);
+    assert!(
+        !stderr.contains("--adjustment-unit only affects"),
+        "a mover ring consumes the unit; no warning is due: {stderr}"
+    );
+    assert!(
+        stdout.contains("Ring(moa)"),
+        "precondition: the ring column should render in the requested unit"
+    );
+}
+
+#[test]
+fn json_output_never_carries_the_warning_text() {
+    let mut json_args = NOOP_BASE.to_vec();
+    json_args.extend(["--adjustment-unit", "moa", "-o", "json"]);
+    let (stdout, stderr) = run_capturing_stderr(&json_args);
+    assert!(
+        stderr.contains("--adjustment-unit only affects"),
+        "the warning still belongs on stderr for machine output: {stderr}"
+    );
+    assert!(
+        !stdout.contains("--adjustment-unit only affects"),
+        "warning text must never reach the JSON payload"
+    );
+    serde_json::from_str::<Value>(&stdout).expect("stdout must remain parseable JSON");
+}
