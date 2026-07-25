@@ -224,7 +224,8 @@ above; inclined zeroing projects the shot-frame trajectory back into that world 
 | --- | --- | --- | --- |
 | `altitude_m` | no | `0` | Station altitude. |
 | `temperature_k` | no | ICAO at `altitude_m` | Authoritative station temperature when present. |
-| `pressure_pa` | no | ICAO at `altitude_m` | Authoritative station pressure when present. |
+| `pressure_pa` | no | ICAO at `altitude_m` | Station or sea-level pressure when present; see `pressure_reference`. |
+| `pressure_reference` | no | `"absolute"` | Whether `pressure_pa` is absolute station pressure or a QNH altimeter setting. |
 | `relative_humidity` | no | `0.5` | Relative-humidity fraction. |
 | `latitude_rad` | no | absent | Geodetic latitude; needed when Coriolis is enabled. |
 
@@ -239,6 +240,23 @@ standard-atmosphere sentinels. MBA-1302 must bypass that CLI sentinel inference:
 select ICAO-at-altitude resolution, while present fields are passed as authoritative values. The
 resolved values are recorded as explicit numbers in a successful response's
 `resolved_request`; the resolved altitude and relative humidity are concrete there as well.
+
+#### `pressure_reference` (MBA-1397)
+
+`pressure_pa` can mean two different physical quantities, and the caller must say which:
+
+- `"absolute"` (the default, and the only meaning before this field existed): `pressure_pa` is
+  already the absolute station pressure at `altitude_m`. Used as-is.
+- `"qnh"`: `pressure_pa` is a sea-level-corrected altimeter setting (a weather-report barometer
+  / METAR-style QNH reading). It is reduced to station pressure at `altitude_m` via the ICAO
+  inverse-barometric formula (`station = QNH * (1 - 0.0065*h/288.15)^5.25588`) before use, and
+  the resolved `pressure_pa` in a successful response's `resolved_request` is the REDUCED
+  station pressure, not the raw QNH the caller sent. The reduction is recorded as an
+  `assumptions` entry with code `qnh_reduced_to_station_pressure`.
+
+`pressure_reference` has no effect when `pressure_pa` is omitted: an omitted pressure always
+resolves to the ICAO standard station pressure at `altitude_m`, which is mathematically the same
+result as reducing a QNH of exactly `101325 Pa` (the ICAO sea-level standard).
 
 ### `wind`
 
@@ -324,10 +342,12 @@ arrays of objects with a stable `code`, a human-readable `message`, and an optio
 
 The service emits notices in deterministic request-field order. Stable v1 assumption codes are
 `default_applied` for literal defaults, `icao_standard_temperature` and
-`icao_standard_pressure` for omitted station values resolved from the requested altitude, and
-`estimated_projectile_length` when the engine needs inferred projectile geometry. Stable v1
-warning codes are `partial_wind_coverage`, `experimental_effect`, and
-`rk45_time_step_ignored`. Messages are descriptive text rather than a compatibility surface.
+`icao_standard_pressure` for omitted station values resolved from the requested altitude,
+`qnh_reduced_to_station_pressure` for an explicit `pressure_reference: "qnh"` pressure reduced
+to station pressure (MBA-1397), and `estimated_projectile_length` when the engine needs
+inferred projectile geometry. Stable v1 warning codes are `partial_wind_coverage`,
+`experimental_effect`, and `rk45_time_step_ignored`. Messages are descriptive text rather than
+a compatibility surface.
 
 ```json
 {
