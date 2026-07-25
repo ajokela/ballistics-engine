@@ -1032,7 +1032,7 @@ enum Commands {
         #[arg(long)]
         velocity_data: Option<String>,
 
-        /// Drag model to estimate: g1, g7, or both
+        /// Drag model to estimate: g1, g7, both, or any single family (g2/g5/g6/g8/gi/gs/ra4)
         #[arg(long, default_value = "both")]
         drag_model: String,
 

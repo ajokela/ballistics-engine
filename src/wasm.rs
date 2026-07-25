@@ -5186,7 +5186,7 @@ Estimate BC Command:
     -d, --diameter <DIA>         Diameter (inches/mm)
     --data <PAIRS>               Drop data: "dist,drop;..." (yd,in / m,mm)
     --velocity-data <PAIRS>      Velocity data: "dist,vel;..." (yd,fps / m,m/s)
-    --drag-model <MODEL>         g1, g7, or both [default: both]
+    --drag-model <MODEL>         g1, g7, both, or any single family (g2/g5/g6/g8/gi/gs/ra4) [default: both]
     --zero-range <DIST>          Zero range of the drop data (yd/m). Dope cards are
                                  zeroed — pass this so drop is fit below line of sight.
     --sight-height <H>           Sight height above bore (in/mm) for the zeroed fit
