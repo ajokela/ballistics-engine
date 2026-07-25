@@ -15523,6 +15523,9 @@ mod dsf_cli_tests {
             max_yaw_angle: None,
             max_precession_angle: None,
             aerodynamic_jump: None,
+            mach_1_2_distance_m: None,
+            mach_1_0_distance_m: None,
+            mach_0_9_distance_m: None,
         }
     }
 
