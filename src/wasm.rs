@@ -11,6 +11,7 @@ use crate::cli_api::{
 use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
 use crate::moving_target::{calculate_lead, mover_ring};
+use crate::truing_dsf::{apply_dsf, DsfPoint, DsfTable};
 use std::cell::RefCell;
 
 #[wasm_bindgen]
@@ -223,6 +224,53 @@ fn cd_scale_range_warning(value: f64) -> Option<String> {
             "warning: --cd-scale {value} is far outside the typical truing range (0.90-1.10)\n\n"
         ))
     }
+}
+
+/// `"{n} points, Mach {lo:.2}-{hi:.2}"` summary of a DSF table's points — mirrors native
+/// `main.rs`'s `dsf_table_summary` exactly (byte-identical wording), so the WASM
+/// terminal's "DSF table active (...)" note reads the same as the native CLI's
+/// (MBA-1411). Kept as a local copy since the native version is private to the binary
+/// crate. `points` empty reports Mach 0.00-0.00 rather than panicking.
+fn dsf_table_summary(points: &[DsfPoint]) -> String {
+    let lo = points.first().map(|p| p.mach).unwrap_or(0.0);
+    let hi = points.last().map(|p| p.mach).unwrap_or(0.0);
+    format!("{} points, Mach {:.2}-{:.2}", points.len(), lo, hi)
+}
+
+/// Parse every `--dsf-point MACH:DSF` occurrence into a validated [`DsfTable`] (MBA-1411:
+/// WASM has no saved-profile storage, so the DSF table is a per-call argument, mirroring
+/// the MBA-1343 per-call pattern used by `true-velocity`'s multi-`--observed` and
+/// `monte-carlo --wez`). `None` when no `--dsf-point` flags were given — the caller then
+/// skips `apply_dsf` entirely, an exact no-op. Bounds/cap validation (0 < mach < 1.2,
+/// 0.5 < dsf < 2.0, <= 6 points) is NOT reimplemented here — `DsfTable::from_points`'s
+/// error strings ARE the user-facing errors, identical to the native `dsf`/saved-profile
+/// paths.
+fn parse_dsf_points(raw: &[String]) -> Result<Option<DsfTable>, JsValue> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let mut points = Vec::with_capacity(raw.len());
+    for s in raw {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 2 {
+            return Err(JsValue::from_str(&format!(
+                "--dsf-point expects MACH:DSF (e.g. 0.95:1.08), got '{}'",
+                s
+            )));
+        }
+        let mach: f64 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| JsValue::from_str(&format!("--dsf-point: invalid MACH in '{}'", s)))?;
+        let dsf: f64 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| JsValue::from_str(&format!("--dsf-point: invalid DSF in '{}'", s)))?;
+        points.push(DsfPoint { mach, dsf });
+    }
+    DsfTable::from_points(points)
+        .map(Some)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 /// Local mirror of the native CLI's `MonteCarloOutput` modes for the WEZ path
@@ -990,6 +1038,9 @@ impl WasmBallistics {
         // Raw "VMIN:VMAX:BC" strings from every --bc-segment occurrence (manual
         // velocity-keyed BC segments; take precedence over a loaded BC5D table).
         let mut bc_segment_strs: Vec<String> = Vec::new();
+        // Raw "MACH:DSF" strings from every --dsf-point occurrence (MBA-1411: per-call
+        // DSF table — WASM has no saved-profile storage to carry one).
+        let mut dsf_point_strs: Vec<String> = Vec::new();
         let mut temperature = default_temp;
         let mut pressure = default_pressure;
         let mut humidity = 50.0;
@@ -1196,6 +1247,12 @@ impl WasmBallistics {
                 "--bc-segment" => {
                     if i + 1 < args.len() {
                         bc_segment_strs.push(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                "--dsf-point" => {
+                    if i + 1 < args.len() {
+                        dsf_point_strs.push(args[i + 1].to_string());
                         i += 1;
                     }
                 }
@@ -1504,6 +1561,10 @@ impl WasmBallistics {
             }
             i += 1;
         }
+
+        // MBA-1411: validate the per-call DSF table (if any) before doing any solve work —
+        // dimensionless (Mach/DSF ratio), so no unit conversion is needed.
+        let dsf_table = parse_dsf_points(&dsf_point_strs)?;
 
         // Build inputs with unit conversions
         let mut inputs = InternalBallisticInputs::default();
@@ -1970,7 +2031,17 @@ impl WasmBallistics {
         };
 
         match solver.solve() {
-            Ok(result) => {
+            Ok(mut result) => {
+                // MBA-1411: apply the per-call DSF table (if any), IN PLACE, before any
+                // output format below reads `result` — mirrors native main.rs's single
+                // post-solve `apply_dsf` site (drop-only: velocity/energy/TOF/windage and
+                // sampled_points' non-drop fields are untouched; see apply_dsf's doc
+                // comment for the invariant). Must run identically ahead of every format,
+                // including the Ring column (mover_ring, below), which keys off
+                // `result.points`' downrange position/time only — untouched by apply_dsf.
+                if let Some(table) = dsf_table.as_ref() {
+                    apply_dsf(&mut result, table);
+                }
                 let output = match output_format {
                     OutputFormat::Table => self.format_trajectory_table(
                         &result,
@@ -2015,6 +2086,19 @@ impl WasmBallistics {
                 // JSON/CSV payload would break any downstream parser of those formats.
                 if print_bc_segments && matches!(output_format, OutputFormat::Table) {
                     combined.push_str(&self.format_bc_segments_report(&inputs, units));
+                }
+                // MBA-1411: table-output-only note that a per-call DSF table was applied —
+                // the Drop column above already reflects it (`apply_dsf`, called before
+                // this match arm's formatting, corrects every output format identically).
+                // JSON/CSV get no equivalent text or top-level field (purity rule, matching
+                // native main.rs's saved-profile note).
+                if let Some(table) = dsf_table.as_ref() {
+                    if matches!(output_format, OutputFormat::Table) {
+                        combined.push_str(&format!(
+                            "\nDSF table active ({})\n",
+                            dsf_table_summary(table.points())
+                        ));
+                    }
                 }
                 // MBA-1337 p3: table-only chart append, mirroring the native CLI's
                 // --plot block (72x12 cells; drop then lateral drift vs range). JSON
@@ -2356,6 +2440,13 @@ impl WasmBallistics {
         let mut range = 500.0;
         let mut adjustment_unit = "mil";
         let mut lead_output = "table";
+        // MBA-1411 (carried from the MBA-1356 review's "WASM lead untrued-curve gap"):
+        // this command already applies a loaded custom drag table unconditionally (see
+        // the self.drag_table block below) but, unlike trajectory/zero/monte-carlo, never
+        // wired up --cd-scale to go with it — a table trued via `trajectory --cd-scale`
+        // silently reverted to its untrued curve here. None until parsed; resolved against
+        // self.drag_table once the arg-parse loop is done, exactly like handle_trajectory_command.
+        let mut cd_scale: Option<f64> = None;
         // Powder temperature plumbing (MBA-1325), identical defaults/parsing to
         // handle_trajectory_command so a curve/sensitivity correction resolves the
         // same muzzle velocity from either command.
@@ -2430,6 +2521,16 @@ impl WasmBallistics {
                 "--drag-model" => {
                     if i + 1 < args.len() {
                         drag_model = args[i + 1];
+                        i += 1;
+                    }
+                }
+                "--cd-scale" => {
+                    if i + 1 < args.len() {
+                        cd_scale = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid cd-scale"))?,
+                        );
                         i += 1;
                     }
                 }
@@ -2655,6 +2756,16 @@ impl WasmBallistics {
         if let Some(table) = self.drag_table.borrow().as_ref() {
             inputs.custom_drag_table = Some(table.clone());
         }
+        // MBA-1411: --cd-scale requires a loaded drag table, mirroring the native CLI's
+        // --cd-scale/--drag-table pairing requirement and the identical check in
+        // handle_trajectory_command/handle_zero_command. Validate before any solve.
+        if let Some(scale) = cd_scale {
+            if self.drag_table.borrow().is_none() {
+                return Err(JsValue::from_str(CD_SCALE_REQUIRES_DRAG_TABLE));
+            }
+            inputs.cd_scale = scale;
+        }
+        let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
 
         // Powder temperature (MBA-1325): identical resolution to handle_trajectory_command
         // so a curve/sensitivity muzzle-velocity correction reproduces exactly between the
@@ -2803,8 +2914,11 @@ impl WasmBallistics {
                         .unwrap_or_else(|_| "Error formatting JSON".to_string()));
                 }
 
+                // MBA-1411: table-only prepend, same pattern as
+                // handle_trajectory_command/handle_zero_command — the JSON branch above
+                // already returned, so everything past this point is the table view.
                 Ok(format!(
-                    "Moving-Target Lead\n\
+                    "{}Moving-Target Lead\n\
                      ===================\n\
                      Target: {:.1} {} at {:.0}\u{b0} \
                      (0=away, 90=left-to-right, 180=toward, 270=right-to-left;\n\
@@ -2814,6 +2928,7 @@ impl WasmBallistics {
                      Lead: {:.2} {} ({})\n\
                      Intercept Range: {:.1} {}\n\
                      Iterations: {}\n",
+                    cd_scale_warning.as_deref().unwrap_or(""),
                     target_speed,
                     speed_unit,
                     target_angle,
@@ -5107,6 +5222,10 @@ Trajectory Command:
     --bc-segment <VMIN:VMAX:BC>  Manual velocity-keyed BC segment (repeatable; fps/m/s per --units)
     --print-bc-segments          Print the active BC segment ladder (velocity/Mach span + BC)
                                  applied to this run, or a note when none are active
+    --dsf-point <MACH:DSF>        Drop-scale-factor truing point (repeatable; up to 6). Scales
+                                 predicted drop by DSF at MACH (0 < MACH < 1.2, 0.5 < DSF < 2.0)
+                                 — WASM has no saved profile, so pass the table per call
+                                 (native CLI equivalent: a saved profile's `dsf` table)
     --use-powder-sensitivity     Enable powder temp sensitivity
     --ignore-ground-impact       Disable ground-impact truncation; trajectory runs to
                                  --max-range regardless of drop below the muzzle
@@ -5254,6 +5373,9 @@ Lead Command:
     -m, --mass <MASS>             Mass (grains/grams)
     -d, --diameter <DIA>          Diameter (inches/mm)
     --drag-model <MODEL>          Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
+    --cd-scale <FACTOR>            Whole-curve drag scale for a loaded drag table
+                                  (1.0 = neutral, typical 0.90-1.10). Requires a
+                                  drag table (loadDragTable)
     --sight-height <HEIGHT>       Sight height above bore (inches/mm)
     --temperature <T>             Air temperature (°F/°C) [default: 15°C standard]
     --pressure <P>                Barometric pressure (inHg/hPa) [default: 1013.25 hPa]
