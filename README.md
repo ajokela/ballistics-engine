@@ -359,6 +359,16 @@ Calculate the effective muzzle velocity that produces a measured drop at a known
   --chrono-velocity 2822 \
   --offline
 
+# Chronograph measured downrange, not at the muzzle (MBA-1377): most
+# chronographs read 10-15 ft (or 25 m) downrange, so --chrono-distance
+# back-solves the true muzzle velocity from the raw reading
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --chrono-velocity 2822 --chrono-distance 15 \
+  --offline
+
 # With BC5D tables for improved accuracy
 ./ballistics true-velocity \
   --measured-drop 5.1 --range 600 \
@@ -375,6 +385,8 @@ Calculate the effective muzzle velocity that produces a measured drop at a known
 ```
 
 Use case: A shooter measures 5.1 MIL of drop at 600 yards. Their chronograph showed 2822 fps. The command calculates the effective velocity is actually ~2740 fps, suggesting a -82 fps adjustment for accurate ballistic predictions.
+
+**Downrange chronograph correction (MBA-1377).** Most chronographs (and radar units) read some distance downrange rather than at the muzzle — 10-15 ft is typical for optical screens, 25 m for Lapua/JBM's reference distance — so the raw reading is a few fps low. `--chrono-distance` back-solves the true muzzle velocity from that reading via secant iteration on the same forward drag model (BC/`--drag-model`/atmosphere) the rest of the command uses; zero or absent is an exact no-op. It's a pure display-side correction (`--chrono-velocity` never feeds the drop-based solve either way) and validates its input to a sane 1-100 ft / 0.3-30 m band rather than silently extrapolating a bad distance into a bad velocity.
 
 **Joint velocity + BC truing.** With two or more `--observed RANGE:DROP` impacts spanning supersonic to transonic ranges, `true-velocity` fits *both* muzzle velocity and ballistic coefficient against the real trajectory solver. When the observation set is too short/closely-spaced to separate the two, it refuses the joint fit, trues velocity only, and says so — no false-precision BC. See [CLI_USAGE.md](CLI_USAGE.md#joint-mv--bc-calibration-multiple-observed-impacts) for details.
 

@@ -3929,6 +3929,7 @@ impl WasmBallistics {
         let mut mass = default_mass;
         let mut diameter = default_diameter;
         let mut chrono_velocity: Option<f64> = None;
+        let mut chrono_distance: Option<f64> = None;
         let mut zero_distance = 100.0;
         let mut sight_height: Option<f64> = None;
         let mut temperature: Option<f64> = None;
@@ -3998,6 +3999,14 @@ impl WasmBallistics {
                         require_value(args, i)?
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid chrono velocity"))?,
+                    );
+                    i += 1;
+                }
+                "--chrono-distance" => {
+                    chrono_distance = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid chrono distance"))?,
                     );
                     i += 1;
                 }
@@ -4208,6 +4217,40 @@ impl WasmBallistics {
         // --bc-table-dir / --bc-table-auto, which the WASM terminal does not expose
         // (the loaded-BC5D host API only wires into `trajectory --use-bc-segments`).
         let bc_segments: Option<Vec<crate::BCSegmentData>> = None;
+
+        // MBA-1377: correct a downrange chronograph reading back to muzzle velocity. Mirrors
+        // the native `Commands::TrueVelocity` dispatch byte-for-byte: pure input-side
+        // transform on `chrono_fps` before it reaches any display/comparison path below, with
+        // `truing.rs`'s drop-based solves never seeing --chrono-distance.
+        if chrono_distance.is_some_and(|d| d != 0.0) && chrono_fps.is_none() {
+            return Err(JsValue::from_str(
+                "--chrono-distance requires --chrono-velocity",
+            ));
+        }
+        let chrono_fps = match (chrono_fps, chrono_distance) {
+            (Some(measured), Some(d)) if d != 0.0 => {
+                let screen_distance_m = match units {
+                    UnitSystem::Imperial => d * 0.3048, // feet to meters
+                    UnitSystem::Metric => d,
+                };
+                let correction = crate::truing::correct_chrono_velocity_fps(
+                    measured,
+                    screen_distance_m,
+                    bc,
+                    drag_model_arg,
+                    weight_gr,
+                    caliber_in,
+                    temp_f,
+                    press_inhg,
+                    humidity,
+                    alt_ft,
+                    &bc_segments,
+                )
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                Some(correction.muzzle_velocity_fps)
+            }
+            _ => chrono_fps,
+        };
 
         if !observed.is_empty() {
             // MBA-1316: one or more --observed impacts -> joint MV+BC calibration via
@@ -6136,6 +6179,12 @@ True Velocity Command:
     -m, --mass <MASS>            Bullet weight (grains/grams)
     -d, --diameter <DIA>         Bullet diameter (inches/mm)
     --chrono-velocity <VEL>      Chronograph velocity for comparison (fps/m/s)
+    --chrono-distance <DIST>     Distance --chrono-velocity was measured at,
+                                 downrange of the muzzle (ft/m). Nonzero
+                                 back-solves the true muzzle velocity via the
+                                 real forward drag model; zero/absent is a
+                                 no-op. Valid range 1-100 ft / 0.3-30 m;
+                                 requires --chrono-velocity
     --zero-distance <DIST>       Zero distance (yd/m) [default: 100]
     --sight-height <HEIGHT>      Sight height above bore (in/mm) [default: 2/50]
     --temperature <T>            Temperature (°F/°C) [default: 59/15]

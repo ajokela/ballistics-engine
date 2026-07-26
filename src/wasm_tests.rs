@@ -3190,4 +3190,74 @@ Impact Velocity: 2510 fps\n";
              --density-altitude"
         );
     }
+
+    // -----------------------------------------------------------------------------
+    // MBA-1377: `--chrono-distance` (correct a downrange chronograph reading back to
+    // muzzle velocity). Native parity with `tests/chrono_distance_correction.rs`: the
+    // hand-computed solver math itself is covered natively
+    // (`truing::chrono_correction_tests`, shared by both surfaces); this section
+    // proves the WASM terminal's independent hand-rolled arg parser wires the flag
+    // through identically -- same additive no-op guarantee, same unit conversion,
+    // same error surfacing.
+    // -----------------------------------------------------------------------------
+
+    const CHRONO_DISTANCE_BASE: &str = "true-velocity --range 300 --measured-drop 1.8 -b 0.475 \
+         --drag-model g7 -m 168 -d 0.308 --chrono-velocity 2680";
+
+    #[wasm_bindgen_test]
+    fn chrono_distance_absent_is_byte_identical_to_explicit_zero() {
+        let wasm = WasmBallistics::new();
+        let absent = wasm.run_command(CHRONO_DISTANCE_BASE).unwrap();
+        let zero = wasm
+            .run_command(&format!("{CHRONO_DISTANCE_BASE} --chrono-distance 0"))
+            .unwrap();
+        assert_eq!(
+            absent, zero,
+            "omitting --chrono-distance must be byte-identical to passing an explicit 0"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn chrono_distance_nonzero_changes_the_displayed_adjustment() {
+        let wasm = WasmBallistics::new();
+        let baseline = wasm.run_command(CHRONO_DISTANCE_BASE).unwrap();
+        let corrected = wasm
+            .run_command(&format!("{CHRONO_DISTANCE_BASE} --chrono-distance 15"))
+            .unwrap();
+        assert_ne!(
+            baseline, corrected,
+            "a nonzero --chrono-distance must change the displayed comparison"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn chrono_distance_requires_chrono_velocity() {
+        let wasm = WasmBallistics::new();
+        let err = wasm
+            .run_command(
+                "true-velocity --range 300 --measured-drop 1.8 -b 0.475 -m 168 -d 0.308 \
+                 --chrono-distance 15",
+            )
+            .unwrap_err();
+        assert!(
+            err.as_string()
+                .unwrap_or_default()
+                .contains("--chrono-distance requires --chrono-velocity"),
+            "{err:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn chrono_distance_out_of_band_is_rejected() {
+        let wasm = WasmBallistics::new();
+        for bad in ["-5", "0.05", "1000"] {
+            let err = wasm
+                .run_command(&format!("{CHRONO_DISTANCE_BASE} --chrono-distance {bad}"))
+                .unwrap_err();
+            assert!(
+                err.as_string().unwrap_or_default().contains("out of range"),
+                "distance {bad}: {err:?}"
+            );
+        }
+    }
 }

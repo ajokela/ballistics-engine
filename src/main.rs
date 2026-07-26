@@ -33,10 +33,10 @@ use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN, GRAINS_PER_GRAM, FPS_TO_MPS};
 use ballistics_engine::cli_api::UnitSystem;
 use ballistics_engine::truing::{
-    calculate_true_velocity_local, dsf_window_start, fallback_bullet_length_m,
-    mv_calibration_window, parse_truing_observation, run_multi_observation_truing_core,
-    validate_truing_observations, DragModelArg, DropUnit, MultiTruingReport, TruingModelInputsV1,
-    TruingObservation,
+    calculate_true_velocity_local, correct_chrono_velocity_fps, dsf_window_start,
+    fallback_bullet_length_m, mv_calibration_window, parse_truing_observation,
+    run_multi_observation_truing_core, validate_truing_observations, DragModelArg, DropUnit,
+    MultiTruingReport, TruingModelInputsV1, TruingObservation,
 };
 use ballistics_engine::truing_dsf::{
     apply_dsf, DsfPoint, DsfTable, UpsertOutcome, DSF_MACH_CEILING,
@@ -1268,6 +1268,21 @@ enum Commands {
         /// Chronograph velocity for comparison (fps for imperial, m/s for metric)
         #[arg(long)]
         chrono_velocity: Option<f64>,
+
+        /// Distance downrange from the muzzle at which --chrono-velocity was measured
+        /// (feet for imperial, meters for metric). Most chronographs read 10-15 ft
+        /// (or 25 m) downrange rather than at the muzzle -- JBM ("Distance to
+        /// Chronograph"), Lapua, Ballistic AE, ColdBore, Remington Shoot!, and
+        /// Hornady all correct for this. A nonzero value here back-solves the
+        /// measured reading to a true muzzle velocity via secant iteration on the
+        /// real forward trajectory model, using the SAME --bc/--drag-model/
+        /// atmosphere as the rest of this command (McCoy, *Modern Exterior
+        /// Ballistics*; JBM's published calculator). Zero or absent is an exact
+        /// no-op -- the measured value is used as-is. Requires --chrono-velocity.
+        /// Valid range: 1-100 ft / 0.3-30 m downrange; outside that band the
+        /// command errors instead of silently producing a bad muzzle velocity.
+        #[arg(long, value_name = "DISTANCE")]
+        chrono_distance: Option<f64>,
 
         /// Zero distance (yards for imperial, meters for metric)
         #[arg(long, default_value = "100.0")]
@@ -6860,6 +6875,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             mass,
             diameter,
             chrono_velocity,
+            chrono_distance,
             zero_distance,
             sight_height,
             temperature,
@@ -6984,6 +7000,37 @@ fn main() -> Result<(), Box<dyn Error>> {
                 } else {
                     None
                 };
+
+            // MBA-1377: correct a downrange chronograph reading back to muzzle velocity.
+            // Pure input-side transform -- runs once here, before `chrono_fps` reaches any
+            // display/comparison path below. `truing.rs`'s drop-based solves never see
+            // --chrono-distance; it only ever adjusts the value being compared against them.
+            if chrono_distance.is_some_and(|d| d != 0.0) && chrono_fps.is_none() {
+                return Err("--chrono-distance requires --chrono-velocity".into());
+            }
+            let chrono_fps = match (chrono_fps, chrono_distance) {
+                (Some(measured), Some(d)) if d != 0.0 => {
+                    let screen_distance_m = match units {
+                        UnitSystem::Imperial => d * 0.3048, // feet to meters
+                        UnitSystem::Metric => d,
+                    };
+                    let correction = correct_chrono_velocity_fps(
+                        measured,
+                        screen_distance_m,
+                        bc,
+                        drag_model,
+                        weight_gr,
+                        caliber_in,
+                        temp_f,
+                        press_inhg,
+                        humidity,
+                        alt_ft,
+                        &bc_segments,
+                    )?;
+                    Some(correction.muzzle_velocity_fps)
+                }
+                _ => chrono_fps,
+            };
 
             // Determine if we should use local calculation
             // Use local if: --offline flag, OR no online feature, OR (no online flag and has bc_table_dir)

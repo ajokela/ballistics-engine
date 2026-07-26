@@ -524,6 +524,13 @@ silently by design. Do not exchange saved profile JSON across
 Phase 2) unless the older side only ever reads single-BC, non-`CUSTOM`
 profiles.
 
+**Muzzle velocity and downrange chronographs (MBA-1377).** The `.a7p` format has no field
+for the screen distance a device's muzzle velocity was measured at, so a profile's stored
+velocity is always taken as a true muzzle velocity, unadjusted. If your chronograph reads
+downrange (most do — 10-15 ft, or 25 m, is typical) run `true-velocity` with
+`--chrono-velocity`/`--chrono-distance` first to back-solve the corrected muzzle velocity,
+then save (or re-import) the profile with that corrected value rather than the raw reading.
+
 The `.a7p` wire format is implemented independently for interoperability;
 no third-party code is bundled.
 
@@ -1654,6 +1661,19 @@ Find the effective muzzle velocity that produces a measured drop at a known rang
   --chrono-velocity 2822 \  # Compare against chrono reading
   --offline
 
+# Chronograph reading taken downrange, not at the muzzle (MBA-1377): most
+# chronographs read 10-15 ft (or 25 m) downrange, so the raw reading is
+# slightly low. --chrono-distance back-solves the true muzzle velocity from
+# the measured reading using the SAME --bc/--drag-model/atmosphere, via
+# secant iteration on the real forward drag model (McCoy; JBM's published
+# "Distance to Chronograph" calculator).
+./ballistics true-velocity \
+  --measured-drop 5.1 --range 600 \
+  --bc 0.27 --drag-model g7 \
+  --mass 140 --diameter 0.264 \
+  --chrono-velocity 2822 --chrono-distance 15 \  # measured 15 ft from the muzzle
+  --offline
+
 # With BC5D tables for improved accuracy
 ./ballistics true-velocity \
   --measured-drop 5.1 --range 600 \
@@ -1690,6 +1710,7 @@ Find the effective muzzle velocity that produces a measured drop at a known rang
 | --mass | Bullet mass | Required |
 | --diameter | Bullet diameter | Required |
 | --chrono-velocity | Chronograph velocity for comparison | None |
+| --chrono-distance | Distance `--chrono-velocity` was measured at, downrange of the muzzle (ft/m). Nonzero back-solves the true muzzle velocity via the real forward drag model (secant iteration); zero/absent is an exact no-op. Valid range 1-100 ft / 0.3-30 m; requires `--chrono-velocity` | None (no-op) |
 | --zero-range | Zero range | 100 yd/m |
 | --sight-height | Sight height above bore | 2.0 in/50mm |
 | --bullet-length | Bullet length (for BC5D lookup) | Auto-calculated |
@@ -2099,7 +2120,10 @@ Optional independent normal priors are explicit:
 ```
 
 No prior is inferred from the input BC, chronograph velocity, a saved profile, or
-the residual RMS. `--chrono-velocity` remains a display-only comparison. The MAP
+the residual RMS. `--chrono-velocity` remains a display-only comparison — it never
+feeds the joint fit, and neither does `--chrono-distance` (MBA-1377): the distance
+correction only adjusts the value being *compared*, before that comparison happens.
+The MAP
 minimizes the weighted observation chi-square plus only the priors shown in the
 request. Because observation sigmas are declared as absolute known standard
 deviations, the local covariance is `(Jᵀ W J + prior precision)⁻¹`; it is **not**
@@ -2480,6 +2504,7 @@ BC5D (5-Dimensional BC Correction) tables provide ML-derived corrections for imp
 | -m, --mass | Bullet mass | Required | grains | grams |
 | -d, --diameter | Bullet diameter | Required | inches | mm |
 | --chrono-velocity | Chronograph velocity for comparison | None | fps | m/s |
+| --chrono-distance | Screen distance from the muzzle for `--chrono-velocity`; nonzero back-solves true muzzle velocity (requires `--chrono-velocity`; range 1-100 / 0.3-30) | None (no-op) | feet | meters |
 | --zero-range | Zero range | 100 | yards | meters |
 | --sight-height | Sight height above bore | 2.0 | inches | mm |
 | --bullet-length | Bullet length (for BC5D lookup) | auto | inches | mm |
