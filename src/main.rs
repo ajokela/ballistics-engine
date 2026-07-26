@@ -11467,6 +11467,13 @@ fn run_zero_range_calculation(
         "calculate_zero_range_from_angle_with_resolved_conditions guarantees at least one \
          crossing on Ok",
     );
+    // MBA-1419: which of the two roots the single `zero_range` value refers to, reported rather
+    // than left for a caller to re-derive from the near/far pair.
+    let primary_crossing = if crossings.far_m.is_some() {
+        "far"
+    } else {
+        "near"
+    };
 
     // Calculate trajectory at the given angle to get additional info, mirroring the forward
     // command's own follow-up solve.
@@ -11478,7 +11485,18 @@ fn run_zero_range_calculation(
         Default::default(),
         atmosphere,
     );
-    solver.set_max_range(primary_range * 3.0);
+    // MBA-1419: 3x the primary crossing normally contains the apex, since the apex always lies
+    // between the two crossings and the far one is preferred. When only the NEAR crossing exists
+    // the far root is beyond the search envelope, so 3x a short near zero can truncate the
+    // trajectory before its apex and yield a degenerate solve. Floor the envelope at the
+    // distance the crossing search itself covered, so the diagnostics see everything the search
+    // saw. Ground impact still stops the solve well before this in the ordinary case.
+    let diagnostics_envelope = if crossings.far_m.is_some() {
+        primary_range * 3.0
+    } else {
+        (primary_range * 3.0).max(ballistics_engine::ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M)
+    };
+    solver.set_max_range(diagnostics_envelope);
     let trajectory = solver.solve()?;
 
     // Same sight-adjustment/point-blank-range diagnostics as the forward command, now
@@ -11531,6 +11549,10 @@ fn run_zero_range_calculation(
                 // Kept for continuity with the primary (far-preferred) crossing; see
                 // "near_zero_range"/"far_zero_range" for both crossings explicitly.
                 "zero_range": primary_range_display,
+                // MBA-1419: which root `zero_range` is. A bore angle generally crosses the line
+                // of sight twice, and this value is far-when-present-else-near; without this key
+                // a consumer cannot tell which of two valid answers it received.
+                "primary_crossing": primary_crossing,
                 "sight_adjustment_moa": sight_adjustment_moa,
                 "max_ordinate": UnitConverter::distance_from_metric(trajectory.max_height, units),
                 "point_blank_range": UnitConverter::distance_from_metric(point_blank_range, units),
@@ -11553,6 +11575,8 @@ fn run_zero_range_calculation(
             println!("zero_angle_moa,{:.2},MOA", zero_angle_rad.to_degrees() * 60.0);
             println!("zero_angle_mrad,{:.2},mrad", zero_angle_rad * 1000.0);
             println!("zero_range,{:.2},{}", primary_range_display, dist_unit);
+            // MBA-1419: same disclosure as JSON — which of the two crossings zero_range is.
+            println!("primary_crossing,{},crossing", primary_crossing);
             if let Some(near) = near_range_display {
                 println!("near_zero_range,{:.2},{}", near, dist_unit);
             }
@@ -11602,12 +11626,21 @@ fn run_zero_range_calculation(
                 "║ Sight Height:      {:>8.3} {:3}       ║",
                 sight_height_display, dist_unit
             );
-            // Tier 2 re-review N2: the diagnostics solve is sized off the primary crossing.
-            // With no far crossing that envelope is ~3x a very short near crossing, so the
-            // apex found inside it is the height at the truncation point rather than the
-            // real max ordinate -- a 5 deg launch reported 0.167 yd. Print the number only
-            // when the envelope provably contains the apex (i.e. a far crossing was found,
-            // since the apex always lies between the two crossings).
+            // Tier 2 re-review N2: the diagnostics solve is sized off the primary crossing, so
+            // a truncated solve reports the height at the truncation point rather than the real
+            // apex -- a 5 deg launch reported 0.167 yd.
+            //
+            // Print the number only when the envelope provably contains the apex (a far crossing
+            // was found, and the apex always lies between the two crossings).
+            //
+            // MBA-1419 proposed replacing this proxy with a direct "did the solve turn over?"
+            // test so the apex could also be reported in the near-only case. Two candidate tests
+            // -- peak-is-not-the-final-point, and peak-height-exceeds-final-height -- both
+            // reported the apex as contained for launch angles up to 45 degrees, where the value
+            // is demonstrably still the height at the truncation point and not an apex at all.
+            // Whatever `max_height` tracks is not settled by either check, so the conservative
+            // proxy stays until that is understood: withholding a number is the safe failure
+            // here, printing a fabricated apex is not.
             if far_range_display.is_some() {
                 println!(
                     "║ Max Ordinate:      {:>8.3} {:3}       ║",

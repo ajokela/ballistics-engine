@@ -26,6 +26,7 @@ pub use cli_api::{
     BallisticInputs, BallisticsError, BcEstimate, BcFitMode, BcReferenceStandard,
     MonteCarloParams, MonteCarloResults, TrajectoryPoint, TrajectoryResult, TrajectorySolver,
     WindConditions, ZeroCrossings, DEFAULT_HIT_RADIUS_M, MAX_TRAJECTORY_POINTS,
+    ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M,
     TARGET_NOT_REACHED_SENTINEL_M,
 };
 pub use atmosphere::{AtmoSegment, AtmoSock};

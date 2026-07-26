@@ -300,3 +300,62 @@ fn target_distance_and_from_angle_are_mutually_exclusive_and_jointly_required() 
         "expected failure with both --target-distance and --from-angle"
     );
 }
+
+/// MBA-1419: `zero_range` is one of two physically valid answers, and a consumer must not have
+/// to re-derive which. The rule is far-when-present-else-near; `primary_crossing` states it.
+mod primary_crossing_disclosure {
+    use super::*;
+
+    fn run_zero_json(angle_deg: f64) -> serde_json::Value {
+        run_zero(&[
+            "zero",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.243",
+            "--mass",
+            "175",
+            "--diameter",
+            "0.308",
+            "--from-angle",
+            &angle_deg.to_string(),
+            "--output",
+            "json",
+        ])
+    }
+
+    /// A shallow angle produces both crossings, so the reported range is the far one.
+    #[test]
+    fn a_two_crossing_angle_reports_the_far_root() {
+        let result = run_zero_json(5.0);
+        assert_eq!(result["primary_crossing"], "far");
+        assert_eq!(result["zero_range"], result["far_zero_range"]);
+        assert!(
+            result["near_zero_range"].as_f64().is_some(),
+            "this fixture is meant to have both crossings"
+        );
+    }
+
+    /// A steep angle puts the far crossing outside the search envelope, so the reported range
+    /// falls back to the near one — the case where a consumer reading `zero_range` alone would
+    /// otherwise silently receive the opposite root from the usual one.
+    #[test]
+    fn a_near_only_angle_says_so_rather_than_looking_like_a_far_zero() {
+        let result = run_zero_json(45.0);
+        assert_eq!(result["primary_crossing"], "near");
+        assert_eq!(result["zero_range"], result["near_zero_range"]);
+        assert!(
+            result["far_zero_range"].as_f64().is_none(),
+            "this fixture is meant to have no far crossing"
+        );
+    }
+
+    /// The two cases must actually differ, or the assertions above prove nothing about the rule.
+    #[test]
+    fn the_two_fixtures_exercise_different_roots() {
+        assert_ne!(
+            run_zero_json(5.0)["primary_crossing"],
+            run_zero_json(45.0)["primary_crossing"]
+        );
+    }
+}
