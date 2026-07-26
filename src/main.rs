@@ -9891,6 +9891,59 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             plot_style.as_canvas_style(),
                         )
                     );
+
+                    // Velocity and energy panels (MBA-1394): same treatment as
+                    // drop/drift above, reusing result.points' raw per-step
+                    // velocity_magnitude/kinetic_energy (McCoy SI values) converted
+                    // through the same UnitConverter calls and unit labels
+                    // (velocity_unit/energy_unit) as the summary box above and the
+                    // --full CSV/JSON trajectory columns, so labels always match
+                    // --units.
+                    let velocity_label = format!("velocity ({})", velocity_unit);
+                    let velocity_points: Vec<(f64, f64)> = result
+                        .points
+                        .iter()
+                        .map(|p| {
+                            (
+                                UnitConverter::distance_from_metric(p.position.x, units),
+                                UnitConverter::velocity_from_metric(p.velocity_magnitude, units),
+                            )
+                        })
+                        .collect();
+                    println!();
+                    println!("Velocity vs Range:");
+                    println!(
+                        "{}",
+                        terminal_plot::render_chart(
+                            &[(velocity_label.as_str(), velocity_points.as_slice())],
+                            72,
+                            12,
+                            plot_style.as_canvas_style(),
+                        )
+                    );
+
+                    let energy_label = format!("energy ({})", energy_unit);
+                    let energy_points: Vec<(f64, f64)> = result
+                        .points
+                        .iter()
+                        .map(|p| {
+                            (
+                                UnitConverter::distance_from_metric(p.position.x, units),
+                                UnitConverter::energy_from_metric(p.kinetic_energy, units),
+                            )
+                        })
+                        .collect();
+                    println!();
+                    println!("Energy vs Range:");
+                    println!(
+                        "{}",
+                        terminal_plot::render_chart(
+                            &[(energy_label.as_str(), energy_points.as_slice())],
+                            72,
+                            12,
+                            plot_style.as_canvas_style(),
+                        )
+                    );
                 }
             }
         }

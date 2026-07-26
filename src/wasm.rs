@@ -2365,6 +2365,50 @@ impl WasmBallistics {
                             style,
                         ));
                         combined.push('\n');
+
+                        // Velocity and energy panels (MBA-1394): same treatment,
+                        // reusing result.points' raw per-step velocity_magnitude/
+                        // kinetic_energy (McCoy SI values). Conversion factors match
+                        // this handler's own CSV/JSON velocity/energy columns
+                        // (3.28084 m/s->fps, 0.737562149 J->ft-lb; e.g. the
+                        // "energy_ftlb" JSON field and the CSV "Energy(ft-lb)"
+                        // column elsewhere in this file) so labels always follow
+                        // --units the same way the rest of this command does.
+                        let (vel_mul, vel_unit_label, energy_mul, energy_unit_label) =
+                            match units {
+                                UnitSystem::Imperial => (3.28084, "fps", 0.737562149, "ft-lb"),
+                                UnitSystem::Metric => (1.0, "m/s", 1.0, "J"),
+                            };
+
+                        let velocity_label = format!("velocity ({})", vel_unit_label);
+                        let velocity_points: Vec<(f64, f64)> = result
+                            .points
+                            .iter()
+                            .map(|p| (p.position.x / dist_div, p.velocity_magnitude * vel_mul))
+                            .collect();
+                        combined.push_str("\nVelocity vs Range:\n");
+                        combined.push_str(&crate::terminal_plot::render_chart(
+                            &[(velocity_label.as_str(), velocity_points.as_slice())],
+                            72,
+                            12,
+                            style,
+                        ));
+                        combined.push('\n');
+
+                        let energy_label = format!("energy ({})", energy_unit_label);
+                        let energy_points: Vec<(f64, f64)> = result
+                            .points
+                            .iter()
+                            .map(|p| (p.position.x / dist_div, p.kinetic_energy * energy_mul))
+                            .collect();
+                        combined.push_str("\nEnergy vs Range:\n");
+                        combined.push_str(&crate::terminal_plot::render_chart(
+                            &[(energy_label.as_str(), energy_points.as_slice())],
+                            72,
+                            12,
+                            style,
+                        ));
+                        combined.push('\n');
                     }
                 }
                 if let Some(warning) = &muzzle_height_warning {
