@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Browser-terminal parity gaps from 0.29.0** (MBA-1418). Three places where the hand-written
+  WASM layer quietly disagreed with native. The zero-day `--zero-pressure-type` refusal is now
+  disclosed in the terminal (it forced `Absolute` silently; native prints a warning, and the
+  browser has no stderr, so it rides the table-only notice block its siblings already use). The
+  `recoil` CSV header emitted `velocity_m/s` in metric where native emits `velocity_mps` — the
+  imperial spelling already agreed, which is why it survived. And `zero --from-angle` is now
+  listed in the terminal help and covered by tests, having worked but been undiscoverable.
 - **Pinned what `--pressure-type` means for a `--location` CSV pressure** (MBA-1421). No
   behaviour change: a mode typed on the command line already applied to a CSV-supplied pressure,
   which is the defensible reading — unlike a profile-stored mode (which describes the value the

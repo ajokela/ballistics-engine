@@ -1969,6 +1969,9 @@ impl WasmBallistics {
         }
 
         // Handle auto-zero if specified
+        // MBA-1418: declared alongside its sibling warnings rather than inside the auto-zero
+        // block, because the output assembly that emits it is at this scope.
+        let mut zero_pressure_type_notice: Option<&'static str> = None;
         let mut zero_info = String::new();
         if let Some(zero_distance) = auto_zero {
             let zero_distance_m = match units {
@@ -2068,9 +2071,22 @@ impl WasmBallistics {
             // --zero-pressure, the zero day inherits the DA-derived station pressure, which is
             // already absolute. An explicit --zero-pressure-type qnh would reduce it a second
             // time. The mode has no value of its own to describe, so it cannot apply.
+            //
+            // MBA-1418: native prints a warning when this forcing happens. The browser terminal
+            // has no visible stderr, so the notice is spliced into the output text instead --
+            // the same convention the --cd-scale range warning and the inert --bc-reference
+            // warning already use here. Silently forcing Absolute is the MBA-1414 class (a flag
+            // that does nothing without saying so) that 0.29.0 spent its effort closing.
             let zero_pressure_type_resolved =
                 match (zero_pressure_type, density_altitude_active, zero_pressure) {
-                    (Some(_), true, None) => PressureReferenceMode::Absolute,
+                    (Some(mode), true, None) => {
+                        if mode != PressureReferenceMode::Absolute {
+                            zero_pressure_type_notice = Some(
+                                "warning: --zero-pressure-type is ignored because --density-altitude supplies the zero-day station pressure directly; pass --zero-pressure to declare a zero-day pressure of your own\n\n",
+                            );
+                        }
+                        PressureReferenceMode::Absolute
+                    }
                     (Some(mode), _, _) => mode,
                     (None, _, _) => pressure_type,
                 };
@@ -2303,10 +2319,13 @@ impl WasmBallistics {
                     // MBA-1386/MBA-1356: table-only, like every human-readable block here —
                     // neither warning may contaminate JSON/CSV payloads.
                     format!(
-                        "{}{}{}{}{}{}{}",
+                        "{}{}{}{}{}{}{}{}",
                         cd_scale_warning.as_deref().unwrap_or(""),
                         bc_reference_warning.as_deref().unwrap_or(""),
                         density_altitude_warning.as_deref().unwrap_or(""),
+                        // MBA-1418: native prints this to stderr; the browser terminal has none,
+                        // so it rides the same table-only block as its siblings.
+                        zero_pressure_type_notice.unwrap_or(""),
                         bc5d_coercion_warning.as_deref().unwrap_or(""),
                         adjustment_unit_noop_warning.unwrap_or(""),
                         zero_info,
@@ -5871,10 +5890,19 @@ impl WasmBallistics {
                 out.push('\n');
             }
             "csv" => {
+                // MBA-1418: the CSV header must match native byte for byte. `vel_unit` above is
+                // the DISPLAY spelling ("m/s") used by the table; native's machine surface uses
+                // the ASCII form ("mps"), so metric CSV read `velocity_m/s` here and
+                // `velocity_mps` there. Machine output that differs by surface breaks anyone
+                // parsing both. Imperial ("fps") already agreed, which is why this survived.
+                let vel_unit_csv = match units {
+                    UnitSystem::Imperial => "fps",
+                    UnitSystem::Metric => "mps",
+                };
                 out.push_str(&format!(
                     "bullet_weight_{w},charge_weight_{w},velocity_{v},firearm_weight_{fw},gas_velocity_{v},recoil_velocity_{v},recoil_energy_{e},impulse_{im}\n",
                     w = weight_unit,
-                    v = vel_unit,
+                    v = vel_unit_csv,
                     fw = match units { UnitSystem::Imperial => "lb", UnitSystem::Metric => "kg" },
                     e = match units { UnitSystem::Imperial => "ftlb", UnitSystem::Metric => "j" },
                     im = match units { UnitSystem::Imperial => "lbs", UnitSystem::Metric => "ns" },
@@ -6238,6 +6266,11 @@ Zero Command:
                                  (1.0 = neutral, typical 0.90-1.10). Requires a
                                  drag table (loadDragTable)
     --target-distance <DIST>     Target distance for zero
+    --from-angle <DEGREES>       Inverse: solve the zero RANGE(S) a stored bore
+                                 angle produces. Reports BOTH line-of-sight
+                                 crossings (near, ascending; far, descending)
+                                 and names which one zero_range is. Conflicts
+                                 with --target-distance; give exactly one
     --sight-height <HEIGHT>      Sight height above bore
 
 Monte Carlo Command:
