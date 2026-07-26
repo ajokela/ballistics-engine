@@ -6,7 +6,8 @@ use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureR
 use crate::bc_table_5d::Bc5dTable;
 use crate::cli_api::{
     calculate_zero_angle_with_conditions, calculate_zero_angle_with_resolved_conditions,
-    estimate_bc_fit, run_monte_carlo_with_direction_std_dev, AtmosphericConditions,
+    calculate_zero_range_from_angle_with_conditions, estimate_bc_fit,
+    run_monte_carlo_with_direction_std_dev, AtmosphericConditions,
     BallisticInputs as InternalBallisticInputs, BcFitMode, BcReferenceStandard, MonteCarloParams,
     TrajectorySolver, WindConditions, BC_REFERENCE_STANDARD_INERT_WARNING,
 };
@@ -2106,10 +2107,14 @@ impl WasmBallistics {
             match zero_solve_result {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
-                    let moa_adjustment = zero_angle * 180.0 / std::f64::consts::PI * 60.0;
+                    let degrees_adjustment = zero_angle * 180.0 / std::f64::consts::PI;
+                    let moa_adjustment = degrees_adjustment * 60.0;
                     let mrad_adjustment = zero_angle * 1000.0;
+                    // MBA-1402: the solved zero angle in degrees was missing here (native
+                    // `trajectory`'s equivalent auto-zero echo had no degrees field at all
+                    // until this same ticket; this banner already had MOA/mrad).
                     zero_info = format!(
-                        "Rifle zeroed at {} {}{} (Adjustment: {:.2} MOA / {:.2} mrad up)\n\n",
+                        "Rifle zeroed at {} {}{} (Adjustment: {:.4}\u{b0} / {:.2} MOA / {:.2} mrad up)\n\n",
                         zero_distance,
                         if units == UnitSystem::Imperial {
                             "yards"
@@ -2121,6 +2126,7 @@ impl WasmBallistics {
                         } else {
                             ""
                         },
+                        degrees_adjustment,
                         moa_adjustment,
                         mrad_adjustment
                     );
@@ -2505,6 +2511,12 @@ impl WasmBallistics {
         // MBA-1356: whole-curve drag scale for a custom drag table. None until parsed;
         // resolved against self.drag_table once the arg-parse loop is done.
         let mut cd_scale: Option<f64> = None;
+        // MBA-1402: inverse mode — solve the zero RANGE a stored bore angle (degrees)
+        // produces, instead of the angle a target distance produces. Mutually exclusive
+        // with an explicit --target-distance (checked after parsing, once we know whether
+        // --target-distance was actually given rather than left at its default).
+        let mut from_angle: Option<f64> = None;
+        let mut target_distance_explicit = false;
 
         // Parse arguments
         let mut i = 0;
@@ -2553,6 +2565,7 @@ impl WasmBallistics {
                         target_distance = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid target distance"))?;
+                        target_distance_explicit = true;
                         i += 1;
                     }
                 }
@@ -2561,6 +2574,18 @@ impl WasmBallistics {
                         sight_height = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid sight height"))?;
+                        i += 1;
+                    }
+                }
+                // MBA-1402: inverse mode — a stored bore angle in DEGREES, in place of
+                // --target-distance.
+                "--from-angle" => {
+                    if i + 1 < args.len() {
+                        from_angle = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid from-angle"))?,
+                        );
                         i += 1;
                     }
                 }
@@ -2649,53 +2674,111 @@ impl WasmBallistics {
             .bc_reference_standard_inert_warning()
             .map(|w| format!("{w}\n\n"));
 
-        let target_distance_m = match units {
-            UnitSystem::Imperial => target_distance * 0.9144,
-            UnitSystem::Metric => target_distance,
-        };
+        // MBA-1402: --from-angle conflicts with an explicitly-given --target-distance —
+        // mirrors the native CLI's `conflicts_with`/`required_unless_present` pair.
+        if from_angle.is_some() && target_distance_explicit {
+            return Err(JsValue::from_str(
+                "--from-angle conflicts with --target-distance; give exactly one",
+            ));
+        }
 
         // MBA-951: target the line-of-sight height at the zero distance (= sight_height), matching
         // the CLI convention in every zero call. Previously 0.0, which solved a BORE-line zero and
         // ignored sight height entirely (off by the sight-height angle — ~2 MOA at 100 yd).
         let los_height = inputs.sight_height;
-        let result = match calculate_zero_angle_with_conditions(
-            inputs,
-            target_distance_m,
-            los_height,
-            WindConditions::default(),
-            AtmosphericConditions::default(),
-        ) {
-            Ok(zero_angle) => {
-                let zero_degrees = zero_angle * 180.0 / std::f64::consts::PI;
-                let moa_adjustment = zero_degrees * 60.0;
-                let mrad_adjustment = zero_angle * 1000.0;
 
-                format!(
-                    "Zero Calculation Results\n\
-                     ========================\n\
-                     Target Distance: {} {}\n\
-                     Zero Angle: {:.4}°\n\
-                     MOA Adjustment: {:.2} MOA up\n\
-                     Mrad Adjustment: {:.2} mrad up\n\
-                     Sight Height: {} {}\n",
-                    target_distance,
-                    if units == UnitSystem::Imperial {
-                        "yards"
-                    } else {
-                        "meters"
-                    },
-                    zero_degrees,
-                    moa_adjustment,
-                    mrad_adjustment,
-                    sight_height,
-                    if units == UnitSystem::Imperial {
-                        "inches"
-                    } else {
-                        "mm"
-                    }
-                )
+        let result = if let Some(angle_deg) = from_angle {
+            // MBA-1402: inverse mode — given a previously solved/stored bore angle (degrees),
+            // solve the zero RANGE it produces. Exact inverse of the --target-distance mode
+            // below; see calculate_zero_range_from_angle_with_conditions's doc comment for
+            // why the FAR line-of-sight crossing, specifically, is what "zero range" means.
+            let angle_rad = angle_deg * std::f64::consts::PI / 180.0;
+            match calculate_zero_range_from_angle_with_conditions(
+                inputs,
+                angle_rad,
+                los_height,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            ) {
+                Ok(zero_range_m) => {
+                    let zero_range_display = match units {
+                        UnitSystem::Imperial => zero_range_m / 0.9144,
+                        UnitSystem::Metric => zero_range_m,
+                    };
+                    let moa_adjustment = angle_deg * 60.0;
+                    let mrad_adjustment = angle_rad * 1000.0;
+
+                    format!(
+                        "Zero Range From Angle Results\n\
+                         ==============================\n\
+                         Input Zero Angle: {:.4}°\n\
+                         MOA Adjustment: {:.2} MOA up\n\
+                         Mrad Adjustment: {:.2} mrad up\n\
+                         Solved Zero Range: {:.1} {}\n\
+                         Sight Height: {} {}\n",
+                        angle_deg,
+                        moa_adjustment,
+                        mrad_adjustment,
+                        zero_range_display,
+                        if units == UnitSystem::Imperial {
+                            "yards"
+                        } else {
+                            "meters"
+                        },
+                        sight_height,
+                        if units == UnitSystem::Imperial {
+                            "inches"
+                        } else {
+                            "mm"
+                        }
+                    )
+                }
+                Err(e) => format!("Error calculating zero range: {}", e),
             }
-            Err(e) => format!("Error calculating zero: {}", e),
+        } else {
+            let target_distance_m = match units {
+                UnitSystem::Imperial => target_distance * 0.9144,
+                UnitSystem::Metric => target_distance,
+            };
+            match calculate_zero_angle_with_conditions(
+                inputs,
+                target_distance_m,
+                los_height,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            ) {
+                Ok(zero_angle) => {
+                    let zero_degrees = zero_angle * 180.0 / std::f64::consts::PI;
+                    let moa_adjustment = zero_degrees * 60.0;
+                    let mrad_adjustment = zero_angle * 1000.0;
+
+                    format!(
+                        "Zero Calculation Results\n\
+                         ========================\n\
+                         Target Distance: {} {}\n\
+                         Zero Angle: {:.4}°\n\
+                         MOA Adjustment: {:.2} MOA up\n\
+                         Mrad Adjustment: {:.2} mrad up\n\
+                         Sight Height: {} {}\n",
+                        target_distance,
+                        if units == UnitSystem::Imperial {
+                            "yards"
+                        } else {
+                            "meters"
+                        },
+                        zero_degrees,
+                        moa_adjustment,
+                        mrad_adjustment,
+                        sight_height,
+                        if units == UnitSystem::Imperial {
+                            "inches"
+                        } else {
+                            "mm"
+                        }
+                    )
+                }
+                Err(e) => format!("Error calculating zero: {}", e),
+            }
         };
         // MBA-1356: table-only prepend, same pattern as the trajectory/monte-carlo handlers —
         // this command has no JSON/CSV output mode to protect from contamination.
