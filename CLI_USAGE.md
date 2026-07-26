@@ -402,7 +402,9 @@ KF_LR,2506,27.29,32
 Home_Range,500,29.92,70
 ```
 
-A `DA` or `DENSITY_ALTITUDE` column is also recognized (MBA-1366) and, when present, supersedes that row's `ALTITUDE`/`PRESSURE` exactly like the `--density-altitude` flag — see [Density Altitude](#density-altitude-as-a-direct-input---density-altitude) for the full precedence (an explicit `--density-altitude`/`--altitude`/`--pressure` CLI flag still overrides the CSV row).
+A `DA` or `DENSITY_ALTITUDE` column is also recognized (MBA-1366) and, when present, supersedes that row's `ALTITUDE`/`PRESSURE` exactly like the `--density-altitude` flag — see [Density Altitude](#density-altitude-as-a-direct-input---density-altitude) for the full precedence.
+
+Note which flag wins here: an explicit `--density-altitude` overrides the CSV `DA` column (CLI beats CSV, as everywhere else), but `--altitude` and `--pressure` do **not** — density altitude supersedes altitude and pressure whichever source it came from, because it is the stronger specification. A run combining a CSV `DA` row with `--altitude`/`--pressure` prints a note saying so.
 
 **Usage:**
 ```bash
