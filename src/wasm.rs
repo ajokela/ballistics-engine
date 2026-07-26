@@ -2058,7 +2058,17 @@ impl WasmBallistics {
             // MBA-1397: an explicit --zero-pressure-type wins; otherwise the zero day shares
             // the shot day's mode (mirrors "omitting all --zero-* flags reuses the shot-day
             // values" for the numeric fields above).
-            let zero_pressure_type_resolved = zero_pressure_type.unwrap_or(pressure_type);
+            //
+            // Whole-branch review (I2), mirroring native: with --density-altitude and no
+            // --zero-pressure, the zero day inherits the DA-derived station pressure, which is
+            // already absolute. An explicit --zero-pressure-type qnh would reduce it a second
+            // time. The mode has no value of its own to describe, so it cannot apply.
+            let zero_pressure_type_resolved =
+                match (zero_pressure_type, density_altitude_active, zero_pressure) {
+                    (Some(_), true, None) => PressureReferenceMode::Absolute,
+                    (Some(mode), _, _) => mode,
+                    (None, _, _) => pressure_type,
+                };
             let zero_target_height =
                 zero_inputs.muzzle_height + zero_inputs.sight_height; // Zero crosses the line of sight (matches CLI)
             let zero_solve_result = match zero_pressure_type_resolved {

@@ -576,3 +576,85 @@ fn a_saved_profiles_pressure_mode_does_not_hijack_a_cli_supplied_pressure() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn a_saved_profiles_bc_reference_does_not_hijack_a_cli_supplied_bc() {
+    // Whole-branch review I1: a stored BC reference standard qualifies the profile's OWN BC.
+    // Applying it to a --bc (or CSV BC) the profile never supplied silently rescaled someone
+    // else's number — 2144.75 vs 2153.93 fps at 300 yd — and made the double-conversion hazard
+    // reachable without the user ever passing the flag. Same rule as the pressure mode: a
+    // qualifier travels with the value it qualifies, or not at all.
+    let home = std::env::temp_dir().join(format!("ballistics-bcref-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("temp home");
+
+    let save = Command::new(get_cli_binary())
+        .env("HOME", &home)
+        .args([
+            "profile", "save", "asmprof", "--velocity", "2700", "--bc", "0.475", "--mass",
+            "168", "--diameter", "0.308", "--bc-reference", "army-standard-metro",
+        ])
+        .output()
+        .expect("profile save");
+    assert!(save.status.success(), "save failed: {}", String::from_utf8_lossy(&save.stderr));
+
+    let run = |extra: &[&str]| -> String {
+        let mut args = vec!["trajectory", "--saved-profile", "asmprof", "--max-range", "300"];
+        args.extend_from_slice(extra);
+        let out = Command::new(get_cli_binary())
+            .env("HOME", &home)
+            .args(&args)
+            .output()
+            .expect("trajectory");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // The user brings their own BC: the profile's ASM reference must not touch it.
+    let own_bc_inherited = run(&["--bc", "0.5"]);
+    let own_bc_icao = run(&["--bc", "0.5", "--bc-reference", "icao"]);
+    let own_bc_asm = run(&["--bc", "0.5", "--bc-reference", "army-standard-metro"]);
+    assert_eq!(
+        own_bc_inherited, own_bc_icao,
+        "a stored BC reference must not be applied to a CLI-supplied --bc"
+    );
+    assert_ne!(
+        own_bc_asm, own_bc_icao,
+        "sanity: an EXPLICIT --bc-reference must still convert"
+    );
+
+    // Using the profile's own BC, its stored reference SHOULD still apply.
+    let profile_bc = run(&[]);
+    let profile_bc_forced_icao = run(&["--bc-reference", "icao"]);
+    assert_ne!(
+        profile_bc, profile_bc_forced_icao,
+        "the profile's stored reference must still qualify the profile's own BC"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn density_altitude_blocks_an_explicit_zero_day_pressure_mode() {
+    // Whole-branch review I2: with --density-altitude and no --zero-pressure, the zero day
+    // inherits the DA-derived station pressure, which is already absolute. An explicit
+    // --zero-pressure-type qnh reduced it a second time (apex 1.6959 -> 1.6655 m at an 800 m
+    // zero), silently. The earlier shot-day reset did not close this door.
+    let base = [
+        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308",
+        "--density-altitude", "2000", "--auto-zero", "800", "--max-range", "900",
+    ];
+
+    let plain = run(&base);
+    let mut with_mode = base.to_vec();
+    with_mode.extend(["--zero-pressure-type", "qnh"]);
+    let (stdout_with_mode, stderr) = run_capturing_stderr(&with_mode);
+
+    assert_eq!(
+        plain, stdout_with_mode,
+        "--zero-pressure-type has no value of its own to describe when density altitude \
+         supplies the zero-day pressure; it must not re-reduce it"
+    );
+    assert!(
+        stderr.contains("--zero-pressure-type is ignored"),
+        "the ignored flag must say so rather than passing silently: {stderr}"
+    );
+}

@@ -4968,6 +4968,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 csv_get_f64(&profile_data, &["VELOCITY_ADJ", "VEL_ADJ"], 0.0)
             };
+            // Track WHERE the BC came from: a stored reference standard describes the profile's
+            // own BC, so it may only be inherited when the BC was inherited too.
+            let bc_came_from_saved_profile = bc.is_none()
+                && csv_get_f64(&profile_data, &["BC"], 0.0) <= 0.0
+                && saved_profile_data.is_some();
             let final_bc = bc
                 .or_else(|| {
                     let v = csv_get_f64(&profile_data, &["BC"], 0.0);
@@ -4979,14 +4984,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
                 .or_else(|| saved_profile_data.as_ref().map(|p| p.bc))
                 .unwrap_or(0.5);
-            // MBA-1365: an explicit --bc-reference always wins; otherwise inherit a saved
-            // profile's stored reference (defaults to ICAO when neither is present —
-            // byte-identical to every run before this flag existed).
+            // MBA-1365 + whole-branch review (I1): an explicit --bc-reference always wins.
+            // Otherwise inherit the profile's stored reference ONLY when this run is also using
+            // the profile's BC. A reference standard qualifies one specific BC number; applying
+            // a profile's `asm` to a `--bc` (or CSV `BC`) the profile never supplied silently
+            // rescaled someone else's value — measured 2144.75 vs 2153.93 fps at 300 yd — and
+            // made the double-conversion hazard the docs warn about reachable without the user
+            // ever passing the flag. Same rule as the pressure mode below: a qualifier travels
+            // with the value it qualifies, or not at all.
             let bc_reference_standard = match bc_reference {
                 Some(v) => v,
-                None => parse_bc_reference_profile_field(
+                None if bc_came_from_saved_profile => parse_bc_reference_profile_field(
                     saved_profile_data.as_ref().and_then(|p| p.bc_reference.as_deref()),
                 )?,
+                None => BcReferenceStandard::Icao,
             };
             let final_bc_adj = if bc_adjustment != 1.0 {
                 bc_adjustment
@@ -5086,6 +5097,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!(
                     "note: --density-altitude supersedes --pressure/--pressure-type (station \
                      pressure is derived from density altitude instead)"
+                );
+            }
+            // Whole-branch review (I3): --altitude was superseded just as silently as --pressure
+            // but said nothing, so a user who set both saw one note and assumed the other flag
+            // had been honored. Density altitude supersedes altitude from EITHER source — flag
+            // or `--location` CSV row — so say so whenever an altitude was actually supplied.
+            // `altitude` carries a clap default of 0.0 rather than an Option, so this reuses the
+            // same "non-default means supplied" sentinel `final_altitude` uses just below; an
+            // explicit `--altitude 0` is indistinguishable from the default, as everywhere else.
+            if final_density_altitude.is_some() && altitude != 0.0 {
+                eprintln!(
+                    "note: --density-altitude supersedes --altitude (the station altitude is \
+                     back-solved from density altitude instead)"
                 );
             }
             let (final_temperature, final_pressure, final_altitude, final_pressure_type) =
@@ -5782,7 +5806,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // MBA-1397: an explicit --zero-pressure-type wins; otherwise the zero day
                 // shares the shot day's mode (matches "omitting all --zero-* flags reuses the
                 // shot-day values" for the numeric pressure above).
-                let zero_pressure_type_resolved = zero_pressure_type.unwrap_or(final_pressure_type);
+                //
+                // Whole-branch review (I2): with `--density-altitude` and no `--zero-pressure`,
+                // the zero day inherits the DA-derived station pressure, which is ALREADY
+                // absolute. An explicit `--zero-pressure-type qnh` then reduced it a second
+                // time (apex 1.6959 -> 1.6655 m at an 800 m zero, silently). The mode has no
+                // value of its own to describe here, so it cannot apply — the same rule the
+                // shot-day reset and the profile-inheritance fix follow. An explicit
+                // `--zero-pressure` DOES bring its own value, so its mode is honored.
+                let zero_pressure_type_resolved = match zero_pressure_type {
+                    Some(mode)
+                        if final_density_altitude.is_some() && zero_pressure.is_none() =>
+                    {
+                        if mode != PressureReferenceMode::Absolute {
+                            eprintln!(
+                                "warning: --zero-pressure-type is ignored because \
+                                 --density-altitude supplies the zero-day station pressure \
+                                 directly; pass --zero-pressure to declare a zero-day pressure \
+                                 of your own"
+                            );
+                        }
+                        PressureReferenceMode::Absolute
+                    }
+                    Some(mode) => mode,
+                    None => final_pressure_type,
+                };
                 let zero_humidity_value = zero_humidity.unwrap_or(final_humidity);
                 let zero_altitude_metric = match zero_altitude {
                     Some(a) => UnitConverter::altitude_to_metric(a, cli.units),
