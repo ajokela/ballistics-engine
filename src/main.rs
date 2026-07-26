@@ -1197,6 +1197,13 @@ enum Commands {
         /// Barometric pressure the data was measured at (inHg imperial / hPa metric) [default 29.92 / 1013.25]
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Relative humidity the data was measured at (percent, 0–100)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1360,6 +1367,13 @@ enum Commands {
         /// Pressure (inHg for imperial, hPa for metric; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1502,6 +1516,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on global --units)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Relative humidity (0-100 percent)
         #[arg(long, value_parser = f64_range(0.0, 100.0))]
@@ -1557,6 +1578,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1640,6 +1668,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -1725,6 +1760,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -2016,6 +2058,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0")]
@@ -2063,6 +2112,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Altitude (feet or meters based on --units)
         #[arg(long, default_value = "0.0")]
@@ -2156,6 +2212,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (0-100%)
         #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
@@ -2244,6 +2307,13 @@ enum Commands {
         /// Pressure (inHg or hPa based on --units)
         #[arg(long)]
         pressure: Option<f64>,
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
+        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
+        /// value a weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
+        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (percent)
         #[arg(long, default_value = "50.0")]
@@ -7044,6 +7114,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             distance1,
@@ -7063,8 +7134,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 temperature: temperature
                     .map(|t| UnitConverter::temperature_to_metric(t, cli.units))
                     .unwrap_or(15.0),
+                // MBA-1416: honor --pressure-type here too. Applied only when a pressure was
+                // actually supplied — the 1013.25 default is sea-level standard by definition,
+                // so reducing it against altitude would corrupt the documented default.
                 pressure: pressure
-                    .map(|p| UnitConverter::pressure_to_metric(p, cli.units))
+                    .map(|p| {
+                        apply_pressure_mode(
+                            UnitConverter::pressure_to_metric(p, cli.units),
+                            altitude,
+                            pressure_type,
+                            cli.units,
+                        )
+                    })
                     .unwrap_or(1013.25),
                 humidity,
                 altitude: match cli.units {
@@ -7215,6 +7296,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             units,
@@ -7234,7 +7316,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, units)?,
+                altitude,
+                pressure_type,
+                units,
+            );
             // Convert to imperial for calculations (internal calculations use imperial)
             let range_yd = match units {
                 UnitSystem::Imperial => range,
@@ -7727,6 +7816,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             output,
@@ -7804,10 +7894,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }),
                 cli.units,
             )?;
-            let pressure = UnitConverter::resolve_pressure(
-                pressure.or_else(|| profile_data.as_ref().map(|profile| profile.pressure)),
+            // MBA-1416: honor --pressure-type here too. `altitude` is Option on this command,
+            // so an omitted altitude means no reduction is possible and QNH falls back to the
+            // value as given rather than silently reducing against sea level.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(
+                    pressure.or_else(|| profile_data.as_ref().map(|profile| profile.pressure)),
+                    cli.units,
+                )?,
+                altitude.unwrap_or(0.0),
+                pressure_type,
                 cli.units,
-            )?;
+            );
             let humidity = humidity
                 .or_else(|| profile_data.as_ref().map(|profile| profile.humidity))
                 .unwrap_or(50.0);
@@ -7885,12 +7983,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, cli.units)?,
+                altitude,
+                pressure_type,
+                cli.units,
+            );
             // Load profile if specified
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
@@ -7962,6 +8068,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             wind_speed,
@@ -7969,7 +8076,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, cli.units)?,
+                altitude,
+                pressure_type,
+                cli.units,
+            );
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -8241,6 +8355,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             wind_speed,
@@ -8260,7 +8375,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, cli.units)?,
+                altitude,
+                pressure_type,
+                cli.units,
+            );
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -8461,12 +8583,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, cli.units)?,
+                altitude,
+                pressure_type,
+                cli.units,
+            );
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -8591,11 +8721,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             velocity,
             temperature,
             pressure,
+            pressure_type,
             altitude,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, cli.units)?,
+                altitude,
+                pressure_type,
+                cli.units,
+            );
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -8651,12 +8789,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, cli.units)?,
+                altitude,
+                pressure_type,
+                cli.units,
+            );
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -8761,12 +8907,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             temperature,
             pressure,
+            pressure_type,
             humidity,
             altitude,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
+            // the same thing on this command as it does on `trajectory`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, cli.units)?,
+                altitude,
+                pressure_type,
+                cli.units,
+            );
 
             // MBA-1410: resolve the independent windage unit and, if either axis needs
             // one, the turret click graduations — before any of the work below. compare
@@ -18055,4 +18209,34 @@ fn run_drag_curve(
     }
 
     Ok(())
+}
+
+/// Apply a subcommand's `--pressure-type` to its `--pressure` (MBA-1416).
+///
+/// The calculator subcommands (`mpbr`, `come-ups`, `range-table`, and the rest) do not run
+/// `trajectory`'s full station-conditions resolution — they take `--pressure` as given and hand
+/// it straight to `AtmosphericConditions`. Before this, that meant they silently treated every
+/// pressure as absolute station pressure, so a weather-report barometer value entered at
+/// elevation was wrong by the ISA reduction on every command except `trajectory` and `zero`.
+///
+/// This applies just the QNH reduction, keyed off the command's own `--altitude`, so `qnh` means
+/// the same thing everywhere it is accepted. `Absolute` (and an omitted flag) returns the
+/// pressure untouched, which keeps every existing invocation byte-identical.
+///
+/// `pressure_hpa` is already unit-resolved; `altitude_display` is still in the command's display
+/// units (feet imperial / meters metric) and is converted here, because feeding feet to a
+/// reduction expecting meters would be a large and completely silent error.
+fn apply_pressure_mode(
+    pressure_hpa: f64,
+    altitude_display: f64,
+    mode: Option<PressureReferenceMode>,
+    units: UnitSystem,
+) -> f64 {
+    match mode.unwrap_or(PressureReferenceMode::Absolute) {
+        PressureReferenceMode::Absolute => pressure_hpa,
+        PressureReferenceMode::Qnh => {
+            let altitude_m = UnitConverter::altitude_to_metric(altitude_display, units);
+            ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(pressure_hpa, altitude_m)
+        }
+    }
 }

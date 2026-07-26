@@ -427,3 +427,131 @@ mod csv_supplied_pressure_mode {
         );
     }
 }
+
+/// MBA-1416: `--pressure-type` on the ten calculator subcommands that previously accepted
+/// `--pressure` and silently treated it as absolute station pressure.
+///
+/// The risk this closes is inconsistency rather than a wrong number in isolation: someone who
+/// learns `--pressure-type` on `trajectory` reasonably assumes `come-ups` honours it too, and a
+/// weather-report barometer value entered at elevation is wrong by the ISA reduction on every
+/// command that lacks it.
+///
+/// Two properties per command, and both matter. That the flag REACHES the physics catches the
+/// failure where an argument parses but never reaches the air — the exact class this ticket is
+/// about. That omitting it is byte-identical to `absolute` protects every existing invocation.
+mod pressure_mode_on_calculator_subcommands {
+    use super::*;
+
+    /// (name, args). Each set is a minimal run for that subcommand at 5000 ft with a 24.90 inHg
+    /// reading, which is a large enough reduction that an applied mode cannot be confused with
+    /// numerical noise.
+    fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
+        let atmo = ["--pressure", "24.90", "--altitude", "5000"];
+        let bullet = [
+            "--bc", "0.243", "--drag-model", "g7", "--velocity", "2700", "-m", "175", "-d",
+            "0.308",
+        ];
+        let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+        let mut push = |name: &'static str, extra: Vec<&'static str>, with_bullet: bool| {
+            let mut args = vec![name];
+            if with_bullet {
+                args.extend_from_slice(&bullet);
+            }
+            args.extend_from_slice(&atmo);
+            args.extend(extra);
+            out.push((name, args));
+        };
+        push("mpbr", vec!["--vital-zone", "8"], true);
+        push("come-ups", vec!["--zero-distance", "100"], true);
+        push("lead", vec!["--target-speed", "10"], true);
+        push("wind-card", vec!["--zero-distance", "100"], true);
+        push("range-table", vec!["--zero-distance", "100"], true);
+        push(
+            "stability",
+            vec![
+                "--twist-rate", "10", "--length", "1.24", "--mass", "175", "--diameter", "0.308",
+                "--velocity", "2700",
+            ],
+            false,
+        );
+        push(
+            "true-velocity",
+            vec![
+                "--measured-drop", "30", "--range", "500", "--bc", "0.243", "--mass", "175",
+                "--diameter", "0.308",
+            ],
+            false,
+        );
+        push(
+            "plan-truing",
+            vec![
+                "--measurement-resolution", "0.25", "--candidate-ranges", "300,500,700",
+                "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter", "0.308",
+            ],
+            false,
+        );
+        push(
+            "compare",
+            vec![
+                "--zero-distance", "100", "--load", "A:g7:0.243:2700:175:0.308", "--load",
+                "B:g7:0.250:2750:180:0.308",
+            ],
+            false,
+        );
+        push(
+            "estimate-bc",
+            vec![
+                "--velocity", "2700", "--mass", "175", "--diameter", "0.308", "--data",
+                "300,10;500,30",
+            ],
+            false,
+        );
+        out
+    }
+
+    fn stdout_of(args: &[&str]) -> String {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "`{}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The declared mode must change the answer. An argument that parses but never reaches the
+    /// atmosphere is precisely the defect this ticket exists to close.
+    #[test]
+    fn qnh_reaches_the_physics_on_every_subcommand() {
+        for (name, args) in cases() {
+            let mut absolute = args.clone();
+            absolute.extend_from_slice(&["--pressure-type", "absolute"]);
+            let mut qnh = args.clone();
+            qnh.extend_from_slice(&["--pressure-type", "qnh"]);
+
+            assert_ne!(
+                stdout_of(&absolute),
+                stdout_of(&qnh),
+                "`{name} --pressure-type qnh` produced identical output to `absolute`; the flag \
+                 parses but is not reaching the atmosphere"
+            );
+        }
+    }
+
+    /// Every pre-existing invocation must be untouched, byte for byte.
+    #[test]
+    fn omitting_the_mode_is_byte_identical_to_absolute_on_every_subcommand() {
+        for (name, args) in cases() {
+            let mut absolute = args.clone();
+            absolute.extend_from_slice(&["--pressure-type", "absolute"]);
+
+            assert_eq!(
+                stdout_of(&args),
+                stdout_of(&absolute),
+                "`{name}` changed when --pressure-type was omitted; the default must remain \
+                 exactly `absolute`"
+            );
+        }
+    }
+}
