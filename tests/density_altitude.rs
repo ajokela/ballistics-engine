@@ -384,3 +384,183 @@ fn cli_density_altitude_flag_wins_over_csv_column() {
         "an explicit --density-altitude flag must win over a CSV DA column"
     );
 }
+
+/// MBA-1422: `--density-altitude` on the standalone `zero` command, and `--zero-density-altitude`
+/// for declaring a zero-day density altitude on `trajectory --auto-zero`.
+///
+/// MBA-1366 scoped the flag to `trajectory` only. These are the two entry points it left out:
+/// a user carrying conditions as a density altitude could not solve a zero the same way they
+/// solve a trajectory, and could not tear a zero under a different DA than the shot.
+///
+/// The zero-day path is where 0.29.0's whole-branch review found two bugs of the same family — a
+/// stale pressure mode surviving into the zero solve, and an explicit `--zero-pressure-type`
+/// re-reducing a DA-derived pressure that was already absolute. The rule these follow is the one
+/// that came out of those: a mode travels with the value it describes, or not at all.
+mod density_altitude_on_zero_surfaces {
+    use super::*;
+
+    fn zero_angle(args: &[&str]) -> f64 {
+        let output = Command::new(get_cli_binary())
+            .args([
+                "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter",
+                "0.308", "--target-distance", "300", "-o", "json",
+            ])
+            .args(args)
+            .output()
+            .expect("zero");
+        assert!(
+            output.status.success(),
+            "zero failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let doc: Value = serde_json::from_slice(&output.stdout).expect("json");
+        doc["zero_angle_degrees"].as_f64().expect("zero_angle_degrees")
+    }
+
+    fn auto_zero_angle(args: &[&str]) -> f64 {
+        let output = Command::new(get_cli_binary())
+            .args([
+                "trajectory", "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7", "-m",
+                "175", "-d", "0.308", "--max-range", "500", "--auto-zero", "300", "-o", "json",
+            ])
+            .args(args)
+            .output()
+            .expect("trajectory");
+        assert!(
+            output.status.success(),
+            "trajectory failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let doc: Value = serde_json::from_slice(&output.stdout).expect("json");
+        doc["zero_angle_degrees"].as_f64().expect("zero_angle_degrees")
+    }
+
+    /// A density altitude equal to a real altitude must give the same answer under the standard
+    /// atmosphere, since that is what "density altitude" means when conditions are ISA.
+    #[test]
+    fn zero_density_altitude_matches_the_equivalent_real_altitude_under_isa() {
+        assert_eq!(
+            zero_angle(&["--density-altitude", "5000"]),
+            zero_angle(&["--altitude", "5000"]),
+            "under ISA a 5000 ft density altitude is a 5000 ft altitude"
+        );
+    }
+
+    /// Omitting the flag must leave `zero` exactly as it was.
+    #[test]
+    fn zero_without_the_flag_is_unchanged() {
+        assert_eq!(
+            zero_angle(&[]),
+            zero_angle(&["--density-altitude", "0"]),
+            "a sea-level density altitude is the standard atmosphere"
+        );
+    }
+
+    /// DA supersedes pressure outright — that is the documented precedence, and it is what makes
+    /// the pressure mode inapplicable.
+    #[test]
+    fn zero_density_altitude_supersedes_an_explicit_pressure() {
+        assert_eq!(
+            zero_angle(&["--density-altitude", "5000", "--pressure", "29.92"]),
+            zero_angle(&["--density-altitude", "5000"]),
+            "--pressure must not survive alongside --density-altitude on `zero`"
+        );
+    }
+
+    /// Same three properties for the zero-day flag on `trajectory`.
+    #[test]
+    fn zero_day_density_altitude_matches_the_equivalent_zero_day_altitude() {
+        assert_eq!(
+            auto_zero_angle(&["--zero-density-altitude", "5000"]),
+            auto_zero_angle(&["--zero-altitude", "5000"]),
+        );
+    }
+
+    #[test]
+    fn zero_day_density_altitude_supersedes_an_explicit_zero_pressure() {
+        assert_eq!(
+            auto_zero_angle(&["--zero-density-altitude", "5000", "--zero-pressure", "29.92"]),
+            auto_zero_angle(&["--zero-density-altitude", "5000"]),
+        );
+    }
+
+    /// The zero-day flag must not disturb the shot-day atmosphere, which is the whole point of
+    /// having a separate zero-day knob.
+    #[test]
+    fn a_zero_day_density_altitude_does_not_touch_the_shot_day_atmosphere() {
+        // Deliberately compared on IMPACT VELOCITY, not the zero angle. Both runs produce the
+        // same zero angle, and correctly so: with no zero-day flags the zero day inherits the
+        // shot-day atmosphere, so `--density-altitude 5000` and `--zero-density-altitude 5000`
+        // both put the ZERO solve at 5000 ft DA. The difference is in the shot-day trajectory,
+        // which only the former moves. Asserting on the angle here would have looked like a bug
+        // in the feature when it was a bug in the test.
+        let impact = |args: &[&str]| -> f64 {
+            let output = Command::new(get_cli_binary())
+                .args([
+                    "trajectory", "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7",
+                    "-m", "175", "-d", "0.308", "--max-range", "500", "--auto-zero", "300", "-o",
+                    "json",
+                ])
+                .args(args)
+                .output()
+                .expect("trajectory");
+            assert!(output.status.success());
+            let doc: Value = serde_json::from_slice(&output.stdout).expect("json");
+            doc["impact_velocity"].as_f64().expect("impact_velocity")
+        };
+
+        let baseline = impact(&[]);
+        let zero_day_only = impact(&["--zero-density-altitude", "5000"]);
+        let shot_day = impact(&["--density-altitude", "5000"]);
+
+        // Not an equality: a zero-day DA legitimately perturbs the shot-day trajectory by a
+        // hair, because it changes the solved zero ANGLE and therefore the bore angle the shot
+        // is fired at. That path is real but tiny (~2e-5 fps here). What must NOT happen is the
+        // zero-day knob moving the shot-day AIR, which would show up at the same scale as the
+        // shot-day flag. Three orders of magnitude separate the two effects.
+        let via_zero_angle = (baseline - zero_day_only).abs();
+        let via_shot_day_air = (baseline - shot_day).abs();
+        assert!(
+            via_zero_angle < 0.01,
+            "a zero-day density altitude moved the shot-day trajectory by {via_zero_angle} fps,              far more than the bore-angle coupling can explain — it is reaching the shot-day              atmosphere"
+        );
+        assert!(
+            via_shot_day_air > 1.0,
+            "a shot-day density altitude should move the shot-day trajectory substantially;              got only {via_shot_day_air} fps"
+        );
+    }
+
+    /// With a zero-day DA and no --zero-pressure, an explicit --zero-pressure-type has no value
+    /// of its own to describe. It must be refused and say so, rather than re-reducing a pressure
+    /// the back-solve already produced as absolute.
+    #[test]
+    fn a_zero_pressure_type_is_refused_and_reported_when_a_zero_day_da_supplies_the_pressure() {
+        let output = Command::new(get_cli_binary())
+            .args([
+                "trajectory", "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7", "-m",
+                "175", "-d", "0.308", "--max-range", "500", "--auto-zero", "300", "-o", "json",
+                "--zero-density-altitude", "5000", "--zero-pressure-type", "qnh",
+            ])
+            .output()
+            .expect("trajectory");
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--zero-pressure-type is ignored"),
+            "expected a refusal notice, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("--zero-density-altitude"),
+            "the notice must name the flag that actually supplied the pressure, got: {stderr}"
+        );
+
+        // And it must be refused, not merely announced.
+        let refused: Value = serde_json::from_slice(&output.stdout).expect("json");
+        let refused = refused["zero_angle_degrees"].as_f64().expect("angle");
+        assert_eq!(
+            refused,
+            auto_zero_angle(&["--zero-density-altitude", "5000"]),
+            "the ignored mode still altered the solve"
+        );
+    }
+}

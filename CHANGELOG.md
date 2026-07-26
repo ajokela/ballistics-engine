@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MBA-1356), so it is fixed structurally and pinned by a cross-entry-point parity test.
 
 ### Added
+- **Density altitude reaches the zero surfaces** (MBA-1422): `zero --density-altitude`, and
+  `trajectory --zero-density-altitude` for declaring a zero-day density altitude alongside the
+  existing `--zero-pressure`/`--zero-pressure-type`. MBA-1366 scoped the flag to `trajectory`
+  only, so a shooter carrying conditions as a density altitude could not solve a zero the same
+  way they solve a trajectory. Precedence matches the shot-day rule: DA supersedes altitude and
+  pressure, an explicit temperature still wins, and the pressure mode is refused with a notice
+  because DA leaves it no value of its own to describe.
 - **`trajectory --saved-profile` now loads a profile's atmosphere** (MBA-1417). `profile save` has
   always stored temperature, pressure, humidity and altitude — and since 0.29.0 `pressure_reference`
   and `density_altitude` — but the trajectory path loaded none of them, so a profile carried its
