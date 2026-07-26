@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **solve-json v1 rejects projectile values that cannot describe a projectile** (MBA-1413).
+  `projectile.mass_kg`, `diameter_m`, `length_m` and `ballistic_coefficient` now carry physical
+  bounds and return a typed `invalid_value` error with the exact JSONPath. Found by fuzzing,
+  which got the engine to accept and solve a bullet weighing 1.1e-66 kg. The visible symptom was
+  narrower — at that magnitude the request did not survive a JSON round trip, breaking the
+  protocol's stability invariant — but the real defect was accepting the number at all. The
+  bounds are enormous (1 mg to 100 kg, 0.1 mm to 1 m), so no real load is affected.
+  `rifle.muzzle_velocity_mps` and `shot.max_range_m` are deliberately left unbounded: the MCP
+  server documents a split where a structurally valid but unsolvable request returns a tool
+  error rather than a protocol error, and bounding those would reclassify it.
 - **Input conditioning now reaches every entry point into integration** (MBA-1415). The BC
   reference-standard conversion, the SI-derived imperial fields, and the powder-resolved muzzle
   velocity were applied only in `TrajectorySolver::new`. `fast_integrate` and

@@ -297,6 +297,9 @@ fn tools_call_solve_execution_failure_is_a_tool_error_result_not_a_protocol_erro
     // (an absurd muzzle velocity) surfaces as isError: true in a normal JSON-RPC *result*,
     // not as a JSON-RPC protocol error — this is the other half of this server's documented
     // invalid-params-vs-tool-error split.
+    //
+    // MBA-1413 added physical bounds to the PROJECTILE fields but deliberately left muzzle
+    // velocity unbounded so this split, and this example of it, keep working.
     let mut session = McpSession::spawn();
     let _ = initialize(&mut session, 1);
     send_initialized_notification(&mut session);
