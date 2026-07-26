@@ -1057,13 +1057,17 @@ enum Commands {
         )]
         target_distance: Option<f64>,
 
-        /// Solve the INVERSE problem (MBA-1402): given a previously solved/stored bore angle
-        /// in DEGREES above bore-horizontal (e.g. a `zero_angle_degrees` value this same
-        /// command already printed, or `trajectory`'s auto-zero echo), find the zero RANGE it
-        /// produces under these conditions — the exact inverse of the default
-        /// --target-distance mode. Hornady and Kestrel 4DOF treat the zero angle as the
-        /// portable quantity: capture it once, then recover the range it implies later,
-        /// independent of the day it was originally solved. Conflicts with --target-distance.
+        /// Given a previously solved/stored bore angle in DEGREES above bore-horizontal (e.g.
+        /// a `zero_angle_degrees` value this same command already printed, or `trajectory`'s
+        /// auto-zero echo), find the zero RANGE(S) it produces under these conditions (MBA-1402;
+        /// Tier 2 review C2). A bore angle generally implies TWO zero distances -- the classic
+        /// 25/300-yard battle-zero relationship is exactly this, one angle with a near zero
+        /// (~25 yd) and a far zero (~300 yd) -- so this reports BOTH crossings it finds rather
+        /// than picking one; it is NOT a single-valued inverse of --target-distance (that
+        /// forward solve's chosen root depends on the distance you asked it to hit). Hornady
+        /// and Kestrel 4DOF treat the zero angle as the portable quantity: capture it once,
+        /// then recover the range(s) it implies later, independent of the day it was
+        /// originally solved. Conflicts with --target-distance.
         #[arg(
             long,
             value_name = "DEGREES",
@@ -1311,7 +1315,8 @@ enum Commands {
         /// atmosphere as the rest of this command (McCoy, *Modern Exterior
         /// Ballistics*; JBM's published calculator). Zero or absent is an exact
         /// no-op -- the measured value is used as-is. Requires --chrono-velocity.
-        /// Valid range: 1-100 ft / 0.3-30 m downrange; outside that band the
+        /// Valid range: 1-98 ft / 0.3-30 m downrange (100 ft is OUT of range --
+        /// see MIN/MAX_CHRONO_DISTANCE_M in truing.rs); outside that band the
         /// command errors instead of silently producing a bad muzzle velocity.
         #[arg(long, value_name = "DISTANCE")]
         chrono_distance: Option<f64>,
@@ -4071,6 +4076,29 @@ fn adjustment_display(
     }
 }
 
+/// Windage-axis adjustment display (Tier 2 review C1 fix): `windage_click` is resolved
+/// whenever the ELEVATION axis is `clicks` (`resolve_click_values`'s precondition — see
+/// `resolve_windage_unit`'s doc comment), but an explicit `--windage-unit` may
+/// independently set the windage axis to a plain angle. Only pass the click graduation
+/// through to `adjustment_display` when the windage axis itself is `Clicks`; otherwise
+/// this collapses to the angular path. The PDF dope card had this guard inline exactly
+/// once; range-table and compare are the two seams that missed it. All three windage
+/// columns (Wind here, plus PDF's wind_adj/lead_adj) now go through this one function so
+/// the guard cannot be dropped a fourth time.
+fn windage_adjustment_display(
+    drift_yd: f64,
+    range_yd: f64,
+    windage_unit: AdjustmentUnit,
+    windage_click: Option<ClickValue>,
+) -> f64 {
+    let click = if windage_unit == AdjustmentUnit::Clicks {
+        windage_click
+    } else {
+        None
+    };
+    adjustment_display(drift_yd, range_yd, windage_unit, click)
+}
+
 /// Display label for an `AdjustmentUnit` header/column name (MBA-1355, generalized in
 /// MBA-1410): every command that prints one shares this, so the "MIL"/"MOA"/"SMOA"/"IPHY"/
 /// "CLICKS" spelling cannot drift between wind-card/lead/range-table/compare/the PDF dope
@@ -4355,15 +4383,21 @@ fn adjustment_unit_noop_warning(
     // rejects negatives today, so the two forms are equivalent in practice.
     let elevation_consumed = target_speed > 0.0 || elevation_unit == AdjustmentUnit::Mil;
     let windage_consumed = windage_unit_explicit.is_none_or(|u| u == AdjustmentUnit::Mil);
-    if elevation_consumed && windage_consumed {
-        None
-    } else {
-        Some(
-            "warning: --adjustment-unit only affects the mover Ring column and the PDF dope \
-             card; add --target-speed or use -o pdf to see it"
-                .to_string(),
-        )
-    }
+    // Tier 2 review M7 fix: name the flag that is ACTUALLY inert. The two axes are
+    // independent (the Ring column is elevation-only -- see the doc comment above), so
+    // `--adjustment-unit clicks --target-speed 5 --windage-unit moa` has a live elevation
+    // axis (Ring column) but an inert windage axis (no Ring, no PDF); the old message
+    // always named `--adjustment-unit` even when it was `--windage-unit` doing nothing.
+    let inert_flag = match (elevation_consumed, windage_consumed) {
+        (false, false) => "--adjustment-unit and --windage-unit",
+        (false, true) => "--adjustment-unit",
+        (true, false) => "--windage-unit",
+        (true, true) => return None,
+    };
+    Some(format!(
+        "warning: {inert_flag} only affects the mover Ring column and the PDF dope card; \
+         add --target-speed or use -o pdf to see it"
+    ))
 }
 
 /// MBA-1410 fold-in of an MBA-1355 backlog minor: `come-ups` has no windage column (it is
@@ -6352,7 +6386,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 dsf_table: dsf_table.clone(),
                 // MBA-1402: `muzzle_angle` above is already the solved zero angle (degrees)
                 // when auto-zero ran; echo it only in that case, so a bare `--angle` run keeps
-                // this `None` and every output format is unchanged.
+                // this `None` and every output format is unchanged. `--auto-zero` is a
+                // PRE-EXISTING flag (also set implicitly from a saved profile's
+                // auto_zero/zero_distance), so this IS a deliberate, user-visible output
+                // change on that existing path: table/JSON/CSV/WASM `trajectory --auto-zero`
+                // runs now emit a Zero Angle line/key/row and the WASM banner grows a
+                // leading `D° /` term that wasn't there before (Tier 2 review I1). Anything
+                // parsing `--auto-zero` output needs to account for the new field.
                 solved_zero_angle_deg: final_auto_zero.map(|_| muzzle_angle),
             };
 
@@ -10429,16 +10469,6 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     let lead_yd = lead_m / 0.9144;
                     let elevation_unit = pdf_meta.adjustment_unit;
                     let windage_unit = pdf_meta.windage_unit;
-                    // MBA-1410: windage_click was resolved whenever the ELEVATION axis is
-                    // Clicks (resolve_click_values' precondition — see
-                    // resolve_windage_unit's doc comment), but an explicit --windage-unit
-                    // may have overridden the windage axis to a plain angle. Only apply the
-                    // graduation when the windage axis itself is actually Clicks.
-                    let windage_click_display = if windage_unit == AdjustmentUnit::Clicks {
-                        windage_click
-                    } else {
-                        None
-                    };
 
                     DopeCardRow {
                         range_yd: range_yd.round() as u32,
@@ -10450,9 +10480,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         // wind/lead the (possibly different) windage one.
                         drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click),
                         // Wind: positive = dial right for wind from right
-                        wind_adj: adjustment_display(drift_yd, range_yd, windage_unit, windage_click_display),
+                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click),
                         // Lead for a moving target
-                        lead_adj: adjustment_display(lead_yd, range_yd, windage_unit, windage_click_display),
+                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click),
                     }
                 })
                 .collect();
@@ -11275,12 +11305,21 @@ fn run_zero_calculation(
     Ok(())
 }
 
-/// Inverse of [`run_zero_calculation`] (MBA-1402): given a fixed, previously solved/stored
-/// bore angle instead of a target distance, solve the zero RANGE it produces — run the
-/// trajectory at that angle and locate the FAR line-of-sight crossing. `zero_angle_rad` is
-/// the stored angle (e.g. a `zero_angle_degrees` value this same command already printed on
-/// an earlier `--target-distance` run, or `trajectory`'s auto-zero echo), already converted
-/// to radians by the caller.
+/// Companion of [`run_zero_calculation`] (MBA-1402), corrected by the Tier 2 whole-branch
+/// review (C2): given a fixed, previously solved/stored bore angle instead of a target
+/// distance, solve the zero RANGE(S) it produces — run the trajectory at that angle and
+/// report BOTH line-of-sight crossings found (near, ascending, close to the muzzle; far,
+/// descending past the apex), rather than silently picking one. `zero_angle_rad` is the
+/// stored angle (e.g. a `zero_angle_degrees` value this same command already printed on an
+/// earlier `--target-distance` run, or `trajectory`'s auto-zero echo), already converted to
+/// radians by the caller.
+///
+/// This is NOT the exact inverse of `run_zero_calculation`'s forward solve: a bore angle
+/// generally implies two valid zero distances (the classic 25/300-yard battle-zero
+/// relationship — a rifle zeroed near 25 yd is, for the same bore angle, also zeroed again
+/// near 300 yd), and the forward solver's chosen root depends on the target distance it was
+/// asked to hit. Round-tripping a solved angle back through here recovers the original
+/// distance as ONE of the two reported crossings, not necessarily the far one.
 #[allow(clippy::too_many_arguments)] // Mirrors run_zero_calculation's own parameter list.
 fn run_zero_range_calculation(
     velocity: f64,
@@ -11339,16 +11378,26 @@ fn run_zero_range_calculation(
     // Same line-of-sight target height convention as run_zero_calculation's forward solve.
     let los_target_height = sight_height + target_height;
 
-    // Solve the zero RANGE this stored angle produces — the exact inverse of
-    // calculate_zero_angle_with_resolved_conditions above. Authoritative: `atmosphere` is
-    // already fully resolved, so it is trusted as-is rather than re-derived a second time.
-    let zero_range = ballistics_engine::calculate_zero_range_from_angle_with_resolved_conditions(
+    // Solve the zero RANGE(S) this stored angle produces (Tier 2 review C2: BOTH crossings,
+    // not just one). Authoritative: `atmosphere` is already fully resolved, so it is trusted
+    // as-is rather than re-derived a second time.
+    let crossings = ballistics_engine::calculate_zero_range_from_angle_with_resolved_conditions(
         inputs.clone(),
         zero_angle_rad,
         los_target_height,
         WindConditions::default(),
         atmosphere.clone(),
     )?;
+
+    // A single concrete distance is still needed to size the follow-up trajectory solve and
+    // to compute the sight-adjustment/point-blank-range diagnostics below. Prefer the far
+    // crossing -- the conventional "sighted in at D yards" meaning -- and fall back to the
+    // near one when the far crossing isn't within the solved envelope; either way, both
+    // crossings are still reported in full below.
+    let primary_range = crossings.far_m.or(crossings.near_m).expect(
+        "calculate_zero_range_from_angle_with_resolved_conditions guarantees at least one \
+         crossing on Ok",
+    );
 
     // Calculate trajectory at the given angle to get additional info, mirroring the forward
     // command's own follow-up solve.
@@ -11360,19 +11409,19 @@ fn run_zero_range_calculation(
         Default::default(),
         atmosphere,
     );
-    solver.set_max_range(zero_range * 3.0);
+    solver.set_max_range(primary_range * 3.0);
     let trajectory = solver.solve()?;
 
     // Same sight-adjustment/point-blank-range diagnostics as the forward command, now
-    // referenced against the SOLVED range rather than a supplied target distance.
+    // referenced against the primary crossing rather than a supplied target distance.
     let sight_adjustment_moa =
-        zero_angle_rad.to_degrees() * 60.0 - (target_height / zero_range * 3437.75);
+        zero_angle_rad.to_degrees() * 60.0 - (target_height / primary_range * 3437.75);
     let mut entered_point_blank_band = false;
     let point_blank_range = trajectory
         .points
         .iter()
         .find_map(|p| {
-            let los_y = sight_height + target_height * (p.position.x / zero_range);
+            let los_y = sight_height + target_height * (p.position.x / primary_range);
             let height_from_los = p.position.y - los_y;
 
             if height_from_los >= -0.05 {
@@ -11391,22 +11440,41 @@ fn run_zero_range_calculation(
         UnitSystem::Imperial => "yd",
     };
 
+    let near_range_display = crossings
+        .near_m
+        .map(|m| UnitConverter::distance_from_metric(m, units));
+    let far_range_display = crossings
+        .far_m
+        .map(|m| UnitConverter::distance_from_metric(m, units));
+    let primary_range_display = UnitConverter::distance_from_metric(primary_range, units);
+
     match output {
         OutputFormat::Json => {
             let units_label = match units {
                 UnitSystem::Metric => "metric",
                 UnitSystem::Imperial => "imperial",
             };
-            let result = serde_json::json!({
+            let mut result = serde_json::json!({
                 "units": units_label,
                 "zero_angle_degrees": zero_angle_rad.to_degrees(),
                 "zero_angle_moa": zero_angle_rad.to_degrees() * 60.0,
                 "zero_angle_mrad": zero_angle_rad * 1000.0,
-                "zero_range": UnitConverter::distance_from_metric(zero_range, units),
+                // Kept for continuity with the primary (far-preferred) crossing; see
+                // "near_zero_range"/"far_zero_range" for both crossings explicitly.
+                "zero_range": primary_range_display,
                 "sight_adjustment_moa": sight_adjustment_moa,
                 "max_ordinate": UnitConverter::distance_from_metric(trajectory.max_height, units),
                 "point_blank_range": UnitConverter::distance_from_metric(point_blank_range, units),
             });
+            // Tier 2 review C2: additive, skip-when-absent keys for both crossings (mirrors
+            // MBA-1402's skip_serializing_if pattern) -- a bore angle generally implies two
+            // zero ranges and both are reported rather than silently picked between.
+            if let Some(near) = near_range_display {
+                result["near_zero_range"] = serde_json::json!(near);
+            }
+            if let Some(far) = far_range_display {
+                result["far_zero_range"] = serde_json::json!(far);
+            }
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
@@ -11415,16 +11483,17 @@ fn run_zero_range_calculation(
             println!("zero_angle,{:.4},degrees", zero_angle_rad.to_degrees());
             println!("zero_angle_moa,{:.2},MOA", zero_angle_rad.to_degrees() * 60.0);
             println!("zero_angle_mrad,{:.2},mrad", zero_angle_rad * 1000.0);
-            println!(
-                "zero_range,{:.2},{}",
-                UnitConverter::distance_from_metric(zero_range, units),
-                dist_unit
-            );
+            println!("zero_range,{:.2},{}", primary_range_display, dist_unit);
+            if let Some(near) = near_range_display {
+                println!("near_zero_range,{:.2},{}", near, dist_unit);
+            }
+            if let Some(far) = far_range_display {
+                println!("far_zero_range,{:.2},{}", far, dist_unit);
+            }
             println!("max_ordinate,{:.3},meters", trajectory.max_height);
         }
 
         OutputFormat::Table => {
-            let zero_range_display = UnitConverter::distance_from_metric(zero_range, units);
             let target_height_display = UnitConverter::distance_from_metric(target_height, units);
             let sight_height_display = UnitConverter::distance_from_metric(sight_height, units);
             let max_ordinate_display =
@@ -11446,10 +11515,16 @@ fn run_zero_range_calculation(
                 zero_angle_rad * 1000.0
             );
             println!("╠════════════════════════════════════════╣");
-            println!(
-                "║ Solved Zero Range: {:>8.1} {:3}       ║",
-                zero_range_display, dist_unit
-            );
+            // Tier 2 review C2: a bore angle generally crosses the line of sight twice --
+            // report both, clearly labelled, rather than silently picking one.
+            match near_range_display {
+                Some(near) => println!("║ Near Zero (ascending): {:>8.1} {:3}   ║", near, dist_unit),
+                None => println!("║ Near Zero: not within the solved range         ║"),
+            }
+            match far_range_display {
+                Some(far) => println!("║ Far Zero (descending): {:>8.1} {:3}   ║", far, dist_unit),
+                None => println!("║ Far Zero: not within the solved range          ║"),
+            }
             println!(
                 "║ Target Height:     {:>8.2} {:3}       ║",
                 target_height_display, dist_unit
@@ -15512,7 +15587,7 @@ fn handle_range_table(
                 };
 
                 let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-                let wind_adj = adjustment_display(drift_yd, range_display, windage_unit, windage_click);
+                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click);
 
                 rows.push(RangeRow {
                     range: current_range,
@@ -15547,21 +15622,27 @@ fn handle_range_table(
                     })
                 })
                 .collect();
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "zero_distance": zero_distance,
                 "wind_speed": wind_speed,
                 "wind_direction": wind_direction,
                 // "adjustment_unit" kept for backward compatibility (== the elevation
-                // axis, i.e. byte-identical to pre-MBA-1410 output); "windage_unit" is
-                // additive and only differs when --windage-unit was explicitly passed.
+                // axis, i.e. byte-identical to pre-MBA-1410 output).
                 "adjustment_unit": elev_label,
-                "windage_unit": wind_label,
                 "distance_unit": dist_unit,
                 "velocity_unit": vel_unit,
                 "energy_unit": energy_unit,
                 "drop_unit": drop_unit,
                 "data": json_rows,
             });
+            // Tier 2 review I2 fix: "windage_unit" is additive and must only appear when
+            // --windage-unit actually diverged from the elevation axis, matching
+            // MBA-1402's skip_serializing_if pattern -- otherwise every default-path
+            // range-table run (no --windage-unit) would gain an unconditional new key
+            // relative to the merge base.
+            if windage_unit != adjustment_unit {
+                json["windage_unit"] = serde_json::json!(wind_label);
+            }
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         OutputFormat::Csv => {
@@ -15878,7 +15959,7 @@ fn handle_compare(
                 UnitSystem::Metric => w.wind_drift_m * 1000.0,
             };
             let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-            let wind_adj = adjustment_display(drift_yd, range_display, windage_unit, windage_click);
+            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click);
             rows.push(LoadRow {
                 drop_linear,
                 drop_adj,
@@ -15906,7 +15987,7 @@ fn handle_compare(
 
     match output {
         OutputFormat::Json => {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "compare": {
                     "loads": loads.iter().zip(results.iter()).map(|(l, res)| {
                         serde_json::json!({
@@ -15935,10 +16016,8 @@ fn handle_compare(
                         "distance": dist_unit,
                         "drop": drop_unit,
                         // "adjustment" kept for backward compatibility (== the elevation
-                        // axis, byte-identical to pre-MBA-1410 output); "windage_adjustment"
-                        // is additive and only differs when --windage-unit was passed.
+                        // axis, byte-identical to pre-MBA-1410 output).
                         "adjustment": elev_label,
-                        "windage_adjustment": wind_label,
                         "velocity": vel_unit,
                         "energy": energy_unit,
                         "wind_speed": wind_unit_label,
@@ -15969,6 +16048,12 @@ fn handle_compare(
                     }).collect::<Vec<_>>(),
                 }
             });
+            // Tier 2 review I2 fix: same additive-only-on-divergence gate as range-table's
+            // "windage_unit" -- "windage_adjustment" must not appear on the default path
+            // (no --windage-unit), matching MBA-1402's skip_serializing_if pattern.
+            if windage_unit != adjustment_unit {
+                json["compare"]["units"]["windage_adjustment"] = serde_json::json!(wind_label);
+            }
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         OutputFormat::Csv => {
@@ -17134,13 +17219,18 @@ mod adjustment_unit_noop_tests {
     /// (the Ring column never shows the windage axis, so `target_speed` cannot excuse it).
     #[test]
     fn explicit_windage_unit_alone_warns_without_pdf_and_is_silent_with_it() {
-        assert!(adjustment_unit_noop_warning(
+        // Tier 2 review M7: elevation is consumed here (Mil is the default -- never a
+        // no-op signal by itself), so the ONLY inert flag is --windage-unit; the message
+        // must name it, not --adjustment-unit.
+        let warning = adjustment_unit_noop_warning(
             AdjustmentUnit::Mil,
             Some(AdjustmentUnit::Moa),
             0.0,
-            false
+            false,
         )
-        .is_some());
+        .unwrap();
+        assert!(warning.contains("--windage-unit"), "{warning}");
+        assert!(!warning.contains("--adjustment-unit"), "{warning}");
         // Even a nonzero target_speed doesn't excuse it -- the Ring column is elevation-only.
         assert!(adjustment_unit_noop_warning(
             AdjustmentUnit::Mil,
@@ -17164,6 +17254,21 @@ mod adjustment_unit_noop_tests {
             false
         )
         .is_none());
+    }
+
+    /// Tier 2 review M7: when BOTH axes are inert, the message names both flags rather
+    /// than only ever blaming --adjustment-unit.
+    #[test]
+    fn both_axes_inert_names_both_flags() {
+        let warning = adjustment_unit_noop_warning(
+            AdjustmentUnit::Moa,
+            Some(AdjustmentUnit::Smoa),
+            0.0,
+            false,
+        )
+        .unwrap();
+        assert!(warning.contains("--adjustment-unit"), "{warning}");
+        assert!(warning.contains("--windage-unit"), "{warning}");
     }
 }
 

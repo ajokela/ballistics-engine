@@ -832,6 +832,28 @@ pub(crate) enum ZeroTargetFrame {
     WorldVertical,
 }
 
+/// Both line-of-sight crossings a single fixed bore angle can produce (Tier 2 whole-branch
+/// review, C2): a rifle whose sight sits above its bore generally crosses a level line of
+/// sight TWICE on a rising shot — an ascending "near zero" close to the muzzle, and a
+/// descending "far zero" past the apex. The classic 25/300-yard battle-zero pairing is one
+/// bore angle producing both. `TrajectorySolver`'s internal `find_zero_range` and the public
+/// `calculate_zero_range_from_angle_*` functions return both rather than silently choosing
+/// one, because `find_zero_angle`'s own choice of root depends on the target distance it was
+/// asked to solve for — the forward and inverse solvers are NOT a single-valued pair.
+///
+/// Either field may be `None` when the solved envelope doesn't reach that crossing (e.g. a
+/// short `--max-range` that stops before the far crossing, or a target height high enough
+/// that the trajectory never rises to it at all). At least one is always `Some` on `Ok`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZeroCrossings {
+    /// Downrange distance (meters) of the near, ascending crossing, if the solved envelope
+    /// reaches it.
+    pub near_m: Option<f64>,
+    /// Downrange distance (meters) of the far, descending crossing -- what "sighted in at D
+    /// yards" conventionally means -- if the solved envelope reaches it.
+    pub far_m: Option<f64>,
+}
+
 impl TrajectorySolver {
     pub fn new(
         inputs: BallisticInputs,
@@ -1132,31 +1154,42 @@ impl TrajectorySolver {
         Ok(None)
     }
 
-    /// Inverse of [`Self::find_zero_angle`] (MBA-1402): given a FIXED bore angle rather than
-    /// searching for one, run that trajectory and locate the downrange distance where it
-    /// crosses `target_height_m` — the zero RANGE a stored/portable bore angle implies under
-    /// THESE conditions. Hornady and Kestrel 4DOF treat the zero angle as the portable
-    /// quantity (captured once, then reusable independent of the day it was solved); this is
-    /// what makes that value usable again.
+    /// Inverse of [`Self::find_zero_angle`] (MBA-1402), corrected by the Tier 2 whole-branch
+    /// review (C2): given a FIXED bore angle rather than searching for one, run that
+    /// trajectory and locate the downrange distance(s) where it crosses `target_height_m` —
+    /// the zero RANGE(S) a stored/portable bore angle implies under THESE conditions. Hornady
+    /// and Kestrel 4DOF treat the zero angle as the portable quantity (captured once, then
+    /// reusable independent of the day it was solved); this is what makes that value usable
+    /// again.
     ///
-    /// A rifle whose sight sits above the bore crosses a level line of sight TWICE on a rising
-    /// shot: once ascending, close to the muzzle (the "near zero"), and once descending past
-    /// the apex (the "far zero" — what "sighted in at D yards" always means). This returns the
-    /// LAST sign change of `height - target_height_m` found while walking the sampled
-    /// trajectory outward, i.e. the far crossing, never the near one. The crossing distance is
-    /// linearly interpolated between the two bracketing sample points, mirroring
-    /// `zero_trial_height_at`'s own height-at-a-known-distance interpolation in the other
-    /// direction.
+    /// A rifle whose sight sits above the bore generally crosses a level line of sight TWICE
+    /// on a rising shot: once ascending, close to the muzzle (the "near zero"), and once
+    /// descending past the apex (the "far zero"). Both are equally real zero ranges for the
+    /// SAME bore angle — this is the classic 25/300-yard battle-zero relationship: a rifle
+    /// zeroed at 25 yd (the near crossing of its bore angle) is, for the same angle, ALSO
+    /// zeroed again around 300 yd (the far crossing). [`Self::find_zero_angle`]'s own choice
+    /// of root depends on which target distance it was asked to solve for, so this is not a
+    /// single-valued inverse of that function — it is this function's job to report both
+    /// roots it can find rather than silently pick one and call it "the" zero range.
+    ///
+    /// Returns [`ZeroCrossings`] with the near (first ascending, error negative → positive)
+    /// and far (descending, error positive → negative) crossings independently, either of
+    /// which may be absent if the solved envelope doesn't reach it (e.g. `--max-range` too
+    /// short to reach the far crossing, or an angle so shallow / a target height so high that
+    /// the near crossing never happens). Errors only when NEITHER crossing is found. Each
+    /// crossing distance is linearly interpolated between its two bracketing sample points,
+    /// mirroring `zero_trial_height_at`'s own height-at-a-known-distance interpolation in the
+    /// other direction.
     fn find_zero_range(
         &self,
         angle_rad: f64,
         target_height_m: f64,
         frame: ZeroTargetFrame,
-    ) -> Result<f64, BallisticsError> {
+    ) -> Result<ZeroCrossings, BallisticsError> {
         let mut trial = self.clone();
         trial.inputs.muzzle_angle = angle_rad;
         // Mirrors zero_trial_height_at's trial setup exactly (MBA-959 / MBA-1286 / MBA-1412),
-        // so this is the true inverse under the same conventions.
+        // so both directions apply the same conventions.
         trial.inputs.enable_aerodynamic_jump = false;
         trial.inputs.cant_angle = 0.0;
         if frame == ZeroTargetFrame::SightLine {
@@ -1164,6 +1197,14 @@ impl TrajectorySolver {
         }
         let result = trial.solve()?;
 
+        // The height-above-target-height error is, for a normal flat-fire trajectory,
+        // unimodal: it starts below the line of sight (bore below sight), rises through it
+        // ONCE (ascending -- the near zero), continues to the apex, then falls back through
+        // it ONCE more (descending -- the far zero) before diverging away for good. So at
+        // most one ascending and one descending crossing exist; classify each sign change by
+        // direction rather than by position (first/last) so a near-only trajectory (solved
+        // range too short to reach the far crossing) is never mislabeled as "far".
+        let mut near_crossing: Option<f64> = None;
         let mut far_crossing: Option<f64> = None;
         let mut previous: Option<(f64, f64)> = None; // (downrange_m, height_error_m)
         for point in &result.points {
@@ -1176,13 +1217,26 @@ impl TrajectorySolver {
             let error = height - target_height_m;
             if let Some((prev_x, prev_error)) = previous {
                 if prev_error == 0.0 {
-                    // An exact touch is itself a crossing; keep walking in case a later
-                    // segment crosses again farther out.
-                    far_crossing = Some(prev_x);
+                    // An exact touch is itself a crossing; assign it to whichever slot is
+                    // still open (near first, since it can only occur before far).
+                    if near_crossing.is_none() {
+                        near_crossing = Some(prev_x);
+                    } else {
+                        far_crossing = Some(prev_x);
+                    }
                 }
                 if prev_error * error < 0.0 {
                     let fraction = prev_error / (prev_error - error);
-                    far_crossing = Some(prev_x + fraction * (point.position.x - prev_x));
+                    let crossing = prev_x + fraction * (point.position.x - prev_x);
+                    if prev_error < 0.0 && error > 0.0 {
+                        // Ascending: the near zero. Keep only the first one found.
+                        if near_crossing.is_none() {
+                            near_crossing = Some(crossing);
+                        }
+                    } else {
+                        // Descending: the far zero.
+                        far_crossing = Some(crossing);
+                    }
                 }
             }
             previous = Some((point.position.x, error));
@@ -1191,17 +1245,26 @@ impl TrajectorySolver {
         // the trajectory's very last sampled point landing exactly on the line too.
         if let Some((last_x, last_error)) = previous {
             if last_error == 0.0 {
-                far_crossing = Some(last_x);
+                if near_crossing.is_none() {
+                    near_crossing = Some(last_x);
+                } else {
+                    far_crossing = Some(last_x);
+                }
             }
         }
 
-        far_crossing.ok_or_else(|| {
-            BallisticsError::from(
+        if near_crossing.is_none() && far_crossing.is_none() {
+            return Err(BallisticsError::from(
                 "Cannot find zero range: this angle never crosses the target height within the \
-                 solved range (angle too shallow to reach it, or the far crossing lies beyond \
+                 solved range (angle too shallow to reach it, or both crossings lie beyond \
                  the solver's max range)."
                     .to_string(),
-            )
+            ));
+        }
+
+        Ok(ZeroCrossings {
+            near_m: near_crossing,
+            far_m: far_crossing,
         })
     }
 
@@ -3752,18 +3815,27 @@ pub fn calculate_zero_angle_with_resolved_conditions(
 /// case, so the larger envelope costs effectively nothing.
 const ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M: f64 = 2000.0;
 
-/// Solve the zero RANGE that a fixed bore angle produces — the exact inverse of
-/// [`calculate_zero_angle_with_conditions`]. Runs the trajectory at `zero_angle_rad` and
-/// returns the downrange distance of the FAR line-of-sight crossing: a rifle sighted above
-/// the bore crosses a level line of sight twice on a rising shot (near, ascending; far,
-/// descending past the apex) and "zero range" always means the far one.
+/// Solve the zero RANGE(S) that a fixed bore angle produces. Runs the trajectory at
+/// `zero_angle_rad` and returns BOTH line-of-sight crossings it finds, as
+/// [`ZeroCrossings`] — a rifle sighted above the bore generally crosses a level line of
+/// sight twice on a rising shot (near, ascending, close to the muzzle; far, descending past
+/// the apex).
+///
+/// **This is NOT the exact inverse of [`calculate_zero_angle_with_conditions`].** A single
+/// bore angle generally implies two valid zero distances (the classic 25/300-yard
+/// battle-zero relationship is exactly this: one angle, two zeros), and
+/// [`calculate_zero_angle_with_conditions`]'s own choice of root depends on which target
+/// distance it was asked to solve for. Round-tripping a solved angle back through this
+/// function recovers the ORIGINAL distance as one of the two returned crossings, not
+/// necessarily as `far_m` specifically — for short/flat zeros the forward solver's answer is
+/// often the NEAR crossing.
 pub fn calculate_zero_range_from_angle_with_conditions(
     inputs: BallisticInputs,
     zero_angle_rad: f64,
     target_height: f64,
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
-) -> Result<f64, BallisticsError> {
+) -> Result<ZeroCrossings, BallisticsError> {
     let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
     solver.set_max_range(ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M);
     solver.find_zero_range(zero_angle_rad, target_height, ZeroTargetFrame::SightLine)
@@ -3772,14 +3844,15 @@ pub fn calculate_zero_range_from_angle_with_conditions(
 /// [`calculate_zero_range_from_angle_with_conditions`] for a presence-aware caller that has
 /// already resolved station temperature/pressure — same relationship as
 /// [`calculate_zero_angle_with_resolved_conditions`] has to
-/// [`calculate_zero_angle_with_conditions`] (MBA-1397 pattern).
+/// [`calculate_zero_angle_with_conditions`] (MBA-1397 pattern). See that function's doc
+/// comment for why this returns both crossings rather than a single "the" zero range.
 pub fn calculate_zero_range_from_angle_with_resolved_conditions(
     inputs: BallisticInputs,
     zero_angle_rad: f64,
     target_height: f64,
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
-) -> Result<f64, BallisticsError> {
+) -> Result<ZeroCrossings, BallisticsError> {
     let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
     solver.set_max_range(ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M);
     solver.find_zero_range(zero_angle_rad, target_height, ZeroTargetFrame::SightLine)

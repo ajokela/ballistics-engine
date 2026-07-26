@@ -2688,10 +2688,13 @@ impl WasmBallistics {
         let los_height = inputs.sight_height;
 
         let result = if let Some(angle_deg) = from_angle {
-            // MBA-1402: inverse mode — given a previously solved/stored bore angle (degrees),
-            // solve the zero RANGE it produces. Exact inverse of the --target-distance mode
-            // below; see calculate_zero_range_from_angle_with_conditions's doc comment for
-            // why the FAR line-of-sight crossing, specifically, is what "zero range" means.
+            // MBA-1402, corrected by the Tier 2 review (C2): inverse mode — given a
+            // previously solved/stored bore angle (degrees), solve the zero RANGE(S) it
+            // produces. NOT the exact inverse of the --target-distance mode below: a bore
+            // angle generally implies TWO zero distances (the classic 25/300-yard
+            // battle-zero relationship), so both crossings are reported rather than one
+            // being silently chosen — see calculate_zero_range_from_angle_with_conditions's
+            // doc comment.
             let angle_rad = angle_deg * std::f64::consts::PI / 180.0;
             match calculate_zero_range_from_angle_with_conditions(
                 inputs,
@@ -2700,13 +2703,26 @@ impl WasmBallistics {
                 WindConditions::default(),
                 AtmosphericConditions::default(),
             ) {
-                Ok(zero_range_m) => {
-                    let zero_range_display = match units {
-                        UnitSystem::Imperial => zero_range_m / 0.9144,
-                        UnitSystem::Metric => zero_range_m,
+                Ok(crossings) => {
+                    let to_display = |m: f64| match units {
+                        UnitSystem::Imperial => m / 0.9144,
+                        UnitSystem::Metric => m,
+                    };
+                    let dist_label = if units == UnitSystem::Imperial {
+                        "yards"
+                    } else {
+                        "meters"
                     };
                     let moa_adjustment = angle_deg * 60.0;
                     let mrad_adjustment = angle_rad * 1000.0;
+                    let near_line = match crossings.near_m {
+                        Some(m) => format!("Near Zero (ascending): {:.1} {}\n", to_display(m), dist_label),
+                        None => "Near Zero: not within the solved range\n".to_string(),
+                    };
+                    let far_line = match crossings.far_m {
+                        Some(m) => format!("Far Zero (descending): {:.1} {}\n", to_display(m), dist_label),
+                        None => "Far Zero: not within the solved range\n".to_string(),
+                    };
 
                     format!(
                         "Zero Range From Angle Results\n\
@@ -2714,17 +2730,14 @@ impl WasmBallistics {
                          Input Zero Angle: {:.4}°\n\
                          MOA Adjustment: {:.2} MOA up\n\
                          Mrad Adjustment: {:.2} mrad up\n\
-                         Solved Zero Range: {:.1} {}\n\
+                         {}\
+                         {}\
                          Sight Height: {} {}\n",
                         angle_deg,
                         moa_adjustment,
                         mrad_adjustment,
-                        zero_range_display,
-                        if units == UnitSystem::Imperial {
-                            "yards"
-                        } else {
-                            "meters"
-                        },
+                        near_line,
+                        far_line,
                         sight_height,
                         if units == UnitSystem::Imperial {
                             "inches"
@@ -6297,7 +6310,7 @@ True Velocity Command:
                                  downrange of the muzzle (ft/m). Nonzero
                                  back-solves the true muzzle velocity via the
                                  real forward drag model; zero/absent is a
-                                 no-op. Valid range 1-100 ft / 0.3-30 m;
+                                 no-op. Valid range 1-98 ft / 0.3-30 m;
                                  requires --chrono-velocity
     --zero-distance <DIST>       Zero distance (yd/m) [default: 100]
     --sight-height <HEIGHT>      Sight height above bore (in/mm) [default: 2/50]
