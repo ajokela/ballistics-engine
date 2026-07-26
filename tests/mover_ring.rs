@@ -629,6 +629,32 @@ fn a_saved_profiles_bc_reference_does_not_hijack_a_cli_supplied_bc() {
         "the profile's stored reference must still qualify the profile's own BC"
     );
 
+    // Re-review M6: the gate covers TWO ways a BC can arrive from outside the profile —
+    // `--bc` above and a CSV `BC` column. Only the first was exercised, so a gate that
+    // checked just `bc.is_none()` would have passed. Cover the CSV arm too.
+    let csv_dir = home.join("csv");
+    std::fs::create_dir_all(&csv_dir).expect("csv dir");
+    let csv_path = csv_dir.join("load.csv");
+    std::fs::write(&csv_path, "NAME,BC\nrow1,0.5\n").expect("write csv");
+    let csv_bc = run(&[
+        "--profile",
+        csv_path.to_str().expect("csv path"),
+        "--profile-row",
+        "row1",
+    ]);
+    let csv_bc_icao = run(&[
+        "--profile",
+        csv_path.to_str().expect("csv path"),
+        "--profile-row",
+        "row1",
+        "--bc-reference",
+        "icao",
+    ]);
+    assert_eq!(
+        csv_bc, csv_bc_icao,
+        "a CSV-supplied BC is also not the profile's, so the stored reference must not apply"
+    );
+
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -656,5 +682,21 @@ fn density_altitude_blocks_an_explicit_zero_day_pressure_mode() {
     assert!(
         stderr.contains("--zero-pressure-type is ignored"),
         "the ignored flag must say so rather than passing silently: {stderr}"
+    );
+
+    // Re-review M6: the two asserts above only pin ONE direction. Dropping the
+    // `zero_pressure.is_none()` guard would still satisfy them while silently breaking the
+    // case that must keep working — an explicit --zero-pressure brings its own value, so its
+    // mode legitimately qualifies it even under --density-altitude. Pin that too, or this
+    // test cannot catch the regression it exists to catch.
+    let mut own_pressure_qnh = base.to_vec();
+    own_pressure_qnh.extend(["--zero-pressure", "30.41", "--zero-pressure-type", "qnh"]);
+    let mut own_pressure_absolute = base.to_vec();
+    own_pressure_absolute.extend(["--zero-pressure", "30.41", "--zero-pressure-type", "absolute"]);
+    assert_ne!(
+        run(&own_pressure_qnh),
+        run(&own_pressure_absolute),
+        "an explicit --zero-pressure supplies its own value, so its mode must still apply \
+         even when --density-altitude governs the shot-day atmosphere"
     );
 }
