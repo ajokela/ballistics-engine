@@ -162,6 +162,105 @@ mod tests {
         assert!(result.contains("Mrad Adjustment"));
     }
 
+    /// MBA-1427: the per-point effective drag coefficient, in the build its requester actually
+    /// runs. MBA-1423 shipped it native-only; `with_drag_coefficient` had 6 references in
+    /// main.rs and 0 in wasm.rs.
+    #[wasm_bindgen_test]
+    fn test_with_drag_coefficient_adds_the_key_to_json_points() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-range 300 \
+                 -o json --with-drag-coefficient",
+            )
+            .unwrap();
+        assert!(
+            result.contains("\"drag_coefficient\""),
+            "the flag parsed but the key never reached the JSON: {result}"
+        );
+    }
+
+    /// Off by default: without the flag the JSON must not gain the key, so an existing consumer
+    /// sees an unchanged document.
+    #[wasm_bindgen_test]
+    fn test_drag_coefficient_is_absent_without_the_flag() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-range 300 \
+                 -o json",
+            )
+            .unwrap();
+        assert!(
+            !result.contains("drag_coefficient"),
+            "drag_coefficient leaked into unflagged JSON: {result}"
+        );
+    }
+
+    /// MBA-1426 item 2: the reference drag curves, from the terminal. The output IS the shared
+    /// formatter's string — asserted by equality, not by spot-checking fragments, so this
+    /// surface cannot drift from native the way the recoil CSV header did.
+    #[wasm_bindgen_test]
+    fn test_drag_curve_output_is_the_shared_formatter_verbatim() {
+        let wasm = WasmBallistics::new();
+        for (args, format) in [
+            ("drag-curve", crate::drag::ReferenceDragCurveFormat::Table),
+            ("drag-curve -o csv", crate::drag::ReferenceDragCurveFormat::Csv),
+            ("drag-curve -o json", crate::drag::ReferenceDragCurveFormat::Json),
+            (
+                "drag-curve --drag-model gs -o csv",
+                crate::drag::ReferenceDragCurveFormat::Csv,
+            ),
+        ] {
+            let model = if args.contains("gs") {
+                crate::DragModel::GS
+            } else {
+                crate::DragModel::G7
+            };
+            assert_eq!(
+                wasm.run_command(args).unwrap(),
+                crate::drag::format_reference_drag_curve(&model, format),
+                "`{args}` diverged from the shared formatter"
+            );
+        }
+    }
+
+    /// A typo'd model must be a hard error, not a silent fall-through to the default — the
+    /// silently-ignored-argument class the last two releases spent effort closing.
+    #[wasm_bindgen_test]
+    fn test_drag_curve_rejects_an_unknown_model_and_argument() {
+        let wasm = WasmBallistics::new();
+        assert!(wasm.run_command("drag-curve --drag-model g9").is_err());
+        assert!(wasm.run_command("drag-curve --bogus-flag").is_err());
+        // A junk format must get the invalid-format message, not be told PDF has no form —
+        // blaming a format the user never mentioned (review finding).
+        assert!(wasm.run_command("drag-curve -o yaml").is_err());
+        assert!(wasm.run_command("drag-curve -o pdf").is_err());
+    }
+
+    /// Both additions must be discoverable, or they repeat --from-angle's fate (MBA-1418).
+    ///
+    /// The drag-curve assertion is anchored to the Commands INDEX row, not a bare substring:
+    /// the review found the first draft's `contains("drag-curve")` was vacuous, satisfied by a
+    /// pre-existing ".drg vendor drag-curve text" phrase in the loadDragTable Host API prose —
+    /// it passed on a build with no drag-curve help at all, and the index row was in fact
+    /// missing.
+    #[wasm_bindgen_test]
+    fn test_help_lists_the_new_surfaces() {
+        let wasm = WasmBallistics::new();
+        let help = wasm.run_command("help").unwrap();
+        assert!(help.contains("--with-drag-coefficient"));
+        let index = help
+            .split("Global Options:")
+            .next()
+            .expect("help has a Commands index before Global Options");
+        assert!(
+            index.contains("\n  drag-curve "),
+            "drag-curve is missing from the Commands index a user actually scans: {index}"
+        );
+        assert!(help.contains("Drag Curve Command:"));
+    }
+
     /// MBA-1402 parity, reported by an external consumer against the 0.29.0 WASM build: native
     /// emits the solved zero angle on its JSON surface, the browser build emitted it only in the
     /// text banner. Someone parsing the WASM JSON therefore could not read back the angle the

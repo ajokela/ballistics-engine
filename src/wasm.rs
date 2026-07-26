@@ -1020,6 +1020,7 @@ impl WasmBallistics {
             "lead" => self.handle_lead_command(&args[1..], units),
             "powder" => self.handle_powder_command(&args[1..], units),
             "recoil" => self.handle_recoil_command(&args[1..], units),
+            "drag-curve" => Self::handle_drag_curve_command(&args[1..]),
             "power-factor" => self.handle_power_factor_command(&args[1..], units),
             _ => Ok(format!(
                 "Error: Unknown command '{}'\n\n{}",
@@ -1098,6 +1099,9 @@ impl WasmBallistics {
         let mut temperature_supplied = false;
         let mut output_format = OutputFormat::Table;
         let mut full = false;
+        // MBA-1427: per-point effective drag coefficient in -o json (the WASM half of
+        // MBA-1423, which shipped native-only — and whose requester runs this build).
+        let mut with_drag_coefficient = false;
         // MBA-1337 p3: native --plot parity. None = no chart; Some(style) appends the
         // two terminal charts after the table, exactly like the native CLI.
         let mut plot: Option<crate::terminal_plot::CanvasStyle> = None;
@@ -1398,6 +1402,7 @@ impl WasmBallistics {
                     }
                 }
                 "--full" => full = true,
+                "--with-drag-coefficient" => with_drag_coefficient = true,
                 "--auto-zero" | "-z" => {
                     if i + 1 < args.len() {
                         auto_zero = Some(
@@ -2309,6 +2314,7 @@ impl WasmBallistics {
                         inputs.muzzle_height + inputs.sight_height,
                         target_speed_mps,
                         solved_zero_angle_deg,
+                        with_drag_coefficient,
                     ),
                     OutputFormat::Csv => self.format_trajectory_csv(
                         &result,
@@ -5060,6 +5066,76 @@ impl WasmBallistics {
         output
     }
 
+    /// `drag-curve` in the browser terminal (MBA-1426 item 2, requested alongside MBA-1427 by
+    /// the same external consumer — the reference curve his effective Cd curve is plotted
+    /// against).
+    ///
+    /// All formatting comes from `drag::format_reference_drag_curve`, the SAME function the
+    /// native CLI prints, so the two surfaces emit identical bytes and cannot drift the way the
+    /// recoil CSV header did (MBA-1418). This handler only parses arguments and picks the form.
+    ///
+    /// Unknown arguments are a hard error, matching native clap behaviour — not this parser's
+    /// older silently-ignore convention, which is the exact "flag that does nothing without
+    /// saying so" class the last two releases spent effort closing.
+    fn handle_drag_curve_command(args: &[&str]) -> Result<String, JsValue> {
+        let mut drag_model = DragModel::G7; // native's default
+        let mut output = "table".to_string();
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--drag-model" => {
+                    if i + 1 >= args.len() {
+                        return Err(JsValue::from_str("--drag-model requires a value"));
+                    }
+                    drag_model = DragModel::from_str(args[i + 1]).ok_or_else(|| {
+                        JsValue::from_str(&format!(
+                            "'{}' is not a recognized drag model (g1, g2, g5, g6, g7, g8, gi, \
+                             gs, ra4)",
+                            args[i + 1]
+                        ))
+                    })?;
+                    i += 1;
+                }
+                "-o" | "--output" => {
+                    if i + 1 >= args.len() {
+                        return Err(JsValue::from_str("--output requires a value"));
+                    }
+                    output = args[i + 1].to_lowercase();
+                    i += 1;
+                }
+                other => {
+                    return Err(JsValue::from_str(&format!(
+                        "Unknown drag-curve argument '{other}'"
+                    )));
+                }
+            }
+            i += 1;
+        }
+
+        let format = match output.as_str() {
+            "table" => crate::drag::ReferenceDragCurveFormat::Table,
+            "csv" => crate::drag::ReferenceDragCurveFormat::Csv,
+            "json" => crate::drag::ReferenceDragCurveFormat::Json,
+            // The PDF message is reserved for someone who actually asked for PDF (matching
+            // native's rejection text); any other junk gets this surface's own invalid-format
+            // convention. Telling `-o yaml` that "PDF has no form" blamed a format the user
+            // never mentioned — caught in review.
+            "pdf" => {
+                return Err(JsValue::from_str(
+                    "drag-curve has no PDF form; use -o table, -o csv, or -o json",
+                ));
+            }
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid output format '{other}' for drag-curve (expected table, json, or csv)"
+                )));
+            }
+        };
+
+        Ok(crate::drag::format_reference_drag_curve(&drag_model, format))
+    }
+
     fn format_trajectory_json(
         &self,
         result: &crate::cli_api::TrajectoryResult,
@@ -5067,6 +5143,7 @@ impl WasmBallistics {
         los_height_m: f64,
         target_speed_mps: f64,
         zero_angle_degrees: Option<f64>,
+        with_drag_coefficient: bool,
     ) -> String {
         // LOS height is cant-invariant (see format_trajectory_table).
         let los_height = los_height_m;
@@ -5109,6 +5186,17 @@ impl WasmBallistics {
                         if let Some(mil) = ring_mil {
                             obj.insert("mover_ring_mil".to_string(), serde_json::json!(mil));
                         }
+                    }
+                }
+                // MBA-1427: the projectile's own Cd, straight off the point the shared solver
+                // annotated — NOT re-derived here, which would reintroduce exactly the drift
+                // this feature exists to prevent. Additive and flag-gated so default JSON is
+                // byte-identical; absent (not null) when sectional density is unknown, matching
+                // native's skip_serializing_if shape. Dimensionless, so identical under both
+                // unit systems.
+                if let Some(cd) = p.drag_coefficient_json_value(with_drag_coefficient) {
+                    if let Some(obj) = point.as_object_mut() {
+                        obj.insert("drag_coefficient".to_string(), serde_json::json!(cd));
                     }
                 }
                 point
@@ -6161,6 +6249,7 @@ Commands:
   powder         Resolve powder-temperature velocity shift (no trajectory)
   recoil         Free recoil energy/velocity/impulse (SAAMI momentum balance)
   power-factor   Power factor + USPSA/IDPA/SASS rulebook pass/fail
+  drag-curve     Print a built-in reference drag function as (Mach, Cd) data
   help           Show this help message
 
 Global Options:
@@ -6197,6 +6286,10 @@ Trajectory Command:
     -z, --auto-zero <DIST>       Auto-zero at distance
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
+    --with-drag-coefficient      Add each point's effective drag coefficient to
+                                 -o json (the projectile's OWN Cd, form-factor
+                                 scaled — a segmented BC shows its band steps).
+                                 Off by default: JSON without it is unchanged
     --plot [STYLE]               Append terminal charts after the table (drop and
                                  drift vs range); STYLE = braille (default) or ascii
                                  (for fonts without braille glyph coverage)
@@ -6285,6 +6378,21 @@ Zero Command:
                                  and names which one zero_range is. Conflicts
                                  with --target-distance; give exactly one
     --sight-height <HEIGHT>      Sight height above bore
+
+Drag Curve Command:
+  ballistics drag-curve [OPTIONS]
+
+  Print a built-in reference drag function as (Mach, Cd) data — the same
+  numbers the solver interpolates, so a chart cannot drift from the engine.
+  This is the REFERENCE curve for the model's standard projectile; for the
+  effective Cd a specific bullet flew, use trajectory --with-drag-coefficient.
+  Note the tables do not share a Mach domain: most run to Mach 5, GS and RA4
+  stop at Mach 4.
+
+  Options:
+    --drag-model <MODEL>         Model to print (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
+                                 [default: g7]
+    -o, --output <FORMAT>        table (default), csv, or json
 
 Monte Carlo Command:
   ballistics monte-carlo [OPTIONS]

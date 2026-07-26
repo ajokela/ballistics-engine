@@ -110,14 +110,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what the solver interpolates rather than a re-vendored copy that drifts. Note the tables do not
   share a Mach domain: most run to Mach 5, while GS and RA4 stop at Mach 4. Library callers can
   use `drag::reference_drag_table`. These are the public-domain Aberdeen/BRL functions as
-  tabulated in McCoy, plus the British RA 1929 function.
+  tabulated in McCoy, plus the British RA 1929 function. Available in the browser terminal too
+  (MBA-1426), where native and WASM emit **the same shared formatter's bytes** — the sharing is
+  deliberate, so the two surfaces cannot drift the way the recoil CSV header once did.
 - **`trajectory --with-drag-coefficient`** (MBA-1423) adds a `drag_coefficient` key to each
   point of `--full` JSON. This is the projectile's *own* Cd — the reference-table value scaled
   by the form factor `SD / BC` — not the G-model curve, which would be identical for every
   bullet sharing a drag model. A segmented BC therefore shows its band steps, and a custom
   drag table passes through unscaled. Covers only the speeds actually flown, and pairs Cd with
   the station speed of sound the document already reports Mach against. Off by default: JSON
-  without the flag is byte-identical to 0.29.0.
+  without the flag is byte-identical to 0.29.0. Mirrored in the browser terminal's `-o json`
+  (MBA-1427) — the build the requester of this feature actually runs — reading the same
+  solver-annotated value rather than re-deriving it.
 
 ## [0.29.0] - 2026-07-26
 

@@ -697,6 +697,84 @@ pub fn reference_drag_table(drag_model: &DragModel) -> &'static DragTable {
     }
 }
 
+/// Output form for [`format_reference_drag_curve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceDragCurveFormat {
+    Table,
+    Csv,
+    Json,
+}
+
+/// Render one built-in reference drag curve as text, identically on every surface (MBA-1424 /
+/// MBA-1426).
+///
+/// This is THE formatter — the native CLI's `drag-curve` and the browser terminal's both call
+/// it, so their table, CSV and JSON output cannot drift apart. That is a lesson, not a flourish:
+/// the `recoil` CSV header diverged between the two surfaces (`velocity_m/s` vs `velocity_mps`,
+/// MBA-1418) precisely because each carried its own copy of the format strings, and the
+/// divergence survived because the imperial spelling happened to agree.
+///
+/// Returned strings are newline-terminated; callers print or splice them verbatim. PDF is not a
+/// form of this data — each surface rejects it with its own error convention before calling in.
+pub fn format_reference_drag_curve(
+    drag_model: &DragModel,
+    format: ReferenceDragCurveFormat,
+) -> String {
+    let table = reference_drag_table(drag_model);
+    let points: Vec<(f64, f64)> = table
+        .mach_values
+        .iter()
+        .copied()
+        .zip(table.cd_values.iter().copied())
+        .collect();
+
+    match format {
+        ReferenceDragCurveFormat::Json => {
+            let document = serde_json::json!({
+                "drag_model": drag_model.to_string(),
+                "point_count": points.len(),
+                // The domain is per-table, not a constant: GS and RA4 stop at Mach 4 while the
+                // others run to Mach 5. Stated explicitly so a consumer does not assume one.
+                "mach_min": points.first().map(|p| p.0),
+                "mach_max": points.last().map(|p| p.0),
+                "source": "Aberdeen/BRL reference functions as tabulated in McCoy, Modern \
+                           Exterior Ballistics (RA4: British RA 1929). Public domain.",
+                "points": points
+                    .iter()
+                    .map(|(mach, cd)| serde_json::json!({"mach": mach, "cd": cd}))
+                    .collect::<Vec<_>>(),
+            });
+            let mut out = serde_json::to_string_pretty(&document)
+                // Infallible for this value: string keys, finite floats, no custom Serialize.
+                .expect("reference drag curve document serializes");
+            out.push('\n');
+            out
+        }
+        ReferenceDragCurveFormat::Csv => {
+            let mut out = String::from("mach,cd\n");
+            for (mach, cd) in &points {
+                out.push_str(&format!("{mach},{cd}\n"));
+            }
+            out
+        }
+        ReferenceDragCurveFormat::Table => {
+            let mut out = format!(
+                "{} reference drag curve\n{} points, Mach {:.2} to {:.2}\n\n",
+                drag_model.to_string().to_uppercase(),
+                points.len(),
+                points.first().map(|p| p.0).unwrap_or(0.0),
+                points.last().map(|p| p.0).unwrap_or(0.0)
+            );
+            out.push_str(&format!("{:>8}  {:>8}\n", "Mach", "Cd"));
+            out.push_str(&format!("{:->8}  {:->8}\n", "", ""));
+            for (mach, cd) in &points {
+                out.push_str(&format!("{mach:>8.3}  {cd:>8.4}\n"));
+            }
+            out
+        }
+    }
+}
+
 /// Get a standard G-table drag coefficient without double-counting transonic drag.
 ///
 /// Standard G tables are total-drag curves that already contain the transonic

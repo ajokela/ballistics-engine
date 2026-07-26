@@ -18326,60 +18326,21 @@ fn run_drag_curve(
     drag_model: DragModel,
     output: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let table = ballistics_engine::drag::reference_drag_table(&drag_model);
-    let points: Vec<(f64, f64)> = table
-        .mach_values
-        .iter()
-        .copied()
-        .zip(table.cd_values.iter().copied())
-        .collect();
-
-    match output {
-        OutputFormat::Json => {
-            let document = serde_json::json!({
-                "drag_model": drag_model.to_string(),
-                "point_count": points.len(),
-                // The domain is per-table, not a constant: GS and RA4 stop at Mach 4 while the
-                // others run to Mach 5. Stated explicitly so a consumer does not assume one.
-                "mach_min": points.first().map(|p| p.0),
-                "mach_max": points.last().map(|p| p.0),
-                "source": "Aberdeen/BRL reference functions as tabulated in McCoy, Modern \
-                           Exterior Ballistics (RA4: British RA 1929). Public domain.",
-                "points": points
-                    .iter()
-                    .map(|(mach, cd)| serde_json::json!({"mach": mach, "cd": cd}))
-                    .collect::<Vec<_>>(),
-            });
-            println!("{}", serde_json::to_string_pretty(&document)?);
-        }
-        OutputFormat::Csv => {
-            println!("mach,cd");
-            for (mach, cd) in &points {
-                println!("{mach},{cd}");
-            }
-        }
-        OutputFormat::Table => {
-            println!("{} reference drag curve", drag_model.to_string().to_uppercase());
-            println!(
-                "{} points, Mach {:.2} to {:.2}",
-                points.len(),
-                points.first().map(|p| p.0).unwrap_or(0.0),
-                points.last().map(|p| p.0).unwrap_or(0.0)
-            );
-            println!();
-            println!("{:>8}  {:>8}", "Mach", "Cd");
-            println!("{:->8}  {:->8}", "", "");
-            for (mach, cd) in &points {
-                println!("{mach:>8.3}  {cd:>8.4}");
-            }
-        }
+    // MBA-1426: formatting lives in the library (`drag::format_reference_drag_curve`) and is
+    // shared with the browser terminal, so the two surfaces emit identical bytes. Only the PDF
+    // rejection stays here, because each surface owns its error convention.
+    let format = match output {
+        OutputFormat::Table => ballistics_engine::drag::ReferenceDragCurveFormat::Table,
+        OutputFormat::Csv => ballistics_engine::drag::ReferenceDragCurveFormat::Csv,
+        OutputFormat::Json => ballistics_engine::drag::ReferenceDragCurveFormat::Json,
         OutputFormat::Pdf => {
-            return Err(
-                "drag-curve has no PDF form; use -o table, -o csv, or -o json".into(),
-            );
+            return Err("drag-curve has no PDF form; use -o table, -o csv, or -o json".into());
         }
-    }
-
+    };
+    print!(
+        "{}",
+        ballistics_engine::drag::format_reference_drag_curve(&drag_model, format)
+    );
     Ok(())
 }
 
