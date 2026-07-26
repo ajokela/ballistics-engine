@@ -26,6 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-unknown-unknown
 
       - name: Check changed-file whitespace
         shell: bash
@@ -77,6 +78,15 @@ jobs:
 
       - name: Build documentation
         run: RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps --all-features
+
+      - name: Type-check the WASM surface and its tests
+        # src/wasm.rs (and wasm_tests.rs) are cfg(target_arch = "wasm32")-gated, so every host
+        # step above compiles NONE of them — a type error in the browser terminal reached main
+        # green until this step existed. This is the same check developers run locally as the
+        # fourth gate; executing the browser-gated tests would need a headless browser, so
+        # type-checking is the floor CI can hold cheaply. --no-default-features matches the
+        # wasm-pack release build (the default pdf/online features do not compile for wasm32).
+        run: cargo check --locked --target wasm32-unknown-unknown --no-default-features --tests
 
       - name: Verify the offline minimal-feature process protocol
         # MBA-1331: the binary is behind the default-on `cli` feature ([[bin]]

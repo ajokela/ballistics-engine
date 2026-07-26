@@ -673,6 +673,23 @@ pub struct TrajectoryPoint {
     pub drag_coefficient: Option<f64>,
 }
 
+impl TrajectoryPoint {
+    /// The value `--with-drag-coefficient` emits for this point, or `None` when the JSON key
+    /// must be ABSENT — flag off, or sectional density unknown (MBA-1427).
+    ///
+    /// Host-compilable on purpose. The browser terminal's emit site lives in `src/wasm.rs`,
+    /// which is `cfg(target_arch = "wasm32")`-gated out of every native build — CI never
+    /// executes a line of it. Keeping the gating rule here means a native test can pin the
+    /// absent-not-null contract even though the surface that applies it only compiles for wasm.
+    pub fn drag_coefficient_json_value(&self, with_drag_coefficient: bool) -> Option<f64> {
+        if with_drag_coefficient {
+            self.drag_coefficient
+        } else {
+            None
+        }
+    }
+}
+
 // Trajectory result
 #[derive(Debug, Clone)]
 pub struct TrajectoryResult {
@@ -7696,6 +7713,33 @@ mod effective_drag_coefficient_tests {
         inputs.bullet_mass = 0.0;
         let solver = solver(inputs);
         assert!(solver.effective_drag_coefficient(800.0, 340.0).is_none());
+    }
+
+    /// MBA-1427: the emit rule the browser terminal applies, pinned natively because the WASM
+    /// emit site is cfg-gated out of every native build and so is never executed by CI. Three
+    /// cases, and the third is the contract: absent — not null — when sectional density is
+    /// unknown, even with the flag set.
+    #[test]
+    fn the_json_emit_rule_is_flag_gated_and_absent_when_cd_is_unknown() {
+        let mut point = TrajectoryPoint {
+            time: 0.0,
+            position: nalgebra::Vector3::new(0.0, 0.0, 0.0),
+            velocity_magnitude: 800.0,
+            kinetic_energy: 3000.0,
+            drag_coefficient: Some(0.31),
+        };
+        assert_eq!(point.drag_coefficient_json_value(true), Some(0.31));
+        assert_eq!(
+            point.drag_coefficient_json_value(false),
+            None,
+            "without the flag the key must not exist, so default JSON stays byte-identical"
+        );
+        point.drag_coefficient = None;
+        assert_eq!(
+            point.drag_coefficient_json_value(true),
+            None,
+            "unknown sectional density must yield an ABSENT key, not null"
+        );
     }
 
     /// Every solver family runs the same post-pass, so none may leave the field empty.

@@ -1540,6 +1540,10 @@ a backdrop and the load's own curve over it.
 
 Library callers can reach the same data via `ballistics_engine::drag::reference_drag_table`.
 
+**Browser terminal:** `drag-curve` works there too, with the same flags. Both surfaces print the
+same shared formatter (`drag::format_reference_drag_curve`), so their table, CSV and JSON output
+are byte-identical by construction rather than by discipline.
+
 ### Power Factor (`power-factor`)
 
 Power factor (PF) — `bullet weight × velocity / 1000` — gates ammunition into scoring
@@ -2452,6 +2456,12 @@ Consequences worth knowing before you chart it:
 JSON only. CSV's sampled-interval branch (`--sample-interval`) reports a different point type
 that carries no Cd, so a column there would be populated in one branch and empty in the other.
 Without the flag, output is byte-identical to before this field existed.
+
+**Browser terminal:** `--with-drag-coefficient` works there too on `-o json` (MBA-1427). The
+value comes straight off the same solver-annotated points — it is not re-derived in the WASM
+layer, which would reintroduce exactly the drift this feature exists to prevent. One pre-existing
+surface difference to know: the browser JSON always includes the per-point array, while native
+gates it on `--full`.
 
 **`zero_angle_degrees`** (MBA-1402): present only when auto-zero ran (`--auto-zero`, or a
 saved profile's `auto_zero`/`zero_distance`) — the same bore angle `TrajectoryConfig.angle`
