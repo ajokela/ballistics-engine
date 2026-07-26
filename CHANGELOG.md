@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Input conditioning now reaches every entry point into integration** (MBA-1415). The BC
+  reference-standard conversion, the SI-derived imperial fields, and the powder-resolved muzzle
+  velocity were applied only in `TrajectorySolver::new`. `fast_integrate` and
+  `fast_integrate_with_segments` are public and are called directly by the Python binding, so
+  those consumers silently bypassed all three: set a conditioned field, get no error and no
+  effect. All three now live in one idempotent `BallisticInputs::normalize_for_solve`, called by
+  the constructor and both fast entry points. Latent rather than live — no shipped binding
+  exposed the affected field yet — but this is the third instance of the shape (MBA-1296,
+  MBA-1356), so it is fixed structurally and pinned by a cross-entry-point parity test.
+
 ### Added
 - **`trajectory --with-drag-coefficient`** (MBA-1423) adds a `drag_coefficient` key to each
   point of `--full` JSON. This is the projectile's *own* Cd — the reference-table value scaled

@@ -302,6 +302,11 @@ pub fn fast_integrate(
         return FastSolution::degenerate(&params.initial_state);
     }
     let mut effective_inputs = inputs.clone();
+    // MBA-1415: this is a public entry point that external bindings call directly, bypassing
+    // TrajectorySolver::new. It must therefore carry every input-conditioning step itself, or a
+    // caller setting a conditioned field gets no error and no effect. Idempotent, so inputs that
+    // already passed through a solver are unaffected.
+    effective_inputs.normalize_for_solve();
     if params.atmo_params.2 > 0.0 {
         effective_inputs.altitude = params.atmo_params.0;
         effective_inputs.temperature = params.atmo_params.1;
@@ -972,6 +977,15 @@ pub fn fast_integrate_with_segments(
     {
         return FastSolution::degenerate(&params.initial_state);
     }
+
+    // MBA-1415: like plain fast_integrate, this is a public entry point external bindings call
+    // directly, so it must apply every input-conditioning step rather than relying on
+    // TrajectorySolver::new. Shadowing `inputs` here means every read below — mass, bc_value,
+    // drag model, the launch state — sees the conditioned values, with no site left to miss.
+    // Idempotent, so inputs that already passed through a solver are unaffected.
+    let mut normalized_inputs = inputs.clone();
+    normalized_inputs.normalize_for_solve();
+    let inputs = &normalized_inputs;
 
     // Match plain fast_integrate: this entry point also receives a prebuilt launch state, so
     // apply the experimental aerodynamic-jump angle exactly once before the low-level integrator.

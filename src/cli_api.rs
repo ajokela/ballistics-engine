@@ -312,6 +312,83 @@ impl BallisticInputs {
             None
         }
     }
+
+    /// Apply every input-conditioning step integration requires, exactly once (MBA-1415).
+    ///
+    /// **Every public entry point into integration must call this**, not just
+    /// [`TrajectorySolver::new`]. `fast_trajectory::fast_integrate` and
+    /// `fast_integrate_with_segments` are `pub` and are called directly by the Python
+    /// binding, so conditioning that lives only in the solver constructor is invisible to
+    /// those consumers: the caller sets a field, gets no error, and the value is silently
+    /// ignored. That exact shape has already cost this project twice — MBA-1296 (a dropped
+    /// field that zeroed Coriolis in production) and the MBA-1356 review catch
+    /// (`cd_scale` dropped by the segmented fast path). Adding a step here rather than at a
+    /// call site is what keeps the next one from repeating it.
+    ///
+    /// **Idempotent**, and it must stay that way: Monte Carlo builds a solver per sample, and
+    /// the fast entry points may receive inputs that already passed through a solver. Each
+    /// step below is either an absolute override (derived fields, powder-resolved velocity) or
+    /// self-disarming (the BC conversion rewrites `bc_reference_standard` to the reference it
+    /// just converted into, so a second call finds nothing to do). A step that scales a value
+    /// in place without disarming itself would double-apply silently — do not add one.
+    pub fn normalize_for_solve(&mut self) {
+        // MBA-1365: normalize a declared Army-Standard-Metro BC reference to the ICAO
+        // reference this engine's retardation constant (CD_TO_RETARD) is calibrated against,
+        // before any retardation math runs. Every BC representation on these inputs (the
+        // scalar, explicit Mach segments, and velocity segments) is a real BC and gets the
+        // same treatment. `Icao` (the default) takes this branch never, so callers that never
+        // set the field are byte-identical to pre-MBA-1365 behavior. A custom drag table
+        // divides by sectional density rather than a BC, so the conversion is physically inert
+        // there — see `bc_reference_standard_inert_warning`, which callers surface at their own
+        // display sites (native stderr / WASM table text) from their OWN copy of the inputs,
+        // before this runs.
+        if matches!(
+            self.bc_reference_standard,
+            BcReferenceStandard::ArmyStandardMetro
+        ) {
+            self.bc_value *= crate::constants::ASM_TO_ICAO_BC;
+            if let Some(segments) = self.bc_segments.as_mut() {
+                for (_mach, bc) in segments.iter_mut() {
+                    *bc *= crate::constants::ASM_TO_ICAO_BC;
+                }
+            }
+            if let Some(segments) = self.bc_segments_data.as_mut() {
+                for segment in segments.iter_mut() {
+                    segment.bc_value *= crate::constants::ASM_TO_ICAO_BC;
+                }
+            }
+            // Disarm: these BC values are now ICAO-referenced, which is simply true, and it
+            // makes a second call a no-op instead of a silent second scaling.
+            self.bc_reference_standard = BcReferenceStandard::Icao;
+        }
+
+        // Derived imperial fields, recomputed from the canonical SI values. These are an
+        // absolute override, NOT a fallback: a caller that sets only `caliber_inches` /
+        // `weight_grains` and leaves the SI fields at their defaults has those imperial values
+        // overwritten here. SI is authoritative on these inputs.
+        self.caliber_inches = self.bullet_diameter / 0.0254;
+        self.weight_grains = self.bullet_mass / crate::constants::GRAINS_TO_KG;
+
+        // Resolve the muzzle velocity for the ambient temperature before integration. A
+        // measured powder-temperature -> velocity curve (data-driven, non-linear) takes
+        // precedence when supplied; otherwise fall back to the linear powder-temperature-
+        // sensitivity model (MBA-963). Both operate in canonical SI (Celsius, m/s), so every
+        // solver built from these inputs — the main trajectory AND the zero-angle search —
+        // sees the same temperature-resolved velocity. In particular, when a zero solve passes
+        // the zero-day temperature, the curve automatically yields the zero-day velocity.
+        // (The curve interpolates at the POWDER temperature — powder_curve_temp_c, falling
+        // back to ambient. Air temperature still drives density separately; this only sets the
+        // velocity. Absolute override, so applying it twice is a no-op.)
+        self.muzzle_velocity = resolve_powder_adjusted_velocity(
+            self.muzzle_velocity,
+            self.temperature,
+            self.use_powder_sensitivity,
+            self.powder_temp_sensitivity,
+            self.powder_temp,
+            self.powder_temp_curve.as_deref(),
+            self.powder_curve_temp_c,
+        );
+    }
 }
 
 impl Default for BallisticInputs {
@@ -904,60 +981,11 @@ impl TrajectorySolver {
         atmosphere: AtmosphericConditions,
         station_atmosphere_resolution: StationAtmosphereResolution,
     ) -> Self {
-        // MBA-1365: normalize a declared Army-Standard-Metro BC reference to the ICAO
-        // reference this engine's retardation constant (CD_TO_RETARD) is calibrated
-        // against, exactly once, here — before any retardation math runs. Every BC
-        // representation on these inputs (the scalar, explicit Mach segments, and
-        // velocity segments) is a real BC and gets the same treatment, so every surface
-        // built through this constructor (CLI, WASM, FFI, Monte Carlo sampling,
-        // estimate-bc/zero fitting — all of which construct a `TrajectorySolver` rather
-        // than reading `bc_value` directly) inherits the conversion with zero duplicated
-        // math. `Icao` (the default) takes this branch never, so existing callers that
-        // never set the field are byte-identical to pre-MBA-1365 behavior. A custom drag
-        // table divides by sectional density, not a BC value, so the conversion is
-        // physically inert there — see `BallisticInputs::bc_reference_standard_inert_warning`,
-        // which callers surface at their own display sites (native stderr / WASM table text).
-        if matches!(
-            inputs.bc_reference_standard,
-            BcReferenceStandard::ArmyStandardMetro
-        ) {
-            inputs.bc_value *= crate::constants::ASM_TO_ICAO_BC;
-            if let Some(segments) = inputs.bc_segments.as_mut() {
-                for (_mach, bc) in segments.iter_mut() {
-                    *bc *= crate::constants::ASM_TO_ICAO_BC;
-                }
-            }
-            if let Some(segments) = inputs.bc_segments_data.as_mut() {
-                for segment in segments.iter_mut() {
-                    segment.bc_value *= crate::constants::ASM_TO_ICAO_BC;
-                }
-            }
-        }
-
-        // Compute derived fields from base units
-        inputs.caliber_inches = inputs.bullet_diameter / 0.0254;
-        inputs.weight_grains = inputs.bullet_mass / crate::constants::GRAINS_TO_KG;
-
-        // Resolve the muzzle velocity for the ambient temperature before integration.
-        // A measured powder-temperature -> velocity curve (data-driven, non-linear)
-        // takes precedence when supplied; otherwise fall back to the linear
-        // powder-temperature-sensitivity model (MBA-963). Both operate in canonical
-        // SI (Celsius, m/s) and are applied here so every solver built from these
-        // inputs — the main trajectory AND the zero-angle search — sees the same
-        // temperature-resolved velocity. In particular, when a zero solve passes the
-        // zero-day temperature, the curve automatically yields the zero-day velocity.
-        // (Curve interpolates at the POWDER temperature — powder_curve_temp_c, falling
-        // back to ambient. Air temperature still drives density separately; this only
-        // sets the velocity. Absolute override, so applying it here is idempotent.)
-        inputs.muzzle_velocity = resolve_powder_adjusted_velocity(
-            inputs.muzzle_velocity,
-            inputs.temperature,
-            inputs.use_powder_sensitivity,
-            inputs.powder_temp_sensitivity,
-            inputs.powder_temp,
-            inputs.powder_temp_curve.as_deref(),
-            inputs.powder_curve_temp_c,
-        );
+        // MBA-1415: every input-conditioning step lives in one shared, idempotent helper that
+        // the fast_integrate* entry points call too. Keeping it out of this constructor is the
+        // point: conditioning that lives only here is invisible to the external bindings that
+        // call the fast path directly.
+        inputs.normalize_for_solve();
 
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
