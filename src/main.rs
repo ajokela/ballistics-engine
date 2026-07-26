@@ -754,6 +754,15 @@ enum Commands {
         #[arg(long, allow_hyphen_values = true)]
         zero_altitude: Option<f64>,
 
+        /// Zero-day density altitude for --auto-zero (feet imperial / meters metric; MBA-1422).
+        /// The zero-day counterpart of --density-altitude, letting a zero be torn under
+        /// conditions expressed as a single density altitude. SUPERSEDES --zero-altitude and
+        /// --zero-pressure/--zero-pressure-type for the zero solve only; the shot-day
+        /// atmosphere is untouched. An explicit --zero-temperature still wins over the ISA
+        /// temperature at that density altitude.
+        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
+        zero_density_altitude: Option<f64>,
+
         /// Zero-day powder temperature for --auto-zero (°F/°C). With --powder-temp-curve,
         /// the curve is interpolated at this temperature to resolve the zero-day muzzle
         /// velocity. When omitted, the curve follows an explicit --zero-temperature; otherwise
@@ -1130,6 +1139,15 @@ enum Commands {
         /// Altitude (feet or meters based on --units)
         #[arg(long, default_value = "0.0")]
         altitude: f64,
+
+        /// Density altitude (feet imperial / meters metric; MBA-1422): the single-value
+        /// atmosphere entry mode, matching `trajectory --density-altitude`. When given it
+        /// SUPERSEDES `--altitude` and `--pressure`/`--pressure-type` entirely — an ISA-
+        /// equivalent station altitude and pressure are back-solved from it. An explicit
+        /// `--temperature` still wins over the ISA temperature at that density altitude, and
+        /// the pressure is re-solved so the density altitude is reproduced exactly.
+        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
+        density_altitude: Option<f64>,
 
         /// Path to a custom drag deck: CSV `mach,cd` per line, or a vendor `.drg` file (by
         /// extension). Replaces the G-model + BC for drag;
@@ -5298,6 +5316,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             zero_pressure_type,
             zero_humidity,
             zero_altitude,
+            zero_density_altitude,
             zero_powder_temp,
             #[cfg(feature = "online")]
             online,
@@ -6357,14 +6376,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // `--zero-pressure` DOES bring its own value, so its mode is honored.
                 let zero_pressure_type_resolved = match zero_pressure_type {
                     Some(mode)
-                        if final_density_altitude.is_some() && zero_pressure.is_none() =>
+                        if (final_density_altitude.is_some()
+                            || zero_density_altitude.is_some())
+                            && zero_pressure.is_none() =>
                     {
                         if mode != PressureReferenceMode::Absolute {
+                            // Name whichever flag actually supplied the pressure. A zero-day DA
+                            // takes precedence over an inherited shot-day one, so report that.
+                            let source = if zero_density_altitude.is_some() {
+                                "--zero-density-altitude"
+                            } else {
+                                "--density-altitude"
+                            };
                             eprintln!(
-                                "warning: --zero-pressure-type is ignored because \
-                                 --density-altitude supplies the zero-day station pressure \
-                                 directly; pass --zero-pressure to declare a zero-day pressure \
-                                 of your own"
+                                "warning: --zero-pressure-type is ignored because {source} supplies the zero-day station pressure directly; pass --zero-pressure to declare a zero-day pressure of your own"
                             );
                         }
                         PressureReferenceMode::Absolute
@@ -6377,11 +6402,45 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Some(a) => UnitConverter::altitude_to_metric(a, cli.units),
                     None => altitude_metric,
                 };
+
+                // MBA-1422: --zero-density-altitude, the zero-day counterpart of
+                // --density-altitude. It supersedes --zero-altitude and --zero-pressure for the
+                // ZERO solve only; the shot-day atmosphere above is untouched. An explicit
+                // --zero-temperature still wins over the ISA temperature at that density
+                // altitude, and the pressure is re-solved around it so the requested density
+                // altitude is reproduced exactly.
+                //
+                // The mode is already handled by zero_pressure_type_resolved above, which now
+                // covers this case too: with a zero-day DA and no --zero-pressure, an explicit
+                // --zero-pressure-type has no value of its own to describe and is refused rather
+                // than re-reducing a pressure the back-solve already produced as absolute. That
+                // is the same bug 0.29.0's whole-branch review caught on the shot-day DA path
+                // (apex 1.6959 -> 1.6655 m at an 800 m zero, silently).
+                let (zero_temperature_metric, zero_pressure_metric, zero_altitude_metric) =
+                    match zero_density_altitude {
+                        Some(da_display) => {
+                            let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
+                            let explicit_zero_temp_c = zero_temperature
+                                .map(|t| UnitConverter::temperature_to_metric(t, cli.units));
+                            let (da_altitude_m, da_temp_c, da_pressure_hpa) =
+                                ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
+                                    da_m,
+                                    explicit_zero_temp_c,
+                                );
+                            (da_temp_c, da_pressure_hpa, da_altitude_m)
+                        }
+                        None => (
+                            zero_temperature_metric,
+                            zero_pressure_metric,
+                            zero_altitude_metric,
+                        ),
+                    };
                 if zero_velocity.is_some()
                     || zero_temperature.is_some()
                     || zero_pressure.is_some()
                     || zero_humidity.is_some()
                     || zero_altitude.is_some()
+                    || zero_density_altitude.is_some()
                 {
                     eprintln!(
                         "Solving zero angle under supplied zero-day conditions (velocity/atmosphere \
@@ -7072,6 +7131,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             pressure_type,
             humidity,
             altitude,
+            density_altitude,
             drag_table,
             cd_scale,
             output,
@@ -7097,6 +7157,50 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature_metric = UnitConverter::temperature_to_metric(temperature, cli.units);
             let pressure_metric = UnitConverter::pressure_to_metric(pressure, cli.units);
             let altitude_metric = UnitConverter::altitude_to_metric(altitude, cli.units);
+
+            // MBA-1422: --density-altitude on `zero`, with the precedence `trajectory` has used
+            // since MBA-1366. DA supersedes altitude and pressure outright, which leaves the
+            // pressure MODE with no value of its own to describe — so it is forced to Absolute
+            // and says so, the same rule the shot-day and zero-day paths already follow. An
+            // explicit --temperature still wins, and the pressure is re-solved around it so the
+            // requested density altitude is reproduced exactly.
+            let (temperature_metric, pressure_metric, altitude_metric, pressure_type) =
+                match density_altitude {
+                    Some(da_display) => {
+                        let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
+                        // This command defaults --temperature rather than taking an Option, so
+                        // "explicit" has to be inferred by comparing against the unit system's
+                        // own standard rather than by testing for None.
+                        let std_temperature_metric = UnitConverter::temperature_to_metric(
+                            UnitConverter::resolve_temperature(None, cli.units)?,
+                            cli.units,
+                        );
+                        let explicit_temp_c = (temperature_metric != std_temperature_metric)
+                            .then_some(temperature_metric);
+                        if pressure_type != PressureReferenceMode::Absolute {
+                            eprintln!(
+                                "warning: --pressure-type is ignored because --density-altitude supplies the station pressure directly"
+                            );
+                        }
+                        let (da_altitude_m, da_temp_c, da_pressure_hpa) =
+                            ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
+                                da_m,
+                                explicit_temp_c,
+                            );
+                        (
+                            da_temp_c,
+                            da_pressure_hpa,
+                            da_altitude_m,
+                            PressureReferenceMode::Absolute,
+                        )
+                    }
+                    None => (
+                        temperature_metric,
+                        pressure_metric,
+                        altitude_metric,
+                        pressure_type,
+                    ),
+                };
             // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
             // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
             let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
