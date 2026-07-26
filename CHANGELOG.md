@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`zero --from-angle` now says which crossing `zero_range` is** (MBA-1419). A bore angle
+  generally crosses the line of sight twice, and the single `zero_range` value is
+  far-when-present-else-near — a consumer reading it alone could not tell which of two valid
+  answers it received. JSON gains a `primary_crossing` key (`"far"` or `"near"`) and CSV a
+  matching row. The diagnostics solve envelope is also floored at the distance the crossing
+  search itself covers, so a near-only fallback no longer sizes the follow-up solve off a very
+  short near zero. Nothing was silently wrong before this; the rule was documented and both
+  crossings already printed.
 - **solve-json v1 rejects projectile values that cannot describe a projectile** (MBA-1413).
   `projectile.mass_kg`, `diameter_m`, `length_m` and `ballistic_coefficient` now carry physical
   bounds and return a typed `invalid_value` error with the exact JSONPath. Found by fuzzing,

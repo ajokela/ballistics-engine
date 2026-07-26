@@ -3939,7 +3939,7 @@ pub fn calculate_zero_angle_with_resolved_conditions(
 /// ([`TrajectorySolver::new`]) rather than something scaled to an (unknown, being solved for)
 /// target distance; `solve()` still stops at ground impact well before this in the typical
 /// case, so the larger envelope costs effectively nothing.
-const ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M: f64 = 2000.0;
+pub const ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M: f64 = 2000.0;
 
 /// Solve the zero RANGE(S) that a fixed bore angle produces. Runs the trajectory at
 /// `zero_angle_rad` and returns BOTH line-of-sight crossings it finds, as
