@@ -162,6 +162,41 @@ mod tests {
         assert!(result.contains("Mrad Adjustment"));
     }
 
+    /// MBA-1402 parity, reported by an external consumer against the 0.29.0 WASM build: native
+    /// emits the solved zero angle on its JSON surface, the browser build emitted it only in the
+    /// text banner. Someone parsing the WASM JSON therefore could not read back the angle the
+    /// same run had just printed.
+    #[wasm_bindgen_test]
+    fn test_auto_zero_angle_is_present_in_json() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command(
+                "trajectory -v 2650 -b 0.19 -m 77 -d 0.224 --drag-model g7 --sight-height 2.48 \
+                 --auto-zero 100 --max-range 300 --ignore-ground-impact -o json",
+            )
+            .unwrap();
+        assert!(
+            result.contains("zero_angle_degrees"),
+            "auto-zero JSON is missing zero_angle_degrees: {result}"
+        );
+    }
+
+    /// And absent — not null — when auto-zero did not run, so a consumer that never uses it sees
+    /// an unchanged document.
+    #[wasm_bindgen_test]
+    fn test_zero_angle_is_absent_without_auto_zero() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command(
+                "trajectory -v 2650 -b 0.19 -m 77 -d 0.224 --drag-model g7 --max-range 300 -o json",
+            )
+            .unwrap();
+        assert!(
+            !result.contains("zero_angle_degrees"),
+            "zero_angle_degrees must be absent on a run with no auto-zero: {result}"
+        );
+    }
+
     /// MBA-1418: `zero --from-angle` works in the browser terminal but had no tests here and
     /// was absent from the help text, so it was effectively undiscoverable. The inverse reports
     /// BOTH line-of-sight crossings a bore angle produces, and names which one `zero_range` is.

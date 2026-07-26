@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The browser build now emits `zero_angle_degrees` in JSON** (MBA-1402 parity). 0.29.0 added
+  the solved auto-zero angle to native's table, JSON and CSV, but the WASM build shipped it in
+  the text banner only — so a consumer parsing the browser JSON could not read back the angle the
+  same run had just printed. Reported against a real 0.29.0 WASM build. Present only when
+  auto-zero ran, absent (not null) otherwise, matching native. Note the WASM CSV remains
+  structurally different from native's (it has no summary-row form at all), which is tracked
+  separately rather than bolted on here.
 - **Browser-terminal parity gaps from 0.29.0** (MBA-1418). Three places where the hand-written
   WASM layer quietly disagreed with native. The zero-day `--zero-pressure-type` refusal is now
   disclosed in the terminal (it forced `Absolute` silently; native prints a warning, and the

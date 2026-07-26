@@ -1973,6 +1973,10 @@ impl WasmBallistics {
         // block, because the output assembly that emits it is at this scope.
         let mut zero_pressure_type_notice: Option<&'static str> = None;
         let mut zero_info = String::new();
+        // MBA-1402 parity: native emits the solved zero angle on its JSON and CSV surfaces too,
+        // not only in the human banner. The browser build shipped it in text alone, which an
+        // external consumer parsing the WASM JSON reported as a divergence from native.
+        let mut solved_zero_angle_deg: Option<f64> = None;
         if let Some(zero_distance) = auto_zero {
             let zero_distance_m = match units {
                 UnitSystem::Imperial => zero_distance * 0.9144, // yards to meters
@@ -2124,6 +2128,7 @@ impl WasmBallistics {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
                     let degrees_adjustment = zero_angle * 180.0 / std::f64::consts::PI;
+                    solved_zero_angle_deg = Some(degrees_adjustment);
                     let moa_adjustment = degrees_adjustment * 60.0;
                     let mrad_adjustment = zero_angle * 1000.0;
                     // MBA-1402: the solved zero angle in degrees was missing here (native
@@ -2303,6 +2308,7 @@ impl WasmBallistics {
                         units,
                         inputs.muzzle_height + inputs.sight_height,
                         target_speed_mps,
+                        solved_zero_angle_deg,
                     ),
                     OutputFormat::Csv => self.format_trajectory_csv(
                         &result,
@@ -5060,6 +5066,7 @@ impl WasmBallistics {
         units: UnitSystem,
         los_height_m: f64,
         target_speed_mps: f64,
+        zero_angle_degrees: Option<f64>,
     ) -> String {
         // LOS height is cant-invariant (see format_trajectory_table).
         let los_height = los_height_m;
@@ -5127,11 +5134,17 @@ impl WasmBallistics {
             }
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "trajectory": points,
             "summary": summary,
             "legend": trajectory_json_legend(units),
         });
+        // MBA-1402 parity: top-level and present only when auto-zero actually ran, matching
+        // native's `skip_serializing_if` shape. Absent — not null — on a bare --angle run, so a
+        // consumer that never uses auto-zero sees a byte-identical document.
+        if let Some(degrees) = zero_angle_degrees {
+            output["zero_angle_degrees"] = serde_json::json!(degrees);
+        }
 
         serde_json::to_string_pretty(&output)
             .unwrap_or_else(|_| "Error formatting JSON".to_string())
