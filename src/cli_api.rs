@@ -1132,6 +1132,79 @@ impl TrajectorySolver {
         Ok(None)
     }
 
+    /// Inverse of [`Self::find_zero_angle`] (MBA-1402): given a FIXED bore angle rather than
+    /// searching for one, run that trajectory and locate the downrange distance where it
+    /// crosses `target_height_m` — the zero RANGE a stored/portable bore angle implies under
+    /// THESE conditions. Hornady and Kestrel 4DOF treat the zero angle as the portable
+    /// quantity (captured once, then reusable independent of the day it was solved); this is
+    /// what makes that value usable again.
+    ///
+    /// A rifle whose sight sits above the bore crosses a level line of sight TWICE on a rising
+    /// shot: once ascending, close to the muzzle (the "near zero"), and once descending past
+    /// the apex (the "far zero" — what "sighted in at D yards" always means). This returns the
+    /// LAST sign change of `height - target_height_m` found while walking the sampled
+    /// trajectory outward, i.e. the far crossing, never the near one. The crossing distance is
+    /// linearly interpolated between the two bracketing sample points, mirroring
+    /// `zero_trial_height_at`'s own height-at-a-known-distance interpolation in the other
+    /// direction.
+    fn find_zero_range(
+        &self,
+        angle_rad: f64,
+        target_height_m: f64,
+        frame: ZeroTargetFrame,
+    ) -> Result<f64, BallisticsError> {
+        let mut trial = self.clone();
+        trial.inputs.muzzle_angle = angle_rad;
+        // Mirrors zero_trial_height_at's trial setup exactly (MBA-959 / MBA-1286 / MBA-1412),
+        // so this is the true inverse under the same conventions.
+        trial.inputs.enable_aerodynamic_jump = false;
+        trial.inputs.cant_angle = 0.0;
+        if frame == ZeroTargetFrame::SightLine {
+            trial.inputs.shooting_angle = 0.0;
+        }
+        let result = trial.solve()?;
+
+        let mut far_crossing: Option<f64> = None;
+        let mut previous: Option<(f64, f64)> = None; // (downrange_m, height_error_m)
+        for point in &result.points {
+            let height = crate::atmosphere::shot_frame_altitude(
+                0.0,
+                point.position.x,
+                point.position.y,
+                trial.inputs.shooting_angle,
+            );
+            let error = height - target_height_m;
+            if let Some((prev_x, prev_error)) = previous {
+                if prev_error == 0.0 {
+                    // An exact touch is itself a crossing; keep walking in case a later
+                    // segment crosses again farther out.
+                    far_crossing = Some(prev_x);
+                }
+                if prev_error * error < 0.0 {
+                    let fraction = prev_error / (prev_error - error);
+                    far_crossing = Some(prev_x + fraction * (point.position.x - prev_x));
+                }
+            }
+            previous = Some((point.position.x, error));
+        }
+        // The loop above only resolves a point once a later point makes it `previous`; catch
+        // the trajectory's very last sampled point landing exactly on the line too.
+        if let Some((last_x, last_error)) = previous {
+            if last_error == 0.0 {
+                far_crossing = Some(last_x);
+            }
+        }
+
+        far_crossing.ok_or_else(|| {
+            BallisticsError::from(
+                "Cannot find zero range: this angle never crosses the target height within the \
+                 solved range (angle too shallow to reach it, or the far crossing lies beyond \
+                 the solver's max range)."
+                    .to_string(),
+            )
+        })
+    }
+
     /// Reject malformed state before it reaches an integration loop.
     ///
     /// `new` resolves powder-temperature velocity overrides and refreshes the imperial mirror
@@ -3668,6 +3741,48 @@ pub fn calculate_zero_angle_with_resolved_conditions(
 ) -> Result<f64, BallisticsError> {
     let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
     solver.calculate_and_set_zero_angle(target_distance, target_height, ZeroTargetFrame::SightLine)
+}
+
+/// Generous solve envelope for [`calculate_zero_range_from_angle_with_conditions`] /
+/// [`calculate_zero_range_from_angle_with_resolved_conditions`] (MBA-1402): a "zero" bore angle
+/// is a near-horizontal shot, so its far line-of-sight crossing sits well inside this even at
+/// extended small-arms ranges. Double the engine's own default 1000 m solve envelope
+/// ([`TrajectorySolver::new`]) rather than something scaled to an (unknown, being solved for)
+/// target distance; `solve()` still stops at ground impact well before this in the typical
+/// case, so the larger envelope costs effectively nothing.
+const ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M: f64 = 2000.0;
+
+/// Solve the zero RANGE that a fixed bore angle produces — the exact inverse of
+/// [`calculate_zero_angle_with_conditions`]. Runs the trajectory at `zero_angle_rad` and
+/// returns the downrange distance of the FAR line-of-sight crossing: a rifle sighted above
+/// the bore crosses a level line of sight twice on a rising shot (near, ascending; far,
+/// descending past the apex) and "zero range" always means the far one.
+pub fn calculate_zero_range_from_angle_with_conditions(
+    inputs: BallisticInputs,
+    zero_angle_rad: f64,
+    target_height: f64,
+    wind: WindConditions,
+    atmosphere: AtmosphericConditions,
+) -> Result<f64, BallisticsError> {
+    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    solver.set_max_range(ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M);
+    solver.find_zero_range(zero_angle_rad, target_height, ZeroTargetFrame::SightLine)
+}
+
+/// [`calculate_zero_range_from_angle_with_conditions`] for a presence-aware caller that has
+/// already resolved station temperature/pressure — same relationship as
+/// [`calculate_zero_angle_with_resolved_conditions`] has to
+/// [`calculate_zero_angle_with_conditions`] (MBA-1397 pattern).
+pub fn calculate_zero_range_from_angle_with_resolved_conditions(
+    inputs: BallisticInputs,
+    zero_angle_rad: f64,
+    target_height: f64,
+    wind: WindConditions,
+    atmosphere: AtmosphericConditions,
+) -> Result<f64, BallisticsError> {
+    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
+    solver.set_max_range(ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M);
+    solver.find_zero_range(zero_angle_rad, target_height, ZeroTargetFrame::SightLine)
 }
 
 /// What a BC estimate is fit against.

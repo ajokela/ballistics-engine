@@ -1037,9 +1037,30 @@ enum Commands {
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
 
-        /// Target distance (yards for imperial, meters for metric)
-        #[arg(long)]
-        target_distance: f64,
+        /// Target distance (yards for imperial, meters for metric). Required unless
+        /// --from-angle is given.
+        #[arg(
+            long,
+            required_unless_present = "from_angle",
+            conflicts_with = "from_angle"
+        )]
+        target_distance: Option<f64>,
+
+        /// Solve the INVERSE problem (MBA-1402): given a previously solved/stored bore angle
+        /// in DEGREES above bore-horizontal (e.g. a `zero_angle_degrees` value this same
+        /// command already printed, or `trajectory`'s auto-zero echo), find the zero RANGE it
+        /// produces under these conditions — the exact inverse of the default
+        /// --target-distance mode. Hornady and Kestrel 4DOF treat the zero angle as the
+        /// portable quantity: capture it once, then recover the range it implies later,
+        /// independent of the day it was originally solved. Conflicts with --target-distance.
+        #[arg(
+            long,
+            value_name = "DEGREES",
+            required_unless_present = "target_distance",
+            conflicts_with = "target_distance",
+            allow_hyphen_values = true
+        )]
+        from_angle: Option<f64>,
 
         /// Target height (yards for imperial, meters for metric)
         #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
@@ -2633,6 +2654,11 @@ struct TrajectoryResult {
     impact_energy: f64,
     stability_coefficient: Option<f64>,
     spin_drift: Option<f64>,
+    /// The zero angle auto-zero solved for this trajectory, degrees above bore-horizontal
+    /// (MBA-1402). Present only when `--auto-zero` (or a saved profile's `auto_zero`/
+    /// `zero_distance`) ran a zero solve; absent on a bare `--angle` run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zero_angle_degrees: Option<f64>,
     /// Minimum pitch-damping coefficient (only when --enable-pitch-damping).
     #[serde(skip_serializing_if = "Option::is_none")]
     min_pitch_damping: Option<f64>,
@@ -2853,6 +2879,12 @@ struct TrajectoryConfig {
     // applies it (drop-only correction) to every output format and prints a table-only
     // note; see apply_dsf's doc comment for the drop-only invariant.
     dsf_table: Option<DsfTable>,
+
+    // MBA-1402: the zero angle auto-zero solved for this run, degrees above bore-horizontal.
+    // `Some` only when --auto-zero (CLI flag or a saved profile's auto_zero/zero_distance) ran
+    // a zero solve for this trajectory; `None` on the bare `--angle` path. Additive: every
+    // output format prints/serializes nothing new when this is `None`.
+    solved_zero_angle_deg: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -6159,6 +6191,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 windage_click,
                 pdf_metadata: pdf_metadata.clone(),
                 dsf_table: dsf_table.clone(),
+                // MBA-1402: `muzzle_angle` above is already the solved zero angle (degrees)
+                // when auto-zero ran; echo it only in that case, so a bare `--angle` run keeps
+                // this `None` and every output format is unchanged.
+                solved_zero_angle_deg: final_auto_zero.map(|_| muzzle_angle),
             };
 
             // Online mode handling
@@ -6624,6 +6660,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             mass,
             diameter,
             target_distance,
+            from_angle,
             target_height,
             sight_height,
             temperature,
@@ -6643,8 +6680,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
             let diameter_metric = UnitConverter::diameter_to_metric(bullet_diameter, cli.units);
-            let target_distance_metric =
-                UnitConverter::distance_to_metric(target_distance, cli.units);
             let target_height_metric = UnitConverter::distance_to_metric(target_height, cli.units);
             // Default sight height: 2 inches for imperial, 50mm for metric
             let sight_height_default = match cli.units {
@@ -6677,25 +6712,59 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("{}", ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING);
             }
 
-            run_zero_calculation(
-                velocity_metric,
-                bc,
-                bc_reference,
-                mass_metric,
-                diameter_metric,
-                target_distance_metric,
-                target_height_metric,
-                sight_height_metric,
-                temperature_metric,
-                pressure_metric,
-                pressure_type,
-                humidity,
-                altitude_metric,
-                custom_drag_table,
-                cd_scale,
-                output,
-                cli.units,
-            )?;
+            match from_angle {
+                // MBA-1402: inverse mode — a stored bore angle (degrees) is given instead of
+                // a target distance; solve the zero RANGE it produces.
+                Some(angle_deg) => {
+                    run_zero_range_calculation(
+                        velocity_metric,
+                        bc,
+                        bc_reference,
+                        mass_metric,
+                        diameter_metric,
+                        angle_deg.to_radians(),
+                        target_height_metric,
+                        sight_height_metric,
+                        temperature_metric,
+                        pressure_metric,
+                        pressure_type,
+                        humidity,
+                        altitude_metric,
+                        custom_drag_table,
+                        cd_scale,
+                        output,
+                        cli.units,
+                    )?;
+                }
+                None => {
+                    // clap enforces exactly one of --target-distance/--from-angle via
+                    // required_unless_present + conflicts_with on both fields.
+                    let target_distance = target_distance.expect(
+                        "clap requires --target-distance when --from-angle is absent",
+                    );
+                    let target_distance_metric =
+                        UnitConverter::distance_to_metric(target_distance, cli.units);
+                    run_zero_calculation(
+                        velocity_metric,
+                        bc,
+                        bc_reference,
+                        mass_metric,
+                        diameter_metric,
+                        target_distance_metric,
+                        target_height_metric,
+                        sight_height_metric,
+                        temperature_metric,
+                        pressure_metric,
+                        pressure_type,
+                        humidity,
+                        altitude_metric,
+                        custom_drag_table,
+                        cd_scale,
+                        output,
+                        cli.units,
+                    )?;
+                }
+            }
         }
 
         Commands::EstimateBC {
@@ -9025,6 +9094,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         windage_click,
         ref pdf_metadata,
         ref dsf_table,
+        solved_zero_angle_deg,
     } = *config;
 
     // Mover ring (MBA-1325): a per-point Ring column/field, additive across table/JSON/CSV,
@@ -9369,6 +9439,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 } else {
                     None
                 },
+                zero_angle_degrees: solved_zero_angle_deg,
                 // Pitch-damping diagnostics (MBA-966), only present when
                 // --enable-pitch-damping populated them on the engine result.
                 min_pitch_damping: result.min_pitch_damping,
@@ -9542,6 +9613,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         dist_unit
                     );
                 }
+                if let Some(zero_deg) = solved_zero_angle_deg {
+                    println!("zero_angle_degrees,{:.4},degrees", zero_deg);
+                }
             }
         }
 
@@ -9569,6 +9643,12 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 "║ Max Height:        {:>8.2} {:3}       ║",
                 height_display, range_unit
             );
+            if let Some(zero_deg) = solved_zero_angle_deg {
+                println!(
+                    "║ Zero Angle:        {:>8.4}°          ║",
+                    zero_deg
+                );
+            }
             if reached_time_cap {
                 // Integration stopped at the time cap, not at an impact: the
                 // "impact" velocity/energy/ToF are the capped state, not a real
@@ -10900,6 +10980,205 @@ fn run_zero_calculation(
             println!(
                 "║ Zero Angle (mrad): {:>8.2} mrad       ║",
                 zero_angle * 1000.0
+            );
+            println!(
+                "║ Max Ordinate:      {:>8.3} {:3}       ║",
+                max_ordinate_display, dist_unit
+            );
+            println!("╚════════════════════════════════════════╝");
+        }
+
+        OutputFormat::Pdf => {
+            eprintln!("Error: PDF output is not supported for zero calculation.");
+            eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
+        }
+    }
+
+    Ok(())
+}
+
+/// Inverse of [`run_zero_calculation`] (MBA-1402): given a fixed, previously solved/stored
+/// bore angle instead of a target distance, solve the zero RANGE it produces — run the
+/// trajectory at that angle and locate the FAR line-of-sight crossing. `zero_angle_rad` is
+/// the stored angle (e.g. a `zero_angle_degrees` value this same command already printed on
+/// an earlier `--target-distance` run, or `trajectory`'s auto-zero echo), already converted
+/// to radians by the caller.
+#[allow(clippy::too_many_arguments)] // Mirrors run_zero_calculation's own parameter list.
+fn run_zero_range_calculation(
+    velocity: f64,
+    bc: f64,
+    bc_reference_standard: BcReferenceStandard,
+    mass: f64,
+    diameter: f64,
+    zero_angle_rad: f64,
+    target_height: f64,
+    sight_height: f64,
+    temperature: f64,
+    pressure: f64,
+    pressure_type: PressureReferenceMode,
+    humidity: f64,
+    altitude: f64,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    cd_scale: f64,
+    output: OutputFormat,
+    units: UnitSystem,
+) -> Result<(), Box<dyn Error>> {
+    // Create ballistic inputs
+    let inputs = BallisticInputs {
+        muzzle_velocity: velocity,
+        bc_value: bc,
+        bc_reference_standard,
+        bullet_mass: mass,
+        bullet_diameter: diameter,
+        sight_height,
+        temperature,
+        pressure,
+        humidity,
+        altitude,
+        custom_drag_table,
+        cd_scale,
+        ..Default::default()
+    };
+
+    // MBA-1397: same resolve-once pattern as run_zero_calculation (Absolute is byte-identical
+    // to the legacy default-sentinel resolution TrajectorySolver::new performs internally;
+    // Qnh reduces a declared altimeter setting to station pressure). Reused for both the
+    // inverse solve and the follow-up trajectory solve below, so they agree.
+    let (resolved_temperature, resolved_pressure) = resolve_station_conditions_with_pressure_mode(
+        temperature,
+        pressure,
+        altitude,
+        pressure_type,
+    );
+
+    let atmosphere = AtmosphericConditions {
+        temperature: resolved_temperature,
+        pressure: resolved_pressure,
+        humidity,
+        altitude,
+    };
+
+    // Same line-of-sight target height convention as run_zero_calculation's forward solve.
+    let los_target_height = sight_height + target_height;
+
+    // Solve the zero RANGE this stored angle produces — the exact inverse of
+    // calculate_zero_angle_with_resolved_conditions above. Authoritative: `atmosphere` is
+    // already fully resolved, so it is trusted as-is rather than re-derived a second time.
+    let zero_range = ballistics_engine::calculate_zero_range_from_angle_with_resolved_conditions(
+        inputs.clone(),
+        zero_angle_rad,
+        los_target_height,
+        WindConditions::default(),
+        atmosphere.clone(),
+    )?;
+
+    // Calculate trajectory at the given angle to get additional info, mirroring the forward
+    // command's own follow-up solve.
+    let mut zeroed_inputs = inputs;
+    zeroed_inputs.muzzle_angle = zero_angle_rad;
+
+    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(
+        zeroed_inputs,
+        Default::default(),
+        atmosphere,
+    );
+    solver.set_max_range(zero_range * 3.0);
+    let trajectory = solver.solve()?;
+
+    // Same sight-adjustment/point-blank-range diagnostics as the forward command, now
+    // referenced against the SOLVED range rather than a supplied target distance.
+    let sight_adjustment_moa =
+        zero_angle_rad.to_degrees() * 60.0 - (target_height / zero_range * 3437.75);
+    let mut entered_point_blank_band = false;
+    let point_blank_range = trajectory
+        .points
+        .iter()
+        .find_map(|p| {
+            let los_y = sight_height + target_height * (p.position.x / zero_range);
+            let height_from_los = p.position.y - los_y;
+
+            if height_from_los >= -0.05 {
+                entered_point_blank_band = true;
+                None
+            } else if entered_point_blank_band {
+                Some(p.position.x)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(trajectory.max_range);
+
+    let dist_unit = match units {
+        UnitSystem::Metric => "m",
+        UnitSystem::Imperial => "yd",
+    };
+
+    match output {
+        OutputFormat::Json => {
+            let units_label = match units {
+                UnitSystem::Metric => "metric",
+                UnitSystem::Imperial => "imperial",
+            };
+            let result = serde_json::json!({
+                "units": units_label,
+                "zero_angle_degrees": zero_angle_rad.to_degrees(),
+                "zero_angle_moa": zero_angle_rad.to_degrees() * 60.0,
+                "zero_angle_mrad": zero_angle_rad * 1000.0,
+                "zero_range": UnitConverter::distance_from_metric(zero_range, units),
+                "sight_adjustment_moa": sight_adjustment_moa,
+                "max_ordinate": UnitConverter::distance_from_metric(trajectory.max_height, units),
+                "point_blank_range": UnitConverter::distance_from_metric(point_blank_range, units),
+            });
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        OutputFormat::Csv => {
+            println!("metric,value,unit");
+            println!("zero_angle,{:.4},degrees", zero_angle_rad.to_degrees());
+            println!("zero_angle_moa,{:.2},MOA", zero_angle_rad.to_degrees() * 60.0);
+            println!("zero_angle_mrad,{:.2},mrad", zero_angle_rad * 1000.0);
+            println!(
+                "zero_range,{:.2},{}",
+                UnitConverter::distance_from_metric(zero_range, units),
+                dist_unit
+            );
+            println!("max_ordinate,{:.3},meters", trajectory.max_height);
+        }
+
+        OutputFormat::Table => {
+            let zero_range_display = UnitConverter::distance_from_metric(zero_range, units);
+            let target_height_display = UnitConverter::distance_from_metric(target_height, units);
+            let sight_height_display = UnitConverter::distance_from_metric(sight_height, units);
+            let max_ordinate_display =
+                UnitConverter::distance_from_metric(trajectory.max_height, units);
+
+            println!("╔════════════════════════════════════════╗");
+            println!("║     ZERO RANGE FROM STORED ANGLE       ║");
+            println!("╠════════════════════════════════════════╣");
+            println!(
+                "║ Input Zero Angle:  {:>8.4}°          ║",
+                zero_angle_rad.to_degrees()
+            );
+            println!(
+                "║ Input Zero Angle:  {:>8.2} MOA        ║",
+                zero_angle_rad.to_degrees() * 60.0
+            );
+            println!(
+                "║ Input Zero Angle:  {:>8.2} mrad       ║",
+                zero_angle_rad * 1000.0
+            );
+            println!("╠════════════════════════════════════════╣");
+            println!(
+                "║ Solved Zero Range: {:>8.1} {:3}       ║",
+                zero_range_display, dist_unit
+            );
+            println!(
+                "║ Target Height:     {:>8.2} {:3}       ║",
+                target_height_display, dist_unit
+            );
+            println!(
+                "║ Sight Height:      {:>8.3} {:3}       ║",
+                sight_height_display, dist_unit
             );
             println!(
                 "║ Max Ordinate:      {:>8.3} {:3}       ║",

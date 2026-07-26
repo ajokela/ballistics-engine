@@ -1240,6 +1240,34 @@ Output provides:
 - Mrad adjustment
 - Maximum ordinate
 
+#### Solving Range From a Stored Angle (`--from-angle`)
+
+Hornady and Kestrel 4DOF treat the zero angle as the *portable* quantity: capture it once
+(from this command's own `zero_angle_degrees` output, or from `trajectory`'s auto-zero echo
+below), then recover the zero range it implies later — on a different day, under different
+conditions — without re-solving from a target distance. `--from-angle <DEGREES>` (MBA-1402)
+does exactly that: it is the exact inverse of the default `--target-distance` mode, running
+the trajectory at the given bore angle and locating the FAR line-of-sight crossing (a
+rifle sighted above the bore crosses a level line of sight twice on a rising shot; "zero
+range" always means the far, descending crossing, never the near, ascending one).
+
+`--from-angle` and `--target-distance` are mutually exclusive — supply exactly one:
+
+```bash
+# Solve the angle for a 200-yard zero...
+./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 200
+# ... then, later, recover the range that same stored angle (0.0997°) implies:
+./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --from-angle 0.0997
+```
+
+`--output json`/`--output csv` add a `zero_range` value (display units) alongside the
+`zero_angle_degrees`/`zero_angle_moa`/`zero_angle_mrad` echo of the angle you supplied;
+`sight_adjustment_moa`, `max_ordinate`, and `point_blank_range` are computed the same way as
+the forward mode, referenced against the solved range. Round-trip precision follows from the
+forward solver's own convergence granularity — well under 1% at typical zero distances, with
+the shortest/near-tangent zeros (very flat trajectories, e.g. a 100 yd zero for a high-BC
+load) at the loose end of that range.
+
 ### Load Comparison (`compare`)
 
 Run several loads through identical conditions and see them side by side. Each load is
@@ -2269,6 +2297,16 @@ axis in feet and misdiagnosed a bug. The document carries a `legend` block (appe
 `final_pitch_angle`/`final_yaw_angle` diagnostics (only with `--enable-pitch-damping` /
 `--enable-precession`) carry their unit in the field name already and are covered above and
 in the [Mover Ring](#mover-ring---target-speed) section, not restated in `legend`.
+
+**`zero_angle_degrees`** (MBA-1402): present only when auto-zero ran (`--auto-zero`, or a
+saved profile's `auto_zero`/`zero_distance`) — the same bore angle `TrajectoryConfig.angle`
+was set to for this run, echoed in degrees so it can be captured and fed straight into
+`zero --from-angle` later (see [Solving Range From a Stored Angle](#solving-range-from-a-stored-angle---from-angle)).
+Absent (not `null`) on a bare `--angle` run. Always degrees regardless of `--units`, matching
+the `zero` command's own `zero_angle_degrees` convention. `-o csv`'s non-`--full` summary adds
+a matching `zero_angle_degrees,<value>,degrees` row under the same condition; the table
+summary adds a `Zero Angle: <value>°` line. Every surface is additive: with auto-zero absent,
+output is byte-identical to before this field existed.
 
 **WASM `-o json`** (browser/`ballistics.sh` interface) uses a different, already
 self-describing shape — `range_yards`/`drop_inches`/`drift_inches` (or the `_meters`/`_cm`
