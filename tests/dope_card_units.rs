@@ -70,6 +70,75 @@ fn moa_dope_card_generates() {
     let _ = std::fs::remove_file(&out);
 }
 
+/// MBA-1410: independent elevation-vs-windage units on the PDF dope card. mil elevation
+/// (Drop) with moa windage (Wind/Lead) must still produce a valid PDF — the per-axis
+/// plumbing (elevation_unit/windage_unit, gated click args) must not crash when the two
+/// axes diverge.
+#[test]
+fn mixed_axis_units_dope_card_generates() {
+    let out = std::env::temp_dir().join("bx_dope_mixed_axis.pdf");
+    let out_str = out.to_str().unwrap();
+    let output = std::process::Command::new(get_cli_binary())
+        .args([
+            "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308", "--drag-model", "g7",
+            "--max-range", "800", "--temperature", "59", "--pressure", "29.92", "--auto-zero", "100",
+            "--sample-trajectory", "-o", "pdf", "--output-file", out_str,
+            "--adjustment-unit", "mil", "--windage-unit", "moa",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        output.status.success(),
+        "mixed-axis dope card failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_pdf(&out, "mixed-axis");
+    let _ = std::fs::remove_file(&out);
+}
+
+/// Elevation clicks with an explicit non-clicks windage override (moa): the windage click
+/// graduation must NOT be applied to the Wind/Lead columns once `--windage-unit` overrides
+/// away from clicks (the gating this fold-in relies on).
+#[test]
+fn elevation_clicks_with_windage_moa_override_generates() {
+    let out = std::env::temp_dir().join("bx_dope_clicks_elev_moa_wind.pdf");
+    let out_str = out.to_str().unwrap();
+    let output = std::process::Command::new(get_cli_binary())
+        .args([
+            "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308", "--drag-model", "g7",
+            "--max-range", "800", "--temperature", "59", "--pressure", "29.92", "--auto-zero", "100",
+            "--sample-trajectory", "-o", "pdf", "--output-file", out_str,
+            "--adjustment-unit", "clicks", "--elevation-click-value", "0.25moa",
+            "--windage-unit", "moa",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        output.status.success(),
+        "elevation-clicks/windage-moa dope card failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_pdf(&out, "elevation-clicks-windage-moa");
+    let _ = std::fs::remove_file(&out);
+}
+
+/// `--windage-unit clicks` without `--adjustment-unit clicks` is rejected up front (the
+/// MBA-1410 judgment call: clicks requires the elevation graduation to be resolved).
+#[test]
+fn windage_unit_clicks_without_elevation_clicks_is_rejected() {
+    let output = std::process::Command::new(get_cli_binary())
+        .args([
+            "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308",
+            "--max-range", "800", "--adjustment-unit", "mil", "--windage-unit", "clicks",
+        ])
+        .output()
+        .expect("run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--windage-unit"), "{stderr}");
+    assert!(stderr.contains("--adjustment-unit"), "{stderr}");
+}
+
 #[test]
 fn explicit_mil_matches_default() {
     let a = std::env::temp_dir().join("bx_dope_mil_a.pdf");

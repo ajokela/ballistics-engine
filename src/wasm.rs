@@ -2811,6 +2811,11 @@ impl WasmBallistics {
         let mut target_angle = 90.0;
         let mut range = 500.0;
         let mut adjustment_unit = "mil";
+        // MBA-1410: lead's single angular column is windage-like (a horizontal hold), so
+        // `--adjustment-unit clicks` resolves through this graduation, mirroring native
+        // handle_lead's `--windage-click-value` (WASM has no --profile, so there is no
+        // elevation_click fallback here).
+        let mut windage_click_value: Option<&str> = None;
         let mut lead_output = "table";
         // MBA-1411 (carried from the MBA-1356 review's "WASM lead untrued-curve gap"):
         // this command already applies a loaded custom drag table unconditionally (see
@@ -3037,6 +3042,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--windage-click-value" => {
+                    if i + 1 < args.len() {
+                        windage_click_value = Some(args[i + 1]);
+                        i += 1;
+                    }
+                }
                 "-o" | "--output" => {
                     if i + 1 < args.len() {
                         lead_output = args[i + 1];
@@ -3065,17 +3076,25 @@ impl WasmBallistics {
             .ok_or_else(|| JsValue::from_str("--target-speed is required"))?;
 
         // MBA-1355: smoa/iphy join mil/moa as real display units (mirrors native
-        // handle_lead's Smoa|Iphy match arm — sol.lead_mil * smoa_per_mil()). clicks is
-        // out-of-scope for `lead` — real click resolution only exists for
-        // trajectory/come-ups (native's `reject_clicks_out_of_scope`; WASM has no
-        // come-ups command, so only trajectory's Ring column resolves clicks).
+        // handle_lead's Smoa|Iphy match arm — sol.lead_mil * smoa_per_mil()). MBA-1410:
+        // clicks now resolves too (mirrors native handle_lead's Clicks arm), through
+        // --windage-click-value -- lead's single column is windage-like (a horizontal
+        // hold), same axis native resolves it against. WASM has no --profile, so there is
+        // no elevation_click/profile fallback here, only the explicit flag.
         let adjustment_unit_lower = adjustment_unit.to_lowercase();
-        match adjustment_unit_lower.as_str() {
-            "mil" | "moa" | "smoa" | "iphy" => {}
+        let windage_click: Option<crate::adjustment::ClickValue> = match adjustment_unit_lower.as_str()
+        {
+            "mil" | "moa" | "smoa" | "iphy" => None,
             "clicks" => {
-                return Err(JsValue::from_str(
-                    "error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)",
-                ));
+                let w = windage_click_value.ok_or_else(|| {
+                    JsValue::from_str(
+                        "--adjustment-unit clicks requires a turret click graduation: pass \
+                         --windage-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil)",
+                    )
+                })?;
+                Some(
+                    crate::adjustment::parse_click_value(w).map_err(|e| JsValue::from_str(&e))?,
+                )
             }
             _ => {
                 return Err(JsValue::from_str(&format!(
@@ -3083,7 +3102,7 @@ impl WasmBallistics {
                     adjustment_unit
                 )));
             }
-        }
+        };
 
         let lead_output_lower = lead_output.to_lowercase();
         if lead_output_lower != "table" && lead_output_lower != "json" {
@@ -3259,15 +3278,24 @@ impl WasmBallistics {
                 // (MBA-1355: SMOA/IPHY join MOA as a requestable primary unit, sharing the
                 // native smoa_per_mil() conversion off sol.lead_mil).
                 let lead_smoa = sol.lead_mil * smoa_per_mil();
+                // MBA-1410: whole clicks via the resolved windage graduation (validated
+                // above -- Some(...) iff adjustment_unit_lower == "clicks").
+                let lead_clicks = windage_click
+                    .map(|c| crate::adjustment::clicks_for(lead_disp, range, &c));
                 let lead_adj_line = match adjustment_unit_lower.as_str() {
                     "moa" => format!("{:.2} MOA / {:.2} MIL", sol.lead_moa, sol.lead_mil),
                     "smoa" => format!("{:.2} SMOA / {:.2} MIL", lead_smoa, sol.lead_mil),
                     "iphy" => format!("{:.2} IPHY / {:.2} MIL", lead_smoa, sol.lead_mil),
+                    "clicks" => format!(
+                        "{} clicks / {:.2} MIL",
+                        lead_clicks.unwrap_or_default(),
+                        sol.lead_mil
+                    ),
                     _ => format!("{:.2} MIL / {:.2} MOA", sol.lead_mil, sol.lead_moa),
                 };
 
                 if lead_output_lower == "json" {
-                    let payload = serde_json::json!({
+                    let mut payload = serde_json::json!({
                         "target_speed": target_speed,
                         "target_speed_unit": speed_unit,
                         "target_angle_deg": target_angle,
@@ -3282,6 +3310,9 @@ impl WasmBallistics {
                         "iterations": sol.iterations,
                         "adjustment_unit": adjustment_unit_lower,
                     });
+                    if let Some(clicks) = lead_clicks {
+                        payload["lead_clicks"] = serde_json::json!(clicks);
+                    }
                     return Ok(serde_json::to_string_pretty(&payload)
                         .unwrap_or_else(|_| "Error formatting JSON".to_string()));
                 }
@@ -6333,8 +6364,10 @@ Lead Command:
                                   0=away, 90=left-to-right, 180=toward, 270=right-to-left;
                                   positive lead = hold in direction of travel
     --range <DIST>                Range to target (yards/meters) [default: 500]
-    --adjustment-unit <UNIT>      mil/moa/smoa/iphy [default: mil] (clicks: trajectory
-                                  and come-ups only, MBA-1355)
+    --adjustment-unit <UNIT>      mil/moa/smoa/iphy/clicks [default: mil]; clicks
+                                  requires --windage-click-value (MBA-1410)
+    --windage-click-value <S>     Turret click graduation for --adjustment-unit clicks,
+                                  e.g. 0.25moa or 0.1mil
     -o, --output <FORMAT>         Output format (table/json) [default: table]
 
   Time of flight is solved under the supplied wind/atmosphere (wind-aware lead);

@@ -1245,9 +1245,9 @@ Iterations: 0\n";
     }
 
     /// `lead` gains real smoa/iphy display (mirrors native handle_lead's
-    /// Smoa|Iphy => sol.lead_mil * smoa_per_mil() arm) but clicks stays out of scope —
-    /// only trajectory/come-ups ever resolve a real click count (WASM has no
-    /// come-ups command, so trajectory's Ring column is the only real-resolution site).
+    /// Smoa|Iphy => sol.lead_mil * smoa_per_mil() arm). MBA-1410: clicks now resolves too,
+    /// via --windage-click-value (lead's single column is windage-like) -- see
+    /// `lead_accepts_clicks_with_windage_click_value` below.
     #[wasm_bindgen_test]
     fn lead_accepts_smoa_and_iphy_with_real_values() {
         let smoa_json = WasmBallistics::new()
@@ -1283,21 +1283,39 @@ Iterations: 0\n";
         assert!(iphy_table.contains("IPHY"), "{iphy_table}");
     }
 
-    /// `lead --adjustment-unit clicks` rejects with the exact out-of-scope text native
-    /// uses for every command outside trajectory/come-ups (reject_clicks_out_of_scope).
+    /// MBA-1410: `lead --adjustment-unit clicks` now resolves for real via
+    /// --windage-click-value (mirrors native handle_lead's Clicks arm, which resolves
+    /// through the WINDAGE graduation since lead's single column is windage-like). A bare
+    /// `--adjustment-unit clicks` with no graduation (WASM has no --profile, so there is
+    /// no fallback source) still fails fast, naming --windage-click-value.
     #[wasm_bindgen_test]
-    fn lead_rejects_clicks_out_of_scope() {
-        let err = WasmBallistics::new()
+    fn lead_accepts_clicks_with_windage_click_value() {
+        let json = WasmBallistics::new()
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+                 --adjustment-unit clicks --windage-click-value 0.25moa -o json",
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["adjustment_unit"], "clicks");
+        assert!(v["lead_clicks"].as_i64().is_some(), "{json}");
+
+        let table = WasmBallistics::new()
+            .run_command(
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
+                 --adjustment-unit clicks --windage-click-value 0.25moa",
+            )
+            .unwrap();
+        assert!(table.contains("clicks"), "{table}");
+
+        let missing = WasmBallistics::new()
             .run_command(
                 "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 300 \
                  --adjustment-unit clicks",
             )
             .unwrap_err();
-        let msg = err.as_string().unwrap_or_default();
-        assert_eq!(
-            msg,
-            "error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)"
-        );
+        let msg = missing.as_string().unwrap_or_default();
+        assert!(msg.contains("--windage-click-value"), "{msg}");
     }
 
     // -----------------------------------------------------------------------------
