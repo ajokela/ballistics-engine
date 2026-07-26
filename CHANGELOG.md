@@ -71,6 +71,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exposed the affected field yet — but this is the third instance of the shape (MBA-1296,
   MBA-1356), so it is fixed structurally and pinned by a cross-entry-point parity test.
 
+### Changed
+- **printpdf 0.10 → 0.12.4.** PDF dope cards are now self-contained: 0.10 emitted no font
+  resources, no `/Encoding` and no `/ToUnicode`, leaving text to whatever the viewer defaulted
+  to; 0.12 embeds subset fonts with a ToUnicode map, so a card renders identically everywhere
+  and stays searchable and copyable. **The cost is file size** — a sample dope card goes from
+  ~6 KB to ~836 KB, which is the embedded font data. `default-features = false` is preserved, so
+  the Linux-only `mmapio`/`rust-fontconfig` chain that breaks the BSD targets stays out.
+
 ### Added
 - **Density altitude reaches the zero surfaces** (MBA-1422): `zero --density-altitude`, and
   `trajectory --zero-density-altitude` for declaring a zero-day density altitude alongside the
