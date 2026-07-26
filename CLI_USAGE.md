@@ -1475,6 +1475,38 @@ actually weighed. `-b/--bullet-weight`, `-c/--charge-weight`, `-v/--velocity`, a
 `-f/--firearm-weight` are all required (no profile integration — this is a standalone
 calculator). Output: table (default), `-o json`, or `-o csv`; PDF is not supported.
 
+### Reference Drag Curve (`drag-curve`)
+
+Prints a built-in reference drag function as `(Mach, Cd)` data, so a chart or an audit can use
+the engine's own numbers instead of a re-vendored copy that drifts from them as the tables are
+refined.
+
+```bash
+ballistics drag-curve --drag-model g7            # table (default)
+ballistics drag-curve --drag-model g7 -o csv     # mach,cd
+ballistics drag-curve --drag-model gs  -o json   # with provenance and domain
+```
+
+All nine models are available: `g1`, `g2`, `g5`, `g6`, `g7`, `g8`, `gi`, `gs`, `ra4`. Output is
+`table` (default), `csv`, or `json`; PDF is not supported.
+
+Points are emitted **verbatim from the table** — no resampling and no interpolation onto a
+uniform grid — so what you plot is exactly what the solver interpolates.
+
+**The tables do not share a Mach domain.** Most run to Mach 5; `gs` and `ra4` stop at Mach 4.
+Read the emitted points (or `mach_min`/`mach_max` in the JSON form) rather than assuming a range.
+
+These are the public-domain Aberdeen/BRL reference functions as tabulated in McCoy, *Modern
+Exterior Ballistics*, plus the British RA 1929 function for `ra4`. Each `data/*.csv` in the
+source tree carries its own provenance header.
+
+**This is the reference curve for the model's standard projectile**, not the effective Cd a
+particular bullet flew. For that — form-factor scaled, with segmented-BC band steps — use
+`trajectory --full --with-drag-coefficient`. A chart typically wants both: the reference curve as
+a backdrop and the load's own curve over it.
+
+Library callers can reach the same data via `ballistics_engine::drag::reference_drag_table`.
+
 ### Power Factor (`power-factor`)
 
 Power factor (PF) — `bullet weight × velocity / 1000` — gates ammunition into scoring

@@ -667,6 +667,36 @@ pub fn get_drag_coefficient(mach: f64, drag_model: &DragModel) -> f64 {
     }
 }
 
+/// The built-in reference drag table for one model, as tabulated data (MBA-1424).
+///
+/// Exposes the same `(Mach, Cd)` pairs [`get_drag_coefficient`] interpolates, so a consumer can
+/// plot or audit the standard curves without re-vendoring the numbers into their own code — and
+/// without their copy drifting from the engine's as tables are refined.
+///
+/// These are the public-domain Aberdeen/BRL reference functions as tabulated in McCoy, *Modern
+/// Exterior Ballistics*, plus the British RA 1929 function; each `data/*.csv` carries its own
+/// provenance header. Nothing here is vendor drag data.
+///
+/// The tables do not share a Mach domain: most run to Mach 5, while GS and RA4 stop at Mach 4.
+/// Read the returned table's `mach_values` rather than assuming a range.
+///
+/// This returns the *reference* curve for a standard projectile. For the effective Cd a specific
+/// bullet actually flew — form-factor scaled, with segmented-BC band steps — see
+/// [`crate::TrajectorySolver::effective_drag_coefficient`].
+pub fn reference_drag_table(drag_model: &DragModel) -> &'static DragTable {
+    match drag_model {
+        DragModel::G1 => &G1_DRAG_TABLE,
+        DragModel::G2 => &G2_DRAG_TABLE,
+        DragModel::G5 => &G5_DRAG_TABLE,
+        DragModel::G6 => &G6_DRAG_TABLE,
+        DragModel::G7 => &G7_DRAG_TABLE,
+        DragModel::G8 => &G8_DRAG_TABLE,
+        DragModel::GI => &GI_DRAG_TABLE,
+        DragModel::GS => &GS_DRAG_TABLE,
+        DragModel::RA4 => &RA4_DRAG_TABLE,
+    }
+}
+
 /// Get a standard G-table drag coefficient without double-counting transonic drag.
 ///
 /// Standard G tables are total-drag curves that already contain the transonic
@@ -1445,3 +1475,75 @@ pub fn interpolated_bc(mach: f64, segments: &[(f64, f64)]) -> f64 {
 }
 
 // Removed Python-specific function
+
+/// MBA-1424: the built-in reference tables exposed as data.
+#[cfg(test)]
+mod reference_drag_table_tests {
+    use super::*;
+
+    const ALL_MODELS: [DragModel; 9] = [
+        DragModel::G1,
+        DragModel::G2,
+        DragModel::G5,
+        DragModel::G6,
+        DragModel::G7,
+        DragModel::G8,
+        DragModel::GI,
+        DragModel::GS,
+        DragModel::RA4,
+    ];
+
+    /// The reason this accessor exists is so a consumer's chart cannot drift from the engine.
+    /// That only holds if the data handed out is the data interpolated, so assert it directly at
+    /// every tabulated point rather than trusting that both read the same static.
+    #[test]
+    fn the_exposed_table_is_the_one_the_solver_interpolates() {
+        for model in ALL_MODELS {
+            let table = reference_drag_table(&model);
+            for (&mach, &cd) in table.mach_values.iter().zip(table.cd_values.iter()) {
+                let interpolated = get_drag_coefficient(mach, &model);
+                assert!(
+                    (interpolated - cd).abs() < 1e-12,
+                    "{model:?} disagrees at Mach {mach}: table {cd} vs solver {interpolated}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_model_has_a_usable_table() {
+        for model in ALL_MODELS {
+            let table = reference_drag_table(&model);
+            assert_eq!(
+                table.mach_values.len(),
+                table.cd_values.len(),
+                "{model:?} axes differ in length"
+            );
+            assert!(
+                table.mach_values.len() > 2,
+                "{model:?} fell back to a stub table"
+            );
+            assert!(
+                table.mach_values.windows(2).all(|w| w[1] > w[0]),
+                "{model:?} Mach axis is not strictly ascending"
+            );
+            assert!(
+                table.cd_values.iter().all(|cd| cd.is_finite() && *cd > 0.0),
+                "{model:?} has a non-physical Cd"
+            );
+        }
+    }
+
+    /// The tables genuinely do not share a domain, which is why the accessor's contract is "read
+    /// mach_values" rather than "assume 0 to 5". If this ever stops being true the docs and the
+    /// CLI help that both say so should change with it.
+    #[test]
+    fn the_mach_domain_is_per_table_not_universal() {
+        let g7_max = *reference_drag_table(&DragModel::G7).mach_values.last().unwrap();
+        let gs_max = *reference_drag_table(&DragModel::GS).mach_values.last().unwrap();
+        let ra4_max = *reference_drag_table(&DragModel::RA4).mach_values.last().unwrap();
+
+        assert!(g7_max > gs_max, "G7 should extend past GS ({g7_max} vs {gs_max})");
+        assert!(g7_max > ra4_max, "G7 should extend past RA4 ({g7_max} vs {ra4_max})");
+    }
+}
