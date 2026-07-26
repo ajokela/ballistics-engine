@@ -896,9 +896,10 @@ time_s,x_yd,y_yd,z_yd,velocity_fps,energy_ft-lb,ring_mil
 
 ### Terminal Chart (`--plot`)
 
-Render two stacked inline terminal charts after the normal `trajectory` output (MBA-1320):
-drop vs. range, then lateral drift vs. range. Pure Rust, zero new dependencies — no
-terminal-graphics crate, no terminal-size detection, no ANSI colors.
+Render four stacked inline terminal charts after the normal `trajectory` output (MBA-1320,
+extended by MBA-1394): drop vs. range, lateral drift vs. range, velocity vs. range, then
+energy vs. range, in that order. Pure Rust, zero new dependencies — no terminal-graphics
+crate, no terminal-size detection, no ANSI colors.
 
 ```bash
 # Bare --plot: default Unicode braille-dot renderer
@@ -925,15 +926,19 @@ terminal-graphics crate, no terminal-size detection, no ANSI colors.
   `NO_COLOR` (<https://no-color.org/>) entirely — there's nothing to suppress — and keeps
   output byte-identical whether the terminal honors color, redirects to a file, or is a
   dumb pipe.
-- Both charts plot the SAME per-point data the `--full` "Trajectory Points:" table prints
-  (`result.points`, the raw un-decimated integration output — `--plot` works without
-  `--full` too, it just doesn't print the table itself). Drop is the table's `Y` column
-  (vertical position), lateral drift is the table's downrange-paired `Z` column (not
-  printed by the table by default) — both in the same range unit (yd/m) the rest of the
-  table uses, **not** inches. This is a different, deliberate convention from
+- All four charts plot the SAME per-point data the `--full` "Trajectory Points:" table
+  prints (`result.points`, the raw un-decimated integration output — `--plot` works
+  without `--full` too, it just doesn't print the table itself). Drop is the table's `Y`
+  column (vertical position), lateral drift is the table's downrange-paired `Z` column
+  (not printed by the table by default) — both in the same range unit (yd/m) the rest of
+  the table uses, **not** inches. This is a different, deliberate convention from
   `--sample-trajectory`'s sight-line-relative `drop_m`/`wind_drift_m` (see
   [Trajectory Sampling for Analysis](#trajectory-sampling-for-analysis)); don't conflate
   the two.
+- Velocity and energy panels (MBA-1394) plot the same points' velocity magnitude and
+  kinetic energy, in the same units the summary box / `--full` CSV / `-o json` trajectory
+  columns already use for this command: fps/ft-lb under imperial units, m/s/J under
+  metric.
 
 Example (`--plot ascii`, 10 mph 90° crosswind):
 
@@ -968,6 +973,38 @@ Lateral Drift vs Range:
 │                                                               ***      │
 │                                                                  ** *  │
 │                                                                      **│
+└ x:[0.00, 448.79] ──────────────────────────────────────────────────────┘
+
+Velocity vs Range:
+┌ velocity (fps) — y:[1944.46, 2700.00] ─────────────────────────────────┐
+│** **                                                                   │
+│      *** *                                                             │
+│           * ***                                                        │
+│                 *** **                                                 │
+│                       ** **                                            │
+│                            * ****                                      │
+│                                   *****                                │
+│                                         *****                          │
+│                                              * *****                   │
+│                                                     ** ***             │
+│                                                           *******      │
+│                                                                  ** ***│
+└ x:[0.00, 448.79] ──────────────────────────────────────────────────────┘
+
+Energy vs Range:
+┌ energy (ft-lb) — y:[1410.18, 2718.96] ─────────────────────────────────┐
+│** *                                                                    │
+│    * ***                                                               │
+│          ** **                                                         │
+│               * ***                                                    │
+│                     ****                                               │
+│                          *** **                                        │
+│                                ** ***                                  │
+│                                      ** ***                            │
+│                                            *** ***                     │
+│                                                   **** **              │
+│                                                          *******       │
+│                                                                 *** ***│
 └ x:[0.00, 448.79] ──────────────────────────────────────────────────────┘
 ```
 
@@ -2339,7 +2376,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --enable-precession | Angular motion physics | false | - | - |
 | --use-rk4-fixed | Use fixed-step RK4 instead of adaptive RK45 | false | - | - |
 | --target-speed | Moving-target speed, 0–300 (see [Mover Ring](#mover-ring---target-speed)); also drives the PDF dope card's Lead column. `0` disables both | 0 | mph | m/s |
-| --plot | Inline terminal chart, drop then lateral drift vs. range (see [Terminal Chart](#terminal-chart---plot)); bare = braille, `--plot ascii` = ASCII fallback. `-o table` only | off | - | - |
+| --plot | Inline terminal chart: drop, lateral drift, velocity, then energy vs. range (see [Terminal Chart](#terminal-chart---plot)); bare = braille, `--plot ascii` = ASCII fallback. `-o table` only | off | - | - |
 
 ### Manual BC Segments (`--bc-segment`)
 

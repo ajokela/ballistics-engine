@@ -1963,17 +1963,25 @@ Impact Velocity: 2510 fps\n";
     #[wasm_bindgen_test]
     fn test_trajectory_plot_appends_charts() {
         // MBA-1337 p3: --plot appends both charts after the table (table-only).
+        // MBA-1394 adds two more panels (velocity, energy) after drop/drift, mirroring
+        // the native CLI's four-panel --plot output.
         let out = WasmBallistics::new()
             .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot")
             .unwrap();
         assert!(out.contains("Drop vs Range:"), "{}", out);
         assert!(out.contains("Lateral Drift vs Range:"), "{}", out);
+        assert!(out.contains("Velocity vs Range:"), "{}", out);
+        assert!(out.contains("Energy vs Range:"), "{}", out);
+        assert!(out.contains("velocity (fps)"), "{}", out);
+        assert!(out.contains("energy (ft-lb)"), "{}", out);
         let ascii = WasmBallistics::new()
             .run_command(
                 "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot ascii",
             )
             .unwrap();
         assert!(ascii.contains("Drop vs Range:"), "{}", ascii);
+        assert!(ascii.contains("Velocity vs Range:"), "{}", ascii);
+        assert!(ascii.contains("Energy vs Range:"), "{}", ascii);
         // JSON stays pure machine output even with --plot.
         let json = WasmBallistics::new()
             .run_command(
@@ -1981,6 +1989,25 @@ Impact Velocity: 2510 fps\n";
             )
             .unwrap();
         assert!(!json.contains("Drop vs Range:"), "{}", json);
+        assert!(!json.contains("Velocity vs Range:"), "{}", json);
+        assert!(!json.contains("Energy vs Range:"), "{}", json);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_trajectory_plot_velocity_energy_labels_follow_units_metric() {
+        // MBA-1394: under --units metric, the new panels must switch labels to m/s
+        // and J, matching the metric labels the rest of this command uses.
+        let out = WasmBallistics::new()
+            .run_command(
+                "trajectory --units metric -v 823 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot",
+            )
+            .unwrap();
+        assert!(out.contains("Velocity vs Range:"), "{}", out);
+        assert!(out.contains("Energy vs Range:"), "{}", out);
+        assert!(out.contains("velocity (m/s)"), "{}", out);
+        assert!(out.contains("energy (J)"), "{}", out);
+        assert!(!out.contains("velocity (fps)"), "{}", out);
+        assert!(!out.contains("energy (ft-lb)"), "{}", out);
     }
 
     #[wasm_bindgen_test]
