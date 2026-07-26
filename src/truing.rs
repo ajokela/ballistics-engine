@@ -332,6 +332,224 @@ pub(crate) fn calculate_drop_at_velocity(
     Ok(drop_mil)
 }
 
+/// Minimum sane chronograph screen distance from the muzzle, in meters (MBA-1377). Below this
+/// the correction is negligible and a nonzero value more likely reflects a data-entry mistake
+/// than a real chronograph placement, so [`correct_chrono_velocity_fps`] rejects it outright
+/// rather than silently applying a near-zero (and therefore noise-dominated) adjustment.
+pub const MIN_CHRONO_DISTANCE_M: f64 = 0.3; // ~1 ft
+
+/// Maximum sane chronograph screen distance from the muzzle, in meters (MBA-1377).
+/// Comfortably past Lapua/JBM's 25 m reference distance -- past this a "chronograph" reading
+/// is no longer describing a screen/radar setup this correction is meant to undo.
+pub const MAX_CHRONO_DISTANCE_M: f64 = 30.0; // ~98 ft
+
+/// Result of back-solving a muzzle velocity from a chronograph reading taken downrange
+/// (MBA-1377; see [`correct_chrono_velocity_fps`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChronoCorrection {
+    /// The back-solved muzzle velocity, in feet per second.
+    pub muzzle_velocity_fps: f64,
+    /// Number of secant iterations the solve actually took.
+    pub iterations: u32,
+}
+
+/// Forward-model core for the screen-distance correction (MBA-1377): launches
+/// `muzzle_velocity_fps` on a flat (`muzzle_angle = 0`) shot through the SAME BC / drag model /
+/// atmosphere the rest of the command is using, and returns the velocity magnitude at
+/// `screen_distance_m` (linearly interpolated between the bracketing trajectory samples).
+///
+/// Deliberately independent of [`solve_truing_trajectory`]: that helper's zero-angle search and
+/// sight-height bookkeeping are irrelevant here. Chronograph screen distances are short enough
+/// (3-25 m; validated range [`MIN_CHRONO_DISTANCE_M`]..[`MAX_CHRONO_DISTANCE_M`]) that gravity
+/// drop is negligible for the velocity this returns, so firing along the bore line is the
+/// correct simplification for this calculation, not an approximation of convenience.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the rest of this module's forward-model helpers"
+)]
+fn velocity_at_distance_fps(
+    muzzle_velocity_fps: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    screen_distance_m: f64,
+) -> Result<f64, Box<dyn Error>> {
+    let velocity_ms = muzzle_velocity_fps * 0.3048;
+    let mass_kg = mass_gr * GRAINS_TO_KG;
+    let diameter_m = diameter_in * 0.0254;
+    let altitude_m = altitude_ft * 0.3048;
+    let temperature_c = (temperature_f - 32.0) * 5.0 / 9.0;
+    let pressure_hpa = pressure_inhg * 33.8639; // inHg to hPa
+
+    let drag_model_enum = match drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    let inputs = BallisticInputs {
+        muzzle_velocity: velocity_ms,
+        bc_value: bc,
+        bc_type: drag_model_enum,
+        bullet_mass: mass_kg,
+        bullet_diameter: diameter_m,
+        bullet_length: fallback_bullet_length_m(diameter_m, mass_kg), // MBA-1135 mass-based estimate
+        target_distance: screen_distance_m + 2.0, // overshoot so the sample bracket exists
+        use_bc_segments: bc_segments.is_some(),
+        bc_segments_data: bc_segments.clone(),
+        use_rk4: true,
+        muzzle_angle: 0.0, // bore-line: drop over 3-25 m is negligible for velocity
+        ..Default::default()
+    };
+
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity,
+        altitude: altitude_m,
+    };
+
+    let wind = WindConditions::default();
+
+    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    solver.set_max_range(screen_distance_m + 2.0);
+    solver.set_time_step(0.0001);
+    let result = solver.solve()?;
+
+    let idx = result
+        .points
+        .iter()
+        .position(|p| p.position.x >= screen_distance_m)
+        .ok_or("trajectory did not reach the chronograph screen distance")?;
+
+    if idx == 0 {
+        return Ok(result.points[0].velocity_magnitude / 0.3048);
+    }
+
+    // Linearly interpolate to land exactly on screen_distance_m (same spatial-quantization fix
+    // as solve_trajectory_drop's `interpolate = true` path) so the secant solver in
+    // correct_chrono_velocity_fps sees a smooth function of the candidate muzzle velocity.
+    let p0 = &result.points[idx - 1];
+    let p1 = &result.points[idx];
+    let x0 = p0.position.x;
+    let x1 = p1.position.x;
+    let v_ms = if (x1 - x0).abs() < f64::EPSILON {
+        p1.velocity_magnitude
+    } else {
+        let frac = (screen_distance_m - x0) / (x1 - x0);
+        p0.velocity_magnitude + frac * (p1.velocity_magnitude - p0.velocity_magnitude)
+    };
+    Ok(v_ms / 0.3048)
+}
+
+/// Back-solve a true muzzle velocity from a chronograph reading taken `screen_distance_m` (SI
+/// meters) downrange (MBA-1377).
+///
+/// Most chronographs read 10-15 ft (or 25 m) downrange rather than at the muzzle, so the raw
+/// reading is slightly LOW; JBM ("Distance to Chronograph"), Lapua (V25m to V0), Ballistic AE,
+/// ColdBore, Remington Shoot!, and Hornady all correct for this. Flat-fire point-mass
+/// deceleration is monotone in muzzle velocity over the validated screen-distance band
+/// ([`MIN_CHRONO_DISTANCE_M`]..[`MAX_CHRONO_DISTANCE_M`]), so the secant method converges in a
+/// handful of iterations (McCoy, *Modern Exterior Ballistics*; JBM's published calculator).
+///
+/// This is a pure input-side transform: `velocity_at_distance_fps` runs the EXISTING forward
+/// trajectory model (the same BC / `drag_model` / atmosphere the rest of the command is
+/// configured with) to predict the screen-distance velocity for a candidate muzzle velocity,
+/// and the candidate is iterated until that prediction matches the measured reading. Callers
+/// apply this once, before the corrected value is used for display/comparison --
+/// `solve_truing_trajectory`'s drop-based solves never receive a screen distance.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the rest of this module's forward-model helpers"
+)]
+pub fn correct_chrono_velocity_fps(
+    measured_velocity_fps: f64,
+    screen_distance_m: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+) -> Result<ChronoCorrection, Box<dyn Error>> {
+    if !measured_velocity_fps.is_finite() || measured_velocity_fps <= 0.0 {
+        return Err("--chrono-velocity must be positive and finite".into());
+    }
+    if !(MIN_CHRONO_DISTANCE_M..=MAX_CHRONO_DISTANCE_M).contains(&screen_distance_m) {
+        return Err(format!(
+            "--chrono-distance is out of range: {screen_distance_m:.3} m downrange (expected \
+             {MIN_CHRONO_DISTANCE_M}..{MAX_CHRONO_DISTANCE_M} m; most chronographs read 10-15 \
+             ft / ~3-5 m, and Lapua/JBM's reference distance is 25 m)"
+        )
+        .into());
+    }
+
+    // Residual: forward-model screen velocity for candidate muzzle velocity `v0`, minus the
+    // measured reading. `correct_chrono_velocity_fps` iterates on `v0` until this is ~0. (Not
+    // JS/Python `eval` -- a plain Rust closure over a local candidate value.)
+    let residual = |v0: f64| -> Result<f64, Box<dyn Error>> {
+        let v_screen = velocity_at_distance_fps(
+            v0,
+            bc,
+            drag_model,
+            mass_gr,
+            diameter_in,
+            temperature_f,
+            pressure_inhg,
+            humidity,
+            altitude_ft,
+            bc_segments,
+            screen_distance_m,
+        )?;
+        Ok(v_screen - measured_velocity_fps)
+    };
+
+    // Secant method. Drag only decelerates, so the true muzzle velocity always exceeds the
+    // downrange reading -- seed the second guess 1% above the first, comfortably inside the
+    // near-linear region for the sub-percent corrections this band produces.
+    let mut v_prev = measured_velocity_fps;
+    let mut f_prev = residual(v_prev)?;
+    let mut v_curr = measured_velocity_fps * 1.01;
+    let mut f_curr = residual(v_curr)?;
+
+    const TOL_FPS: f64 = 1e-4;
+    const MAX_ITERATIONS: u32 = 20;
+    let mut iterations = 0u32;
+
+    while f_curr.abs() > TOL_FPS && iterations < MAX_ITERATIONS {
+        let denom = f_curr - f_prev;
+        if denom.abs() < f64::EPSILON {
+            return Err("chronograph correction failed to converge (stalled secant step)".into());
+        }
+        let v_next = v_curr - f_curr * (v_curr - v_prev) / denom;
+        v_prev = v_curr;
+        f_prev = f_curr;
+        v_curr = v_next;
+        f_curr = residual(v_curr)?;
+        iterations += 1;
+    }
+
+    if f_curr.abs() > TOL_FPS {
+        return Err(format!(
+            "chronograph correction did not converge after {iterations} iterations"
+        )
+        .into());
+    }
+
+    Ok(ChronoCorrection {
+        muzzle_velocity_fps: v_curr,
+        iterations,
+    })
+}
+
 /// Result of the classic single-observation velocity truing
 /// ([`calculate_true_velocity_local`]).
 #[derive(Debug, Clone)]
@@ -1508,5 +1726,237 @@ mod window_helper_tests {
     fn dsf_window_start_exact_arithmetic_at_a_representative_distance() {
         let start = dsf_window_start(Some(500.0)).expect("Some");
         assert_eq!(start.to_bits(), 450.0_f64.to_bits());
+    }
+}
+
+/// MBA-1377: `correct_chrono_velocity_fps` (screen-distance chronograph correction).
+#[cfg(test)]
+mod chrono_correction_tests {
+    use super::*;
+
+    /// Hand-computed pin, matching a real chronograph shot: 168 gr, 0.308", BC 0.475 G7, a
+    /// reading taken 15 ft downrange, dry standard atmosphere (59 F / 29.92124356615747 inHg
+    /// == 1013.25 hPa exactly / 0% humidity / sea level).
+    ///
+    /// Arithmetic (all from published/documented physical constants, not this function).
+    /// Speed of sound (dry air, ICAO): `a = sqrt(gamma * R_air * T_K)`, gamma = 1.4, R_air =
+    /// 287.0531 J/(kg K) (see `atmosphere.rs`), T_K = 288.15 (59 F == 15 C exactly), giving
+    /// `a = sqrt(1.4 * 287.0531 * 288.15) = 340.294124 m/s = 1116.450575 fps`.
+    ///
+    /// The measured (screen) velocity is chosen so its Mach number lands exactly on a G7
+    /// table grid point -- Mach 2.40, Cd = 0.2752 (data/g7.csv row "2.40,0.2752") -- which
+    /// sidesteps interpolation uncertainty entirely (cubic Hermite interpolation is exact at
+    /// its own knots): `v_screen = 2.40 * 1116.450575 = 2679.481380 fps`.
+    ///
+    /// Air density ratio vs the 1.225 kg/m^3 CD_TO_RETARD reference, via the crate's own
+    /// published CIPM-2007 formula (`calculate_air_density_cimp`, dry air, sea level, 1013.25
+    /// hPa, 15 C): `rho = 1.225521 kg/m^3`, `ratio = rho / 1.225 = 1.00042559`.
+    ///
+    /// Deceleration (McCoy retardation form, see the `constants::CD_TO_RETARD` doc comment):
+    /// `a_ft_s2 = Cd * v_fps^2 * (rho/1.225) * CD_TO_RETARD / BC`, CD_TO_RETARD = 2.08551e-4.
+    /// Over a flight this short, Cd and the density ratio are effectively constant, so
+    /// `dv/dx = a/v = -(CD_TO_RETARD * Cd * ratio / BC) * v` (linear in v), giving the
+    /// classic short-range exponential-decay solution `v(x) = v0 * exp(-C*x)`, x in FEET:
+    /// `C = CD_TO_RETARD * Cd * ratio / BC = 2.08551e-4 * 0.2752 * 1.00042559 / 0.475
+    /// = 1.2087929e-4` (1/ft), so `v0 = v_screen * exp(C * 15)
+    /// = 2679.481380 * exp(1.2087929e-4 * 15) = 2684.344194 fps`.
+    ///
+    /// The real solver differs only by the (second-order, and here tiny) fact that its Cd is
+    /// evaluated continuously at the LOCAL velocity along the RK45 path rather than held fixed
+    /// at v_screen's value; the measured residual is ~0.0024 fps, so 0.05 fps is a safe,
+    /// still-tight pin tolerance (0.001% of muzzle velocity).
+    #[test]
+    fn hand_computed_pin_168gr_308_bc475_g7_15ft() {
+        let measured_screen_velocity_fps = 2679.481379882625;
+        let correction = correct_chrono_velocity_fps(
+            measured_screen_velocity_fps,
+            15.0 * 0.3048, // 15 ft screen distance, in meters
+            0.475,         // BC
+            DragModelArg::G7,
+            168.0,               // mass, grains
+            0.308,               // diameter, inches
+            59.0,                // temperature, F (== 15 C exactly)
+            1013.25 / 33.8639,   // pressure, inHg (== 1013.25 hPa exactly)
+            0.0,                 // humidity, % (dry air keeps the arithmetic exact)
+            0.0,                 // altitude, ft
+            &None,
+        )
+        .expect("hand-computed case must converge");
+
+        let expected_v0 = 2684.344194108996;
+        assert!(
+            (correction.muzzle_velocity_fps - expected_v0).abs() < 0.05,
+            "got {}, expected {} +/- 0.05",
+            correction.muzzle_velocity_fps,
+            expected_v0
+        );
+        // The corrected muzzle velocity must exceed the raw downrange reading -- drag only
+        // decelerates, so a chronograph reading downrange always understates true MV.
+        assert!(correction.muzzle_velocity_fps > measured_screen_velocity_fps);
+        // McCoy/JBM: this band converges in a handful of secant iterations, not dozens.
+        assert!(
+            correction.iterations <= 6,
+            "expected fast convergence, took {} iterations",
+            correction.iterations
+        );
+    }
+
+    /// Realistic smoke case from the task brief: 168 gr .308, BC 0.475 G7, 2680 fps measured
+    /// at 15 ft, default atmosphere. The corrected muzzle velocity must be higher than the
+    /// measured value by a small, physically plausible margin (a few fps, not tens).
+    #[test]
+    fn smoke_2680fps_at_15ft_corrects_upward_by_a_plausible_margin() {
+        let correction = correct_chrono_velocity_fps(
+            2680.0,
+            15.0 * 0.3048,
+            0.475,
+            DragModelArg::G7,
+            168.0,
+            0.308,
+            59.0,
+            29.92,
+            50.0,
+            0.0,
+            &None,
+        )
+        .expect("realistic case must converge");
+
+        let margin = correction.muzzle_velocity_fps - 2680.0;
+        assert!(
+            (0.5..15.0).contains(&margin),
+            "expected a plausible few-fps correction, got {margin} fps (V0={})",
+            correction.muzzle_velocity_fps
+        );
+    }
+
+    /// Convergence across the full stated screen-distance band (3-25 m): every distance in
+    /// range solves without error, in a small number of secant iterations, and the correction
+    /// grows monotonically with distance (more travel -> more velocity lost -> a bigger
+    /// muzzle-velocity correction to explain the same downrange reading).
+    #[test]
+    fn convergence_across_the_3_to_25_m_band() {
+        let mut last_correction = 0.0;
+        for distance_m in [3.0, 5.0, 10.0, 15.0, 20.0, 25.0] {
+            let correction = correct_chrono_velocity_fps(
+                2680.0,
+                distance_m,
+                0.475,
+                DragModelArg::G7,
+                168.0,
+                0.308,
+                59.0,
+                29.92,
+                50.0,
+                0.0,
+                &None,
+            )
+            .unwrap_or_else(|e| panic!("distance {distance_m} m must converge: {e}"));
+            assert!(
+                correction.iterations <= 6,
+                "distance {distance_m} m took {} iterations",
+                correction.iterations
+            );
+            let delta = correction.muzzle_velocity_fps - 2680.0;
+            assert!(
+                delta > last_correction,
+                "correction must grow with distance: {delta} <= {last_correction} at {distance_m} m"
+            );
+            last_correction = delta;
+        }
+    }
+
+    /// Absent distance is handled entirely by the CLI/WASM callers (they special-case
+    /// `None`/`0.0` as a byte-identical no-op and never call into this solver at all); at this
+    /// layer, an explicit zero screen distance is simply out of the validated band and must be
+    /// rejected rather than silently treated as "at the muzzle" by a solver that has no
+    /// special-case for it.
+    #[test]
+    fn zero_distance_is_rejected_by_the_low_level_solver() {
+        let err = correct_chrono_velocity_fps(
+            2680.0, 0.0, 0.475, DragModelArg::G7, 168.0, 0.308, 59.0, 29.92, 50.0, 0.0, &None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
+    }
+
+    /// Out-of-band screen distances (negative, too-short, too-long) are rejected outright
+    /// rather than silently clamped or extrapolated into a garbage muzzle velocity.
+    #[test]
+    fn out_of_band_distances_are_rejected() {
+        for bad_distance_m in [-5.0, -0.001, 0.05, 30.001, 100.0, f64::NAN, f64::INFINITY] {
+            let err = correct_chrono_velocity_fps(
+                2680.0,
+                bad_distance_m,
+                0.475,
+                DragModelArg::G7,
+                168.0,
+                0.308,
+                59.0,
+                29.92,
+                50.0,
+                0.0,
+                &None,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("out of range"),
+                "distance {bad_distance_m}: {err}"
+            );
+        }
+    }
+
+    /// A non-positive or non-finite measured velocity is rejected outright.
+    #[test]
+    fn invalid_measured_velocity_is_rejected() {
+        for bad_v in [0.0, -100.0, f64::NAN, f64::INFINITY] {
+            let err = correct_chrono_velocity_fps(
+                bad_v, 4.572, 0.475, DragModelArg::G7, 168.0, 0.308, 59.0, 29.92, 50.0, 0.0, &None,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("must be positive and finite"), "{err}");
+        }
+    }
+
+    /// The correction must actually consult the configured drag model, not a hardcoded G1: the
+    /// SAME (measured velocity, distance, BC) triple fed through G1 and G7 must back-solve to
+    /// DIFFERENT muzzle velocities, since the two standard drag curves are numerically distinct
+    /// at this Mach range.
+    #[test]
+    fn drag_model_is_actually_consulted_g1_vs_g7_diverge() {
+        let g1 = correct_chrono_velocity_fps(
+            2680.0,
+            15.0 * 0.3048,
+            0.475,
+            DragModelArg::G1,
+            168.0,
+            0.308,
+            59.0,
+            29.92,
+            50.0,
+            0.0,
+            &None,
+        )
+        .expect("G1 must converge");
+        let g7 = correct_chrono_velocity_fps(
+            2680.0,
+            15.0 * 0.3048,
+            0.475,
+            DragModelArg::G7,
+            168.0,
+            0.308,
+            59.0,
+            29.92,
+            50.0,
+            0.0,
+            &None,
+        )
+        .expect("G7 must converge");
+
+        assert!(
+            (g1.muzzle_velocity_fps - g7.muzzle_velocity_fps).abs() > 0.05,
+            "G1 ({}) and G7 ({}) corrections should differ measurably for the same inputs",
+            g1.muzzle_velocity_fps,
+            g7.muzzle_velocity_fps
+        );
     }
 }
