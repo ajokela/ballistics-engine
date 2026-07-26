@@ -910,9 +910,93 @@ pub fn decode_solve_request_v1(input: &str) -> Result<SolveRequestV1, SolveError
 
     validate_request_shape(&value)?;
 
-    serde_json::from_value(value).map_err(|error| {
+    let request: SolveRequestV1 = serde_json::from_value(value).map_err(|error| {
         envelope(SolveErrorV1::new(SolveErrorCodeV1::InvalidValue, error.to_string()).at_path("$"))
-    })
+    })?;
+
+    validate_request_ranges(&request)?;
+
+    Ok(request)
+}
+
+/// Physically meaningful bounds for solve-json v1's numeric inputs (MBA-1413).
+///
+/// Deliberately enormous — the point is to exclude values that are not projectiles at all, not
+/// to police calibers. Every bound below admits everything from an airgun pellet to naval
+/// artillery, so a request rejected here was never going to produce a meaningful answer.
+///
+/// Found by fuzzing, which reached a request declaring a `mass_kg` of 1.1e-66 — about
+/// 10^40 times lighter than a proton. The engine accepted it and solved. The visible symptom was
+/// narrower: at that magnitude `serde_json`'s float parser is a bit off re-reading its own
+/// output, so the request did not survive a JSON round trip and broke the protocol's stability
+/// invariant. Tightening the float handling would have addressed the symptom; the actual defect
+/// is that a number no projectile could have was accepted as a projectile.
+mod limits {
+    /// 1 mg to 100 kg. A .17 cal pellet is ~500 mg; a 16-inch naval shell is ~1200 kg, so the
+    /// upper bound is the one a caller might conceivably reach — it is set past small artillery
+    /// on purpose and can be raised without ceremony.
+    pub const MASS_KG: (f64, f64) = (1.0e-6, 100.0);
+    /// 0.1 mm to 1 m.
+    pub const DIAMETER_M: (f64, f64) = (1.0e-4, 1.0);
+    /// 0.1 mm to 10 m. Only checked when supplied.
+    pub const LENGTH_M: (f64, f64) = (1.0e-4, 10.0);
+    /// Ballistic coefficient, lb/in². Real values run ~0.1–1.5; the bound is far past both ends.
+    pub const BALLISTIC_COEFFICIENT: (f64, f64) = (1.0e-4, 100.0);
+
+    // Deliberately NOT bounded here: muzzle_velocity_mps and max_range_m. The MCP server
+    // documents — and tests — a split where a structurally valid request the engine cannot
+    // solve returns a tool error rather than a protocol error, and an absurd muzzle velocity is
+    // its worked example of that case. Bounding those two fields here would reclassify that
+    // example as invalid params and change a contract MCP clients may rely on, which is a
+    // separate decision from rejecting values that cannot describe a projectile.
+}
+
+fn require_range(
+    value: f64,
+    (min, max): (f64, f64),
+    path: &str,
+) -> Result<(), SolveErrorEnvelopeV1> {
+    if !value.is_finite() {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            format!("{path} must be a finite number"),
+            path,
+        ));
+    }
+    if value < min || value > max {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            format!("{path} must be between {min} and {max}, got {value}"),
+            path,
+        ));
+    }
+    Ok(())
+}
+
+/// Reject requests whose numbers cannot describe a projectile, before any solve runs.
+///
+/// Runs after deserialization so the fields are typed and each error can carry the exact
+/// JSONPath the caller used, matching how the shape errors above report.
+fn validate_request_ranges(request: &SolveRequestV1) -> Result<(), SolveErrorEnvelopeV1> {
+    require_range(
+        request.projectile.mass_kg,
+        limits::MASS_KG,
+        "$.projectile.mass_kg",
+    )?;
+    require_range(
+        request.projectile.diameter_m,
+        limits::DIAMETER_M,
+        "$.projectile.diameter_m",
+    )?;
+    require_range(
+        request.projectile.ballistic_coefficient,
+        limits::BALLISTIC_COEFFICIENT,
+        "$.projectile.ballistic_coefficient",
+    )?;
+    if let Some(length_m) = request.projectile.length_m {
+        require_range(length_m, limits::LENGTH_M, "$.projectile.length_m")?;
+    }
+    Ok(())
 }
 
 fn envelope(error: SolveErrorV1) -> SolveErrorEnvelopeV1 {
@@ -1356,4 +1440,113 @@ fn validate_optional_booleans(
 
 fn child_path(parent: &str, field: &str) -> String {
     format!("{parent}.{field}")
+}
+
+/// MBA-1413: physical bounds on the projectile fields.
+#[cfg(test)]
+mod request_range_tests {
+    use super::*;
+
+    /// A complete, ordinary request. Every range test below starts from this and perturbs one
+    /// field, so a bound that accidentally rejects real data fails loudly here first.
+    fn valid_request_json() -> String {
+        r#"{"schema_version":1,
+            "projectile":{"mass_kg":0.01134,"diameter_m":0.00782,"length_m":0.031,
+                          "drag_model":"G7","ballistic_coefficient":0.243},
+            "rifle":{"muzzle_velocity_mps":823.0},
+            "shot":{"max_range_m":1000.0},
+            "atmosphere":{},"wind":{},"solver":{},"effects":{},"sampling":{}}"#
+            .to_string()
+    }
+
+    fn decode_err(json: &str) -> SolveErrorEnvelopeV1 {
+        decode_solve_request_v1(json).expect_err("request should have been rejected")
+    }
+
+    #[test]
+    fn an_ordinary_request_still_decodes() {
+        decode_solve_request_v1(&valid_request_json()).expect("a real load must not be rejected");
+    }
+
+    /// The exact input cargo-fuzz found (MBA-1413). It declared a projectile mass of about
+    /// 1.1e-66 kg — roughly 10^40 times lighter than a proton — and the engine accepted and
+    /// solved it. The visible symptom was that the request did not survive a JSON round trip,
+    /// because serde_json's float parser is a bit off re-reading its own output at that
+    /// magnitude; the actual defect was accepting the number at all.
+    #[test]
+    fn the_fuzz_reproducer_is_now_a_clean_typed_rejection() {
+        let reproducer = r#"{"schema_version":1,
+            "projectile":{"mass_kg":0.011366666667e-64,"diameter_m":0.00782,
+                          "drag_model":"G7","ballistic_coefficient":1.2e2},
+            "rifle":{"muzzle_velocity_mps":823.0},
+            "shot":{"max_range_m":100.0},
+            "atmosphere":{},"wind":{},"solver":{},"effects":{},"sampling":{}}"#;
+
+        let envelope = decode_err(reproducer);
+        assert_eq!(envelope.error.code, SolveErrorCodeV1::InvalidValue);
+        assert_eq!(envelope.error.path(), Some("$.projectile.mass_kg"));
+    }
+
+    /// An error envelope must itself round-trip, since that is the invariant the fuzz target
+    /// asserts on the rejection branch.
+    #[test]
+    fn the_rejection_envelope_round_trips() {
+        let envelope = decode_err(
+            r#"{"schema_version":1,
+                "projectile":{"mass_kg":1.0e-66,"diameter_m":0.00782,
+                              "drag_model":"G7","ballistic_coefficient":0.243},
+                "rifle":{"muzzle_velocity_mps":823.0},
+                "shot":{"max_range_m":100.0},
+                "atmosphere":{},"wind":{},"solver":{},"effects":{},"sampling":{}}"#,
+        );
+        let encoded = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: SolveErrorEnvelopeV1 = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn each_bounded_field_reports_its_own_path() {
+        for (field, bad_value, path) in [
+            ("mass_kg", "1.0e-66", "$.projectile.mass_kg"),
+            ("diameter_m", "1.0e-9", "$.projectile.diameter_m"),
+            (
+                "ballistic_coefficient",
+                "1.0e6",
+                "$.projectile.ballistic_coefficient",
+            ),
+            ("length_m", "1.0e-9", "$.projectile.length_m"),
+        ] {
+            let json = valid_request_json().replace(
+                &format!("\"{field}\":{}", default_for(field)),
+                &format!("\"{field}\":{bad_value}"),
+            );
+            let envelope = decode_err(&json);
+            assert_eq!(
+                envelope.error.path(),
+                Some(path),
+                "wrong path for {field}"
+            );
+            assert_eq!(envelope.error.code, SolveErrorCodeV1::InvalidValue);
+        }
+    }
+
+    fn default_for(field: &str) -> &'static str {
+        match field {
+            "mass_kg" => "0.01134",
+            "diameter_m" => "0.00782",
+            "ballistic_coefficient" => "0.243",
+            "length_m" => "0.031",
+            other => panic!("no default recorded for {other}"),
+        }
+    }
+
+    /// Muzzle velocity is deliberately unbounded: the MCP server documents and tests a split
+    /// where a structurally valid request the engine cannot solve returns a tool error rather
+    /// than a protocol error, using an absurd muzzle velocity as its example.
+    #[test]
+    fn muzzle_velocity_is_deliberately_left_unbounded() {
+        let json = valid_request_json().replace("823.0", "1.0e308");
+        decode_solve_request_v1(&json)
+            .expect("muzzle velocity must stay a solve-time concern, not a protocol one");
+    }
 }
