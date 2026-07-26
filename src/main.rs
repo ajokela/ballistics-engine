@@ -11519,11 +11519,11 @@ fn run_zero_range_calculation(
             // report both, clearly labelled, rather than silently picking one.
             match near_range_display {
                 Some(near) => println!("║ Near Zero (ascending): {:>8.1} {:3}   ║", near, dist_unit),
-                None => println!("║ Near Zero: not within the solved range         ║"),
+                None => println!("║ Near Zero:  not in solved range        ║"),
             }
             match far_range_display {
                 Some(far) => println!("║ Far Zero (descending): {:>8.1} {:3}   ║", far, dist_unit),
-                None => println!("║ Far Zero: not within the solved range          ║"),
+                None => println!("║ Far Zero:   not in solved range        ║"),
             }
             println!(
                 "║ Target Height:     {:>8.2} {:3}       ║",
@@ -11533,10 +11533,20 @@ fn run_zero_range_calculation(
                 "║ Sight Height:      {:>8.3} {:3}       ║",
                 sight_height_display, dist_unit
             );
-            println!(
-                "║ Max Ordinate:      {:>8.3} {:3}       ║",
-                max_ordinate_display, dist_unit
-            );
+            // Tier 2 re-review N2: the diagnostics solve is sized off the primary crossing.
+            // With no far crossing that envelope is ~3x a very short near crossing, so the
+            // apex found inside it is the height at the truncation point rather than the
+            // real max ordinate -- a 5 deg launch reported 0.167 yd. Print the number only
+            // when the envelope provably contains the apex (i.e. a far crossing was found,
+            // since the apex always lies between the two crossings).
+            if far_range_display.is_some() {
+                println!(
+                    "║ Max Ordinate:      {:>8.3} {:3}       ║",
+                    max_ordinate_display, dist_unit
+                );
+            } else {
+                println!("║ Max Ordinate:  needs a far zero        ║");
+            }
             println!("╚════════════════════════════════════════╝");
         }
 
