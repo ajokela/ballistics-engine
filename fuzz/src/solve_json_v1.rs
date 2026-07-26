@@ -2,7 +2,8 @@
 
 use arbitrary::{Result, Unstructured};
 use ballistics_engine::solve_json::{
-    AtmosphereV1, DragModelV1, EffectsV1, ProjectileV1, ResolvedWindV1, RifleV1, SamplingV1,
+    AtmosphereV1, DragModelV1, EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedWindV1,
+    RifleV1, SamplingV1,
     SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
     TwistDirectionV1, WindSegmentV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
@@ -174,6 +175,17 @@ fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
                     -std::f64::consts::FRAC_PI_2,
                     std::f64::consts::FRAC_PI_2,
                 )?)
+            } else {
+                None
+            },
+            // MBA-1397: generate the pressure reference rather than pinning it, so the
+            // QNH reduction path is actually fuzzed instead of only its absolute default.
+            pressure_reference: if u.arbitrary()? {
+                Some(if u.arbitrary()? {
+                    PressureReferenceV1::Qnh
+                } else {
+                    PressureReferenceV1::Absolute
+                })
             } else {
                 None
             },
