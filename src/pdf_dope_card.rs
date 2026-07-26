@@ -33,9 +33,14 @@ pub struct DopeCardConfig {
     pub velocity_fps: f64,
     pub font_scale: f32,
     pub bold_data: bool,
-    /// Angular unit label shown in the Drop/Wind/Lead column sub-headers ("MIL" or
-    /// "MOA"). The row values in DopeCardRow are already expressed in this unit.
-    pub unit_label: String,
+    /// Angular unit label shown in the Drop column sub-header ("MIL", "MOA", "SMOA",
+    /// "IPHY", or "CLICKS"). `DopeCardRow::drop_adj` is already expressed in this unit
+    /// (MBA-1410: independent from `windage_unit_label` below).
+    pub elevation_unit_label: String,
+    /// Angular unit label shown in the Wind/Lead column sub-headers. `DopeCardRow::
+    /// wind_adj`/`lead_adj` are already expressed in this unit -- may differ from
+    /// `elevation_unit_label` (MBA-1410 independent elevation/windage unit selection).
+    pub windage_unit_label: String,
 }
 
 /// Preset font size profiles for dope cards
@@ -384,7 +389,8 @@ fn render_page(
         y,
         table_size,
         font_scale,
-        &config.unit_label,
+        &config.elevation_unit_label,
+        &config.windage_unit_label,
     );
     y -= row_height;
 
@@ -407,6 +413,7 @@ fn render_page(
         // Draw left side data
         draw_data_row(
             ops, data_font, table_x, y, left, true, table_size, font_scale,
+            &config.elevation_unit_label, &config.windage_unit_label,
         );
 
         // Draw right side data
@@ -420,6 +427,8 @@ fn render_page(
                 false,
                 table_size,
                 font_scale,
+                &config.elevation_unit_label,
+                &config.windage_unit_label,
             );
         }
 
@@ -485,6 +494,7 @@ fn draw_row_stripe(ops: &mut Vec<Op>, x: f32, y: f32, width: f32, height: f32) {
     });
 }
 
+#[allow(clippy::too_many_arguments)] // Drawing primitive mirrors the PDF text/layout parameters.
 fn draw_table_header(
     ops: &mut Vec<Op>,
     font: &FontId,
@@ -492,7 +502,8 @@ fn draw_table_header(
     y: f32,
     table_size: f32,
     font_scale: f32,
-    unit: &str,
+    elevation_unit: &str,
+    windage_unit: &str,
 ) {
     let headers = [
         ("Range", COLOR_BLACK),
@@ -504,8 +515,18 @@ fn draw_table_header(
         ("Wind", COLOR_GREEN),
         ("Lead", COLOR_BLUE),
     ];
-    // Range columns are yards; Drop/Wind/Lead are in the card's angular unit (MIL/MOA).
-    let sub_headers = ["Yd", unit, unit, unit, "Yd", unit, unit, unit];
+    // Range columns are yards; Drop is the elevation unit, Wind/Lead the (possibly
+    // different, MBA-1410) windage unit.
+    let sub_headers = [
+        "Yd",
+        elevation_unit,
+        windage_unit,
+        windage_unit,
+        "Yd",
+        elevation_unit,
+        windage_unit,
+        windage_unit,
+    ];
 
     for (i, ((header, color), sub)) in headers.iter().zip(sub_headers.iter()).enumerate() {
         let col_x = x + (i as f32 * COL_WIDTH) + (COL_WIDTH / 2.0);
@@ -523,6 +544,19 @@ fn draw_table_header(
     }
 }
 
+/// Formats one Drop/Wind/Lead cell value for its column's angular unit (MBA-1410 fold-in
+/// of an MBA-1355 backlog minor): whole turret clicks are integers, so `unit_label ==
+/// "CLICKS"` prints with no decimal point -- every other unit (MIL/MOA/SMOA/IPHY) keeps
+/// the pre-existing one-decimal-place format. Before this fix, a clicks dope card printed
+/// e.g. "5.0" instead of "5" for every cell.
+fn format_adjustment(value: f64, unit_label: &str) -> String {
+    if unit_label.eq_ignore_ascii_case("clicks") {
+        format!("{:.0}", value)
+    } else {
+        format!("{:.1}", value)
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // Drawing primitive mirrors the PDF text/layout parameters.
 fn draw_data_row(
     ops: &mut Vec<Op>,
@@ -533,12 +567,14 @@ fn draw_data_row(
     _is_left: bool,
     table_size: f32,
     font_scale: f32,
+    elevation_unit: &str,
+    windage_unit: &str,
 ) {
     let values = [
         (row.range_yd.to_string(), COLOR_BLACK),
-        (format!("{:.1}", row.drop_adj), COLOR_RED),
-        (format!("{:.1}", row.wind_adj), COLOR_GREEN),
-        (format!("{:.1}", row.lead_adj), COLOR_BLUE),
+        (format_adjustment(row.drop_adj, elevation_unit), COLOR_RED),
+        (format_adjustment(row.wind_adj, windage_unit), COLOR_GREEN),
+        (format_adjustment(row.lead_adj, windage_unit), COLOR_BLUE),
     ];
 
     for (i, (value, color)) in values.iter().enumerate() {
@@ -730,6 +766,20 @@ mod tests {
             "Standard conditions should give DA near 0, got {}",
             da_standard
         );
+    }
+
+    /// MBA-1410 fold-in: a clicks dope-card cell must print as a bare integer ("5"), not
+    /// "5.0" -- the trailing-`.0` bug tracked as an MBA-1355 backlog minor. Every other
+    /// unit keeps its pre-existing one-decimal-place format.
+    #[test]
+    fn format_adjustment_drops_the_decimal_for_clicks_only() {
+        assert_eq!(format_adjustment(5.0, "CLICKS"), "5");
+        assert_eq!(format_adjustment(-3.0, "CLICKS"), "-3");
+        assert_eq!(format_adjustment(5.0, "clicks"), "5", "case-insensitive");
+        assert_eq!(format_adjustment(2.34, "MIL"), "2.3");
+        assert_eq!(format_adjustment(2.34, "MOA"), "2.3");
+        assert_eq!(format_adjustment(2.34, "SMOA"), "2.3");
+        assert_eq!(format_adjustment(2.34, "IPHY"), "2.3");
     }
 
     #[test]

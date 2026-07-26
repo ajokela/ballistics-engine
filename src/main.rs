@@ -866,6 +866,17 @@ enum Commands {
         #[arg(long, value_enum, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
 
+        /// Independent windage unit (MBA-1410): overrides `--adjustment-unit` for the PDF
+        /// dope card's Wind/Lead columns only (the mover Ring column and the Drop column
+        /// stay on `--adjustment-unit`, i.e. the elevation axis). Falls back to
+        /// `--adjustment-unit` when omitted -- the same windage-falls-back-to-elevation
+        /// shape `--windage-click-value` already uses. `clicks` is only accepted here when
+        /// `--adjustment-unit` is ALSO `clicks` (turret click output needs the elevation
+        /// graduation resolved first); pass a plain angle (mil/moa/smoa/iphy) to mix e.g.
+        /// mil elevation with moa windage.
+        #[arg(long, value_enum)]
+        windage_unit: Option<AdjustmentUnit>,
+
         /// Turret elevation click graduation for `--adjustment-unit clicks`, e.g. 0.1mil or
         /// 0.25moa (falls back to the saved profile's elevation_click when omitted).
         #[arg(long)]
@@ -1754,9 +1765,18 @@ enum Commands {
         #[arg(long, default_value = "100.0", value_parser = f64_range(0.001, 100000.0))]
         step: f64,
 
-        /// Adjustment unit (mil or moa)
+        /// Adjustment unit (mil, moa, smoa, iphy, or clicks). `clicks` requires
+        /// --windage-click-value (or a saved profile's windage_click/elevation_click) and
+        /// formats whole turret clicks instead of an angle (MBA-1410: lead's single
+        /// column is windage-like, so it resolves through the windage graduation).
         #[arg(long, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
+
+        /// Turret click graduation for `--adjustment-unit clicks`, e.g. 0.1mil or 0.25moa
+        /// (falls back to the saved profile's windage_click, then its elevation_click,
+        /// when omitted).
+        #[arg(long)]
+        windage_click_value: Option<String>,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -1942,9 +1962,19 @@ enum Commands {
         #[arg(long, default_value = "100.0", value_parser = f64_range(0.001, 100000.0))]
         step: f64,
 
-        /// Adjustment unit (mil or moa)
+        /// Adjustment unit (mil, moa, smoa, iphy, or clicks). `clicks` requires
+        /// --windage-click-value (or a saved profile's windage_click/elevation_click) and
+        /// formats whole turret clicks instead of an angle (MBA-1410: the whole card is a
+        /// windage quantity — crosswind drift — so it resolves through the windage
+        /// graduation).
         #[arg(long, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
+
+        /// Turret click graduation for `--adjustment-unit clicks`, e.g. 0.1mil or 0.25moa
+        /// (falls back to the saved profile's windage_click, then its elevation_click,
+        /// when omitted).
+        #[arg(long)]
+        windage_click_value: Option<String>,
 
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
@@ -2064,9 +2094,27 @@ enum Commands {
         #[arg(long, default_value = "90.0")]
         wind_direction: f64,
 
-        /// Adjustment unit (mil or moa)
+        /// Adjustment unit (mil, moa, smoa, iphy, or clicks), applied to the Drop column
+        /// (the elevation axis). `clicks` requires --elevation-click-value (or a saved
+        /// profile's elevation_click).
         #[arg(long, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
+
+        /// Independent windage unit for the Wind column (MBA-1410). Falls back to
+        /// `--adjustment-unit` when omitted; `clicks` is only accepted here when
+        /// `--adjustment-unit` is ALSO `clicks`.
+        #[arg(long, value_enum)]
+        windage_unit: Option<AdjustmentUnit>,
+
+        /// Turret elevation click graduation for `--adjustment-unit clicks`, e.g. 0.1mil or
+        /// 0.25moa (falls back to the saved profile's elevation_click when omitted).
+        #[arg(long)]
+        elevation_click_value: Option<String>,
+
+        /// Turret windage click graduation for `--adjustment-unit clicks` (falls back to the
+        /// resolved elevation graduation, then the saved profile's windage_click).
+        #[arg(long)]
+        windage_click_value: Option<String>,
 
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
@@ -2134,9 +2182,27 @@ enum Commands {
         #[arg(long, default_value = "90.0")]
         wind_direction: f64,
 
-        /// Adjustment unit (mil or moa)
+        /// Adjustment unit (mil, moa, smoa, iphy, or clicks), applied to the Drop column
+        /// (the elevation axis). `clicks` requires --elevation-click-value -- compare has
+        /// no single --profile (it compares multiple loads), so the graduation always
+        /// comes from the explicit flag, never a per-load profile.
         #[arg(long, default_value = "mil")]
         adjustment_unit: AdjustmentUnit,
+
+        /// Independent windage unit for the Drift column (MBA-1410). Falls back to
+        /// `--adjustment-unit` when omitted; `clicks` is only accepted here when
+        /// `--adjustment-unit` is ALSO `clicks`.
+        #[arg(long, value_enum)]
+        windage_unit: Option<AdjustmentUnit>,
+
+        /// Turret elevation click graduation for `--adjustment-unit clicks`.
+        #[arg(long)]
+        elevation_click_value: Option<String>,
+
+        /// Turret windage click graduation for `--adjustment-unit clicks` (falls back to
+        /// the resolved elevation graduation when omitted).
+        #[arg(long)]
+        windage_click_value: Option<String>,
 
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long, default_value = "1.5")]
@@ -2867,7 +2933,10 @@ struct TrajectoryConfig {
     // Resolved turret click graduations for `--adjustment-unit clicks` (MBA-1355): Some(...) iff
     // adjustment_unit == Clicks (resolved once, eagerly, in the Trajectory command's
     // dispatch — see resolve_click_values); None for every other adjustment_unit. Drives
-    // the mover Ring column and the PDF dope-card rows.
+    // the mover Ring column and the PDF dope-card rows. MBA-1410: the independent
+    // windage-axis UNIT (as opposed to this graduation) lives only on `PdfMetadata` —
+    // it is read solely by the PDF dope card's Wind/Lead columns, which already carry
+    // their own `PdfMetadata` copy; the mover Ring column stays elevation-only.
     elevation_click: Option<ClickValue>,
     windage_click: Option<ClickValue>,
 
@@ -4002,18 +4071,67 @@ fn adjustment_display(
     }
 }
 
-/// `--adjustment-unit clicks` real click resolution exists only for `trajectory`/`come-ups`
-/// (MBA-1355 Task 2 scope). Every other command that still reads `AdjustmentUnit` (wind
-/// card, lead/moving-target, range-table, compare) must reject it up front rather than
-/// silently falling back to MIL through the `debug_assert!`-guarded arms further down —
-/// call this as the first statement of each such handler.
-fn reject_clicks_out_of_scope(unit: AdjustmentUnit) {
-    if matches!(unit, AdjustmentUnit::Clicks) {
-        eprintln!(
-            "error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)"
-        );
-        std::process::exit(1);
+/// Display label for an `AdjustmentUnit` header/column name (MBA-1355, generalized in
+/// MBA-1410): every command that prints one shares this, so the "MIL"/"MOA"/"SMOA"/"IPHY"/
+/// "CLICKS" spelling cannot drift between wind-card/lead/range-table/compare/the PDF dope
+/// card.
+fn adjustment_unit_label(unit: AdjustmentUnit) -> String {
+    match unit {
+        AdjustmentUnit::Mil => "MIL".to_string(),
+        AdjustmentUnit::Moa => "MOA".to_string(),
+        AdjustmentUnit::Smoa => "SMOA".to_string(),
+        AdjustmentUnit::Iphy => "IPHY".to_string(),
+        AdjustmentUnit::Clicks => "CLICKS".to_string(),
     }
+}
+
+/// Resolves an independent windage-axis unit (MBA-1410) against the elevation axis
+/// (`--adjustment-unit`): an explicit `--windage-unit` wins, otherwise windage falls back
+/// to the elevation unit -- the same shape `resolve_click_values` already uses for the
+/// click GRADUATIONS. `clicks` is only reachable on the windage axis when the elevation
+/// axis is ALSO `clicks`: turret click output needs a resolved elevation graduation
+/// (`resolve_click_values`'s own precondition), so an explicit `--windage-unit clicks`
+/// paired with a non-clicks `--adjustment-unit` has no graduation to resolve against and
+/// is rejected here rather than silently displaying a raw angle.
+fn resolve_windage_unit(
+    elevation_unit: AdjustmentUnit,
+    windage_unit: Option<AdjustmentUnit>,
+) -> Result<AdjustmentUnit, String> {
+    let resolved = windage_unit.unwrap_or(elevation_unit);
+    if matches!(resolved, AdjustmentUnit::Clicks) && !matches!(elevation_unit, AdjustmentUnit::Clicks)
+    {
+        return Err(
+            "--windage-unit clicks requires --adjustment-unit clicks (turret click output \
+             needs the resolved elevation graduation)"
+                .to_string(),
+        );
+    }
+    Ok(resolved)
+}
+
+/// Resolves a single-axis (windage-only) turret click graduation for commands with no
+/// elevation column of their own (`wind-card`, `lead`) -- MBA-1410. Precedence: an
+/// explicit `--windage-click-value` flag, then the saved profile's `windage_click`, then
+/// the profile's `elevation_click` (most turrets share one graduation between the two
+/// knobs -- the same windage-falls-back-to-elevation shape `resolve_click_values` uses,
+/// collapsed to the one axis these commands actually display).
+fn resolve_single_axis_click_value(
+    flag_windage: Option<&str>,
+    profile: Option<&ProfileData>,
+) -> Result<ClickValue, String> {
+    let s = flag_windage
+        .map(str::to_string)
+        .or_else(|| profile.and_then(|p| p.windage_click.clone()))
+        .or_else(|| profile.and_then(|p| p.elevation_click.clone()));
+    let Some(s) = s else {
+        return Err(
+            "--adjustment-unit clicks requires a turret click graduation: pass \
+             --windage-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil), or save one on \
+             the profile with `profile save --windage-click` (or --elevation-click)"
+                .to_string(),
+        );
+    };
+    parse_click_value(&s)
 }
 
 /// Get a timestamp string without chrono
@@ -4216,15 +4334,28 @@ fn cd_scale_range_warning(value: f64) -> Option<String> {
 /// never having passed the flag at all; warning there would fire on the common case for
 /// nothing. Pure/side-effect-free, same shape as `cd_scale_range_warning` -- see the
 /// Trajectory arm for the call site that actually prints it.
+///
+/// `windage_unit_explicit` (MBA-1410) is the RAW `--windage-unit` value, before falling
+/// back to `elevation_unit` -- the fallback value is never a no-op signal by itself (it
+/// was never explicitly requested), only an explicit non-mil `--windage-unit` is. The Ring
+/// column never consumes the windage axis (it is elevation-only, see `resolve_windage_unit`'s
+/// doc comment on why clicks needs the elevation graduation), so a nonzero `target_speed`
+/// only ever excuses the elevation half of this warning, never the windage half.
 fn adjustment_unit_noop_warning(
-    unit: AdjustmentUnit,
+    elevation_unit: AdjustmentUnit,
+    windage_unit_explicit: Option<AdjustmentUnit>,
     target_speed: f64,
     is_pdf: bool,
 ) -> Option<String> {
+    if is_pdf {
+        return None;
+    }
     // `> 0.0` rather than `!= 0.0` so this reads the same as the browser terminal's guard
     // (wasm.rs) and stays correct if a negative ever reaches here; clap's range parser
     // rejects negatives today, so the two forms are equivalent in practice.
-    if is_pdf || target_speed > 0.0 || unit == AdjustmentUnit::Mil {
+    let elevation_consumed = target_speed > 0.0 || elevation_unit == AdjustmentUnit::Mil;
+    let windage_consumed = windage_unit_explicit.is_none_or(|u| u == AdjustmentUnit::Mil);
+    if elevation_consumed && windage_consumed {
         None
     } else {
         Some(
@@ -4233,6 +4364,20 @@ fn adjustment_unit_noop_warning(
                 .to_string(),
         )
     }
+}
+
+/// MBA-1410 fold-in of an MBA-1355 backlog minor: `come-ups` has no windage column (it is
+/// a pure elevation table), so `--windage-click-value` can never do anything there --
+/// unlike `trajectory`, which resolves it into the Wind/Lead PDF columns. Previously this
+/// was silently accepted and discarded; now it gets the same MBA-1414 "inert flag" stderr
+/// treatment as `adjustment_unit_noop_warning`, so a shooter who typos `--elevation-click-value`
+/// as `--windage-click-value` finds out instead of silently getting no clicks output.
+fn windage_click_value_noop_warning(windage_click_value: Option<&str>) -> Option<String> {
+    windage_click_value.map(|_| {
+        "warning: --windage-click-value has no effect on come-ups (it has no windage \
+         column); did you mean --elevation-click-value?"
+            .to_string()
+    })
 }
 
 /// Resolve `--cd-scale` against whether a custom drag table (`--drag-table`) is present on
@@ -5002,6 +5147,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             font_preset,
             bold_data,
             adjustment_unit,
+            windage_unit,
             elevation_click_value,
             windage_click_value,
         } => {
@@ -5050,11 +5196,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             // resolved just below) silently changes nothing.
             if let Some(w) = adjustment_unit_noop_warning(
                 adjustment_unit,
+                windage_unit,
                 target_speed,
                 matches!(output, OutputFormat::Pdf),
             ) {
                 eprintln!("{w}");
             }
+
+            // MBA-1410: independent windage-axis unit for the PDF dope card's Wind/Lead
+            // columns (the mover Ring column stays elevation-only — see
+            // `resolve_windage_unit`'s doc comment). Resolved before the click graduations
+            // below so a `--windage-unit clicks` / `--adjustment-unit`-not-clicks mismatch
+            // fails fast with a clear message.
+            let windage_unit_resolved = resolve_windage_unit(adjustment_unit, windage_unit)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
 
             // MBA-1355: resolve turret click graduations FIRST, eagerly — before any of
             // the Ring column / PDF dope card display work below — so a missing
@@ -5840,6 +5998,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     font_scale: effective_font_scale,
                     bold_data,
                     adjustment_unit,
+                    windage_unit: windage_unit_resolved,
                 })
             } else {
                 None
@@ -7711,6 +7870,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
             });
 
+            // MBA-1410: come-ups has no windage column, so --windage-click-value can never
+            // do anything -- warn instead of silently accepting it (the MBA-1414 inert-flag
+            // treatment).
+            if let Some(w) = windage_click_value_noop_warning(windage_click_value.as_deref()) {
+                eprintln!("{w}");
+            }
+
             // MBA-1355: resolve the elevation click graduation FIRST — before any of the
             // work below — so a missing graduation fails fast with a clear flag name.
             // come-ups has no windage column, so the resolved windage value (which would
@@ -7983,6 +8149,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             end,
             step,
             adjustment_unit,
+            windage_click_value,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
@@ -7993,6 +8160,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 })
             });
+
+            // MBA-1410: resolve the (windage) click graduation FIRST — before any of the
+            // work below — so a missing graduation fails fast with a clear flag name, same
+            // shape as trajectory/come-ups's elevation_click resolution.
+            let windage_click: Option<ClickValue> = if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
+                match resolve_single_axis_click_value(windage_click_value.as_deref(), profile_data.as_ref())
+                {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
 
             let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
                 .unwrap_or_else(|| {
@@ -8084,6 +8267,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 end,
                 step,
                 adjustment_unit,
+                windage_click,
                 cli.units,
                 output,
                 bc_segments_data,
@@ -8166,6 +8350,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             end,
             step,
             adjustment_unit,
+            windage_click_value,
             sight_height,
             temperature,
             pressure,
@@ -8181,6 +8366,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 })
             });
+
+            // MBA-1410: resolve the (windage) click graduation FIRST — before any of the
+            // work below — so a missing graduation fails fast with a clear flag name.
+            let windage_click: Option<ClickValue> = if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
+                match resolve_single_axis_click_value(windage_click_value.as_deref(), profile_data.as_ref())
+                {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
 
             let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
                 .unwrap_or_else(|| {
@@ -8264,6 +8464,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 end,
                 step,
                 adjustment_unit,
+                windage_click,
                 final_sight_height,
                 temperature,
                 pressure,
@@ -8337,6 +8538,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_speed,
             wind_direction,
             adjustment_unit,
+            windage_unit,
+            elevation_click_value,
+            windage_click_value,
             sight_height,
             temperature,
             pressure,
@@ -8352,6 +8556,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 })
             });
+
+            // MBA-1410: resolve the independent windage unit and, if either axis needs
+            // one, the turret click graduations — before any of the work below, so a
+            // mismatch or a missing graduation fails fast with a clear message.
+            let windage_unit_resolved =
+                resolve_windage_unit(adjustment_unit, windage_unit).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            let (elevation_click, windage_click): (Option<ClickValue>, Option<ClickValue>) =
+                if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
+                    match resolve_click_values(
+                        elevation_click_value.as_deref(),
+                        windage_click_value.as_deref(),
+                        profile_data.as_ref(),
+                    ) {
+                        Ok(Some((el, wi))) => (Some(el), Some(wi)),
+                        Ok(None) => (None, None),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    (None, None)
+                };
 
             let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
                 .unwrap_or_else(|| {
@@ -8395,6 +8625,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_speed,
                 wind_direction,
                 adjustment_unit,
+                windage_unit_resolved,
+                elevation_click,
+                windage_click,
                 final_sight_height,
                 temperature,
                 pressure,
@@ -8415,6 +8648,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_speed,
             wind_direction,
             adjustment_unit,
+            windage_unit,
+            elevation_click_value,
+            windage_click_value,
             sight_height,
             temperature,
             pressure,
@@ -8424,6 +8660,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+
+            // MBA-1410: resolve the independent windage unit and, if either axis needs
+            // one, the turret click graduations — before any of the work below. compare
+            // has no single --profile, so the graduations come only from the explicit
+            // flags (profile: None).
+            let windage_unit_resolved =
+                resolve_windage_unit(adjustment_unit, windage_unit).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            let (elevation_click, windage_click): (Option<ClickValue>, Option<ClickValue>) =
+                if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
+                    match resolve_click_values(
+                        elevation_click_value.as_deref(),
+                        windage_click_value.as_deref(),
+                        None,
+                    ) {
+                        Ok(Some((el, wi))) => (Some(el), Some(wi)),
+                        Ok(None) => (None, None),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    (None, None)
+                };
 
             // Assemble the load list: explicit --load specs first, then --profile loads,
             // preserving command-line order within each group. Load #1 is the delta baseline.
@@ -8479,6 +8742,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wind_speed,
                 wind_direction,
                 adjustment_unit,
+                windage_unit_resolved,
+                elevation_click,
+                windage_click,
                 sight_height,
                 temperature,
                 pressure,
@@ -8871,6 +9137,10 @@ struct PdfMetadata {
     font_scale: f32,
     bold_data: bool,
     adjustment_unit: AdjustmentUnit,
+    // MBA-1410: independent windage-axis unit for the Wind/Lead columns (Drop stays on
+    // `adjustment_unit`, the elevation axis). Falls back to `adjustment_unit` when
+    // `--windage-unit` is omitted — see `resolve_windage_unit`.
+    windage_unit: AdjustmentUnit,
 }
 
 // ============================================================================
@@ -10123,13 +10393,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 velocity_fps: pdf_meta.velocity_fps,
                 font_scale: pdf_meta.font_scale,
                 bold_data: pdf_meta.bold_data,
-                unit_label: match pdf_meta.adjustment_unit {
-                    AdjustmentUnit::Mil => "MIL".to_string(),
-                    AdjustmentUnit::Moa => "MOA".to_string(),
-                    AdjustmentUnit::Smoa => "SMOA".to_string(),
-                    AdjustmentUnit::Iphy => "IPHY".to_string(),
-                    AdjustmentUnit::Clicks => "CLICKS".to_string(),
-                },
+                // MBA-1410: independent per-axis labels — Drop renders in the elevation
+                // unit, Wind/Lead in the (possibly different) windage unit.
+                elevation_unit_label: adjustment_unit_label(pdf_meta.adjustment_unit),
+                windage_unit_label: adjustment_unit_label(pdf_meta.windage_unit),
             };
 
             // Convert sampled trajectory to dope card rows
@@ -10160,7 +10427,18 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     )
                     .lead_m;
                     let lead_yd = lead_m / 0.9144;
-                    let unit = pdf_meta.adjustment_unit;
+                    let elevation_unit = pdf_meta.adjustment_unit;
+                    let windage_unit = pdf_meta.windage_unit;
+                    // MBA-1410: windage_click was resolved whenever the ELEVATION axis is
+                    // Clicks (resolve_click_values' precondition — see
+                    // resolve_windage_unit's doc comment), but an explicit --windage-unit
+                    // may have overridden the windage axis to a plain angle. Only apply the
+                    // graduation when the windage axis itself is actually Clicks.
+                    let windage_click_display = if windage_unit == AdjustmentUnit::Clicks {
+                        windage_click
+                    } else {
+                        None
+                    };
 
                     DopeCardRow {
                         range_yd: range_yd.round() as u32,
@@ -10168,13 +10446,13 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         // positive-below-LOS (sample_trajectory: los_y - y_interp), matching the
                         // come-up / range tables, so do NOT negate it (this column was sign-flipped).
                         // Rendered in MIL/MOA/SMOA/IPHY (MBA-724) or whole clicks (MBA-1355) per
-                        // --adjustment-unit; drop uses the elevation graduation, wind/lead the
-                        // windage one.
-                        drop_adj: adjustment_display(drop_yd, range_yd, unit, elevation_click),
+                        // its own axis unit (MBA-1410): drop uses the elevation unit/graduation,
+                        // wind/lead the (possibly different) windage one.
+                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click),
                         // Wind: positive = dial right for wind from right
-                        wind_adj: adjustment_display(drift_yd, range_yd, unit, windage_click),
+                        wind_adj: adjustment_display(drift_yd, range_yd, windage_unit, windage_click_display),
                         // Lead for a moving target
-                        lead_adj: adjustment_display(lead_yd, range_yd, unit, windage_click),
+                        lead_adj: adjustment_display(lead_yd, range_yd, windage_unit, windage_click_display),
                     }
                 })
                 .collect();
@@ -14285,6 +14563,12 @@ fn handle_lead(
     end: f64,
     step: f64,
     adjustment_unit: AdjustmentUnit,
+    // MBA-1410: resolved turret click graduation for `--adjustment-unit clicks`. `lead`
+    // has a single (windage-like) angular column, so this is always the windage
+    // resolution (`resolve_single_axis_click_value`), never an elevation one -- Some(...)
+    // iff adjustment_unit == Clicks (resolved eagerly by the caller, same "fail fast on a
+    // missing graduation" shape as trajectory/come-ups's elevation_click).
+    windage_click: Option<ClickValue>,
     units: UnitSystem,
     output: OutputFormat,
     // MBA-1323 Phase 2: saved-profile velocity-BC segments / Mach-Cd drag curve, already
@@ -14292,9 +14576,6 @@ fn handle_lead(
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: `lead` (moving-target) is out of scope for `--adjustment-unit clicks` — reject
-    // before doing any work rather than silently falling back to MIL below.
-    reject_clicks_out_of_scope(adjustment_unit);
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -14346,16 +14627,11 @@ fn handle_lead(
     inputs.powder_temp_curve = powder_temp_curve;
     inputs.powder_curve_temp_c = powder_curve_temp_c;
 
-    let adj_label = match adjustment_unit {
-        AdjustmentUnit::Mil => "MIL",
-        AdjustmentUnit::Moa => "MOA",
-        AdjustmentUnit::Smoa => "SMOA",
-        AdjustmentUnit::Iphy => "IPHY",
-        AdjustmentUnit::Clicks => {
-            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
-            "MIL"
-        }
-    };
+    // MBA-1410: `lead`'s single angular column is fundamentally a windage-type hold (the
+    // horizontal lead ahead of a moving target), so `--adjustment-unit clicks` resolves
+    // through `windage_click` (the caller's `resolve_single_axis_click_value`), same as
+    // wind-card.
+    let adj_label = adjustment_unit_label(adjustment_unit);
     let (dist_unit, speed_unit) = match units {
         UnitSystem::Imperial => ("yd", "mph"),
         UnitSystem::Metric => ("m", "m/s"),
@@ -14462,10 +14738,9 @@ fn handle_lead(
                             AdjustmentUnit::Mil => sol.lead_mil,
                             AdjustmentUnit::Moa => sol.lead_moa,
                             AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => sol.lead_mil * smoa_per_mil(),
-                            AdjustmentUnit::Clicks => {
-                                debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
-                                sol.lead_mil
-                            }
+                            AdjustmentUnit::Clicks => windage_click
+                                .map(|c| clicks_for(lead_disp, r.range, &c) as f64)
+                                .unwrap_or(sol.lead_mil),
                         };
                         let intercept_disp =
                             UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -14528,13 +14803,9 @@ fn handle_lead(
                                 AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => {
                                     sol.lead_mil * smoa_per_mil()
                                 }
-                                AdjustmentUnit::Clicks => {
-                                    debug_assert!(
-                                        false,
-                                        "Clicks must be resolved via clicks_for() before display"
-                                    );
-                                    sol.lead_mil
-                                }
+                                AdjustmentUnit::Clicks => windage_click
+                                    .map(|c| clicks_for(lead_disp, r.range, &c) as f64)
+                                    .unwrap_or(sol.lead_mil),
                             };
                             let intercept_disp =
                                 UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -14574,13 +14845,9 @@ fn handle_lead(
                                 AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => {
                                     sol.lead_mil * smoa_per_mil()
                                 }
-                                AdjustmentUnit::Clicks => {
-                                    debug_assert!(
-                                        false,
-                                        "Clicks must be resolved via clicks_for() before display"
-                                    );
-                                    sol.lead_mil
-                                }
+                                AdjustmentUnit::Clicks => windage_click
+                                    .map(|c| clicks_for(lead_disp, r.range, &c) as f64)
+                                    .unwrap_or(sol.lead_mil),
                             };
                             let intercept_disp =
                                 UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -14624,6 +14891,11 @@ fn handle_wind_card(
     end: f64,
     step: f64,
     adjustment_unit: AdjustmentUnit,
+    // MBA-1410: resolved windage click graduation for `--adjustment-unit clicks` (wind
+    // card's whole table is a windage quantity — crosswind drift). Some(...) iff
+    // adjustment_unit == Clicks, resolved eagerly by the caller via
+    // `resolve_single_axis_click_value`.
+    windage_click: Option<ClickValue>,
     sight_height: f64,
     temperature: f64,
     pressure: f64,
@@ -14632,9 +14904,6 @@ fn handle_wind_card(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: wind card is out of scope for `--adjustment-unit clicks` — reject before doing
-    // any work rather than silently falling back to MIL below.
-    reject_clicks_out_of_scope(adjustment_unit);
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -14677,16 +14946,7 @@ fn handle_wind_card(
         atmosphere,
     )?;
 
-    let adj_label = match adjustment_unit {
-        AdjustmentUnit::Mil => "MIL",
-        AdjustmentUnit::Moa => "MOA",
-        AdjustmentUnit::Smoa => "SMOA",
-        AdjustmentUnit::Iphy => "IPHY",
-        AdjustmentUnit::Clicks => {
-            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
-            "MIL"
-        }
-    };
+    let adj_label = adjustment_unit_label(adjustment_unit);
 
     let (dist_unit, wind_unit) = match units {
         UnitSystem::Imperial => ("yd", "mph"),
@@ -14755,7 +15015,7 @@ fn handle_wind_card(
                     if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
                         let drift_yd =
                             UnitConverter::distance_from_metric(sample.wind_drift_m, units);
-                        drop_to_adjustment(drift_yd, range_display, adjustment_unit)
+                        adjustment_display(drift_yd, range_display, adjustment_unit, windage_click)
                     } else {
                         0.0
                     }
@@ -15087,6 +15347,15 @@ fn handle_range_table(
     wind_speed: f64,
     wind_direction: f64,
     adjustment_unit: AdjustmentUnit,
+    // MBA-1410: independent windage-axis unit for the Wind column (Drop stays on
+    // `adjustment_unit`, the elevation axis) — already resolved/validated by the caller
+    // (`resolve_windage_unit`).
+    windage_unit: AdjustmentUnit,
+    // Resolved turret click graduations for `--adjustment-unit clicks`: Some(...) iff
+    // that axis's own unit is Clicks (see the caller's `resolve_click_values` +
+    // `resolve_windage_unit` gating), None otherwise.
+    elevation_click: Option<ClickValue>,
+    windage_click: Option<ClickValue>,
     sight_height: f64,
     temperature: f64,
     pressure: f64,
@@ -15095,9 +15364,6 @@ fn handle_range_table(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: range-table is out of scope for `--adjustment-unit clicks` — reject before doing
-    // any work rather than silently falling back to MIL below.
-    reject_clicks_out_of_scope(adjustment_unit);
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -15187,17 +15453,10 @@ fn handle_range_table(
         None,
     )?;
 
-    // Build output rows
-    let adj_label = match adjustment_unit {
-        AdjustmentUnit::Mil => "MIL",
-        AdjustmentUnit::Moa => "MOA",
-        AdjustmentUnit::Smoa => "SMOA",
-        AdjustmentUnit::Iphy => "IPHY",
-        AdjustmentUnit::Clicks => {
-            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
-            "MIL"
-        }
-    };
+    // Build output rows. MBA-1410: Drop is the elevation axis, Wind the (possibly
+    // different) windage axis.
+    let elev_label = adjustment_unit_label(adjustment_unit);
+    let wind_label = adjustment_unit_label(windage_unit);
 
     let (dist_unit, vel_unit, energy_unit, drop_unit, wind_unit_label) = match units {
         UnitSystem::Imperial => ("yd", "fps", "ft-lb", "in", "mph"),
@@ -15245,7 +15504,7 @@ fn handle_range_table(
                 };
 
                 let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-                let drop_adj = drop_to_adjustment(drop_yd, range_display, adjustment_unit);
+                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click);
 
                 let wind_linear = match units {
                     UnitSystem::Imperial => w.wind_drift_m / 0.0254,
@@ -15253,7 +15512,7 @@ fn handle_range_table(
                 };
 
                 let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-                let wind_adj = drop_to_adjustment(drift_yd, range_display, adjustment_unit);
+                let wind_adj = adjustment_display(drift_yd, range_display, windage_unit, windage_click);
 
                 rows.push(RangeRow {
                     range: current_range,
@@ -15292,7 +15551,11 @@ fn handle_range_table(
                 "zero_distance": zero_distance,
                 "wind_speed": wind_speed,
                 "wind_direction": wind_direction,
-                "adjustment_unit": adj_label,
+                // "adjustment_unit" kept for backward compatibility (== the elevation
+                // axis, i.e. byte-identical to pre-MBA-1410 output); "windage_unit" is
+                // additive and only differs when --windage-unit was explicitly passed.
+                "adjustment_unit": elev_label,
+                "windage_unit": wind_label,
                 "distance_unit": dist_unit,
                 "velocity_unit": vel_unit,
                 "energy_unit": energy_unit,
@@ -15306,9 +15569,9 @@ fn handle_range_table(
                 "range_{},drop_{},drop_{},wind_{},wind_{},velocity_{},energy_{},tof_s",
                 dist_unit,
                 drop_unit,
-                adj_label.to_lowercase(),
+                elev_label.to_lowercase(),
                 drop_unit,
-                adj_label.to_lowercase(),
+                wind_label.to_lowercase(),
                 vel_unit,
                 energy_unit
             );
@@ -15339,7 +15602,7 @@ fn handle_range_table(
                 "│Range  │Drop     │Drop     │Wind     │Wind     │Vel      │Energy   │ToF    │"
             );
             println!("│({:>2})   │({:>2})     │({:>3})    │({:>2})     │({:>3})    │({:>3})    │({:>4})   │(s)    │",
-                     dist_unit, drop_unit, adj_label, drop_unit, adj_label, vel_unit, energy_unit);
+                     dist_unit, drop_unit, elev_label, drop_unit, wind_label, vel_unit, energy_unit);
             println!(
                 "├───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┤"
             );
@@ -15448,6 +15711,15 @@ fn handle_compare(
     wind_speed: f64,
     wind_direction: f64,
     adjustment_unit: AdjustmentUnit,
+    // MBA-1410: independent windage-axis unit for the Wind column (Drop stays on
+    // `adjustment_unit`, the elevation axis) — already resolved/validated by the caller.
+    windage_unit: AdjustmentUnit,
+    // Resolved turret click graduations for `--adjustment-unit clicks`. `compare` has no
+    // single `--profile` (it compares multiple loads, each optionally from its own saved
+    // profile), so these come ONLY from the explicit CLI flags -- never a per-load
+    // profile's own elevation_click/windage_click.
+    elevation_click: Option<ClickValue>,
+    windage_click: Option<ClickValue>,
     sight_height: f64,
     temperature: f64,
     pressure: f64,
@@ -15456,9 +15728,6 @@ fn handle_compare(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    // MBA-1355: compare is out of scope for `--adjustment-unit clicks` — reject before doing any
-    // work rather than silently falling back to MIL below.
-    reject_clicks_out_of_scope(adjustment_unit);
     // Shared conditions in metric
     let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
     let zero_distance_m = UnitConverter::distance_to_metric(zero_distance, units);
@@ -15603,13 +15872,13 @@ fn handle_compare(
                 UnitSystem::Metric => nw.drop_m * 1000.0,
             };
             let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-            let drop_adj = drop_to_adjustment(drop_yd, range_display, adjustment_unit);
+            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click);
             let wind_linear = match units {
                 UnitSystem::Imperial => w.wind_drift_m / 0.0254,
                 UnitSystem::Metric => w.wind_drift_m * 1000.0,
             };
             let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-            let wind_adj = drop_to_adjustment(drift_yd, range_display, adjustment_unit);
+            let wind_adj = adjustment_display(drift_yd, range_display, windage_unit, windage_click);
             rows.push(LoadRow {
                 drop_linear,
                 drop_adj,
@@ -15626,16 +15895,10 @@ fn handle_compare(
         });
     }
 
-    let adj_label = match adjustment_unit {
-        AdjustmentUnit::Mil => "MIL",
-        AdjustmentUnit::Moa => "MOA",
-        AdjustmentUnit::Smoa => "SMOA",
-        AdjustmentUnit::Iphy => "IPHY",
-        AdjustmentUnit::Clicks => {
-            debug_assert!(false, "Clicks must be resolved via clicks_for() before display");
-            "MIL"
-        }
-    };
+    // MBA-1410: Drop is the elevation axis, Wind/drift the (possibly different)
+    // windage axis.
+    let elev_label = adjustment_unit_label(adjustment_unit);
+    let wind_label = adjustment_unit_label(windage_unit);
     let (dist_unit, vel_unit, energy_unit, drop_unit, wind_unit_label) = match units {
         UnitSystem::Imperial => ("yd", "fps", "ft-lb", "in", "mph"),
         UnitSystem::Metric => ("m", "m/s", "J", "mm", "m/s"),
@@ -15671,7 +15934,11 @@ fn handle_compare(
                     "units": {
                         "distance": dist_unit,
                         "drop": drop_unit,
-                        "adjustment": adj_label,
+                        // "adjustment" kept for backward compatibility (== the elevation
+                        // axis, byte-identical to pre-MBA-1410 output); "windage_adjustment"
+                        // is additive and only differs when --windage-unit was passed.
+                        "adjustment": elev_label,
+                        "windage_adjustment": wind_label,
                         "velocity": vel_unit,
                         "energy": energy_unit,
                         "wind_speed": wind_unit_label,
@@ -15718,8 +15985,8 @@ fn handle_compare(
             let mut header = format!("range_{dist_unit}");
             for name in &safe {
                 header.push_str(&format!(
-                    ",{name}_drop_{drop_unit},{name}_drop_{adj_label},{name}_drift_{drop_unit},\
-                     {name}_drift_{adj_label},{name}_velocity_{vel_unit},{name}_energy_{energy_unit},\
+                    ",{name}_drop_{drop_unit},{name}_drop_{elev_label},{name}_drift_{drop_unit},\
+                     {name}_drift_{wind_label},{name}_velocity_{vel_unit},{name}_energy_{energy_unit},\
                      {name}_tof_s"
                 ));
             }
@@ -15804,11 +16071,22 @@ fn handle_compare(
                 println!("{line}");
             }
             println!("{}", "-".repeat(width));
-            println!(
-                "Drop/Drift in {adj_label} (- is down/left), Vel in {vel_unit}. \
-                 Use -o json or -o csv for linear drop/drift ({drop_unit}), energy \
-                 ({energy_unit}), time of flight, and deltas vs load #1."
-            );
+            // MBA-1410: byte-identical to the pre-per-axis phrasing when both axes share a
+            // unit (the default, and every run before --windage-unit existed); spells out
+            // both units only when they genuinely differ.
+            if elev_label == wind_label {
+                println!(
+                    "Drop/Drift in {elev_label} (- is down/left), Vel in {vel_unit}. \
+                     Use -o json or -o csv for linear drop/drift ({drop_unit}), energy \
+                     ({energy_unit}), time of flight, and deltas vs load #1."
+                );
+            } else {
+                println!(
+                    "Drop in {elev_label}, Drift in {wind_label} (- is down/left), Vel in {vel_unit}. \
+                     Use -o json or -o csv for linear drop/drift ({drop_unit}), energy \
+                     ({energy_unit}), time of flight, and deltas vs load #1."
+                );
+            }
         }
     }
 
@@ -16555,6 +16833,114 @@ mod adjustment_unit_tests {
         assert_eq!(wi, parse_click_value("0.1mil").unwrap());
     }
 
+    /// MBA-1410: `--windage-unit` falls back to the elevation unit (`--adjustment-unit`)
+    /// when omitted, and genuinely differs from it when supplied -- mirrors
+    /// `windage_click_defaults_to_elevation`/`explicit_windage_flag_overrides_elevation_fallback`
+    /// above, but for the display UNIT rather than the click graduation.
+    #[test]
+    fn windage_unit_defaults_to_elevation_and_can_diverge() {
+        assert_eq!(
+            resolve_windage_unit(AdjustmentUnit::Mil, None).unwrap(),
+            AdjustmentUnit::Mil
+        );
+        assert_eq!(
+            resolve_windage_unit(AdjustmentUnit::Mil, Some(AdjustmentUnit::Moa)).unwrap(),
+            AdjustmentUnit::Moa,
+            "an explicit --windage-unit must genuinely diverge from the elevation unit"
+        );
+        assert_eq!(
+            resolve_windage_unit(AdjustmentUnit::Moa, None).unwrap(),
+            AdjustmentUnit::Moa,
+            "omitted --windage-unit falls back to whatever --adjustment-unit resolved to"
+        );
+    }
+
+    #[test]
+    fn windage_unit_clicks_requires_elevation_clicks() {
+        // Both axes clicks (the pre-MBA-1410 global mode): allowed, explicit or via fallback.
+        assert_eq!(
+            resolve_windage_unit(AdjustmentUnit::Clicks, None).unwrap(),
+            AdjustmentUnit::Clicks
+        );
+        assert_eq!(
+            resolve_windage_unit(AdjustmentUnit::Clicks, Some(AdjustmentUnit::Clicks)).unwrap(),
+            AdjustmentUnit::Clicks
+        );
+        // Elevation clicks + an explicit non-clicks windage override: allowed.
+        assert_eq!(
+            resolve_windage_unit(AdjustmentUnit::Clicks, Some(AdjustmentUnit::Moa)).unwrap(),
+            AdjustmentUnit::Moa
+        );
+        // Windage clicks without elevation clicks: rejected, naming both flags.
+        let e = resolve_windage_unit(AdjustmentUnit::Mil, Some(AdjustmentUnit::Clicks)).unwrap_err();
+        assert!(e.contains("--windage-unit"), "{e}");
+        assert!(e.contains("--adjustment-unit"), "{e}");
+    }
+
+    /// MBA-1410: the windage-only single-axis click resolver (`wind-card`/`lead`) falls
+    /// back from an explicit flag to the profile's `windage_click`, then its
+    /// `elevation_click` -- same precedence order as `resolve_click_values`'s windage arm.
+    #[test]
+    fn single_axis_click_value_falls_back_windage_then_elevation() {
+        let e = resolve_single_axis_click_value(None, None).unwrap_err();
+        assert!(e.contains("--windage-click-value"), "{e}");
+
+        let explicit = resolve_single_axis_click_value(Some("0.25moa"), None).unwrap();
+        assert_eq!(explicit, parse_click_value("0.25moa").unwrap());
+
+        fn profile_stub() -> ProfileData {
+            ProfileData {
+                name: "stub".to_string(),
+                velocity: 762.0,
+                bc: 0.243,
+                mass: 11.339_809_25,
+                diameter: 7.8232,
+                drag_model: "G7".to_string(),
+                twist_rate: None,
+                sight_height: None,
+                zero_distance: None,
+                units: "metric".to_string(),
+                temperature: 15.0,
+                pressure: 1_013.207_888,
+                humidity: 55.0,
+                altitude: 0.0,
+                bullet_name: None,
+                created: None,
+                wind_speed: None,
+                wind_direction: None,
+                shooting_angle: None,
+                auto_zero: None,
+                twist_right: None,
+                use_bc_segments: None,
+                bullet_length: None,
+                elevation_click: None,
+                windage_click: None,
+                bc_segments: None,
+                drag_curve: None,
+                dsf_points: None,
+                bc_reference: None,
+                pressure_reference: None,
+                density_altitude: None,
+            }
+        }
+
+        let mut profile = profile_stub();
+        profile.elevation_click = Some("0.1mil".to_string());
+        let from_elevation = resolve_single_axis_click_value(None, Some(&profile)).unwrap();
+        assert_eq!(from_elevation, parse_click_value("0.1mil").unwrap());
+
+        profile.windage_click = Some("0.2mil".to_string());
+        let from_windage = resolve_single_axis_click_value(None, Some(&profile)).unwrap();
+        assert_eq!(
+            from_windage,
+            parse_click_value("0.2mil").unwrap(),
+            "profile windage_click must beat profile elevation_click"
+        );
+
+        let flag_beats_profile = resolve_single_axis_click_value(Some("0.3moa"), Some(&profile)).unwrap();
+        assert_eq!(flag_beats_profile, parse_click_value("0.3moa").unwrap());
+    }
+
     #[test]
     fn default_trajectory_header_is_stable() {
         // Pin the come-ups table header line for the default unit (Mil, imperial) so a
@@ -16718,7 +17104,7 @@ mod adjustment_unit_noop_tests {
             AdjustmentUnit::Iphy,
             AdjustmentUnit::Clicks,
         ] {
-            let warning = adjustment_unit_noop_warning(unit, 0.0, false)
+            let warning = adjustment_unit_noop_warning(unit, None, 0.0, false)
                 .unwrap_or_else(|| panic!("{unit:?} without --target-speed or -o pdf must warn"));
             assert!(warning.contains("--adjustment-unit"), "{warning}");
             assert!(warning.contains("--target-speed"), "{warning}");
@@ -16729,10 +17115,10 @@ mod adjustment_unit_noop_tests {
     #[test]
     fn silent_when_the_ring_column_or_the_dope_card_consumes_the_unit() {
         // A mover ring is requested: the Ring column renders in the chosen unit.
-        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Moa, 10.0, false).is_none());
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Moa, None, 10.0, false).is_none());
         // PDF dope card: Drop/Wind/Lead columns render in the chosen unit even with no ring.
-        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Moa, 0.0, true).is_none());
-        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Clicks, 0.0, true).is_none());
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Moa, None, 0.0, true).is_none());
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Clicks, None, 0.0, true).is_none());
     }
 
     #[test]
@@ -16740,7 +17126,65 @@ mod adjustment_unit_noop_tests {
         // `mil` is clap's `default_value`, so an explicit `--adjustment-unit mil` cannot be
         // told apart from never passing the flag — warning there would fire on the common
         // case for nothing.
-        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Mil, 0.0, false).is_none());
+        assert!(adjustment_unit_noop_warning(AdjustmentUnit::Mil, None, 0.0, false).is_none());
+    }
+
+    /// MBA-1410: a fallback windage unit (no explicit `--windage-unit`) is never itself a
+    /// no-op signal -- only an EXPLICIT non-mil `--windage-unit` is, and only without PDF
+    /// (the Ring column never shows the windage axis, so `target_speed` cannot excuse it).
+    #[test]
+    fn explicit_windage_unit_alone_warns_without_pdf_and_is_silent_with_it() {
+        assert!(adjustment_unit_noop_warning(
+            AdjustmentUnit::Mil,
+            Some(AdjustmentUnit::Moa),
+            0.0,
+            false
+        )
+        .is_some());
+        // Even a nonzero target_speed doesn't excuse it -- the Ring column is elevation-only.
+        assert!(adjustment_unit_noop_warning(
+            AdjustmentUnit::Mil,
+            Some(AdjustmentUnit::Moa),
+            10.0,
+            false
+        )
+        .is_some());
+        assert!(adjustment_unit_noop_warning(
+            AdjustmentUnit::Mil,
+            Some(AdjustmentUnit::Moa),
+            0.0,
+            true
+        )
+        .is_none());
+        // An explicit `--windage-unit mil` matches the default and never warns by itself.
+        assert!(adjustment_unit_noop_warning(
+            AdjustmentUnit::Mil,
+            Some(AdjustmentUnit::Mil),
+            0.0,
+            false
+        )
+        .is_none());
+    }
+}
+
+/// MBA-1410 fold-in of an MBA-1355 backlog minor: come-ups' `--windage-click-value` was a
+/// silent no-op (no windage column exists there); it must now warn.
+#[cfg(test)]
+mod windage_click_value_noop_tests {
+    use super::*;
+
+    #[test]
+    fn warns_when_supplied() {
+        let w = windage_click_value_noop_warning(Some("0.1mil"))
+            .expect("a supplied --windage-click-value on come-ups must warn");
+        assert!(w.contains("--windage-click-value"), "{w}");
+        assert!(w.contains("come-ups"), "{w}");
+        assert!(w.contains("--elevation-click-value"), "{w}");
+    }
+
+    #[test]
+    fn silent_when_omitted() {
+        assert!(windage_click_value_noop_warning(None).is_none());
     }
 }
 

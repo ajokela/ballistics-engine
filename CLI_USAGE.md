@@ -38,9 +38,9 @@ The CLI supports two unit systems, selectable with the `--units` flag (default: 
 
 ## Turret Adjustment Units
 
-Separate from `--units` (imperial/metric, above), most sweep-table commands take an
+Separate from `--units` (imperial/metric, above), every sweep-table command takes an
 `--adjustment-unit` flag selecting how angular dial/hold columns (Drop, Wind, Lead, the
-mover Ring) are displayed. Five values are accepted (MBA-724, MBA-1355):
+mover Ring) are displayed. Five values are accepted (MBA-724, MBA-1355, MBA-1410):
 
 | Value | Meaning | Conversion |
 |---|---|---|
@@ -50,13 +50,38 @@ mover Ring) are displayed. Five values are accepted (MBA-724, MBA-1355):
 | `iphy` | Inches per hundred yards | numerically identical to `smoa` — same conversion, different header text |
 | `clicks` | Whole turret clicks | see below — requires a click graduation, not a fixed factor |
 
-Which columns the unit reaches depends on the command. `come-ups` and the other sweep
-tables always print dial columns, so it always applies there. On `trajectory` it reaches
-only two places — the PDF dope card's Drop/Wind/Lead columns (`-o pdf`) and the mover
-Ring column (`--target-speed`) — so a `trajectory` run with neither leaves the printed
-table byte-identical. Since 0.28.2 that case warns on stderr rather than passing
-silently; the browser terminal warns in the table output (it has no PDF card and no
-stderr).
+Which columns the unit reaches depends on the command. `come-ups`, `wind-card`,
+`range-table`, and `compare` always print dial columns, so it always applies there. On
+`trajectory` it reaches only two places — the PDF dope card's Drop/Wind/Lead columns
+(`-o pdf`) and the mover Ring column (`--target-speed`) — so a `trajectory` run with
+neither leaves the printed table byte-identical. Since 0.28.2 that case warns on stderr
+rather than passing silently; the browser terminal warns in the table output (it has no
+PDF card and no stderr).
+
+### Independent elevation vs. windage units (MBA-1410)
+
+`--adjustment-unit` sets the **elevation** axis (Drop, and the mover Ring column, which
+is treated as elevation-like). Commands with a separate horizontal column — `range-table`
+and `compare` (Wind), plus `trajectory`'s PDF dope card (Wind/Lead) — also accept an
+independent:
+
+- **`--windage-unit <mil|moa|smoa|iphy|clicks>`** — falls back to `--adjustment-unit` when
+  omitted, so e.g. `--adjustment-unit mil --windage-unit moa` prints mil elevation holds
+  next to moa windage holds in the same run. `clicks` is only accepted here when
+  `--adjustment-unit` is **also** `clicks` — turret click output needs the elevation
+  graduation resolved first (see below); an explicit `--windage-unit clicks` paired with a
+  non-clicks `--adjustment-unit` is rejected:
+
+  ```
+  error: --windage-unit clicks requires --adjustment-unit clicks (turret click output needs the resolved elevation graduation)
+  ```
+
+Commands with only ONE angular column resolve it through whichever axis the column
+actually is, with no separate `--windage-unit` flag to set: `wind-card`'s drift and
+`lead`'s hold are both windage-type (horizontal), so `--adjustment-unit` on those two
+commands drives the windage axis directly. `come-ups` is the mirror case — a pure
+elevation table, so `--adjustment-unit` there is always the elevation axis (see the
+`--windage-click-value` note below).
 
 ### `clicks`: whole-click output
 
@@ -70,40 +95,46 @@ click on your turret — which has no default and must come from one of two plac
   CLI flags, e.g. `--elevation-click-value 0.25moa` or `--elevation-click-value 0.1mil`.
   The suffix is mandatory and selects the graduation's own base unit — `mil`, `moa`,
   `smoa`, or `iphy` (`iphy` is accepted as an alias for `smoa`, the identical unit); the
-  magnitude must be a positive, finite number.
+  magnitude must be a positive, finite number. `wind-card` and `lead` have only one
+  (windage) column, so they take just `--windage-click-value` — there is no
+  `--elevation-click-value` flag on those two.
 - **A saved profile's `elevation_click` / `windage_click` fields** — see [Importing
   profiles (.a7p)](#importing-profiles-a7p) below for saved-profile basics; set the click
   fields with `profile save --elevation-click <SIZE><UNIT> --windage-click <SIZE><UNIT>`,
   validated with the same parser at save time so a profile can never store an invalid
-  graduation.
+  graduation. `compare` has no single `--profile` (it compares multiple loads, each
+  optionally from its own saved profile), so its click graduations come only from the
+  explicit CLI flags, never a per-load profile.
 
 **Resolution order** (checked once, eagerly, before any calculation): an explicit CLI
 flag beats the saved profile's field for that axis. **Windage falls back to elevation**
 when neither `--windage-click-value` nor the profile's `windage_click` is set — most
-turrets share one graduation between the two knobs. **Elevation must resolve from at
-least one source** — clicks output has nowhere else to get a graduation from — so a run
+turrets share one graduation between the two knobs (on `wind-card`/`lead`, which have no
+elevation column of their own, the single click value still falls back from
+`--windage-click-value` to the profile's `windage_click`, then its `elevation_click`).
+**Elevation must resolve from at least one source** on the commands that have an
+elevation column — clicks output has nowhere else to get a graduation from — so a run
 with neither an elevation flag nor a profile elevation click fails fast:
 
 ```
 error: --adjustment-unit clicks requires a turret elevation graduation: pass --elevation-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil), or save one on the profile with `profile save --elevation-click`
 ```
 
-**Scope: `trajectory` and `come-ups` only.** Every other command that still accepts
-`--adjustment-unit` (`lead`, `wind-card`, `range-table`, `compare`) rejects `clicks`
-immediately, rather than silently falling back to another unit:
-
-```
-error: --adjustment-unit clicks is currently supported for trajectory and come-ups only (MBA-1355)
-```
-
 Where clicks resolves, the header/column suffix follows the same `(mil)`/`(moa)`
 convention as every other unit — e.g. the mover Ring column reads `Ring(clicks)`, and
 come-ups' Drop column reads `Drop (CLICKS)` — and the values print as whole integers
 instead of a decimal angle. Drop/Ring use the **elevation** click graduation; Wind/Lead
-(on the PDF dope card) use the **windage** one. `come-ups` has no windage column, so its
-`--windage-click-value` flag exists only for CLI parity and validation, and does not
-affect its output. The default `mil`/`moa`/`smoa`/`iphy` output is completely unaffected
-by any of this — `clicks` is strictly additive.
+(on `range-table`, `compare`, and the PDF dope card), plus `wind-card`'s drift and
+`lead`'s hold, use the **windage** one. `come-ups` has no windage column, so its
+`--windage-click-value` flag can never affect its output — since 0.29.0 it warns on
+stderr rather than silently accepting it:
+
+```
+warning: --windage-click-value has no effect on come-ups (it has no windage column); did you mean --elevation-click-value?
+```
+
+The default `mil`/`moa`/`smoa`/`iphy` output is completely unaffected by any of this —
+`clicks` (and `--windage-unit`) are strictly additive.
 
 ## Commands
 
@@ -670,10 +701,13 @@ unchanged from before (`-v` used verbatim).
   (`lead ÷ target_length`) — a common visual hold reference ("hold one body-length ahead").
 - **`--start` / `--end` / `--step`** — range sweep in yards (imperial) or meters (metric),
   like the other sweep tables; defaults `100`/`600`/`100`.
-- **`--adjustment-unit <mil|moa|smoa|iphy>`** — angular unit for the `Lead` column
-  (default `mil`). See [Turret Adjustment Units](#turret-adjustment-units) for the full
-  unit list — `clicks` is **not** available here (`lead` is out of scope for MBA-1355;
-  passing it exits non-zero).
+- **`--adjustment-unit <mil|moa|smoa|iphy|clicks>`** — angular unit for the `Lead` column
+  (default `mil`); the column is windage-type (a horizontal hold), so `clicks` resolves
+  through `--windage-click-value` (MBA-1410) — there is no `--elevation-click-value` flag
+  here. See [Turret Adjustment Units](#turret-adjustment-units) for the full unit list.
+- **`--windage-click-value <SIZE><UNIT>`** — turret click graduation for
+  `--adjustment-unit clicks`, e.g. `0.25moa` or `0.1mil` (falls back to the saved
+  profile's `windage_click`, then its `elevation_click`, when omitted).
 - **`-o, --output <table|json|csv|pdf>`** — output format (`pdf` renders the same as `table`
   on this subcommand).
 
@@ -1039,10 +1073,13 @@ Besides the usual load/atmosphere arguments shared with `trajectory` (`-v -b -m 
   angle (e.g. `--wind-angles 30,60,90`). Mutually exclusive with `--wind-angle`.
 - **`--start` / `--end` / `--step`** — range sweep, like the other sweep tables; defaults
   `100`/`1000`/`100`.
-- **`--adjustment-unit <mil|moa|smoa|iphy>`** — angular unit for the drift columns
-  (default `mil`). See [Turret Adjustment Units](#turret-adjustment-units) — `clicks` is
-  **not** available here (`wind-card` is out of scope for MBA-1355; passing it exits
-  non-zero).
+- **`--adjustment-unit <mil|moa|smoa|iphy|clicks>`** — angular unit for the drift columns
+  (default `mil`); the card is windage-type (crosswind drift), so `clicks` resolves
+  through `--windage-click-value` (MBA-1410) — there is no `--elevation-click-value` flag
+  here. See [Turret Adjustment Units](#turret-adjustment-units).
+- **`--windage-click-value <SIZE><UNIT>`** — turret click graduation for
+  `--adjustment-unit clicks`, e.g. `0.25moa` or `0.1mil` (falls back to the saved
+  profile's `windage_click`, then its `elevation_click`, when omitted).
 - **`-o, --output <table|json|csv|pdf>`** — output format (`pdf` renders the same as
   `table` on this subcommand).
 
@@ -1296,13 +1333,16 @@ import) ARE consumed here — they drive both the load's zeroing and its traject
 and such loads are tagged `[BC segments]` / `[custom drag curve]` in the table legend
 (and flagged in JSON). Inline `--load` specs use the scalar BC.
 
-The table shows per-load drop, drift (both in the `--adjustment-unit <mil|moa|smoa|iphy>`
-— see [Turret Adjustment Units](#turret-adjustment-units); `clicks` is **not** available
-here, `compare` is out of scope for MBA-1355 and exits non-zero), and velocity at
-each range. `-o json` adds linear drop/drift, energy, time of flight, each load's zero
-angle, and per-row deltas against load #1 (`delta_drop`, `delta_drift`, `delta_velocity`,
-`delta_energy` — zero for the baseline itself); `-o csv` emits one column group per load
-(names sanitized for CSV). PDF output is not supported for this command.
+The table shows per-load drop (`--adjustment-unit <mil|moa|smoa|iphy|clicks>`, the
+elevation axis) and drift (`--windage-unit`, falling back to `--adjustment-unit` when
+omitted — MBA-1410; see [Turret Adjustment Units](#turret-adjustment-units)), and velocity
+at each range. `clicks` requires `--elevation-click-value`/`--windage-click-value` — since
+`compare` has no single `--profile`, these always come from the explicit flags, never a
+per-load profile's own graduation. `-o json` adds linear drop/drift, energy, time of
+flight, each load's zero angle, and per-row deltas against load #1 (`delta_drop`,
+`delta_drift`, `delta_velocity`, `delta_energy` — zero for the baseline itself); `-o csv`
+emits one column group per load (names sanitized for CSV). PDF output is not supported
+for this command.
 
 ### Powder Temperature Velocity (`powder`)
 
@@ -2360,7 +2400,8 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | Parameter | Description |
 |-----------|-------------|
 | `--output-file` | Output file path (required for PDF) |
-| `--adjustment-unit` | Angular unit for Drop/Wind/Lead columns: `mil` (default), `moa`, `smoa`, `iphy`, or `clicks` — see [Turret Adjustment Units](#turret-adjustment-units) |
+| `--adjustment-unit` | Angular unit for the Drop column and the mover Ring (elevation axis): `mil` (default), `moa`, `smoa`, `iphy`, or `clicks` — see [Turret Adjustment Units](#turret-adjustment-units) |
+| `--windage-unit` | Independent angular unit for the Wind/Lead columns (MBA-1410); falls back to `--adjustment-unit` when omitted — see [Turret Adjustment Units](#turret-adjustment-units) |
 | `--elevation-click-value` / `--windage-click-value` | Turret click graduations for `--adjustment-unit clicks`, e.g. `0.1mil` or `0.25moa` — see [Turret Adjustment Units](#turret-adjustment-units) |
 | `--target-speed` | Target speed for the Lead column (mph imperial / m/s metric — MBA-1325 fixed this to follow `--units` like every other speed flag; previously always read as mph). Also enables the [Mover Ring](#mover-ring---target-speed) column/fields on every output format |
 | `--powder` | Powder type (shown in footer) |
