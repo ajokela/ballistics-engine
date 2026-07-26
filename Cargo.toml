@@ -94,7 +94,7 @@ strsim = { version = "0.11", optional = true }
 # PDF generation for dope cards (optional, not WASM compatible)
 # default-features=false drops the `html` feature (azul-layout -> rust-fontconfig
 # -> mmapio, which is Linux-only via MAP_LOCKED and breaks all BSD targets).
-printpdf = { version = "0.10", optional = true, default-features = false }
+printpdf = { version = "0.12", optional = true, default-features = false }
 
 # Optional: HTTP client for online mode
 ureq = { version = "3.1", optional = true, features = ["json"] }
