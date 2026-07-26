@@ -5,6 +5,56 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-07-26
+
+The theme of this release is inputs that mean what the shooter means: several
+values you can already type were being silently reinterpreted, and several
+flags did nothing without saying so.
+
+### Changed
+- **`trajectory --auto-zero` output now includes the solved zero angle**
+  (MBA-1402) on the table, JSON, CSV and browser-terminal surfaces. This is a
+  deliberate, user-visible change to a pre-existing flag: if you parse
+  `--auto-zero` output, expect the new line/key/column.
+- `--adjustment-unit` now warns when it cannot affect anything (MBA-1414). On
+  `trajectory` it reaches only the mover Ring column (`--target-speed`) and the
+  PDF dope card (`-o pdf`); supplying it with neither used to be silent.
+
+### Added
+- Declare which reference atmosphere a BC is corrected to (MBA-1365):
+  `--bc-reference icao|army-standard-metro`. Many Sierra, Hornady and Barnes
+  BCs are Army Standard Metro referenced, which reads about 1.8% too little
+  drag if fed in unconverted. ICAO remains the default and is unchanged.
+- Enter a sea-level (QNH / weather-report "barometer") pressure and have it
+  reduced to station pressure (MBA-1397): `--pressure-type absolute|qnh`, plus
+  `--zero-pressure-type` for the zero day. Typing a QNH value at elevation and
+  having it treated as station pressure was a classic source of vertical error.
+- Carry conditions as a single density altitude (MBA-1366):
+  `--density-altitude`, the entry mode Shooter, Nosler, AB Analytics, Ballistic
+  AE and TRASOL all support. Implemented by back-solving an ISA-equivalent
+  atmosphere, so Mach, lapse rate and segmented-atmosphere behaviour are all
+  preserved. It supersedes `--altitude`/`--pressure`; an explicit
+  `--temperature` still wins, with the pressure re-solved so the same density
+  altitude is reproduced. The `DA`/`DENSITY_ALTITUDE` CSV columns now work.
+- Correct a downrange chronograph reading back to true muzzle velocity
+  (MBA-1377): `--chrono-distance`. Most chronographs read 10-15 ft out.
+- Recover the zero range a stored bore angle implies (MBA-1402):
+  `zero --from-angle`. A bore angle generally implies TWO zeros — the same
+  relationship that makes a 25 yd and a ~300 yd zero the same angle — so both
+  the near and far crossing are reported.
+- `recoil` and `power-factor` calculators (MBA-1372), using SAAMI's own recoil
+  formulae and published USPSA/IDPA/SASS thresholds.
+- Velocity and energy panels on `trajectory --plot` (MBA-1394), alongside drop
+  and drift.
+- Adjustment units on `wind-card`, `lead`, `range-table` and `compare`, plus
+  independent per-axis selection via `--windage-unit` (MBA-1410).
+
+### Fixed
+- `--windage-unit moa` with `--adjustment-unit clicks` printed whole clicks
+  under an MOA header on `range-table` and `compare` (MBA-1410).
+- `come-ups --windage-click-value` was inert and silent; it now warns
+  (MBA-1410). The PDF dope card no longer prints clicks with a trailing `.0`.
+
 ## [0.28.1] - 2026-07-25
 
 ### Fixed
