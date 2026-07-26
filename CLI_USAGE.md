@@ -1301,9 +1301,11 @@ which one you mean and reports both instead.
 ```bash
 # Solve the angle for a 200-yard zero...
 ./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 200
-# ... then, later, recover the range(s) that same stored angle (0.0997°) implies. At a
-# conventional 200 yd zero the near crossing sits far enough forward that the trajectory
-# never dips back below the line of sight before it, so only the far crossing is found here:
+# ... then, later, recover the range(s) that same stored angle (0.0997°) implies. One angle
+# generally gives TWO zeros: this one reports a near crossing at 37.3 yd (the bullet rising
+# through the line of sight) and a far crossing at 199.9 yd (descending back through it).
+# The 200 yd zero you asked for is the far one — the same relationship that makes a 25 yd
+# zero and a ~300 yd zero the same bore angle:
 ./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --from-angle 0.0997
 ```
 
