@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MBA-1356), so it is fixed structurally and pinned by a cross-entry-point parity test.
 
 ### Added
+- **`--pressure-type` now works on every subcommand that accepts `--pressure`** (MBA-1416):
+  `estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`,
+  `stability`, `range-table` and `compare`. These ten previously accepted a pressure and silently
+  treated it as absolute station pressure, so a weather-report barometer value entered at
+  elevation was wrong by the ISA reduction on every command except `trajectory` and `zero`. The
+  mode reduces against each command's own `--altitude`. Omitting it is exactly `absolute`, so
+  existing invocations are byte-identical — pinned by a test per command, alongside one asserting
+  the flag actually reaches the physics rather than merely parsing.
 - **`ballistics drag-curve`** (MBA-1424) prints a built-in reference drag function as
   `(Mach, Cd)` data in table, CSV, or JSON form, for all nine models (G1/G2/G5/G6/G7/G8/GI/GS/
   RA4). Points come out verbatim from the table — no resampling — so a consumer charts exactly
