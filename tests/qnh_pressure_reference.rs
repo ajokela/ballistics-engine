@@ -280,3 +280,150 @@ fn qnh_pressure_at_sea_level_matches_absolute_exactly() {
         "at sea level, QNH and absolute must be byte-identical (QNH reduces to itself)"
     );
 }
+
+/// MBA-1421: what `--pressure-type` means for a pressure that came from a `--location` CSV
+/// rather than from `--pressure`.
+///
+/// This was recorded as unspecified after the 0.29.0 review, because the pairing has the same
+/// shape as two bugs that release fixed (an interpretive MODE reaching a VALUE it does not
+/// describe). It turns out the engine already does the defensible thing: the CLI mode applies
+/// to the CSV value. Unlike a profile-STORED mode — which describes a value the profile also
+/// stored, and which 0.29.0 correctly stopped applying to a CLI `--pressure` — a mode typed on
+/// the command line is the user's present-tense declaration about whatever pressure this run
+/// uses, and there is exactly one pressure in the run for it to describe.
+///
+/// These tests exist so that stops being an accident of implementation.
+mod csv_supplied_pressure_mode {
+    use super::*;
+    use std::io::Write;
+
+    /// Writes a location CSV and returns its path. Named per test, matching the temp_dir idiom
+    /// the PDF tests already use, so parallel tests cannot collide on one fixture file.
+    fn location_csv(test_name: &str, pressure_inhg: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("bx_loc_{test_name}.csv"));
+        let mut file = std::fs::File::create(&path).expect("create location csv");
+        writeln!(file, "NAME,LATITUDE,ALTITUDE,TEMPERATURE,PRESSURE,HUMIDITY")
+            .expect("write header");
+        writeln!(file, "TestSite,45.0,5000,59,{pressure_inhg},50").expect("write row");
+        path
+    }
+
+    fn impact_velocity(args: &[&str]) -> f64 {
+        run_json(args)["impact_velocity"]
+            .as_f64()
+            .expect("impact_velocity")
+    }
+
+    fn base() -> Vec<&'static str> {
+        vec![
+            "trajectory",
+            "--bc",
+            "0.243",
+            "--drag-model",
+            "g7",
+            "--velocity",
+            "2700",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--max-range",
+            "500",
+            "-o",
+            "json",
+        ]
+    }
+
+    /// CONTROL, and the reason this module exists at all. An earlier investigation of this
+    /// ticket used `--location-name` (a PDF header display override) instead of `--site` (the
+    /// row selector), so the CSV was never loaded, both runs were plain no-CSV runs, and they
+    /// matched — which looked exactly like "the mode is inert". Any test that compares two
+    /// location runs must first prove the location file changes the answer at all.
+    #[test]
+    fn the_location_csv_actually_reaches_the_atmosphere() {
+        let csv = location_csv("reaches_atmosphere", "24.90");
+        let csv = csv.to_str().expect("utf-8 path");
+
+        let mut with_csv = base();
+        with_csv.extend_from_slice(&["--location", csv, "--site", "TestSite"]);
+
+        let without = impact_velocity(&base());
+        let with = impact_velocity(&with_csv);
+
+        assert!(
+            (without - with).abs() > 1.0,
+            "the location CSV changed nothing ({without} vs {with} fps) — the fixture is not \
+             actually loading, and every comparison below would be vacuous"
+        );
+    }
+
+    /// The declared mode reaches the CSV-supplied value, and in the correct direction: reading
+    /// 24.90 inHg at 5000 ft as a sea-level altimeter setting reduces it to a THINNER station
+    /// pressure than taking it as station pressure directly, so drag falls and the projectile
+    /// retains more velocity.
+    #[test]
+    fn a_cli_pressure_mode_applies_to_a_csv_supplied_pressure() {
+        let csv = location_csv("mode_applies", "24.90");
+        let csv = csv.to_str().expect("utf-8 path");
+
+        let mut absolute = base();
+        absolute.extend_from_slice(&[
+            "--location",
+            csv,
+            "--site",
+            "TestSite",
+            "--pressure-type",
+            "absolute",
+        ]);
+        let mut qnh = base();
+        qnh.extend_from_slice(&[
+            "--location",
+            csv,
+            "--site",
+            "TestSite",
+            "--pressure-type",
+            "qnh",
+        ]);
+
+        let absolute = impact_velocity(&absolute);
+        let qnh = impact_velocity(&qnh);
+
+        assert!(
+            qnh > absolute,
+            "QNH should reduce the CSV pressure to a thinner station pressure and retain MORE \
+             velocity; got qnh {qnh} vs absolute {absolute}"
+        );
+        assert!(
+            (qnh - absolute).abs() > 50.0,
+            "the two modes differ by only {:.2} fps on a 5000 ft fixture — too small to \
+             distinguish an applied mode from an ignored one",
+            (qnh - absolute).abs()
+        );
+    }
+
+    /// Omitting the mode must equal declaring `absolute`, so a CSV run without the flag is
+    /// unchanged from before `--pressure-type` existed.
+    #[test]
+    fn omitting_the_mode_matches_absolute_on_a_csv_pressure() {
+        let csv = location_csv("omitted_matches_absolute", "24.90");
+        let csv = csv.to_str().expect("utf-8 path");
+
+        let mut omitted = base();
+        omitted.extend_from_slice(&["--location", csv, "--site", "TestSite"]);
+        let mut absolute = base();
+        absolute.extend_from_slice(&[
+            "--location",
+            csv,
+            "--site",
+            "TestSite",
+            "--pressure-type",
+            "absolute",
+        ]);
+
+        assert_eq!(
+            impact_velocity(&omitted),
+            impact_velocity(&absolute),
+            "an omitted --pressure-type must be exactly `absolute` on a CSV pressure too"
+        );
+    }
+}

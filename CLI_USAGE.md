@@ -303,6 +303,24 @@ An omitted `--pressure` is unaffected by `--pressure-type`: the sea-level standa
 
 Available on `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, and `profile save`. **`profile save` records the mode but `--saved-profile` does not apply it to a solve.** The field round-trips through the profile FILE, not into the trajectory: `trajectory --saved-profile` deliberately does not inherit a stored pressure mode, because it does not load the stored pressure VALUE either, and a mode applied to a pressure it does not describe is silently wrong — the same reasoning as the density-altitude section below. Wiring the profile's atmosphere fields as a set is the follow-up (MBA-1417) that would make it live. Profiles saved before this flag existed omit the key and load as `absolute`.
 
+**Which pressure the mode describes (MBA-1421).** A `--pressure-type` you type on the command
+line describes **whatever pressure that run actually uses**, including one supplied by a
+`--location` CSV's `PRESSURE` column. There is exactly one pressure in the run for it to
+describe, and the mode is your present-tense declaration about it:
+
+```bash
+# 24.90 inHg in the CSV, read as a sea-level altimeter setting and reduced to station pressure
+ballistics trajectory ... --location sites.csv --site TestSite --pressure-type qnh
+```
+
+That is the opposite of how a profile-STORED mode behaves, and deliberately so. A stored mode
+describes the value the profile stored alongside it; applying it to a different pressure is the
+silent-error case 0.29.0 fixed. A typed mode has no other value it could be describing.
+
+Note the row selector is **`--site <NAME>`**, not `--location-name` (which only overrides the
+location string printed on a PDF header). `--location` without `--site` currently loads nothing,
+silently — tracked as MBA-1425.
+
 **Not yet available** on `estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, or `compare` — these subcommands still treat `--pressure` as absolute station pressure only. This is a tracked follow-up, not an oversight.
 
 **WASM:** pass `--pressure-type <absolute|qnh>` (and `--zero-pressure-type` for the auto-zero override) as a terminal argument to `trajectory`; behavior matches native exactly (same reduction formula, same Authoritative-constructor bypass of the legacy default-sentinel heuristic).

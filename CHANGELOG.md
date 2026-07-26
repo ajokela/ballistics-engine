@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Pinned what `--pressure-type` means for a `--location` CSV pressure** (MBA-1421). No
+  behaviour change: a mode typed on the command line already applied to a CSV-supplied pressure,
+  which is the defensible reading — unlike a profile-stored mode (which describes the value the
+  profile stored alongside it), a typed mode has exactly one pressure in the run to describe.
+  That is now covered by tests and stated in CLI_USAGE instead of being an accident of
+  implementation. Note the CSV row selector is `--site`, not `--location-name`.
 - **Docs and comments that described behaviour the code does not have** (MBA-1420). The QNH
   section of CLI_USAGE said a saved profile's `pressure_reference` "round-trips with the
   profile", which oversold it: the field round-trips through the profile file but is never
