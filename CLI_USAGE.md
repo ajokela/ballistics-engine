@@ -1281,29 +1281,44 @@ Output provides:
 
 Hornady and Kestrel 4DOF treat the zero angle as the *portable* quantity: capture it once
 (from this command's own `zero_angle_degrees` output, or from `trajectory`'s auto-zero echo
-below), then recover the zero range it implies later — on a different day, under different
-conditions — without re-solving from a target distance. `--from-angle <DEGREES>` (MBA-1402)
-does exactly that: it is the exact inverse of the default `--target-distance` mode, running
-the trajectory at the given bore angle and locating the FAR line-of-sight crossing (a
-rifle sighted above the bore crosses a level line of sight twice on a rising shot; "zero
-range" always means the far, descending crossing, never the near, ascending one).
+below), then recover the zero range(s) it implies later — on a different day, under
+different conditions — without re-solving from a target distance. `--from-angle <DEGREES>`
+(MBA-1402) does this by running the trajectory at the given bore angle and reporting BOTH
+line-of-sight crossings it finds.
+
+**This is *not* the exact inverse of the default `--target-distance` mode.** A rifle sighted
+above the bore generally crosses a level line of sight TWICE on a rising shot: once
+ascending, close to the muzzle (the near zero), and once descending past the apex (the far
+zero). Both are equally real zero ranges for the *same* bore angle — this is the classic
+25/300-yard battle-zero relationship: a rifle zeroed at 25 yd is, for that same bore angle,
+also zeroed again around 300 yd. `--target-distance`'s forward solve returns whichever root
+matches the distance you asked it to hit — the near root for a short/flat zero like 25 or 50
+yd, the far root for a conventional 100+ yd zero — so `--from-angle` cannot know in advance
+which one you mean and reports both instead.
 
 `--from-angle` and `--target-distance` are mutually exclusive — supply exactly one:
 
 ```bash
 # Solve the angle for a 200-yard zero...
 ./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 200
-# ... then, later, recover the range that same stored angle (0.0997°) implies:
+# ... then, later, recover the range(s) that same stored angle (0.0997°) implies. At a
+# conventional 200 yd zero the near crossing sits far enough forward that the trajectory
+# never dips back below the line of sight before it, so only the far crossing is found here:
 ./ballistics zero -v 2700 -b 0.475 -m 168 -d 0.308 --from-angle 0.0997
 ```
 
-`--output json`/`--output csv` add a `zero_range` value (display units) alongside the
-`zero_angle_degrees`/`zero_angle_moa`/`zero_angle_mrad` echo of the angle you supplied;
-`sight_adjustment_moa`, `max_ordinate`, and `point_blank_range` are computed the same way as
-the forward mode, referenced against the solved range. Round-trip precision follows from the
-forward solver's own convergence granularity — well under 1% at typical zero distances, with
-the shortest/near-tangent zeros (very flat trajectories, e.g. a 100 yd zero for a high-BC
-load) at the loose end of that range.
+`--output table` prints a "Near Zero"/"Far Zero" line for each crossing, or "not within the
+solved range" when that crossing doesn't occur (e.g. a short/shallow angle whose far crossing
+lies beyond the solve envelope). `--output json`/`--output csv` add `near_zero_range` and
+`far_zero_range` values (display units), each present only when that crossing was found, plus
+a `zero_range` value kept for continuity (the far crossing when present, else the near one) —
+alongside the `zero_angle_degrees`/`zero_angle_moa`/`zero_angle_mrad` echo of the angle you
+supplied. `sight_adjustment_moa`, `max_ordinate`, and `point_blank_range` are computed the
+same way as the forward mode, referenced against that same `zero_range` value. Round-trip
+precision — recovering the ORIGINAL distance as one of the two reported crossings — follows
+from the forward solver's own convergence granularity: well under 1% at typical zero
+distances, with the shortest/near-tangent zeros (very flat trajectories, e.g. a 100 yd zero
+for a high-BC load) at the loose end of that range.
 
 ### Load Comparison (`compare`)
 
@@ -1778,7 +1793,7 @@ Find the effective muzzle velocity that produces a measured drop at a known rang
 | --mass | Bullet mass | Required |
 | --diameter | Bullet diameter | Required |
 | --chrono-velocity | Chronograph velocity for comparison | None |
-| --chrono-distance | Distance `--chrono-velocity` was measured at, downrange of the muzzle (ft/m). Nonzero back-solves the true muzzle velocity via the real forward drag model (secant iteration); zero/absent is an exact no-op. Valid range 1-100 ft / 0.3-30 m; requires `--chrono-velocity` | None (no-op) |
+| --chrono-distance | Distance `--chrono-velocity` was measured at, downrange of the muzzle (ft/m). Nonzero back-solves the true muzzle velocity via the real forward drag model (secant iteration); zero/absent is an exact no-op. Valid range 1-98 ft / 0.3-30 m (100 ft is out of range); requires `--chrono-velocity` | None (no-op) |
 | --zero-range | Zero range | 100 yd/m |
 | --sight-height | Sight height above bore | 2.0 in/50mm |
 | --bullet-length | Bullet length (for BC5D lookup) | Auto-calculated |
@@ -2348,6 +2363,11 @@ a matching `zero_angle_degrees,<value>,degrees` row under the same condition; th
 summary adds a `Zero Angle: <value>°` line. Every surface is additive: with auto-zero absent,
 output is byte-identical to before this field existed.
 
+**Note:** `--auto-zero` itself is not a new flag. This means every existing `--auto-zero`
+invocation gains a new table line / JSON key / CSV row / WASM banner term as of this
+release, on a flag that predates it — anything already parsing `trajectory --auto-zero`
+output (scripts, the WASM banner text, downstream bindings) should be updated to expect it.
+
 **WASM `-o json`** (browser/`ballistics.sh` interface) uses a different, already
 self-describing shape — `range_yards`/`drop_inches`/`drift_inches` (or the `_meters`/`_cm`
 metric equivalents) instead of bare `x`/`y`/`z` — but until MBA-1315 it still left the sign
@@ -2583,7 +2603,7 @@ BC5D (5-Dimensional BC Correction) tables provide ML-derived corrections for imp
 | -m, --mass | Bullet mass | Required | grains | grams |
 | -d, --diameter | Bullet diameter | Required | inches | mm |
 | --chrono-velocity | Chronograph velocity for comparison | None | fps | m/s |
-| --chrono-distance | Screen distance from the muzzle for `--chrono-velocity`; nonzero back-solves true muzzle velocity (requires `--chrono-velocity`; range 1-100 / 0.3-30) | None (no-op) | feet | meters |
+| --chrono-distance | Screen distance from the muzzle for `--chrono-velocity`; nonzero back-solves true muzzle velocity (requires `--chrono-velocity`; range 1-98 / 0.3-30) | None (no-op) | feet | meters |
 | --zero-range | Zero range | 100 | yards | meters |
 | --sight-height | Sight height above bore | 2.0 | inches | mm |
 | --bullet-length | Bullet length (for BC5D lookup) | auto | inches | mm |

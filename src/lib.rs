@@ -25,7 +25,8 @@ pub use cli_api::{
     run_monte_carlo_with_wind_and_direction_std_dev_seeded, AtmosphericConditions,
     BallisticInputs, BallisticsError, BcEstimate, BcFitMode, BcReferenceStandard,
     MonteCarloParams, MonteCarloResults, TrajectoryPoint, TrajectoryResult, TrajectorySolver,
-    WindConditions, DEFAULT_HIT_RADIUS_M, MAX_TRAJECTORY_POINTS, TARGET_NOT_REACHED_SENTINEL_M,
+    WindConditions, ZeroCrossings, DEFAULT_HIT_RADIUS_M, MAX_TRAJECTORY_POINTS,
+    TARGET_NOT_REACHED_SENTINEL_M,
 };
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;

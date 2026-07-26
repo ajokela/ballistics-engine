@@ -212,6 +212,60 @@ fn range_table_drop_and_wind_adj_values_differ_by_unit_ratio_when_axes_diverge()
     );
 }
 
+// ---------------------------------------------------------------------------
+// Tier 2 whole-branch review, C1: `--adjustment-unit clicks --windage-unit <angle>` must
+// print the WINDAGE axis's own angular value in the Wind/drift column, not the elevation
+// axis's whole-click count. `windage_click` is resolved whenever the ELEVATION axis is
+// `clicks` (see `resolve_click_values`'s precondition), independent of what the windage
+// axis's own unit is -- range-table and compare both missed the guard the PDF dope card
+// already had for this. Proven by an EXACT match against a pure `--adjustment-unit moa`
+// run: the Wind/drift column math never reads the elevation axis, so if the guard is
+// correctly wired, "clicks elevation + moa windage" and "moa elevation + moa windage" must
+// produce bit-identical windage numbers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn range_table_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
+    let base = [
+        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
+        "--zero-distance", "100", "--end", "300",
+        "--wind-speed", "10", "--wind-direction", "90",
+        "-o", "json",
+    ];
+    let clicks_moa = run(&[
+        &base[..],
+        &[
+            "--adjustment-unit", "clicks",
+            "--elevation-click-value", "0.1mil",
+            "--windage-unit", "moa",
+        ],
+    ]
+    .concat());
+    let moa_only = run(&[&base[..], &["--adjustment-unit", "moa"]].concat());
+    assert!(clicks_moa.status.success(), "{}", stderr(&clicks_moa));
+    assert!(moa_only.status.success(), "{}", stderr(&moa_only));
+
+    let cm: serde_json::Value = serde_json::from_str(&stdout(&clicks_moa)).unwrap();
+    let mo: serde_json::Value = serde_json::from_str(&stdout(&moa_only)).unwrap();
+    let cm_rows = cm["data"].as_array().unwrap();
+    let mo_rows = mo["data"].as_array().unwrap();
+    assert_eq!(cm_rows.len(), mo_rows.len());
+
+    let mut saw_nonzero_wind = false;
+    for (c, m) in cm_rows.iter().zip(mo_rows.iter()) {
+        let (c_wind, m_wind) = (c["wind_adj"].as_f64().unwrap(), m["wind_adj"].as_f64().unwrap());
+        assert!(
+            (c_wind - m_wind).abs() < 1e-9,
+            "clicks-elevation/moa-windage wind_adj={c_wind} must equal pure-moa wind_adj={m_wind} \
+             (the old bug printed the 0.1mil elevation click count here instead)"
+        );
+        if m_wind.abs() > 1e-6 {
+            saw_nonzero_wind = true;
+        }
+    }
+    assert!(saw_nonzero_wind, "sanity: at least one row must have nonzero drift");
+}
+
 #[test]
 fn compare_json_carries_independent_elevation_and_windage_units() {
     let out = run(&[
@@ -228,6 +282,56 @@ fn compare_json_carries_independent_elevation_and_windage_units() {
     assert_eq!(units["adjustment"], "MIL");
     assert_eq!(units["windage_adjustment"], "MOA");
     assert_ne!(units["adjustment"], units["windage_adjustment"]);
+}
+
+#[test]
+fn compare_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
+    let base = [
+        "compare",
+        "--load", "A:g1:0.5:168:2700",
+        "--load", "B:g1:0.45:175:2650",
+        "--zero-distance", "100", "--end", "300",
+        "-o", "json",
+    ];
+    let clicks_moa = run(&[
+        &base[..],
+        &[
+            "--adjustment-unit", "clicks",
+            "--elevation-click-value", "0.1mil",
+            "--windage-unit", "moa",
+        ],
+    ]
+    .concat());
+    let moa_only = run(&[&base[..], &["--adjustment-unit", "moa"]].concat());
+    assert!(clicks_moa.status.success(), "{}", stderr(&clicks_moa));
+    assert!(moa_only.status.success(), "{}", stderr(&moa_only));
+
+    let cm: serde_json::Value = serde_json::from_str(&stdout(&clicks_moa)).unwrap();
+    let mo: serde_json::Value = serde_json::from_str(&stdout(&moa_only)).unwrap();
+    let cm_rows = cm["compare"]["rows"].as_array().unwrap();
+    let mo_rows = mo["compare"]["rows"].as_array().unwrap();
+    assert_eq!(cm_rows.len(), mo_rows.len());
+
+    let mut saw_nonzero_wind = false;
+    for (c_row, m_row) in cm_rows.iter().zip(mo_rows.iter()) {
+        let c_loads = c_row["loads"].as_array().unwrap();
+        let m_loads = m_row["loads"].as_array().unwrap();
+        assert_eq!(c_loads.len(), m_loads.len());
+        for (c, m) in c_loads.iter().zip(m_loads.iter()) {
+            let (c_drift, m_drift) =
+                (c["drift_adj"].as_f64().unwrap(), m["drift_adj"].as_f64().unwrap());
+            assert!(
+                (c_drift - m_drift).abs() < 1e-9,
+                "clicks-elevation/moa-windage drift_adj={c_drift} must equal pure-moa \
+                 drift_adj={m_drift} (the old bug printed the 0.1mil elevation click count \
+                 here instead) -- Tier 2 review C1"
+            );
+            if m_drift.abs() > 1e-6 {
+                saw_nonzero_wind = true;
+            }
+        }
+    }
+    assert!(saw_nonzero_wind, "sanity: at least one row must have nonzero drift");
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +409,65 @@ fn compare_default_is_byte_identical_to_pre_mba_1410() {
     assert!(no_flag.status.success() && explicit_mil.status.success() && explicit_both.status.success());
     assert_eq!(stdout(&no_flag), stdout(&explicit_mil));
     assert_eq!(stdout(&no_flag), stdout(&explicit_both));
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2 whole-branch review, I2: the table/CSV byte-identity tests above never exercised
+// this bug -- it only affected JSON. `range-table`'s "windage_unit" and `compare`'s
+// "windage_adjustment" keys were serialized unconditionally, so default-path JSON (no
+// --windage-unit) differed from a pre-MBA-1410 merge base by gaining a key nothing asked
+// for. MBA-1402 (`solved_zero_angle_deg`) solved the identical shape of problem with
+// `skip_serializing_if`; these two must behave the same way -- present only when
+// --windage-unit actually diverges from the elevation axis, absent (not `null`) otherwise.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn range_table_json_default_path_is_byte_identical_without_windage_unit() {
+    let base = [
+        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
+        "--zero-distance", "100", "--end", "300", "-o", "json",
+    ];
+    let no_flag = run(&base);
+    let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
+    // --windage-unit mil explicitly matches the (fallback) elevation axis -- not a
+    // divergence, so this must ALSO be byte-identical, not merely "close".
+    let explicit_windage_mil = run(&[&base[..], &["--windage-unit", "mil"]].concat());
+    assert!(no_flag.status.success(), "{}", stderr(&no_flag));
+    assert!(explicit_mil.status.success(), "{}", stderr(&explicit_mil));
+    assert!(explicit_windage_mil.status.success(), "{}", stderr(&explicit_windage_mil));
+    assert_eq!(stdout(&no_flag), stdout(&explicit_mil));
+    assert_eq!(stdout(&no_flag), stdout(&explicit_windage_mil));
+
+    let v: serde_json::Value = serde_json::from_str(&stdout(&no_flag)).expect("json");
+    assert!(
+        v.as_object().unwrap().get("windage_unit").is_none(),
+        "default-path range-table JSON must not gain a \"windage_unit\" key: {v}"
+    );
+}
+
+#[test]
+fn compare_json_default_path_is_byte_identical_without_windage_unit() {
+    let base = [
+        "compare",
+        "--load", "A:g1:0.5:168:2700",
+        "--load", "B:g1:0.45:175:2650",
+        "--zero-distance", "100", "--end", "300", "-o", "json",
+    ];
+    let no_flag = run(&base);
+    let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
+    let explicit_windage_mil = run(&[&base[..], &["--windage-unit", "mil"]].concat());
+    assert!(no_flag.status.success(), "{}", stderr(&no_flag));
+    assert!(explicit_mil.status.success(), "{}", stderr(&explicit_mil));
+    assert!(explicit_windage_mil.status.success(), "{}", stderr(&explicit_windage_mil));
+    assert_eq!(stdout(&no_flag), stdout(&explicit_mil));
+    assert_eq!(stdout(&no_flag), stdout(&explicit_windage_mil));
+
+    let v: serde_json::Value = serde_json::from_str(&stdout(&no_flag)).expect("json");
+    let units = v["compare"]["units"].as_object().unwrap();
+    assert!(
+        units.get("windage_adjustment").is_none(),
+        "default-path compare JSON must not gain a \"windage_adjustment\" key: {v}"
+    );
 }
 
 // ---------------------------------------------------------------------------
