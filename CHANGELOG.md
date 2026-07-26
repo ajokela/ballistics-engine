@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MBA-1356), so it is fixed structurally and pinned by a cross-entry-point parity test.
 
 ### Added
+- **`ballistics drag-curve`** (MBA-1424) prints a built-in reference drag function as
+  `(Mach, Cd)` data in table, CSV, or JSON form, for all nine models (G1/G2/G5/G6/G7/G8/GI/GS/
+  RA4). Points come out verbatim from the table — no resampling — so a consumer charts exactly
+  what the solver interpolates rather than a re-vendored copy that drifts. Note the tables do not
+  share a Mach domain: most run to Mach 5, while GS and RA4 stop at Mach 4. Library callers can
+  use `drag::reference_drag_table`. These are the public-domain Aberdeen/BRL functions as
+  tabulated in McCoy, plus the British RA 1929 function.
 - **`trajectory --with-drag-coefficient`** (MBA-1423) adds a `drag_coefficient` key to each
   point of `--full` JSON. This is the projectile's *own* Cd — the reference-table value scaled
   by the form factor `SD / BC` — not the G-model curve, which would be identical for every

@@ -2259,6 +2259,27 @@ enum Commands {
         action: ProfileAction,
     },
 
+    /// Print a built-in reference drag curve as (Mach, Cd) data (MBA-1424)
+    ///
+    /// Emits the standard drag function the engine itself interpolates, so a chart or an audit
+    /// can use the engine's numbers rather than a re-vendored copy that drifts from them.
+    ///
+    /// This is the REFERENCE curve for the model's standard projectile, not the effective Cd a
+    /// particular bullet flew — for that, see `trajectory --with-drag-coefficient`, which is
+    /// form-factor scaled and shows segmented-BC band steps.
+    ///
+    /// The tables do not share a Mach domain: most run to Mach 5, while GS and RA4 stop at
+    /// Mach 4. The output carries whatever the table actually holds; it is not resampled.
+    DragCurve {
+        /// Drag model to print (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
+        #[arg(long, default_value = "g7")]
+        drag_model: DragModel,
+
+        /// Output format: table (default), csv, or json
+        #[arg(short, long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -9183,6 +9204,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     eprintln!("Profile '{}' deleted.", name);
                 }
             }
+        }
+
+        Commands::DragCurve { drag_model, output } => {
+            run_drag_curve(drag_model, output)?;
         }
 
         Commands::Completions { shell } => {
@@ -17907,4 +17932,71 @@ mod dsf_cli_tests {
         assert_eq!(y, 1.0);
         assert_eq!(v, 800.0);
     }
+}
+
+/// Print one built-in reference drag curve as `(Mach, Cd)` data (MBA-1424).
+///
+/// The engine already carries these tables; this hands them back so a consumer charting drag
+/// does not have to re-vendor the numbers and then drift from the engine as tables are refined.
+/// Emitted verbatim from the table — no resampling, no interpolation onto a uniform grid — so
+/// what you plot is exactly what the solver interpolates.
+fn run_drag_curve(
+    drag_model: DragModel,
+    output: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let table = ballistics_engine::drag::reference_drag_table(&drag_model);
+    let points: Vec<(f64, f64)> = table
+        .mach_values
+        .iter()
+        .copied()
+        .zip(table.cd_values.iter().copied())
+        .collect();
+
+    match output {
+        OutputFormat::Json => {
+            let document = serde_json::json!({
+                "drag_model": drag_model.to_string(),
+                "point_count": points.len(),
+                // The domain is per-table, not a constant: GS and RA4 stop at Mach 4 while the
+                // others run to Mach 5. Stated explicitly so a consumer does not assume one.
+                "mach_min": points.first().map(|p| p.0),
+                "mach_max": points.last().map(|p| p.0),
+                "source": "Aberdeen/BRL reference functions as tabulated in McCoy, Modern \
+                           Exterior Ballistics (RA4: British RA 1929). Public domain.",
+                "points": points
+                    .iter()
+                    .map(|(mach, cd)| serde_json::json!({"mach": mach, "cd": cd}))
+                    .collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&document)?);
+        }
+        OutputFormat::Csv => {
+            println!("mach,cd");
+            for (mach, cd) in &points {
+                println!("{mach},{cd}");
+            }
+        }
+        OutputFormat::Table => {
+            println!("{} reference drag curve", drag_model.to_string().to_uppercase());
+            println!(
+                "{} points, Mach {:.2} to {:.2}",
+                points.len(),
+                points.first().map(|p| p.0).unwrap_or(0.0),
+                points.last().map(|p| p.0).unwrap_or(0.0)
+            );
+            println!();
+            println!("{:>8}  {:>8}", "Mach", "Cd");
+            println!("{:->8}  {:->8}", "", "");
+            for (mach, cd) in &points {
+                println!("{mach:>8.3}  {cd:>8.4}");
+            }
+        }
+        OutputFormat::Pdf => {
+            return Err(
+                "drag-curve has no PDF form; use -o table, -o csv, or -o json".into(),
+            );
+        }
+    }
+
+    Ok(())
 }
