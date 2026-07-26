@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MBA-1356), so it is fixed structurally and pinned by a cross-entry-point parity test.
 
 ### Added
+- **`trajectory --saved-profile` now loads a profile's atmosphere** (MBA-1417). `profile save` has
+  always stored temperature, pressure, humidity and altitude — and since 0.29.0 `pressure_reference`
+  and `density_altitude` — but the trajectory path loaded none of them, so a profile carried its
+  ballistics and silently dropped its conditions. They now load as a set, with per-value precedence
+  CLI flag > `--location` CSV > profile > standard. **If you have profiles that stored a
+  non-standard atmosphere, runs against them will change** — that is the fix, but re-baseline
+  before relying on it. Profiles that never set an atmosphere are byte-identical, pinned by a test.
+  The stored pressure mode applies only when the profile's own pressure value is in use, and a
+  stored density altitude only when the run supplies no pressure or altitude of its own.
 - **`--pressure-type` now works on every subcommand that accepts `--pressure`** (MBA-1416):
   `estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`,
   `stability`, `range-table` and `compare`. These ten previously accepted a pressure and silently

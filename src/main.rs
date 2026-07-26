@@ -3602,6 +3602,19 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
 }
 
 /// Get f64 value from HashMap, trying multiple key names
+/// Whether a location CSV actually supplied one of these columns as a parseable number.
+///
+/// `csv_get_f64` collapses "absent" and "present" into one value, which is fine for reading a
+/// number but not for deciding PROVENANCE. MBA-1417 needs provenance: a saved profile's pressure
+/// mode may only be applied when the profile's pressure VALUE is the one in use, so it has to
+/// distinguish "the CSV gave a pressure" from "the CSV gave nothing and we fell back".
+fn csv_has(map: &HashMap<String, String>, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        map.get(&key.to_uppercase())
+            .is_some_and(|val| val.parse::<f64>().is_ok())
+    })
+}
+
 fn csv_get_f64(map: &HashMap<String, String>, keys: &[&str], default: f64) -> f64 {
     for key in keys {
         if let Some(val) = map.get(&key.to_uppercase()) {
@@ -4366,13 +4379,10 @@ fn bc_reference_profile_field(value: BcReferenceStandard) -> Option<String> {
 /// ("absolute", "qnh"), case-insensitively. `None`/empty defaults to `Absolute` -- byte-
 /// identical to every profile saved before this field existed.
 ///
-/// Currently unused at the solve sites: `trajectory --saved-profile` deliberately does NOT
-/// inherit a stored pressure mode, because it does not load the stored pressure VALUE either
-/// and a mode applied to someone else's value is silently wrong (see the `final_pressure_type`
-/// comment). `profile save` still records the field, and its round-trip tests still exercise
-/// this parser, so it is kept rather than deleted -- wiring the profile atmosphere fields as a
-/// set is the follow-up (MBA-1417) that makes it live again.
-#[allow(dead_code)]
+/// Live at the solve site since MBA-1417 wired the profile atmosphere as a set. It is applied
+/// ONLY when the profile's pressure VALUE is the one the run is using: an explicit --pressure or
+/// a --location CSV pressure means the stored mode describes some other reading, and inheriting
+/// it there is the silent 77 fps error MBA-1397 hit.
 fn parse_pressure_reference_profile_field(
     value: Option<&str>,
 ) -> Result<PressureReferenceMode, String> {
@@ -5508,12 +5518,35 @@ fn main() -> Result<(), Box<dyn Error>> {
             // standard atmosphere for --units (MBA-960/961).
             let std_temperature = UnitConverter::resolve_temperature(None, cli.units)?;
             let std_pressure = UnitConverter::resolve_pressure(None, cli.units)?;
+
+            // MBA-1417: a saved profile's atmosphere, wired as a SET rather than field by field.
+            //
+            // Precedence per VALUE is unchanged in spirit: explicit CLI flag > --location CSV >
+            // saved profile > built-in standard. The profile simply becomes the innermost
+            // fallback instead of the ISA default, so `--saved-profile` finally carries the
+            // conditions it has been storing all along. Values arrive already converted to
+            // --units by `load_profile_for_units`.
+            //
+            // The QUALIFIERS are the part that needs care, and the reason this is a set. A
+            // pressure MODE describes one specific pressure VALUE, so it may only be inherited
+            // when that value is the one actually in use. Inheriting a mode apart from its value
+            // is exactly the 77 fps silent error MBA-1397 hit: a profile saved with
+            // --pressure-type qnh applied its mode to a CLI absolute reading, giving 2299.49 fps
+            // instead of 2222.86 at 300 yd.
+            let saved_atmo = saved_profile_data.as_ref();
+            let profile_supplied_pressure = pressure.is_none()
+                && !csv_has(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"])
+                && saved_atmo.is_some();
             let final_temperature = match temperature {
                 Some(t) => UnitConverter::resolve_temperature(Some(t), cli.units)?,
                 None => csv_get_f64(
                     &location_data,
                     &["TARGET_TEMP", "TEMPERATURE", "TEMP"],
-                    csv_get_f64(&profile_data, &["ZERO_TEMP"], std_temperature),
+                    csv_get_f64(
+                        &profile_data,
+                        &["ZERO_TEMP"],
+                        saved_atmo.map_or(std_temperature, |p| p.temperature),
+                    ),
                 ),
             };
             let final_pressure = match pressure {
@@ -5521,7 +5554,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => csv_get_f64(
                     &location_data,
                     &["PRESSURE", "PRESSURE(HPA OR INHG)"],
-                    std_pressure,
+                    saved_atmo.map_or(std_pressure, |p| p.pressure),
                 ),
             };
             // MBA-1397 + MBA-1366 review: a pressure MODE describes one specific pressure
@@ -5532,13 +5565,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             // used — a CLI-supplied absolute station reading got silently reduced a second
             // time. Measured at 300 yd: 2299.49 fps inherited vs 2222.86 fps correct, a 77 fps
             // error from a flag the user set once, on a different day, for a different value.
-            // Until the profile atmosphere fields are wired as a set, the mode stays with its
-            // value: only an explicit --pressure-type is honored here.
-            let final_pressure_type = pressure_type.unwrap_or(PressureReferenceMode::Absolute);
+            // MBA-1417 wires the atmosphere as a set, so the stored mode is live again — but
+            // ONLY when the profile's pressure value is the one in use. An explicit
+            // --pressure-type still wins; a CLI or CSV pressure means the stored mode describes
+            // some other reading and is ignored, which is what keeps the bug above fixed.
+            let final_pressure_type = match pressure_type {
+                Some(mode) => mode,
+                None if profile_supplied_pressure => parse_pressure_reference_profile_field(
+                    saved_atmo.and_then(|p| p.pressure_reference.as_deref()),
+                )?,
+                None => PressureReferenceMode::Absolute,
+            };
             let final_humidity = if humidity != 50.0 {
                 humidity
             } else {
-                csv_get_f64(&location_data, &["HUMIDITY"], 50.0)
+                csv_get_f64(
+                    &location_data,
+                    &["HUMIDITY"],
+                    saved_atmo.map_or(50.0, |p| p.humidity),
+                )
             };
             let final_altitude = if altitude != 0.0 {
                 altitude
@@ -5546,7 +5591,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 csv_get_f64(
                     &location_data,
                     &["ALTITUDE", "ALT"],
-                    csv_get_f64(&profile_data, &["ZERO_ALT"], 0.0),
+                    csv_get_f64(
+                        &profile_data,
+                        &["ZERO_ALT"],
+                        saved_atmo.map_or(0.0, |p| p.altitude),
+                    ),
                 )
             };
 
@@ -5557,11 +5606,30 @@ fn main() -> Result<(), Box<dyn Error>> {
             // `atmosphere::resolve_atmosphere_for_density_altitude`'s doc comment for the
             // back-solve). Values here are in DISPLAY units (feet/meters per --units), like
             // final_altitude above; the actual back-solve runs in metric further down.
+            //
+            // MBA-1417: a profile-stored density_altitude is the third source, and it is the
+            // most invasive qualifier of the three, because DA does not merely describe a
+            // pressure — it SUPERSEDES the altitude and pressure entirely. So it is honored only
+            // when the run has no present-tense pressure or altitude of its own to supersede: no
+            // explicit --pressure/--altitude, and nothing from a --location CSV. Letting a DA
+            // stored on a different day quietly override a pressure the user just typed would be
+            // the same class of error as inheriting a pressure mode apart from its value, with a
+            // larger blast radius.
             let final_density_altitude: Option<f64> = match density_altitude {
                 Some(da) => Some(da),
                 None => {
                     let da_csv = csv_get_f64(&location_data, &["DA", "DENSITY_ALTITUDE"], f64::NAN);
-                    (!da_csv.is_nan()).then_some(da_csv)
+                    if !da_csv.is_nan() {
+                        Some(da_csv)
+                    } else {
+                        let run_supplied_its_own_atmosphere = pressure.is_some()
+                            || altitude != 0.0
+                            || csv_has(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"])
+                            || csv_has(&location_data, &["ALTITUDE", "ALT"]);
+                        saved_atmo
+                            .filter(|_| !run_supplied_its_own_atmosphere)
+                            .and_then(|p| p.density_altitude)
+                    }
                 }
             };
             if final_density_altitude.is_some() && (pressure.is_some() || pressure_type.is_some())
