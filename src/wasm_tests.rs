@@ -2048,6 +2048,216 @@ Impact Velocity: 2510 fps\n";
     }
 
     // -----------------------------------------------------------------------------
+    // MBA-1372: `recoil` (SAAMI free-recoil momentum balance) and `power-factor`
+    // (USPSA/IDPA/SASS rulebook pass/fail). Numeric expectations here are the SAME
+    // numbers asserted for the native CLI (see the doctests/tests in main.rs's
+    // handle_recoil/handle_power_factor coverage and CLI_USAGE.md's worked examples) --
+    // this is the WASM-parity cross-check: both front ends call into the identical
+    // `ballistics_engine::recoil`/`ballistics_engine::power_factor` core.
+    // -----------------------------------------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn test_recoil_saami_rifle_default_matches_native_worked_example() {
+        // .308 Win: 168 gr bullet, 43 gr charge, 2700 fps, 8.5 lb rifle, default
+        // --firearm-type rifle (SAAMI f=1.75). Same numbers as the native CLI's
+        // `recoil -b 168 -c 43 -v 2700 -f 8.5` smoke test.
+        let out = WasmBallistics::new()
+            .run_command("recoil -b 168 -c 43 -v 2700 -f 8.5")
+            .unwrap();
+        assert!(out.contains("saami-rifle"), "{}", out);
+        assert!(out.contains("4725.0 fps"), "{}", out); // gas velocity = 1.75 * 2700
+        assert!(out.contains("11.04 fps"), "{}", out); // recoil velocity
+        assert!(out.contains("16.09 ft-lb"), "{}", out); // recoil energy
+        assert!(out.contains("2.916 lb-s"), "{}", out); // recoil impulse
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_metric_round_trip_matches_native() {
+        // Same load as above, expressed in metric display units.
+        let out = WasmBallistics::new()
+            .run_command(
+                "--units metric recoil -b 10.89 -c 2.79 -v 823.0 -f 3.86",
+            )
+            .unwrap();
+        assert!(out.contains("1440.2 m/s") || out.contains("1440.3 m/s"), "{}", out);
+        assert!(out.contains("3.36 m/s"), "{}", out);
+        assert!(out.contains("21.8"), "{}", out); // ~21.82-21.83 J
+        assert!(out.contains("12.98"), "{}", out); // ~12.97-12.98 N-s
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_firearm_type_selects_saami_factor() {
+        let pistol = WasmBallistics::new()
+            .run_command("recoil -b 230 -c 6 -v 830 -f 2.5 --firearm-type pistol")
+            .unwrap();
+        assert!(pistol.contains("saami-pistol"), "{}", pistol);
+        assert!(pistol.contains("1245.0 fps"), "{}", pistol); // 1.50 * 830
+
+        let shotgun_long = WasmBallistics::new()
+            .run_command("recoil -b 490 -c 30 -v 1300 -f 7.5 --firearm-type shotgun-long")
+            .unwrap();
+        assert!(shotgun_long.contains("saami-shotgun-long"), "{}", shotgun_long);
+        assert!(shotgun_long.contains("1625.0 fps"), "{}", shotgun_long); // 1.25 * 1300
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_gas_velocity_overrides_take_precedence() {
+        // --gas-velocity-factor overrides --firearm-type.
+        let factor = WasmBallistics::new()
+            .run_command("recoil -b 168 -c 43 -v 2700 -f 8.5 --gas-velocity-factor 2.0")
+            .unwrap();
+        assert!(factor.contains("factor(2.000)"), "{}", factor);
+        assert!(factor.contains("5400.0 fps"), "{}", factor); // 2.0 * 2700
+
+        // --gas-velocity overrides both --gas-velocity-factor and --firearm-type, and
+        // is independent of muzzle velocity.
+        let fixed = WasmBallistics::new()
+            .run_command(
+                "recoil -b 168 -c 43 -v 2700 -f 8.5 --gas-velocity-factor 2.0 --gas-velocity 4700",
+            )
+            .unwrap();
+        assert!(fixed.contains("fixed"), "{}", fixed);
+        assert!(fixed.contains("4700.0 fps"), "{}", fixed);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_zero_charge_weight_is_bullet_only() {
+        let out = WasmBallistics::new()
+            .run_command("recoil -b 168 -c 0 -v 2700 -f 8.5")
+            .unwrap();
+        assert!(out.contains("Charge weight:       0.0 gr"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_json_fields() {
+        let out = WasmBallistics::new()
+            .run_command("recoil -b 168 -c 43 -v 2700 -f 8.5 -o json")
+            .unwrap();
+        assert!(out.contains("\"command\": \"recoil\""), "{}", out);
+        assert!(out.contains("\"gas_velocity_model\": \"saami-rifle\""), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_missing_required_flags_error() {
+        assert!(WasmBallistics::new()
+            .run_command("recoil -c 43 -v 2700 -f 8.5")
+            .is_err());
+        assert!(WasmBallistics::new()
+            .run_command("recoil -b 168 -v 2700 -f 8.5")
+            .is_err());
+        assert!(WasmBallistics::new()
+            .run_command("recoil -b 168 -c 43 -f 8.5")
+            .is_err());
+        assert!(WasmBallistics::new()
+            .run_command("recoil -b 168 -c 43 -v 2700")
+            .is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_invalid_firearm_type_rejected() {
+        assert!(WasmBallistics::new()
+            .run_command("recoil -b 168 -c 43 -v 2700 -f 8.5 --firearm-type revolver")
+            .is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_recoil_nonpositive_firearm_weight_rejected() {
+        // f64_range enforces > 0 (min 0.1), same as the native clap definition.
+        assert!(WasmBallistics::new()
+            .run_command("recoil -b 168 -c 43 -v 2700 -f 0")
+            .is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_power_factor_9mm_matches_native_worked_example() {
+        // 147 gr @ 900 fps -> raw 132.30, scored 132: passes USPSA Minor/IDPA
+        // SSP-ESP-CO, fails USPSA Major/IDPA PCC/Enhanced Revolver/CDP.
+        let out = WasmBallistics::new()
+            .run_command("power-factor -w 147 -v 900")
+            .unwrap();
+        assert!(out.contains("132.30"), "{}", out);
+        assert!(out.contains("Power factor (scored): 132"), "{}", out);
+        assert!(out.contains("USPSA     Minor                            125    PASS"), "{}", out);
+        assert!(out.contains("USPSA     Major                            165    FAIL"), "{}", out);
+        assert!(out.contains("IDPA      PCC                              135    FAIL"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_power_factor_every_boundary_both_sides() {
+        // USPSA Minor floor (125): weight 1000 makes velocity numerically equal PF.
+        let at = WasmBallistics::new()
+            .run_command("power-factor -w 1000 -v 125 --organization uspsa")
+            .unwrap();
+        assert!(at.contains("Minor                            125    PASS"), "{}", at);
+        let below = WasmBallistics::new()
+            .run_command("power-factor -w 1000 -v 124 --organization uspsa")
+            .unwrap();
+        assert!(below.contains("Minor                            125    FAIL"), "{}", below);
+
+        // SASS floor (60) and minimum velocity (400 fps) boundary, isolated from each
+        // other with a 200gr bullet (PF stays >= 60 across 399-400 fps).
+        let sass_min_v_pass = WasmBallistics::new()
+            .run_command("power-factor -w 200 -v 400 --organization sass")
+            .unwrap();
+        assert!(sass_min_v_pass.contains("PASS"), "{}", sass_min_v_pass);
+        let sass_min_v_fail = WasmBallistics::new()
+            .run_command("power-factor -w 200 -v 399 --organization sass")
+            .unwrap();
+        assert!(sass_min_v_fail.contains("FAIL"), "{}", sass_min_v_fail);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_power_factor_metric_converts_to_grains_fps_internally() {
+        // 9.526 g == 147.0 gr (9.526 / 0.06479891); 900 fps == 274.32 m/s.
+        let out = WasmBallistics::new()
+            .run_command("--units metric power-factor -w 9.526 -v 274.32")
+            .unwrap();
+        assert!(out.contains("Power factor (raw):  132."), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_power_factor_organization_filter() {
+        let out = WasmBallistics::new()
+            .run_command("power-factor -w 147 -v 900 --organization sass")
+            .unwrap();
+        assert!(out.contains("SASS"), "{}", out);
+        assert!(!out.contains("USPSA"), "{}", out);
+        assert!(!out.contains("IDPA"), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_power_factor_unknown_organization_errors() {
+        assert!(WasmBallistics::new()
+            .run_command("power-factor -w 147 -v 900 --organization xyz")
+            .is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_power_factor_json_fields() {
+        let out = WasmBallistics::new()
+            .run_command("power-factor -w 147 -v 900 -o json")
+            .unwrap();
+        assert!(out.contains("\"power_factor_scored\": 132.0"), "{}", out);
+        assert!(out.contains("\"organization\": \"SASS\""), "{}", out);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_power_factor_csv_has_no_embedded_commas_in_class_field() {
+        // Every `class` value must be CSV-safe (no literal comma) since this handler
+        // does no field quoting/escaping.
+        let out = WasmBallistics::new()
+            .run_command("power-factor -w 147 -v 900 -o csv")
+            .unwrap();
+        for line in out.lines().skip(1) {
+            assert_eq!(
+                line.split(',').count(),
+                8,
+                "row does not have exactly 8 CSV fields: {line}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------
     // MBA-1343 Phase C: `true-velocity` (single- and multi-observation truing) and
     // `monte-carlo --wez`, both sharing the native compute cores
     // (ballistics_engine::truing / ballistics_engine::wez) with renderers that

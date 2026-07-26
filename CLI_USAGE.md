@@ -1291,6 +1291,134 @@ velocity, `-v` only anchors the reported shift. `-m/--mass` (grains/grams) adds 
 energy (ft·lb / J). Output: table (default), `-o json`, or `-o csv`; PDF is not
 supported for this command.
 
+### Free Recoil (`recoil`)
+
+Free recoil energy, velocity, and impulse from SAAMI's own momentum-balance formula
+("Gun Recoil - Technical", Rev. 7/9/2018, freely downloadable from saami.org): the
+firearm's momentum is equal and opposite to the ejecta (bullet) plus propellant gas
+momentum leaving the muzzle, with the propellant gas *mass* equated to the powder
+charge weight (SAAMI's own simplifying assumption — the gas itself is hard to weigh).
+
+**Gas-velocity convention.** The propellant gas leaves the muzzle faster than the
+bullet. This command defaults to **SAAMI's own type-keyed multiplier** (`V_gas = f *
+V_muzzle`), sourced from the document's own 1929-era British ballistic testing:
+
+| `--firearm-type` | `f` |
+|---|---|
+| `rifle` (default) | 1.75 |
+| `pistol` | 1.50 |
+| `shotgun-average` | 1.50 |
+| `shotgun-long` | 1.25 |
+
+This is preferred over the popular fixed "~4700 fps for smokeless powder" rule of
+thumb quoted by some reloading references because it scales with muzzle velocity (a
+fixed constant over- or under-states gas momentum for very slow or very fast loads)
+and is keyed to firearm class the way SAAMI itself publishes it. Both escape hatches
+are still exposed: `--gas-velocity-factor <F>` overrides the SAAMI factor with your
+own ratio, and `--gas-velocity <VEL>` pins an absolute gas velocity (fps/m·s⁻¹)
+independent of muzzle velocity — e.g. to reproduce the fixed-constant convention or
+plug in a chronographed value. Precedence: `--gas-velocity` > `--gas-velocity-factor`
+> `--firearm-type`.
+
+```bash
+# .308 Win: 168 gr bullet, 43 gr charge, 2700 fps, 8.5 lb rifle
+ballistics recoil -b 168 -c 43 -v 2700 -f 8.5
+```
+
+```
+Free Recoil (SAAMI Momentum Balance)
+=====================================
+  Firearm weight:      8.50 lb
+  Bullet weight:       168.0 gr
+  Charge weight:       43.0 gr
+  Muzzle velocity:     2700.0 fps
+  Gas velocity model:  saami-rifle  (4725.0 fps)
+
+  Recoil velocity:     11.04 fps
+  Recoil energy:       16.09 ft-lb
+  Recoil impulse:      2.916 lb-s
+```
+
+Flags follow the session `--units`: bullet/charge weight in grains (imperial) or
+grams (metric); firearm weight in **pounds** (imperial) or **kilograms** (metric) —
+note this differs from bullet/charge weight's grains/grams, matching how a firearm is
+actually weighed. `-b/--bullet-weight`, `-c/--charge-weight`, `-v/--velocity`, and
+`-f/--firearm-weight` are all required (no profile integration — this is a standalone
+calculator). Output: table (default), `-o json`, or `-o csv`; PDF is not supported.
+
+### Power Factor (`power-factor`)
+
+Power factor (PF) — `bullet weight × velocity / 1000` — gates ammunition into scoring
+categories across essentially every American practical/action shooting sport. This
+command reports PF plus a per-organization pass/fail against a small, cheap-to-update
+data table of published rulebook minimums:
+
+| Organization | Class | Min PF | Velocity limit | Source |
+|---|---|---|---|---|
+| USPSA | Minor | 125 | — | USPSA Competition Rules, March 2026, Sec. 5.6 |
+| USPSA | Major | 165 | — | USPSA Competition Rules, March 2026, Sec. 5.6 |
+| IDPA | BUG | 95 | — | 2024 IDPA Rulebook, Sec. 8.3.4.5 |
+| IDPA | Stock Revolver / CCP | 105 | — | 2024 IDPA Rulebook, Sec. 8.3.4.3 |
+| IDPA | SSP / ESP / CO | 125 | — | 2024 IDPA Rulebook, Sec. 8.3.4.1 |
+| IDPA | PCC | 135 | — | 2024 IDPA Rulebook, Sec. 8.3.4.6 |
+| IDPA | Enhanced Revolver | 155 | — | 2024 IDPA Rulebook, Sec. 8.3.4.4 |
+| IDPA | CDP | 165 | — | 2024 IDPA Rulebook, Sec. 8.3.4.2 |
+| SASS | Smokeless, Pistol/Revolver | 60 | 400-1000 fps | SASS CAS Shooter's Handbook, Version 28, Jan 2026 |
+| SASS | Smokeless, Rifle | 60 | 400-1400 fps | SASS CAS Shooter's Handbook, Version 28, Jan 2026 |
+
+**Truncation.** USPSA's and IDPA's own rulebooks both say the scored PF *truncates*
+decimals rather than rounding (USPSA Sec. 5.6 Rule 36: "a result of 124.9999 is not
+125"; IDPA Sec. 8.3.4.7: "ignore numbers to the right of the decimal"). This command
+reports both `Power factor (raw)` (unrounded) and `Power factor (scored)`
+(`floor(weight × velocity / 1000)`, applied uniformly to every organization including
+SASS, whose own handbook doesn't spell out a truncation rule) — pass/fail is always
+judged against the scored value.
+
+**Boundary semantics.** Every rulebook cited above uses "meets or exceeds" / "at
+least" / "not less than" language, never a strict "greater than" — so a load landing
+*exactly on* a threshold **passes**. Every threshold here is `>=`, every velocity cap
+is inclusive (`<=`/`>=`), never a strict inequality.
+
+```bash
+# 9mm major/minor check across every organization
+ballistics power-factor -w 147 -v 900
+```
+
+```
+Power Factor
+============
+  Weight:              147.0 gr
+  Velocity:            900.0 fps
+  Power factor (raw):  132.30
+  Power factor (scored): 132
+
+  Org       Class                         Min PF    Pass      Velocity limit
+  USPSA     Minor                            125    PASS                   -
+  USPSA     Major                            165    FAIL                   -
+  IDPA      BUG                               95    PASS                   -
+  IDPA      Stock Revolver / CCP             105    PASS                   -
+  IDPA      SSP / ESP / CO                   125    PASS                   -
+  IDPA      PCC                              135    FAIL                   -
+  IDPA      Enhanced Revolver                155    FAIL                   -
+  IDPA      CDP                              165    FAIL                   -
+  SASS      Smokeless - Pistol-Revolver       60    PASS        400-1000 fps
+  SASS      Smokeless - Rifle                 60    PASS        400-1400 fps
+```
+
+```bash
+# Filter to one organization
+ballistics power-factor -w 147 -v 900 --organization sass
+```
+
+Flags follow the session `--units` (weight in grains/grams, velocity in fps/m·s⁻¹),
+but power factor is intrinsically a grains/fps quantity by every rulebook's own
+definition, so metric inputs are converted internally before the PF arithmetic runs
+— the echoed weight/velocity stay in your chosen display units. `--organization
+<uspsa|idpa|sass>` filters the table to one organization (case-insensitive); omit it
+to see all three. Output: table (default), `-o json`, or `-o csv` — the JSON/CSV
+`thresholds` rows carry `pf_pass`, `velocity_pass` (`null` when the organization has
+no velocity constraint), and the combined `pass`. PDF is not supported.
+
 ### Monte Carlo Simulation
 
 Statistical analysis with parameter variations:

@@ -13,6 +13,8 @@ use crate::cli_api::{
 use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
 use crate::moving_target::{calculate_lead, mover_ring};
+use crate::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
+use crate::recoil::{free_recoil, FirearmType, FreeRecoilInputs, GasVelocityModel, POUNDS_TO_KG};
 use crate::truing_dsf::{apply_dsf, DsfPoint, DsfTable};
 use std::cell::RefCell;
 
@@ -1016,6 +1018,8 @@ impl WasmBallistics {
             "estimate-bc" => self.handle_estimate_bc_command(&args[1..], units),
             "lead" => self.handle_lead_command(&args[1..], units),
             "powder" => self.handle_powder_command(&args[1..], units),
+            "recoil" => self.handle_recoil_command(&args[1..], units),
+            "power-factor" => self.handle_power_factor_command(&args[1..], units),
             _ => Ok(format!(
                 "Error: Unknown command '{}'\n\n{}",
                 args[0],
@@ -5412,6 +5416,481 @@ impl WasmBallistics {
         Ok(out)
     }
 
+    /// Free recoil (MBA-1372): mirrors the native `recoil` subcommand's flags exactly.
+    /// See `ballistics_engine::recoil` for the SAAMI momentum-balance math and the
+    /// gas-velocity convention (SAAMI type-keyed factor by default; `--gas-velocity` /
+    /// `--gas-velocity-factor` are the fixed/override escape hatches).
+    fn handle_recoil_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
+        let mut bullet_weight: Option<f64> = None;
+        let mut charge_weight: Option<f64> = None;
+        let mut velocity: Option<f64> = None;
+        let mut firearm_weight: Option<f64> = None;
+        let mut firearm_type_str = "rifle";
+        let mut gas_velocity_factor: Option<f64> = None;
+        let mut gas_velocity: Option<f64> = None;
+        let mut out_fmt = "table";
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-b" | "--bullet-weight" => {
+                    if i + 1 < args.len() {
+                        bullet_weight = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid bullet weight"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "-c" | "--charge-weight" => {
+                    if i + 1 < args.len() {
+                        charge_weight = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid charge weight"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "-v" | "--velocity" => {
+                    if i + 1 < args.len() {
+                        velocity = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid velocity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "-f" | "--firearm-weight" => {
+                    if i + 1 < args.len() {
+                        firearm_weight = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid firearm weight"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--firearm-type" => {
+                    if i + 1 < args.len() {
+                        firearm_type_str = args[i + 1];
+                        i += 1;
+                    }
+                }
+                "--gas-velocity-factor" => {
+                    if i + 1 < args.len() {
+                        gas_velocity_factor = Some(args[i + 1].parse().map_err(|_| {
+                            JsValue::from_str("Invalid gas velocity factor")
+                        })?);
+                        i += 1;
+                    }
+                }
+                "--gas-velocity" => {
+                    if i + 1 < args.len() {
+                        gas_velocity = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid gas velocity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "-o" | "--output" => {
+                    if i + 1 < args.len() {
+                        out_fmt = args[i + 1];
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if !matches!(out_fmt, "table" | "json" | "csv") {
+            return Err(JsValue::from_str(
+                "Invalid output format for recoil (expected table, json, or csv)",
+            ));
+        }
+
+        let bullet_weight =
+            bullet_weight.ok_or_else(|| JsValue::from_str("--bullet-weight is required"))?;
+        let charge_weight =
+            charge_weight.ok_or_else(|| JsValue::from_str("--charge-weight is required"))?;
+        let velocity = velocity.ok_or_else(|| JsValue::from_str("--velocity is required"))?;
+        let firearm_weight =
+            firearm_weight.ok_or_else(|| JsValue::from_str("--firearm-weight is required"))?;
+
+        // Same numeric ranges the native clap definition enforces (f64_range).
+        if !(0.1..=2000.0).contains(&bullet_weight) {
+            return Err(JsValue::from_str("Bullet weight must be between 0.1 and 2000"));
+        }
+        if !(0.0..=1000.0).contains(&charge_weight) {
+            return Err(JsValue::from_str("Charge weight must be between 0 and 1000"));
+        }
+        if !(1.0..=6000.0).contains(&velocity) {
+            return Err(JsValue::from_str("Velocity must be between 1 and 6000"));
+        }
+        if !(0.1..=500.0).contains(&firearm_weight) {
+            return Err(JsValue::from_str("Firearm weight must be between 0.1 and 500"));
+        }
+        if let Some(f) = gas_velocity_factor {
+            if !(0.0..=20.0).contains(&f) {
+                return Err(JsValue::from_str("Gas velocity factor must be between 0 and 20"));
+            }
+        }
+        if let Some(v) = gas_velocity {
+            if !(0.0..=20000.0).contains(&v) {
+                return Err(JsValue::from_str("Gas velocity must be between 0 and 20000"));
+            }
+        }
+
+        let firearm_type = match firearm_type_str.to_ascii_lowercase().as_str() {
+            "rifle" => FirearmType::Rifle,
+            "pistol" => FirearmType::Pistol,
+            "shotgun-average" | "shotgun" => FirearmType::ShotgunAverage,
+            "shotgun-long" => FirearmType::ShotgunLong,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid --firearm-type '{other}' (expected rifle, pistol, shotgun-average, or shotgun-long)"
+                )))
+            }
+        };
+
+        let bullet_mass_kg = match units {
+            UnitSystem::Imperial => bullet_weight * crate::constants::GRAINS_TO_KG,
+            UnitSystem::Metric => bullet_weight * 0.001, // grams -> kg
+        };
+        let charge_mass_kg = match units {
+            UnitSystem::Imperial => charge_weight * crate::constants::GRAINS_TO_KG,
+            UnitSystem::Metric => charge_weight * 0.001, // grams -> kg
+        };
+        let firearm_mass_kg = match units {
+            UnitSystem::Imperial => firearm_weight * POUNDS_TO_KG,
+            UnitSystem::Metric => firearm_weight, // already kg
+        };
+        let muzzle_velocity_mps = match units {
+            UnitSystem::Imperial => velocity * 0.3048,
+            UnitSystem::Metric => velocity,
+        };
+
+        // Precedence: --gas-velocity (absolute) > --gas-velocity-factor (override ratio)
+        // > --firearm-type (SAAMI default) -- identical to the native handler.
+        let (gas_model, gas_model_desc): (GasVelocityModel, String) = if let Some(v) = gas_velocity
+        {
+            let v_mps = match units {
+                UnitSystem::Imperial => v * 0.3048,
+                UnitSystem::Metric => v,
+            };
+            (GasVelocityModel::Fixed(v_mps), "fixed".to_string())
+        } else if let Some(f) = gas_velocity_factor {
+            (GasVelocityModel::Factor(f), format!("factor({f:.3})"))
+        } else {
+            let name = match firearm_type {
+                FirearmType::Rifle => "saami-rifle",
+                FirearmType::Pistol => "saami-pistol",
+                FirearmType::ShotgunAverage => "saami-shotgun-average",
+                FirearmType::ShotgunLong => "saami-shotgun-long",
+            };
+            (GasVelocityModel::Saami(firearm_type), name.to_string())
+        };
+        let gas_velocity_mps = gas_model.resolve_mps(muzzle_velocity_mps);
+
+        let result = free_recoil(FreeRecoilInputs {
+            bullet_mass_kg,
+            charge_mass_kg,
+            muzzle_velocity_mps,
+            firearm_mass_kg,
+            gas_velocity_mps,
+        })
+        .map_err(|e| JsValue::from_str(&e))?;
+
+        let (weight_unit, firearm_weight_unit, vel_unit, energy_unit, impulse_unit) = match units {
+            UnitSystem::Imperial => ("gr", "lb", "fps", "ft-lb", "lb-s"),
+            UnitSystem::Metric => ("g", "kg", "m/s", "J", "N-s"),
+        };
+        // 1 lbf = 4.4482216152605 N, exact by definition; used only to display the
+        // recoil impulse (a genuine N*s quantity) in pound-seconds for imperial output.
+        const LBF_TO_N: f64 = 4.4482216152605;
+        let gas_velocity_display = match units {
+            UnitSystem::Imperial => gas_velocity_mps / 0.3048,
+            UnitSystem::Metric => gas_velocity_mps,
+        };
+        let recoil_velocity_display = match units {
+            UnitSystem::Imperial => result.recoil_velocity_mps / 0.3048,
+            UnitSystem::Metric => result.recoil_velocity_mps,
+        };
+        let recoil_energy_display = match units {
+            UnitSystem::Imperial => result.recoil_energy_j * 0.737562,
+            UnitSystem::Metric => result.recoil_energy_j,
+        };
+        let impulse_display = match units {
+            UnitSystem::Imperial => result.impulse_ns / LBF_TO_N,
+            UnitSystem::Metric => result.impulse_ns,
+        };
+
+        let mut out = String::new();
+        match out_fmt {
+            "json" => {
+                let result_json = serde_json::json!({
+                    "command": "recoil",
+                    "units": match units {
+                        UnitSystem::Imperial => "imperial",
+                        UnitSystem::Metric => "metric",
+                    },
+                    "inputs": {
+                        "bullet_weight": bullet_weight,
+                        "charge_weight": charge_weight,
+                        "velocity": velocity,
+                        "firearm_weight": firearm_weight,
+                    },
+                    "gas_velocity_model": gas_model_desc,
+                    "gas_velocity": gas_velocity_display,
+                    "recoil_velocity": recoil_velocity_display,
+                    "recoil_energy": recoil_energy_display,
+                    "impulse": impulse_display,
+                });
+                out.push_str(
+                    &serde_json::to_string_pretty(&result_json)
+                        .map_err(|e| JsValue::from_str(&e.to_string()))?,
+                );
+                out.push('\n');
+            }
+            "csv" => {
+                out.push_str(&format!(
+                    "bullet_weight_{w},charge_weight_{w},velocity_{v},firearm_weight_{fw},gas_velocity_{v},recoil_velocity_{v},recoil_energy_{e},impulse_{im}\n",
+                    w = weight_unit,
+                    v = vel_unit,
+                    fw = match units { UnitSystem::Imperial => "lb", UnitSystem::Metric => "kg" },
+                    e = match units { UnitSystem::Imperial => "ftlb", UnitSystem::Metric => "j" },
+                    im = match units { UnitSystem::Imperial => "lbs", UnitSystem::Metric => "ns" },
+                ));
+                out.push_str(&format!(
+                    "{:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.3},{:.4}\n",
+                    bullet_weight,
+                    charge_weight,
+                    velocity,
+                    firearm_weight,
+                    gas_velocity_display,
+                    recoil_velocity_display,
+                    recoil_energy_display,
+                    impulse_display,
+                ));
+            }
+            _ => {
+                out.push_str("Free Recoil (SAAMI Momentum Balance)\n");
+                out.push_str("=====================================\n");
+                out.push_str(&format!(
+                    "  Firearm weight:      {:.2} {}\n",
+                    firearm_weight, firearm_weight_unit
+                ));
+                out.push_str(&format!("  Bullet weight:       {:.1} {}\n", bullet_weight, weight_unit));
+                out.push_str(&format!("  Charge weight:       {:.1} {}\n", charge_weight, weight_unit));
+                out.push_str(&format!("  Muzzle velocity:     {:.1} {}\n", velocity, vel_unit));
+                out.push_str(&format!(
+                    "  Gas velocity model:  {}  ({:.1} {})\n",
+                    gas_model_desc, gas_velocity_display, vel_unit
+                ));
+                out.push('\n');
+                out.push_str(&format!(
+                    "  Recoil velocity:     {:.2} {}\n",
+                    recoil_velocity_display, vel_unit
+                ));
+                out.push_str(&format!(
+                    "  Recoil energy:       {:.2} {}\n",
+                    recoil_energy_display, energy_unit
+                ));
+                out.push_str(&format!(
+                    "  Recoil impulse:      {:.3} {}\n",
+                    impulse_display, impulse_unit
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Power factor (MBA-1372): mirrors the native `power-factor` subcommand's flags
+    /// exactly. PF is intrinsically grains/fps by every rulebook, so weight/velocity are
+    /// converted to grains/fps regardless of `--units` before calling into
+    /// `ballistics_engine::power_factor`; echoed weight/velocity stay in display units.
+    fn handle_power_factor_command(
+        &self,
+        args: &[&str],
+        units: UnitSystem,
+    ) -> Result<String, JsValue> {
+        let mut weight: Option<f64> = None;
+        let mut velocity: Option<f64> = None;
+        let mut organization: Option<String> = None;
+        let mut out_fmt = "table";
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-w" | "--weight" => {
+                    if i + 1 < args.len() {
+                        weight = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid weight"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "-v" | "--velocity" => {
+                    if i + 1 < args.len() {
+                        velocity = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid velocity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--organization" => {
+                    if i + 1 < args.len() {
+                        organization = Some(args[i + 1].to_string());
+                        i += 1;
+                    }
+                }
+                "-o" | "--output" => {
+                    if i + 1 < args.len() {
+                        out_fmt = args[i + 1];
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if !matches!(out_fmt, "table" | "json" | "csv") {
+            return Err(JsValue::from_str(
+                "Invalid output format for power-factor (expected table, json, or csv)",
+            ));
+        }
+
+        let weight = weight.ok_or_else(|| JsValue::from_str("--weight is required"))?;
+        let velocity = velocity.ok_or_else(|| JsValue::from_str("--velocity is required"))?;
+        if !(0.1..=2000.0).contains(&weight) {
+            return Err(JsValue::from_str("Weight must be between 0.1 and 2000"));
+        }
+        if !(1.0..=6000.0).contains(&velocity) {
+            return Err(JsValue::from_str("Velocity must be between 1 and 6000"));
+        }
+
+        let weight_gr = match units {
+            UnitSystem::Imperial => weight,
+            UnitSystem::Metric => weight * GRAINS_PER_GRAM,
+        };
+        let velocity_fps = match units {
+            UnitSystem::Imperial => velocity,
+            UnitSystem::Metric => velocity / 0.3048,
+        };
+
+        let raw_pf = weight_gr * velocity_fps / 1000.0;
+        let scored_pf = scored_power_factor(weight_gr, velocity_fps);
+        let mut rows = pf_evaluate_all(weight_gr, velocity_fps);
+        if let Some(org) = organization.as_deref() {
+            let org_lower = org.to_ascii_lowercase();
+            rows.retain(|r| r.organization.eq_ignore_ascii_case(&org_lower));
+            if rows.is_empty() {
+                return Err(JsValue::from_str(&format!(
+                    "--organization '{org}' matched nothing; expected uspsa, idpa, or sass"
+                )));
+            }
+        }
+
+        let (weight_unit, vel_unit) = match units {
+            UnitSystem::Imperial => ("gr", "fps"),
+            UnitSystem::Metric => ("g", "m/s"),
+        };
+
+        let mut out = String::new();
+        match out_fmt {
+            "json" => {
+                let rows_json: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "organization": r.organization,
+                            "class": r.class,
+                            "min_pf": r.min_pf,
+                            "pf_pass": r.pf_pass,
+                            "min_velocity_fps": r.min_velocity_fps,
+                            "max_velocity_fps": r.max_velocity_fps,
+                            "velocity_pass": r.velocity_pass,
+                            "pass": r.pass,
+                        })
+                    })
+                    .collect();
+                let result_json = serde_json::json!({
+                    "command": "power-factor",
+                    "units": match units {
+                        UnitSystem::Imperial => "imperial",
+                        UnitSystem::Metric => "metric",
+                    },
+                    "weight": weight,
+                    "velocity": velocity,
+                    "power_factor_raw": raw_pf,
+                    "power_factor_scored": scored_pf,
+                    "thresholds": rows_json,
+                });
+                out.push_str(
+                    &serde_json::to_string_pretty(&result_json)
+                        .map_err(|e| JsValue::from_str(&e.to_string()))?,
+                );
+                out.push('\n');
+            }
+            "csv" => {
+                out.push_str(
+                    "organization,class,min_pf,pf_pass,min_velocity_fps,max_velocity_fps,velocity_pass,pass\n",
+                );
+                for r in &rows {
+                    out.push_str(&format!(
+                        "{},{},{:.0},{},{},{},{},{}\n",
+                        r.organization,
+                        r.class,
+                        r.min_pf,
+                        r.pf_pass,
+                        r.min_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
+                        r.max_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
+                        r.velocity_pass.map(|b| b.to_string()).unwrap_or_default(),
+                        r.pass,
+                    ));
+                }
+            }
+            _ => {
+                out.push_str("Power Factor\n");
+                out.push_str("============\n");
+                out.push_str(&format!("  Weight:              {:.1} {}\n", weight, weight_unit));
+                out.push_str(&format!("  Velocity:            {:.1} {}\n", velocity, vel_unit));
+                out.push_str(&format!("  Power factor (raw):  {:.2}\n", raw_pf));
+                out.push_str(&format!("  Power factor (scored): {:.0}\n", scored_pf));
+                out.push('\n');
+                out.push_str(&format!(
+                    "  {:<8}  {:<26}  {:>8}  {:>6}  {:>18}\n",
+                    "Org", "Class", "Min PF", "Pass", "Velocity limit"
+                ));
+                for r in &rows {
+                    let vel_limit = match (r.min_velocity_fps, r.max_velocity_fps) {
+                        (Some(min), Some(max)) => format!("{:.0}-{:.0} fps", min, max),
+                        (Some(min), None) => format!(">= {:.0} fps", min),
+                        (None, Some(max)) => format!("<= {:.0} fps", max),
+                        (None, None) => "-".to_string(),
+                    };
+                    out.push_str(&format!(
+                        "  {:<8}  {:<26}  {:>8.0}  {:>6}  {:>18}\n",
+                        r.organization,
+                        r.class,
+                        r.min_pf,
+                        if r.pass { "PASS" } else { "FAIL" },
+                        vel_limit,
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn show_help(&self) -> String {
         r#"Ballistics Engine - WebAssembly Version
 
@@ -5425,6 +5904,8 @@ Commands:
   estimate-bc    Estimate BC from trajectory data
   lead           Calculate moving-target lead (hold)
   powder         Resolve powder-temperature velocity shift (no trajectory)
+  recoil         Free recoil energy/velocity/impulse (SAAMI momentum balance)
+  power-factor   Power factor + USPSA/IDPA/SASS rulebook pass/fail
   help           Show this help message
 
 Global Options:
@@ -5706,6 +6187,42 @@ Powder Command:
     -m, --mass <MASS>             Bullet mass (grains/grams): adds muzzle energy
     -o, --output <FORMAT>         Output format (table/json/csv) [default: table]
 
+Recoil Command:
+  ballistics recoil [OPTIONS]
+
+  Free recoil energy, velocity, and impulse from a SAAMI momentum balance: ejecta
+  (bullet) + propellant gas recoiling against the firearm. Gas velocity defaults to
+  SAAMI's own type-keyed multiplier of the muzzle velocity (rifle 1.75x, pistol/
+  average shotgun 1.5x, long-barrel shotgun 1.25x); --gas-velocity-factor and
+  --gas-velocity are escape hatches for a different ratio or an absolute constant
+  (e.g. the ~4700 fps smokeless rule of thumb).
+
+  Options:
+    -b, --bullet-weight <W>       Bullet weight (grains/grams) [required]
+    -c, --charge-weight <W>       Powder charge weight (grains/grams) [required]
+    -v, --velocity <VEL>          Muzzle velocity (fps/m/s) [required]
+    -f, --firearm-weight <W>      Firearm weight incl. attachments (lb/kg) [required]
+    --firearm-type <TYPE>         rifle/pistol/shotgun-average/shotgun-long
+                                  [default: rifle]
+    --gas-velocity-factor <F>     Override: gas velocity = F * muzzle velocity
+    --gas-velocity <VEL>          Override: absolute gas velocity (fps/m/s)
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]
+
+Power Factor Command:
+  ballistics power-factor [OPTIONS]
+
+  Power factor (weight x velocity / 1000) with per-organization pass/fail against a
+  DATA TABLE of published rulebook minimums (USPSA, IDPA, SASS). A load exactly ON a
+  threshold PASSES (every rulebook uses "meets or exceeds" language, never a strict
+  "greater than"); see CLI_USAGE.md for citations and the truncation convention.
+
+  Options:
+    -w, --weight <W>              Bullet weight (grains/grams) [required]
+    -v, --velocity <VEL>          Velocity (fps/m/s) [required]
+    --organization <ORG>          Filter to one organization: uspsa/idpa/sass
+                                  [default: all]
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]
+
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
   ballistics trajectory --auto-zero 200 --enable-spin-drift
@@ -5719,7 +6236,9 @@ Examples:
     --target-size 18x30 -n 300 --wez-start 200 --wez-end 500 --wez-step 100
   ballistics true-velocity --range 300 --measured-drop 1.8 -b 0.475 -m 168 -d 0.308
   ballistics true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
-    --observed 900:10.9 -b 0.475 -m 168 -d 0.308 --chrono-velocity 2700"#
+    --observed 900:10.9 -b 0.475 -m 168 -d 0.308 --chrono-velocity 2700
+  ballistics recoil -b 168 -c 43 -v 2700 -f 8.5
+  ballistics power-factor -w 147 -v 900 --organization uspsa"#
             .to_string()
     }
 }

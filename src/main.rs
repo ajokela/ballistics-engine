@@ -30,7 +30,7 @@ use ballistics_engine::bc_table::BcCorrectionTable;
 use ballistics_engine::bc_table_5d::Bc5dTableManager;
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
-use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN};
+use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN, GRAINS_PER_GRAM, FPS_TO_MPS};
 use ballistics_engine::cli_api::UnitSystem;
 use ballistics_engine::truing::{
     calculate_true_velocity_local, dsf_window_start, fallback_bullet_length_m,
@@ -50,6 +50,9 @@ use ballistics_engine::truing_uncertainty::{
     UncertaintyTruingReportV1, UncertaintyTruingRequestV1, WeightedTruingObservationV1,
 };
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
+// MBA-1372: SAAMI free-recoil and power-factor calculators.
+use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
+use ballistics_engine::recoil::{free_recoil, FirearmType, FreeRecoilInputs, GasVelocityModel, POUNDS_TO_KG};
 use ballistics_engine::atmosphere::{
     resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
 };
@@ -1779,6 +1782,73 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Free recoil energy, velocity, and impulse from a SAAMI momentum balance
+    /// (MBA-1372): ejecta (bullet) + propellant gas recoil against the firearm.
+    /// See CLI_USAGE.md for the gas-velocity convention this command defaults to.
+    Recoil {
+        /// Bullet weight (grains for imperial, grams for metric)
+        #[arg(short = 'b', long, value_parser = f64_range(0.1, 2000.0))]
+        bullet_weight: f64,
+
+        /// Powder charge weight (grains for imperial, grams for metric)
+        #[arg(short = 'c', long, value_parser = f64_range(0.0, 1000.0))]
+        charge_weight: f64,
+
+        /// Muzzle velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long, value_parser = f64_range(1.0, 6000.0))]
+        velocity: f64,
+
+        /// Firearm weight, including all attachments such as scopes and suppressors
+        /// (pounds for imperial, kilograms for metric)
+        #[arg(short = 'f', long, value_parser = f64_range(0.1, 500.0))]
+        firearm_weight: f64,
+
+        /// Firearm type, selecting SAAMI's propellant-gas-velocity multiplier f
+        /// (gas velocity = f * muzzle velocity): rifle (f=1.75), pistol (f=1.50),
+        /// shotgun-average (f=1.50), shotgun-long (f=1.25). Ignored if
+        /// --gas-velocity-factor or --gas-velocity is given.
+        #[arg(long, default_value = "rifle")]
+        firearm_type: RecoilFirearmTypeArg,
+
+        /// Override the SAAMI type-based multiplier with an explicit ratio
+        /// (gas velocity = factor * muzzle velocity). Takes precedence over
+        /// --firearm-type; overridden by --gas-velocity if both are given.
+        #[arg(long, value_parser = f64_range(0.0, 20.0))]
+        gas_velocity_factor: Option<f64>,
+
+        /// Override with an absolute propellant gas velocity (fps or m/s based on
+        /// --units), independent of muzzle velocity -- e.g. the classic fixed
+        /// "~4700 fps for smokeless powder" rule of thumb. Takes precedence over
+        /// both --gas-velocity-factor and --firearm-type.
+        #[arg(long, value_parser = f64_range(0.0, 20000.0))]
+        gas_velocity: Option<f64>,
+
+        /// Output format (table, json, or csv)
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Power factor (bullet weight x velocity / 1000) with per-organization
+    /// USPSA/IDPA/SASS rulebook pass/fail (MBA-1372). See CLI_USAGE.md for the
+    /// truncation convention and threshold boundary semantics.
+    PowerFactor {
+        /// Bullet weight (grains for imperial, grams for metric)
+        #[arg(short = 'w', long, value_parser = f64_range(0.1, 2000.0))]
+        weight: f64,
+
+        /// Velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long, value_parser = f64_range(1.0, 6000.0))]
+        velocity: f64,
+
+        /// Filter results to one organization: uspsa, idpa, or sass (default: all)
+        #[arg(long)]
+        organization: Option<String>,
+
+        /// Output format (table, json, or csv)
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Generate wind drift card (wind deflection at multiple speeds)
     WindCard {
         /// Load parameters from saved profile
@@ -2248,6 +2318,33 @@ enum OutputFormat {
     Csv,
     Table,
     Pdf,
+}
+
+/// CLI-facing mirror of `ballistics_engine::recoil::FirearmType`, selecting SAAMI's
+/// type-keyed propellant-gas-velocity multiplier for `recoil --firearm-type` (MBA-1372).
+/// Kept as a thin clap `ValueEnum` here (rather than deriving `ValueEnum` on the lib enum
+/// itself) so `recoil.rs` stays clap-free and trivially compiles for wasm32, matching the
+/// established `WindShearModelArg` pattern.
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum, Default)]
+enum RecoilFirearmTypeArg {
+    #[default]
+    Rifle,
+    Pistol,
+    #[value(name = "shotgun-average", alias = "shotgun")]
+    ShotgunAverage,
+    #[value(name = "shotgun-long")]
+    ShotgunLong,
+}
+
+impl RecoilFirearmTypeArg {
+    fn to_engine(self) -> FirearmType {
+        match self {
+            RecoilFirearmTypeArg::Rifle => FirearmType::Rifle,
+            RecoilFirearmTypeArg::Pistol => FirearmType::Pistol,
+            RecoilFirearmTypeArg::ShotgunAverage => FirearmType::ShotgunAverage,
+            RecoilFirearmTypeArg::ShotgunLong => FirearmType::ShotgunLong,
+        }
+    }
 }
 
 // DropUnit moved to ballistics_engine::truing (MBA-1343).
@@ -7906,6 +8003,38 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
         }
 
+        Commands::Recoil {
+            bullet_weight,
+            charge_weight,
+            velocity,
+            firearm_weight,
+            firearm_type,
+            gas_velocity_factor,
+            gas_velocity,
+            output,
+        } => {
+            handle_recoil(
+                bullet_weight,
+                charge_weight,
+                velocity,
+                firearm_weight,
+                firearm_type.to_engine(),
+                gas_velocity_factor,
+                gas_velocity,
+                cli.units,
+                output,
+            )?;
+        }
+
+        Commands::PowerFactor {
+            weight,
+            velocity,
+            organization,
+            output,
+        } => {
+            handle_power_factor(weight, velocity, organization, cli.units, output)?;
+        }
+
         Commands::WindCard {
             profile,
             velocity,
@@ -13470,6 +13599,279 @@ fn energy_unit_ascii(units: UnitSystem) -> &'static str {
         UnitSystem::Imperial => "ftlb",
         UnitSystem::Metric => "j",
     }
+}
+
+/// 1 lbf in newtons, exact by definition (1 lbf = 1 lb-mass * standard gravity
+/// 9.80665 m/s^2 = 4.4482216152605 N). Used only to display the SAAMI recoil impulse
+/// (a genuine N*s / kg*m/s quantity) in pound-seconds for imperial output.
+const LBF_TO_N: f64 = 4.4482216152605;
+
+/// Free-recoil handler (MBA-1372). Converts the CLI's display-unit inputs (imperial:
+/// grains for bullet/charge, pounds for firearm weight, fps; metric: grams, kilograms,
+/// m/s) into `ballistics_engine::recoil`'s SI inputs, resolves the propellant gas
+/// velocity from whichever override is given (`--gas-velocity` > `--gas-velocity-factor`
+/// > `--firearm-type`), and renders energy/velocity/impulse back in display units.
+#[allow(clippy::too_many_arguments)]
+fn handle_recoil(
+    bullet_weight: f64,
+    charge_weight: f64,
+    velocity: f64,
+    firearm_weight: f64,
+    firearm_type: FirearmType,
+    gas_velocity_factor: Option<f64>,
+    gas_velocity: Option<f64>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), String> {
+    let bullet_mass_kg = match units {
+        UnitSystem::Imperial => bullet_weight * GRAINS_TO_KG,
+        UnitSystem::Metric => bullet_weight * 0.001, // grams -> kg
+    };
+    let charge_mass_kg = match units {
+        UnitSystem::Imperial => charge_weight * GRAINS_TO_KG,
+        UnitSystem::Metric => charge_weight * 0.001, // grams -> kg
+    };
+    let firearm_mass_kg = match units {
+        UnitSystem::Imperial => firearm_weight * POUNDS_TO_KG,
+        UnitSystem::Metric => firearm_weight, // already kg
+    };
+    let muzzle_velocity_mps = match units {
+        UnitSystem::Imperial => velocity * FPS_TO_MPS,
+        UnitSystem::Metric => velocity,
+    };
+
+    // Precedence: --gas-velocity (absolute) > --gas-velocity-factor (override ratio)
+    // > --firearm-type (SAAMI default). See CLI_USAGE.md.
+    let (gas_model, gas_model_desc): (GasVelocityModel, String) = if let Some(v) = gas_velocity {
+        let v_mps = match units {
+            UnitSystem::Imperial => v * FPS_TO_MPS,
+            UnitSystem::Metric => v,
+        };
+        (GasVelocityModel::Fixed(v_mps), "fixed".to_string())
+    } else if let Some(f) = gas_velocity_factor {
+        (GasVelocityModel::Factor(f), format!("factor({f:.3})"))
+    } else {
+        let name = match firearm_type {
+            FirearmType::Rifle => "saami-rifle",
+            FirearmType::Pistol => "saami-pistol",
+            FirearmType::ShotgunAverage => "saami-shotgun-average",
+            FirearmType::ShotgunLong => "saami-shotgun-long",
+        };
+        (GasVelocityModel::Saami(firearm_type), name.to_string())
+    };
+    let gas_velocity_mps = gas_model.resolve_mps(muzzle_velocity_mps);
+
+    let result = free_recoil(FreeRecoilInputs {
+        bullet_mass_kg,
+        charge_mass_kg,
+        muzzle_velocity_mps,
+        firearm_mass_kg,
+        gas_velocity_mps,
+    })?;
+
+    let (weight_unit, firearm_weight_unit, vel_unit, energy_unit, impulse_unit) = match units {
+        UnitSystem::Imperial => ("gr", "lb", "fps", "ft-lb", "lb-s"),
+        UnitSystem::Metric => ("g", "kg", "m/s", "J", "N-s"),
+    };
+    let gas_velocity_display = match units {
+        UnitSystem::Imperial => gas_velocity_mps / FPS_TO_MPS,
+        UnitSystem::Metric => gas_velocity_mps,
+    };
+    let recoil_velocity_display = match units {
+        UnitSystem::Imperial => result.recoil_velocity_mps / FPS_TO_MPS,
+        UnitSystem::Metric => result.recoil_velocity_mps,
+    };
+    let recoil_energy_display = match units {
+        UnitSystem::Imperial => result.recoil_energy_j * 0.737562, // J -> ft-lb
+        UnitSystem::Metric => result.recoil_energy_j,
+    };
+    let impulse_display = match units {
+        UnitSystem::Imperial => result.impulse_ns / LBF_TO_N, // N*s -> lbf*s
+        UnitSystem::Metric => result.impulse_ns,
+    };
+
+    match output {
+        OutputFormat::Table => {
+            println!("Free Recoil (SAAMI Momentum Balance)");
+            println!("=====================================");
+            println!("  Firearm weight:      {:.2} {}", firearm_weight, firearm_weight_unit);
+            println!("  Bullet weight:       {:.1} {}", bullet_weight, weight_unit);
+            println!("  Charge weight:       {:.1} {}", charge_weight, weight_unit);
+            println!("  Muzzle velocity:     {:.1} {}", velocity, vel_unit);
+            println!(
+                "  Gas velocity model:  {}  ({:.1} {})",
+                gas_model_desc, gas_velocity_display, vel_unit
+            );
+            println!();
+            println!("  Recoil velocity:     {:.2} {}", recoil_velocity_display, vel_unit);
+            println!("  Recoil energy:       {:.2} {}", recoil_energy_display, energy_unit);
+            println!("  Recoil impulse:      {:.3} {}", impulse_display, impulse_unit);
+        }
+        OutputFormat::Json => {
+            let result_json = serde_json::json!({
+                "command": "recoil",
+                "units": match units {
+                    UnitSystem::Imperial => "imperial",
+                    UnitSystem::Metric => "metric",
+                },
+                "inputs": {
+                    "bullet_weight": bullet_weight,
+                    "charge_weight": charge_weight,
+                    "velocity": velocity,
+                    "firearm_weight": firearm_weight,
+                },
+                "gas_velocity_model": gas_model_desc,
+                "gas_velocity": gas_velocity_display,
+                "recoil_velocity": recoil_velocity_display,
+                "recoil_energy": recoil_energy_display,
+                "impulse": impulse_display,
+            });
+            println!("{}", serde_json::to_string_pretty(&result_json).map_err(|e| e.to_string())?);
+        }
+        OutputFormat::Csv => {
+            println!(
+                "bullet_weight_{w},charge_weight_{w},velocity_{v},firearm_weight_{fw},gas_velocity_{v},recoil_velocity_{v},recoil_energy_{e},impulse_{i}",
+                w = weight_unit,
+                v = vel_unit_ascii(units),
+                fw = match units { UnitSystem::Imperial => "lb", UnitSystem::Metric => "kg" },
+                e = energy_unit_ascii(units),
+                i = match units { UnitSystem::Imperial => "lbs", UnitSystem::Metric => "ns" },
+            );
+            println!(
+                "{:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.3},{:.4}",
+                bullet_weight,
+                charge_weight,
+                velocity,
+                firearm_weight,
+                gas_velocity_display,
+                recoil_velocity_display,
+                recoil_energy_display,
+                impulse_display,
+            );
+        }
+        OutputFormat::Pdf => {
+            return Err("PDF output is not supported for the recoil command".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Power-factor handler (MBA-1372). PF is intrinsically defined in grains/fps by every
+/// rulebook, so the input weight/velocity are converted to grains/fps regardless of
+/// `--units` before calling into `ballistics_engine::power_factor`; the echoed
+/// weight/velocity stay in the caller's own display units.
+fn handle_power_factor(
+    weight: f64,
+    velocity: f64,
+    organization: Option<String>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), String> {
+    let weight_gr = match units {
+        UnitSystem::Imperial => weight,
+        UnitSystem::Metric => weight * GRAINS_PER_GRAM,
+    };
+    let velocity_fps = match units {
+        UnitSystem::Imperial => velocity,
+        UnitSystem::Metric => velocity / FPS_TO_MPS,
+    };
+
+    let raw_pf = weight_gr * velocity_fps / 1000.0;
+    let scored_pf = scored_power_factor(weight_gr, velocity_fps);
+    let mut rows = pf_evaluate_all(weight_gr, velocity_fps);
+    if let Some(org) = organization.as_deref() {
+        let org_lower = org.to_ascii_lowercase();
+        rows.retain(|r| r.organization.eq_ignore_ascii_case(&org_lower));
+        if rows.is_empty() {
+            return Err(format!(
+                "--organization '{org}' matched nothing; expected uspsa, idpa, or sass"
+            ));
+        }
+    }
+
+    let (weight_unit, vel_unit) = match units {
+        UnitSystem::Imperial => ("gr", "fps"),
+        UnitSystem::Metric => ("g", "m/s"),
+    };
+
+    match output {
+        OutputFormat::Table => {
+            println!("Power Factor");
+            println!("============");
+            println!("  Weight:              {:.1} {}", weight, weight_unit);
+            println!("  Velocity:            {:.1} {}", velocity, vel_unit);
+            println!("  Power factor (raw):  {:.2}", raw_pf);
+            println!("  Power factor (scored): {:.0}", scored_pf);
+            println!();
+            println!("  {:<8}  {:<26}  {:>8}  {:>6}  {:>18}", "Org", "Class", "Min PF", "Pass", "Velocity limit");
+            for r in &rows {
+                let vel_limit = match (r.min_velocity_fps, r.max_velocity_fps) {
+                    (Some(min), Some(max)) => format!("{:.0}-{:.0} fps", min, max),
+                    (Some(min), None) => format!(">= {:.0} fps", min),
+                    (None, Some(max)) => format!("<= {:.0} fps", max),
+                    (None, None) => "-".to_string(),
+                };
+                println!(
+                    "  {:<8}  {:<26}  {:>8.0}  {:>6}  {:>18}",
+                    r.organization,
+                    r.class,
+                    r.min_pf,
+                    if r.pass { "PASS" } else { "FAIL" },
+                    vel_limit,
+                );
+            }
+        }
+        OutputFormat::Json => {
+            let rows_json: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "organization": r.organization,
+                        "class": r.class,
+                        "min_pf": r.min_pf,
+                        "pf_pass": r.pf_pass,
+                        "min_velocity_fps": r.min_velocity_fps,
+                        "max_velocity_fps": r.max_velocity_fps,
+                        "velocity_pass": r.velocity_pass,
+                        "pass": r.pass,
+                    })
+                })
+                .collect();
+            let result_json = serde_json::json!({
+                "command": "power-factor",
+                "units": match units {
+                    UnitSystem::Imperial => "imperial",
+                    UnitSystem::Metric => "metric",
+                },
+                "weight": weight,
+                "velocity": velocity,
+                "power_factor_raw": raw_pf,
+                "power_factor_scored": scored_pf,
+                "thresholds": rows_json,
+            });
+            println!("{}", serde_json::to_string_pretty(&result_json).map_err(|e| e.to_string())?);
+        }
+        OutputFormat::Csv => {
+            println!("organization,class,min_pf,pf_pass,min_velocity_fps,max_velocity_fps,velocity_pass,pass");
+            for r in &rows {
+                println!(
+                    "{},{},{:.0},{},{},{},{},{}",
+                    r.organization,
+                    r.class,
+                    r.min_pf,
+                    r.pf_pass,
+                    r.min_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
+                    r.max_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
+                    r.velocity_pass.map(|b| b.to_string()).unwrap_or_default(),
+                    r.pass,
+                );
+            }
+        }
+        OutputFormat::Pdf => {
+            return Err("PDF output is not supported for the power-factor command".to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Moving-target lead table handler (MBA-1287).

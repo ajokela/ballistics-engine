@@ -72,6 +72,13 @@ pub mod adjustment;
 // the WASM terminal. No feature gate: must compile for wasm32; parses TEXT only (no
 // std::fs — file I/O stays in main.rs/wasm.rs).
 pub mod drag_file;
+// MBA-1372: SAAMI free-recoil momentum-balance calculator, shared by the CLI and the
+// WASM terminal. No feature gate: must compile for wasm32; pure math, no I/O.
+pub mod recoil;
+// MBA-1372: power-factor arithmetic and per-organization (USPSA/IDPA/SASS) rulebook
+// pass/fail thresholds, shared by the CLI and the WASM terminal. No feature gate: must
+// compile for wasm32; pure math + a data table, no I/O.
+pub mod power_factor;
 pub mod trajectory_observation;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
