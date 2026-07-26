@@ -162,6 +162,53 @@ mod tests {
         assert!(result.contains("Mrad Adjustment"));
     }
 
+    /// MBA-1418: `zero --from-angle` works in the browser terminal but had no tests here and
+    /// was absent from the help text, so it was effectively undiscoverable. The inverse reports
+    /// BOTH line-of-sight crossings a bore angle produces, and names which one `zero_range` is.
+    #[wasm_bindgen_test]
+    fn test_zero_from_angle_reports_both_crossings() {
+        let wasm = WasmBallistics::new();
+        let result = wasm
+            .run_command("zero -v 2700 -b 0.243 -m 175 -d 0.308 --from-angle 0.14")
+            .unwrap();
+        assert!(result.contains("Zero"), "unexpected output: {result}");
+        // A bore angle generally crosses the line of sight twice; both must be reported rather
+        // than the tool silently picking one.
+        assert!(
+            result.contains("Near Zero") || result.contains("near"),
+            "the near crossing is missing: {result}"
+        );
+        assert!(
+            result.contains("Far Zero") || result.contains("far"),
+            "the far crossing is missing: {result}"
+        );
+    }
+
+    /// The two modes are mutually exclusive on native, and the terminal must agree rather than
+    /// silently honouring one of them.
+    #[wasm_bindgen_test]
+    fn test_zero_from_angle_conflicts_with_target_distance() {
+        let wasm = WasmBallistics::new();
+        let result = wasm.run_command(
+            "zero -v 2700 -b 0.243 -m 175 -d 0.308 --from-angle 0.14 --target-distance 300",
+        );
+        assert!(
+            result.is_err(),
+            "--from-angle with --target-distance must be refused, got: {result:?}"
+        );
+    }
+
+    /// `--from-angle` must appear in the terminal help, or a browser user has no way to find it.
+    #[wasm_bindgen_test]
+    fn test_help_lists_from_angle() {
+        let wasm = WasmBallistics::new();
+        let help = wasm.run_command("help").unwrap();
+        assert!(
+            help.contains("--from-angle"),
+            "the zero command's --from-angle is missing from the terminal help"
+        );
+    }
+
     #[wasm_bindgen_test]
     fn test_monte_carlo_command() {
         let wasm = WasmBallistics::new();
