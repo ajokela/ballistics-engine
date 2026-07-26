@@ -509,8 +509,41 @@ mod pressure_mode_on_calculator_subcommands {
         out
     }
 
+    /// A private HOME with the terms of service pre-accepted.
+    ///
+    /// `true-velocity` prompts for ToS acceptance on first use and stores the answer under
+    /// `$HOME/.ballistics`. A developer machine has already answered it, so this suite passed
+    /// locally and failed on a clean CI runner — the test was reading state from the machine it
+    /// ran on. Same fixture as `tests/integration_cli.rs::accepted_tos_home`.
+    fn accepted_tos_home() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "bx-qnh-tos-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let config_dir = home.join(".ballistics");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("tos.json"),
+            r#"{
+  "accepted": true,
+  "accepted_version": "2026-01-26",
+  "accepted_at": "test",
+  "terms_hash": "test"
+}"#,
+        )
+        .expect("write tos.json");
+        home
+    }
+
     fn stdout_of(args: &[&str]) -> String {
-        let output = run(args);
+        let output = Command::new(get_cli_binary())
+            .env("HOME", accepted_tos_home())
+            .args(args)
+            .output()
+            .expect("failed to execute ballistics binary");
         assert!(
             output.status.success(),
             "`{}` failed: {}",
