@@ -504,7 +504,12 @@ enum Commands {
         /// speed of sound) and the implied pressure is re-solved so the density altitude is
         /// still reproduced exactly. A `--location`/CSV `DA`/`DENSITY_ALTITUDE` column is used
         /// when this flag is omitted.
-        #[arg(long, allow_hyphen_values = true)]
+        // MBA-1420: bound the flag so an out-of-range value fails naming --density-altitude.
+        // Without this an extreme value drives the pressure inverse negative and surfaces as
+        // "atmosphere.pressure must be finite", pointing at a field the user never typed. The
+        // band is deliberately wide (and unit-agnostic, since the flag is feet imperial /
+        // meters metric): -2000 and 100000 both solve fine, so this only catches nonsense.
+        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
         density_altitude: Option<f64>,
 
         /// Output format
@@ -515,8 +520,8 @@ enum Commands {
         #[arg(long)]
         full: bool,
 
-        /// Render an inline terminal chart (drop vs. range, then lateral drift vs. range)
-        /// after the normal output. Only applies to `-o table` (the default); other
+        /// Render inline terminal charts after the normal output: drop, lateral drift,
+        /// velocity, and energy, each vs. range (four stacked panels). Only applies to `-o table` (the default); other
         /// `--output` formats stay machine-readable and unchanged. Bare `--plot` uses the
         /// Unicode braille-dot canvas; `--plot ascii` uses a '*'-per-cell fallback for
         /// terminals/fonts without braille glyph coverage. Monochrome (no ANSI colors —
@@ -2369,7 +2374,12 @@ enum ProfileAction {
         /// fields, `trajectory --saved-profile` does not currently read any of them back (only
         /// `--location`/CSV feeds shot-day atmosphere there); this is for round-trip storage
         /// parity, not a new saved-profile atmosphere source.
-        #[arg(long, allow_hyphen_values = true)]
+        // MBA-1420: bound the flag so an out-of-range value fails naming --density-altitude.
+        // Without this an extreme value drives the pressure inverse negative and surfaces as
+        // "atmosphere.pressure must be finite", pointing at a field the user never typed. The
+        // band is deliberately wide (and unit-agnostic, since the flag is feet imperial /
+        // meters metric): -2000 and 100000 both solve fine, so this only catches nonsense.
+        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
         density_altitude: Option<f64>,
 
         /// Bullet name/description
@@ -9653,6 +9663,19 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         altitude,
     };
 
+    // MBA-1420: WHICH OF THE TWO IS AUTHORITATIVE. From here on `atmosphere` holds the resolved
+    // station values, while `inputs.temperature`/`inputs.pressure` still hold the RAW figures the
+    // user typed -- pre-QNH-reduction. Only `atmosphere` reaches the trajectory: it is handed to
+    // `new_with_resolved_station_atmosphere` below, and `fast_integrate` overwrites the inputs'
+    // copies from its own atmo params. Every reader of `inputs.pressure` on this path was traced
+    // and none is reachable from the solve, so the stale copies are inert today.
+    //
+    // They are still a trap for the next reader, and they are inconsistent with the
+    // density-altitude path above, where those same input fields ARE the resolved values (which
+    // is exactly why `density_altitude_active` has to short-circuit the resolution). `wasm.rs`
+    // carries the identical split. Treat `atmosphere` as the answer to "what did it fly under";
+    // do not reach for `inputs.pressure` here without re-checking which of the two you have.
+
     // Create solver. Authoritative: `atmosphere` above is already fully resolved (including
     // the QNH reduction, when applicable), so it is trusted as-is rather than re-derived
     // through the legacy default-sentinel heuristic a second time.
@@ -10335,8 +10358,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            // Inline terminal chart (MBA-1320): two stacked charts, drop vs. range then
-            // lateral drift vs. range, from the SAME per-point data the "Trajectory
+            // Inline terminal charts (MBA-1320): four stacked charts -- drop, lateral drift,
+            // velocity and energy, each vs. range -- from the SAME per-point data the "Trajectory
             // Points:" table above prints — result.points, McCoy frame (x=downrange,
             // y=vertical, z=lateral) — converted through the same UnitConverter calls and
             // the same range_unit as that table's X/Y columns. This intentionally reuses

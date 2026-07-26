@@ -301,7 +301,7 @@ engine's number exactly.
 
 An omitted `--pressure` is unaffected by `--pressure-type`: the sea-level standard default (29.92 inHg / 1013.25 hPa) reduces to precisely the same ICAO-standard station pressure at any altitude under either mode, so there is nothing to reduce.
 
-Available on `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, and `profile save` (stored in the saved profile so it round-trips with the profile; profiles saved before this flag existed omit the key and load as `absolute`).
+Available on `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, and `profile save`. **`profile save` records the mode but `--saved-profile` does not apply it to a solve.** The field round-trips through the profile FILE, not into the trajectory: `trajectory --saved-profile` deliberately does not inherit a stored pressure mode, because it does not load the stored pressure VALUE either, and a mode applied to a pressure it does not describe is silently wrong — the same reasoning as the density-altitude section below. Wiring the profile's atmosphere fields as a set is the follow-up (MBA-1417) that would make it live. Profiles saved before this flag existed omit the key and load as `absolute`.
 
 **Not yet available** on `estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, or `compare` — these subcommands still treat `--pressure` as absolute station pressure only. This is a tracked follow-up, not an oversight.
 
@@ -1295,6 +1295,21 @@ also zeroed again around 300 yd. `--target-distance`'s forward solve returns whi
 matches the distance you asked it to hit — the near root for a short/flat zero like 25 or 50
 yd, the far root for a conventional 100+ yd zero — so `--from-angle` cannot know in advance
 which one you mean and reports both instead.
+
+**The handoff only reproduces the original zero under the original conditions.** A stored bore
+angle is portable, but the RANGE it implies is not a property of the angle alone: it depends on
+the wind, the bore height, and the zero-day atmosphere in force when you feed it back. Recover a
+range under a different crosswind, a different scope height, or a materially different density
+altitude and you will get a different — and correct — answer for those conditions, not the
+number you originally zeroed at. That is the point of the feature, but it surprises people who
+expect a round trip to be exact. Re-supply the same `--wind-*`, `--sight-height`, and zero-day
+atmosphere flags if you want the original range back.
+
+**`primary_crossing`** (MBA-1419) names which of the two roots the single `zero_range` value is:
+`"far"` when a far crossing was found (the conventional "sighted in at D yards" meaning), and
+`"near"` when it was not, which happens when the far crossing lies beyond the search envelope.
+Both roots are also reported individually as `near_zero_range` / `far_zero_range` whenever they
+exist, so a consumer never has to infer which answer it received.
 
 `--from-angle` and `--target-distance` are mutually exclusive — supply exactly one:
 
