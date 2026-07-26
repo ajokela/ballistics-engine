@@ -828,6 +828,25 @@ enum Commands {
         #[arg(long, default_value = "0.0", value_parser = f64_range(0.0, 300.0))]
         target_speed: f64,
 
+        /// Add each point's effective drag coefficient to `--full` JSON (MBA-1423).
+        ///
+        /// This is the PROJECTILE's own Cd, not the reference table's: a G-model Cd describes
+        /// the standard projectile, so it is scaled by the form factor (sectional density / BC)
+        /// to describe this bullet. A velocity- or Mach-segmented BC therefore shows its band
+        /// steps here, and a custom drag table's curve is already the projectile's own Cd and
+        /// passes through unchanged.
+        ///
+        /// Covers only the speeds the bullet actually flew, not a full Mach sweep. Cd is paired
+        /// with the station speed of sound the document reports Mach against, so plotting one
+        /// against the other is self-consistent. Off by default: without this flag the JSON is
+        /// byte-for-byte what it was.
+        ///
+        /// JSON only for now. CSV's sampled-interval branch reports a different point type that
+        /// carries no Cd, so a column there would be populated in one branch and empty in the
+        /// other; that parity work is tracked separately rather than shipped half-done.
+        #[arg(long)]
+        with_drag_coefficient: bool,
+
         /// Powder type/name (for PDF metadata)
         #[arg(long)]
         powder: Option<String>,
@@ -2712,6 +2731,17 @@ struct TrajectoryPoint {
     /// `mover_ring_m` itself is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     mover_ring_mil: Option<f64>,
+    /// The projectile's own effective drag coefficient at this point, dimensionless (MBA-1423).
+    ///
+    /// Present only when `--with-drag-coefficient` was supplied, so JSON without the flag keeps
+    /// every key it had. Serialized last for the same reason the mover-ring fields were appended:
+    /// the pre-existing keys stay byte-identical ahead of it.
+    ///
+    /// This is the projectile's Cd, not the reference table's — see the flag's help for the
+    /// form-factor scaling and why a segmented BC shows band steps here. Absent on a point whose
+    /// sectional density is unknown, which is why it stays `Option` even under the flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drag_coefficient: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2930,6 +2960,10 @@ struct TrajectoryConfig {
     // same convention as `lead --target-speed`). 0.0 (default) disables the per-point
     // Ring column/fields in every output format; also feeds the PDF Lead column.
     target_speed: f64,
+    // Per-point effective drag coefficient (MBA-1423): when true, `--full` JSON gains a
+    // `drag_coefficient` key per point. False (default) leaves the document byte-identical,
+    // so the flag cannot disturb an existing consumer.
+    with_drag_coefficient: bool,
     // Angular unit for the ring TABLE column (mil or moa) — from --adjustment-unit,
     // which trajectory already exposes for the PDF dope card. CSV keeps ring_mil and
     // JSON keeps mover_ring_m/mover_ring_mil regardless: those carry the unit in the
@@ -5173,6 +5207,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             weather_zone_interpolation,
             // PDF dope card parameters
             target_speed,
+            with_drag_coefficient,
             powder,
             bullet_name,
             location_name,
@@ -6379,6 +6414,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 powder_temp_curve: powder_temp_curve_si.clone(),
                 powder_curve_temp_c,
                 target_speed,
+                with_drag_coefficient,
                 adjustment_unit,
                 elevation_click,
                 windage_click,
@@ -9399,6 +9435,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         ref powder_temp_curve,
         powder_curve_temp_c,
         target_speed,
+        with_drag_coefficient,
         adjustment_unit,
         elevation_click,
         windage_click,
@@ -9791,6 +9828,13 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                                 energy: UnitConverter::energy_from_metric(p.kinetic_energy, units),
                                 mover_ring_m,
                                 mover_ring_mil,
+                                // MBA-1423: dimensionless, so no unit conversion — it means the
+                                // same thing under --units metric and imperial.
+                                drag_coefficient: if with_drag_coefficient {
+                                    p.drag_coefficient
+                                } else {
+                                    None
+                                },
                             }
                         })
                         .collect()
@@ -17719,6 +17763,7 @@ mod dsf_cli_tests {
             position: nalgebra::Vector3::new(x, 0.0, 0.0),
             velocity_magnitude,
             kinetic_energy: 0.0,
+            drag_coefficient: None,
         }
     }
 
@@ -17837,6 +17882,7 @@ mod dsf_cli_tests {
             position: nalgebra::Vector3::new(x, y, 0.0),
             velocity_magnitude: v,
             kinetic_energy: 0.0,
+            drag_coefficient: None,
         }
     }
 

@@ -587,6 +587,13 @@ pub struct TrajectoryPoint {
     pub position: Vector3<f64>,
     pub velocity_magnitude: f64,
     pub kinetic_energy: f64,
+    /// The projectile's own drag coefficient at this point (MBA-1423).
+    ///
+    /// Filled in one pass after integration finishes, not at the sites that build this struct,
+    /// so a solver family added later cannot silently omit it. `None` when sectional density is
+    /// unavailable — see [`TrajectorySolver::effective_drag_coefficient`] for the definition and
+    /// why this is the projectile's Cd rather than the reference table's.
+    pub drag_coefficient: Option<f64>,
 }
 
 // Trajectory result
@@ -1890,6 +1897,7 @@ impl TrajectorySolver {
             position,
             velocity_magnitude,
             kinetic_energy,
+            drag_coefficient: None,
         };
         if terminal_point.position.x < previous.position.x {
             return Err(BallisticsError::from(
@@ -2131,6 +2139,7 @@ impl TrajectorySolver {
                     position,
                     velocity_magnitude,
                     kinetic_energy,
+                    drag_coefficient: None,
                 },
             )?;
 
@@ -2225,6 +2234,11 @@ impl TrajectorySolver {
             self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         // Get final values
+        // MBA-1423: fill the per-point Cd here, once, rather than inside each integrator loop.
+        // Every solver family reaches this line, so none can leave the field empty while the
+        // others populate it. Must precede the `last_point` borrow below.
+        self.annotate_drag_coefficients(&mut points, speed_of_sound);
+
         let last_point = points.last().ok_or("No trajectory points generated")?;
 
         // Create trajectory sampling data if enabled
@@ -2395,6 +2409,7 @@ impl TrajectorySolver {
                     position,
                     velocity_magnitude,
                     kinetic_energy,
+                    drag_coefficient: None,
                 },
             )?;
 
@@ -2516,6 +2531,11 @@ impl TrajectorySolver {
             self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
 
         // Get final values
+        // MBA-1423: fill the per-point Cd here, once, rather than inside each integrator loop.
+        // Every solver family reaches this line, so none can leave the field empty while the
+        // others populate it. Must precede the `last_point` borrow below.
+        self.annotate_drag_coefficients(&mut points, speed_of_sound);
+
         let last_point = points.last().ok_or("No trajectory points generated")?;
 
         // Create trajectory sampling data if enabled
@@ -2682,6 +2702,7 @@ impl TrajectorySolver {
                     position,
                     velocity_magnitude,
                     kinetic_energy,
+                    drag_coefficient: None,
                 },
             )?;
 
@@ -2775,6 +2796,9 @@ impl TrajectorySolver {
         // Shared MBA-968/MBA-1218 range-crossing interpolation for all solver modes.
         let termination =
             self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
+
+        // MBA-1423: see the sibling solvers — fill the per-point Cd before the borrow below.
+        self.annotate_drag_coefficients(&mut points, speed_of_sound);
 
         let last_point = points.last().unwrap();
 
@@ -3112,71 +3136,13 @@ impl TrajectorySolver {
             drag_humidity_percent,
         );
 
-        // Get drag coefficient from drag model (Mach-indexed from drag tables)
-        let cd = self.calculate_drag_coefficient(velocity_magnitude, speed_of_sound);
+        // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423
+        // reports a per-point Cd derived from these same two values, so the number a consumer
+        // charts cannot drift from the number actually flown here.
+        let (cd, retard_denom) = self.drag_terms(velocity_magnitude, speed_of_sound);
 
-        // Convert velocity to fps for BC lookups
+        // Convert velocity to fps (still used below outside the BC lookup).
         let velocity_fps = velocity_magnitude * 3.28084;
-
-        // Match the other solver families' BC precedence: enabled velocity-keyed segments first,
-        // then legacy Mach-keyed segments, then the scalar BC. `use_bc_segments` gates velocity
-        // tables, while explicit Mach segments remain active when it is false; derivatives.rs and
-        // the fast solver preserve that legacy contract for callers that provide a Mach table.
-        let (base_bc, bc_from_segments) = if let Some(segments) = self
-            .inputs
-            .bc_segments_data
-            .as_ref()
-            .filter(|segments| self.inputs.use_bc_segments && !segments.is_empty())
-        {
-            // Find matching segment for current velocity.
-            (
-                crate::bc_estimation::velocity_segment_bc(
-                    velocity_fps,
-                    segments,
-                    self.inputs.bc_value,
-                ),
-                true,
-            )
-        } else if let Some(segments) = self
-            .inputs
-            .bc_segments
-            .as_ref()
-            .filter(|segments| !segments.is_empty())
-        {
-            (
-                crate::derivatives::interpolated_bc(
-                    velocity_magnitude / speed_of_sound,
-                    segments,
-                    Some(&self.inputs),
-                ),
-                true,
-            )
-        } else {
-            (self.inputs.bc_value, false)
-        };
-
-        // Segment tables already own the velocity-dependent BC shape. Stacking the empirical
-        // cluster ladder on top would apply that shape twice (MBA-1175). Cluster correction is
-        // therefore only a fallback for a scalar BC, regardless of which explicit segment
-        // representation supplied the active value.
-        let effective_bc = if bc_from_segments {
-            base_bc
-        } else {
-            self.apply_cluster_bc_correction(base_bc, velocity_fps)
-        };
-        // The scalar BC is validated at the solve boundary. Retain a small denominator floor for
-        // explicit segment tables, whose interpolated values are independent caller data.
-        let effective_bc = effective_bc.max(1e-6);
-
-        // When a custom drag table is active, calculate_drag_coefficient returned the
-        // projectile's ACTUAL Cd, so the retardation denominator must be the sectional
-        // density (lb/in²), not a BC: Cd_own / SD == Cd_ref / BC
-        // (see BallisticInputs::custom_drag_denominator).
-        let retard_denom = if self.inputs.custom_drag_table.is_some() {
-            self.inputs.custom_drag_denominator(effective_bc)
-        } else {
-            effective_bc
-        };
 
         // Use proper ballistics retardation formula
         // This matches the proven formula from fast_trajectory.rs
@@ -3319,6 +3285,138 @@ impl TrajectorySolver {
         }
 
         accel
+    }
+
+    /// The reference drag coefficient and the retardation denominator this solver divides by,
+    /// at one speed.
+    ///
+    /// This is the single place the two are resolved. `calculate_acceleration` divides one by
+    /// the other to produce drag; [`Self::effective_drag_coefficient`] recombines them into the
+    /// projectile's own Cd for reporting (MBA-1423). Keeping both callers on one resolver is
+    /// deliberate: a second copy of the BC-precedence ladder below is exactly the kind of
+    /// duplicate that drifts silently once someone edits one of them.
+    ///
+    /// The denominator is a BC (lb/in²) for a G-model and the sectional density for a custom
+    /// drag table, because that table already supplies the projectile's actual Cd.
+    fn drag_terms(&self, velocity_magnitude: f64, speed_of_sound: f64) -> (f64, f64) {
+        let cd = self.calculate_drag_coefficient(velocity_magnitude, speed_of_sound);
+
+        let velocity_fps = velocity_magnitude * 3.28084;
+
+        // Match the other solver families' BC precedence: enabled velocity-keyed segments first,
+        // then legacy Mach-keyed segments, then the scalar BC. `use_bc_segments` gates velocity
+        // tables, while explicit Mach segments remain active when it is false; derivatives.rs and
+        // the fast solver preserve that legacy contract for callers that provide a Mach table.
+        let (base_bc, bc_from_segments) = if let Some(segments) = self
+            .inputs
+            .bc_segments_data
+            .as_ref()
+            .filter(|segments| self.inputs.use_bc_segments && !segments.is_empty())
+        {
+            // Find matching segment for current velocity.
+            (
+                crate::bc_estimation::velocity_segment_bc(
+                    velocity_fps,
+                    segments,
+                    self.inputs.bc_value,
+                ),
+                true,
+            )
+        } else if let Some(segments) = self
+            .inputs
+            .bc_segments
+            .as_ref()
+            .filter(|segments| !segments.is_empty())
+        {
+            (
+                crate::derivatives::interpolated_bc(
+                    velocity_magnitude / speed_of_sound,
+                    segments,
+                    Some(&self.inputs),
+                ),
+                true,
+            )
+        } else {
+            (self.inputs.bc_value, false)
+        };
+
+        // Segment tables already own the velocity-dependent BC shape. Stacking the empirical
+        // cluster ladder on top would apply that shape twice (MBA-1175). Cluster correction is
+        // therefore only a fallback for a scalar BC, regardless of which explicit segment
+        // representation supplied the active value.
+        let effective_bc = if bc_from_segments {
+            base_bc
+        } else {
+            self.apply_cluster_bc_correction(base_bc, velocity_fps)
+        };
+        // The scalar BC is validated at the solve boundary. Retain a small denominator floor for
+        // explicit segment tables, whose interpolated values are independent caller data.
+        let effective_bc = effective_bc.max(1e-6);
+
+        // When a custom drag table is active, calculate_drag_coefficient returned the
+        // projectile's ACTUAL Cd, so the retardation denominator must be the sectional
+        // density (lb/in²), not a BC: Cd_own / SD == Cd_ref / BC
+        // (see BallisticInputs::custom_drag_denominator).
+        let retard_denom = if self.inputs.custom_drag_table.is_some() {
+            self.inputs.custom_drag_denominator(effective_bc)
+        } else {
+            effective_bc
+        };
+
+        (cd, retard_denom)
+    }
+
+    /// The projectile's own drag coefficient at one speed — the curve a shooter would compare
+    /// against a measured CDM trace, not the reference-table Cd (MBA-1423).
+    ///
+    /// A G-model Cd describes the *standard* projectile, so reporting it directly would hand a
+    /// consumer the same G7 curve no matter which bullet was flown. Scaling by the form factor
+    /// `SD / BC` converts it to this projectile's actual Cd, from the identity that both
+    /// descriptions must produce the same retardation:
+    ///
+    /// ```text
+    /// Cd_own / SD == Cd_ref / BC   =>   Cd_own == Cd_ref * SD / BC
+    /// ```
+    ///
+    /// Because the denominator comes from the same internal resolver the integrator divides by,
+    /// a velocity- or Mach-segmented BC
+    /// carries into the result and its band steps appear in the reported curve. The same
+    /// expression is already correct for a custom drag table, where the denominator *is* the
+    /// sectional density and the scale factor collapses to 1.
+    ///
+    /// Returns `None` when the projectile's mass or diameter is unavailable, since sectional
+    /// density — and therefore the projectile's own Cd — is undefined without both.
+    pub fn effective_drag_coefficient(
+        &self,
+        velocity_magnitude: f64,
+        speed_of_sound: f64,
+    ) -> Option<f64> {
+        if !velocity_magnitude.is_finite() || speed_of_sound <= 1e-9 {
+            return None;
+        }
+        let sectional_density = self.inputs.sectional_density_lb_in2()?;
+        let (cd, retard_denom) = self.drag_terms(velocity_magnitude, speed_of_sound);
+        if retard_denom <= 0.0 {
+            return None;
+        }
+        let effective = cd * sectional_density / retard_denom;
+        effective.is_finite().then_some(effective)
+    }
+
+    /// Fill every point's [`TrajectoryPoint::drag_coefficient`] in one pass (MBA-1423).
+    ///
+    /// Deliberately a pass over the finished vector rather than a value set where points are
+    /// built: this solver constructs them in several places — terminal interpolation plus one
+    /// loop per integrator family — and a pass covers a site added later for free.
+    ///
+    /// `speed_of_sound` must be the station value the result reports Mach against, so that a
+    /// consumer plotting Cd against Mach gets a self-consistent pair. Feeding each step's local
+    /// speed of sound instead would attribute a Cd to a Mach the document never shows.
+    fn annotate_drag_coefficients(&self, points: &mut [TrajectoryPoint], speed_of_sound: f64) {
+        for point in points.iter_mut() {
+            point.drag_coefficient =
+                self.effective_drag_coefficient(point.velocity_magnitude, speed_of_sound);
+        }
     }
 
     fn calculate_drag_coefficient(&self, velocity: f64, speed_of_sound: f64) -> f64 {
@@ -5075,6 +5173,7 @@ mod bc_fit_objective_tests {
             position: Vector3::new(range_m, 0.0, 0.0),
             velocity_magnitude: velocity_mps,
             kinetic_energy: 0.0,
+            drag_coefficient: None,
         }
     }
 
@@ -5861,6 +5960,7 @@ mod terminal_range_interpolation_tests {
             position: Vector3::new(90.0, 1.0, -1.0),
             velocity_magnitude: previous_speed,
             kinetic_energy: 0.5 * solver.inputs.bullet_mass * previous_speed.powi(2),
+            drag_coefficient: None,
         }];
         let mut max_height = 1.0;
         let termination = solver
@@ -5921,6 +6021,7 @@ mod terminal_range_interpolation_tests {
             position: Vector3::new(100.0, 1.0, 0.0),
             velocity_magnitude: speed,
             kinetic_energy: 0.5 * solver.inputs.bullet_mass * speed.powi(2),
+            drag_coefficient: None,
         }];
         let mut max_height = 1.0;
         let termination = solver
@@ -7437,5 +7538,148 @@ mod bc_reference_standard_tests {
             .expect("must warn");
         assert!(warning.contains("--bc-reference"));
         assert!(warning.contains("--drag-table"));
+    }
+}
+
+/// MBA-1423: the per-point effective drag coefficient.
+///
+/// These pin the DEFINITION (the projectile's own Cd, form-factor scaled) rather than the
+/// plumbing, because the plumbing being present is not the risk — reporting a plausible number
+/// that is not the one flown is.
+#[cfg(test)]
+mod effective_drag_coefficient_tests {
+    use super::*;
+
+    fn inputs_175gr_g7() -> BallisticInputs {
+        let mut inputs = BallisticInputs {
+            bc_value: 0.243,
+            bc_type: DragModel::G7,
+            muzzle_velocity: 823.0,
+            ..Default::default()
+        };
+        // Set the SI fields: TrajectorySolver::new re-derives caliber_inches/weight_grains
+        // from bullet_diameter/bullet_mass, so setting only the imperial pair would be
+        // silently overwritten by the SI defaults (a 154gr .30, not a 175gr .308).
+        inputs.bullet_mass = 175.0 * crate::constants::GRAINS_TO_KG;
+        inputs.bullet_diameter = 0.308 * 0.0254;
+        inputs.weight_grains = 175.0;
+        inputs.caliber_inches = 0.308;
+        inputs
+    }
+
+    fn solver(inputs: BallisticInputs) -> TrajectorySolver {
+        TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        )
+    }
+
+    /// The reported Cd is the projectile's own, i.e. the reference Cd scaled by the form factor
+    /// SD/BC — not the reference table value itself, which would be identical for every bullet
+    /// sharing a drag model and so useless for charting a specific load.
+    #[test]
+    fn reports_the_projectiles_own_cd_not_the_reference_tables() {
+        let inputs = inputs_175gr_g7();
+        let sd = inputs.sectional_density_lb_in2().expect("SD");
+        let solver = solver(inputs);
+
+        let sos = 340.0;
+        let velocity = 800.0;
+        let mach = velocity / sos;
+
+        let reference = crate::drag::get_drag_coefficient(mach, &DragModel::G7);
+        let reported = solver
+            .effective_drag_coefficient(velocity, sos)
+            .expect("mass and diameter are set");
+
+        let expected = reference * sd / 0.243;
+        assert!(
+            (reported - expected).abs() < 1e-12,
+            "reported {reported} != Cd_ref * SD / BC {expected}"
+        );
+        // The form factor here is > 1, so the two genuinely differ: a test that passed with
+        // `reported == reference` would not be testing anything.
+        assert!(
+            (reported - reference).abs() > 1e-6,
+            "form factor collapsed to 1; this fixture no longer distinguishes the two values"
+        );
+    }
+
+    /// A custom drag table already supplies the projectile's actual Cd and divides by sectional
+    /// density, so the form-factor scale must collapse to exactly 1 and pass the curve through.
+    #[test]
+    fn a_custom_drag_table_passes_through_unscaled() {
+        let mut inputs = inputs_175gr_g7();
+        inputs.custom_drag_table = Some(crate::drag::DragTable::new(
+            vec![0.5, 3.0],
+            vec![0.15, 0.40],
+        ));
+        let solver = solver(inputs);
+
+        let sos = 340.0;
+        let velocity = 0.9 * sos;
+        let table_value = solver
+            .inputs
+            .custom_drag_table
+            .as_ref()
+            .expect("table")
+            .interpolate(0.9);
+
+        let reported = solver
+            .effective_drag_coefficient(velocity, sos)
+            .expect("mass and diameter are set");
+        assert!(
+            (reported - table_value).abs() < 1e-12,
+            "custom table Cd {table_value} was rescaled to {reported}"
+        );
+    }
+
+    /// The band step a segmented BC produces is the whole reason this field exists: it is the
+    /// one feature of a real load's drag curve a consumer cannot reconstruct from a published BC.
+    #[test]
+    fn a_velocity_segmented_bc_steps_the_reported_cd() {
+        let mut inputs = inputs_175gr_g7();
+        inputs.use_bc_segments = true;
+        inputs.bc_segments_data = Some(vec![
+            crate::BCSegmentData { velocity_min: 2400.0, velocity_max: 4000.0, bc_value: 0.243 },
+            crate::BCSegmentData { velocity_min: 0.0, velocity_max: 2400.0, bc_value: 0.200 },
+        ]);
+        let solver = solver(inputs);
+
+        let sos = 340.0;
+        // Straddle the 2400 fps boundary (fps -> m/s).
+        let above = solver.effective_drag_coefficient(2500.0 / 3.28084, sos).expect("cd");
+        let below = solver.effective_drag_coefficient(2300.0 / 3.28084, sos).expect("cd");
+
+        // Lower BC below the boundary means MORE drag for the same reference curve.
+        assert!(
+            below > above,
+            "expected the 0.200 band to report a higher Cd than the 0.243 band; got {below} vs {above}"
+        );
+    }
+
+    /// Sectional density is undefined without both mass and diameter, and so is the projectile's
+    /// own Cd. Reporting the reference value there would be a silently wrong number.
+    #[test]
+    fn is_absent_when_sectional_density_is_unknown() {
+        let mut inputs = inputs_175gr_g7();
+        inputs.weight_grains = 0.0;
+        inputs.bullet_mass = 0.0;
+        let solver = solver(inputs);
+        assert!(solver.effective_drag_coefficient(800.0, 340.0).is_none());
+    }
+
+    /// Every solver family runs the same post-pass, so none may leave the field empty.
+    #[test]
+    fn every_point_of_a_solved_trajectory_carries_the_value() {
+        let mut solver = solver(inputs_175gr_g7());
+        solver.set_max_range(300.0);
+        let result = solver.solve().expect("solve");
+        assert!(!result.points.is_empty());
+        assert!(
+            result.points.iter().all(|p| p.drag_coefficient.is_some()),
+            "the post-integration pass missed at least one point"
+        );
     }
 }
