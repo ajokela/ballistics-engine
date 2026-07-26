@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Docs and comments that described behaviour the code does not have** (MBA-1420). The QNH
+  section of CLI_USAGE said a saved profile's `pressure_reference` "round-trips with the
+  profile", which oversold it: the field round-trips through the profile file but is never
+  applied to a solve. `--plot`'s help and its code comment both described two panels; it renders
+  four (drop, drift, velocity, energy). A `recoil.rs` comment showed arithmetic that does not
+  reproduce its own cited figure (752122.5 + 63877.5 is 816000, not 816001, and the shown steps
+  give 30.161 ft-lb, not the 30.22 the SAAMI document states) — the pinned test value was always
+  correct. The `zero --from-angle` handoff is now documented with its preconditions: a recovered
+  range reproduces the original zero only under the same wind, bore height, and zero-day
+  atmosphere. And a comment now records which of `atmosphere` and `inputs.pressure` is
+  authoritative after the QNH reduction, since the two differ and only one reaches the solve.
+- **`--density-altitude` out-of-range errors now name the flag** (MBA-1420). An extreme value
+  drove the pressure inverse negative and surfaced as `atmosphere.pressure must be finite`,
+  pointing at a field the user never typed; NaN surfaced as a temperature error. The flag now
+  carries its own wide bound (-5000 to 120000) and fails naming itself.
 - **`zero --from-angle` now says which crossing `zero_range` is** (MBA-1419). A bore angle
   generally crosses the line of sight twice, and the single `zero_range` value is
   far-when-present-else-near — a consumer reading it alone could not tell which of two valid

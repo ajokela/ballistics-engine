@@ -195,8 +195,12 @@ mod tests {
     ///   VE  = 1275 fps (ejecta/shot velocity)
     ///   f   = 1.50 (average-length shotgun)
     /// SAAMI's own (rounded) arithmetic: V = (589.9*1275 + 33.4*1275*1.5) / (7000*7)
-    ///   = (752122 + 63877.5) / 49000 = 816001/49000 = 16.653 fps (rounded to 16.65 fps
-    ///   before squaring in the source document); FRE = (7/64.34)*16.65^2 = 30.22 ft-lb
+    ///   = (752122.5 + 63877.5) / 49000 = 816000/49000 = 16.6531 fps (rounded to 16.65 fps
+    ///   before squaring in the source document). NOTE the shown steps do not reproduce
+    ///   SAAMI's printed result: (7/64.34)*16.65^2 = 30.161 ft-lb, and even the unrounded
+    ///   16.6531 gives 30.172 -- not the 30.22 ft-lb the document states. 30.22 is quoted
+    ///   here as the source's own stated answer, not as something derivable from the
+    ///   intermediates it shows; the assertion below brackets both.
     ///   ("or about 30 ft-lb due to the uncertainty of the exact shot charge weight and
     ///   velocity" -- SAAMI's own words). Converting through exact SI (kg/m/s, no
     ///   intermediate rounding) instead of SAAMI's g=32.17-and-round-16.65 shortcut gives
