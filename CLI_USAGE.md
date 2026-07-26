@@ -2355,6 +2355,39 @@ axis in feet and misdiagnosed a bug. The document carries a `legend` block (appe
 `--enable-precession`) carry their unit in the field name already and are covered above and
 in the [Mover Ring](#mover-ring---target-speed) section, not restated in `legend`.
 
+**`drag_coefficient`** (MBA-1423): present on each `trajectory[]` point only when
+`--with-drag-coefficient` was supplied alongside `--full`. Dimensionless, so it does not vary
+with `--units`.
+
+This is the **projectile's own** drag coefficient, not the reference table's. A G-model Cd
+describes the *standard* projectile, so reporting it directly would hand back the same G7
+curve for every bullet sharing a drag model. It is scaled by the form factor to describe this
+bullet, from the identity that both descriptions must produce the same retardation:
+
+```
+Cd_own / SD == Cd_ref / BC    =>    Cd_own == Cd_ref × SD / BC
+```
+
+Consequences worth knowing before you chart it:
+
+- A **velocity- or Mach-segmented BC** (`--bc-segment`) shows its band steps here, because the
+  BC in that denominator is the one resolved for that point. This is the part of a real load's
+  drag curve you cannot reconstruct from a published BC.
+- A **custom drag table** (`--drag-table`) already supplies the projectile's actual Cd and is
+  divided by sectional density rather than a BC, so the scale factor collapses to exactly 1
+  and the curve passes through unchanged (including `--cd-scale`).
+- It covers **only the speeds the bullet actually flew** — it is not a 0–3 Mach sweep. If you
+  need the reference curves themselves across their full domain, that is a separate concern.
+- Cd is paired with the **station** speed of sound, the same one the document reports Mach
+  against, so plotting Cd against Mach is self-consistent. Using each step's local speed of
+  sound would attribute a Cd to a Mach this document never shows.
+- **Absent** (not `null`) on a point whose sectional density is unknown, since the
+  projectile's own Cd is undefined without both mass and diameter.
+
+JSON only. CSV's sampled-interval branch (`--sample-interval`) reports a different point type
+that carries no Cd, so a column there would be populated in one branch and empty in the other.
+Without the flag, output is byte-identical to before this field existed.
+
 **`zero_angle_degrees`** (MBA-1402): present only when auto-zero ran (`--auto-zero`, or a
 saved profile's `auto_zero`/`zero_distance`) — the same bore angle `TrajectoryConfig.angle`
 was set to for this run, echoed in degrees so it can be captured and fed straight into

@@ -5,6 +5,17 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`trajectory --with-drag-coefficient`** (MBA-1423) adds a `drag_coefficient` key to each
+  point of `--full` JSON. This is the projectile's *own* Cd — the reference-table value scaled
+  by the form factor `SD / BC` — not the G-model curve, which would be identical for every
+  bullet sharing a drag model. A segmented BC therefore shows its band steps, and a custom
+  drag table passes through unscaled. Covers only the speeds actually flown, and pairs Cd with
+  the station speed of sound the document already reports Mach against. Off by default: JSON
+  without the flag is byte-identical to 0.29.0.
+
 ## [0.29.0] - 2026-07-26
 
 The theme of this release is inputs that mean what the shooter means: several

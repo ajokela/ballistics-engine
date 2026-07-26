@@ -469,6 +469,7 @@ mod tests {
             position: Vector3::new(x, y, z),
             velocity_magnitude: speed,
             kinetic_energy: 0.5 * 0.02 * speed * speed,
+            drag_coefficient: None,
         }
     }
 
