@@ -479,6 +479,12 @@ mod pressure_mode_on_calculator_subcommands {
             vec![
                 "--measured-drop", "30", "--range", "500", "--bc", "0.243", "--mass", "175",
                 "--diameter", "0.308",
+                // --offline: without it this command calls a live API by DEFAULT, which made
+                // this suite network-dependent — it went green four CI runs in a row and then
+                // failed on an API timeout. A hermetic test may depend on neither $HOME (the
+                // ToS lesson) nor the network, and the pressure-mode behaviour under test is
+                // entirely in the local solve path.
+                "--offline",
             ],
             false,
         );
