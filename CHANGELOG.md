@@ -5,7 +5,14 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.30.0] - 2026-07-26
+
+The theme of this release is reaching every surface: the numbers the engine
+already computes now arrive where consumers actually are — bindings that call
+the fast path, scripts that parse the calculator subcommands, saved profiles
+that carry their own weather, and above all the browser terminal, which gains
+the release's two headline features on the same bytes as native.
+
 
 ### Fixed
 - **The browser build now emits `zero_angle_degrees` in JSON** (MBA-1402 parity). 0.29.0 added
