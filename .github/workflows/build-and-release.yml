@@ -89,7 +89,8 @@ jobs:
       run: |
         cargo build --release --locked --target ${{ matrix.target }}
         cp target/${{ matrix.target }}/release/ballistics ./ballistics-${VERSION}-macos-${{ matrix.arch }}
-        shasum -a 256 ./ballistics-${VERSION}-macos-${{ matrix.arch }} | cut -d' ' -f1 > ./ballistics-${VERSION}-macos-${{ matrix.arch }}.sha256
+        # Two-space, bare-filename form so `shasum -c` / `sha256sum -c` accept it.
+        shasum -a 256 ballistics-${VERSION}-macos-${{ matrix.arch }} > ballistics-${VERSION}-macos-${{ matrix.arch }}.sha256
 
     - name: Version gate
       env:
@@ -172,7 +173,8 @@ jobs:
       env:
         VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        sha256sum ballistics-${VERSION}-linux-${{ matrix.arch }} | cut -d' ' -f1 > ballistics-${VERSION}-linux-${{ matrix.arch }}.sha256
+        # Two-space, bare-filename form so `sha256sum -c` accepts it.
+        sha256sum ballistics-${VERSION}-linux-${{ matrix.arch }} > ballistics-${VERSION}-linux-${{ matrix.arch }}.sha256
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
@@ -216,8 +218,11 @@ jobs:
       env:
         VERSION: ${{ needs.prep.outputs.version }}
       run: |
+        # Two-space, bare-filename form so `shasum -c` accepts it. ASCII, no BOM,
+        # trailing newline - Out-File's default UTF8-with-BOM breaks `-c` parsing.
         $hash = Get-FileHash -Path ballistics-$env:VERSION-windows-x86_64.exe -Algorithm SHA256
-        $hash.Hash.ToLower() | Out-File -FilePath ballistics-$env:VERSION-windows-x86_64.exe.sha256 -NoNewline
+        $line = $hash.Hash.ToLower() + "  ballistics-$env:VERSION-windows-x86_64.exe`n"
+        [System.IO.File]::WriteAllText("ballistics-$env:VERSION-windows-x86_64.exe.sha256", $line, (New-Object System.Text.ASCIIEncoding))
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
@@ -257,7 +262,11 @@ jobs:
 
           # Create versioned binary + checksum
           cp target/release/ballistics ./ballistics-${VERSION}-freebsd-x86_64
-          sha256 ./ballistics-${VERSION}-freebsd-x86_64 > ./ballistics-${VERSION}-freebsd-x86_64.sha256
+          # BSD sha256(1) emits tag format with a ./ path; normalize to the
+          # two-space bare-filename convention the rest of the release uses.
+          sha256 -q ./ballistics-${VERSION}-freebsd-x86_64 \
+            | awk -v f="ballistics-${VERSION}-freebsd-x86_64" '{print $1"  "f}' \
+            > ./ballistics-${VERSION}-freebsd-x86_64.sha256
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
@@ -297,7 +306,11 @@ jobs:
 
           # Create versioned binary + checksum
           cp target/release/ballistics ./ballistics-${VERSION}-netbsd-x86_64
-          sha256 ./ballistics-${VERSION}-netbsd-x86_64 > ./ballistics-${VERSION}-netbsd-x86_64.sha256
+          # BSD sha256(1) emits tag format with a ./ path; normalize to the
+          # two-space bare-filename convention the rest of the release uses.
+          sha256 -q ./ballistics-${VERSION}-netbsd-x86_64 \
+            | awk -v f="ballistics-${VERSION}-netbsd-x86_64" '{print $1"  "f}' \
+            > ./ballistics-${VERSION}-netbsd-x86_64.sha256
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
@@ -341,7 +354,11 @@ jobs:
 
           # Create versioned binary + checksum
           cp target/release/ballistics ./ballistics-${VERSION}-openbsd-x86_64
-          sha256 ./ballistics-${VERSION}-openbsd-x86_64 > ./ballistics-${VERSION}-openbsd-x86_64.sha256
+          # BSD sha256(1) emits tag format with a ./ path; normalize to the
+          # two-space bare-filename convention the rest of the release uses.
+          sha256 -q ./ballistics-${VERSION}-openbsd-x86_64 \
+            | awk -v f="ballistics-${VERSION}-openbsd-x86_64" '{print $1"  "f}' \
+            > ./ballistics-${VERSION}-openbsd-x86_64.sha256
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
@@ -374,6 +391,10 @@ jobs:
       run: |
         find artifacts -type f -name "ballistics-*" -exec mv {} . \; 2>/dev/null || true
         echo "Release files:"; ls -la ballistics-* || true
+        # Every .sha256 must be in the parseable two-space form AND verify. This is the
+        # end-to-end check that the format drift (three different formats across the
+        # matrix) can never come back silently.
+        shasum -c ./*.sha256
         # On a tag build, all 8 hosted binaries are mandatory (16 files with checksums).
         if [ "$IS_TAG" = "true" ]; then
           COUNT=$(ls ballistics-${VERSION}-* 2>/dev/null | wc -l)
@@ -387,6 +408,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         VERSION: ${{ needs.prep.outputs.version }}
+        IS_TAG: ${{ needs.prep.outputs.is_tag }}
       run: |
         # Notes come from the CHANGELOG section for this version (the runbook keeps
         # [Unreleased] current during development); fall back to a generic stub only
@@ -404,8 +426,27 @@ jobs:
           echo '```'
         } >> release-notes.md
 
-        gh release create "v${VERSION}" \
-          --title "v${VERSION}" \
-          --notes-file release-notes.md \
-          ballistics-* || \
-        gh release upload "v${VERSION}" ballistics-* --clobber
+        # A dispatch run builds the DISPATCHED REF, not the tag — and main's
+        # Cargo.toml holds the released version between bumps, so prep's version
+        # cross-check passes for an already-released version. Without this guard the
+        # create-then-clobber fallback would silently replace published, verified
+        # release assets with branch-HEAD bytes (plus freshly matching checksums, so
+        # nothing downstream could notice). Tag runs publish; dispatch runs may only
+        # create something that does not exist yet, and only as a draft.
+        if [ "$IS_TAG" = "true" ]; then
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes-file release-notes.md \
+            ballistics-* || \
+          gh release upload "v${VERSION}" ballistics-* --clobber
+        else
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::release v${VERSION} already exists. A dispatch build comes from the dispatched ref, not the tag, and must never overwrite published assets. Re-run the tag workflow, or replace assets deliberately by hand."
+            exit 1
+          fi
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes-file release-notes.md \
+            --draft \
+            ballistics-*
+        fi
