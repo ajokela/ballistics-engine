@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Lateral sight offset input for offset-mounted optics** (MBA-1396). New
+  `BallisticInputs.sight_offset_lateral_m` (positive = sight RIGHT of bore) models the
+  windage half of sight geometry the way `sight_height` models the vertical half: the
+  bullet starts that far LEFT of the sight line (`initial_position` lateral term,
+  composing with the cant displacement), and a zero solve applies the windage-zero
+  convergence (`offset / zero_distance`) so the trajectory crosses the sight line
+  laterally at the zero range — not a constant parallel offset. Without a zero solve
+  (explicit muzzle angle) only the physical displacement applies. Distinct from and
+  additive with MBA-1359's zero POI offset (angular zero state vs physical mount
+  geometry). Surfaces: `--sight-offset` (inches imperial / mm metric, the
+  `--sight-height` units) on `trajectory`, `mpbr`, `come-ups`, `wind-card`,
+  `range-table`, `compare`, and `monte-carlo` (mirroring `--cant`; MC solves no zero, so
+  only the physical displacement applies there) plus the WASM terminal's `trajectory`;
+  solve-json v1 request field `rifle.sight_offset_lateral_m`; a third appended
+  `c_double` on `FFIBallisticInputs`; `compute_wez` gained a trailing
+  `sight_offset_lateral_m` parameter (cant precedent); back-compatible
+  `sight_offset_lateral_m` saved-profile field (always meters). Omitting every new
+  input is byte-identical.
 - **Deliberate zero POI offset inputs** (MBA-1359, Kestrel ZH/ZO semantics). New
   `BallisticInputs` fields `zero_poi_vertical_m`/`zero_poi_horizontal_m` record that the
   rifle is deliberately zeroed off — e.g. 0.1 in high / 0.2 in left at the zero range —

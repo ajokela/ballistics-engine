@@ -179,6 +179,19 @@ pub struct RifleV1 {
         deserialize_with = "deserialize_present"
     )]
     pub twist_direction: Option<TwistDirectionV1>,
+    /// Lateral offset between the sight axis and the bore axis, meters (MBA-1396,
+    /// offset-mounted optics): positive = the sight sits RIGHT of the bore. The bore
+    /// starts that far left of the line of sight, and a solved zero adds the windage
+    /// convergence (`offset / zero_distance`) so the trajectory crosses the LOS laterally
+    /// at the zero range. Omitted (the default) is byte-identical to pre-MBA-1396
+    /// behavior; there is no resolved-DTO echo (request-side additive field — the
+    /// response shape is unchanged).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub sight_offset_lateral_m: Option<f64>,
 }
 
 /// Direction of rifling twist as viewed from the breech toward the muzzle.
@@ -1146,6 +1159,7 @@ fn validate_rifle(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "muzzle_height_m",
             "twist_rate_m_per_turn",
             "twist_direction",
+            "sight_offset_lateral_m",
         ],
         &["muzzle_velocity_mps"],
     )?;
@@ -1153,7 +1167,12 @@ fn validate_rifle(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     validate_optional_numbers(
         object,
         path,
-        &["sight_height_m", "muzzle_height_m", "twist_rate_m_per_turn"],
+        &[
+            "sight_height_m",
+            "muzzle_height_m",
+            "twist_rate_m_per_turn",
+            "sight_offset_lateral_m",
+        ],
     )?;
     if let Some(direction) = object.get("twist_direction") {
         validate_string_enum(direction, "$.rifle.twist_direction", &["left", "right"])?;

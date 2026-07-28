@@ -364,6 +364,9 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         enable_trajectory_sampling: false,
         sample_interval: 10.0,
         sight_height: 0.0,
+        // MBA-1396: like cant_angle above, the fast kernel does not plumb sight-mount
+        // geometry — callers own the initial lateral state.
+        sight_offset_lateral_m: 0.0,
         muzzle_height: 0.0,
         target_height: 0.0,
         // MBA-1359: zero-POI offsets bias a ZERO SOLVE; this low-level kernel never solves

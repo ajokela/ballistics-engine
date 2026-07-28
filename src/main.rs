@@ -563,6 +563,16 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
+        /// Lateral sight-to-bore mount offset for offset-mounted optics (inches for
+        /// imperial, mm for metric; signed). Positive = the sight sits RIGHT of the bore
+        /// (MBA-1396). Physical mount geometry, distinct from --zero-poi-right's angular
+        /// zero-state bias: the bullet starts that far LEFT of the sight line, and a zero
+        /// solve adds the windage convergence so it crosses the sight line at the zero
+        /// range. Without a zero solve (explicit --angle), only the constant physical
+        /// displacement applies — drift starts offset and stays uncorrected.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        sight_offset: Option<f64>,
+
         /// Bore height above ground (inches for imperial, mm for metric; MBA-1339 unified
         /// this with --sight-height and the WASM --muzzle-height flag). Default: 60in/1500mm
         /// (= 5ft/1.5m). Also accepts --muzzle-height.
@@ -1042,6 +1052,14 @@ enum Commands {
         /// right). Models "zeroed level, fired canted": POI moves right and low. 0 = level.
         #[arg(long, alias = "cant-angle", value_name = "DEGREES", default_value_t = 0.0)]
         cant: f64,
+
+        /// Lateral sight-to-bore mount offset (inches imperial / mm metric; signed;
+        /// positive = sight RIGHT of bore, MBA-1396). monte-carlo solves no zero, so only
+        /// the constant physical displacement applies (shifts every sample's lateral
+        /// start, and therefore the dispersion center), mirroring --cant's fire-time-only
+        /// role here.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        sight_offset: Option<f64>,
 
         /// WEZ (Weapon Employment Zone) sweep mode: report hit probability vs range for a
         /// target size instead of a single summary. See CLI_USAGE.md's WEZ section.
@@ -1633,6 +1651,12 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         zero_poi_right: Option<f64>,
 
+        /// Lateral sight-to-bore mount offset (inches imperial / mm metric; signed;
+        /// positive = sight RIGHT of bore). Same semantics as `trajectory --sight-offset`
+        /// (MBA-1396).
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        sight_offset: Option<f64>,
+
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
         temperature: Option<f64>,
@@ -1735,6 +1759,13 @@ enum Commands {
         /// no windage column, so it does not change this table.
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         zero_poi_right: Option<f64>,
+
+        /// Lateral sight-to-bore mount offset (inches imperial / mm metric; signed;
+        /// positive = sight RIGHT of bore). Same semantics as `trajectory --sight-offset`
+        /// (MBA-1396). Accepted for a consistent flag set; the offset is lateral-only, so
+        /// it does not change this elevation table.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        sight_offset: Option<f64>,
 
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
@@ -2139,6 +2170,13 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         zero_poi_right: Option<f64>,
 
+        /// Lateral sight-to-bore mount offset (inches imperial / mm metric; signed;
+        /// positive = sight RIGHT of bore). Same semantics as `trajectory --sight-offset`
+        /// (MBA-1396): drift starts offset left of the sight line and converges to it at
+        /// the zero distance.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        sight_offset: Option<f64>,
+
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
         temperature: Option<f64>,
@@ -2306,6 +2344,13 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         zero_poi_right: Option<f64>,
 
+        /// Lateral sight-to-bore mount offset (inches imperial / mm metric; signed;
+        /// positive = sight RIGHT of bore). Same semantics as `trajectory --sight-offset`
+        /// (MBA-1396): the Wind column starts offset left of the sight line and converges
+        /// to it at the zero distance.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        sight_offset: Option<f64>,
+
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
         temperature: Option<f64>,
@@ -2412,6 +2457,12 @@ enum Commands {
         /// --zero-poi-right` (MBA-1359); applied identically to every compared load.
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         zero_poi_right: Option<f64>,
+
+        /// Lateral sight-to-bore mount offset (inches imperial / mm metric; signed;
+        /// positive = sight RIGHT of bore). Same semantics as `trajectory --sight-offset`
+        /// (MBA-1396); applied identically to every compared load.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        sight_offset: Option<f64>,
 
         /// Temperature (F or C based on --units)
         #[arg(long)]
@@ -2910,6 +2961,12 @@ struct ProfileData {
     /// offset"): positive = impacts RIGHT. ALWAYS meters, like `zero_poi_up_m` above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     zero_poi_right_m: Option<f64>,
+    /// Lateral sight-to-bore mount offset (MBA-1396, offset-mounted optics): positive =
+    /// sight RIGHT of bore. ALWAYS meters (unit-fixed like the zero POI fields above), so
+    /// `converted_to` leaves it untouched; same `#[serde(default)]` forward-compat
+    /// pattern (an old reader silently drops it on re-save).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sight_offset_lateral_m: Option<f64>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -3153,6 +3210,10 @@ struct TrajectoryConfig {
     // dispatch's zero solve returned biased).
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-to-bore mount offset (meters, positive = sight right of
+    // bore). Physical geometry on the flight inputs; its windage-zero convergence shares
+    // the MBA-1359 azimuth term via windage_zero_bias_rad.
+    sight_offset_lateral_m: f64,
     // Some(zero distance, meters) iff the dispatch solved a zero at that distance
     // (--auto-zero or a profile zero); None for an explicit --angle flight.
     zero_solve_distance_m: Option<f64>,
@@ -4307,6 +4368,8 @@ fn map_a7p_to_profile(
         // convert the file's zero_x/zero_y click counts with (see the mapping above).
         zero_poi_up_m,
         zero_poi_right_m,
+        // MBA-1396: .a7p has no lateral sight-offset concept; left for a hand edit.
+        sight_offset_lateral_m: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -5236,6 +5299,8 @@ fn solve_profile_for_dsf(
         // MBA-1359: honor a stored zero POI offset when solving from a saved profile.
         zero_poi_vertical_m: profile.zero_poi_up_m.unwrap_or(0.0),
         zero_poi_horizontal_m: profile.zero_poi_right_m.unwrap_or(0.0),
+        // MBA-1396: honor a stored lateral sight-mount offset the same way.
+        sight_offset_lateral_m: profile.sight_offset_lateral_m.unwrap_or(0.0),
         // Ground-impact detection ON (0.0), matching run_trajectory's default (Default::default()
         // otherwise leaves this at -100.0 = effectively disabled) — `dsf` has no
         // --ignore-ground-impact flag.
@@ -5471,6 +5536,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             zero_poi_up,
             zero_poi_right,
             sight_height,
+            sight_offset,
             bore_height,
             ignore_ground_impact,
             use_bc_segments,
@@ -5959,6 +6025,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let zero_poi_horizontal_metric = zero_poi_right
                 .map(|v| zero_poi_display_to_metric(v, cli.units))
                 .or_else(|| saved_profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
+                .unwrap_or(0.0);
+            // MBA-1396: lateral sight-mount offset, same CLI-over-profile precedence
+            // (profile value is ALWAYS meters — see ProfileData::sight_offset_lateral_m).
+            let sight_offset_lateral_metric = sight_offset
+                .map(|v| sight_offset_display_to_metric(v, cli.units))
+                .or_else(|| {
+                    saved_profile_data
+                        .as_ref()
+                        .and_then(|p| p.sight_offset_lateral_m)
+                })
                 .unwrap_or(0.0);
             let twist_rate =
                 twist_rate.or_else(|| saved_profile_data.as_ref().and_then(|p| p.twist_rate));
@@ -6738,6 +6814,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // (the solved-angle copy cannot carry an azimuth term).
                     zero_poi_vertical_m: zero_poi_vertical_metric,
                     zero_poi_horizontal_m: zero_poi_horizontal_metric,
+                    // MBA-1396: physical sight geometry participates in the zero trials
+                    // (initial lateral position; y-uncoupled, so the elevation search is
+                    // unaffected). The windage convergence is likewise re-derived for the
+                    // flight inputs in run_trajectory.
+                    sight_offset_lateral_m: sight_offset_lateral_metric,
                     ..Default::default()
                 };
 
@@ -6842,6 +6923,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 cant,
                 zero_poi_vertical_m: zero_poi_vertical_metric,
                 zero_poi_horizontal_m: zero_poi_horizontal_metric,
+                sight_offset_lateral_m: sight_offset_lateral_metric,
                 zero_solve_distance_m: final_auto_zero
                     .map(|zd| UnitConverter::distance_to_metric(zd, cli.units)),
                 use_bc_segments: effective_use_bc_segments,
@@ -7064,6 +7146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     cd_scale,
                                     zero_poi_vertical_m: zero_poi_vertical_metric,
                                     zero_poi_horizontal_m: zero_poi_horizontal_metric,
+                                    sight_offset_lateral_m: sight_offset_lateral_metric,
                                 };
 
                                 let local_wind = WindConditions {
@@ -7236,6 +7319,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             drag_table,
             cd_scale,
             cant,
+            sight_offset,
             wez,
             target_size,
             wind_call_error,
@@ -7246,6 +7330,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             let bullet_mass = mass;
             let bullet_diameter = diameter;
+            // MBA-1396: lateral sight-mount offset (inches imperial / mm metric -> meters).
+            let sight_offset_lateral_m = sight_offset
+                .map(|v| sight_offset_display_to_metric(v, cli.units))
+                .unwrap_or(0.0);
             // Convert inputs to metric (MBA-716)
             let velocity_metric = UnitConverter::velocity_to_metric(velocity, cli.units);
             let mass_metric = UnitConverter::mass_to_metric(bullet_mass, cli.units);
@@ -7325,6 +7413,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     custom_drag_table,
                     cd_scale,
                     cant,
+                    sight_offset_lateral_m,
                     output,
                     cli.units,
                 )?;
@@ -7350,6 +7439,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     custom_drag_table,
                     cd_scale,
                     cant,
+                    sight_offset_lateral_m,
                     output,
                 )?;
             }
@@ -8397,6 +8487,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             zero_poi_up,
             zero_poi_right,
+            sight_offset,
             temperature,
             pressure,
             pressure_type,
@@ -8459,6 +8550,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|v| zero_poi_display_to_metric(v, cli.units))
                 .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
                 .unwrap_or(0.0);
+            // MBA-1396: same CLI-over-profile precedence for the lateral mount offset.
+            let sight_offset_lateral_m = sight_offset
+                .map(|v| sight_offset_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_offset_lateral_m))
+                .unwrap_or(0.0);
 
             handle_mpbr(
                 final_velocity,
@@ -8470,6 +8566,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
+                sight_offset_lateral_m,
                 temperature,
                 pressure,
                 humidity,
@@ -8496,6 +8593,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             zero_poi_up,
             zero_poi_right,
+            sight_offset,
             temperature,
             pressure,
             pressure_type,
@@ -8612,6 +8710,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|v| zero_poi_display_to_metric(v, cli.units))
                 .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
                 .unwrap_or(0.0);
+            // MBA-1396: same CLI-over-profile precedence for the lateral mount offset.
+            let sight_offset_lateral_m = sight_offset
+                .map(|v| sight_offset_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_offset_lateral_m))
+                .unwrap_or(0.0);
 
             handle_come_ups(
                 final_velocity,
@@ -8628,6 +8731,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
+                sight_offset_lateral_m,
                 temperature,
                 pressure,
                 humidity,
@@ -9026,6 +9130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             zero_poi_up,
             zero_poi_right,
+            sight_offset,
             temperature,
             pressure,
             pressure_type,
@@ -9142,6 +9247,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|v| zero_poi_display_to_metric(v, cli.units))
                 .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
                 .unwrap_or(0.0);
+            // MBA-1396: same CLI-over-profile precedence for the lateral mount offset.
+            let sight_offset_lateral_m = sight_offset
+                .map(|v| sight_offset_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_offset_lateral_m))
+                .unwrap_or(0.0);
 
             handle_wind_card(
                 final_velocity,
@@ -9161,6 +9271,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
+                sight_offset_lateral_m,
                 temperature,
                 pressure,
                 humidity,
@@ -9247,6 +9358,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             zero_poi_up,
             zero_poi_right,
+            sight_offset,
             temperature,
             pressure,
             pressure_type,
@@ -9335,6 +9447,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|v| zero_poi_display_to_metric(v, cli.units))
                 .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
                 .unwrap_or(0.0);
+            // MBA-1396: same CLI-over-profile precedence for the lateral mount offset.
+            let sight_offset_lateral_m = sight_offset
+                .map(|v| sight_offset_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.sight_offset_lateral_m))
+                .unwrap_or(0.0);
 
             handle_range_table(
                 final_velocity,
@@ -9355,6 +9472,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
+                sight_offset_lateral_m,
                 temperature,
                 pressure,
                 humidity,
@@ -9380,6 +9498,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             sight_height,
             zero_poi_up,
             zero_poi_right,
+            sight_offset,
             temperature,
             pressure,
             pressure_type,
@@ -9477,6 +9596,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let zero_poi_horizontal_m = zero_poi_right
                 .map(|v| zero_poi_display_to_metric(v, cli.units))
                 .unwrap_or(0.0);
+            // MBA-1396: compare has no single profile — CLI flag only, every load.
+            let sight_offset_lateral_m = sight_offset
+                .map(|v| sight_offset_display_to_metric(v, cli.units))
+                .unwrap_or(0.0);
 
             handle_compare(
                 compare_loads,
@@ -9493,6 +9616,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
+                sight_offset_lateral_m,
                 temperature,
                 pressure,
                 humidity,
@@ -9558,6 +9682,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         existing_profile.as_ref().and_then(|p| p.zero_poi_up_m);
                     let carried_zero_poi_right_m =
                         existing_profile.as_ref().and_then(|p| p.zero_poi_right_m);
+                    let carried_sight_offset_lateral_m = existing_profile
+                        .as_ref()
+                        .and_then(|p| p.sight_offset_lateral_m);
 
                     // MBA-1355: validate click graduations at save time so a saved profile
                     // can never store a value `resolve_click_values` would later reject.
@@ -9607,6 +9734,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         density_altitude,
                         zero_poi_up_m: carried_zero_poi_up_m,
                         zero_poi_right_m: carried_zero_poi_right_m,
+                        sight_offset_lateral_m: carried_sight_offset_lateral_m,
                     };
 
                     let path = save_profile(&profile)?;
@@ -10105,6 +10233,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         cant,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         zero_solve_distance_m,
         use_bc_segments,
         use_cluster_bc,
@@ -10209,6 +10338,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         shooting_angle: shooting_angle.to_radians(),
         cant_angle: cant.to_radians(),
         sight_height,
+        sight_offset_lateral_m,
         muzzle_height: bore_height, // Bore height above ground from --bore-height CLI option
         target_height: 0.0,
         zero_poi_vertical_m,
@@ -11597,6 +11727,8 @@ fn run_monte_carlo_wez(
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
     cd_scale: f64,
     cant: f64,
+    // MBA-1396: lateral sight-mount offset, METERS (positive = sight right of bore).
+    sight_offset_lateral_m: f64,
     output: MonteCarloOutput,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
@@ -11627,6 +11759,7 @@ fn run_monte_carlo_wez(
         custom_drag_table,
         cd_scale,
         cant,
+        sight_offset_lateral_m,
     )?;
 
     match output {
@@ -11682,6 +11815,7 @@ mod wez_tests {
             /* custom_drag_table */ None,
             /* cd_scale */ 1.0,
             /* cant */ 0.0,
+            /* sight_offset_lateral_m */ 0.0,
             MonteCarloOutput::Summary,
             UnitSystem::Metric,
         );
@@ -11718,6 +11852,9 @@ fn run_monte_carlo(
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
     cd_scale: f64,
     cant: f64,
+    // MBA-1396: lateral sight-mount offset, METERS (positive = sight right of bore).
+    // monte-carlo solves no zero, so only the physical initial displacement applies.
+    sight_offset_lateral_m: f64,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
     // Create base inputs. MBA-967: use the same bore-height/ground convention as the
@@ -11742,6 +11879,7 @@ fn run_monte_carlo(
         custom_drag_table,
         cd_scale,
         cant_angle: cant.to_radians(),
+        sight_offset_lateral_m,
         ..Default::default()
     };
 
@@ -14074,6 +14212,9 @@ fn build_trajectory_components(
     // the zero solves that reuse these components inherit it. 0.0 = no offset.
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-to-bore mount offset (meters, positive = sight right of
+    // bore). 0.0 = sight directly above the bore.
+    sight_offset_lateral_m: f64,
 ) -> (BallisticInputs, WindConditions, AtmosphericConditions) {
     let drag_model_enum = drag_model;
     let wind_direction_rad = wind_direction.to_radians();
@@ -14089,6 +14230,7 @@ fn build_trajectory_components(
         muzzle_angle: 0.0,
         target_distance: max_range,
         sight_height,
+        sight_offset_lateral_m,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
         altitude,
@@ -14163,6 +14305,10 @@ fn run_sampled_trajectory(
     // it to its own solver. (0.0, 0.0, _) and (_, _, None) are exact no-ops.
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-mount offset (meters). Physically displaces the initial
+    // lateral position, and (via windage_zero_bias_rad) joins the azimuth convergence
+    // below when a zero was solved.
+    sight_offset_lateral_m: f64,
     zero_solve_distance_m: Option<f64>,
 ) -> Result<Vec<trajectory_sampling::TrajectorySample>, Box<dyn Error>> {
     let (mut inputs, wind, atmosphere) = build_trajectory_components(
@@ -14184,6 +14330,7 @@ fn run_sampled_trajectory(
         custom_drag_table,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
     );
     inputs.muzzle_angle = zero_angle_rad;
     if let Some(zero_distance_m) = zero_solve_distance_m {
@@ -14226,6 +14373,15 @@ fn zero_poi_display_to_metric(value: f64, units: UnitSystem) -> f64 {
     }
 }
 
+/// MBA-1396: convert a `--sight-offset` CLI value (inches for imperial, millimeters for
+/// metric — mount geometry, same units as `--sight-height`) to meters.
+fn sight_offset_display_to_metric(value: f64, units: UnitSystem) -> f64 {
+    match units {
+        UnitSystem::Imperial => value * 0.0254, // inches -> meters
+        UnitSystem::Metric => value * 0.001,    // millimeters -> meters
+    }
+}
+
 /// Resolve bullet parameters: CLI arg overrides profile value
 fn resolve_param(
     cli_val: Option<f64>,
@@ -14252,6 +14408,9 @@ fn handle_mpbr(
     // CLI-over-profile and converted by the dispatch). Biases every candidate zero.
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-mount offset, METERS (y-uncoupled physical geometry; rides
+    // through the vertical vital-zone analysis unchanged).
+    sight_offset_lateral_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -14302,6 +14461,7 @@ fn handle_mpbr(
             use_rk4: true,
             zero_poi_vertical_m,
             zero_poi_horizontal_m,
+            sight_offset_lateral_m,
             ..Default::default()
         };
 
@@ -14350,6 +14510,7 @@ fn handle_mpbr(
             None,
             zero_poi_vertical_m,
             zero_poi_horizontal_m,
+            sight_offset_lateral_m,
             Some(test_zero_m),
         ) {
             Ok(s) => s,
@@ -14423,6 +14584,7 @@ fn handle_mpbr(
         use_rk4: true,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         ..Default::default()
     };
 
@@ -14462,6 +14624,7 @@ fn handle_mpbr(
         None,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         Some(best_zero_m),
     )?;
 
@@ -14648,6 +14811,9 @@ fn handle_come_ups(
     // CLI-over-profile and converted by the dispatch).
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-mount offset, METERS (lateral-only; the elevation table is
+    // unaffected, but the solve carries the true geometry).
+    sight_offset_lateral_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -14697,6 +14863,7 @@ fn handle_come_ups(
         custom_drag_table: custom_drag_table.clone(),
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         ..Default::default()
     };
 
@@ -14737,6 +14904,7 @@ fn handle_come_ups(
         dsf_table.as_ref(),
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         Some(zero_distance_m),
     )?;
 
@@ -15578,6 +15746,8 @@ fn handle_lead(
         // MBA-1359: `lead` solves no zero, so a zero POI offset has nothing to bias here.
         0.0,
         0.0,
+        // MBA-1396: lead exposes no --sight-offset flag (not a zero-solving command).
+        0.0,
     );
 
     // Powder temperature (MBA-1325): identical resolution to `run_trajectory` so a
@@ -15869,6 +16039,9 @@ fn handle_wind_card(
     // CLI-over-profile and converted by the dispatch).
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-mount offset, METERS (drift starts offset left of the LOS
+    // and converges to it at the zero distance).
+    sight_offset_lateral_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -15902,6 +16075,7 @@ fn handle_wind_card(
         use_rk4: true,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         ..Default::default()
     };
 
@@ -15975,6 +16149,7 @@ fn handle_wind_card(
                 None,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
+                sight_offset_lateral_m,
                 Some(zero_distance_m),
             )?;
 
@@ -16338,6 +16513,8 @@ fn handle_range_table(
     // CLI-over-profile and converted by the dispatch).
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-mount offset, METERS.
+    sight_offset_lateral_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -16372,6 +16549,7 @@ fn handle_range_table(
         use_rk4: true,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         ..Default::default()
     };
 
@@ -16414,6 +16592,7 @@ fn handle_range_table(
         None,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         Some(zero_distance_m),
     )?;
 
@@ -16439,6 +16618,7 @@ fn handle_range_table(
         None,
         zero_poi_vertical_m,
         zero_poi_horizontal_m,
+        sight_offset_lateral_m,
         Some(zero_distance_m),
     )?;
 
@@ -16720,6 +16900,8 @@ fn handle_compare(
     // dispatch). Shared conditions like sight_height: applied identically to every load.
     zero_poi_vertical_m: f64,
     zero_poi_horizontal_m: f64,
+    // MBA-1396: lateral sight-mount offset, METERS; shared across loads like sight_height.
+    sight_offset_lateral_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -16788,6 +16970,7 @@ fn handle_compare(
             custom_drag_table: load.custom_drag_table.clone(),
             zero_poi_vertical_m,
             zero_poi_horizontal_m,
+            sight_offset_lateral_m,
             ..Default::default()
         };
         let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
@@ -16820,6 +17003,7 @@ fn handle_compare(
             None,
             zero_poi_vertical_m,
             zero_poi_horizontal_m,
+            sight_offset_lateral_m,
             Some(zero_distance_m),
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
@@ -16844,6 +17028,7 @@ fn handle_compare(
             None,
             zero_poi_vertical_m,
             zero_poi_horizontal_m,
+            sight_offset_lateral_m,
             Some(zero_distance_m),
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
@@ -17205,6 +17390,7 @@ mod profile_unit_tests {
             density_altitude: None,
             zero_poi_up_m: None,
             zero_poi_right_m: None,
+            sight_offset_lateral_m: None,
         }
     }
 
@@ -17514,16 +17700,19 @@ mod profile_unit_tests {
         let profile = ProfileData {
             zero_poi_up_m: Some(0.00254),
             zero_poi_right_m: Some(-0.00508),
+            sight_offset_lateral_m: Some(0.0127), // MBA-1396, same unit-fixed contract
             ..metric_profile()
         };
         let reloaded: ProfileData =
             serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
         assert_eq!(reloaded.zero_poi_up_m, Some(0.00254));
         assert_eq!(reloaded.zero_poi_right_m, Some(-0.00508));
+        assert_eq!(reloaded.sight_offset_lateral_m, Some(0.0127));
 
         let imperial = reloaded.converted_to(UnitSystem::Imperial).unwrap();
         assert_eq!(imperial.zero_poi_up_m, Some(0.00254));
         assert_eq!(imperial.zero_poi_right_m, Some(-0.00508));
+        assert_eq!(imperial.sight_offset_lateral_m, Some(0.0127));
     }
 
     #[test]
@@ -17664,6 +17853,62 @@ mod a7p_import_mapping_tests {
         let mut payload = Vec::new();
         enc_bytes(1, &p, &mut payload);
         wrap_payload(&payload)
+    }
+
+    /// MBA-1359: `--zero-click` converts the file's zero_x/zero_y device click counts
+    /// into a stored POI offset — sign conventions per upstream a7p tooling (X negated on
+    /// entry: right-clicks = -zero_x/1000; up-clicks = zero_y/1000) — while omitting the
+    /// click size keeps the historical unmapped report byte-identical.
+    #[test]
+    fn zero_click_converts_click_counts_with_correct_signs() {
+        // Same fixture plus zeroing state: zero_x = -20_000 (-20.0 raw => 20 clicks
+        // RIGHT after upstream's negation), zero_y = 10_000 (10 clicks UP).
+        let mut p = Vec::new();
+        enc_str(1, "ZEROED", &mut p);
+        enc_i32(7, -20_000, &mut p);
+        enc_i32(8, 10_000, &mut p);
+        enc_i32(11, 7920, &mut p);
+        enc_i32(20, 338, &mut p);
+        enc_i32(21, 3000, &mut p);
+        enc_i32(24, 0, &mut p);
+        let mut row = Vec::new();
+        enc_i32(1, 7160, &mut row);
+        enc_i32(2, 7920, &mut row);
+        enc_bytes(27, &row, &mut p);
+        let mut packed = Vec::new();
+        enc_varint(10_000, &mut packed); // one distance: 100.00 m (zero index defaults 0)
+        enc_bytes(26, &packed, &mut p);
+        let mut payload = Vec::new();
+        enc_bytes(1, &p, &mut payload);
+        let doc = parse_a7p(&wrap_payload(&payload)).unwrap();
+
+        // Without --zero-click: the historical unmapped line, verbatim.
+        let outcome = map_a7p_to_profile(&doc, None, None).unwrap();
+        assert_eq!(outcome.profile.zero_poi_up_m, None);
+        assert_eq!(outcome.profile.zero_poi_right_m, None);
+        assert!(outcome.report.unmapped.iter().any(|(f, msg)| f == "zero_x / zero_y"
+            && msg == "scope zeroing click offsets (-20000, 10000) — click state is not modeled"));
+
+        // With --zero-click 0.1mil at a 100 m zero:
+        //   up:    10 clicks * 0.1/1000 rad * 100 m = 0.1  m high
+        //   right: 20 clicks * 0.1/1000 rad * 100 m = 0.2  m right
+        let click = ballistics_engine::adjustment::parse_click_value("0.1mil").unwrap();
+        let outcome = map_a7p_to_profile(&doc, None, Some(click)).unwrap();
+        let up = outcome.profile.zero_poi_up_m.expect("up mapped");
+        let right = outcome.profile.zero_poi_right_m.expect("right mapped");
+        assert!((up - 0.1).abs() < 1e-12, "up = {up}");
+        assert!((right - 0.2).abs() < 1e-12, "right = {right}");
+        assert!(!outcome
+            .report
+            .unmapped
+            .iter()
+            .any(|(f, _)| f == "zero_x / zero_y"));
+        assert!(outcome
+            .report
+            .mapped
+            .iter()
+            .any(|row| row[0] == "zero_x / zero_y"
+                && row[3] == "zero_poi_up_m + zero_poi_right_m"));
     }
 
     #[test]
@@ -17963,6 +18208,7 @@ mod adjustment_unit_tests {
                 density_altitude: None,
                 zero_poi_up_m: None,
                 zero_poi_right_m: None,
+                sight_offset_lateral_m: None,
             }
         }
 
@@ -18552,6 +18798,7 @@ mod wind_angle_unit_tests {
             100.0,
             None,
             None,
+            0.0,
             0.0,
             0.0,
         );

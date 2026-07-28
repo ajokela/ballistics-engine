@@ -456,7 +456,8 @@ fn solve_input_schema() -> Value {
                     "sight_height_m": {"type": "number"},
                     "muzzle_height_m": {"type": "number"},
                     "twist_rate_m_per_turn": {"type": "number"},
-                    "twist_direction": {"type": "string", "enum": ["left", "right"]}
+                    "twist_direction": {"type": "string", "enum": ["left", "right"]},
+                    "sight_offset_lateral_m": {"type": "number"}
                 }
             },
             "shot": {

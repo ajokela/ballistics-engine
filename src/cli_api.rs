@@ -146,6 +146,17 @@ pub struct BallisticInputs {
     /// 0.0 = level rifle (bit-identical to pre-cant behavior). (MBA-1286)
     pub cant_angle: f64,
     pub sight_height: f64,     // meters above bore
+    /// Lateral offset between the sight axis and the bore axis, meters (MBA-1396;
+    /// offset-mounted optics): positive = the sight sits RIGHT of the bore, so the bore
+    /// starts LEFT of the line of sight (initial lateral position `z -= offset`). When a
+    /// zero is solved, a windage-zero convergence term of `offset / zero_distance` is
+    /// added to `azimuth_angle` (see [`BallisticInputs::windage_zero_bias_rad`]) so the
+    /// trajectory crosses the LOS laterally at the zero range — matching AB/JBM/Shooter,
+    /// not a constant parallel offset. Without a zero solve (an explicit muzzle angle),
+    /// only the physical displacement applies. Distinct from `zero_poi_horizontal_m`,
+    /// which is an angular ZERO-STATE bias, not mount geometry. 0.0 (the default) is
+    /// byte-identical to pre-MBA-1396 behavior.
+    pub sight_offset_lateral_m: f64,
     pub muzzle_height: f64,    // meters above ground
     pub target_height: f64,    // meters above ground for zeroing
     /// Deliberate vertical point-of-impact offset AT THE ZERO RANGE, meters (MBA-1359;
@@ -259,16 +270,22 @@ impl BallisticInputs {
     }
 
     /// Azimuth bias (radians) a zero solved at `zero_distance_m` applies to the launch
-    /// direction (MBA-1359): the deliberate horizontal POI offset at the zero range,
-    /// expressed as the equivalent small angle. `calculate_and_set_zero_angle` applies
-    /// this to its OWN solver's `azimuth_angle`; callers that copy a solved zero angle
-    /// onto separate flight inputs (the CLI/WASM auto-zero paths) must add this to their
-    /// flight `azimuth_angle` themselves — the returned elevation angle cannot carry it.
-    /// Returns exactly `0.0` when the offset is `0.0` or `zero_distance_m` is not
-    /// positive, so default inputs stay byte-identical.
+    /// direction. Two independent terms share this one convergence point:
+    /// * MBA-1359 — the deliberate horizontal POI offset at the zero range
+    ///   (`zero_poi_horizontal_m`), an angular zero-state bias;
+    /// * MBA-1396 — the lateral sight-mount offset (`sight_offset_lateral_m`): the bore
+    ///   starts `offset` left of the LOS (see `initial_position`), so the windage zero
+    ///   steers `offset / zero_distance` right to cross the LOS at the zero range.
+    ///
+    /// `calculate_and_set_zero_angle` applies this to its OWN solver's `azimuth_angle`;
+    /// callers that copy a solved zero angle onto separate flight inputs (the CLI/WASM
+    /// auto-zero paths) must add this to their flight `azimuth_angle` themselves — the
+    /// returned elevation angle cannot carry it. Returns exactly `0.0` when both offsets
+    /// are `0.0` or `zero_distance_m` is not positive, so default inputs stay
+    /// byte-identical.
     pub fn windage_zero_bias_rad(&self, zero_distance_m: f64) -> f64 {
         if zero_distance_m > 0.0 {
-            self.zero_poi_horizontal_m / zero_distance_m
+            (self.zero_poi_horizontal_m + self.sight_offset_lateral_m) / zero_distance_m
         } else {
             0.0
         }
@@ -451,6 +468,7 @@ impl Default for BallisticInputs {
             shooting_angle: 0.0,
             cant_angle: 0.0,
             sight_height: 0.05,
+            sight_offset_lateral_m: 0.0, // Sight directly above the bore (MBA-1396)
             muzzle_height: 0.0,       // Default 0 - height is in sight_height
             target_height: 0.0,       // Target at ground level by default
             zero_poi_vertical_m: 0.0, // No deliberate POI offset at the zero range (MBA-1359)
@@ -1430,6 +1448,20 @@ impl TrajectorySolver {
             }
         }
 
+        // MBA-1396: a lateral sight-mount offset is physically bounded by rail/mount
+        // geometry (an inch or two). |0.5 m| is almost certainly a unit error
+        // (inches/mm passed as meters).
+        require_finite(
+            "sight_offset_lateral_m",
+            self.inputs.sight_offset_lateral_m,
+        )?;
+        if self.inputs.sight_offset_lateral_m.abs() >= 0.5 {
+            return Err(BallisticsError::from(
+                "sight_offset_lateral_m must be smaller than 0.5 m in magnitude (it is \
+                 the lateral sight-to-bore mount offset, in meters)",
+            ));
+        }
+
         // Negative infinity is the documented ignore-ground sentinel. NaN and positive infinity
         // make the loop condition meaningless and are rejected.
         if !(self.inputs.ground_threshold.is_finite()
@@ -2146,9 +2178,16 @@ impl TrajectorySolver {
     /// With cant the rifle rotates about the LINE OF SIGHT, so the bore — sight_height
     /// below the sight — swings laterally by `-sight_height*sin(cant)` (left of the aim
     /// plane for clockwise cant) and rises by `sight_height*(1-cos(cant))` toward the
-    /// pivot. Exactly-0.0 cant returns the historical position (bit-identical). (MBA-1286)
+    /// pivot. (MBA-1286)
+    ///
+    /// A lateral sight-mount offset (MBA-1396) additionally starts the bore
+    /// `sight_offset_lateral_m` LEFT of the LOS (`z -= offset` — the LOS is the z = 0
+    /// axis, the cant convention above): a sight mounted right of the bore means the
+    /// bore sits left of the sight line. The windage-zero convergence that makes the
+    /// trajectory cross the LOS at the zero range lives in `windage_zero_bias_rad`, not
+    /// here. Exactly-0.0 cant AND offset return the historical position (bit-identical).
     fn initial_position(&self) -> Vector3<f64> {
-        if self.inputs.cant_angle == 0.0 {
+        if self.inputs.cant_angle == 0.0 && self.inputs.sight_offset_lateral_m == 0.0 {
             return Vector3::new(0.0, self.inputs.muzzle_height, 0.0);
         }
         let (sin_c, cos_c) = self.inputs.cant_angle.sin_cos();
@@ -2156,7 +2195,7 @@ impl TrajectorySolver {
         Vector3::new(
             0.0,
             self.inputs.muzzle_height + sh * (1.0 - cos_c),
-            -sh * sin_c,
+            -sh * sin_c - self.inputs.sight_offset_lateral_m,
         )
     }
 
