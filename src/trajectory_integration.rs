@@ -374,6 +374,10 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         // here — same reasoning as cant_angle/shot_azimuth above.
         zero_poi_vertical_m: 0.0,
         zero_poi_horizontal_m: 0.0,
+        // MBA-1403: an output-mode toggle for the trajectory sampler; this kernel never
+        // runs trajectory sampling (enable_trajectory_sampling is false above), so the
+        // default LOS reference is structurally inert here.
+        drops_reference: crate::cli_api::DropsReference::Los,
     };
 
     // MBA-955: pre-populate velocity-BC segments ONCE here, instead of get_bc_for_velocity

@@ -78,6 +78,11 @@ pub struct FFIBallisticInputs {
     // replicating an auto-zero flow must add
     // (zero_poi_horizontal + sight_offset_lateral) / zero_distance to azimuth_angle itself.
     pub sight_offset_lateral: c_double,
+    // NOT plumbed (deliberately): BallisticInputs.drops_reference (MBA-1403) is an
+    // OUTPUT-mode toggle for the trajectory sampler's drop column, not physics. This FFI
+    // surface exposes raw kinematic samples only (world-frame positions — no drop/dial
+    // outputs), so there is nothing for the toggle to act on; C callers wanting
+    // target-plane drops divide their own LOS drop by cos(shooting_angle).
 }
 
 #[repr(C)]

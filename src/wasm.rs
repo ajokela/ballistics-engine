@@ -183,10 +183,22 @@ fn parse_powder_temp_curve_str(
 /// LOS-relative (`los_height - position.y`), positive when the bullet is below the line of
 /// sight; `drift` is `position.z` directly, positive to the shooter's right, identical in
 /// sign and source to the native CLI legacy JSON's `x`.
-fn trajectory_json_legend(units: UnitSystem) -> serde_json::Value {
+fn trajectory_json_legend(units: UnitSystem, target_drops: bool) -> serde_json::Value {
     let (distance, drop, drift, velocity, energy) = match units {
         UnitSystem::Imperial => ("yd", "in", "in", "fps", "ft-lb"),
         UnitSystem::Metric => ("m", "cm", "cm", "m/s", "J"),
+    };
+    // MBA-1403: with --drops-reference target the drop values are target-plane
+    // referenced, so the legend must say so; the default (LOS) text stays
+    // byte-identical to the historical legend.
+    let drop_axis = if target_drops {
+        "vertical miss in the target plane (--drops-reference target): the \
+         LOS-perpendicular drop scaled by 1/cos(shooting angle); positive means the \
+         bullet is below the aim point."
+    } else {
+        "vertical miss from the line of sight; positive means the bullet is below \
+                     the line of sight (has fallen below the aim point). Not the same reference \
+                     as the native CLI legacy JSON's world-frame `y`."
     };
     serde_json::json!({
         "units": {
@@ -198,9 +210,7 @@ fn trajectory_json_legend(units: UnitSystem) -> serde_json::Value {
         },
         "axes": {
             "range": "downrange distance from the muzzle; zero at the muzzle, always increasing.",
-            "drop": "vertical miss from the line of sight; positive means the bullet is below \
-                     the line of sight (has fallen below the aim point). Not the same reference \
-                     as the native CLI legacy JSON's world-frame `y`.",
+            "drop": drop_axis,
             "drift": "lateral miss from the line of sight; positive means to the shooter's \
                       right (e.g. a crosswind FROM the left, --wind-direction 270, drifts it \
                       positive; FROM the right, --wind-direction 90, drifts it negative). Same \
@@ -1211,6 +1221,9 @@ impl WasmBallistics {
         // MBA-1396: lateral sight-to-bore mount offset (inches imperial / mm metric,
         // positive = sight RIGHT of bore). Mirrors native's --sight-offset.
         let mut sight_offset: Option<f64> = None;
+        // MBA-1403: sampled-drop reference toggle; false = LOS (the historical default),
+        // true = target plane. Mirrors native's --drops-reference {los|target}.
+        let mut drops_reference_target = false;
 
         // Parse arguments
         let mut i = 0;
@@ -1687,6 +1700,20 @@ impl WasmBallistics {
                     );
                     i += 1;
                 }
+                // MBA-1403: sampled-drop reference toggle (los | target).
+                "--drops-reference" => {
+                    drops_reference_target = match require_value(args, i)? {
+                        "los" => false,
+                        "target" => true,
+                        other => {
+                            return Err(JsValue::from_str(&format!(
+                                "Invalid drops reference '{}': expected 'los' or 'target'",
+                                other
+                            )))
+                        }
+                    };
+                    i += 1;
+                }
                 // --units/-u (+ its value) is consumed globally in run_command, which
                 // pre-scans it to set the unit system before dispatch. Skip it here so
                 // it isn't rejected as an unknown flag (this is what blocked metric input).
@@ -1843,6 +1870,14 @@ impl WasmBallistics {
         inputs.enable_wind_shear = enable_wind_shear;
         inputs.enable_trajectory_sampling = sample_trajectory;
         inputs.sample_interval = sample_interval;
+        // MBA-1403: sampled-drop reference. Los (the default) is byte-identical to the
+        // historical output; Target scales sampled drop by 1/cos(shooting angle) inside
+        // the engine's shared sampling helper and relabels the table/CSV drop column.
+        inputs.drops_reference = if drops_reference_target {
+            crate::cli_api::DropsReference::Target
+        } else {
+            crate::cli_api::DropsReference::Los
+        };
         inputs.enable_pitch_damping = enable_pitch_damping;
         inputs.enable_precession_nutation = enable_precession;
         inputs.use_bc_segments = use_bc_segments;
@@ -2412,6 +2447,15 @@ impl WasmBallistics {
                 if let Some(table) = dsf_table.as_ref() {
                     apply_dsf(&mut result, table);
                 }
+                // MBA-1403: target-plane drops reference for the formatters. None (the
+                // default LOS mode) leaves every format byte-identical; validate_for_solve
+                // has already rejected target mode at |shooting angle| >= 90 degrees, so
+                // the cosine is strictly positive here.
+                let target_drops_cos = if drops_reference_target {
+                    Some(inputs.shooting_angle.cos())
+                } else {
+                    None
+                };
                 let output = match output_format {
                     OutputFormat::Table => self.format_trajectory_table(
                         &result,
@@ -2421,6 +2465,7 @@ impl WasmBallistics {
                         inputs.muzzle_height + inputs.sight_height,
                         target_speed_mps,
                         ring_unit,
+                        target_drops_cos,
                     ),
                     OutputFormat::Json => self.format_trajectory_json(
                         &result,
@@ -2429,6 +2474,7 @@ impl WasmBallistics {
                         target_speed_mps,
                         solved_zero_angle_deg,
                         with_drag_coefficient,
+                        target_drops_cos,
                     ),
                     OutputFormat::Csv => self.format_trajectory_csv(
                         &result,
@@ -2436,6 +2482,7 @@ impl WasmBallistics {
                         full,
                         inputs.muzzle_height + inputs.sight_height,
                         target_speed_mps,
+                        target_drops_cos,
                     ),
                 };
                 // JSON/CSV must stay pure machine output: the human-readable "Rifle zeroed
@@ -5229,6 +5276,10 @@ impl WasmBallistics {
         los_height_m: f64,
         target_speed_mps: f64,
         ring_unit: RingDisplayUnit,
+        // MBA-1403: None = historical LOS reference (byte-identical); Some(cos of the
+        // shooting angle) = target-plane reference — drop values divided by it and the
+        // Drop column relabeled "Drop (target)".
+        target_drops_cos: Option<f64>,
     ) -> String {
         // Mover ring (MBA-1325): additive "Ring" column, only when --target-speed > 0.
         let ring_enabled = target_speed_mps > 0.0;
@@ -5243,14 +5294,25 @@ impl WasmBallistics {
         let mut output = String::new();
         output.push_str("Trajectory Calculation Results\n");
         output.push_str("==============================\n\n");
+        // MBA-1403: the Drop column header carries the active drops reference. The LOS
+        // arm keeps the historical header bytes (which the ballistics.rs terminal's
+        // chart parser arms on) untouched.
+        let drop_hdr = if target_drops_cos.is_some() {
+            "Drop (target)"
+        } else {
+            "Drop"
+        };
         if ring_enabled {
             output.push_str(&format!(
-                "Range | Drop | Drift | Velocity | Energy | Time | Ring({})\n",
-                ring_hdr_unit
+                "Range | {} | Drift | Velocity | Energy | Time | Ring({})\n",
+                drop_hdr, ring_hdr_unit
             ));
             output.push_str("------|------|-------|----------|--------|------|------\n");
         } else {
-            output.push_str("Range | Drop | Drift | Velocity | Energy | Time\n");
+            output.push_str(&format!(
+                "Range | {} | Drift | Velocity | Energy | Time\n",
+                drop_hdr
+            ));
             output.push_str("------|------|-------|----------|--------|------\n");
         }
 
@@ -5299,7 +5361,10 @@ impl WasmBallistics {
                     && (range_display - zero_distance.unwrap()).abs() < 1.0);
 
             if should_show {
-                let drop = los_height - point.position.y;
+                // MBA-1403: /1.0 in LOS mode is bit-exact, so the default stays
+                // byte-identical; target mode divides by cos(shooting angle).
+                let drop =
+                    (los_height - point.position.y) / target_drops_cos.unwrap_or(1.0);
                 let drift = point.position.z; // Z is lateral (windage, McCoy)
                 let velocity = point.velocity_magnitude;
 
@@ -5528,9 +5593,14 @@ impl WasmBallistics {
         target_speed_mps: f64,
         zero_angle_degrees: Option<f64>,
         with_drag_coefficient: bool,
+        // MBA-1403: None = LOS reference (byte-identical); Some(cos) = target plane —
+        // drop values divided by it, and the legend's drop axis says so. Keys unchanged.
+        target_drops_cos: Option<f64>,
     ) -> String {
         // LOS height is cant-invariant (see format_trajectory_table).
         let los_height = los_height_m;
+        // /1.0 in LOS mode is bit-exact — default output stays byte-identical.
+        let drop_denominator = target_drops_cos.unwrap_or(1.0);
         // Mover ring (MBA-1325): additive fields, only when --target-speed > 0. Units are
         // in the field names (mover_ring_m is always meters, MBA-1315 hygiene) regardless
         // of --units, matching the native CLI's `-o json` per-point contract.
@@ -5544,7 +5614,7 @@ impl WasmBallistics {
                     UnitSystem::Imperial => {
                         serde_json::json!({
                             "range_yards": p.position.x * 1.09361,  // X is downrange (McCoy)
-                            "drop_inches": (los_height - p.position.y) * 39.3701,
+                            "drop_inches": (los_height - p.position.y) / drop_denominator * 39.3701,
                             "drift_inches": p.position.z * 39.3701,  // Z is lateral (windage, McCoy)
                             "velocity_fps": p.velocity_magnitude * 3.28084,
                             "energy_ftlb": p.kinetic_energy * 0.737562149,
@@ -5554,7 +5624,7 @@ impl WasmBallistics {
                     UnitSystem::Metric => {
                         serde_json::json!({
                             "range_meters": p.position.x,  // X is downrange (McCoy)
-                            "drop_cm": (los_height - p.position.y) * 100.0,
+                            "drop_cm": (los_height - p.position.y) / drop_denominator * 100.0,
                             "drift_cm": p.position.z * 100.0,  // Z is lateral (windage, McCoy)
                             "velocity_mps": p.velocity_magnitude,
                             "energy_joules": p.kinetic_energy,
@@ -5609,7 +5679,7 @@ impl WasmBallistics {
         let mut output = serde_json::json!({
             "trajectory": points,
             "summary": summary,
-            "legend": trajectory_json_legend(units),
+            "legend": trajectory_json_legend(units, target_drops_cos.is_some()),
         });
         // MBA-1402 parity: top-level and present only when auto-zero actually ran, matching
         // native's `skip_serializing_if` shape. Absent — not null — on a bare --angle run, so a
@@ -5629,6 +5699,10 @@ impl WasmBallistics {
         full: bool,
         los_height_m: f64,
         target_speed_mps: f64,
+        // MBA-1403: None = LOS reference (byte-identical); Some(cos) = target plane —
+        // drop values divided by it, Drop column header relabeled Drop_target. No
+        // summary line is added here: WASM CSV stays rows-only (MBA-1433 stays open).
+        target_drops_cos: Option<f64>,
     ) -> String {
         let mut output = String::new();
         // Mover ring (MBA-1325): extra column, header carries the unit; only emitted
@@ -5636,14 +5710,25 @@ impl WasmBallistics {
         let ring_enabled = target_speed_mps > 0.0;
 
         // Header
+        let target_drops = target_drops_cos.is_some();
         match units {
             UnitSystem::Imperial => {
-                output.push_str("Range(yards),Drop(inches),Drift(inches),Velocity(fps),Energy(ft-lb),Time(seconds)");
+                if target_drops {
+                    output.push_str("Range(yards),Drop_target(inches),Drift(inches),Velocity(fps),Energy(ft-lb),Time(seconds)");
+                } else {
+                    output.push_str("Range(yards),Drop(inches),Drift(inches),Velocity(fps),Energy(ft-lb),Time(seconds)");
+                }
             }
             UnitSystem::Metric => {
-                output.push_str(
-                    "Range(meters),Drop(cm),Drift(cm),Velocity(m/s),Energy(joules),Time(seconds)",
-                );
+                if target_drops {
+                    output.push_str(
+                        "Range(meters),Drop_target(cm),Drift(cm),Velocity(m/s),Energy(joules),Time(seconds)",
+                    );
+                } else {
+                    output.push_str(
+                        "Range(meters),Drop(cm),Drift(cm),Velocity(m/s),Energy(joules),Time(seconds)",
+                    );
+                }
             }
         }
         if ring_enabled {
@@ -5686,7 +5771,9 @@ impl WasmBallistics {
             let is_last_point = idx == result.points.len() - 1;
 
             if range_display >= current_range || is_last_point {
-                let drop = los_height - point.position.y;
+                // MBA-1403: /1.0 in LOS mode is bit-exact — default stays byte-identical.
+                let drop =
+                    (los_height - point.position.y) / target_drops_cos.unwrap_or(1.0);
 
                 let row = match units {
                     UnitSystem::Imperial => {
@@ -6678,6 +6765,10 @@ Trajectory Command:
                                  mount geometry: drift starts offset left of the sight
                                  line; with --auto-zero it converges to the sight line
                                  at the zero range, without a zero it stays displaced
+    --drops-reference <REF>      Drop reference plane: los (default) = perpendicular
+                                 to the line of sight; target = vertical in the target
+                                 plane (drop / cos(shooting angle), JBM's "target
+                                 plane"); relabels the Drop column (MBA-1403)
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
     --with-drag-coefficient      Add each point's effective drag coefficient to

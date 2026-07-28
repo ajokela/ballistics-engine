@@ -124,10 +124,26 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         .sample_observations(sample_interval_m, MAX_SOLVE_JSON_SAMPLES_V1)
         .map_err(map_observation_error)?;
 
+    // MBA-1403 target-plane drops reference: this solve path samples drop via
+    // TrajectoryResult::sample_observations (LOS-perpendicular by construction), so the
+    // 1/cos(shooting_angle) reference transform is applied exactly once here, at the wire
+    // boundary. `"los"`/omitted divides by cos(0) == 1.0 exactly — byte-identical.
+    // validate_for_solve has already rejected target mode at |shooting_angle| >= 90 deg.
+    let drops_scale_denominator = match request.shot.drops_reference.unwrap_or_default() {
+        crate::solve_json::DropsReferenceV1::Los => 1.0,
+        crate::solve_json::DropsReferenceV1::Target => prepared
+            .resolved_request
+            .shot
+            .shooting_angle_rad
+            .cos(),
+    };
     let samples = observations
         .iter()
         .cloned()
-        .map(observation_to_wire)
+        .map(|mut observation| {
+            observation.drop_m /= drops_scale_denominator;
+            observation_to_wire(observation)
+        })
         .collect::<Vec<_>>();
     let terminal = observations.last().ok_or_else(|| {
         internal_error("trajectory observation sampling returned no terminal observation")
@@ -341,6 +357,16 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
         wind_shear_model: "none".to_owned(),
         enable_trajectory_sampling: false,
         sample_interval: resolved_request.sampling.interval_m,
+        // MBA-1403: consumed straight from the request (no resolved-DTO echo, matching the
+        // zero-POI fields above). The engine-side field is set for validation (target mode
+        // rejects |shooting_angle| >= 90 deg inside validate_for_solve); the actual wire
+        // transform is applied where observations map to samples in solve_v1, because this
+        // solve path samples via TrajectoryResult::sample_observations, not the
+        // trajectory-sampling module.
+        drops_reference: match request.shot.drops_reference.unwrap_or_default() {
+            crate::solve_json::DropsReferenceV1::Los => crate::cli_api::DropsReference::Los,
+            crate::solve_json::DropsReferenceV1::Target => crate::cli_api::DropsReference::Target,
+        },
         enable_pitch_damping: false,
         enable_precession_nutation: false,
         enable_aerodynamic_jump: false,
@@ -1277,6 +1303,7 @@ mod tests {
                 ground_threshold_m: None,
                 zero_poi_up_m: None,
                 zero_poi_right_m: None,
+                drops_reference: None,
             },
             atmosphere: AtmosphereV1::default(),
             wind: WindV1::default(),

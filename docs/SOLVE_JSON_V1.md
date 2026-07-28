@@ -208,6 +208,7 @@ them rather than silently claiming a distinct model.
 | `ground_threshold_m` | no | `-100` | Stop after the projectile falls below this height. |
 | `zero_poi_up_m` | no | `0` | Deliberate vertical POI offset AT the zero range (MBA-1359, Kestrel "zero height"): positive = deliberately zeroed to impact HIGH by this much at `zero_distance_m`. Must be finite and smaller than 1 m in magnitude. |
 | `zero_poi_right_m` | no | `0` | Deliberate horizontal POI offset AT the zero range (MBA-1359, Kestrel "zero offset"): positive = impacts RIGHT. Same bounds as `zero_poi_up_m`. |
+| `drops_reference` | no | `"los"` | Which plane sample `drop_m` values are referenced to (MBA-1403). `"los"` = perpendicular to the line of sight (the historical behavior); `"target"` = vertical in the target plane: `drop_m` divided by `cos(shooting_angle_rad)` (JBM's "target plane" reference). |
 
 `zero_distance_m` and `muzzle_angle_rad` conflict in an input request. A request supplies at most
 one. When neither is present, the service uses a zero muzzle angle and records that assumption in
@@ -228,6 +229,13 @@ segments), effects, and integration method. It follows the engine's level-rifle 
 solving with zero cant; the requested `cant_angle_rad` is applied only to the subsequent trajectory.
 `target_height_m` remains an absolute world-vertical height above the local ground datum, as named
 above; inclined zeroing projects the shot-frame trajectory back into that world frame.
+
+`drops_reference` is an output-mode toggle only: it rescales each sample's `drop_m` and changes
+nothing else — not the solved trajectory, not `windage_m`, not the `summary` block, and not
+zeroing (which keeps its own `target_height_m` semantics). With `"target"` and
+`|shooting_angle_rad| >= 90 degrees` the transform is undefined and the request fails with a
+solve error. There is no resolved-DTO echo: omitting the field (or supplying `"los"`) is
+byte-identical to requests that predate it, and no assumption notice is emitted for its absence.
 
 ### `atmosphere`
 
