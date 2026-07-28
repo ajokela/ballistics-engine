@@ -77,19 +77,24 @@ pub fn clicks_for(drop_yd: f64, range_yd: f64, click: &ClickValue) -> i64 {
     (angle / click.size).round() as i64
 }
 
-/// Zero-banner dial values `(MOA, mrad)` for a solved zero angle, scaled by the
+/// Zero-banner dial values `(MOA, mrad)` for a solved zero angle, corrected by the
 /// elevation tracking correction factor (MBA-1358).
+///
+/// Direction: the stored CF is the published tall-target ratio `actual measured travel
+/// / dialed travel` (0.95 = the scope under-tracks by 5%). To obtain a true angular
+/// need `N` on a scope whose dialed unit delivers `CF` true units, the number set on
+/// the dial must be `N / CF` — so dial-unit OUTPUTS are DIVIDED by the CF.
 ///
 /// Replicates the WASM terminal's historical banner conversions bit-for-bit at
 /// `elevation_cf == 1.0`: `deg * 60.0` (true MOA — deliberately NOT this module's locked
 /// printed-table `Moa = 3438.0` factor; see the MBA-724 note in the wasm banner sites)
-/// and `rad * 1000.0`, each multiplied by exactly `1.0` (a bit-exact no-op). Lives here,
+/// and `rad * 1000.0`, each divided by exactly `1.0` (a bit-exact no-op). Lives here,
 /// in an ungated module, so the emit rule is host-testable (`wasm.rs` is wasm32-gated)
 /// and shared by all three banner sites instead of being edited in parallel.
 pub fn zero_banner_dial_values(angle_deg: f64, angle_rad: f64, elevation_cf: f64) -> (f64, f64) {
     (
-        angle_deg * 60.0 * elevation_cf,
-        angle_rad * 1000.0 * elevation_cf,
+        angle_deg * 60.0 / elevation_cf,
+        angle_rad * 1000.0 / elevation_cf,
     )
 }
 
@@ -108,17 +113,18 @@ mod tests {
     // MBA-1358: the WASM zero-banner emit rule, host-tested here because wasm.rs is
     // wasm32-gated (the drag_coefficient_json_value pattern).
     #[test]
-    fn zero_banner_dial_values_scale_by_the_elevation_cf_and_are_exact_at_one() {
+    fn zero_banner_dial_values_divide_by_the_elevation_cf_and_are_exact_at_one() {
         let deg = 0.0717_f64;
         let rad = deg.to_radians();
         // cf = 1.0 is bit-exact against the historical inline expressions.
         let (moa, mrad) = zero_banner_dial_values(deg, rad, 1.0);
         assert_eq!(moa.to_bits(), (deg * 60.0).to_bits());
         assert_eq!(mrad.to_bits(), (rad * 1000.0).to_bits());
-        // cf scales both dial values linearly.
-        let (moa_cf, mrad_cf) = zero_banner_dial_values(deg, rad, 1.05);
-        assert_eq!(moa_cf.to_bits(), (deg * 60.0 * 1.05).to_bits());
-        assert_eq!(mrad_cf.to_bits(), (rad * 1000.0 * 1.05).to_bits());
+        // an under-tracking scope (CF < 1) needs MORE dial: outputs divide by the CF.
+        let (moa_cf, mrad_cf) = zero_banner_dial_values(deg, rad, 0.95);
+        assert_eq!(moa_cf.to_bits(), (deg * 60.0 / 0.95).to_bits());
+        assert_eq!(mrad_cf.to_bits(), (rad * 1000.0 / 0.95).to_bits());
+        assert!(moa_cf > moa && mrad_cf > mrad);
     }
 
     #[test]
