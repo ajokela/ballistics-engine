@@ -1687,27 +1687,29 @@ pub fn dsf_window_start(mach_0_9_distance_m: Option<f64>) -> Option<f64> {
 }
 
 /// MBA-1358: express a multi-observation truing report's dial-unit values back in SCOPE
-/// units for display. The fit consumes observations DIVIDED by the scope tracking CF
-/// (true angular units); this multiplies the report's observed/predicted/residual drops
-/// and the RMS by `dial_cf` so the rendered tables echo what the shooter actually dials.
-/// Fit results (MV/BC), iteration diagnostics, and the meter-denominated window fields
-/// are deliberately untouched (they are not dial-unit outputs). `dial_cf == 1.0` (no CF,
-/// or `--drop-unit in` — linear tape measurements never scale) multiplies by exactly 1.0,
-/// leaving every downstream byte identical. `pub` (not `pub(crate)`): shared by the
-/// native CLI (`main.rs`) and the WASM terminal (`wasm.rs`) so the two surfaces cannot
-/// drift, and host-testable (wasm.rs itself is wasm32-gated).
+/// units for display. The stored CF is the published tall-target ratio `actual / dialed`
+/// (0.95 = under-tracks 5%), so a dialed reading of `D` scope units delivers `D * CF`
+/// true units: the fit consumes observations MULTIPLIED by the CF (true angular units),
+/// and this converts the report's observed/predicted/residual drops and the RMS back to
+/// scope units by DIVIDING by `dial_cf` — the rendered tables echo what the shooter
+/// actually dials. Fit results (MV/BC), iteration diagnostics, and the meter-denominated
+/// window fields are deliberately untouched (they are not dial-unit outputs).
+/// `dial_cf == 1.0` (no CF, or `--drop-unit in` — linear tape measurements never scale)
+/// divides by exactly 1.0, leaving every downstream byte identical. `pub` (not
+/// `pub(crate)`): shared by the native CLI (`main.rs`) and the WASM terminal (`wasm.rs`)
+/// so the two surfaces cannot drift, and host-testable (wasm.rs itself is wasm32-gated).
 pub fn scale_report_dial_values(report: &MultiTruingReport, dial_cf: f64) -> MultiTruingReport {
     let mut scaled = report.clone();
     for observation in &mut scaled.observations {
-        observation.drop *= dial_cf;
+        observation.drop /= dial_cf;
     }
     for predicted in &mut scaled.predicted {
-        *predicted *= dial_cf;
+        *predicted /= dial_cf;
     }
     for residual in &mut scaled.residuals {
-        *residual *= dial_cf;
+        *residual /= dial_cf;
     }
-    scaled.rms *= dial_cf;
+    scaled.rms /= dial_cf;
     scaled
 }
 
@@ -1741,11 +1743,12 @@ mod window_helper_tests {
             window_solved_range_m: 2743.2,
             muzzle_mach: 2.4,
         };
-        let scaled = scale_report_dial_values(&report, 1.1);
-        assert_eq!(scaled.observations[0].drop.to_bits(), (10.0_f64 * 1.1).to_bits());
-        assert_eq!(scaled.predicted[0].to_bits(), (9.8_f64 * 1.1).to_bits());
-        assert_eq!(scaled.residuals[0].to_bits(), (0.2_f64 * 1.1).to_bits());
-        assert_eq!(scaled.rms.to_bits(), (0.2_f64 * 1.1).to_bits());
+        // Under-tracking scope (CF < 1): scope-unit dial values are LARGER than true.
+        let scaled = scale_report_dial_values(&report, 0.95);
+        assert_eq!(scaled.observations[0].drop.to_bits(), (10.0_f64 / 0.95).to_bits());
+        assert_eq!(scaled.predicted[0].to_bits(), (9.8_f64 / 0.95).to_bits());
+        assert_eq!(scaled.residuals[0].to_bits(), (0.2_f64 / 0.95).to_bits());
+        assert_eq!(scaled.rms.to_bits(), (0.2_f64 / 0.95).to_bits());
         // fit results and the meter-denominated window fields are untouched
         assert_eq!(scaled.fitted_mv_fps, report.fitted_mv_fps);
         assert_eq!(scaled.fitted_bc, report.fitted_bc);

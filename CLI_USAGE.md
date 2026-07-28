@@ -87,24 +87,37 @@ elevation table, so `--adjustment-unit` there is always the elevation axis (see 
 
 Real turrets rarely move exactly their nominal click value. A **tall-target test**
 (Litz, *Accuracy and Precision for Long Range Shooting*; the same feature AB, Strelok
-Pro, Shooter, TRASOL, ColdBore and ChairGun expose) measures the error, and the engine
-accepts the result as two per-axis **correction factors** that multiply every dial-unit
-output exactly once, at the shared conversion boundary:
+Pro, Shooter, TRASOL, ColdBore and ChairGun expose) measures the error. The engine
+stores the published tall-target ratio — **`CF = actual measured travel / dialed
+travel`** (0.95 = the scope under-tracks by 5%) — and **divides** every dial-unit
+output by it exactly once, at the shared conversion boundary. The direction is the
+physics: to land a true angular correction `N` on a scope whose dialed unit delivers
+`CF` true units, the number set on the dial must be `N / CF`, so an under-tracking
+scope (CF < 1) needs **more** dial.
 
-- **`--elevation-cf <FACTOR>`** — scales elevation dial values: `come-ups`,
-  `range-table`/`compare` Drop columns, the PDF dope card's Drop column, and the zero
-  banners' MOA/mrad on the browser terminal.
-- **`--windage-cf <FACTOR>`** — scales windage/lead dial values: `wind-card` drift,
+- **`--elevation-cf <FACTOR>`** — corrects elevation dial values: `come-ups`,
+  `range-table`/`compare` Drop columns, the PDF dope card's Drop column, and the
+  `zero` command's MOA/mrad outputs (native and browser terminal).
+- **`--windage-cf <FACTOR>`** — corrects windage/lead dial values: `wind-card` drift,
   `range-table`/`compare` Wind columns, `lead` (mover lead is a dialed quantity), the
   mover Ring column/fields (`--target-speed`), and the PDF Wind/Lead columns.
 
-The factors are dimensionless multipliers on **dial units only** (mil/MOA/SMOA/IPHY and
-whole clicks — clicks scale before quantization): raw drop/drift **inches are never
-touched**. Both must be **strictly between 0.5 and 1.5** — anything outside that band
-means the tall-target test went wrong, and both the flags and the stored profile fields
-(`elevation_cf` / `windage_cf`, validated on load, carried forward on re-save) reject it
-with a hard error naming the field. `1.0` (the default) is byte-identical to not passing
-the flag. CLI flags override the profile fields.
+**Worked example**: you dial 10 mil in the tall-target test and measure only 9.5 mil of
+actual group travel (34.2 in at 100 yd) — `CF = 9.5 / 10 = 0.95`. With
+`--elevation-cf 0.95`, a solution needing a true 10 mil correction displays as
+`10 / 0.95 = 10.53` mil: dialing 10.53 indicated on that scope moves the impact the
+true 10 mil.
+
+The factors apply to **dial units only** (mil/MOA/SMOA/IPHY and whole clicks — the
+angle is corrected before click quantization): raw drop/drift **inches and degree
+bore-angle echoes are never touched**. Both must be **strictly between 0.5 and 1.5** —
+anything outside that band means the tall-target test went wrong, and both the flags
+and the stored profile fields (`elevation_cf` / `windage_cf`, validated on load,
+carried forward on re-save) reject it with a hard error naming the field. `1.0` (the
+default) is byte-identical to not passing the flag. CLI flags override the profile
+fields. (Convention note: Kestrel's Scope Cal *multiplies* its factor into the solution
+because it stores the reciprocal, dialed/actual; this engine divides because it stores
+the published actual/dialed — same physics, opposite bookkeeping.)
 
 **Deriving the factor** — `ballistics tall-target` computes `CF = actual measured travel
 / dialed travel`, pure arithmetic over the same locked angular factors every dial column
@@ -114,16 +127,17 @@ uses (no trajectory solve):
 # Dialed 10 mil; the group moved 36.0 inches at 100 yd (exactly 10 mil): CF = 1.0000
 ballistics tall-target --dialed 10 --measured 36 --range 100
 
-# The group moved 37.8 inches (10.5 mil): CF = 1.0500
-ballistics tall-target --dialed 10 --measured 37.8 --range 100 --unit mil
+# The group moved 34.2 inches (9.5 mil): CF = 0.9500 — enter as --elevation-cf 0.95
+ballistics tall-target --dialed 10 --measured 34.2 --range 100 --unit mil
 ```
 
-**Truing interacts in the opposite direction** (`true-velocity --elevation-cf`): dialed
-observations (mil/moa drops; single-observation mode is always mil) are **divided** by
-the CF before the fit consumes them, so scope tracking error is not baked into the trued
-MV/BC; the report's dial-unit values are then shown back in scope units. Linear `in`
-drops are tape measurements and never scale. (The uncertainty-aware mode divides its
-inputs the same way but reports in true, scope-corrected units — its report is a
+**Truing converts in the opposite direction** (`true-velocity --elevation-cf`): dialed
+observations (mil/moa drops; single-observation mode is always mil) are **multiplied**
+by the CF before the fit consumes them — a dialed reading of `D` scope units delivers
+`D × CF` true angular units — so scope tracking error is not baked into the trued
+MV/BC; the report's dial-unit values are then shown back in scope units (÷CF). Linear
+`in` drops are tape measurements and never scale. (The uncertainty-aware mode converts
+its inputs the same way but reports in true, scope-corrected units — its report is a
 versioned analysis document, and it says so when a CF is active.)
 
 ### `clicks`: whole-click output
