@@ -31,6 +31,8 @@ typedef struct {
     int enable_coriolis;
     double shot_azimuth;
     double cant_angle;      // appended (must match FFIBallisticInputs field order): rifle cant angle, radians
+    double zero_poi_vertical;   // appended (must match FFIBallisticInputs field order): deliberate vertical POI offset at the zero range, meters, + = impacts high (MBA-1359)
+    double zero_poi_horizontal; // appended (must match FFIBallisticInputs field order): deliberate horizontal POI offset at the zero range, meters, + = impacts right (MBA-1359)
 } FFIBallisticInputs;
 
 typedef struct {
@@ -118,7 +120,9 @@ int main() {
         .enable_magnus = 1,             // Enable Magnus effect
         .enable_coriolis = 0,           // Disable Coriolis for now
         .shot_azimuth = 0.0,            // North; appended ABI field
-        .cant_angle = 0.0               // No cant; appended ABI field
+        .cant_angle = 0.0,              // No cant; appended ABI field
+        .zero_poi_vertical = 0.0,       // No deliberate zero POI offset; appended ABI field (MBA-1359)
+        .zero_poi_horizontal = 0.0      // No deliberate zero POI offset; appended ABI field (MBA-1359)
     };
 
     FFIWindConditions wind = {

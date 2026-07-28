@@ -205,12 +205,22 @@ them rather than silently claiming a distinct model.
 | `cant_angle_rad` | no | `0` | Clockwise rifle cant is positive from the shooter's view. |
 | `target_height_m` | no | `0` | Target height above the ground reference for zeroing. |
 | `ground_threshold_m` | no | `-100` | Stop after the projectile falls below this height. |
+| `zero_poi_up_m` | no | `0` | Deliberate vertical POI offset AT the zero range (MBA-1359, Kestrel "zero height"): positive = deliberately zeroed to impact HIGH by this much at `zero_distance_m`. Must be finite and smaller than 1 m in magnitude. |
+| `zero_poi_right_m` | no | `0` | Deliberate horizontal POI offset AT the zero range (MBA-1359, Kestrel "zero offset"): positive = impacts RIGHT. Same bounds as `zero_poi_up_m`. |
 
 `zero_distance_m` and `muzzle_angle_rad` conflict in an input request. A request supplies at most
 one. When neither is present, the service uses a zero muzzle angle and records that assumption in
 the response. In `resolved_request`, `muzzle_angle_rad` is always the effective angle used by the
 engine. If the caller requested a zero distance, the resolved shot contains both the original
 `zero_distance_m` intent and the muzzle angle calculated for it.
+
+`zero_poi_up_m` and `zero_poi_right_m` describe an angular zero-state bias (offset divided by the
+zero distance, applied to the solved elevation and azimuth after the zero search converges). They
+are meaningful only together with `zero_distance_m`; with `muzzle_angle_rad` supplied directly (or
+neither field present) no zero is solved and they have no effect. They have no resolved-DTO echo of
+their own: when `zero_poi_up_m` is used, the resolved `muzzle_angle_rad` simply reports the biased
+effective angle. Omitting both fields is byte-identical to requests that predate them, and no
+assumption notice is emitted for their absence.
 
 The zero search uses the request's resolved projectile, atmosphere, wind (including downrange
 segments), effects, and integration method. It follows the engine's level-rifle convention by

@@ -1203,6 +1203,11 @@ impl WasmBallistics {
         // --zero-pressure/--zero-pressure-type for the zero solve only.
         let mut zero_density_altitude: Option<f64> = None;
         let mut zero_powder_temp: Option<f64> = None;
+        // MBA-1359: deliberate POI offset at the zero range (inches imperial / cm metric;
+        // Kestrel ZH/ZO semantics — positive = impacts high / right). Mirrors native's
+        // --zero-poi-up/--zero-poi-right; only meaningful together with --auto-zero.
+        let mut zero_poi_up: Option<f64> = None;
+        let mut zero_poi_right: Option<f64> = None;
 
         // Parse arguments
         let mut i = 0;
@@ -1653,6 +1658,24 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                // MBA-1359: new arms follow the require_value hardening contract (MBA-1343)
+                // — a dangling flag is an error, never a silent skip.
+                "--zero-poi-up" => {
+                    zero_poi_up = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid zero POI up offset"))?,
+                    );
+                    i += 1;
+                }
+                "--zero-poi-right" => {
+                    zero_poi_right = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid zero POI right offset"))?,
+                    );
+                    i += 1;
+                }
                 // --units/-u (+ its value) is consumed globally in run_command, which
                 // pre-scans it to set the unit system before dispatch. Skip it here so
                 // it isn't rejected as an unknown flag (this is what blocked metric input).
@@ -1696,6 +1719,21 @@ impl WasmBallistics {
                 inputs.muzzle_height = muzzle_height * 0.001; // mm to meters
                 inputs.target_height = target_height * 0.001; // mm to meters
             }
+        }
+
+        // MBA-1359: deliberate POI offset at the zero range — inches (imperial) or
+        // centimeters (metric) at the flag, meters on the inputs, matching native.
+        if let Some(v) = zero_poi_up {
+            inputs.zero_poi_vertical_m = match units {
+                UnitSystem::Imperial => v * 0.0254, // inches to meters
+                UnitSystem::Metric => v * 0.01,     // centimeters to meters
+            };
+        }
+        if let Some(v) = zero_poi_right {
+            inputs.zero_poi_horizontal_m = match units {
+                UnitSystem::Imperial => v * 0.0254, // inches to meters
+                UnitSystem::Metric => v * 0.01,     // centimeters to meters
+            };
         }
         // MBA-1135: mass-based length estimate (mirrors CLI/FFI), replacing the mass-blind
         // 4.5-caliber heuristic. WASM otherwise left it at the struct default regardless of the
@@ -2183,6 +2221,13 @@ impl WasmBallistics {
             match zero_solve_result {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
+                    // MBA-1359: the returned angle already carries the vertical POI bias
+                    // (zero_inputs is a clone of `inputs`, so it carried the offsets into
+                    // the solve); the horizontal bias is an azimuth term the angle copy
+                    // cannot carry — apply it to the flight inputs here, exactly as
+                    // calculate_and_set_zero_angle applies it to its own solver. Exact
+                    // no-op when the offset is 0.0.
+                    inputs.azimuth_angle += inputs.windage_zero_bias_rad(zero_distance_m);
                     let degrees_adjustment = zero_angle * 180.0 / std::f64::consts::PI;
                     solved_zero_angle_deg = Some(degrees_adjustment);
                     let moa_adjustment = degrees_adjustment * 60.0;
@@ -6604,6 +6649,11 @@ Trajectory Command:
                                  drag table (loadDragTable)
     --max-range <RANGE>          Maximum range (yards/meters)
     -z, --auto-zero <DIST>       Auto-zero at distance
+    --zero-poi-up <OFFSET>       Deliberate POI offset AT the zero range (in/cm, signed;
+                                 positive = zeroed to impact HIGH). Angular zero-state
+                                 bias; needs --auto-zero (MBA-1359)
+    --zero-poi-right <OFFSET>    Deliberate POI offset AT the zero range (in/cm, signed;
+                                 positive = impacts RIGHT); needs --auto-zero (MBA-1359)
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
     --with-drag-coefficient      Add each point's effective drag coefficient to

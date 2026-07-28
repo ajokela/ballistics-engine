@@ -5,6 +5,26 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Deliberate zero POI offset inputs** (MBA-1359, Kestrel ZH/ZO semantics). New
+  `BallisticInputs` fields `zero_poi_vertical_m`/`zero_poi_horizontal_m` record that the
+  rifle is deliberately zeroed off — e.g. 0.1 in high / 0.2 in left at the zero range —
+  and shift the whole solution by the equivalent angular bias (offset / zero distance),
+  applied post-solve to the zero elevation and azimuth (the zero search itself still
+  solves perfect convergence). Sign convention: positive = impacts HIGH / impacts RIGHT
+  at the zero distance. Surfaces: `--zero-poi-up`/`--zero-poi-right` (inches imperial /
+  cm metric) on `trajectory`, `mpbr`, `come-ups`, `wind-card`, `range-table`, and
+  `compare` plus the WASM terminal's `trajectory`; solve-json v1 request fields
+  `shot.zero_poi_up_m`/`shot.zero_poi_right_m` (SI, additive, no response-shape change);
+  two appended `c_double`s on `FFIBallisticInputs` (ABI append-only convention);
+  back-compatible `zero_poi_up_m`/`zero_poi_right_m` saved-profile fields (always
+  meters); and `.a7p` import can now convert the file's `zero_x`/`zero_y` device click
+  counts via the new `profile import --zero-click <e.g. 0.1mil>` flag (the `.a7p` format
+  does not store the device's click size, so without the flag the counts remain reported
+  as unmapped, unchanged). Omitting every new input is byte-identical to 0.30.x.
+
 ## [0.30.1] - 2026-07-28
 
 ### Fixed
