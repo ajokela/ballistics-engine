@@ -1224,6 +1224,11 @@ impl WasmBallistics {
         // MBA-1403: sampled-drop reference toggle; false = LOS (the historical default),
         // true = target plane. Mirrors native's --drops-reference {los|target}.
         let mut drops_reference_target = false;
+        // MBA-1358: scope tracking correction factors (dial-unit outputs × CF exactly
+        // once; raw inches never). 1.0 = no correction, byte-identical. Elevation scales
+        // the auto-zero banner's MOA/mrad; windage scales the mover Ring dial outputs.
+        let mut elevation_cf: f64 = 1.0;
+        let mut windage_cf: f64 = 1.0;
 
         // Parse arguments
         let mut i = 0;
@@ -1712,6 +1717,32 @@ impl WasmBallistics {
                             )))
                         }
                     };
+                    i += 1;
+                }
+                // MBA-1358: scope tracking correction factors, same accepted band as the
+                // native CLI (strictly between 0.5 and 1.5, shared bound).
+                "--elevation-cf" => {
+                    elevation_cf = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid elevation CF"))?;
+                    if !crate::adjustment::tracking_cf_in_range(elevation_cf) {
+                        return Err(JsValue::from_str(
+                            "--elevation-cf must be a tracking correction factor strictly \
+                             between 0.5 and 1.5",
+                        ));
+                    }
+                    i += 1;
+                }
+                "--windage-cf" => {
+                    windage_cf = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid windage CF"))?;
+                    if !crate::adjustment::tracking_cf_in_range(windage_cf) {
+                        return Err(JsValue::from_str(
+                            "--windage-cf must be a tracking correction factor strictly \
+                             between 0.5 and 1.5",
+                        ));
+                    }
                     i += 1;
                 }
                 // --units/-u (+ its value) is consumed globally in run_command, which
@@ -2283,8 +2314,15 @@ impl WasmBallistics {
                     inputs.azimuth_angle += inputs.windage_zero_bias_rad(zero_distance_m);
                     let degrees_adjustment = zero_angle * 180.0 / std::f64::consts::PI;
                     solved_zero_angle_deg = Some(degrees_adjustment);
-                    let moa_adjustment = degrees_adjustment * 60.0;
-                    let mrad_adjustment = zero_angle * 1000.0;
+                    // MBA-1358: the banner's MOA/mrad are dial-unit outputs — scaled by
+                    // the elevation CF via the shared, host-tested helper (×1.0 exact).
+                    // The degrees echo above is a bore angle, not a dial value: unscaled.
+                    let (moa_adjustment, mrad_adjustment) =
+                        crate::adjustment::zero_banner_dial_values(
+                            degrees_adjustment,
+                            zero_angle,
+                            elevation_cf,
+                        );
                     // MBA-1402: the solved zero angle in degrees was missing here (native
                     // `trajectory`'s equivalent auto-zero echo had no degrees field at all
                     // until this same ticket; this banner already had MOA/mrad).
@@ -2466,6 +2504,7 @@ impl WasmBallistics {
                         target_speed_mps,
                         ring_unit,
                         target_drops_cos,
+                        windage_cf,
                     ),
                     OutputFormat::Json => self.format_trajectory_json(
                         &result,
@@ -2475,6 +2514,7 @@ impl WasmBallistics {
                         solved_zero_angle_deg,
                         with_drag_coefficient,
                         target_drops_cos,
+                        windage_cf,
                     ),
                     OutputFormat::Csv => self.format_trajectory_csv(
                         &result,
@@ -2483,6 +2523,7 @@ impl WasmBallistics {
                         inputs.muzzle_height + inputs.sight_height,
                         target_speed_mps,
                         target_drops_cos,
+                        windage_cf,
                     ),
                 };
                 // JSON/CSV must stay pure machine output: the human-readable "Rifle zeroed
@@ -2730,6 +2771,9 @@ impl WasmBallistics {
         // MBA-1356: whole-curve drag scale for a custom drag table. None until parsed;
         // resolved against self.drag_table once the arg-parse loop is done.
         let mut cd_scale: Option<f64> = None;
+        // MBA-1358: elevation tracking CF — the zero banners' MOA/mrad are dial-unit
+        // outputs and scale by it (×1.0 exact, byte-identical without the flag).
+        let mut elevation_cf: f64 = 1.0;
         // MBA-1402: inverse mode — solve the zero RANGE a stored bore angle (degrees)
         // produces, instead of the angle a target distance produces. Mutually exclusive
         // with an explicit --target-distance (checked after parsing, once we know whether
@@ -2835,6 +2879,20 @@ impl WasmBallistics {
                         );
                         i += 1;
                     }
+                }
+                // MBA-1358: elevation tracking CF for the dial-unit banner values (new
+                // arm — require_value hardening per MBA-1343, unlike the legacy arms).
+                "--elevation-cf" => {
+                    elevation_cf = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid elevation CF"))?;
+                    if !crate::adjustment::tracking_cf_in_range(elevation_cf) {
+                        return Err(JsValue::from_str(
+                            "--elevation-cf must be a tracking correction factor strictly \
+                             between 0.5 and 1.5",
+                        ));
+                    }
+                    i += 1;
                 }
                 // --units/-u (+ its value) is consumed globally in run_command, which
                 // pre-scans it to set the unit system before dispatch. Skip it here so
@@ -3100,8 +3158,14 @@ impl WasmBallistics {
                     } else {
                         "meters"
                     };
-                    let moa_adjustment = angle_deg * 60.0;
-                    let mrad_adjustment = angle_rad * 1000.0;
+                    // MBA-1358: dial-unit banner values scale by the elevation CF via
+                    // the shared, host-tested helper (×1.0 exact).
+                    let (moa_adjustment, mrad_adjustment) =
+                        crate::adjustment::zero_banner_dial_values(
+                            angle_deg,
+                            angle_rad,
+                            elevation_cf,
+                        );
                     let near_line = match crossings.near_m {
                         Some(m) => format!("Near Zero (ascending): {:.1} {}\n", to_display(m), dist_label),
                         None => "Near Zero: not within the solved range\n".to_string(),
@@ -3181,8 +3245,15 @@ impl WasmBallistics {
             match zero_result {
                 Ok(zero_angle) => {
                     let zero_degrees = zero_angle * 180.0 / std::f64::consts::PI;
-                    let moa_adjustment = zero_degrees * 60.0;
-                    let mrad_adjustment = zero_angle * 1000.0;
+                    // MBA-1358: dial-unit banner values scale by the elevation CF via
+                    // the shared, host-tested helper (×1.0 exact). The degrees echo is a
+                    // bore angle, not a dial value: unscaled.
+                    let (moa_adjustment, mrad_adjustment) =
+                        crate::adjustment::zero_banner_dial_values(
+                            zero_degrees,
+                            zero_angle,
+                            elevation_cf,
+                        );
 
                     format!(
                         "{zero_atmo_notice}Zero Calculation Results\n\
@@ -4495,6 +4566,10 @@ impl WasmBallistics {
         let mut range: Option<f64> = None;
         let mut observed: Vec<String> = Vec::new();
         let mut drop_unit = DropUnit::Mil;
+        // MBA-1358: elevation tracking CF — dialed observations are DIVIDED by it
+        // before the fit; dial-unit report values are scaled back (×CF) for display.
+        // Mirrors the native command exactly.
+        let mut elevation_cf: f64 = 1.0;
         let mut bc = 0.475;
         let mut drag_model = "g1";
         let mut mass = default_mass;
@@ -4543,6 +4618,19 @@ impl WasmBallistics {
                 "--drop-unit" => {
                     drop_unit = DropUnit::parse(require_value(args, i)?)
                         .map_err(|e| JsValue::from_str(&e))?;
+                    i += 1;
+                }
+                // MBA-1358: same accepted band as the native CLI (shared bound).
+                "--elevation-cf" => {
+                    elevation_cf = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid elevation CF"))?;
+                    if !crate::adjustment::tracking_cf_in_range(elevation_cf) {
+                        return Err(JsValue::from_str(
+                            "--elevation-cf must be a tracking correction factor strictly \
+                             between 0.5 and 1.5",
+                        ));
+                    }
                     i += 1;
                 }
                 "-b" | "--bc" => {
@@ -4845,6 +4933,16 @@ impl WasmBallistics {
             _ => chrono_fps,
         };
 
+        // MBA-1358: dialed observations divide by the elevation CF before the fit
+        // (single-observation mode is always MIL = dialed; multi mode is dialed unless
+        // --drop-unit in, a tape measurement that never scales). /1.0 is bit-exact.
+        let observation_cf = if observed.is_empty() || drop_unit != DropUnit::In {
+            elevation_cf
+        } else {
+            1.0
+        };
+        let measured_drop = measured_drop / observation_cf;
+
         if !observed.is_empty() {
             // MBA-1316: one or more --observed impacts -> joint MV+BC calibration via
             // the shared core. Token parsing happens here (the typed core takes
@@ -4857,10 +4955,12 @@ impl WasmBallistics {
                 drop: measured_drop,
             });
             for token in &observed {
-                observations.push(
+                let mut observation =
                     crate::truing::parse_truing_observation(token, engine_units(units))
-                        .map_err(|e| JsValue::from_str(&e))?,
-                );
+                        .map_err(|e| JsValue::from_str(&e))?;
+                // MBA-1358: same single division as the primary observation above.
+                observation.drop /= observation_cf;
+                observations.push(observation);
             }
             let report = crate::truing::run_multi_observation_truing_core(
                 &observations,
@@ -4878,8 +4978,12 @@ impl WasmBallistics {
                 &bc_segments,
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            // MBA-1358: dial-unit report values are shown back in scope units (×CF) via
+            // the same shared helper the native CLI uses (×1.0 exact without a CF).
+            let display_report =
+                crate::truing::scale_report_dial_values(&report, observation_cf);
             Ok(format_multi_truing_result(
-                &report, drop_unit, units, chrono_fps, output,
+                &display_report, drop_unit, units, chrono_fps, output,
             ))
         } else {
             // Classic single-observation velocity truing (drop is always MIL here).
@@ -4920,9 +5024,11 @@ impl WasmBallistics {
                 adjustment_percent,
                 &result.confidence,
                 result.iterations,
-                result.final_error_mil,
-                result.calculated_drop_mil,
-                measured_drop,
+                // MBA-1358: dial-unit outputs render in scope units (×CF; the fit
+                // consumed the ÷CF true values) — mirrors native exactly. ×1.0 exact.
+                result.final_error_mil * observation_cf,
+                result.calculated_drop_mil * observation_cf,
+                measured_drop * observation_cf,
                 units,
                 output,
                 false,
@@ -5307,6 +5413,9 @@ impl WasmBallistics {
         // shooting angle) = target-plane reference — drop values divided by it and the
         // Drop column relabeled "Drop (target)".
         target_drops_cos: Option<f64>,
+        // MBA-1358: windage tracking CF for the Ring dial column (mover lead is a
+        // dialed quantity); ×1.0 is bit-exact — byte-identical without a CF.
+        ring_windage_cf: f64,
     ) -> String {
         // Mover ring (MBA-1325): additive "Ring" column, only when --target-speed > 0.
         let ring_enabled = target_speed_mps > 0.0;
@@ -5422,7 +5531,9 @@ impl WasmBallistics {
                 if ring_enabled {
                     let (_, ring_mil) =
                         mover_ring(target_speed_mps, point.time, point.position.x);
-                    let ring_str = match ring_mil {
+                    // MBA-1358: scale the mil angle by the windage CF BEFORE unit/click
+                    // conversion, mirroring native run_trajectory's Ring cell.
+                    let ring_str = match ring_mil.map(|mil| mil * ring_windage_cf) {
                         Some(mil) => match ring_unit {
                             RingDisplayUnit::Factor(f, label) => format!("{:.2} {}", mil * f, label),
                             // clicks_for(drop_yd, range_yd, click) only needs the
@@ -5623,6 +5734,9 @@ impl WasmBallistics {
         // MBA-1403: None = LOS reference (byte-identical); Some(cos) = target plane —
         // drop values divided by it, and the legend's drop axis says so. Keys unchanged.
         target_drops_cos: Option<f64>,
+        // MBA-1358: windage tracking CF for mover_ring_mil (dial-unit); mover_ring_m
+        // stays raw meters. ×1.0 is bit-exact.
+        ring_windage_cf: f64,
     ) -> String {
         // LOS height is cant-invariant (see format_trajectory_table).
         let los_height = los_height_m;
@@ -5664,8 +5778,12 @@ impl WasmBallistics {
                         mover_ring(target_speed_mps, p.time, p.position.x);
                     if let Some(obj) = point.as_object_mut() {
                         obj.insert("mover_ring_m".to_string(), serde_json::json!(ring_m));
+                        // MBA-1358: dialed quantity — windage CF (×1.0 exact).
                         if let Some(mil) = ring_mil {
-                            obj.insert("mover_ring_mil".to_string(), serde_json::json!(mil));
+                            obj.insert(
+                                "mover_ring_mil".to_string(),
+                                serde_json::json!(mil * ring_windage_cf),
+                            );
                         }
                     }
                 }
@@ -5730,6 +5848,8 @@ impl WasmBallistics {
         // drop values divided by it, Drop column header relabeled Drop_target. No
         // summary line is added here: WASM CSV stays rows-only (MBA-1433 stays open).
         target_drops_cos: Option<f64>,
+        // MBA-1358: windage tracking CF for the ring_mil column; ×1.0 is bit-exact.
+        ring_windage_cf: f64,
     ) -> String {
         let mut output = String::new();
         // Mover ring (MBA-1325): extra column, header carries the unit; only emitted
@@ -5834,7 +5954,10 @@ impl WasmBallistics {
                         point.position.x,
                     );
                     match ring_mil {
-                        Some(mil) => output.push_str(&format!("{},{:.3}\n", row, mil)),
+                        // MBA-1358: dialed quantity — windage CF (×1.0 exact).
+                        Some(mil) => {
+                            output.push_str(&format!("{},{:.3}\n", row, mil * ring_windage_cf))
+                        }
                         None => output.push_str(&format!("{},\n", row)),
                     }
                 } else {
@@ -6796,6 +6919,13 @@ Trajectory Command:
                                  to the line of sight; target = vertical in the target
                                  plane (drop / cos(shooting angle), JBM's "target
                                  plane"); relabels the Drop column (MBA-1403)
+    --elevation-cf <FACTOR>      Elevation scope tracking correction factor from a
+                                 tall-target test (MBA-1358): multiplies the auto-zero
+                                 banner's MOA/mrad dial values. Strictly between
+                                 0.5 and 1.5
+    --windage-cf <FACTOR>        Windage tracking correction factor (MBA-1358):
+                                 multiplies the mover Ring dial outputs (table/JSON/
+                                 CSV). Same bounds as --elevation-cf
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
     --with-drag-coefficient      Add each point's effective drag coefficient to
@@ -6893,6 +7023,9 @@ Zero Command:
                                  and names which one zero_range is. Conflicts
                                  with --target-distance; give exactly one
     --sight-height <HEIGHT>      Sight height above bore
+    --elevation-cf <FACTOR>      Elevation scope tracking correction factor
+                                 (MBA-1358): multiplies the MOA/mrad dial values
+                                 in the results. Strictly between 0.5 and 1.5
     --temperature <T>            Zero-day air temperature (°F/°C)
     --pressure <P>               Zero-day pressure (inHg/hPa)
     --pressure-type <TYPE>       absolute (default) or qnh — a QNH altimeter
@@ -6977,6 +7110,12 @@ True Velocity Command:
                                  --drop-unit. Enables joint MV+BC calibration
     --drop-unit <UNIT>           Drop unit for --measured-drop/--observed in
                                  multi-observation mode: mil/moa/in [default: mil]
+    --elevation-cf <FACTOR>      Elevation scope tracking correction factor
+                                 (MBA-1358): dialed (mil/moa) observations are
+                                 DIVIDED by it before the fit so scope error is
+                                 not baked into the trued MV/BC; report dial
+                                 values are shown back in scope units. 'in'
+                                 drops never scale. Strictly between 0.5 and 1.5
     -b, --bc <BC>                Ballistic coefficient (starting value; fitted
                                  when the observations allow)
     --drag-model <MODEL>         Drag model (G1/G7) [default: g1]
