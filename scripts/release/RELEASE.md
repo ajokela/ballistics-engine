@@ -44,9 +44,14 @@ MIPS). This is non-negotiable: stale binaries have shipped-adjacent twice.
 
 ## What the first automated release (0.30.1) taught
 
-- **The three fleet jobs SERIALIZE.** One runner, one job slot: k3s-bsds + riscv +
-  mips run back to back (~3.5 h), not in parallel. Plan the wall clock accordingly,
-  or add a second runner label.
+- **The three fleet jobs SERIALIZE, and mostly SHOULD.** One runner, one job slot:
+  k3s-bsds + riscv + mips run back to back (~3.5 h). Do NOT "fix" this by adding
+  runner slots: `orangepi5-max` is 10.1.1.10, i.e. the BSD KVM host and the MIPS
+  cross-compile host are the SAME machine, and co-scheduling a host build with its
+  VM jobs is what broke netbsd in 0.27.0. Only `riscv` (10.1.1.26, separate
+  hardware) is safe to overlap, and it is ~19 min of a ~3.5 h critical path — so
+  the serialization costs little and buys the invariant. Plan wall clock, not
+  parallelism.
 - **A partial fleet run does NOT need a rebuild.** Artifacts persist on a cluster
   volume reachable through the long-lived `artifacts-reader-*` pod:
   `kubectl exec`/`kubectl cp` from `/workspace/artifacts/ballistics-engine/v<tag>/`.
