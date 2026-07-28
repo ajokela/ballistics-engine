@@ -158,6 +158,7 @@ fn success_for_resolved(resolved_request: ResolvedSolveRequestV1) -> SolveSucces
             terminal_energy_j: 734.8,
             stability_factor: Some(1.5),
             spin_drift_m: Some(0.12),
+            equivalent_horizontal_range_m: None,
             termination: TerminationReasonV1::MaxRange,
         },
         samples: vec![TrajectorySampleV1 {

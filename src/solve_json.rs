@@ -709,6 +709,15 @@ pub struct SolveSummaryV1 {
     /// cannot be calculated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spin_drift_m: Option<f64>,
+    /// Equivalent horizontal range for an inclined shot (MBA-1395): the flat-fire range
+    /// whose angular elevation correction against the same zero matches the inclined
+    /// solution's at the terminal range — the BDC "shoot-to" range (SIG AMR / Leica EHR
+    /// style, angular-match inversion, not the rifleman's-rule cosine). Present only when
+    /// `shot.shooting_angle_rad != 0`, a `zero_distance_m` was solved, and the inverse is
+    /// well-defined (terminal past the zero range, positive correction); absent otherwise
+    /// — responses that predate the field, and every flat solve, are byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equivalent_horizontal_range_m: Option<f64>,
     pub termination: TerminationReasonV1,
 }
 

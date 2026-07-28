@@ -806,6 +806,30 @@ Details worth knowing:
   (`"los"`/`"target"`); the WASM browser terminal accepts `--drops-reference` with the
   same semantics.
 
+#### Equivalent Horizontal Range (BDC shoot-to) — MBA-1395
+
+When a look angle is set (`--shooting-angle` nonzero) **and** a zero was solved
+(`--auto-zero` or a profile zero), the trajectory table prints one extra summary line:
+
+```
+Equivalent horizontal range: 469 yd (shoot-to for BDC)
+```
+
+This is the range SIG BDX (AMR), Leica (EHR), and Gunwerks BR2 report: the **flat-fire
+range whose angular elevation correction — against the same zero — matches the inclined
+solution's** at the solved range. A shooter with a fixed BDC turret or reticle
+calibrated on flat ground dials or holds for the printed range instead of the true
+slant range. The match is **angular**, computed by an inverse lookup over one extra
+flat solve (McDonald's Sierra inclined-fire treatment / Litz), *not* the rifleman's-rule
+`range × cos(angle)` approximation — matching linear drop that way reproduces
+rifleman's-rule-class error at long range.
+
+The line is deliberately omitted where the inverse is ill-defined: flat shots (output
+byte-identical to before this feature), targets at or inside the zero range, and
+non-positive corrections (bullet at/above the line of sight). solve-json v1 carries the
+same value as `summary.equivalent_horizontal_range_m` (absent under the same
+conditions); the WASM terminal prints the same summary line after the trajectory table.
+
 ### Moving-Target Lead
 
 Calculate the hold needed to hit a target moving at a constant ground speed across (or
