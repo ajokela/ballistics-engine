@@ -6,7 +6,8 @@ use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureR
 use crate::bc_table_5d::Bc5dTable;
 use crate::cli_api::{
     calculate_zero_angle_with_conditions, calculate_zero_angle_with_resolved_conditions,
-    calculate_zero_range_from_angle_with_conditions, estimate_bc_fit,
+    calculate_zero_range_from_angle_with_conditions,
+    calculate_zero_range_from_angle_with_resolved_conditions, estimate_bc_fit,
     run_monte_carlo_with_direction_std_dev, AtmosphericConditions,
     BallisticInputs as InternalBallisticInputs, BcFitMode, BcReferenceStandard, MonteCarloParams,
     TrajectorySolver, WindConditions, BC_REFERENCE_STANDARD_INERT_WARNING,
@@ -1197,6 +1198,10 @@ impl WasmBallistics {
         let mut zero_pressure: Option<f64> = None;
         let mut zero_humidity: Option<f64> = None;
         let mut zero_altitude: Option<f64> = None;
+        // MBA-1426 item 4: the zero-day density altitude, mirroring native's
+        // --zero-density-altitude (MBA-1422). Supersedes --zero-altitude and
+        // --zero-pressure/--zero-pressure-type for the zero solve only.
+        let mut zero_density_altitude: Option<f64> = None;
         let mut zero_powder_temp: Option<f64> = None;
 
         // Parse arguments
@@ -1614,6 +1619,16 @@ impl WasmBallistics {
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid zero humidity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--zero-density-altitude" => {
+                    if i + 1 < args.len() {
+                        zero_density_altitude = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero-density-altitude"))?,
                         );
                         i += 1;
                     }
@@ -2058,6 +2073,34 @@ impl WasmBallistics {
                 zero_inputs.altitude = a_m;
                 zero_day_overridden = true;
             }
+            // MBA-1426 item 4 / MBA-1422: a zero-day density altitude supersedes the zero-day
+            // altitude and pressure above — an ISA-equivalent station atmosphere is back-solved
+            // from it, exactly as native does. An explicit --zero-temperature still wins over
+            // the ISA temperature (the resolver re-solves pressure around it so the requested
+            // DA is reproduced), which is why the converted zero-day temperature is passed in.
+            if let Some(zda) = zero_density_altitude {
+                let da_m = match units {
+                    UnitSystem::Imperial => zda * 0.3048, // feet to meters
+                    UnitSystem::Metric => zda,
+                };
+                let explicit_zero_temp_c = zero_temperature.map(|t| match units {
+                    UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0,
+                    UnitSystem::Metric => t,
+                });
+                let (da_altitude_m, da_temp_c, da_pressure_hpa) =
+                    crate::atmosphere::resolve_atmosphere_for_density_altitude(
+                        da_m,
+                        explicit_zero_temp_c,
+                    );
+                zero_atmosphere.temperature = da_temp_c;
+                zero_inputs.temperature = da_temp_c;
+                zero_atmosphere.pressure = da_pressure_hpa;
+                zero_inputs.pressure = da_pressure_hpa;
+                zero_atmosphere.altitude = da_altitude_m;
+                zero_inputs.altitude = da_altitude_m;
+                zero_day_overridden = true;
+            }
+
             // An explicit zero-day powder temperature wins. Otherwise an explicit zero-day air
             // temperature retains the established "powder follows zero-day air" behavior. With
             // neither override, keep the cloned shot-day powder temperature so a no-override
@@ -2086,19 +2129,27 @@ impl WasmBallistics {
             // the same convention the --cd-scale range warning and the inert --bc-reference
             // warning already use here. Silently forcing Absolute is the MBA-1414 class (a flag
             // that does nothing without saying so) that 0.29.0 spent its effort closing.
-            let zero_pressure_type_resolved =
-                match (zero_pressure_type, density_altitude_active, zero_pressure) {
-                    (Some(mode), true, None) => {
-                        if mode != PressureReferenceMode::Absolute {
-                            zero_pressure_type_notice = Some(
-                                "warning: --zero-pressure-type is ignored because --density-altitude supplies the zero-day station pressure directly; pass --zero-pressure to declare a zero-day pressure of your own\n\n",
-                            );
-                        }
-                        PressureReferenceMode::Absolute
+            let zero_pressure_type_resolved = match (
+                zero_pressure_type,
+                density_altitude_active || zero_density_altitude.is_some(),
+                zero_pressure,
+            ) {
+                (Some(mode), true, None) => {
+                    if mode != PressureReferenceMode::Absolute {
+                        // MBA-1422 parity: name whichever flag actually supplied the zero-day
+                        // pressure — a zero-day DA takes precedence over an inherited shot-day
+                        // one, so it gets the blame line.
+                        zero_pressure_type_notice = Some(if zero_density_altitude.is_some() {
+                            "warning: --zero-pressure-type is ignored because --zero-density-altitude supplies the zero-day station pressure directly; pass --zero-pressure to declare a zero-day pressure of your own\n\n"
+                        } else {
+                            "warning: --zero-pressure-type is ignored because --density-altitude supplies the zero-day station pressure directly; pass --zero-pressure to declare a zero-day pressure of your own\n\n"
+                        });
                     }
-                    (Some(mode), _, _) => mode,
-                    (None, _, _) => pressure_type,
-                };
+                    PressureReferenceMode::Absolute
+                }
+                (Some(mode), _, _) => mode,
+                (None, _, _) => pressure_type,
+            };
             let zero_target_height =
                 zero_inputs.muzzle_height + zero_inputs.sight_height; // Zero crosses the line of sight (matches CLI)
             let zero_solve_result = match zero_pressure_type_resolved {
@@ -2548,6 +2599,18 @@ impl WasmBallistics {
         // --target-distance was actually given rather than left at its default).
         let mut from_angle: Option<f64> = None;
         let mut target_distance_explicit = false;
+        // MBA-1426 items 3+4: the terminal's zero solved BOTH its branches against
+        // AtmosphericConditions::default(), silently ignoring nothing — it REJECTED these
+        // flags as unknown — while native zero has carried --temperature/--pressure/
+        // --pressure-type/--humidity/--altitude since MBA-1397 and --density-altitude since
+        // MBA-1422. Parsed as Option so a no-flag run leaves the default objects untouched
+        // (byte-identical by construction, the same guarantee lead's env flags documented).
+        let mut temperature: Option<f64> = None;
+        let mut pressure: Option<f64> = None;
+        let mut pressure_type: Option<PressureReferenceMode> = None;
+        let mut humidity: Option<f64> = None;
+        let mut altitude: Option<f64> = None;
+        let mut density_altitude: Option<f64> = None;
 
         // Parse arguments
         let mut i = 0;
@@ -2642,6 +2705,62 @@ impl WasmBallistics {
                 "--units" | "-u" => {
                     i += 1;
                 }
+                "--temperature" => {
+                    if i + 1 < args.len() {
+                        temperature = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid temperature"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--pressure" => {
+                    if i + 1 < args.len() {
+                        pressure = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid pressure"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--pressure-type" => {
+                    if i + 1 < args.len() {
+                        pressure_type = Some(parse_pressure_type_arg(args[i + 1])?);
+                        i += 1;
+                    }
+                }
+                "--humidity" => {
+                    if i + 1 < args.len() {
+                        humidity = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid humidity"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--altitude" => {
+                    if i + 1 < args.len() {
+                        altitude = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid altitude"))?,
+                        );
+                        i += 1;
+                    }
+                }
+                "--density-altitude" => {
+                    if i + 1 < args.len() {
+                        density_altitude = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid density-altitude"))?,
+                        );
+                        i += 1;
+                    }
+                }
                 // Reject unrecognized flags instead of silently ignoring them, so a
                 // typo or a flag that isn't wired into this WASM surface is caught
                 // immediately rather than looking like a no-op. (The native CLI's clap
@@ -2656,6 +2775,83 @@ impl WasmBallistics {
 
         // Build inputs
         let mut inputs = InternalBallisticInputs::default();
+
+        // Assemble the zero-day atmosphere (MBA-1426 items 3+4). Same conversion and
+        // dual-write (condition object + inputs fields) pattern as handle_lead_command.
+        let mut atmosphere = AtmosphericConditions::default();
+        let mut zero_atmo_notice = String::new();
+        if let Some(t) = temperature {
+            let t_c = match units {
+                UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0,
+                UnitSystem::Metric => t,
+            };
+            atmosphere.temperature = t_c;
+            inputs.temperature = t_c;
+        }
+        if let Some(p) = pressure {
+            let p_hpa = match units {
+                UnitSystem::Imperial => p * 33.863886666667, // inHg to hPa
+                UnitSystem::Metric => p,
+            };
+            // The RAW declared pressure is stored; a declared QNH is resolved at the solve
+            // sites below via resolve_station_conditions_with_pressure_mode + the
+            // *_with_resolved_conditions solvers — NOT pre-reduced here. Review finding: a
+            // pre-reduced QNH that lands inside resolve_station_pressure's 1013.25±0.5 hPa
+            // legacy-sentinel window would be silently re-derived from altitude by the base
+            // solvers, discarding the user's pressure (an ordinary winter high-pressure QNH
+            // at a few hundred meters reduces into exactly that window). Native zero routes
+            // through the mode-aware resolver unconditionally; this now mirrors it.
+            atmosphere.pressure = p_hpa;
+            inputs.pressure = p_hpa;
+        }
+        if let Some(h) = humidity {
+            atmosphere.humidity = h; // percent
+            inputs.humidity = (h / 100.0).clamp(0.0, 1.0); // fraction
+        }
+        if let Some(alt) = altitude {
+            let a_m = match units {
+                UnitSystem::Imperial => alt * 0.3048,
+                UnitSystem::Metric => alt,
+            };
+            atmosphere.altitude = a_m;
+            inputs.altitude = a_m;
+        }
+        // Whether the solves below must run through the mode-aware resolver (Qnh declared
+        // with a pressure, and not superseded by --density-altitude). Absolute keeps the
+        // base solvers so their legacy-sentinel behavior stays bit-identical to native's
+        // Absolute path. A DA-resolved pressure keeps the base path too — native zero does
+        // the same, and a DA value recaptured by the ±0.5 hPa sentinel is ISA-adjacent by
+        // construction (≤0.05% density), unlike a discarded QNH (~1%).
+        let qnh_declared = pressure.is_some()
+            && density_altitude.is_none()
+            && matches!(pressure_type, Some(PressureReferenceMode::Qnh));
+
+        // --density-altitude supersedes --altitude and --pressure/--pressure-type entirely
+        // (MBA-1422 precedence); an explicit --temperature still wins. Notices ride the
+        // output text — this surface has no stderr (MBA-1414 convention).
+        if let Some(da) = density_altitude {
+            if pressure.is_some() || pressure_type.is_some() {
+                zero_atmo_notice.push_str(
+                    "note: --density-altitude supersedes --pressure/--pressure-type (station pressure is derived from density altitude instead)\n\n",
+                );
+            }
+            let da_m = match units {
+                UnitSystem::Imperial => da * 0.3048,
+                UnitSystem::Metric => da,
+            };
+            let explicit_temp_c = temperature.map(|t| match units {
+                UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0,
+                UnitSystem::Metric => t,
+            });
+            let (da_altitude_m, da_temp_c, da_pressure_hpa) =
+                crate::atmosphere::resolve_atmosphere_for_density_altitude(da_m, explicit_temp_c);
+            atmosphere.temperature = da_temp_c;
+            inputs.temperature = da_temp_c;
+            atmosphere.pressure = da_pressure_hpa;
+            inputs.pressure = da_pressure_hpa;
+            atmosphere.altitude = da_altitude_m;
+            inputs.altitude = da_altitude_m;
+        }
 
         // Convert units
         match units {
@@ -2727,13 +2923,36 @@ impl WasmBallistics {
             // being silently chosen — see calculate_zero_range_from_angle_with_conditions's
             // doc comment.
             let angle_rad = angle_deg * std::f64::consts::PI / 180.0;
-            match calculate_zero_range_from_angle_with_conditions(
-                inputs,
-                angle_rad,
-                los_height,
-                WindConditions::default(),
-                AtmosphericConditions::default(),
-            ) {
+            let from_angle_result = if qnh_declared {
+                let (resolved_temp_c, resolved_pressure_hpa) =
+                    resolve_station_conditions_with_pressure_mode(
+                        atmosphere.temperature,
+                        atmosphere.pressure,
+                        atmosphere.altitude,
+                        PressureReferenceMode::Qnh,
+                    );
+                let mut resolved_atmosphere = atmosphere.clone();
+                resolved_atmosphere.temperature = resolved_temp_c;
+                resolved_atmosphere.pressure = resolved_pressure_hpa;
+                calculate_zero_range_from_angle_with_resolved_conditions(
+                    inputs,
+                    angle_rad,
+                    los_height,
+                    WindConditions::default(),
+                    resolved_atmosphere,
+                )
+            } else {
+                calculate_zero_range_from_angle_with_conditions(
+                    inputs,
+                    angle_rad,
+                    los_height,
+                    WindConditions::default(),
+                    // MBA-1426: was AtmosphericConditions::default() — typed conditions never
+                    // reached this solve at all.
+                    atmosphere.clone(),
+                )
+            };
+            match from_angle_result {
                 Ok(crossings) => {
                     let to_display = |m: f64| match units {
                         UnitSystem::Imperial => m / 0.9144,
@@ -2754,13 +2973,21 @@ impl WasmBallistics {
                         Some(m) => format!("Far Zero (descending): {:.1} {}\n", to_display(m), dist_label),
                         None => "Far Zero: not within the solved range\n".to_string(),
                     };
+                    // MBA-1426 item 5 / MBA-1419: name which root the single zero-range value
+                    // refers to, exactly as native's JSON/CSV do — far when present, else near.
+                    let primary_line = if crossings.far_m.is_some() {
+                        "Primary Crossing: far (the conventional zeroed-at distance)\n"
+                    } else {
+                        "Primary Crossing: near (the far root lies beyond the solved range)\n"
+                    };
 
                     format!(
-                        "Zero Range From Angle Results\n\
+                        "{zero_atmo_notice}Zero Range From Angle Results\n\
                          ==============================\n\
                          Input Zero Angle: {:.4}°\n\
                          MOA Adjustment: {:.2} MOA up\n\
                          Mrad Adjustment: {:.2} mrad up\n\
+                         {}\
                          {}\
                          {}\
                          Sight Height: {} {}\n",
@@ -2769,6 +2996,7 @@ impl WasmBallistics {
                         mrad_adjustment,
                         near_line,
                         far_line,
+                        primary_line,
                         sight_height,
                         if units == UnitSystem::Imperial {
                             "inches"
@@ -2784,20 +3012,43 @@ impl WasmBallistics {
                 UnitSystem::Imperial => target_distance * 0.9144,
                 UnitSystem::Metric => target_distance,
             };
-            match calculate_zero_angle_with_conditions(
-                inputs,
-                target_distance_m,
-                los_height,
-                WindConditions::default(),
-                AtmosphericConditions::default(),
-            ) {
+            let zero_result = if qnh_declared {
+                let (resolved_temp_c, resolved_pressure_hpa) =
+                    resolve_station_conditions_with_pressure_mode(
+                        atmosphere.temperature,
+                        atmosphere.pressure,
+                        atmosphere.altitude,
+                        PressureReferenceMode::Qnh,
+                    );
+                let mut resolved_atmosphere = atmosphere.clone();
+                resolved_atmosphere.temperature = resolved_temp_c;
+                resolved_atmosphere.pressure = resolved_pressure_hpa;
+                calculate_zero_angle_with_resolved_conditions(
+                    inputs,
+                    target_distance_m,
+                    los_height,
+                    WindConditions::default(),
+                    resolved_atmosphere,
+                )
+            } else {
+                calculate_zero_angle_with_conditions(
+                    inputs,
+                    target_distance_m,
+                    los_height,
+                    WindConditions::default(),
+                    // MBA-1426: was AtmosphericConditions::default() — typed conditions never
+                    // reached this solve at all.
+                    atmosphere.clone(),
+                )
+            };
+            match zero_result {
                 Ok(zero_angle) => {
                     let zero_degrees = zero_angle * 180.0 / std::f64::consts::PI;
                     let moa_adjustment = zero_degrees * 60.0;
                     let mrad_adjustment = zero_angle * 1000.0;
 
                     format!(
-                        "Zero Calculation Results\n\
+                        "{zero_atmo_notice}Zero Calculation Results\n\
                          ========================\n\
                          Target Distance: {} {}\n\
                          Zero Angle: {:.4}°\n\
@@ -2900,6 +3151,9 @@ impl WasmBallistics {
         let mut pressure: Option<f64> = None;
         let mut humidity: Option<f64> = None;
         let mut altitude: Option<f64> = None;
+        // MBA-1426 item 3: native lead has honored --pressure-type since MBA-1416; the
+        // terminal silently lacked it.
+        let mut pressure_type: Option<PressureReferenceMode> = None;
         let mut wind_speed: Option<f64> = None;
         let mut wind_direction: Option<f64> = None;
 
@@ -2990,6 +3244,12 @@ impl WasmBallistics {
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid humidity"))?,
                         );
+                        i += 1;
+                    }
+                }
+                "--pressure-type" => {
+                    if i + 1 < args.len() {
+                        pressure_type = Some(parse_pressure_type_arg(args[i + 1])?);
                         i += 1;
                     }
                 }
@@ -3254,6 +3514,21 @@ impl WasmBallistics {
             let p_hpa = match units {
                 UnitSystem::Imperial => p * 33.863886666667, // inHg to hPa
                 UnitSystem::Metric => p,
+            };
+            // MBA-1426 item 3: a declared QNH is reduced to station pressure against this
+            // command's own --altitude, matching native lead since MBA-1416. The reduction is
+            // multiplicative, so it composes cleanly with the unit conversion above.
+            let p_hpa = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
+                PressureReferenceMode::Absolute => p_hpa,
+                PressureReferenceMode::Qnh => {
+                    let altitude_m = altitude
+                        .map(|alt| match units {
+                            UnitSystem::Imperial => alt * 0.3048,
+                            UnitSystem::Metric => alt,
+                        })
+                        .unwrap_or(0.0);
+                    crate::atmosphere::reduce_qnh_to_station_pressure(p_hpa, altitude_m)
+                }
             };
             atmosphere.pressure = p_hpa;
             inputs.pressure = p_hpa;
@@ -4092,6 +4367,8 @@ impl WasmBallistics {
         let mut sight_height: Option<f64> = None;
         let mut temperature: Option<f64> = None;
         let mut pressure: Option<f64> = None;
+        // MBA-1426 item 3: native true-velocity has honored --pressure-type since MBA-1416.
+        let mut pressure_type: Option<PressureReferenceMode> = None;
         let mut humidity = 50.0;
         let mut altitude = 0.0;
         let mut output = "table";
@@ -4202,6 +4479,12 @@ impl WasmBallistics {
                     humidity = require_value(args, i)?
                         .parse()
                         .map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                    i += 1;
+                }
+                "--pressure-type" => {
+                    // This parser is hardened (MBA-1343): every value flag goes through
+                    // require_value so a dangling flag errors instead of silently skipping.
+                    pressure_type = Some(parse_pressure_type_arg(require_value(args, i)?)?);
                     i += 1;
                 }
                 "--altitude" => {
@@ -4326,6 +4609,20 @@ impl WasmBallistics {
                 v
             }
         };
+        // MBA-1426 item 3: a declared QNH reduces against this command's own --altitude,
+        // matching native true-velocity since MBA-1416. Multiplicative, so applying it to the
+        // display-unit value composes exactly like native's apply_pressure_mode.
+        let pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
+            PressureReferenceMode::Absolute => pressure,
+            PressureReferenceMode::Qnh => {
+                let altitude_m = match units {
+                    UnitSystem::Imperial => altitude * 0.3048,
+                    UnitSystem::Metric => altitude,
+                };
+                crate::atmosphere::reduce_qnh_to_station_pressure(pressure, altitude_m)
+            }
+        };
+
 
         // Convert to the truing core's internal imperial units — factor-for-factor the
         // native Commands::TrueVelocity dispatch.
@@ -4515,6 +4812,8 @@ impl WasmBallistics {
         let mut sight_height: Option<f64> = None;
         let mut temperature: Option<f64> = None;
         let mut pressure: Option<f64> = None;
+        // MBA-1426 item 3: native estimate-bc has honored --pressure-type since MBA-1416.
+        let mut pressure_type: Option<PressureReferenceMode> = None;
         let mut humidity: f64 = 50.0;
         let mut altitude: f64 = 0.0;
 
@@ -4625,6 +4924,12 @@ impl WasmBallistics {
                         i += 1;
                     }
                 }
+                "--pressure-type" => {
+                    if i + 1 < args.len() {
+                        pressure_type = Some(parse_pressure_type_arg(args[i + 1])?);
+                        i += 1;
+                    }
+                }
                 "--altitude" => {
                     if i + 1 < args.len() {
                         altitude = args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid altitude"))?;
@@ -4695,10 +5000,25 @@ impl WasmBallistics {
                     UnitSystem::Metric => t,
                 })
                 .unwrap_or(15.0),
+            // MBA-1426 item 3: the mode applies only when a pressure was actually supplied —
+            // the 1013.25 default is sea-level standard by definition (same rule as native
+            // estimate-bc since MBA-1416).
             pressure: pressure
-                .map(|p| match units {
-                    UnitSystem::Imperial => p * 33.8639,
-                    UnitSystem::Metric => p,
+                .map(|p| {
+                    let p_hpa = match units {
+                        UnitSystem::Imperial => p * 33.8639,
+                        UnitSystem::Metric => p,
+                    };
+                    match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
+                        PressureReferenceMode::Absolute => p_hpa,
+                        PressureReferenceMode::Qnh => {
+                            let altitude_m = match units {
+                                UnitSystem::Imperial => altitude * 0.3048,
+                                UnitSystem::Metric => altitude,
+                            };
+                            crate::atmosphere::reduce_qnh_to_station_pressure(p_hpa, altitude_m)
+                        }
+                    }
                 })
                 .unwrap_or(1013.25),
             humidity,
@@ -6313,6 +6633,9 @@ Trajectory Command:
                                  speed which follows --units
     --temperature <TEMP>         Temperature (F/C)
     --pressure <PRESSURE>        Pressure (inHg/hPa)
+    --zero-density-altitude <DA> Zero-day density altitude for --auto-zero (ft/m);
+                                 supersedes --zero-altitude and --zero-pressure/
+                                 --zero-pressure-type for the zero solve only
     --humidity <HUMIDITY>        Humidity (0-100%)
     --altitude <ALT>             Altitude (feet/meters)
     
@@ -6378,6 +6701,14 @@ Zero Command:
                                  and names which one zero_range is. Conflicts
                                  with --target-distance; give exactly one
     --sight-height <HEIGHT>      Sight height above bore
+    --temperature <T>            Zero-day air temperature (°F/°C)
+    --pressure <P>               Zero-day pressure (inHg/hPa)
+    --pressure-type <TYPE>       absolute (default) or qnh — a QNH altimeter
+                                 setting is reduced against --altitude
+    --humidity <H>               Relative humidity percent
+    --altitude <ALT>             Zero-day altitude (ft/m)
+    --density-altitude <DA>      Single-value atmosphere entry (ft/m); supersedes
+                                 --altitude and --pressure/--pressure-type
 
 Drag Curve Command:
   ballistics drag-curve [OPTIONS]
@@ -6470,6 +6801,7 @@ True Velocity Command:
     --sight-height <HEIGHT>      Sight height above bore (in/mm) [default: 2/50]
     --temperature <T>            Temperature (°F/°C) [default: 59/15]
     --pressure <P>               Pressure (inHg/hPa) [default: 29.92/1013.25]
+    --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
     --humidity <H>               Humidity (0-100%) [default: 50]
     --altitude <A>               Altitude (ft/m) [default: 0]
     --offline                    Accepted for native-command parity (the WASM
@@ -6491,6 +6823,7 @@ Estimate BC Command:
     --sight-height <H>           Sight height above bore (in/mm) for the zeroed fit
     --temperature <T>            Air temp the data was measured at (°F/°C) [59/15]
     --pressure <P>               Pressure the data was measured at (inHg/hPa) [29.92/1013.25]
+    --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
     --humidity <H>               Relative humidity (percent) [50]
     --altitude <A>               Altitude the data was measured at (ft/m) [0]
 
@@ -6515,6 +6848,7 @@ Lead Command:
     --sight-height <HEIGHT>       Sight height above bore (inches/mm)
     --temperature <T>             Air temperature (°F/°C) [default: 15°C standard]
     --pressure <P>                Barometric pressure (inHg/hPa) [default: 1013.25 hPa]
+    --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
     --humidity <H>                Relative humidity (percent) [default: 50]
     --altitude <A>                Altitude (ft/m) [default: 0]
     --wind-speed <SPEED>          Wind speed (mph/m/s) [default: 0]

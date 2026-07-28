@@ -5,6 +5,38 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A supplied `--location`/`--site` (or `--profile`/`--profile-row`) now loads or stops the
+  run** (MBA-1425). Three silences existed: `--location` without `--site` was ignored entirely
+  (no message at all — the file was never read); an unreadable path warned and continued; a
+  missing site row warned and continued. All three produced a clean trajectory computed against
+  air or a gun the user never chose. The FILE flags now require their row selectors at the
+  parser level (deliberately asymmetric: a standalone `--site`/`--profile-row` keeps its
+  pre-existing PDF-labeling job), and both load failures are hard errors naming the path/row.
+- **`zero --from-angle` reports real apexes it used to withhold** (MBA-1419 item 3, resolved).
+  The max ordinate is now gated on whether the diagnostics trajectory actually TURNED OVER
+  inside its envelope, replacing the far-crossing proxy — which was over-conservative (a
+  45° G1 launch turns over at ~2040 yd with a genuine ~1432 yd apex the proxy refused to
+  print). When the solve is still climbing at its envelope, the table says so, and JSON/CSV
+  now OMIT `max_ordinate` instead of emitting the truncation height as if it were an apex.
+- **The browser terminal's `zero` now has an atmosphere at all** (MBA-1426 items 3-4). Both of
+  its solve branches previously ran against the default atmosphere and REJECTED
+  `--temperature`/`--pressure`/`--altitude` as unknown flags, while native zero has carried
+  them since 0.29.0. It now accepts the full set including `--pressure-type` and
+  `--density-altitude` (with the supersede notice riding the output text, since this surface
+  has no stderr), feeding both the target-distance and `--from-angle` solves.
+- **Terminal parity sweep** (MBA-1426 items 3-5): `--pressure-type` on the terminal's
+  `true-velocity`, `estimate-bc`, and `lead`; `--zero-density-altitude` on the terminal's
+  trajectory (naming itself, not `--density-altitude`, in the refusal notice); and the
+  from-angle output now names the primary crossing, matching native's `primary_crossing`.
+
+### Added
+- **`zero --drag-model`** (MBA-1419). The zero command lacked drag-model selection while every
+  sibling — including the browser terminal's own zero — had it, so a G7 BC silently ran
+  against the G1 reference table. Default `g1` preserves existing behavior byte-for-byte.
+
 ## [0.30.0] - 2026-07-26
 
 The theme of this release is reaching every surface: the numbers the engine

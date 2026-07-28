@@ -317,7 +317,10 @@ That is the opposite of how a profile-STORED mode behaves, and deliberately so. 
 describes the value the profile stored alongside it; applying it to a different pressure is the
 silent-error case 0.29.0 fixed. A typed mode has no other value it could be describing.
 
-Note the row selector is **`--site <NAME>`**, not `--location-name` (which only overrides the
+As of 0.30.1, `--location` REQUIRES `--site` (the half-pair was silently ignored before),
+and an unreadable file or a missing site row is a hard error instead of a warn-and-continue
+on the default atmosphere. The reverse stays legal: a standalone `--site` (like a standalone
+`--profile-row`) is a PDF-label-only input with a pre-existing job. Note the row selector is **`--site <NAME>`**, not `--location-name` (which only overrides the
 location string printed on a PDF header). `--location` without `--site` currently loads nothing,
 silently — tracked as MBA-1425.
 
@@ -1323,11 +1326,29 @@ number you originally zeroed at. That is the point of the feature, but it surpri
 expect a round trip to be exact. Re-supply the same `--wind-*`, `--sight-height`, and zero-day
 atmosphere flags if you want the original range back.
 
+**`max_ordinate` is conditional** (MBA-1419): present in JSON/CSV — and printed in the
+table — only when the diagnostics trajectory actually turned over inside its solve envelope.
+When the solve is still climbing at its limit (a steep launch under a slick drag model), the
+table says `still climbing at limit` and the JSON key / CSV row are omitted rather than
+carrying the truncation height, which is not a max ordinate. Before 0.30.1 the JSON and CSV
+emitted that truncation height unconditionally.
+
 **`primary_crossing`** (MBA-1419) names which of the two roots the single `zero_range` value is:
 `"far"` when a far crossing was found (the conventional "sighted in at D yards" meaning), and
 `"near"` when it was not, which happens when the far crossing lies beyond the search envelope.
 Both roots are also reported individually as `near_zero_range` / `far_zero_range` whenever they
 exist, so a consumer never has to infer which answer it received.
+
+**`--drag-model`** (0.30.1): the zero command previously had no drag-model selection — a G7
+BC silently ran against the G1 reference while every sibling command (including the browser
+terminal's own zero) could choose. Default `g1` preserves the old behavior byte-for-byte.
+
+**Browser terminal**: the terminal's `zero` previously accepted NO atmosphere flags at all
+(both its solve branches ran on the default atmosphere). As of 0.30.1 it takes
+`--temperature`/`--pressure`/`--pressure-type`/`--humidity`/`--altitude`/`--density-altitude`,
+feeding both the target-distance and `--from-angle` solves, with the density-altitude
+supersede notice riding the output text. The terminal's `true-velocity`, `estimate-bc`, and
+`lead` also gained `--pressure-type`, and `trajectory` gained `--zero-density-altitude`.
 
 `--from-angle` and `--target-distance` are mutually exclusive — supply exactly one:
 

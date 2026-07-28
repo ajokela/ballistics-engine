@@ -355,11 +355,16 @@ enum Commands {
 
     /// Calculate a single trajectory
     Trajectory {
-        /// Load parameters from CSV profile file (gun_profiles.csv format)
-        #[arg(long, value_name = "FILE")]
+        /// Load parameters from CSV profile file (gun_profiles.csv format).
+        /// Requires --profile-row: the file alone selects nothing, and silently
+        /// ignoring it was the MBA-1425 trap.
+        #[arg(long, value_name = "FILE", requires = "profile_row")]
         profile: Option<PathBuf>,
 
-        /// Row name to load from profile CSV (matches first column, e.g., "R700_65CM")
+        /// Row name to load from profile CSV (matches first column, e.g., "R700_65CM").
+        /// Legal without --profile: standalone it only labels the PDF dope card's rifle
+        /// name, a pre-existing use the MBA-1425 pairing must not break — the silent trap
+        /// was the FILE without a selector, not the selector alone.
         #[arg(long, value_name = "NAME")]
         profile_row: Option<String>,
 
@@ -367,11 +372,16 @@ enum Commands {
         #[arg(long, value_name = "NAME")]
         saved_profile: Option<String>,
 
-        /// Load location/environmental data from CSV file
-        #[arg(long, value_name = "FILE")]
+        /// Load location/environmental data from CSV file. Requires --site: without a row
+        /// selector the file was silently ignored entirely (MBA-1425), and the near-miss
+        /// --location-name flag (a PDF header override) made the trap easy to fall into.
+        #[arg(long, value_name = "FILE", requires = "site")]
         location: Option<PathBuf>,
 
-        /// Site name to load from location CSV (matches first column, e.g., "KF_LR")
+        /// Site name to load from location CSV (matches first column, e.g., "KF_LR").
+        /// Legal without --location: standalone it only labels the PDF dope card's
+        /// location line (unless --location-name overrides it) — same asymmetry as
+        /// --profile-row, and for the same MBA-1425 reason.
         #[arg(long, value_name = "NAME")]
         site: Option<String>,
 
@@ -1080,6 +1090,13 @@ enum Commands {
         /// Diameter (inches for imperial, mm for metric)
         #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
         diameter: f64,
+
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4). Added for MBA-1419: the zero
+        /// command lacked this while every sibling — including the browser terminal's own
+        /// zero — had it, so a G7 BC silently ran against the G1 reference. Default g1
+        /// preserves existing behavior byte-for-byte.
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModel,
 
         /// Target distance (yards for imperial, meters for metric). Required unless
         /// --from-angle is given.
@@ -5358,9 +5375,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                             eprintln!("Loaded profile '{}' from {:?}", row, path);
                             data
                         }
+                        // MBA-1425: a supplied profile that cannot be loaded is a hard error.
+                        // The old warn-and-continue ran the shot on defaults the user did not
+                        // choose — a clean-looking answer computed from the wrong gun.
                         Err(e) => {
-                            eprintln!("Warning: Failed to load profile: {}", e);
-                            HashMap::new()
+                            return Err(format!(
+                                "failed to load profile row '{row}' from {path:?}: {e}"
+                            )
+                            .into());
                         }
                     }
                 } else {
@@ -5443,9 +5465,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                             eprintln!("Loaded location '{}' from {:?}", site_name, path);
                             data
                         }
+                        // MBA-1425: same rule as the profile CSV above — a supplied location
+                        // that cannot be loaded must stop the run, not silently fall back to
+                        // the default atmosphere. A typo'd site name or path produced a
+                        // plausible trajectory computed against air the user never asked for.
                         Err(e) => {
-                            eprintln!("Warning: Failed to load location: {}", e);
-                            HashMap::new()
+                            return Err(format!(
+                                "failed to load location '{site_name}' from {path:?}: {e}"
+                            )
+                            .into());
                         }
                     }
                 } else {
@@ -7122,6 +7150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             bc_reference,
             mass,
             diameter,
+            drag_model,
             target_distance,
             from_angle,
             target_height,
@@ -7230,6 +7259,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         bc_reference,
                         mass_metric,
                         diameter_metric,
+                        drag_model,
                         angle_deg.to_radians(),
                         target_height_metric,
                         sight_height_metric,
@@ -7258,6 +7288,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         bc_reference,
                         mass_metric,
                         diameter_metric,
+                        drag_model,
                         target_distance_metric,
                         target_height_metric,
                         sight_height_metric,
@@ -11538,6 +11569,7 @@ fn run_zero_calculation(
     bc_reference_standard: BcReferenceStandard,
     mass: f64,
     diameter: f64,
+    drag_model: DragModel,
     target_distance: f64,
     target_height: f64,
     sight_height: f64,
@@ -11555,6 +11587,7 @@ fn run_zero_calculation(
     let inputs = BallisticInputs {
         muzzle_velocity: velocity,
         bc_value: bc,
+        bc_type: drag_model,
         bc_reference_standard,
         bullet_mass: mass,
         bullet_diameter: diameter,
@@ -11745,6 +11778,7 @@ fn run_zero_range_calculation(
     bc_reference_standard: BcReferenceStandard,
     mass: f64,
     diameter: f64,
+    drag_model: DragModel,
     zero_angle_rad: f64,
     target_height: f64,
     sight_height: f64,
@@ -11762,6 +11796,7 @@ fn run_zero_range_calculation(
     let inputs = BallisticInputs {
         muzzle_velocity: velocity,
         bc_value: bc,
+        bc_type: drag_model,
         bc_reference_standard,
         bullet_mass: mass,
         bullet_diameter: diameter,
@@ -11871,6 +11906,27 @@ fn run_zero_range_calculation(
         })
         .unwrap_or(trajectory.max_range);
 
+    // MBA-1419 item 3, resolved: report the apex if and only if the diagnostics trajectory
+    // actually TURNED OVER inside its envelope — peak strictly before the final point and
+    // strictly above it. This replaces 0.30.0's "was a far crossing found?" proxy, which was
+    // over-conservative: a 45-degree G1 launch turns over at ~2040 yd inside the 2000 m floor
+    // and has a perfectly real ~1432 yd apex that the proxy withheld. (0.30.0's comment here
+    // claimed the direct tests had mis-reported containment at steep angles; investigation
+    // showed the tests were right and the claim was wrong — the "obviously bogus" 45-degree
+    // apex was a genuine G1 apex all along. The far-crossing case is a subset: an apex between
+    // two crossings has, by construction, turned over.)
+    let apex_is_contained = {
+        let ys: Vec<f64> = trajectory.points.iter().map(|p| p.position.y).collect();
+        match (ys.iter().cloned().enumerate().max_by(|a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        }), ys.last()) {
+            (Some((peak_index, peak_y)), Some(&last_y)) => {
+                peak_index + 1 < ys.len() && peak_y > last_y + 1e-9
+            }
+            _ => false,
+        }
+    };
+
     let dist_unit = match units {
         UnitSystem::Metric => "m",
         UnitSystem::Imperial => "yd",
@@ -11903,9 +11959,16 @@ fn run_zero_range_calculation(
                 // a consumer cannot tell which of two valid answers it received.
                 "primary_crossing": primary_crossing,
                 "sight_adjustment_moa": sight_adjustment_moa,
-                "max_ordinate": UnitConverter::distance_from_metric(trajectory.max_height, units),
                 "point_blank_range": UnitConverter::distance_from_metric(point_blank_range, units),
             });
+            // MBA-1419 item 3: absent — not null, and not a fabrication — when the diagnostics
+            // solve was still climbing at its envelope. Previously this key carried the height
+            // at the truncation point in that case, which is not a max ordinate.
+            if apex_is_contained {
+                result["max_ordinate"] = serde_json::json!(
+                    UnitConverter::distance_from_metric(trajectory.max_height, units)
+                );
+            }
             // Tier 2 review C2: additive, skip-when-absent keys for both crossings (mirrors
             // MBA-1402's skip_serializing_if pattern) -- a bore angle generally implies two
             // zero ranges and both are reported rather than silently picked between.
@@ -11932,7 +11995,10 @@ fn run_zero_range_calculation(
             if let Some(far) = far_range_display {
                 println!("far_zero_range,{:.2},{}", far, dist_unit);
             }
-            println!("max_ordinate,{:.3},meters", trajectory.max_height);
+            // MBA-1419 item 3: row omitted when the solve was still climbing at its envelope.
+            if apex_is_contained {
+                println!("max_ordinate,{:.3},meters", trajectory.max_height);
+            }
         }
 
         OutputFormat::Table => {
@@ -11979,24 +12045,18 @@ fn run_zero_range_calculation(
             // a truncated solve reports the height at the truncation point rather than the real
             // apex -- a 5 deg launch reported 0.167 yd.
             //
-            // Print the number only when the envelope provably contains the apex (a far crossing
-            // was found, and the apex always lies between the two crossings).
-            //
-            // MBA-1419 proposed replacing this proxy with a direct "did the solve turn over?"
-            // test so the apex could also be reported in the near-only case. Two candidate tests
-            // -- peak-is-not-the-final-point, and peak-height-exceeds-final-height -- both
-            // reported the apex as contained for launch angles up to 45 degrees, where the value
-            // is demonstrably still the height at the truncation point and not an apex at all.
-            // Whatever `max_height` tracks is not settled by either check, so the conservative
-            // proxy stays until that is understood: withholding a number is the safe failure
-            // here, printing a fabricated apex is not.
-            if far_range_display.is_some() {
+            // MBA-1419 item 3: gate on the trajectory itself (see `apex_is_contained` above).
+            // The 0.30.0 comment that stood here claimed the direct turn-over tests had
+            // mis-reported containment at steep angles; they had not — the 45-degree value they
+            // accepted was a real G1 apex, not truncation. The proxy it defended withheld real
+            // apexes in every near-only case that turned over.
+            if apex_is_contained {
                 println!(
                     "║ Max Ordinate:      {:>8.3} {:3}       ║",
                     max_ordinate_display, dist_unit
                 );
             } else {
-                println!("║ Max Ordinate:  needs a far zero        ║");
+                println!("║ Max Ordinate:  still climbing at limit ║");
             }
             println!("╚════════════════════════════════════════╝");
         }

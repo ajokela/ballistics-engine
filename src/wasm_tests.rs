@@ -296,6 +296,102 @@ mod tests {
         );
     }
 
+    /// MBA-1426 items 3+4: the terminal's zero previously REJECTED every atmosphere flag
+    /// (both its solve branches ran against AtmosphericConditions::default()), while native
+    /// zero has carried them since MBA-1397/MBA-1422. These pin that the flags are accepted
+    /// AND reach the physics.
+    #[wasm_bindgen_test]
+    fn test_zero_atmosphere_flags_reach_the_solve() {
+        let wasm = WasmBallistics::new();
+        let base = "zero -v 2700 -b 0.243 -m 175 -d 0.308 --target-distance 300";
+        let sea = wasm.run_command(base).unwrap();
+        let high = wasm
+            .run_command(&format!("{base} --altitude 5000"))
+            .unwrap();
+        assert_ne!(sea, high, "--altitude parsed but never reached the zero solve");
+
+        let qnh = wasm
+            .run_command(&format!("{base} --pressure 24.90 --altitude 5000 --pressure-type qnh"))
+            .unwrap();
+        let abs = wasm
+            .run_command(&format!(
+                "{base} --pressure 24.90 --altitude 5000 --pressure-type absolute"
+            ))
+            .unwrap();
+        assert_ne!(qnh, abs, "--pressure-type parsed but inert on zero");
+    }
+
+    /// Density altitude supersedes pressure on the terminal's zero, with the notice spliced
+    /// into the output text (this surface has no stderr).
+    #[wasm_bindgen_test]
+    fn test_zero_density_altitude_supersedes_and_says_so() {
+        let wasm = WasmBallistics::new();
+        let out = wasm
+            .run_command(
+                "zero -v 2700 -b 0.243 -m 175 -d 0.308 --target-distance 300 \
+                 --density-altitude 5000 --pressure 29.92",
+            )
+            .unwrap();
+        assert!(
+            out.contains("--density-altitude supersedes"),
+            "supersede notice missing: {out}"
+        );
+    }
+
+    /// MBA-1426 item 5: the from-angle output names which root the single zero-range value
+    /// refers to, matching native's primary_crossing disclosure.
+    #[wasm_bindgen_test]
+    fn test_from_angle_names_the_primary_crossing() {
+        let wasm = WasmBallistics::new();
+        let out = wasm
+            .run_command("zero -v 2700 -b 0.243 -m 175 -d 0.308 --from-angle 0.14")
+            .unwrap();
+        assert!(
+            out.contains("Primary Crossing:"),
+            "primary crossing line missing: {out}"
+        );
+    }
+
+    /// MBA-1426 item 4: the zero-day density altitude on trajectory --auto-zero.
+    #[wasm_bindgen_test]
+    fn test_trajectory_zero_day_density_altitude_changes_the_zero() {
+        let wasm = WasmBallistics::new();
+        let base = "trajectory -v 2700 -b 0.243 -m 175 -d 0.308 --drag-model g7 \
+                    --max-range 500 --auto-zero 300";
+        let plain = wasm.run_command(base).unwrap();
+        let zday = wasm
+            .run_command(&format!("{base} --zero-density-altitude 5000"))
+            .unwrap();
+        assert_ne!(plain, zday, "--zero-density-altitude parsed but inert");
+    }
+
+    /// MBA-1426 item 3: --pressure-type on the calculators that take --pressure.
+    #[wasm_bindgen_test]
+    fn test_calculators_honor_pressure_type() {
+        let wasm = WasmBallistics::new();
+        for (qnh, abs) in [
+            (
+                "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 \
+                 --pressure 24.90 --altitude 5000 --pressure-type qnh --offline",
+                "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 \
+                 --pressure 24.90 --altitude 5000 --pressure-type absolute --offline",
+            ),
+            (
+                "lead --target-speed 10 -v 2700 -b 0.243 -m 175 -d 0.308 \
+                 --pressure 24.90 --altitude 5000 --pressure-type qnh",
+                "lead --target-speed 10 -v 2700 -b 0.243 -m 175 -d 0.308 \
+                 --pressure 24.90 --altitude 5000 --pressure-type absolute",
+            ),
+        ] {
+            let a = wasm.run_command(qnh);
+            let b = wasm.run_command(abs);
+            match (a, b) {
+                (Ok(x), Ok(y)) => assert_ne!(x, y, "pressure-type inert on: {qnh}"),
+                (a, b) => panic!("calculator run failed: {a:?} / {b:?}"),
+            }
+        }
+    }
+
     /// MBA-1418: `zero --from-angle` works in the browser terminal but had no tests here and
     /// was absent from the help text, so it was effectively undiscoverable. The inverse reports
     /// BOTH line-of-sight crossings a bore angle produces, and names which one `zero_range` is.
