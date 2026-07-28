@@ -359,3 +359,98 @@ mod primary_crossing_disclosure {
         );
     }
 }
+
+/// MBA-1419 item 3, resolved: the max ordinate is reported iff the diagnostics trajectory
+/// actually turned over inside its envelope — not gated on the far-crossing proxy, which
+/// withheld real apexes (a 45-degree G1 launch turns over at ~2040 yd with a genuine ~1432 yd
+/// apex that 0.30.0 refused to print).
+mod max_ordinate_containment {
+    use super::*;
+
+    fn zero_json(extra: &[&str]) -> serde_json::Value {
+        run_zero(
+            &[&[
+                "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter",
+                "0.308", "--from-angle", "45", "--output", "json",
+            ], extra].concat(),
+        )
+    }
+
+    /// G1 (the default) turns over inside the envelope: a real apex, now reported.
+    #[test]
+    fn a_turned_over_near_only_solve_reports_its_real_apex() {
+        let doc = zero_json(&[]);
+        let apex = doc["max_ordinate"].as_f64().expect("apex must be present");
+        assert!(
+            (1350.0..1500.0).contains(&apex),
+            "45-degree G1 apex should be ~1432 yd, got {apex}"
+        );
+        // and it is genuinely near-only:
+        assert_eq!(doc["primary_crossing"], "near");
+    }
+
+    /// G7 at the same angle is still climbing at the 2000 m envelope: the key must be ABSENT,
+    /// because the old behavior emitted the truncation height as if it were an apex.
+    #[test]
+    fn a_still_climbing_solve_omits_max_ordinate_instead_of_fabricating_one() {
+        let doc = zero_json(&["--drag-model", "g7"]);
+        assert!(
+            doc.get("max_ordinate").is_none(),
+            "climbing solve must not fabricate an apex: {doc}"
+        );
+    }
+
+    /// The new --drag-model flag defaults to the old implicit G1, byte-for-byte.
+    #[test]
+    fn explicit_g1_is_byte_identical_to_the_old_default() {
+        assert_eq!(zero_json(&[]), zero_json(&["--drag-model", "g1"]));
+    }
+
+    /// The CSV and table surfaces gate identically to JSON — pinned on raw stdout because
+    /// the review found only JSON and the table message had coverage.
+    #[test]
+    fn csv_and_table_gate_the_same_way_as_json() {
+        let run_raw = |extra: &[&str]| -> String {
+            let out = std::process::Command::new(env!("CARGO_BIN_EXE_ballistics"))
+                .args([
+                    "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175",
+                    "--diameter", "0.308", "--from-angle", "45",
+                ])
+                .args(extra)
+                .output()
+                .expect("zero");
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        // G1 turns over: CSV carries the row, table prints the value.
+        let csv_g1 = run_raw(&["--output", "csv"]);
+        assert!(
+            csv_g1.lines().any(|l| l.starts_with("max_ordinate,")),
+            "turned-over CSV must carry the max_ordinate row: {csv_g1}"
+        );
+        let table_g1 = run_raw(&["--output", "table"]);
+        assert!(table_g1.contains("Max Ordinate:") && !table_g1.contains("still climbing"));
+
+        // G7 is still climbing: row omitted, table says so.
+        let csv_g7 = run_raw(&["--output", "csv", "--drag-model", "g7"]);
+        assert!(
+            !csv_g7.contains("max_ordinate"),
+            "climbing CSV must omit the row: {csv_g7}"
+        );
+        let table_g7 = run_raw(&["--output", "table", "--drag-model", "g7"]);
+        assert!(table_g7.contains("still climbing at limit"));
+    }
+
+    /// Two-crossing solves are unchanged: apex between crossings has turned over by
+    /// construction, so it stays reported exactly as before.
+    #[test]
+    fn two_crossing_solves_still_report_the_apex() {
+        let doc = run_zero(&[
+            "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter",
+            "0.308", "--from-angle", "5", "--output", "json",
+        ]);
+        assert!(doc["max_ordinate"].as_f64().is_some());
+        assert_eq!(doc["primary_crossing"], "far");
+    }
+}
