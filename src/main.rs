@@ -961,6 +961,19 @@ enum Commands {
         /// resolved elevation graduation, then the saved profile's windage_click).
         #[arg(long)]
         windage_click_value: Option<String>,
+
+        /// Elevation-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358): multiplies elevation dial-unit outputs (the PDF dope card's drop
+        /// column). Strictly between 0.5 and 1.5; overrides the saved profile's
+        /// elevation_cf. Derive it with `ballistics tall-target`
+        #[arg(long, value_name = "FACTOR")]
+        elevation_cf: Option<f64>,
+
+        /// Windage-axis scope tracking correction factor (MBA-1358): multiplies windage
+        /// and mover-lead dial-unit outputs (the Ring column, PDF wind/lead columns).
+        /// Same bounds and profile fallback (windage_cf) as --elevation-cf
+        #[arg(long, value_name = "FACTOR")]
+        windage_cf: Option<f64>,
     },
 
     /// Run Monte Carlo simulation
@@ -1217,6 +1230,13 @@ enum Commands {
         #[arg(long, value_name = "FACTOR")]
         cd_scale: Option<f64>,
 
+        /// Elevation-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358): multiplies the MOA/mrad dial-unit outputs (zero angle, sight
+        /// adjustment); the degrees echo is a bore angle and is not touched. Strictly
+        /// between 0.5 and 1.5. Derive it with `ballistics tall-target`
+        #[arg(long, value_name = "FACTOR")]
+        elevation_cf: Option<f64>,
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
@@ -1390,6 +1410,15 @@ enum Commands {
         /// mode. Ignored in single-observation mode (which is always MIL).
         #[arg(long = "drop-unit", default_value = "mil")]
         drop_unit: DropUnit,
+
+        /// Elevation-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358). DIALED observations (mil/moa drops; single-observation mode is
+        /// always mil) are DIVIDED by it before the fit, so scope tracking error is not
+        /// baked into the trued MV/BC; dial-unit report values are shown back in scope
+        /// units. Linear 'in' drops are tape measurements and are never scaled.
+        /// Strictly between 0.5 and 1.5
+        #[arg(long, value_name = "FACTOR")]
+        elevation_cf: Option<f64>,
 
         /// Ballistic coefficient
         #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
@@ -1612,6 +1641,29 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Compute a scope tracking correction factor from a tall-target test (MBA-1358):
+    /// CF = actual measured travel / dialed travel. Pure arithmetic — no trajectory
+    /// solve. Feed the result to --elevation-cf/--windage-cf or store it on a profile
+    /// (elevation_cf/windage_cf).
+    TallTarget {
+        /// Dialed travel in --unit (e.g. 10 for a 10 mil tall-target test)
+        #[arg(long, value_name = "DIAL")]
+        dialed: f64,
+
+        /// Actual measured group travel on the target, inches (imperial) or cm
+        /// (metric, with --units metric)
+        #[arg(long, value_name = "TRAVEL")]
+        measured: f64,
+
+        /// Distance to the tall target, yards (imperial) or meters (metric)
+        #[arg(long, value_name = "RANGE")]
+        range: f64,
+
+        /// Angular unit the turret was dialed in (mil, moa, smoa, or iphy)
+        #[arg(long, value_enum, default_value = "mil")]
+        unit: AdjustmentUnit,
+    },
+
     /// Calculate Maximum Point-Blank Range (MPBR)
     Mpbr {
         /// Load parameters from saved profile
@@ -1749,6 +1801,13 @@ enum Commands {
         /// with `trajectory`; come-ups has no windage column to apply it to).
         #[arg(long)]
         windage_click_value: Option<String>,
+
+        /// Elevation-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358): multiplies the come-up column's dial-unit values (mil/moa/smoa/
+        /// iphy/clicks). Strictly between 0.5 and 1.5; overrides the saved profile's
+        /// elevation_cf. Derive it with `ballistics tall-target`
+        #[arg(long, value_name = "FACTOR")]
+        elevation_cf: Option<f64>,
 
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
@@ -1962,6 +2021,13 @@ enum Commands {
         #[arg(long)]
         windage_click_value: Option<String>,
 
+        /// Windage-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358): mover lead is a dialed quantity, so the lead's dial-unit outputs
+        /// (mil/moa/smoa/iphy/clicks) are multiplied by it; the linear lead distance is
+        /// not. Strictly between 0.5 and 1.5; overrides the saved profile's windage_cf
+        #[arg(long, value_name = "FACTOR")]
+        windage_cf: Option<f64>,
+
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
@@ -2160,6 +2226,13 @@ enum Commands {
         #[arg(long)]
         windage_click_value: Option<String>,
 
+        /// Windage-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358): the wind card's dial-unit drift values are multiplied by it; raw
+        /// drift inches are not. Strictly between 0.5 and 1.5; overrides the saved
+        /// profile's windage_cf
+        #[arg(long, value_name = "FACTOR")]
+        windage_cf: Option<f64>,
+
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
         sight_height: Option<f64>,
@@ -2334,6 +2407,19 @@ enum Commands {
         #[arg(long)]
         windage_click_value: Option<String>,
 
+        /// Elevation-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358): multiplies the drop-adjustment column's dial-unit values; raw
+        /// drop inches are not touched. Strictly between 0.5 and 1.5; overrides the
+        /// saved profile's elevation_cf
+        #[arg(long, value_name = "FACTOR")]
+        elevation_cf: Option<f64>,
+
+        /// Windage-axis scope tracking correction factor (MBA-1358): multiplies the
+        /// wind-adjustment column's dial-unit values. Same bounds; overrides the saved
+        /// profile's windage_cf
+        #[arg(long, value_name = "FACTOR")]
+        windage_cf: Option<f64>,
+
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
         sight_height: Option<f64>,
@@ -2448,6 +2534,18 @@ enum Commands {
         /// the resolved elevation graduation when omitted).
         #[arg(long)]
         windage_click_value: Option<String>,
+
+        /// Elevation-axis scope tracking correction factor from a tall-target test
+        /// (MBA-1358): multiplies every load's drop-adjustment dial values. Strictly
+        /// between 0.5 and 1.5; overrides a saved profile's elevation_cf
+        #[arg(long, value_name = "FACTOR")]
+        elevation_cf: Option<f64>,
+
+        /// Windage-axis scope tracking correction factor (MBA-1358): multiplies every
+        /// load's wind-adjustment dial values. Same bounds; overrides a saved
+        /// profile's windage_cf
+        #[arg(long, value_name = "FACTOR")]
+        windage_cf: Option<f64>,
 
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long, default_value = "1.5")]
@@ -2995,6 +3093,20 @@ struct ProfileData {
     /// pattern (an old reader silently drops it on re-save).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sight_offset_lateral_m: Option<f64>,
+    /// Elevation-axis scope tracking correction factor from a tall-target test
+    /// (MBA-1358, Litz): dial-unit outputs (mil/MOA/SMOA/IPHY/clicks) on the elevation
+    /// axis are MULTIPLIED by this factor; raw drop inches never are. Dimensionless, so
+    /// `converted_to` leaves it untouched. Validated on load: must be strictly between
+    /// 0.5 and 1.5 (a factor outside that band means the tall-target test went wrong,
+    /// not that the scope does). `None` = 1.0 = no correction. Derive with
+    /// `ballistics tall-target`; overridden by `--elevation-cf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    elevation_cf: Option<f64>,
+    /// Windage-axis scope tracking correction factor (MBA-1358), same contract as
+    /// `elevation_cf`: multiplies windage-axis dial-unit outputs (including mover
+    /// lead/ring); overridden by `--windage-cf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windage_cf: Option<f64>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -3275,6 +3387,12 @@ struct TrajectoryConfig {
     // the sampled table/CSV drop column, and lets a supplied target height slope the
     // sampler's LOS datum.
     drops_reference: DropsReferenceArg,
+    // MBA-1358: scope tracking correction factors (dial-unit outputs multiplied by the
+    // axis's CF exactly once; raw inches never). 1.0 = no correction, byte-identical.
+    // Elevation scales the PDF dope card's drop column; windage scales the PDF wind/lead
+    // columns and every mover Ring dial output (table/JSON/CSV).
+    elevation_cf: f64,
+    windage_cf: f64,
 
     // Integration method
     use_rk4: bool,
@@ -3899,7 +4017,46 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     }
     let content = fs::read_to_string(&path)?;
     let profile: ProfileData = serde_json::from_str(&content)?;
+    // MBA-1358: tracking correction factors are validated ON LOAD (hard error naming the
+    // field) so a hand-edited or corrupted CF can never silently scale a firing solution.
+    if let Some(cf) = profile.elevation_cf {
+        validate_tracking_cf(cf, "profile field elevation_cf")?;
+    }
+    if let Some(cf) = profile.windage_cf {
+        validate_tracking_cf(cf, "profile field windage_cf")?;
+    }
     Ok(profile)
+}
+
+/// MBA-1358: a scope tracking correction factor must be strictly between 0.5 and 1.5.
+/// Values outside that band mean the tall-target test (or a hand edit) went wrong — a
+/// real scope does not mistrack by 50% — so they are a hard error naming the offending
+/// field/flag rather than a silently applied scale. The band itself lives in the shared
+/// `ballistics_engine::adjustment::tracking_cf_in_range` so the WASM terminal enforces
+/// the identical bound.
+fn validate_tracking_cf(value: f64, source: &str) -> Result<(), String> {
+    if ballistics_engine::adjustment::tracking_cf_in_range(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{source} must be a tracking correction factor strictly between 0.5 and 1.5 \
+             (got {value}); derive it from a tall-target test with `ballistics tall-target`"
+        ))
+    }
+}
+
+/// MBA-1358: resolve one axis's tracking CF — explicit CLI flag beats the saved
+/// profile's field, default 1.0 (no correction). The flag value is validated here
+/// (profile values were already validated on load, but re-validating is harmless and
+/// keeps this the single resolution point).
+fn resolve_tracking_cf(
+    flag: Option<f64>,
+    profile_value: Option<f64>,
+    flag_name: &str,
+) -> Result<f64, String> {
+    let value = flag.or(profile_value).unwrap_or(1.0);
+    validate_tracking_cf(value, flag_name)?;
+    Ok(value)
 }
 
 /// Load a profile for calculation, converting its stored display units to the active CLI units.
@@ -4404,6 +4561,9 @@ fn map_a7p_to_profile(
         zero_poi_right_m,
         // MBA-1396: .a7p has no lateral sight-offset concept; left for a hand edit.
         sight_offset_lateral_m: None,
+        // MBA-1358: .a7p has no scope tracking-CF concept; derive with `tall-target`.
+        elevation_cf: None,
+        windage_cf: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -4518,15 +4678,24 @@ fn resolve_click_values(
 /// (`--adjustment-unit clicks`), else the pre-existing `drop_to_adjustment` angular value. Shared by
 /// the come-ups table and the trajectory PDF dope-card rows so both format Clicks
 /// identically.
+/// `cf` is the axis's scope tracking correction factor (MBA-1358): dial-unit outputs
+/// (angular values AND click counts, which quantize AFTER the scale) are multiplied by
+/// it exactly once, here at the shared conversion boundary, so every dial surface that
+/// routes through this function (come-ups/wind-card/range-table/compare tables, the PDF
+/// dope-card rows) inherits the correction identically. `1.0` (no correction) is
+/// bit-exact — byte-identical output.
 fn adjustment_display(
     drop_yd: f64,
     range_yd: f64,
     unit: AdjustmentUnit,
     click: Option<ClickValue>,
+    cf: f64,
 ) -> f64 {
     match click {
-        Some(c) => clicks_for(drop_yd, range_yd, &c) as f64,
-        None => drop_to_adjustment(drop_yd, range_yd, unit),
+        // Clicks convert from RAW drop (not from the angular value above), so the CF is
+        // applied to the input drop — scaling the angle before click quantization.
+        Some(c) => clicks_for(drop_yd * cf, range_yd, &c) as f64,
+        None => drop_to_adjustment(drop_yd, range_yd, unit) * cf,
     }
 }
 
@@ -4539,18 +4708,21 @@ fn adjustment_display(
 /// once; range-table and compare are the two seams that missed it. All three windage
 /// columns (Wind here, plus PDF's wind_adj/lead_adj) now go through this one function so
 /// the guard cannot be dropped a fourth time.
+/// `windage_cf` is the windage-axis tracking CF (MBA-1358), applied once via the shared
+/// `adjustment_display` boundary below.
 fn windage_adjustment_display(
     drift_yd: f64,
     range_yd: f64,
     windage_unit: AdjustmentUnit,
     windage_click: Option<ClickValue>,
+    windage_cf: f64,
 ) -> f64 {
     let click = if windage_unit == AdjustmentUnit::Clicks {
         windage_click
     } else {
         None
     };
-    adjustment_display(drift_yd, range_yd, windage_unit, click)
+    adjustment_display(drift_yd, range_yd, windage_unit, click, windage_cf)
 }
 
 /// Display label for an `AdjustmentUnit` header/column name (MBA-1355, generalized in
@@ -5652,6 +5824,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             windage_unit,
             elevation_click_value,
             windage_click_value,
+            elevation_cf,
+            windage_cf,
         } => {
             // Load profile from CSV if specified
             let profile_data: HashMap<String, String> =
@@ -6074,6 +6248,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .and_then(|p| p.sight_offset_lateral_m)
                 })
                 .unwrap_or(0.0);
+            // MBA-1358: scope tracking CFs — CLI flag over profile field, validated here
+            // (and again on profile load); 1.0 = no correction, byte-identical.
+            let elevation_cf = resolve_tracking_cf(
+                elevation_cf,
+                saved_profile_data.as_ref().and_then(|p| p.elevation_cf),
+                "--elevation-cf",
+            )?;
+            let windage_cf = resolve_tracking_cf(
+                windage_cf,
+                saved_profile_data.as_ref().and_then(|p| p.windage_cf),
+                "--windage-cf",
+            )?;
             let twist_rate =
                 twist_rate.or_else(|| saved_profile_data.as_ref().and_then(|p| p.twist_rate));
             // --twist-rate is mm/turn in metric and inches/turn in imperial, matching the
@@ -6980,6 +7166,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 sample_trajectory,
                 sample_interval,
                 drops_reference,
+                elevation_cf,
+                windage_cf,
                 use_rk4: !use_euler,
                 use_rk45: !use_rk4_fixed,
                 twist_rate,
@@ -7506,8 +7694,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             density_altitude,
             drag_table,
             cd_scale,
+            elevation_cf,
             output,
         } => {
+            // MBA-1358: zero has no --profile, so the CF comes only from the flag.
+            let elevation_cf = resolve_tracking_cf(elevation_cf, None, "--elevation-cf")?;
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
             let bullet_mass = mass;
@@ -7613,6 +7804,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         altitude_metric,
                         custom_drag_table,
                         cd_scale,
+                        elevation_cf,
                         output,
                         cli.units,
                     )?;
@@ -7642,6 +7834,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         altitude_metric,
                         custom_drag_table,
                         cd_scale,
+                        elevation_cf,
                         output,
                         cli.units,
                     )?;
@@ -7822,6 +8015,64 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
         }
 
+        // MBA-1358: tall-target helper — CF = actual measured travel / dialed travel.
+        // Pure arithmetic over the same locked angular factors every dial column uses
+        // (ballistics_engine::adjustment via drop_to_adjustment); no trajectory solve.
+        Commands::TallTarget {
+            dialed,
+            measured,
+            range,
+            unit,
+        } => {
+            if unit == AdjustmentUnit::Clicks {
+                return Err(
+                    "--unit clicks is not an angular unit; enter the dialed travel in \
+                     mil, moa, smoa, or iphy"
+                        .into(),
+                );
+            }
+            if !dialed.is_finite() || dialed <= 0.0 {
+                return Err("--dialed must be a positive angular travel".into());
+            }
+            if !measured.is_finite() || measured <= 0.0 {
+                return Err("--measured must be a positive measured travel".into());
+            }
+            if !range.is_finite() || range < 1.0 {
+                return Err("--range must be at least 1 yard/meter".into());
+            }
+            // drop_to_adjustment only needs a consistent drop/range length ratio:
+            // imperial measures inches at yards (36 in/yd), metric cm at meters.
+            let (drop_len, range_len, measured_label, range_label) = match cli.units {
+                UnitSystem::Imperial => (measured / 36.0, range, "in", "yd"),
+                UnitSystem::Metric => (measured / 100.0, range, "cm", "m"),
+            };
+            let actual = drop_to_adjustment(drop_len, range_len, unit);
+            let cf = actual / dialed;
+            let unit_label = adjustment_unit_label(unit);
+            println!();
+            println!("Tall-Target Test Result");
+            println!("  Dialed travel:   {:.2} {}", dialed, unit_label);
+            println!(
+                "  Actual travel:   {:.2} {} ({:.2} {} at {:.0} {})",
+                actual, unit_label, measured, measured_label, range, range_label
+            );
+            println!("  Correction factor (actual / dialed): {:.4}", cf);
+            if validate_tracking_cf(cf, "the computed factor").is_err() {
+                println!(
+                    "  warning: {:.4} is outside the accepted (0.5, 1.5) band — the engine \
+                     will reject it as a CF; re-check the tall-target measurement",
+                    cf
+                );
+            } else {
+                println!(
+                    "  Apply with --elevation-cf/--windage-cf {:.4}, or store it on a \
+                     profile (elevation_cf/windage_cf).",
+                    cf
+                );
+            }
+            println!();
+        }
+
         Commands::TrueVelocity {
             measured_drop,
             range,
@@ -7832,6 +8083,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             predict_range,
             prediction_sigma,
             drop_unit,
+            elevation_cf,
             bc,
             drag_model,
             mass,
@@ -7861,6 +8113,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             bullet_length,
             output,
         } => {
+            // MBA-1358: dialed observations are DIVIDED by the elevation tracking CF
+            // before any fit consumes them, so scope tracking error is not baked into
+            // the trued MV/BC. Dialed = angular drops: single-observation mode is always
+            // MIL, and multi/uncertainty modes are dialed unless --drop-unit in (a tape
+            // measurement, never scaled). Dial-unit report values are scaled back (×CF)
+            // at display time, so tables echo what the shooter actually dialed.
+            let elevation_cf = resolve_tracking_cf(elevation_cf, None, "--elevation-cf")?;
+            let observation_cf = if observed.is_empty() || drop_unit != DropUnit::In {
+                elevation_cf
+            } else {
+                1.0
+            };
+            let measured_drop = measured_drop / observation_cf;
+
             let temperature = UnitConverter::resolve_temperature(temperature, units)?;
             // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
             // the same thing on this command as it does on `trajectory`.
@@ -8036,19 +8302,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
+                // MBA-1358: dialed drops AND their dialed sigmas divide by the CF once,
+                // uniformly, here (measured_drop was already divided above; sigmas are
+                // divided after parsing so a token-supplied sigma and the default get
+                // exactly one division each). /1.0 is exact when no CF is active.
                 let mut weighted_observations = Vec::with_capacity(observed.len() + 1);
                 weighted_observations.push(WeightedTruingObservationV1 {
                     range_yd,
                     drop: measured_drop,
-                    sigma: default_sigma,
+                    sigma: default_sigma / observation_cf,
                 });
                 for token in &observed {
                     let (observation, sigma) =
                         parse_uncertain_truing_observation(token, units, default_sigma)?;
                     weighted_observations.push(WeightedTruingObservationV1 {
                         range_yd: observation.range_yd,
-                        drop: observation.drop,
-                        sigma,
+                        drop: observation.drop / observation_cf,
+                        sigma: sigma / observation_cf,
                     });
                 }
 
@@ -8122,6 +8392,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     "Fitting {} weighted observations (uncertainty-aware joint MV+BC MAP)...",
                     request.observations.len()
                 );
+                // MBA-1358: unlike the table-oriented single/multi displays, the
+                // uncertainty report is a versioned schema document
+                // (truing-uncertainty-v1) consumed for further analysis — its values
+                // stay in TRUE (scope-corrected) angular units rather than being scaled
+                // back to scope units. Say so when a CF actually changed the inputs.
+                if observation_cf != 1.0 {
+                    eprintln!(
+                        "note: --elevation-cf {observation_cf} divided the dialed observations; \
+                         uncertainty-report values are in true (scope-corrected) angular units"
+                    );
+                }
                 let report = run_uncertainty_truing_v1(&request)?;
                 display_uncertainty_truing_result(&report, units, chrono_fps, output)?;
             } else if !observed.is_empty() {
@@ -8134,6 +8415,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     range_yd,
                     &observed,
                     drop_unit,
+                    observation_cf,
                     bc,
                     drag_model,
                     weight_gr,
@@ -8192,9 +8474,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             adjustment_percent,
                             &result.confidence,
                             result.iterations,
-                            result.final_error_mil,
-                            result.calculated_drop_mil,
-                            measured_drop,
+                            // MBA-1358: dial-unit outputs render in scope units (×CF;
+                            // the fit consumed the ÷CF true values). ×1.0 is exact.
+                            result.final_error_mil * observation_cf,
+                            result.calculated_drop_mil * observation_cf,
+                            measured_drop * observation_cf,
                             units,
                             output,
                             bc_segments.is_some(),
@@ -8257,9 +8541,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 response.adjustment_percent,
                                 &response.confidence,
                                 response.iterations,
-                                response.final_error_mil,
-                                response.calculated_drop_mil,
-                                measured_drop,
+                                // MBA-1358: same scope-unit rendering as the local path.
+                                response.final_error_mil * observation_cf,
+                                response.calculated_drop_mil * observation_cf,
+                                measured_drop * observation_cf,
                                 units,
                                 output,
                                 false,
@@ -8310,9 +8595,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             adjustment_percent,
                                             &result.confidence,
                                             result.iterations,
-                                            result.final_error_mil,
-                                            result.calculated_drop_mil,
-                                            measured_drop,
+                                            // MBA-1358: scope-unit rendering (×CF).
+                                            result.final_error_mil * observation_cf,
+                                            result.calculated_drop_mil * observation_cf,
+                                            measured_drop * observation_cf,
                                             units,
                                             output,
                                             bc_segments.is_some(),
@@ -8632,6 +8918,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             adjustment_unit,
             elevation_click_value,
             windage_click_value,
+            elevation_cf,
             sight_height,
             zero_poi_up,
             zero_poi_right,
@@ -8667,6 +8954,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(w) = windage_click_value_noop_warning(windage_click_value.as_deref()) {
                 eprintln!("{w}");
             }
+
+            // MBA-1358: elevation tracking CF — flag over profile field, validated here.
+            let elevation_cf = resolve_tracking_cf(
+                elevation_cf,
+                profile_data.as_ref().and_then(|p| p.elevation_cf),
+                "--elevation-cf",
+            )?;
 
             // MBA-1355: resolve the elevation click graduation FIRST — before any of the
             // work below — so a missing graduation fails fast with a clear flag name.
@@ -8770,6 +9064,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 step,
                 adjustment_unit,
                 elevation_click,
+                elevation_cf,
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
@@ -8961,6 +9256,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             step,
             adjustment_unit,
             windage_click_value,
+            windage_cf,
             output,
         } => {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
@@ -9060,6 +9356,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
             });
 
+            // MBA-1358: windage-axis tracking CF (mover lead is a dialed quantity).
+            let windage_cf = resolve_tracking_cf(
+                windage_cf,
+                profile_data.as_ref().and_then(|p| p.windage_cf),
+                "--windage-cf",
+            )?;
+
             handle_lead(
                 final_velocity,
                 final_bc,
@@ -9086,6 +9389,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 step,
                 adjustment_unit,
                 windage_click,
+                windage_cf,
                 cli.units,
                 output,
                 bc_segments_data,
@@ -9169,6 +9473,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             step,
             adjustment_unit,
             windage_click_value,
+            windage_cf,
             sight_height,
             zero_poi_up,
             zero_poi_right,
@@ -9295,6 +9600,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .or_else(|| profile_data.as_ref().and_then(|p| p.sight_offset_lateral_m))
                 .unwrap_or(0.0);
 
+            // MBA-1358: windage-axis tracking CF for the drift dial values.
+            let windage_cf = resolve_tracking_cf(
+                windage_cf,
+                profile_data.as_ref().and_then(|p| p.windage_cf),
+                "--windage-cf",
+            )?;
+
             handle_wind_card(
                 final_velocity,
                 final_bc,
@@ -9310,6 +9622,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 step,
                 adjustment_unit,
                 windage_click,
+                windage_cf,
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
@@ -9397,6 +9710,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             windage_unit,
             elevation_click_value,
             windage_click_value,
+            elevation_cf,
+            windage_cf,
             sight_height,
             zero_poi_up,
             zero_poi_right,
@@ -9494,6 +9809,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|v| sight_offset_display_to_metric(v, cli.units))
                 .or_else(|| profile_data.as_ref().and_then(|p| p.sight_offset_lateral_m))
                 .unwrap_or(0.0);
+            // MBA-1358: per-axis tracking CFs, flag-over-profile.
+            let elevation_cf = resolve_tracking_cf(
+                elevation_cf,
+                profile_data.as_ref().and_then(|p| p.elevation_cf),
+                "--elevation-cf",
+            )?;
+            let windage_cf = resolve_tracking_cf(
+                windage_cf,
+                profile_data.as_ref().and_then(|p| p.windage_cf),
+                "--windage-cf",
+            )?;
 
             handle_range_table(
                 final_velocity,
@@ -9511,6 +9837,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 windage_unit_resolved,
                 elevation_click,
                 windage_click,
+                elevation_cf,
+                windage_cf,
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
@@ -9537,6 +9865,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             windage_unit,
             elevation_click_value,
             windage_click_value,
+            elevation_cf,
+            windage_cf,
             sight_height,
             zero_poi_up,
             zero_poi_right,
@@ -9642,6 +9972,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let sight_offset_lateral_m = sight_offset
                 .map(|v| sight_offset_display_to_metric(v, cli.units))
                 .unwrap_or(0.0);
+            // MBA-1358: compare has no single profile — CLI flags only, every load.
+            let elevation_cf = resolve_tracking_cf(elevation_cf, None, "--elevation-cf")?;
+            let windage_cf = resolve_tracking_cf(windage_cf, None, "--windage-cf")?;
 
             handle_compare(
                 compare_loads,
@@ -9655,6 +9988,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 windage_unit_resolved,
                 elevation_click,
                 windage_click,
+                elevation_cf,
+                windage_cf,
                 sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
@@ -9727,6 +10062,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let carried_sight_offset_lateral_m = existing_profile
                         .as_ref()
                         .and_then(|p| p.sight_offset_lateral_m);
+                    // MBA-1358: like dsf_points/zero POI above — `profile save` cannot
+                    // express tracking CFs (derive them with `tall-target`, store by hand
+                    // edit), so a re-save carries any stored values forward.
+                    let carried_elevation_cf =
+                        existing_profile.as_ref().and_then(|p| p.elevation_cf);
+                    let carried_windage_cf =
+                        existing_profile.as_ref().and_then(|p| p.windage_cf);
 
                     // MBA-1355: validate click graduations at save time so a saved profile
                     // can never store a value `resolve_click_values` would later reject.
@@ -9777,6 +10119,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         zero_poi_up_m: carried_zero_poi_up_m,
                         zero_poi_right_m: carried_zero_poi_right_m,
                         sight_offset_lateral_m: carried_sight_offset_lateral_m,
+                        elevation_cf: carried_elevation_cf,
+                        windage_cf: carried_windage_cf,
                     };
 
                     let path = save_profile(&profile)?;
@@ -10293,6 +10637,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         sample_trajectory,
         sample_interval,
         drops_reference,
+        elevation_cf,
+        windage_cf,
         use_rk4,
         use_rk45,
         twist_rate,
@@ -10706,7 +11052,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             let (mover_ring_m, mover_ring_mil) = if ring_enabled {
                                 let (ring_m, ring_mil) =
                                     ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
-                                (Some(ring_m), ring_mil)
+                                // MBA-1358: mover lead is a dialed quantity — the mil
+                                // field scales by the windage CF; ring_m stays raw meters.
+                                (Some(ring_m), ring_mil.map(|mil| mil * windage_cf))
                             } else {
                                 (None, None)
                             };
@@ -10795,7 +11143,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             let (_, ring_mil) =
                                 ballistics_engine::mover_ring(target_speed_mps, s.time_s, s.distance_m);
                             match ring_mil {
-                                Some(mil) => println!("{},{:.3}", row, mil),
+                                // MBA-1358: dialed quantity — windage CF (1.0 is exact).
+                                Some(mil) => println!("{},{:.3}", row, mil * windage_cf),
                                 None => println!("{},", row),
                             }
                         } else {
@@ -10830,7 +11179,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             // lateral/downrange column swap above.
                             let (_, ring_mil) = ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
                             match ring_mil {
-                                Some(mil) => println!("{},{:.3}", row, mil),
+                                // MBA-1358: dialed quantity — windage CF (1.0 is exact).
+                                Some(mil) => println!("{},{:.3}", row, mil * windage_cf),
                                 None => println!("{},", row),
                             }
                         } else {
@@ -11116,7 +11466,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             let energy_display =
                                 UnitConverter::energy_from_metric(p.kinetic_energy, units);
                             let (_, ring_mil) = ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
-                            let ring_cell = match ring_mil {
+                            // MBA-1358: dialed quantity — scale the mil angle by the
+                            // windage CF BEFORE unit/click conversion (1.0 is exact).
+                            let ring_cell = match ring_mil.map(|mil| mil * windage_cf) {
                                 Some(mil) => match ring_unit {
                                     RingUnit::Factor(f) => format!("{:>8.2}", mil * f),
                                     // clicks_for(drop_yd, range_yd, click) only needs the
@@ -11482,11 +11834,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         // Rendered in MIL/MOA/SMOA/IPHY (MBA-724) or whole clicks (MBA-1355) per
                         // its own axis unit (MBA-1410): drop uses the elevation unit/graduation,
                         // wind/lead the (possibly different) windage one.
-                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click),
+                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, elevation_cf),
                         // Wind: positive = dial right for wind from right
-                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click),
-                        // Lead for a moving target
-                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click),
+                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, windage_cf),
+                        // Lead for a moving target (a dialed quantity — windage CF applies, MBA-1358)
+                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, windage_cf),
                     }
                 })
                 .collect();
@@ -12143,6 +12495,10 @@ fn run_zero_calculation(
     altitude: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
     cd_scale: f64,
+    // MBA-1358: elevation tracking CF — the MOA/mrad dial-unit outputs (zero angle,
+    // sight adjustment) are multiplied by it exactly once at their emission points;
+    // the degrees echo is a bore angle and never scales. 1.0 (no CF) is bit-exact.
+    elevation_cf: f64,
     output: OutputFormat,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
@@ -12212,8 +12568,10 @@ fn run_zero_calculation(
     // `zero_angle` is the bore angle above horizontal. The sight line runs from
     // (0, sight_height) to (target_distance, sight_height + target_height), so its slope is
     // target_height / target_distance: the sight-height translation cancels between endpoints.
-    let sight_adjustment_moa = zero_angle.to_degrees() * 60.0
-        - (target_height / target_distance * 3437.75);
+    // MBA-1358: a dialed correction — scope units (×CF; 1.0 is exact).
+    let sight_adjustment_moa = (zero_angle.to_degrees() * 60.0
+        - (target_height / target_distance * 3437.75))
+        * elevation_cf;
     // The bullet starts below the sight line by `sight_height`, which can already exceed the
     // 5 cm lower bound at the muzzle. Ignore that initial offset and report only a lower-bound
     // exit after the trajectory has first entered the point-blank band.
@@ -12245,8 +12603,8 @@ fn run_zero_calculation(
             let result = serde_json::json!({
                 "units": units_label,
                 "zero_angle_degrees": zero_angle.to_degrees(),
-                "zero_angle_moa": zero_angle.to_degrees() * 60.0,
-                "zero_angle_mrad": zero_angle * 1000.0,
+                "zero_angle_moa": zero_angle.to_degrees() * 60.0 * elevation_cf,
+                "zero_angle_mrad": zero_angle * 1000.0 * elevation_cf,
                 "sight_adjustment_moa": sight_adjustment_moa,
                 "max_ordinate": UnitConverter::distance_from_metric(trajectory.max_height, units),
                 "point_blank_range": UnitConverter::distance_from_metric(point_blank_range, units),
@@ -12257,8 +12615,11 @@ fn run_zero_calculation(
         OutputFormat::Csv => {
             println!("metric,value,unit");
             println!("zero_angle,{:.4},degrees", zero_angle.to_degrees());
-            println!("zero_angle_moa,{:.2},MOA", zero_angle.to_degrees() * 60.0);
-            println!("zero_angle_mrad,{:.2},mrad", zero_angle * 1000.0);
+            println!(
+                "zero_angle_moa,{:.2},MOA",
+                zero_angle.to_degrees() * 60.0 * elevation_cf
+            );
+            println!("zero_angle_mrad,{:.2},mrad", zero_angle * 1000.0 * elevation_cf);
             println!("max_ordinate,{:.3},meters", trajectory.max_height);
         }
 
@@ -12297,11 +12658,11 @@ fn run_zero_calculation(
             );
             println!(
                 "║ Zero Angle (MOA):  {:>8.2} MOA        ║",
-                zero_angle.to_degrees() * 60.0
+                zero_angle.to_degrees() * 60.0 * elevation_cf
             );
             println!(
                 "║ Zero Angle (mrad): {:>8.2} mrad       ║",
-                zero_angle * 1000.0
+                zero_angle * 1000.0 * elevation_cf
             );
             println!(
                 "║ Max Ordinate:      {:>8.3} {:3}       ║",
@@ -12352,6 +12713,10 @@ fn run_zero_range_calculation(
     altitude: f64,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
     cd_scale: f64,
+    // MBA-1358: elevation tracking CF — the MOA/mrad dial-unit outputs (zero angle,
+    // sight adjustment) are multiplied by it exactly once at their emission points;
+    // the degrees echo is a bore angle and never scales. 1.0 (no CF) is bit-exact.
+    elevation_cf: f64,
     output: OutputFormat,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
@@ -12448,8 +12813,10 @@ fn run_zero_range_calculation(
 
     // Same sight-adjustment/point-blank-range diagnostics as the forward command, now
     // referenced against the primary crossing rather than a supplied target distance.
-    let sight_adjustment_moa =
-        zero_angle_rad.to_degrees() * 60.0 - (target_height / primary_range * 3437.75);
+    // MBA-1358: a dialed correction — scope units (×CF; 1.0 is exact).
+    let sight_adjustment_moa = (zero_angle_rad.to_degrees() * 60.0
+        - (target_height / primary_range * 3437.75))
+        * elevation_cf;
     let mut entered_point_blank_band = false;
     let point_blank_range = trajectory
         .points
@@ -12512,8 +12879,8 @@ fn run_zero_range_calculation(
             let mut result = serde_json::json!({
                 "units": units_label,
                 "zero_angle_degrees": zero_angle_rad.to_degrees(),
-                "zero_angle_moa": zero_angle_rad.to_degrees() * 60.0,
-                "zero_angle_mrad": zero_angle_rad * 1000.0,
+                "zero_angle_moa": zero_angle_rad.to_degrees() * 60.0 * elevation_cf,
+                "zero_angle_mrad": zero_angle_rad * 1000.0 * elevation_cf,
                 // Kept for continuity with the primary (far-preferred) crossing; see
                 // "near_zero_range"/"far_zero_range" for both crossings explicitly.
                 "zero_range": primary_range_display,
@@ -12547,8 +12914,14 @@ fn run_zero_range_calculation(
         OutputFormat::Csv => {
             println!("metric,value,unit");
             println!("zero_angle,{:.4},degrees", zero_angle_rad.to_degrees());
-            println!("zero_angle_moa,{:.2},MOA", zero_angle_rad.to_degrees() * 60.0);
-            println!("zero_angle_mrad,{:.2},mrad", zero_angle_rad * 1000.0);
+            println!(
+                "zero_angle_moa,{:.2},MOA",
+                zero_angle_rad.to_degrees() * 60.0 * elevation_cf
+            );
+            println!(
+                "zero_angle_mrad,{:.2},mrad",
+                zero_angle_rad * 1000.0 * elevation_cf
+            );
             println!("zero_range,{:.2},{}", primary_range_display, dist_unit);
             // MBA-1419: same disclosure as JSON — which of the two crossings zero_range is.
             println!("primary_crossing,{},crossing", primary_crossing);
@@ -12577,13 +12950,16 @@ fn run_zero_range_calculation(
                 "║ Input Zero Angle:  {:>8.4}°          ║",
                 zero_angle_rad.to_degrees()
             );
+            // MBA-1358: the MOA/mrad representations are dial units and scale with the
+            // CF, matching this path's own JSON/CSV zero_angle_moa/mrad; the degrees
+            // echo above stays the raw stored bore angle.
             println!(
                 "║ Input Zero Angle:  {:>8.2} MOA        ║",
-                zero_angle_rad.to_degrees() * 60.0
+                zero_angle_rad.to_degrees() * 60.0 * elevation_cf
             );
             println!(
                 "║ Input Zero Angle:  {:>8.2} mrad       ║",
-                zero_angle_rad * 1000.0
+                zero_angle_rad * 1000.0 * elevation_cf
             );
             println!("╠════════════════════════════════════════╣");
             // Tier 2 review C2: a bore angle generally crosses the line of sight twice --
@@ -13219,6 +13595,12 @@ fn run_multi_observation_truing(
     range_yd: f64,
     observed: &[String],
     drop_unit: DropUnit,
+    // MBA-1358: elevation tracking CF for dialed observations. The primary
+    // (`measured_drop`) arrives ALREADY divided by it; parsed `--observed` drops are
+    // divided here (exactly once each), and dial-unit report values are scaled back
+    // (×CF) for display so the tables echo scope units. 1.0 = no correction, and the
+    // caller passes 1.0 for --drop-unit in (linear tape measurements never scale).
+    observation_cf: f64,
     bc_input: f64,
     drag_model: DragModelArg,
     mass_gr: f64,
@@ -13243,7 +13625,11 @@ fn run_multi_observation_truing(
         drop: measured_drop,
     });
     for token in observed {
-        observations.push(parse_truing_observation(token, units)?);
+        let mut observation = parse_truing_observation(token, units)?;
+        // MBA-1358: dialed observations divide by the tracking CF before the fit
+        // consumes them (the primary above was divided by the caller). /1.0 is exact.
+        observation.drop /= observation_cf;
+        observations.push(observation);
     }
 
     // Pre-validate before announcing the fit: the core validates again (cheaply),
@@ -13272,7 +13658,10 @@ fn run_multi_observation_truing(
         alt_ft,
         bc_segments,
     )?;
-    display_multi_truing_result(&report, drop_unit, units, chrono_fps, output);
+    // MBA-1358: dial-unit report values are shown back in scope units (×CF); the shared
+    // helper is a no-op (×1.0 exact) without a CF, keeping output byte-identical.
+    let display_report = ballistics_engine::truing::scale_report_dial_values(&report, observation_cf);
+    display_multi_truing_result(&display_report, drop_unit, units, chrono_fps, output);
     Ok(())
 }
 
@@ -14913,6 +15302,9 @@ fn handle_come_ups(
     // Some(...) iff adjustment_unit == Clicks (resolved once, eagerly, in the ComeUps
     // command's dispatch — see resolve_click_values); None otherwise.
     elevation_click: Option<ClickValue>,
+    // MBA-1358: elevation-axis tracking CF (resolved flag-over-profile by the dispatch);
+    // multiplies the come-up column's dial values exactly once via adjustment_display.
+    elevation_cf: f64,
     sight_height: f64,
     // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
     // CLI-over-profile and converted by the dispatch).
@@ -15057,8 +15449,13 @@ fn handle_come_ups(
             if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
                 let drop_yd = UnitConverter::distance_from_metric(sample.drop_m, units);
                 let range_display = UnitConverter::distance_from_metric(sample.distance_m, units);
-                let drop_adj =
-                    adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click);
+                let drop_adj = adjustment_display(
+                    drop_yd,
+                    range_display,
+                    adjustment_unit,
+                    elevation_click,
+                    elevation_cf,
+                );
                 let come_up = drop_adj - prev_drop_adj;
 
                 rows.push(ComeUpRow {
@@ -15809,6 +16206,10 @@ fn handle_lead(
     // iff adjustment_unit == Clicks (resolved eagerly by the caller, same "fail fast on a
     // missing graduation" shape as trajectory/come-ups's elevation_click).
     windage_click: Option<ClickValue>,
+    // MBA-1358: windage-axis tracking CF (mover lead is a dialed quantity): every
+    // dial-unit lead output (mil/moa/smoa/iphy/clicks/hold strings) is multiplied by it
+    // exactly once at its emission point; the linear lead distance is never scaled.
+    windage_cf: f64,
     units: UnitSystem,
     output: OutputFormat,
     // MBA-1323 Phase 2: saved-profile velocity-BC segments / Mach-Cd drag curve, already
@@ -15927,8 +16328,10 @@ fn handle_lead(
                             "range": r.range,
                             "tof_s": sol.time_of_flight_s,
                             "lead": UnitConverter::distance_from_metric(sol.lead_m, units),
-                            "lead_mil": sol.lead_mil,
-                            "lead_moa": sol.lead_moa,
+                            // MBA-1358: dial-unit lead scales by the windage CF (×1.0
+                            // exact when no CF); the linear lead above never does.
+                            "lead_mil": sol.lead_mil * windage_cf,
+                            "lead_moa": sol.lead_moa * windage_cf,
                             "intercept_range": UnitConverter::distance_from_metric(
                                 sol.corrected_range_m,
                                 units
@@ -15979,13 +16382,16 @@ fn handle_lead(
                 match &r.result {
                     Ok(sol) => {
                         let lead_disp = UnitConverter::distance_from_metric(sol.lead_m, units);
+                        // MBA-1358: mover lead is a dialed quantity — the windage CF
+                        // multiplies every dial-unit form exactly once (clicks scale the
+                        // input angle before quantization). ×1.0 exact when no CF.
                         let lead_adj = match adjustment_unit {
-                            AdjustmentUnit::Mil => sol.lead_mil,
-                            AdjustmentUnit::Moa => sol.lead_moa,
-                            AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => sol.lead_mil * smoa_per_mil(),
+                            AdjustmentUnit::Mil => sol.lead_mil * windage_cf,
+                            AdjustmentUnit::Moa => sol.lead_moa * windage_cf,
+                            AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => sol.lead_mil * smoa_per_mil() * windage_cf,
                             AdjustmentUnit::Clicks => windage_click
-                                .map(|c| clicks_for(lead_disp, r.range, &c) as f64)
-                                .unwrap_or(sol.lead_mil),
+                                .map(|c| clicks_for(lead_disp * windage_cf, r.range, &c) as f64)
+                                .unwrap_or(sol.lead_mil * windage_cf),
                         };
                         let intercept_disp =
                             UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -16042,15 +16448,16 @@ fn handle_lead(
                     match &r.result {
                         Ok(sol) => {
                             let lead_disp = UnitConverter::distance_from_metric(sol.lead_m, units);
+                            // MBA-1358: dialed quantity — windage CF, exactly once.
                             let lead_adj = match adjustment_unit {
-                                AdjustmentUnit::Mil => sol.lead_mil,
-                                AdjustmentUnit::Moa => sol.lead_moa,
+                                AdjustmentUnit::Mil => sol.lead_mil * windage_cf,
+                                AdjustmentUnit::Moa => sol.lead_moa * windage_cf,
                                 AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => {
-                                    sol.lead_mil * smoa_per_mil()
+                                    sol.lead_mil * smoa_per_mil() * windage_cf
                                 }
                                 AdjustmentUnit::Clicks => windage_click
-                                    .map(|c| clicks_for(lead_disp, r.range, &c) as f64)
-                                    .unwrap_or(sol.lead_mil),
+                                    .map(|c| clicks_for(lead_disp * windage_cf, r.range, &c) as f64)
+                                    .unwrap_or(sol.lead_mil * windage_cf),
                             };
                             let intercept_disp =
                                 UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -16084,15 +16491,16 @@ fn handle_lead(
                     match &r.result {
                         Ok(sol) => {
                             let lead_disp = UnitConverter::distance_from_metric(sol.lead_m, units);
+                            // MBA-1358: dialed quantity — windage CF, exactly once.
                             let lead_adj = match adjustment_unit {
-                                AdjustmentUnit::Mil => sol.lead_mil,
-                                AdjustmentUnit::Moa => sol.lead_moa,
+                                AdjustmentUnit::Mil => sol.lead_mil * windage_cf,
+                                AdjustmentUnit::Moa => sol.lead_moa * windage_cf,
                                 AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => {
-                                    sol.lead_mil * smoa_per_mil()
+                                    sol.lead_mil * smoa_per_mil() * windage_cf
                                 }
                                 AdjustmentUnit::Clicks => windage_click
-                                    .map(|c| clicks_for(lead_disp, r.range, &c) as f64)
-                                    .unwrap_or(sol.lead_mil),
+                                    .map(|c| clicks_for(lead_disp * windage_cf, r.range, &c) as f64)
+                                    .unwrap_or(sol.lead_mil * windage_cf),
                             };
                             let intercept_disp =
                                 UnitConverter::distance_from_metric(sol.corrected_range_m, units);
@@ -16141,6 +16549,9 @@ fn handle_wind_card(
     // adjustment_unit == Clicks, resolved eagerly by the caller via
     // `resolve_single_axis_click_value`.
     windage_click: Option<ClickValue>,
+    // MBA-1358: windage-axis tracking CF; the drift dial values scale by it exactly
+    // once via adjustment_display (the wind card's whole table is a windage quantity).
+    windage_cf: f64,
     sight_height: f64,
     // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
     // CLI-over-profile and converted by the dispatch).
@@ -16274,7 +16685,14 @@ fn handle_wind_card(
                     if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
                         let drift_yd =
                             UnitConverter::distance_from_metric(sample.wind_drift_m, units);
-                        adjustment_display(drift_yd, range_display, adjustment_unit, windage_click)
+                        // MBA-1358: windage CF applied once at the conversion boundary.
+                        adjustment_display(
+                            drift_yd,
+                            range_display,
+                            adjustment_unit,
+                            windage_click,
+                            windage_cf,
+                        )
                     } else {
                         0.0
                     }
@@ -16615,6 +17033,11 @@ fn handle_range_table(
     // `resolve_windage_unit` gating), None otherwise.
     elevation_click: Option<ClickValue>,
     windage_click: Option<ClickValue>,
+    // MBA-1358: per-axis tracking CFs (flag-over-profile, resolved by the caller):
+    // Drop dial values ×elevation_cf, Wind dial values ×windage_cf, exactly once each
+    // via the shared adjustment_display boundary. Raw inches never scale.
+    elevation_cf: f64,
+    windage_cf: f64,
     sight_height: f64,
     // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
     // CLI-over-profile and converted by the dispatch).
@@ -16780,7 +17203,7 @@ fn handle_range_table(
                 };
 
                 let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click);
+                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, elevation_cf);
 
                 let wind_linear = match units {
                     UnitSystem::Imperial => w.wind_drift_m / 0.0254,
@@ -16788,7 +17211,7 @@ fn handle_range_table(
                 };
 
                 let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click);
+                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, windage_cf);
 
                 rows.push(RangeRow {
                     range: current_range,
@@ -17002,6 +17425,10 @@ fn handle_compare(
     // profile's own elevation_click/windage_click.
     elevation_click: Option<ClickValue>,
     windage_click: Option<ClickValue>,
+    // MBA-1358: per-axis tracking CFs — CLI flags only (compare has no single profile),
+    // applied identically to every load's dial columns via adjustment_display.
+    elevation_cf: f64,
+    windage_cf: f64,
     sight_height: f64,
     // MBA-1359: deliberate POI offset at the zero range, METERS (converted by the
     // dispatch). Shared conditions like sight_height: applied identically to every load.
@@ -17171,13 +17598,13 @@ fn handle_compare(
                 UnitSystem::Metric => nw.drop_m * 1000.0,
             };
             let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click);
+            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, elevation_cf);
             let wind_linear = match units {
                 UnitSystem::Imperial => w.wind_drift_m / 0.0254,
                 UnitSystem::Metric => w.wind_drift_m * 1000.0,
             };
             let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click);
+            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, windage_cf);
             rows.push(LoadRow {
                 drop_linear,
                 drop_adj,
@@ -17498,6 +17925,8 @@ mod profile_unit_tests {
             zero_poi_up_m: None,
             zero_poi_right_m: None,
             sight_offset_lateral_m: None,
+            elevation_cf: None,
+            windage_cf: None,
         }
     }
 
@@ -18316,6 +18745,8 @@ mod adjustment_unit_tests {
                 zero_poi_up_m: None,
                 zero_poi_right_m: None,
                 sight_offset_lateral_m: None,
+                elevation_cf: None,
+                windage_cf: None,
             }
         }
 

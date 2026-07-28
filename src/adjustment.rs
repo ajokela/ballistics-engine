@@ -77,9 +77,49 @@ pub fn clicks_for(drop_yd: f64, range_yd: f64, click: &ClickValue) -> i64 {
     (angle / click.size).round() as i64
 }
 
+/// Zero-banner dial values `(MOA, mrad)` for a solved zero angle, scaled by the
+/// elevation tracking correction factor (MBA-1358).
+///
+/// Replicates the WASM terminal's historical banner conversions bit-for-bit at
+/// `elevation_cf == 1.0`: `deg * 60.0` (true MOA — deliberately NOT this module's locked
+/// printed-table `Moa = 3438.0` factor; see the MBA-724 note in the wasm banner sites)
+/// and `rad * 1000.0`, each multiplied by exactly `1.0` (a bit-exact no-op). Lives here,
+/// in an ungated module, so the emit rule is host-testable (`wasm.rs` is wasm32-gated)
+/// and shared by all three banner sites instead of being edited in parallel.
+pub fn zero_banner_dial_values(angle_deg: f64, angle_rad: f64, elevation_cf: f64) -> (f64, f64) {
+    (
+        angle_deg * 60.0 * elevation_cf,
+        angle_rad * 1000.0 * elevation_cf,
+    )
+}
+
+/// MBA-1358: the ONE accepted band for a scope tracking correction factor, shared by the
+/// native CLI and the WASM terminal so the two surfaces cannot drift: strictly between
+/// 0.5 and 1.5 (a real scope does not mistrack by 50% — values outside the band mean the
+/// tall-target test or a hand edit went wrong) and finite.
+pub fn tracking_cf_in_range(value: f64) -> bool {
+    value.is_finite() && value > 0.5 && value < 1.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // MBA-1358: the WASM zero-banner emit rule, host-tested here because wasm.rs is
+    // wasm32-gated (the drag_coefficient_json_value pattern).
+    #[test]
+    fn zero_banner_dial_values_scale_by_the_elevation_cf_and_are_exact_at_one() {
+        let deg = 0.0717_f64;
+        let rad = deg.to_radians();
+        // cf = 1.0 is bit-exact against the historical inline expressions.
+        let (moa, mrad) = zero_banner_dial_values(deg, rad, 1.0);
+        assert_eq!(moa.to_bits(), (deg * 60.0).to_bits());
+        assert_eq!(mrad.to_bits(), (rad * 1000.0).to_bits());
+        // cf scales both dial values linearly.
+        let (moa_cf, mrad_cf) = zero_banner_dial_values(deg, rad, 1.05);
+        assert_eq!(moa_cf.to_bits(), (deg * 60.0 * 1.05).to_bits());
+        assert_eq!(mrad_cf.to_bits(), (rad * 1000.0 * 1.05).to_bits());
+    }
 
     #[test]
     fn parse_click_value_accepts_suffixed_and_rejects_bare() {

@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Scope tracking correction factors from a tall-target test** (MBA-1358, Litz).
+  Per-axis `--elevation-cf`/`--windage-cf` (strictly between 0.5 and 1.5; CLI flag over
+  the new validated-on-load `elevation_cf`/`windage_cf` saved-profile fields) multiply
+  every dial-unit output exactly once at the shared conversion boundary — come-ups,
+  range-table/compare Drop and Wind columns, wind-card drift, mover lead and the Ring
+  column/fields (a dialed quantity), the PDF dope-card rows, and the zero command's
+  MOA/mrad dial outputs on both the native CLI and the WASM terminal's banners — while
+  raw drop/drift inches (and degree bore-angle echoes) are never scaled. New `tall-target`
+  subcommand computes `CF = actual measured travel / dialed travel` with no trajectory
+  solve. `true-velocity --elevation-cf` DIVIDES dialed (mil/moa) observations by the CF
+  before the fit, so scope tracking error is not baked into trued MV/BC, and shows
+  dial-unit report values back in scope units; linear `in` drops never scale. Defaults
+  (no flag/fields) are byte-identical. FFI is deliberately excluded (no dial outputs).
 - **Equivalent horizontal range (BDC shoot-to) for inclined shots** (MBA-1395). When a
   look angle is set and a zero was solved, `trajectory` prints one summary line —
   `Equivalent horizontal range: X yd (shoot-to for BDC)` — on the native CLI and the
