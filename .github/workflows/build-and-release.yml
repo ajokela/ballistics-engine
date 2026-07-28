@@ -1,16 +1,28 @@
 name: Build and Release All Platforms
 
+# Two triggers, one contract:
+#  - push of a v* tag: build ALL hosted platforms FROM THE TAG, create the GitHub
+#    release with CHANGELOG-derived notes. This is the normal release path; the
+#    private ballistics-release repo picks up from here for fleet platforms and
+#    channel publishing (no publishing secrets live in this public repo).
+#  - workflow_dispatch: manual/partial builds, same version gates.
+#
+# Every job gates on the built binary printing exactly "ballistics <version>" ON
+# its target (Rosetta for macOS x86_64 on arm runners, qemu for linux-aarch64,
+# inside the VM for the BSDs). Stale or mis-versioned binaries have nearly shipped
+# twice; the gate is the point.
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build'
+        description: 'Version to build (must match Cargo.toml at the ref)'
         required: true
-        default: '0.3.2'
       platforms:
-        description: 'Platforms to build (comma-separated: macos,linux,windows,bsd)'
+        description: 'Platforms (comma-separated: macos,linux,windows,bsd)'
         required: true
-        default: 'macos,linux,bsd'
+        default: 'macos,linux,windows,bsd'
 
 # Default every job to read-only; only create-release is granted write (below), so a
 # compromised build-job dependency can't push to the repo. The default token is read-only,
@@ -18,9 +30,42 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_tag: ${{ steps.v.outputs.is_tag }}
+    steps:
+    - uses: actions/checkout@v7
+    - name: Derive and cross-check the version
+      id: v
+      env:
+        EVENT: ${{ github.event_name }}
+        REF_NAME: ${{ github.ref_name }}
+        INPUT_VERSION: ${{ github.event.inputs.version }}
+      run: |
+        if [ "$EVENT" = "push" ]; then
+          VERSION="${REF_NAME#v}"
+          echo "is_tag=true" >> "$GITHUB_OUTPUT"
+        else
+          VERSION="$INPUT_VERSION"
+          echo "is_tag=false" >> "$GITHUB_OUTPUT"
+        fi
+        CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+        if [ "$VERSION" != "$CARGO_VERSION" ]; then
+          echo "::error::version mismatch: building '$VERSION' but Cargo.toml at this ref says '$CARGO_VERSION'. Tag the bumped commit."
+          exit 1
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   build-macos:
-    if: contains(github.event.inputs.platforms, 'macos')
+    needs: prep
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'macos')
     runs-on: macos-latest
     strategy:
       matrix:
@@ -29,25 +74,31 @@ jobs:
             arch: x86_64
           - target: aarch64-apple-darwin
             arch: aarch64
-    
+
     steps:
     - uses: actions/checkout@v7
-    
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.target }}
-    
+
     - name: Build
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        cargo build --release --target ${{ matrix.target }}
-        
-        VERSION="${{ github.event.inputs.version }}"
+        cargo build --release --locked --target ${{ matrix.target }}
         cp target/${{ matrix.target }}/release/ballistics ./ballistics-${VERSION}-macos-${{ matrix.arch }}
-        
-        # Generate checksum
         shasum -a 256 ./ballistics-${VERSION}-macos-${{ matrix.arch }} | cut -d' ' -f1 > ./ballistics-${VERSION}-macos-${{ matrix.arch }}.sha256
-    
+
+    - name: Version gate
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
+      # macos-latest runners are arm64 with Rosetta installed, so both arches execute.
+      run: |
+        GOT=$(./ballistics-${VERSION}-macos-${{ matrix.arch }} --version)
+        [ "$GOT" = "ballistics $VERSION" ] || { echo "::error::version gate: '$GOT' != 'ballistics $VERSION'"; exit 1; }
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
       with:
@@ -56,7 +107,8 @@ jobs:
           ballistics-*-macos-*
 
   build-linux:
-    if: contains(github.event.inputs.platforms, 'linux')
+    needs: prep
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'linux')
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -66,44 +118,62 @@ jobs:
           - target: aarch64-unknown-linux-musl
             arch: aarch64
             use_cross: true
-    
+
     steps:
     - uses: actions/checkout@v7
-    
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.target }}
-    
+
     - name: Install cross
       if: matrix.use_cross
       run: cargo install cross
-    
+
     - name: Install musl tools
       if: matrix.arch == 'x86_64'
       run: sudo apt-get update && sudo apt-get install -y musl-tools
-    
+
+    - name: Set up QEMU (for the aarch64 version gate)
+      if: matrix.use_cross
+      uses: docker/setup-qemu-action@v3
+
     - name: Build with cargo
       if: '!matrix.use_cross'
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        cargo build --release --target ${{ matrix.target }}
-        
-        VERSION="${{ github.event.inputs.version }}"
+        cargo build --release --locked --target ${{ matrix.target }}
         cp target/${{ matrix.target }}/release/ballistics ./ballistics-${VERSION}-linux-${{ matrix.arch }}
-    
+
     - name: Build with cross
       if: matrix.use_cross
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        cross build --release --target ${{ matrix.target }}
-        
-        VERSION="${{ github.event.inputs.version }}"
+        cross build --release --locked --target ${{ matrix.target }}
         cp target/${{ matrix.target }}/release/ballistics ./ballistics-${VERSION}-linux-${{ matrix.arch }}
-    
-    - name: Generate checksums
+
+    - name: Version gate
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        VERSION="${{ github.event.inputs.version }}"
+        BIN=./ballistics-${VERSION}-linux-${{ matrix.arch }}
+        if [ "${{ matrix.arch }}" = "x86_64" ]; then
+          GOT=$("$BIN" --version)
+        else
+          # musl-static binary executes in any arm64 container under qemu.
+          GOT=$(docker run --rm --platform linux/arm64 -v "$PWD:/w" alpine /w/ballistics-${VERSION}-linux-aarch64 --version)
+        fi
+        [ "$GOT" = "ballistics $VERSION" ] || { echo "::error::version gate: '$GOT' != 'ballistics $VERSION'"; exit 1; }
+
+    - name: Generate checksums
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
+      run: |
         sha256sum ballistics-${VERSION}-linux-${{ matrix.arch }} | cut -d' ' -f1 > ballistics-${VERSION}-linux-${{ matrix.arch }}.sha256
-    
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
       with:
@@ -112,30 +182,43 @@ jobs:
           ballistics-*-linux-*
 
   build-windows:
-    if: contains(github.event.inputs.platforms, 'windows')
+    needs: prep
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'windows')
     runs-on: windows-latest
-    
+
     steps:
     - uses: actions/checkout@v7
-    
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: x86_64-pc-windows-msvc
-    
+
     - name: Build
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        cargo build --release --target x86_64-pc-windows-msvc
-        
-        $VERSION = "${{ github.event.inputs.version }}"
-        Copy-Item target\x86_64-pc-windows-msvc\release\ballistics.exe .\ballistics-$VERSION-windows-x86_64.exe
-    
+        cargo build --release --locked --target x86_64-pc-windows-msvc
+        Copy-Item target\x86_64-pc-windows-msvc\release\ballistics.exe .\ballistics-$env:VERSION-windows-x86_64.exe
+
+    - name: Version gate
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
+      run: |
+        $got = (& .\ballistics-$env:VERSION-windows-x86_64.exe --version) | Out-String
+        $got = $got.Trim()
+        if ($got -ne "ballistics $env:VERSION") {
+          Write-Error "version gate: '$got' != 'ballistics $env:VERSION'"
+          exit 1
+        }
+
     - name: Generate checksum
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        $VERSION = "${{ github.event.inputs.version }}"
-        $hash = Get-FileHash -Path ballistics-$VERSION-windows-x86_64.exe -Algorithm SHA256
-        $hash.Hash.ToLower() | Out-File -FilePath ballistics-$VERSION-windows-x86_64.exe.sha256 -NoNewline
-    
+        $hash = Get-FileHash -Path ballistics-$env:VERSION-windows-x86_64.exe -Algorithm SHA256
+        $hash.Hash.ToLower() | Out-File -FilePath ballistics-$env:VERSION-windows-x86_64.exe.sha256 -NoNewline
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
       with:
@@ -144,33 +227,38 @@ jobs:
           ballistics-*-windows-*
 
   build-freebsd:
-    if: contains(github.event.inputs.platforms, 'bsd')
+    needs: prep
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
     name: Build FreeBSD binary
-    
+
     steps:
     - uses: actions/checkout@v7
-    
+
     - name: Build in FreeBSD VM
       uses: cross-platform-actions/action@5ea7e8e4677bd726033a10b094ba1c5762b15dee  # v1.3.0
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       with:
         operating_system: freebsd
         version: '14.0'
         architecture: x86-64
+        environment_variables: VERSION
         run: |
           # Install Rust
           sudo pkg install -y rust git
-          
+
           # Build the project
-          cargo build --release
-          
-          # Create versioned binary
-          VERSION="${{ github.event.inputs.version }}"
+          cargo build --release --locked
+
+          # Version gate, inside the VM, on the target OS
+          GOT=$(target/release/ballistics --version)
+          [ "$GOT" = "ballistics ${VERSION}" ] || { echo "version gate: '$GOT'"; exit 1; }
+
+          # Create versioned binary + checksum
           cp target/release/ballistics ./ballistics-${VERSION}-freebsd-x86_64
-          
-          # Generate checksum
           sha256 ./ballistics-${VERSION}-freebsd-x86_64 > ./ballistics-${VERSION}-freebsd-x86_64.sha256
-    
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
       with:
@@ -179,33 +267,38 @@ jobs:
           ballistics-*-freebsd-*
 
   build-netbsd:
-    if: contains(github.event.inputs.platforms, 'bsd')
+    needs: prep
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
     name: Build NetBSD binary
-    
+
     steps:
     - uses: actions/checkout@v7
-    
+
     - name: Build in NetBSD VM
       uses: cross-platform-actions/action@5ea7e8e4677bd726033a10b094ba1c5762b15dee  # v1.3.0
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       with:
         operating_system: netbsd
         version: '10.0'
         architecture: x86-64
+        environment_variables: VERSION
         run: |
           # Install Rust
           sudo pkgin -y install rust git
-          
+
           # Build the project
-          cargo build --release
-          
-          # Create versioned binary
-          VERSION="${{ github.event.inputs.version }}"
+          cargo build --release --locked
+
+          # Version gate, inside the VM, on the target OS
+          GOT=$(target/release/ballistics --version)
+          [ "$GOT" = "ballistics ${VERSION}" ] || { echo "version gate: '$GOT'"; exit 1; }
+
+          # Create versioned binary + checksum
           cp target/release/ballistics ./ballistics-${VERSION}-netbsd-x86_64
-          
-          # Generate checksum
           sha256 ./ballistics-${VERSION}-netbsd-x86_64 > ./ballistics-${VERSION}-netbsd-x86_64.sha256
-    
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
       with:
@@ -214,7 +307,8 @@ jobs:
           ballistics-*-netbsd-*
 
   build-openbsd:
-    if: contains(github.event.inputs.platforms, 'bsd')
+    needs: prep
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
     name: Build OpenBSD binary
 
@@ -223,10 +317,13 @@ jobs:
 
     - name: Build in OpenBSD VM
       uses: cross-platform-actions/action@5ea7e8e4677bd726033a10b094ba1c5762b15dee  # v1.3.0
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
       with:
         operating_system: openbsd
         version: '7.8'
         architecture: x86-64
+        environment_variables: VERSION
         run: |
           # Install Rust
           sudo pkg_add -I rust git
@@ -236,13 +333,14 @@ jobs:
           ulimit -d "$(ulimit -dH)" 2>/dev/null || true
 
           # Build the project
-          cargo build --release
+          cargo build --release --locked
 
-          # Create versioned binary
-          VERSION="${{ github.event.inputs.version }}"
+          # Version gate, inside the VM, on the target OS
+          GOT=$(target/release/ballistics --version)
+          [ "$GOT" = "ballistics ${VERSION}" ] || { echo "version gate: '$GOT'"; exit 1; }
+
+          # Create versioned binary + checksum
           cp target/release/ballistics ./ballistics-${VERSION}-openbsd-x86_64
-
-          # Generate checksum
           sha256 ./ballistics-${VERSION}-openbsd-x86_64 > ./ballistics-${VERSION}-openbsd-x86_64.sha256
 
     - name: Upload artifacts
@@ -253,64 +351,61 @@ jobs:
           ballistics-*-openbsd-*
 
   create-release:
-    needs: [build-macos, build-linux, build-windows, build-freebsd, build-netbsd, build-openbsd]
-    if: always()
+    needs: [prep, build-macos, build-linux, build-windows, build-freebsd, build-netbsd, build-openbsd]
+    # Run when nothing failed (skipped partial-dispatch jobs are fine); never create a
+    # release from a red build. The old `if: always()` could publish over failures.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v7
-    
+
     - name: Download all artifacts
       uses: actions/download-artifact@v8
       with:
         path: artifacts
-    
-    - name: Prepare release files
+
+    - name: Prepare and verify release files
+      env:
+        VERSION: ${{ needs.prep.outputs.version }}
+        IS_TAG: ${{ needs.prep.outputs.is_tag }}
       run: |
-        # Flatten artifact structure
         find artifacts -type f -name "ballistics-*" -exec mv {} . \; 2>/dev/null || true
-        
-        # List all files
-        echo "Release files:"
-        ls -la ballistics-* || echo "No files found"
-    
+        echo "Release files:"; ls -la ballistics-* || true
+        # On a tag build, all 8 hosted binaries are mandatory (16 files with checksums).
+        if [ "$IS_TAG" = "true" ]; then
+          COUNT=$(ls ballistics-${VERSION}-* 2>/dev/null | wc -l)
+          if [ "$COUNT" -lt 16 ]; then
+            echo "::error::expected 16 hosted release files (8 binaries + 8 checksums), found $COUNT"
+            exit 1
+          fi
+        fi
+
     - name: Create GitHub Release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ needs.prep.outputs.version }}
       run: |
-        VERSION="${{ github.event.inputs.version }}"
-        
-        # Create release notes
-        cat > release-notes.md << 'EOF'
-        ## Ballistics Engine v${{ github.event.inputs.version }}
-        
-        ### Installation
-        
-        Install via the universal installer:
-        ```bash
-        curl --proto '=https' --tlsv1.2 -sSf https://ballistics.zip | sh
-        ```
-        
-        ### Available Binaries
-        
-        This release includes binaries for:
-        - macOS (Intel and Apple Silicon)
-        - Linux (x86_64 and ARM64)
-        - Windows (x86_64)
-        - FreeBSD (x86_64)
-        - NetBSD (x86_64)
-        - OpenBSD (x86_64)
-        
-        ### Checksums
-        
-        All binaries include SHA256 checksums for verification.
-        EOF
-        
-        # Create release (allow it to fail if tag exists)
+        # Notes come from the CHANGELOG section for this version (the runbook keeps
+        # [Unreleased] current during development); fall back to a generic stub only
+        # if extraction fails, and say so.
+        if scripts/release/extract-notes.sh "$VERSION" > release-notes.md 2>/dev/null; then
+          :
+        else
+          echo "Release v${VERSION}. (CHANGELOG section missing - fix CHANGELOG.md.)" > release-notes.md
+        fi
+        {
+          echo ""
+          echo "### Installation"
+          echo '```bash'
+          echo "curl --proto '=https' --tlsv1.2 -sSf https://ballistics.zip | sh"
+          echo '```'
+        } >> release-notes.md
+
         gh release create "v${VERSION}" \
-          --title "Ballistics Engine v${VERSION}" \
+          --title "v${VERSION}" \
           --notes-file release-notes.md \
           ballistics-* || \
         gh release upload "v${VERSION}" ballistics-* --clobber
