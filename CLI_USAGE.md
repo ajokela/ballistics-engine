@@ -768,6 +768,44 @@ the whole cloud together and has almost no effect on the reported spread — exp
 dispersion numbers to look essentially the same as a level run. Use `trajectory --cant` to
 see the point-of-impact shift itself.
 
+#### Drops Reference: LOS vs Target Plane (`--drops-reference`) — MBA-1403
+
+**The convention.** The engine solves inclined fire in the shot frame (gravity is rotated
+by `--shooting-angle`), so a sampled drop value is natively measured **perpendicular to
+the line of sight** — that is the `los` reference, the default, and the only convention
+every output used before this flag existed. JBM's "target plane" checkbox instead reports
+drop **vertically in the plane of the target**, which matters when holding over a steeply
+inclined shot against a vertical target face: the two differ by exactly
+`1 / cos(shooting angle)` (about 15% at 30°). `--drops-reference target` applies that
+transform to the sampled drop values — and, because the mil/MOA conversions derive from
+the same drop, to those as well. Wind drift is a lateral quantity and is never touched.
+
+```bash
+# LOS-referenced (default; byte-identical with or without the flag)
+ballistics trajectory -v 2700 -m 175 -d 0.308 --bc 0.243 --drag-model g7 \
+  --shooting-angle 30 --auto-zero 100 --max-range 600 \
+  --sample-trajectory --sample-interval 100
+
+# Target-plane referenced: sampled drops are divided by cos(30) and the drop
+# column is relabeled "Drop (target)" (CSV: drop_target_in)
+ballistics trajectory -v 2700 -m 175 -d 0.308 --bc 0.243 --drag-model g7 \
+  --shooting-angle 30 --auto-zero 100 --max-range 600 \
+  --sample-trajectory --sample-interval 100 --drops-reference target
+```
+
+Details worth knowing:
+
+- The table and CSV drop columns are labeled with the active reference (`Drop (target)`
+  / `drop_target_in`), so a card never leaves ambiguity about its convention.
+- This is an **output-mode toggle only**: the solved trajectory, drift, velocity, energy,
+  time, zeroing, and `--auto-zero` semantics are all unchanged.
+- At `--shooting-angle 0` the two references coincide exactly.
+- `target` mode is rejected at shooting angles of 90° or beyond, where the transform is
+  undefined.
+- The solve-json v1 surface accepts the same toggle as `$.shot.drops_reference`
+  (`"los"`/`"target"`); the WASM browser terminal accepts `--drops-reference` with the
+  same semantics.
+
 ### Moving-Target Lead
 
 Calculate the hold needed to hit a target moving at a constant ground speed across (or

@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Drops-reference toggle: LOS vs target plane** (MBA-1403). New
+  `--drops-reference {los|target}` on `trajectory` (native CLI and the WASM terminal)
+  plus the solve-json v1 request field `shot.drops_reference`. `los` (the default) keeps
+  the historical LOS-perpendicular sampled drop byte-identically; `target` reports drop
+  as vertical in the target plane — the LOS-perpendicular drop divided by
+  `cos(shooting angle)` (JBM's "target plane" reference) — relabels the sampled
+  table/CSV drop column (`Drop (target)` / `drop_target_in`), and lets a supplied
+  target height slope the sampler's LOS datum. Output-mode toggle only: the solved
+  trajectory, drift, and zeroing semantics are unchanged; rejected at shooting angles
+  of 90° or beyond; FFI is deliberately not plumbed (raw-kinematics surface). The three
+  per-integrator trajectory-sampling blocks in `cli_api.rs` were consolidated into one
+  shared helper (byte-identical refactor) so the sampler's LOS datum is chosen in
+  exactly one place.
 - **Lateral sight offset input for offset-mounted optics** (MBA-1396). New
   `BallisticInputs.sight_offset_lateral_m` (positive = sight RIGHT of bore) models the
   windage half of sight geometry the way `sight_height` models the vertical half: the

@@ -108,6 +108,23 @@ impl From<&str> for BallisticsError {
     }
 }
 
+/// Which plane sampled drop values are referenced to (MBA-1403).
+///
+/// See [`BallisticInputs::drops_reference`]. This is an output-mode toggle for the
+/// trajectory sampler, not new plane machinery: the solver implements incline as gravity
+/// rotation into the shot frame, so sampled drop is already perpendicular to the LOS and
+/// the JBM-equivalent "target" mode is a `1 / cos(shooting_angle)` reference transform
+/// plus relabeling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DropsReference {
+    /// Drop measured perpendicular to the line of sight (the historical default).
+    #[default]
+    Los,
+    /// Drop measured vertically in the target plane (JBM's "target plane" reference):
+    /// the LOS-perpendicular drop scaled by `1 / cos(shooting_angle)`.
+    Target,
+}
+
 // Ballistic input parameters - MBA-151 Reconciled Structure
 // Unified structure used by both ballistics-engine and ballistics_rust
 // Duplicates removed, all necessary fields included
@@ -238,6 +255,15 @@ pub struct BallisticInputs {
     pub wind_shear_model: String,
     pub enable_trajectory_sampling: bool,
     pub sample_interval: f64, // meters
+    /// Which plane sampled drop values are referenced to (MBA-1403). The default
+    /// [`DropsReference::Los`] keeps the historical behavior (drop perpendicular to the
+    /// line of sight) byte-identical; [`DropsReference::Target`] reports drop as vertical
+    /// in the target plane — the LOS-perpendicular drop scaled by
+    /// `1 / cos(shooting_angle)` (JBM's "target plane" checkbox) — and, when a non-zero
+    /// `target_height` is supplied, slopes the sampler's LOS datum toward it. This is an
+    /// OUTPUT-mode toggle: the solved trajectory itself is unchanged, and zero-solve
+    /// `target_height` semantics are untouched.
+    pub drops_reference: DropsReference,
     pub enable_pitch_damping: bool,
     pub enable_precession_nutation: bool,
     // MBA-959: apply aerodynamic jump as a muzzle launch-angle perturbation.
@@ -520,6 +546,7 @@ impl Default for BallisticInputs {
             wind_shear_model: "none".to_string(),
             enable_trajectory_sampling: false,
             sample_interval: 10.0, // Default 10 meter intervals
+            drops_reference: DropsReference::Los, // historical LOS-perpendicular drops
             enable_pitch_damping: false,
             enable_precession_nutation: false,
             enable_aerodynamic_jump: false,
@@ -1501,6 +1528,18 @@ impl TrajectorySolver {
             projected_sample_count(self.max_range, self.inputs.sample_interval)?;
         }
 
+        // MBA-1403: the target-plane drops reference divides sampled drop by
+        // cos(shooting_angle); at or beyond 90 degrees the transform is undefined.
+        // Gated on the non-default mode only, so LOS-mode validation is unchanged.
+        if self.inputs.drops_reference == DropsReference::Target {
+            require_finite("target_height", self.inputs.target_height)?;
+            if self.inputs.shooting_angle.cos() <= 1e-9 {
+                return Err(BallisticsError::from(
+                    "drops reference 'target' is undefined for shooting angles at or beyond 90 degrees",
+                ));
+            }
+        }
+
         if self.inputs.enable_coriolis {
             require_finite("shot_azimuth", self.inputs.shot_azimuth)?;
             if let Some(latitude) = self.inputs.latitude {
@@ -2199,6 +2238,88 @@ impl TrajectorySolver {
         )
     }
 
+    /// Shared post-integration sampling used by all three integrators (MBA-1403).
+    ///
+    /// Builds the `TrajectoryData`/`TrajectoryOutputs` pair and runs
+    /// [`sample_trajectory`] when `enable_trajectory_sampling` is set. This is the
+    /// single place the sampler's LOS datum (`target_vertical_height_m`) is chosen,
+    /// replacing three per-integrator copies that had to be edited in parallel.
+    fn build_sampled_points(
+        &self,
+        points: &[TrajectoryPoint],
+        max_height: f64,
+        transonic_distances: Vec<f64>,
+        mach_transitions: &MachTransitionTracker,
+    ) -> Result<Option<Vec<TrajectorySample>>, BallisticsError> {
+        if !self.inputs.enable_trajectory_sampling {
+            return Ok(None);
+        }
+
+        let last_point = points.last().ok_or("No trajectory points generated")?;
+        let trajectory_data = TrajectoryData {
+            times: points.iter().map(|p| p.time).collect(),
+            positions: points.iter().map(|p| p.position).collect(),
+            velocities: points
+                .iter()
+                .map(|p| {
+                    // Reconstruct velocity vectors from magnitude (approximate)
+                    Vector3::new(0.0, 0.0, p.velocity_magnitude)
+                })
+                .collect(),
+            transonic_distances, // populated by the integrator at each Mach-threshold crossing
+            mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
+            mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
+            mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
+        };
+
+        // For LOS calculation in ground-referenced coordinates:
+        // sight_position_m is the sight's actual y-position above ground
+        // (muzzle_height + sight_height, not just sight_height)
+        // For flat shots, target is at same height as the sight (horizontal LOS)
+        let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
+        let target_reference = self.inputs.drops_reference == DropsReference::Target;
+        // MBA-1403: only the (new, non-default) target mode reads `target_height` here,
+        // and only when a real (non-zero) height was supplied — the sampler's LOS then
+        // slopes toward the actual target instead of staying at the sight height. LOS
+        // mode keeps the historical datum byte-identically, and zero-solve
+        // `target_height` semantics (an explicit function argument, never this field)
+        // are untouched.
+        let target_vertical_height_m = if target_reference && self.inputs.target_height != 0.0 {
+            self.inputs.target_height
+        } else {
+            sight_position_m
+        };
+        let outputs = TrajectoryOutputs {
+            target_distance_horiz_m: last_point.position.x, // X is downrange
+            target_vertical_height_m,
+            time_of_flight_s: last_point.time,
+            max_ord_dist_horiz_m: max_height,
+            sight_height_m: sight_position_m,
+        };
+
+        // Sample at specified intervals
+        let mut samples = sample_trajectory(
+            &trajectory_data,
+            &outputs,
+            self.inputs.sample_interval,
+            self.inputs.bullet_mass,
+        )?;
+
+        // MBA-1403 target-plane reference: scale the LOS-perpendicular drop to vertical
+        // in the target plane. Scaling by the positive constant 1/cos preserves signs
+        // and ordering, so the sampler's zero-crossing/apex flags are unaffected.
+        // validate_for_solve rejects target mode at |shooting_angle| >= 90 degrees, so
+        // cos_theta is strictly positive here. Downstream mil/moa conversions derive
+        // from drop_m, so they inherit the transform without further edits.
+        if target_reference {
+            let cos_theta = self.inputs.shooting_angle.cos();
+            for sample in &mut samples {
+                sample.drop_m /= cos_theta;
+            }
+        }
+        Ok(Some(samples))
+    }
+
     fn solve_euler(&self) -> Result<TrajectoryResult, BallisticsError> {
         // Simple trajectory integration using Euler method
         let mut time = 0.0;
@@ -2388,48 +2509,13 @@ impl TrajectorySolver {
 
         let last_point = points.last().ok_or("No trajectory points generated")?;
 
-        // Create trajectory sampling data if enabled
-        let sampled_points = if self.inputs.enable_trajectory_sampling {
-            let trajectory_data = TrajectoryData {
-                times: points.iter().map(|p| p.time).collect(),
-                positions: points.iter().map(|p| p.position).collect(),
-                velocities: points
-                    .iter()
-                    .map(|p| {
-                        // Reconstruct velocity vectors from magnitude (approximate)
-                        Vector3::new(0.0, 0.0, p.velocity_magnitude)
-                    })
-                    .collect(),
-                transonic_distances, // populated above at each Mach-threshold crossing
-                mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
-                mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
-                mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
-            };
-
-            // For LOS calculation in ground-referenced coordinates:
-            // sight_position_m is the sight's actual y-position above ground
-            // (muzzle_height + sight_height, not just sight_height)
-            // For flat shots, target is at same height as the sight (horizontal LOS)
-            let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
-            let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.x, // X is downrange
-                target_vertical_height_m: sight_position_m,
-                time_of_flight_s: last_point.time,
-                max_ord_dist_horiz_m: max_height,
-                sight_height_m: sight_position_m,
-            };
-
-            // Sample at specified intervals
-            let samples = sample_trajectory(
-                &trajectory_data,
-                &outputs,
-                self.inputs.sample_interval,
-                self.inputs.bullet_mass,
-            )?;
-            Some(samples)
-        } else {
-            None
-        };
+        // Create trajectory sampling data if enabled (shared helper, MBA-1403)
+        let sampled_points = self.build_sampled_points(
+            &points,
+            max_height,
+            transonic_distances,
+            &mach_transitions,
+        )?;
 
         Ok(TrajectoryResult {
             max_range: last_point.position.x, // X is downrange
@@ -2685,48 +2771,13 @@ impl TrajectorySolver {
 
         let last_point = points.last().ok_or("No trajectory points generated")?;
 
-        // Create trajectory sampling data if enabled
-        let sampled_points = if self.inputs.enable_trajectory_sampling {
-            let trajectory_data = TrajectoryData {
-                times: points.iter().map(|p| p.time).collect(),
-                positions: points.iter().map(|p| p.position).collect(),
-                velocities: points
-                    .iter()
-                    .map(|p| {
-                        // Reconstruct velocity vectors from magnitude (approximate)
-                        Vector3::new(0.0, 0.0, p.velocity_magnitude)
-                    })
-                    .collect(),
-                transonic_distances, // populated above at each Mach-threshold crossing
-                mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
-                mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
-                mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
-            };
-
-            // For LOS calculation in ground-referenced coordinates:
-            // sight_position_m is the sight's actual y-position above ground
-            // (muzzle_height + sight_height, not just sight_height)
-            // For flat shots, target is at same height as the sight (horizontal LOS)
-            let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
-            let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.x, // X is downrange
-                target_vertical_height_m: sight_position_m,
-                time_of_flight_s: last_point.time,
-                max_ord_dist_horiz_m: max_height,
-                sight_height_m: sight_position_m,
-            };
-
-            // Sample at specified intervals
-            let samples = sample_trajectory(
-                &trajectory_data,
-                &outputs,
-                self.inputs.sample_interval,
-                self.inputs.bullet_mass,
-            )?;
-            Some(samples)
-        } else {
-            None
-        };
+        // Create trajectory sampling data if enabled (shared helper, MBA-1403)
+        let sampled_points = self.build_sampled_points(
+            &points,
+            max_height,
+            transonic_distances,
+            &mach_transitions,
+        )?;
 
         Ok(TrajectoryResult {
             max_range: last_point.position.x, // X is downrange
@@ -2949,48 +3000,13 @@ impl TrajectorySolver {
 
         let last_point = points.last().unwrap();
 
-        // Generate sampled trajectory points if enabled
-        let sampled_points = if self.inputs.enable_trajectory_sampling {
-            // Build trajectory data for sampling
-            let trajectory_data = TrajectoryData {
-                times: points.iter().map(|p| p.time).collect(),
-                positions: points.iter().map(|p| p.position).collect(),
-                velocities: points
-                    .iter()
-                    .map(|p| {
-                        // Approximate velocity direction from position changes
-                        Vector3::new(0.0, 0.0, p.velocity_magnitude)
-                    })
-                    .collect(),
-                transonic_distances, // populated at each Mach-threshold crossing
-                mach_1_2_distance_m: mach_transitions.mach_1_2_distance_m,
-                mach_1_0_distance_m: mach_transitions.mach_1_0_distance_m,
-                mach_0_9_distance_m: mach_transitions.mach_0_9_distance_m,
-            };
-
-            // For LOS calculation in ground-referenced coordinates:
-            // sight_position_m is the sight's actual y-position above ground
-            // (muzzle_height + sight_height, not just sight_height)
-            // For flat shots, target is at same height as the sight (horizontal LOS)
-            let sight_position_m = self.inputs.muzzle_height + self.inputs.sight_height;
-            let outputs = TrajectoryOutputs {
-                target_distance_horiz_m: last_point.position.x,
-                target_vertical_height_m: sight_position_m,
-                time_of_flight_s: last_point.time,
-                max_ord_dist_horiz_m: max_height,
-                sight_height_m: sight_position_m,
-            };
-
-            let samples = sample_trajectory(
-                &trajectory_data,
-                &outputs,
-                self.inputs.sample_interval,
-                self.inputs.bullet_mass,
-            )?;
-            Some(samples)
-        } else {
-            None
-        };
+        // Generate sampled trajectory points if enabled (shared helper, MBA-1403)
+        let sampled_points = self.build_sampled_points(
+            &points,
+            max_height,
+            transonic_distances,
+            &mach_transitions,
+        )?;
 
         Ok(TrajectoryResult {
             max_range: last_point.position.x, // X is downrange

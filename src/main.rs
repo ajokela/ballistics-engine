@@ -647,6 +647,13 @@ enum Commands {
         #[arg(long, default_value = "10.0")]
         sample_interval: f64,
 
+        /// Which plane sampled drop values are referenced to (MBA-1403): 'los' (default)
+        /// measures drop perpendicular to the line of sight; 'target' reports drop as
+        /// vertical in the target plane (LOS drop scaled by 1/cos(shooting angle), JBM's
+        /// "target plane" reference) and relabels the sampled table/CSV drop column
+        #[arg(long, value_enum, default_value_t = DropsReferenceArg::Los)]
+        drops_reference: DropsReferenceArg,
+
         /// Enable pitch damping for transonic stability analysis
         #[arg(long)]
         enable_pitch_damping: bool,
@@ -2807,6 +2814,27 @@ enum AdjustmentUnit {
     Clicks,
 }
 
+/// CLI-facing mirror of `ballistics_engine::DropsReference` (MBA-1403), following the
+/// thin-`ValueEnum`-wrapper pattern of `RecoilFirearmTypeArg` so `cli_api` stays clap-free.
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
+enum DropsReferenceArg {
+    /// Drop measured perpendicular to the line of sight (the historical default)
+    #[default]
+    Los,
+    /// Drop measured vertically in the target plane: LOS-perpendicular drop scaled by
+    /// 1/cos(shooting angle), matching JBM's "target plane" reference
+    Target,
+}
+
+impl DropsReferenceArg {
+    fn to_engine(self) -> ballistics_engine::DropsReference {
+        match self {
+            DropsReferenceArg::Los => ballistics_engine::DropsReference::Los,
+            DropsReferenceArg::Target => ballistics_engine::DropsReference::Target,
+        }
+    }
+}
+
 /// Terminal chart renderer for `trajectory --plot` (MBA-1320). Bare `--plot` (no value)
 /// resolves to `Braille` via clap's `default_missing_value`; see the `plot` field on
 /// `Commands::Trajectory`.
@@ -3241,6 +3269,12 @@ struct TrajectoryConfig {
     // Sampling
     sample_trajectory: bool,
     sample_interval: f64,
+    // MBA-1403: which plane sampled drop values are referenced to. `Los` (the default) is
+    // byte-identical to historical output; `Target` scales sampled drop (and every
+    // downstream mil/moa conversion derived from it) by 1/cos(shooting_angle), relabels
+    // the sampled table/CSV drop column, and lets a supplied target height slope the
+    // sampler's LOS datum.
+    drops_reference: DropsReferenceArg,
 
     // Integration method
     use_rk4: bool,
@@ -5349,6 +5383,9 @@ fn solve_profile_for_dsf(
         wind_shear_model: "none".to_string(),
         enable_trajectory_sampling: false,
         sample_interval: 0.0,
+        // MBA-1403: sampler output-mode toggle; this profile-driven DSF solve never
+        // samples (enable_trajectory_sampling is false above), so LOS is inert here.
+        drops_reference: ballistics_engine::DropsReference::Los,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
         enable_aerodynamic_jump: false,
@@ -5551,6 +5588,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             enable_wind_shear,
             sample_trajectory,
             sample_interval,
+            drops_reference,
             enable_pitch_damping,
             enable_precession,
             use_cluster_bc,
@@ -6941,6 +6979,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 enable_precession,
                 sample_trajectory,
                 sample_interval,
+                drops_reference,
                 use_rk4: !use_euler,
                 use_rk45: !use_rk4_fixed,
                 twist_rate,
@@ -7138,6 +7177,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     wind_shear_model: if enable_wind_shear { wind_shear_model.as_engine_str().to_string() } else { "none".to_string() },
                                     enable_trajectory_sampling: sample_trajectory,
                                     sample_interval,
+                                    // MBA-1403: mirror the main solve so the local
+                                    // comparison leg samples in the same drops reference.
+                                    drops_reference: drops_reference.to_engine(),
                                     enable_pitch_damping,
                                     enable_precession_nutation: enable_precession,
                                     use_cluster_bc,
@@ -10250,6 +10292,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         enable_precession,
         sample_trajectory,
         sample_interval,
+        drops_reference,
         use_rk4,
         use_rk45,
         twist_rate,
@@ -10414,6 +10457,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         },
         enable_trajectory_sampling: sample_trajectory,
         sample_interval,
+        drops_reference: drops_reference.to_engine(),
         enable_pitch_damping,
         enable_precession_nutation: enable_precession,
         use_cluster_bc,
@@ -10716,9 +10760,16 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         UnitSystem::Metric => "m",
                         UnitSystem::Imperial => "in",
                     };
+                    // MBA-1403: the drop column header carries the active drops
+                    // reference (drop_target_in vs drop_in); drift is untouched. The
+                    // Los arm formats byte-identically to the historical header.
+                    let drop_col = match drops_reference {
+                        DropsReferenceArg::Los => format!("drop_{}", defl_unit),
+                        DropsReferenceArg::Target => format!("drop_target_{}", defl_unit),
+                    };
                     let header = format!(
-                        "distance_{},drop_{},drift_{},velocity_{},energy_{},time_s",
-                        dist_unit, defl_unit, defl_unit, vel_unit, energy_unit
+                        "distance_{},{},drift_{},velocity_{},energy_{},time_s",
+                        dist_unit, drop_col, defl_unit, vel_unit, energy_unit
                     );
                     // Mover ring (MBA-1325): extra column, header carries the unit; only
                     // emitted when --target-speed enabled it (additive, matches JSON).
@@ -11111,12 +11162,28 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         UnitSystem::Imperial => ("(yd)", "(in)", "(in)", "(fps)"),
                     };
 
-                    println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
-                    println!(
-                        "│ Dist{:4} │ Drop{:4} │Drift{:4} │ Vel{:5} │  Flags   │",
-                        dist_hdr, drop_hdr, drift_hdr, vel_hdr
-                    );
-                    println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+                    // MBA-1403: label the drop column with the active drops reference.
+                    // The target-plane variant needs a wider column for its label; the
+                    // LOS branch prints the historical header byte-identically.
+                    let target_drops = drops_reference == DropsReferenceArg::Target;
+                    if target_drops {
+                        println!("┌──────────┬───────────────────┬──────────┬──────────┬──────────┐");
+                        println!(
+                            "│ Dist{:4} │ {:>17} │Drift{:4} │ Vel{:5} │  Flags   │",
+                            dist_hdr,
+                            format!("Drop (target){}", drop_hdr),
+                            drift_hdr,
+                            vel_hdr
+                        );
+                        println!("├──────────┼───────────────────┼──────────┼──────────┼──────────┤");
+                    } else {
+                        println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
+                        println!(
+                            "│ Dist{:4} │ Drop{:4} │Drift{:4} │ Vel{:5} │  Flags   │",
+                            dist_hdr, drop_hdr, drift_hdr, vel_hdr
+                        );
+                        println!("├──────────┼──────────┼──────────┼──────────┼──────────┤");
+                    }
 
                     for sample in samples.iter() {
                         let dist_display =
@@ -11145,21 +11212,40 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             .collect::<Vec<_>>()
                             .join(",");
 
-                        println!(
-                            "│ {:>8.1} │ {:>8.2} │ {:>8.2} │ {:>8.1} │ {:8} │",
-                            dist_display,
-                            drop_display,
-                            drift_display,
-                            vel_display,
-                            if flags_str.is_empty() {
-                                "-"
-                            } else {
-                                &flags_str
-                            }
-                        );
+                        if target_drops {
+                            println!(
+                                "│ {:>8.1} │ {:>17.2} │ {:>8.2} │ {:>8.1} │ {:8} │",
+                                dist_display,
+                                drop_display,
+                                drift_display,
+                                vel_display,
+                                if flags_str.is_empty() {
+                                    "-"
+                                } else {
+                                    &flags_str
+                                }
+                            );
+                        } else {
+                            println!(
+                                "│ {:>8.1} │ {:>8.2} │ {:>8.2} │ {:>8.1} │ {:8} │",
+                                dist_display,
+                                drop_display,
+                                drift_display,
+                                vel_display,
+                                if flags_str.is_empty() {
+                                    "-"
+                                } else {
+                                    &flags_str
+                                }
+                            );
+                        }
                     }
 
-                    println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+                    if target_drops {
+                        println!("└──────────┴───────────────────┴──────────┴──────────┴──────────┘");
+                    } else {
+                        println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
+                    }
                 }
             }
 

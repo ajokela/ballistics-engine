@@ -276,6 +276,31 @@ pub struct ShotV1 {
         deserialize_with = "deserialize_present"
     )]
     pub zero_poi_right_m: Option<f64>,
+    /// Which plane sampled `drop_m` values are referenced to (MBA-1403). `"los"` (the
+    /// default when omitted) keeps the historical LOS-perpendicular drop byte-identically;
+    /// `"target"` reports drop as vertical in the target plane — the LOS-perpendicular
+    /// drop scaled by `1 / cos(shooting_angle_rad)` (JBM's "target plane" reference).
+    /// Output-mode toggle only: the solved trajectory, `windage_m`, the summary block and
+    /// zeroing semantics are unchanged, and there is no resolved-DTO echo (request-side
+    /// additive field — the response shape is unchanged).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub drops_reference: Option<DropsReferenceV1>,
+}
+
+/// Wire values for [`ShotV1::drops_reference`] (MBA-1403).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DropsReferenceV1 {
+    /// Drop measured perpendicular to the line of sight (the historical default).
+    #[default]
+    Los,
+    /// Drop measured vertically in the target plane: LOS-perpendicular drop scaled by
+    /// `1 / cos(shooting_angle_rad)`.
+    Target,
 }
 
 /// Atmospheric station conditions.
@@ -1198,6 +1223,7 @@ fn validate_shot(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "ground_threshold_m",
             "zero_poi_up_m",
             "zero_poi_right_m",
+            "drops_reference",
         ],
         &["max_range_m"],
     )?;
@@ -1217,7 +1243,13 @@ fn validate_shot(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "zero_poi_up_m",
             "zero_poi_right_m",
         ],
-    )
+    )?;
+    // MBA-1403: string enum, not a number — same shape-validation pattern as
+    // $.rifle.twist_direction.
+    if let Some(reference) = object.get("drops_reference") {
+        validate_string_enum(reference, "$.shot.drops_reference", &["los", "target"])?;
+    }
+    Ok(())
 }
 
 fn validate_atmosphere(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {

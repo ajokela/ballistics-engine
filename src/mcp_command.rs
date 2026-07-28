@@ -475,7 +475,8 @@ fn solve_input_schema() -> Value {
                     "target_height_m": {"type": "number"},
                     "ground_threshold_m": {"type": "number"},
                     "zero_poi_up_m": {"type": "number"},
-                    "zero_poi_right_m": {"type": "number"}
+                    "zero_poi_right_m": {"type": "number"},
+                    "drops_reference": {"type": "string", "enum": ["los", "target"]}
                 }
             },
             "atmosphere": {
