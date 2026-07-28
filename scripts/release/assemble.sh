@@ -12,6 +12,10 @@ for p in "${EXPECTED[@]}"; do
   [ -f "ballistics-$V-$p" ] || { echo "MISSING: ballistics-$V-$p"; missing=1; }
 done
 [ "$missing" = 0 ] || exit 1
+# Every producer (hosted CI, BSD VMs, fleet scripts) emits the two-space
+# "<hash>  <bare-filename>" form, so this verifies rather than erroring out on
+# format drift. If this ever fails with "no properly formatted lines", a producer
+# regressed - fix the producer, not this check.
 shasum -c ./*.sha256
 scripts_dir=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null || echo "$HOME/projects/ballistics-engine")
 "$scripts_dir/scripts/release/extract-notes.sh" "$V" > "/tmp/relnotes-$V.md"
