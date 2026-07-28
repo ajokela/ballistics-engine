@@ -69,6 +69,15 @@ pub struct FFIBallisticInputs {
     // range, METERS (MBA-1359, Kestrel "zero offset"): positive = impacts RIGHT by this much
     // at the zero distance. 0.0 if unset (identical to absent).
     pub zero_poi_horizontal: c_double,
+    // Appended (keeps existing field offsets): lateral sight-to-bore mount offset, METERS
+    // (MBA-1396, offset-mounted optics): positive = the sight sits RIGHT of the bore, so
+    // the trajectory starts that far LEFT of the line of sight. 0.0 if unset (identical to
+    // absent). NOTE for callers pairing ballistics_calculate_zero_angle with a trajectory
+    // call: the returned zero angle carries the VERTICAL zero_poi bias, but the horizontal
+    // terms are azimuth corrections a bare elevation angle cannot carry — a caller
+    // replicating an auto-zero flow must add
+    // (zero_poi_horizontal + sight_offset_lateral) / zero_distance to azimuth_angle itself.
+    pub sight_offset_lateral: c_double,
 }
 
 #[repr(C)]
@@ -175,6 +184,7 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.cant_angle = inputs.cant_angle;
     ballistic_inputs.zero_poi_vertical_m = inputs.zero_poi_vertical;
     ballistic_inputs.zero_poi_horizontal_m = inputs.zero_poi_horizontal;
+    ballistic_inputs.sight_offset_lateral_m = inputs.sight_offset_lateral;
     ballistic_inputs.use_rk4 = inputs.use_rk4 != 0;
     ballistic_inputs.use_adaptive_rk45 = inputs.use_adaptive_rk45 != 0;
     ballistic_inputs.bc_value = inputs.bc_value;
@@ -1233,6 +1243,7 @@ mod tests {
             cant_angle: 0.0,
             zero_poi_vertical: 0.0,
             zero_poi_horizontal: 0.0,
+            sight_offset_lateral: 0.0,
         }
     }
 

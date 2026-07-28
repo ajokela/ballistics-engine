@@ -191,6 +191,7 @@ them rather than silently claiming a distinct model.
 | `muzzle_height_m` | no | `0` | Bore height above the ground reference. |
 | `twist_rate_m_per_turn` | no | `0.3048` | Rifling travel per full turn. |
 | `twist_direction` | no | `right` | `left` or `right`. |
+| `sight_offset_lateral_m` | no | `0` | Lateral sight-to-bore mount offset (MBA-1396): positive = sight RIGHT of bore. The trajectory starts that far left of the sight line; with `zero_distance_m` the windage zero converges it onto the sight line at the zero range. Must be finite and smaller than 0.5 m in magnitude. No resolved-DTO echo; omitting it is byte-identical to requests that predate it, with no assumption notice for its absence. |
 
 ### `shot`
 

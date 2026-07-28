@@ -594,6 +594,13 @@ the rifle was zeroed. They must not be conflated:
 * **Zero POI offset** (`--zero-poi-up` / `--zero-poi-right`, MBA-1359) — an *angular zero
   state*: "my rifle is deliberately zeroed 0.1 in high / 0.2 in left AT the zero range"
   (sub-click zero error, suppressor on/off shift). Kestrel ZH/ZO semantics.
+* **Lateral sight offset** (`--sight-offset`, MBA-1396) — *physical mount geometry*: "my
+  optic sits 0.5 in right of the bore axis" (offset mounts, side-mounted clip-ons). The
+  windage counterpart of `--sight-height`.
+
+Both may be set together; their effects are additive and distinct — the POI offset shows
+up AT the zero range, while a converged mount offset contributes nothing there (see the
+convergence rule below).
 
 #### Deliberate Zero POI Offset (`--zero-poi-up`, `--zero-poi-right`)
 
@@ -627,6 +634,39 @@ device **click counts** without the device's click size. Pass
 `profile import <file> --zero-click 0.1mil` (or `0.25moa`, etc.) to convert them into the
 profile's zero POI offset at the file's zero distance; without `--zero-click` they remain
 reported as unmapped, exactly as before.
+
+#### Lateral Sight Offset (`--sight-offset`)
+
+Values are **inches** under imperial units and **millimeters** under metric (the same
+units as `--sight-height` — this is its windage counterpart), signed:
+
+* `--sight-offset 0.5` — the sight sits 0.5 in **RIGHT** of the bore axis.
+* `--sight-offset -20` (metric) — the sight sits 20 mm **LEFT** of the bore axis.
+
+This is physical mount geometry, present from the instant the bullet leaves the bore: the
+bullet starts `offset` LEFT of the sight line (for a sight right of bore). What happens
+next depends on whether a zero is solved:
+
+* **With a zero** (`--auto-zero`, or the zero every table command solves): the windage
+  zero converges the trajectory onto the sight line — an azimuth term of
+  `offset / zero distance` — so drift reads `-offset` at the muzzle, `0` at the zero
+  range, and continues right past it. This matches what AB Mobile, JBM, and Shooter
+  compute; it is **not** a constant parallel offset.
+* **Without a zero** (an explicit `--angle` flight, or `monte-carlo`, which solves no
+  zero): only the constant physical displacement applies — drift starts at `-offset` and
+  stays uncorrected. The flag's help text states this explicitly.
+
+```bash
+# Optic mounted 0.5" right of bore, zeroed at 100 yd:
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 --sight-offset 0.5 --max-range 600
+```
+
+Composes with `--cant` (the cant term swings the bore's sight-HEIGHT offset laterally;
+this flag adds the fixed mount displacement on top) and with the zero POI offsets above
+(angular zero state vs physical geometry — both azimuth terms share one convergence
+point in the zero solve). Saved profiles store it as `sight_offset_lateral_m` (always
+meters); the explicit CLI flag overrides the stored value.
 
 ### Canted Shooting
 

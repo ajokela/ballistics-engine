@@ -504,6 +504,9 @@ pub struct WezResult {
 /// * `cd_scale` — whole-curve multiplier on `custom_drag_table`'s interpolated Cd (MBA-1356);
 ///   `1.0` = neutral. Inert when `custom_drag_table` is `None`.
 /// * `cant` — rifle cant, DEGREES, positive = clockwise from the shooter.
+/// * `sight_offset_lateral_m` — lateral sight-to-bore mount offset, METERS, positive =
+///   sight right of bore (MBA-1396); displaces every sample's initial lateral position
+///   exactly like the trajectory command. `0.0` = neutral (byte-identical).
 ///
 /// A fixed, distinct seed per range step (`0x57_45_5A_00 ^ step_index`) keeps a sweep
 /// reproducible run-to-run while still drawing independent samples at each range.
@@ -535,6 +538,7 @@ pub fn compute_wez(
     custom_drag_table: Option<DragTable>,
     cd_scale: f64,
     cant: f64,
+    sight_offset_lateral_m: f64,
 ) -> Result<WezResult, Box<dyn Error>> {
     if !(wez_step > 0.0 && wez_step.is_finite()) {
         return Err("--wez-step must be a positive, finite distance".into());
@@ -557,6 +561,7 @@ pub fn compute_wez(
         custom_drag_table,
         cd_scale,
         cant_angle: cant.to_radians(),
+        sight_offset_lateral_m,
         ..Default::default()
     };
     let base_wind = WindConditions {

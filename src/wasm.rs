@@ -1208,6 +1208,9 @@ impl WasmBallistics {
         // --zero-poi-up/--zero-poi-right; only meaningful together with --auto-zero.
         let mut zero_poi_up: Option<f64> = None;
         let mut zero_poi_right: Option<f64> = None;
+        // MBA-1396: lateral sight-to-bore mount offset (inches imperial / mm metric,
+        // positive = sight RIGHT of bore). Mirrors native's --sight-offset.
+        let mut sight_offset: Option<f64> = None;
 
         // Parse arguments
         let mut i = 0;
@@ -1676,6 +1679,14 @@ impl WasmBallistics {
                     );
                     i += 1;
                 }
+                "--sight-offset" => {
+                    sight_offset = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid sight offset"))?,
+                    );
+                    i += 1;
+                }
                 // --units/-u (+ its value) is consumed globally in run_command, which
                 // pre-scans it to set the unit system before dispatch. Skip it here so
                 // it isn't rejected as an unknown flag (this is what blocked metric input).
@@ -1733,6 +1744,13 @@ impl WasmBallistics {
             inputs.zero_poi_horizontal_m = match units {
                 UnitSystem::Imperial => v * 0.0254, // inches to meters
                 UnitSystem::Metric => v * 0.01,     // centimeters to meters
+            };
+        }
+        // MBA-1396: lateral sight-mount offset — same in/mm units as --sight-height.
+        if let Some(v) = sight_offset {
+            inputs.sight_offset_lateral_m = match units {
+                UnitSystem::Imperial => v * 0.0254, // inches to meters
+                UnitSystem::Metric => v * 0.001,    // millimeters to meters
             };
         }
         // MBA-1135: mass-based length estimate (mirrors CLI/FFI), replacing the mass-blind
@@ -4361,6 +4379,7 @@ impl WasmBallistics {
             custom_drag_table,
             cd_scale,
             0.0, // cant
+            0.0, // sight_offset_lateral_m (not exposed on this surface, like cant)
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -6654,6 +6673,11 @@ Trajectory Command:
                                  bias; needs --auto-zero (MBA-1359)
     --zero-poi-right <OFFSET>    Deliberate POI offset AT the zero range (in/cm, signed;
                                  positive = impacts RIGHT); needs --auto-zero (MBA-1359)
+    --sight-offset <OFFSET>      Lateral sight-to-bore mount offset (in/mm, signed;
+                                 positive = sight RIGHT of bore, MBA-1396). Physical
+                                 mount geometry: drift starts offset left of the sight
+                                 line; with --auto-zero it converges to the sight line
+                                 at the zero range, without a zero it stays displaced
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
     --with-drag-coefficient      Add each point's effective drag coefficient to

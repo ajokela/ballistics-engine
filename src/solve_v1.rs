@@ -293,6 +293,9 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
         shooting_angle: resolved_request.shot.shooting_angle_rad,
         cant_angle: resolved_request.shot.cant_angle_rad,
         sight_height: resolved_request.rifle.sight_height_m,
+        // MBA-1396: consumed straight from the request (validated in resolve_rifle), no
+        // resolved-DTO echo — same contract as the zero-POI fields below.
+        sight_offset_lateral_m: request.rifle.sight_offset_lateral_m.unwrap_or(0.0),
         muzzle_height: resolved_request.rifle.muzzle_height_m,
         target_height: resolved_request.shot.target_height_m,
         // MBA-1359: consumed straight from the request (validated in resolve_shot). There is
@@ -431,6 +434,20 @@ fn resolve_rifle(
     }
     if let Some(value) = rifle.twist_rate_m_per_turn {
         require_positive("$.rifle.twist_rate_m_per_turn", value)?;
+    }
+    // MBA-1396: validated here but NOT resolved through `literal_default` — an absence
+    // notice would change the response bytes of every request that predates the field.
+    // Consumed directly into the engine inputs with no resolved-DTO echo (additive
+    // request-side field, response shape unchanged — the MBA-1397 tolerance rule).
+    if let Some(value) = rifle.sight_offset_lateral_m {
+        require_finite("$.rifle.sight_offset_lateral_m", value)?;
+        if value.abs() >= 0.5 {
+            return Err(invalid_value(
+                "$.rifle.sight_offset_lateral_m",
+                "lateral sight offset must be smaller than 0.5 m in magnitude (the \
+                 sight-to-bore mount offset, in meters)",
+            ));
+        }
     }
 
     let sight_height_m = literal_default(
@@ -1246,6 +1263,7 @@ mod tests {
                 muzzle_height_m: None,
                 twist_rate_m_per_turn: None,
                 twist_direction: None,
+                sight_offset_lateral_m: None,
             },
             shot: ShotV1 {
                 max_range_m: 1_000.0,

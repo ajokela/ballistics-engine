@@ -33,6 +33,7 @@ typedef struct {
     double cant_angle;      // appended (must match FFIBallisticInputs field order): rifle cant angle, radians
     double zero_poi_vertical;   // appended (must match FFIBallisticInputs field order): deliberate vertical POI offset at the zero range, meters, + = impacts high (MBA-1359)
     double zero_poi_horizontal; // appended (must match FFIBallisticInputs field order): deliberate horizontal POI offset at the zero range, meters, + = impacts right (MBA-1359)
+    double sight_offset_lateral;// appended (must match FFIBallisticInputs field order): lateral sight-to-bore mount offset, meters, + = sight right of bore (MBA-1396)
 } FFIBallisticInputs;
 
 typedef struct {
@@ -122,7 +123,8 @@ int main() {
         .shot_azimuth = 0.0,            // North; appended ABI field
         .cant_angle = 0.0,              // No cant; appended ABI field
         .zero_poi_vertical = 0.0,       // No deliberate zero POI offset; appended ABI field (MBA-1359)
-        .zero_poi_horizontal = 0.0      // No deliberate zero POI offset; appended ABI field (MBA-1359)
+        .zero_poi_horizontal = 0.0,     // No deliberate zero POI offset; appended ABI field (MBA-1359)
+        .sight_offset_lateral = 0.0     // Sight directly above the bore; appended ABI field (MBA-1396)
     };
 
     FFIWindConditions wind = {
