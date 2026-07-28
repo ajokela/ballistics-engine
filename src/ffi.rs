@@ -60,6 +60,15 @@ pub struct FFIBallisticInputs {
     // of sight, positive = clockwise from the shooter. Rotates the sight-frame aim offsets
     // and bore geometry ("zeroed level, fired canted" -> POI right and low). 0.0 if unset.
     pub cant_angle: c_double,
+    // Appended (keeps existing field offsets): deliberate vertical POI offset AT the zero
+    // range, METERS (MBA-1359, Kestrel "zero height"): positive = the rifle is deliberately
+    // zeroed to impact HIGH by this much at the zero distance. Applied by the zero-angle
+    // solve as an angular bias on the solved angle. 0.0 if unset (identical to absent).
+    pub zero_poi_vertical: c_double,
+    // Appended (keeps existing field offsets): deliberate horizontal POI offset AT the zero
+    // range, METERS (MBA-1359, Kestrel "zero offset"): positive = impacts RIGHT by this much
+    // at the zero distance. 0.0 if unset (identical to absent).
+    pub zero_poi_horizontal: c_double,
 }
 
 #[repr(C)]
@@ -164,6 +173,8 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     ballistic_inputs.azimuth_angle = inputs.azimuth_angle;
     ballistic_inputs.shot_azimuth = inputs.shot_azimuth;
     ballistic_inputs.cant_angle = inputs.cant_angle;
+    ballistic_inputs.zero_poi_vertical_m = inputs.zero_poi_vertical;
+    ballistic_inputs.zero_poi_horizontal_m = inputs.zero_poi_horizontal;
     ballistic_inputs.use_rk4 = inputs.use_rk4 != 0;
     ballistic_inputs.use_adaptive_rk45 = inputs.use_adaptive_rk45 != 0;
     ballistic_inputs.bc_value = inputs.bc_value;
@@ -1220,6 +1231,8 @@ mod tests {
             enable_coriolis: 0,
             shot_azimuth: 0.0,
             cant_angle: 0.0,
+            zero_poi_vertical: 0.0,
+            zero_poi_horizontal: 0.0,
         }
     }
 

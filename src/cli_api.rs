@@ -148,6 +148,21 @@ pub struct BallisticInputs {
     pub sight_height: f64,     // meters above bore
     pub muzzle_height: f64,    // meters above ground
     pub target_height: f64,    // meters above ground for zeroing
+    /// Deliberate vertical point-of-impact offset AT THE ZERO RANGE, meters (MBA-1359;
+    /// Kestrel "zero height" semantics): positive = the rifle is deliberately zeroed to
+    /// impact HIGH by this much at the zero distance. Applied POST-solve by
+    /// `calculate_and_set_zero_angle` as a constant angular bias of
+    /// `zero_poi_vertical_m / zero_distance` on the solved elevation — the zero trials
+    /// themselves always solve perfect convergence, and the small-angle addition is
+    /// identical in both zero target frames. 0.0 (the default) is byte-identical to
+    /// pre-MBA-1359 behavior.
+    pub zero_poi_vertical_m: f64,
+    /// Deliberate horizontal point-of-impact offset AT THE ZERO RANGE, meters (MBA-1359;
+    /// Kestrel "zero offset" semantics): positive = impacts RIGHT by this much at the
+    /// zero distance. Applied POST-solve as an azimuth bias of
+    /// `zero_poi_horizontal_m / zero_distance` when a zero is solved — see
+    /// [`BallisticInputs::windage_zero_bias_rad`]. 0.0 (the default) is neutral.
+    pub zero_poi_horizontal_m: f64,
     pub ground_threshold: f64, // meters below which to stop
 
     // Environmental conditions
@@ -241,6 +256,22 @@ impl BallisticInputs {
     /// See the field doc on [`BallisticInputs::humidity`] (MBA-722).
     pub fn humidity_percent(&self) -> f64 {
         (self.humidity * 100.0).clamp(0.0, 100.0)
+    }
+
+    /// Azimuth bias (radians) a zero solved at `zero_distance_m` applies to the launch
+    /// direction (MBA-1359): the deliberate horizontal POI offset at the zero range,
+    /// expressed as the equivalent small angle. `calculate_and_set_zero_angle` applies
+    /// this to its OWN solver's `azimuth_angle`; callers that copy a solved zero angle
+    /// onto separate flight inputs (the CLI/WASM auto-zero paths) must add this to their
+    /// flight `azimuth_angle` themselves — the returned elevation angle cannot carry it.
+    /// Returns exactly `0.0` when the offset is `0.0` or `zero_distance_m` is not
+    /// positive, so default inputs stay byte-identical.
+    pub fn windage_zero_bias_rad(&self, zero_distance_m: f64) -> f64 {
+        if zero_distance_m > 0.0 {
+            self.zero_poi_horizontal_m / zero_distance_m
+        } else {
+            0.0
+        }
     }
 
     /// Sectional density in lb/in²: `weight_grains / 7000 / diameter_in²`.
@@ -422,6 +453,8 @@ impl Default for BallisticInputs {
             sight_height: 0.05,
             muzzle_height: 0.0,       // Default 0 - height is in sight_height
             target_height: 0.0,       // Target at ground level by default
+            zero_poi_vertical_m: 0.0, // No deliberate POI offset at the zero range (MBA-1359)
+            zero_poi_horizontal_m: 0.0,
             ground_threshold: -100.0, // Effectively disable ground detection (allow bullet to drop 100m below start)
 
             // Environmental conditions
@@ -1049,7 +1082,21 @@ impl TrajectorySolver {
         frame: ZeroTargetFrame,
     ) -> Result<f64, BallisticsError> {
         let angle = self.find_zero_angle(target_distance_m, target_height_m, frame)?;
+        // MBA-1359: a deliberate POI offset at the zero range (Kestrel ZH/ZO) is an angular
+        // bias ON the solved angle, applied post-solve so the zero trials above still solve
+        // perfect convergence. The small-angle addition is frame-independent (identical in
+        // SightLine and WorldVertical), and with both offsets at their 0.0 defaults the
+        // additions below are exact no-ops (byte-identical). The returned angle carries the
+        // vertical bias so auto-zero callers that copy it onto flight inputs inherit it; the
+        // horizontal bias lands on THIS solver's azimuth_angle — separate flight inputs must
+        // add `windage_zero_bias_rad` themselves.
+        let angle = if target_distance_m > 0.0 {
+            angle + self.inputs.zero_poi_vertical_m / target_distance_m
+        } else {
+            angle
+        };
         self.inputs.muzzle_angle = angle;
+        self.inputs.azimuth_angle += self.inputs.windage_zero_bias_rad(target_distance_m);
         Ok(angle)
     }
 
@@ -1366,6 +1413,22 @@ impl TrajectorySolver {
         require_finite("shooting_angle", self.inputs.shooting_angle)?;
         require_finite("cant_angle", self.inputs.cant_angle)?;
         require_finite("muzzle_height", self.inputs.muzzle_height)?;
+
+        // MBA-1359: a deliberate zero POI offset is a small linear offset at the zero range
+        // (fractions of an inch to a few inches). |1 m| is far beyond any plausible
+        // deliberate offset and almost certainly a unit error (inches/cm passed as meters).
+        for (name, value) in [
+            ("zero_poi_vertical_m", self.inputs.zero_poi_vertical_m),
+            ("zero_poi_horizontal_m", self.inputs.zero_poi_horizontal_m),
+        ] {
+            require_finite(name, value)?;
+            if value.abs() >= 1.0 {
+                return Err(BallisticsError::from(format!(
+                    "{name} must be smaller than 1.0 m in magnitude (it is a linear POI \
+                     offset at the zero range, in meters)"
+                )));
+            }
+        }
 
         // Negative infinity is the documented ignore-ground sentinel. NaN and positive infinity
         // make the loop condition meaningless and are rejected.

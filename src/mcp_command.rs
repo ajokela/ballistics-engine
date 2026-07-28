@@ -472,7 +472,9 @@ fn solve_input_schema() -> Value {
                     "shooting_angle_rad": {"type": "number"},
                     "cant_angle_rad": {"type": "number"},
                     "target_height_m": {"type": "number"},
-                    "ground_threshold_m": {"type": "number"}
+                    "ground_threshold_m": {"type": "number"},
+                    "zero_poi_up_m": {"type": "number"},
+                    "zero_poi_right_m": {"type": "number"}
                 }
             },
             "atmosphere": {

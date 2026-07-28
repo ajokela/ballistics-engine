@@ -586,6 +586,48 @@ then save (or re-import) the profile with that corrected value rather than the r
 The `.a7p` wire format is implemented independently for interoperability;
 no third-party code is bundled.
 
+### Sight geometry and zero state
+
+Two related but deliberately distinct input families describe how the sight sits and how
+the rifle was zeroed. They must not be conflated:
+
+* **Zero POI offset** (`--zero-poi-up` / `--zero-poi-right`, MBA-1359) — an *angular zero
+  state*: "my rifle is deliberately zeroed 0.1 in high / 0.2 in left AT the zero range"
+  (sub-click zero error, suppressor on/off shift). Kestrel ZH/ZO semantics.
+
+#### Deliberate Zero POI Offset (`--zero-poi-up`, `--zero-poi-right`)
+
+Values are **inches** under imperial units and **centimeters** under metric, signed:
+
+* `--zero-poi-up 0.1` — the rifle is zeroed to impact 0.1 in **HIGH** at the zero range
+  (negative = low).
+* `--zero-poi-right -0.2` — zeroed to impact 0.2 in **LEFT** at the zero range
+  (positive = right).
+
+The offset is a *linear distance at the zero range*, converted once to the equivalent
+angular bias (`offset / zero distance`) and applied to the solved zero elevation and
+azimuth after the zero search converges — the standard Kestrel/AB "zero height / zero
+offset" model, not a re-zero. It therefore requires a zero solve to act on: pair it with
+`--auto-zero` (or a saved profile's zero) on `trajectory`, and it is accepted anywhere a
+zero is solved (`mpbr`, `come-ups`, `wind-card`, `range-table`, `compare`).
+
+```bash
+# Zeroed deliberately 0.1" high and 0.2" left at 100 yd:
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --auto-zero 100 --zero-poi-up 0.1 --zero-poi-right -0.2 --max-range 600
+```
+
+The whole solution shifts by the equivalent angle: ~0.1 in high at 100 yd becomes ~0.2 in
+at 200 yd, and the drift column carries the constant angular windage bias. Saved profiles
+store the offsets as `zero_poi_up_m` / `zero_poi_right_m` (always meters, regardless of
+the profile's display units); explicit CLI flags override the stored values.
+
+`.a7p` import: the ArcherBC2 format stores its zeroing state (`zero_x`/`zero_y`) as raw
+device **click counts** without the device's click size. Pass
+`profile import <file> --zero-click 0.1mil` (or `0.25moa`, etc.) to convert them into the
+profile's zero POI offset at the file's zero distance; without `--zero-click` they remain
+reported as unmapped, exactly as before.
+
 ### Canted Shooting
 
 Model a rifle that is zeroed level but *fired* with the scope/receiver rotated about the

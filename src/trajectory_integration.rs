@@ -366,6 +366,11 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         sight_height: 0.0,
         muzzle_height: 0.0,
         target_height: 0.0,
+        // MBA-1359: zero-POI offsets bias a ZERO SOLVE; this low-level kernel never solves
+        // a zero (callers hand it a finished launch state), so they are structurally inert
+        // here — same reasoning as cant_angle/shot_azimuth above.
+        zero_poi_vertical_m: 0.0,
+        zero_poi_horizontal_m: 0.0,
     };
 
     // MBA-955: pre-populate velocity-BC segments ONCE here, instead of get_bc_for_velocity

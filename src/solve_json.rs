@@ -243,6 +243,26 @@ pub struct ShotV1 {
         deserialize_with = "deserialize_present"
     )]
     pub ground_threshold_m: Option<f64>,
+    /// Deliberate vertical POI offset AT the zero range, meters (MBA-1359, Kestrel "zero
+    /// height"): positive = the rifle is deliberately zeroed to impact HIGH by this much at
+    /// `zero_distance_m`. Meaningful only when `zero_distance_m` is supplied. Omitted (the
+    /// default) is byte-identical to pre-MBA-1359 behavior; there is no resolved-DTO echo
+    /// (request-side additive field — the response shape is unchanged).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub zero_poi_up_m: Option<f64>,
+    /// Deliberate horizontal POI offset AT the zero range, meters (MBA-1359, Kestrel "zero
+    /// offset"): positive = impacts RIGHT by this much at `zero_distance_m`. Same contract
+    /// as `zero_poi_up_m`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub zero_poi_right_m: Option<f64>,
 }
 
 /// Atmospheric station conditions.
@@ -1157,6 +1177,8 @@ fn validate_shot(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "cant_angle_rad",
             "target_height_m",
             "ground_threshold_m",
+            "zero_poi_up_m",
+            "zero_poi_right_m",
         ],
         &["max_range_m"],
     )?;
@@ -1173,6 +1195,8 @@ fn validate_shot(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "cant_angle_rad",
             "target_height_m",
             "ground_threshold_m",
+            "zero_poi_up_m",
+            "zero_poi_right_m",
         ],
     )
 }

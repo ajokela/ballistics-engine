@@ -295,6 +295,11 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
         sight_height: resolved_request.rifle.sight_height_m,
         muzzle_height: resolved_request.rifle.muzzle_height_m,
         target_height: resolved_request.shot.target_height_m,
+        // MBA-1359: consumed straight from the request (validated in resolve_shot). There is
+        // deliberately no resolved-DTO echo — see resolve_shot's comment. The zero solve in
+        // solve_v1 runs on THIS solver, so both the vertical and azimuth biases apply there.
+        zero_poi_vertical_m: request.shot.zero_poi_up_m.unwrap_or(0.0),
+        zero_poi_horizontal_m: request.shot.zero_poi_right_m.unwrap_or(0.0),
         ground_threshold: resolved_request.shot.ground_threshold_m,
         altitude: resolved_request.atmosphere.altitude_m,
         temperature: temperature_c,
@@ -505,6 +510,27 @@ fn resolve_shot(
     ] {
         if let Some(value) = value {
             require_finite(path, value)?;
+        }
+    }
+
+    // MBA-1359: deliberate POI offset at the zero range (Kestrel ZH/ZO). Validated here but
+    // NOT resolved through `literal_default`: emitting an absence notice would change the
+    // response bytes of every request that predates these fields. They are consumed directly
+    // into the engine inputs and deliberately have no resolved-DTO echo (additive
+    // request-side field, response shape unchanged — the MBA-1397 tolerance rule).
+    for (path, value) in [
+        ("$.shot.zero_poi_up_m", shot.zero_poi_up_m),
+        ("$.shot.zero_poi_right_m", shot.zero_poi_right_m),
+    ] {
+        if let Some(value) = value {
+            require_finite(path, value)?;
+            if value.abs() >= 1.0 {
+                return Err(invalid_value(
+                    path,
+                    "zero POI offset must be smaller than 1.0 m in magnitude (a linear \
+                     point-of-impact offset at the zero range, in meters)",
+                ));
+            }
         }
     }
 
@@ -1231,6 +1257,8 @@ mod tests {
                 cant_angle_rad: None,
                 target_height_m: None,
                 ground_threshold_m: None,
+                zero_poi_up_m: None,
+                zero_poi_right_m: None,
             },
             atmosphere: AtmosphereV1::default(),
             wind: WindV1::default(),

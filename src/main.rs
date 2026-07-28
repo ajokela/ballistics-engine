@@ -544,6 +544,21 @@ enum Commands {
         #[arg(long)]
         auto_zero: Option<f64>,
 
+        /// Deliberate vertical POI offset AT the zero range (inches for imperial, cm for
+        /// metric; signed). Positive = the rifle is deliberately zeroed to impact HIGH by
+        /// this much at the zero distance (Kestrel "zero height" semantics, MBA-1359).
+        /// Applied as an angular bias on the solved zero; requires a zero solve
+        /// (--auto-zero or a profile zero) to have any effect.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_up: Option<f64>,
+
+        /// Deliberate horizontal POI offset AT the zero range (inches for imperial, cm for
+        /// metric; signed). Positive = impacts RIGHT by this much at the zero distance
+        /// (Kestrel "zero offset" semantics, MBA-1359). Applied as an azimuth bias when a
+        /// zero is solved; requires a zero solve to have any effect.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_right: Option<f64>,
+
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
         sight_height: Option<f64>,
@@ -1606,6 +1621,18 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
+        /// Deliberate vertical POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts HIGH). Same semantics as `trajectory --zero-poi-up`
+        /// (MBA-1359); biases every candidate zero the search solves.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_up: Option<f64>,
+
+        /// Deliberate horizontal POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts RIGHT). Same semantics as `trajectory
+        /// --zero-poi-right` (MBA-1359).
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_right: Option<f64>,
+
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
         temperature: Option<f64>,
@@ -1695,6 +1722,19 @@ enum Commands {
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long)]
         sight_height: Option<f64>,
+
+        /// Deliberate vertical POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts HIGH). Same semantics as `trajectory --zero-poi-up`
+        /// (MBA-1359); the come-up table is computed from the biased zero.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_up: Option<f64>,
+
+        /// Deliberate horizontal POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts RIGHT). Same semantics as `trajectory
+        /// --zero-poi-right` (MBA-1359). Accepted for a consistent flag set; come-ups has
+        /// no windage column, so it does not change this table.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_right: Option<f64>,
 
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
@@ -2086,6 +2126,19 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
+        /// Deliberate vertical POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts HIGH). Same semantics as `trajectory --zero-poi-up`
+        /// (MBA-1359); biases the zero the drift columns are computed against.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_up: Option<f64>,
+
+        /// Deliberate horizontal POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts RIGHT). Same semantics as `trajectory
+        /// --zero-poi-right` (MBA-1359); shifts every drift column by the equivalent
+        /// angular bias.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_right: Option<f64>,
+
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
         temperature: Option<f64>,
@@ -2240,6 +2293,19 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
+        /// Deliberate vertical POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts HIGH). Same semantics as `trajectory --zero-poi-up`
+        /// (MBA-1359); the Drop column is computed from the biased zero.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_up: Option<f64>,
+
+        /// Deliberate horizontal POI offset AT the zero range (inches imperial / cm metric;
+        /// signed; positive = impacts RIGHT). Same semantics as `trajectory
+        /// --zero-poi-right` (MBA-1359); shifts the Wind column by the equivalent angular
+        /// bias.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_right: Option<f64>,
+
         /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
         #[arg(long)]
         temperature: Option<f64>,
@@ -2334,6 +2400,18 @@ enum Commands {
         /// Sight height above bore (inches for imperial, mm for metric)
         #[arg(long, default_value = "1.5")]
         sight_height: f64,
+
+        /// Deliberate vertical POI offset AT the shared zero range (inches imperial /
+        /// cm metric; signed; positive = impacts HIGH). Same semantics as `trajectory
+        /// --zero-poi-up` (MBA-1359); applied identically to every compared load.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_up: Option<f64>,
+
+        /// Deliberate horizontal POI offset AT the shared zero range (inches imperial /
+        /// cm metric; signed; positive = impacts RIGHT). Same semantics as `trajectory
+        /// --zero-poi-right` (MBA-1359); applied identically to every compared load.
+        #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
+        zero_poi_right: Option<f64>,
 
         /// Temperature (F or C based on --units)
         #[arg(long)]
@@ -2554,6 +2632,15 @@ enum ProfileAction {
         /// Treat a checksum mismatch as a fatal error instead of a warning
         #[arg(long)]
         strict: bool,
+
+        /// The source device's scope click graduation, e.g. 0.1mil or 0.25moa (MBA-1359).
+        /// The .a7p format stores its zeroing state (`zero_x`/`zero_y`) as raw device
+        /// CLICK counts but does not store the device's click size, so without this flag
+        /// those fields cannot be converted and are reported as unmapped (unchanged
+        /// behavior). With it, the click counts are converted to a linear POI offset at
+        /// the file's zero distance and stored as the profile's zero POI offset fields.
+        #[arg(long, value_name = "CLICK")]
+        zero_click: Option<String>,
     },
 
     /// List all saved profiles
@@ -2810,6 +2897,19 @@ struct ProfileData {
     /// like `altitude` since it shares the same feet/meters convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     density_altitude: Option<f64>,
+    /// Deliberate vertical POI offset AT the zero range (MBA-1359, Kestrel "zero height"):
+    /// positive = the rifle is deliberately zeroed to impact HIGH by this much at the zero
+    /// distance. ALWAYS meters regardless of this profile's `units` field (same unit-fixed
+    /// convention as [`ProfileBcSegment::velocity_mps`]), so `converted_to` leaves it
+    /// untouched. `None` (the omitted-field default, and every profile saved before this
+    /// field existed) means no offset; an old reader silently drops it on re-save (the
+    /// `bc_segments` forward-compat pattern).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zero_poi_up_m: Option<f64>,
+    /// Deliberate horizontal POI offset AT the zero range (MBA-1359, Kestrel "zero
+    /// offset"): positive = impacts RIGHT. ALWAYS meters, like `zero_poi_up_m` above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zero_poi_right_m: Option<f64>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -3047,6 +3147,15 @@ struct TrajectoryConfig {
     ignore_ground_impact: bool,
     // Rifle cant, degrees (CLI boundary; converted to radians for BallisticInputs.cant_angle).
     cant: f64,
+    // MBA-1359: deliberate POI offset at the zero range (meters). Carried onto the flight
+    // inputs; when `zero_solve_distance_m` is Some, run_trajectory applies the horizontal
+    // offset as an azimuth bias (the vertical bias already rides inside `angle`, which the
+    // dispatch's zero solve returned biased).
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
+    // Some(zero distance, meters) iff the dispatch solved a zero at that distance
+    // (--auto-zero or a profile zero); None for an explicit --angle flight.
+    zero_solve_distance_m: Option<f64>,
 
     // BC options
     use_bc_segments: bool,
@@ -3795,6 +3904,11 @@ fn sanitize_profile_name(raw: &str) -> String {
 fn map_a7p_to_profile(
     doc: &ballistics_engine::profile_import::A7pDocument,
     name_override: Option<&str>,
+    // MBA-1359: the source device's scope click graduation (`--zero-click`). The .a7p
+    // format stores zeroing state as raw device click counts WITHOUT the click size, so
+    // this is the only way to convert `zero_x`/`zero_y` into a linear POI offset. `None`
+    // keeps the historical behavior (the click counts are reported as unmapped).
+    zero_click: Option<ballistics_engine::adjustment::ClickValue>,
 ) -> Result<A7pImportOutcome, String> {
     use ballistics_engine::profile_import::{A7pBcType, EnvelopeStatus};
     let src = &doc.profile;
@@ -4034,14 +4148,70 @@ fn map_a7p_to_profile(
             ),
         ));
     }
+    // MBA-1359: `zero_x`/`zero_y` are the device's zeroing state in CLICK counts x 1000
+    // (upstream a7p spec: "zeroing h-clicks / v-clicks for specific device"). The file does
+    // NOT carry the device's click size, so conversion is only possible when the user
+    // supplies it (`--zero-click`). Axis conventions, confirmed against upstream tooling
+    // (a7p's own CLI negates X on entry: `zero_x += round(x_offset * -1000)`,
+    // `zero_y += round(y_offset * 1000)`): user-facing right-offset clicks = -zero_x/1000,
+    // up-offset clicks = zero_y/1000. Linear offset at the zero range =
+    // clicks x (click size / adjustment_factor(base)) [radians] x zero distance [m].
+    let mut zero_poi_up_m: Option<f64> = None;
+    let mut zero_poi_right_m: Option<f64> = None;
     if src.zero_x_raw != 0 || src.zero_y_raw != 0 {
-        report.unmapped.push((
-            "zero_x / zero_y".to_string(),
-            format!(
-                "scope zeroing click offsets ({}, {}) — click state is not modeled",
-                src.zero_x_raw, src.zero_y_raw
-            ),
-        ));
+        match (zero_click, src.zero_distance_m) {
+            (Some(click), Some(zero_distance_m)) if zero_distance_m > 0.0 => {
+                let click_rad =
+                    click.size / ballistics_engine::adjustment::adjustment_factor(click.base);
+                let up_clicks = f64::from(src.zero_y_raw) / 1000.0;
+                let right_clicks = -f64::from(src.zero_x_raw) / 1000.0;
+                let up_m = up_clicks * click_rad * zero_distance_m;
+                let right_m = right_clicks * click_rad * zero_distance_m;
+                zero_poi_up_m = Some(up_m);
+                zero_poi_right_m = Some(right_m);
+                push(
+                    "zero_x / zero_y",
+                    format!(
+                        "({}, {}) raw = {:.2} right / {:.2} up device clicks",
+                        src.zero_x_raw, src.zero_y_raw, right_clicks, up_clicks
+                    ),
+                    format!(
+                        "POI {:.2} cm up / {:.2} cm right at {zero_distance_m:.0} m \
+                         (--zero-click {}{})",
+                        up_m * 100.0,
+                        right_m * 100.0,
+                        click.size,
+                        match click.base {
+                            ballistics_engine::adjustment::ClickBase::Mil => "mil",
+                            ballistics_engine::adjustment::ClickBase::Moa => "moa",
+                            ballistics_engine::adjustment::ClickBase::Smoa => "smoa",
+                        },
+                    ),
+                    "zero_poi_up_m + zero_poi_right_m",
+                );
+            }
+            (Some(_), _) => {
+                report.unmapped.push((
+                    "zero_x / zero_y".to_string(),
+                    format!(
+                        "scope zeroing click offsets ({}, {}) — the file stores no zero \
+                         distance, so --zero-click cannot convert them to a POI offset",
+                        src.zero_x_raw, src.zero_y_raw
+                    ),
+                ));
+            }
+            // No --zero-click: the historical report line, byte-identical (the .a7p
+            // format itself carries no click size to convert with).
+            (None, _) => {
+                report.unmapped.push((
+                    "zero_x / zero_y".to_string(),
+                    format!(
+                        "scope zeroing click offsets ({}, {}) — click state is not modeled",
+                        src.zero_x_raw, src.zero_y_raw
+                    ),
+                ));
+            }
+        }
     }
     if !src.distances_m.is_empty() {
         report.unmapped.push((
@@ -4133,6 +4303,10 @@ fn map_a7p_to_profile(
         // are used as-is unless the user later edits the saved profile with
         // `--density-altitude`.
         density_altitude: None,
+        // MBA-1359: populated only when --zero-click supplied a device click size to
+        // convert the file's zero_x/zero_y click counts with (see the mapping above).
+        zero_poi_up_m,
+        zero_poi_right_m,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -5059,6 +5233,9 @@ fn solve_profile_for_dsf(
         sight_height: sight_height_m,
         muzzle_height: bore_height_m,
         target_height: 0.0,
+        // MBA-1359: honor a stored zero POI offset when solving from a saved profile.
+        zero_poi_vertical_m: profile.zero_poi_up_m.unwrap_or(0.0),
+        zero_poi_horizontal_m: profile.zero_poi_right_m.unwrap_or(0.0),
         // Ground-impact detection ON (0.0), matching run_trajectory's default (Default::default()
         // otherwise leaves this at -100.0 = effectively disabled) — `dsf` has no
         // --ignore-ground-impact flag.
@@ -5130,6 +5307,9 @@ fn solve_profile_for_dsf(
             wind.clone(),
             atmosphere.clone(),
         )?;
+        // MBA-1359: the returned angle carries the vertical POI bias; the horizontal bias
+        // is an azimuth term the flight inputs must apply themselves. Exact no-op at 0.0.
+        inputs.azimuth_angle += inputs.windage_zero_bias_rad(zero_distance_m);
     }
 
     let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
@@ -5288,6 +5468,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             full,
             plot,
             auto_zero,
+            zero_poi_up,
+            zero_poi_right,
             sight_height,
             bore_height,
             ignore_ground_impact,
@@ -5767,6 +5949,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 bullet_length.or_else(|| saved_profile_data.as_ref().and_then(|p| p.bullet_length));
             let sight_height =
                 sight_height.or_else(|| saved_profile_data.as_ref().and_then(|p| p.sight_height));
+            // MBA-1359: deliberate POI offset at the zero range. The CLI flags (inches
+            // imperial / cm metric) win over the saved profile's stored values (which are
+            // ALWAYS meters — see ProfileData::zero_poi_up_m). 0.0 = no offset.
+            let zero_poi_vertical_metric = zero_poi_up
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| saved_profile_data.as_ref().and_then(|p| p.zero_poi_up_m))
+                .unwrap_or(0.0);
+            let zero_poi_horizontal_metric = zero_poi_right
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| saved_profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
+                .unwrap_or(0.0);
             let twist_rate =
                 twist_rate.or_else(|| saved_profile_data.as_ref().and_then(|p| p.twist_rate));
             // --twist-rate is mm/turn in metric and inches/turn in imperial, matching the
@@ -6540,6 +6733,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     use_cluster_bc,
                     custom_drag_table: custom_drag_table.clone(),
                     cd_scale,
+                    // MBA-1359: the returned zero angle carries the vertical POI bias; the
+                    // horizontal bias is re-derived for the flight inputs in run_trajectory
+                    // (the solved-angle copy cannot carry an azimuth term).
+                    zero_poi_vertical_m: zero_poi_vertical_metric,
+                    zero_poi_horizontal_m: zero_poi_horizontal_metric,
                     ..Default::default()
                 };
 
@@ -6642,6 +6840,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 bore_height: bore_height_metric,
                 ignore_ground_impact,
                 cant,
+                zero_poi_vertical_m: zero_poi_vertical_metric,
+                zero_poi_horizontal_m: zero_poi_horizontal_metric,
+                zero_solve_distance_m: final_auto_zero
+                    .map(|zd| UnitConverter::distance_to_metric(zd, cli.units)),
                 use_bc_segments: effective_use_bc_segments,
                 use_cluster_bc,
                 bc_segments_data: bc_segments_data.clone(),
@@ -6860,6 +7062,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     bc_type_str: None,
                                     custom_drag_table: custom_drag_table.clone(),
                                     cd_scale,
+                                    zero_poi_vertical_m: zero_poi_vertical_metric,
+                                    zero_poi_horizontal_m: zero_poi_horizontal_metric,
                                 };
 
                                 let local_wind = WindConditions {
@@ -6888,6 +7092,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             local_atmo.clone(),
                                         )?;
                                 }
+                                // MBA-1359: both branches are zeroed at zero_range_metric
+                                // (the --auto-zero branch inherits `muzzle_angle`, whose
+                                // vertical POI bias the dispatch's zero solve already
+                                // applied); the azimuth term must be applied to the flight
+                                // inputs directly. Exact no-op when the offset is 0.0.
+                                local_inputs.azimuth_angle +=
+                                    local_inputs.windage_zero_bias_rad(zero_range_metric);
 
                                 let mut local_solver =
                                     TrajectorySolver::new(local_inputs, local_wind, local_atmo);
@@ -8184,6 +8395,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             drag_model,
             vital_zone,
             sight_height,
+            zero_poi_up,
+            zero_poi_right,
             temperature,
             pressure,
             pressure_type,
@@ -8236,6 +8449,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (Some(profile), None) => parse_drag_model_arg(&profile.drag_model),
                 _ => drag_model,
             };
+            // MBA-1359: CLI flags (inches imperial / cm metric) win over the profile's
+            // stored SI values.
+            let zero_poi_vertical_m = zero_poi_up
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_up_m))
+                .unwrap_or(0.0);
+            let zero_poi_horizontal_m = zero_poi_right
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
+                .unwrap_or(0.0);
 
             handle_mpbr(
                 final_velocity,
@@ -8245,6 +8468,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 final_drag_model,
                 vital_zone,
                 final_sight_height,
+                zero_poi_vertical_m,
+                zero_poi_horizontal_m,
                 temperature,
                 pressure,
                 humidity,
@@ -8269,6 +8494,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             elevation_click_value,
             windage_click_value,
             sight_height,
+            zero_poi_up,
+            zero_poi_right,
             temperature,
             pressure,
             pressure_type,
@@ -8375,6 +8602,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     })
                 });
 
+            // MBA-1359: CLI flags (inches imperial / cm metric) win over the profile's
+            // stored SI values.
+            let zero_poi_vertical_m = zero_poi_up
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_up_m))
+                .unwrap_or(0.0);
+            let zero_poi_horizontal_m = zero_poi_right
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
+                .unwrap_or(0.0);
+
             handle_come_ups(
                 final_velocity,
                 final_bc,
@@ -8388,6 +8626,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 adjustment_unit,
                 elevation_click,
                 final_sight_height,
+                zero_poi_vertical_m,
+                zero_poi_horizontal_m,
                 temperature,
                 pressure,
                 humidity,
@@ -8784,6 +9024,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             adjustment_unit,
             windage_click_value,
             sight_height,
+            zero_poi_up,
+            zero_poi_right,
             temperature,
             pressure,
             pressure_type,
@@ -8890,6 +9132,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     (vec![90.0], true)
                 };
 
+            // MBA-1359: CLI flags (inches imperial / cm metric) win over the profile's
+            // stored SI values.
+            let zero_poi_vertical_m = zero_poi_up
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_up_m))
+                .unwrap_or(0.0);
+            let zero_poi_horizontal_m = zero_poi_right
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
+                .unwrap_or(0.0);
+
             handle_wind_card(
                 final_velocity,
                 final_bc,
@@ -8906,6 +9159,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 adjustment_unit,
                 windage_click,
                 final_sight_height,
+                zero_poi_vertical_m,
+                zero_poi_horizontal_m,
                 temperature,
                 pressure,
                 humidity,
@@ -8990,6 +9245,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             elevation_click_value,
             windage_click_value,
             sight_height,
+            zero_poi_up,
+            zero_poi_right,
             temperature,
             pressure,
             pressure_type,
@@ -9068,6 +9325,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => drag_model,
             };
 
+            // MBA-1359: CLI flags (inches imperial / cm metric) win over the profile's
+            // stored SI values.
+            let zero_poi_vertical_m = zero_poi_up
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_up_m))
+                .unwrap_or(0.0);
+            let zero_poi_horizontal_m = zero_poi_right
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .or_else(|| profile_data.as_ref().and_then(|p| p.zero_poi_right_m))
+                .unwrap_or(0.0);
+
             handle_range_table(
                 final_velocity,
                 final_bc,
@@ -9085,6 +9353,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 elevation_click,
                 windage_click,
                 final_sight_height,
+                zero_poi_vertical_m,
+                zero_poi_horizontal_m,
                 temperature,
                 pressure,
                 humidity,
@@ -9108,6 +9378,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             elevation_click_value,
             windage_click_value,
             sight_height,
+            zero_poi_up,
+            zero_poi_right,
             temperature,
             pressure,
             pressure_type,
@@ -9197,6 +9469,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err("--start must be less than --end".into());
             }
 
+            // MBA-1359: compare has no single profile, so the offsets come only from the
+            // explicit CLI flags (inches imperial / cm metric), applied to every load.
+            let zero_poi_vertical_m = zero_poi_up
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .unwrap_or(0.0);
+            let zero_poi_horizontal_m = zero_poi_right
+                .map(|v| zero_poi_display_to_metric(v, cli.units))
+                .unwrap_or(0.0);
+
             handle_compare(
                 compare_loads,
                 zero_distance,
@@ -9210,6 +9491,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 elevation_click,
                 windage_click,
                 sight_height,
+                zero_poi_vertical_m,
+                zero_poi_horizontal_m,
                 temperature,
                 pressure,
                 humidity,
@@ -9262,12 +9545,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // above, which are always reset to None here) — but a DSF table isn't
                     // something this command can express at all, so silently dropping it on
                     // every unrelated edit would be hostile. Carry it forward unless
-                    // `--clear-dsf` asked to drop it.
+                    // `--clear-dsf` asked to drop it. MBA-1359: the zero POI offsets are in
+                    // the same class (only `.a7p --zero-click` import or a hand edit can
+                    // produce them), so they are carried forward the same way.
+                    let existing_profile = load_profile(&name).ok();
                     let carried_dsf_points = if clear_dsf {
                         None
                     } else {
-                        load_profile(&name).ok().and_then(|p| p.dsf_points)
+                        existing_profile.as_ref().and_then(|p| p.dsf_points.clone())
                     };
+                    let carried_zero_poi_up_m =
+                        existing_profile.as_ref().and_then(|p| p.zero_poi_up_m);
+                    let carried_zero_poi_right_m =
+                        existing_profile.as_ref().and_then(|p| p.zero_poi_right_m);
 
                     // MBA-1355: validate click graduations at save time so a saved profile
                     // can never store a value `resolve_click_values` would later reject.
@@ -9315,6 +9605,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         bc_reference: bc_reference_profile_field(bc_reference),
                         pressure_reference: pressure_reference_profile_field(pressure_type),
                         density_altitude,
+                        zero_poi_up_m: carried_zero_poi_up_m,
+                        zero_poi_right_m: carried_zero_poi_right_m,
                     };
 
                     let path = save_profile(&profile)?;
@@ -9327,8 +9619,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     name,
                     dry_run,
                     strict,
+                    zero_click,
                 } => {
                     use ballistics_engine::profile_import::{parse_a7p, EnvelopeStatus};
+                    // MBA-1359: parse the device click graduation up front so a malformed
+                    // value fails before any file work.
+                    let zero_click: Option<ballistics_engine::adjustment::ClickValue> =
+                        match zero_click.as_deref() {
+                            Some(raw) => Some(
+                                ballistics_engine::adjustment::parse_click_value(raw)
+                                    .map_err(|e| format!("--zero-click: {e}"))?,
+                            ),
+                            None => None,
+                        };
                     let bytes = fs::read(&file)
                         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
                     let doc = parse_a7p(&bytes)
@@ -9354,7 +9657,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         sanitized
                     });
-                    let outcome = map_a7p_to_profile(&doc, sanitized_name.as_deref())?;
+                    let outcome =
+                        map_a7p_to_profile(&doc, sanitized_name.as_deref(), zero_click)?;
                     print!("{}", render_import_report(&outcome.report));
                     if dry_run {
                         println!("\nDry run — nothing saved.");
@@ -9799,6 +10103,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         bore_height,
         ignore_ground_impact,
         cant,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
+        zero_solve_distance_m,
         use_bc_segments,
         use_cluster_bc,
         ref bc_segments_data,
@@ -9884,7 +10191,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     let drag_model_enum = drag_model;
     let wind_direction_rad = wind_direction.to_radians();
 
-    let inputs = BallisticInputs {
+    let mut inputs = BallisticInputs {
         // Core ballistics parameters
         bc_value: bc,
         bc_type: drag_model_enum,
@@ -9904,6 +10211,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         sight_height,
         muzzle_height: bore_height, // Bore height above ground from --bore-height CLI option
         target_height: 0.0,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
         ground_threshold: if ignore_ground_impact {
             f64::NEG_INFINITY
         } else {
@@ -9984,6 +10293,15 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         custom_drag_table: custom_drag_table.clone(),
         cd_scale,
     };
+
+    // MBA-1359: when the dispatch solved a zero, the muzzle angle above already carries the
+    // vertical POI bias (the zero solve returned it biased), but an angle copy cannot carry
+    // the horizontal bias — re-derive the azimuth term here, exactly as
+    // calculate_and_set_zero_angle applies it to its own solver. Exact no-op when the
+    // offset is 0.0 or no zero was solved.
+    if let Some(zero_distance_m) = zero_solve_distance_m {
+        inputs.azimuth_angle += inputs.windage_zero_bias_rad(zero_distance_m);
+    }
 
     // Set up wind conditions
     let wind = WindConditions {
@@ -13752,6 +14070,10 @@ fn build_trajectory_components(
     // a saved profile — see handle_come_ups/handle_lead for the callers that do.
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    // MBA-1359: deliberate POI offset at the zero range (meters), carried on the inputs so
+    // the zero solves that reuse these components inherit it. 0.0 = no offset.
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
 ) -> (BallisticInputs, WindConditions, AtmosphericConditions) {
     let drag_model_enum = drag_model;
     let wind_direction_rad = wind_direction.to_radians();
@@ -13767,6 +14089,8 @@ fn build_trajectory_components(
         muzzle_angle: 0.0,
         target_distance: max_range,
         sight_height,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
         altitude,
         temperature,
         pressure,
@@ -13832,6 +14156,14 @@ fn run_sampled_trajectory(
     // every call site except come-ups (the only sampled-trajectory command with a DSF
     // auto-apply story so far).
     dsf_table: Option<&DsfTable>,
+    // MBA-1359: deliberate POI offset at the zero range (meters) plus the distance the
+    // caller's zero solve used (Some iff a zero was solved). The vertical offset already
+    // rides inside `zero_angle_rad` (the zero solve returns it biased); the horizontal
+    // offset becomes an azimuth bias here, exactly as calculate_and_set_zero_angle applies
+    // it to its own solver. (0.0, 0.0, _) and (_, _, None) are exact no-ops.
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
+    zero_solve_distance_m: Option<f64>,
 ) -> Result<Vec<trajectory_sampling::TrajectorySample>, Box<dyn Error>> {
     let (mut inputs, wind, atmosphere) = build_trajectory_components(
         velocity,
@@ -13850,8 +14182,13 @@ fn run_sampled_trajectory(
         sample_interval,
         bc_segments_data,
         custom_drag_table,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
     );
     inputs.muzzle_angle = zero_angle_rad;
+    if let Some(zero_distance_m) = zero_solve_distance_m {
+        inputs.azimuth_angle += inputs.windage_zero_bias_rad(zero_distance_m);
+    }
 
     let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
     solver.set_max_range(max_range);
@@ -13880,6 +14217,15 @@ fn run_sampled_trajectory(
     Ok(samples)
 }
 
+/// MBA-1359: convert a `--zero-poi-up`/`--zero-poi-right` CLI value (inches for imperial,
+/// centimeters for metric — Kestrel-style small POI offsets) to meters.
+fn zero_poi_display_to_metric(value: f64, units: UnitSystem) -> f64 {
+    match units {
+        UnitSystem::Imperial => value * 0.0254, // inches -> meters
+        UnitSystem::Metric => value * 0.01,     // centimeters -> meters
+    }
+}
+
 /// Resolve bullet parameters: CLI arg overrides profile value
 fn resolve_param(
     cli_val: Option<f64>,
@@ -13902,6 +14248,10 @@ fn handle_mpbr(
     drag_model: DragModel,
     vital_zone: f64,   // in user units (inches or cm)
     sight_height: f64, // in user units
+    // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
+    // CLI-over-profile and converted by the dispatch). Biases every candidate zero.
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -13950,6 +14300,8 @@ fn handle_mpbr(
             bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
             sight_height: sight_height_m,
             use_rk4: true,
+            zero_poi_vertical_m,
+            zero_poi_horizontal_m,
             ..Default::default()
         };
 
@@ -13996,6 +14348,9 @@ fn handle_mpbr(
             None,
             None,
             None,
+            zero_poi_vertical_m,
+            zero_poi_horizontal_m,
+            Some(test_zero_m),
         ) {
             Ok(s) => s,
             Err(_) => {
@@ -14066,6 +14421,8 @@ fn handle_mpbr(
         bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
         ..Default::default()
     };
 
@@ -14103,6 +14460,9 @@ fn handle_mpbr(
         None,
         None,
         None,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
+        Some(best_zero_m),
     )?;
 
     // Find near zero crossing (first time trajectory crosses from below LOS to above)
@@ -14284,6 +14644,10 @@ fn handle_come_ups(
     // command's dispatch — see resolve_click_values); None otherwise.
     elevation_click: Option<ClickValue>,
     sight_height: f64,
+    // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
+    // CLI-over-profile and converted by the dispatch).
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -14331,6 +14695,8 @@ fn handle_come_ups(
         use_bc_segments: bc_segments_data.is_some(),
         bc_segments_data: bc_segments_data.clone(),
         custom_drag_table: custom_drag_table.clone(),
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
         ..Default::default()
     };
 
@@ -14369,6 +14735,9 @@ fn handle_come_ups(
         bc_segments_data,
         custom_drag_table,
         dsf_table.as_ref(),
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
+        Some(zero_distance_m),
     )?;
 
     // Build output rows at the requested range intervals
@@ -15206,6 +15575,9 @@ fn handle_lead(
         step_m,
         bc_segments_data,
         custom_drag_table,
+        // MBA-1359: `lead` solves no zero, so a zero POI offset has nothing to bias here.
+        0.0,
+        0.0,
     );
 
     // Powder temperature (MBA-1325): identical resolution to `run_trajectory` so a
@@ -15493,6 +15865,10 @@ fn handle_wind_card(
     // `resolve_single_axis_click_value`.
     windage_click: Option<ClickValue>,
     sight_height: f64,
+    // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
+    // CLI-over-profile and converted by the dispatch).
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -15524,6 +15900,8 @@ fn handle_wind_card(
         bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
         ..Default::default()
     };
 
@@ -15595,6 +15973,9 @@ fn handle_wind_card(
                 None,
                 None,
                 None,
+                zero_poi_vertical_m,
+                zero_poi_horizontal_m,
+                Some(zero_distance_m),
             )?;
 
             for (ri, &range_display) in ranges.iter().enumerate() {
@@ -15953,6 +16334,10 @@ fn handle_range_table(
     elevation_click: Option<ClickValue>,
     windage_click: Option<ClickValue>,
     sight_height: f64,
+    // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
+    // CLI-over-profile and converted by the dispatch).
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -15985,6 +16370,8 @@ fn handle_range_table(
         bullet_length: fallback_bullet_length_m(diameter_m, mass_kg),
         sight_height: sight_height_m,
         use_rk4: true,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
         ..Default::default()
     };
 
@@ -16025,6 +16412,9 @@ fn handle_range_table(
         None,
         None,
         None,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
+        Some(zero_distance_m),
     )?;
 
     // Run trajectory WITHOUT wind (for pure drop)
@@ -16047,6 +16437,9 @@ fn handle_range_table(
         None,
         None,
         None,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
+        Some(zero_distance_m),
     )?;
 
     // Build output rows. MBA-1410: Drop is the elevation axis, Wind the (possibly
@@ -16323,6 +16716,10 @@ fn handle_compare(
     elevation_click: Option<ClickValue>,
     windage_click: Option<ClickValue>,
     sight_height: f64,
+    // MBA-1359: deliberate POI offset at the zero range, METERS (converted by the
+    // dispatch). Shared conditions like sight_height: applied identically to every load.
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
     temperature: f64,
     pressure: f64,
     humidity: f64,
@@ -16389,6 +16786,8 @@ fn handle_compare(
             use_bc_segments: load.bc_segments_data.is_some(),
             bc_segments_data: load.bc_segments_data.clone(),
             custom_drag_table: load.custom_drag_table.clone(),
+            zero_poi_vertical_m,
+            zero_poi_horizontal_m,
             ..Default::default()
         };
         let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
@@ -16419,6 +16818,9 @@ fn handle_compare(
             load.bc_segments_data.clone(),
             load.custom_drag_table.clone(),
             None,
+            zero_poi_vertical_m,
+            zero_poi_horizontal_m,
+            Some(zero_distance_m),
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
         let no_wind_samples = run_sampled_trajectory(
@@ -16440,6 +16842,9 @@ fn handle_compare(
             load.bc_segments_data.clone(),
             load.custom_drag_table.clone(),
             None,
+            zero_poi_vertical_m,
+            zero_poi_horizontal_m,
+            Some(zero_distance_m),
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
 
@@ -16798,6 +17203,8 @@ mod profile_unit_tests {
             bc_reference: None,
             pressure_reference: None,
             density_altitude: None,
+            zero_poi_up_m: None,
+            zero_poi_right_m: None,
         }
     }
 
@@ -17092,6 +17499,33 @@ mod profile_unit_tests {
         assert_eq!(serde_json::to_string(&after).unwrap(), before);
     }
 
+    /// MBA-1359: the zero POI offset fields are unit-FIXED (always meters, like
+    /// `ProfileBcSegment::velocity_mps`), so they must round-trip through serde untouched,
+    /// stay omitted when absent, and survive a unit flip bit-identically.
+    #[test]
+    fn zero_poi_fields_round_trip_and_survive_unit_conversion_untouched() {
+        // Absent: old profiles deserialize as None and re-serialize without the keys.
+        let profile = metric_profile();
+        assert_eq!(profile.zero_poi_up_m, None);
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(!json.contains("zero_poi_up_m") && !json.contains("zero_poi_right_m"));
+
+        // Present: round-trips, and converted_to leaves the SI values untouched.
+        let profile = ProfileData {
+            zero_poi_up_m: Some(0.00254),
+            zero_poi_right_m: Some(-0.00508),
+            ..metric_profile()
+        };
+        let reloaded: ProfileData =
+            serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
+        assert_eq!(reloaded.zero_poi_up_m, Some(0.00254));
+        assert_eq!(reloaded.zero_poi_right_m, Some(-0.00508));
+
+        let imperial = reloaded.converted_to(UnitSystem::Imperial).unwrap();
+        assert_eq!(imperial.zero_poi_up_m, Some(0.00254));
+        assert_eq!(imperial.zero_poi_right_m, Some(-0.00508));
+    }
+
     #[test]
     fn converted_profile_keeps_explicit_cli_precedence() {
         let profile = Some(metric_profile().converted_to(UnitSystem::Imperial).unwrap());
@@ -17235,7 +17669,7 @@ mod a7p_import_mapping_tests {
     #[test]
     fn maps_g1_profile_to_metric_profiledata() {
         let doc = parse_a7p(&barnes_338_file(0)).unwrap();
-        let outcome = map_a7p_to_profile(&doc, None).unwrap();
+        let outcome = map_a7p_to_profile(&doc, None, None).unwrap();
         let p = &outcome.profile;
         assert_eq!(p.name, "338LM_BARNES 300"); // sanitized
         assert_eq!(p.units, "metric");
@@ -17293,7 +17727,7 @@ mod a7p_import_mapping_tests {
     #[test]
     fn name_override_is_applied() {
         let doc = parse_a7p(&barnes_338_file(0)).unwrap();
-        let outcome = map_a7p_to_profile(&doc, Some("my-338")).unwrap();
+        let outcome = map_a7p_to_profile(&doc, Some("my-338"), None).unwrap();
         assert_eq!(outcome.profile.name, "my-338");
     }
 
@@ -17302,7 +17736,7 @@ mod a7p_import_mapping_tests {
         // bc_type=2 (CUSTOM) reinterprets the same three coef rows as (Cd, Mach) pairs
         // instead of (BC, velocity m/s) — see barnes_338_file's row comment.
         let doc = parse_a7p(&barnes_338_file(2)).unwrap();
-        let outcome = map_a7p_to_profile(&doc, None).unwrap();
+        let outcome = map_a7p_to_profile(&doc, None, None).unwrap();
         let p = &outcome.profile;
 
         assert_eq!(p.drag_model, "CUSTOM");
@@ -17347,14 +17781,14 @@ mod a7p_import_mapping_tests {
         let mut payload = Vec::new();
         enc_bytes(1, &p, &mut payload);
         let doc = parse_a7p(&wrap_payload(&payload)).unwrap();
-        let err = map_a7p_to_profile(&doc, None).unwrap_err();
+        let err = map_a7p_to_profile(&doc, None, None).unwrap_err();
         assert!(err.contains("CUSTOM drag curve is invalid"), "{err}");
     }
 
     #[test]
     fn g7_maps_and_report_renders() {
         let doc = parse_a7p(&barnes_338_file(1)).unwrap();
-        let outcome = map_a7p_to_profile(&doc, None).unwrap();
+        let outcome = map_a7p_to_profile(&doc, None, None).unwrap();
         assert_eq!(outcome.profile.drag_model, "G7");
         let rendered = render_import_report(&outcome.report);
         assert!(rendered.contains("muzzle velocity"));
@@ -17369,7 +17803,7 @@ mod a7p_import_mapping_tests {
         let mut payload = Vec::new();
         enc_bytes(1, &p, &mut payload);
         let doc = parse_a7p(&wrap_payload(&payload)).unwrap();
-        let err = map_a7p_to_profile(&doc, None).unwrap_err();
+        let err = map_a7p_to_profile(&doc, None, None).unwrap_err();
         assert!(err.contains("no BC rows"), "{err}");
     }
 }
@@ -17527,6 +17961,8 @@ mod adjustment_unit_tests {
                 bc_reference: None,
                 pressure_reference: None,
                 density_altitude: None,
+                zero_poi_up_m: None,
+                zero_poi_right_m: None,
             }
         }
 
@@ -18116,6 +18552,8 @@ mod wind_angle_unit_tests {
             100.0,
             None,
             None,
+            0.0,
+            0.0,
         );
 
         assert!((inputs.wind_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
