@@ -12,6 +12,9 @@ or a CI job. Codified from the 0.29.0/0.30.0 releases, which were driven by hand
 3. **Approve/triage**: watch the pipeline; re-run red jobs (netbsd guest-net flake
    clears on retry); run `verify-channels.sh X.Y.Z` last. Red verify = not released.
 
+Asset count alone is not proof: 29 can hide a duplicate plus a gap. Check each of
+the 13 platforms is present exactly once.
+
 ## Platform matrix (13)
 
 | Where | Platforms | How |
@@ -38,6 +41,26 @@ MIPS). This is non-negotiable: stale binaries have shipped-adjacent twice.
 6. npm: passkey-gated, human-only until an automation token / OIDC trusted publishing
    is set up.
 7. `verify-channels.sh X.Y.Z` — the release is done when this exits 0, not before.
+
+## What the first automated release (0.30.1) taught
+
+- **The three fleet jobs SERIALIZE.** One runner, one job slot: k3s-bsds + riscv +
+  mips run back to back (~3.5 h), not in parallel. Plan the wall clock accordingly,
+  or add a second runner label.
+- **A partial fleet run does NOT need a rebuild.** Artifacts persist on a cluster
+  volume reachable through the long-lived `artifacts-reader-*` pod:
+  `kubectl exec`/`kubectl cp` from `/workspace/artifacts/ballistics-engine/v<tag>/`.
+  This is how freebsd+openbsd survived a cancelled run intact.
+- **Re-running one BSD: delete the stuck k8s Job first.** Two guests of the same OS
+  must never co-schedule on orangepi5-max. Then
+  `make bsd-build PROJECT=ballistics-engine OS=<os> MODE=release REF=vX.Y.Z RELEASE_TAG=vX.Y.Z VERSION=X.Y.Z`.
+- **The cluster BSD builds emit a BARE 64-hex digest, no filename**, which
+  `shasum -c`/`sha256sum -c` reject outright. Normalize to `<hash>  <file>` before
+  verifying or uploading. Everything else (hosted, riscv, mips) already emits the
+  two-space form; the release must be uniform.
+- **npm lives in the wasm-pack output dir** that `deploy-wasm.sh` writes:
+  `cd /tmp/wasm-X.Y.Z && npm publish` (after `npm login`; it is passkey-gated).
+  Publish older versions first so `latest` ends up on the newest.
 
 ## Standing gotchas (hard-won; do not relearn)
 
