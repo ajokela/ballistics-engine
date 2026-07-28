@@ -11060,6 +11060,27 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 }
             }
 
+            // MBA-1395: equivalent horizontal range (BDC shoot-to) for inclined shots —
+            // the flat range whose angular correction, against the SAME zero, matches
+            // the inclined solution's. Printed only when a look angle is set AND a zero
+            // was solved (a BDC shoot-to is meaningless without a zero); inside the zero
+            // range or with a negative correction the inverse is ill-defined and the
+            // line is deliberately omitted. Flat shots emit nothing — byte-identical.
+            if shooting_angle != 0.0 {
+                if let Some(zero_m) = zero_solve_distance_m {
+                    if let Some(ehr_m) =
+                        solver.equivalent_horizontal_range(result.max_range, zero_m)
+                    {
+                        let ehr_display = UnitConverter::distance_from_metric(ehr_m, units);
+                        println!();
+                        println!(
+                            "Equivalent horizontal range: {:.0} {} (shoot-to for BDC)",
+                            ehr_display, range_unit
+                        );
+                    }
+                }
+            }
+
             if full && !result.points.is_empty() {
                 println!();
                 println!("Trajectory Points:");

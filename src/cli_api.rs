@@ -1412,6 +1412,126 @@ impl TrajectorySolver {
         })
     }
 
+    /// Equivalent horizontal range for an inclined shot (MBA-1395): the flat-fire range
+    /// whose ANGULAR elevation correction — relative to the SAME dialed zero — equals the
+    /// inclined solution's angular correction at `target_range_m`. This is the
+    /// "shoot-to" range SIG BDX (AMR), Leica (EHR), and Gunwerks BR2 report so users of
+    /// fixed BDC turrets/reticles can dial as if the shot were flat, computed by an
+    /// inverse lookup over one flat re-solve (McDonald's Sierra inclined-fire treatment /
+    /// Litz) rather than the rifleman's-rule cosine approximation, which matches LINEAR
+    /// drop and accumulates error at long range.
+    ///
+    /// The solver's current state IS the inclined solution: `muzzle_angle` carries the
+    /// solved zero and `shooting_angle` the look angle. The flat reference clones the
+    /// solver and zeroes only `shooting_angle` (the WASM auto-zero flat-clone precedent),
+    /// keeping the zero, wind, atmosphere, and integration configuration identical, so
+    /// both angular corrections are measured against the same zero.
+    ///
+    /// Returns `None` where the inverse is ill-defined instead of guessing:
+    /// - `target_range_m <= zero_distance_m` (inside the zero, no BDC correction exists);
+    /// - the inclined correction at the target is not positive (bullet at/above the LOS);
+    /// - either solve fails, or the flat solve cannot bracket the correction.
+    ///
+    /// Past the zero range the flat correction is monotone in range, so a plain bisection
+    /// over the flat solve's interpolated corrections converges; the answer is refined to
+    /// centimeter level, far below any display precision.
+    pub fn equivalent_horizontal_range(
+        &self,
+        target_range_m: f64,
+        zero_distance_m: f64,
+    ) -> Option<f64> {
+        if !target_range_m.is_finite() || !zero_distance_m.is_finite() {
+            return None;
+        }
+        if target_range_m <= zero_distance_m || target_range_m <= 0.0 {
+            return None;
+        }
+
+        // Height of the bullet path at a downrange distance, linearly interpolated
+        // between integration points (mirrors zero_trial_height_at's interpolation).
+        // In the shot frame the LOS is the x-axis, so drop below the LOS is
+        // `los_height - y` for the inclined and flat solves alike.
+        fn path_y_at(points: &[TrajectoryPoint], distance_m: f64) -> Option<f64> {
+            let mut previous: Option<(f64, f64)> = None;
+            for point in points {
+                if point.position.x >= distance_m {
+                    return Some(match previous {
+                        None => point.position.y,
+                        Some((prev_x, prev_y)) => {
+                            let span = point.position.x - prev_x;
+                            if span <= 0.0 {
+                                point.position.y
+                            } else {
+                                let fraction = (distance_m - prev_x) / span;
+                                prev_y + fraction * (point.position.y - prev_y)
+                            }
+                        }
+                    });
+                }
+                previous = Some((point.position.x, point.position.y));
+            }
+            None
+        }
+
+        // Inclined solution's angular correction at the target (radians, small-angle:
+        // drop below the LOS divided by range). Sampling is display-side only — turn it
+        // off in both internal solves.
+        let mut inclined = self.clone();
+        inclined.inputs.enable_trajectory_sampling = false;
+        let inclined_result = inclined.solve().ok()?;
+        let los_height = inclined_result.line_of_sight_height_m;
+        let inclined_drop = los_height - path_y_at(&inclined_result.points, target_range_m)?;
+        let correction = inclined_drop / target_range_m;
+        if correction <= 0.0 {
+            return None;
+        }
+
+        // One flat re-solve against the same zero.
+        let mut flat = self.clone();
+        flat.inputs.enable_trajectory_sampling = false;
+        flat.inputs.shooting_angle = 0.0;
+        let flat_result = flat.solve().ok()?;
+        let flat_correction_at = |range_m: f64| -> Option<f64> {
+            Some((los_height - path_y_at(&flat_result.points, range_m)?) / range_m)
+        };
+
+        // Bracket, then bisect. Gravity's along-LOS component only shrinks under a look
+        // angle, so the flat correction at the true range bounds the inclined one from
+        // above and the equivalent range lies in (zero_distance, target_range]. The flat
+        // clone can strike the ground SHORT of the inclined terminal (an uphill shot
+        // stays airborne longer), so the upper bracket is additionally capped at the
+        // flat solve's own terminal distance — the shoot-to range is shorter than the
+        // true range, so the cap does not exclude the root.
+        let flat_terminal_m = flat_result.points.last().map(|p| p.position.x)?;
+        let mut low = zero_distance_m.max(1.0);
+        let mut high = target_range_m.min(flat_terminal_m);
+        if high <= low {
+            return None;
+        }
+        if flat_correction_at(low)? - correction > 0.0 {
+            return None; // no bracket below
+        }
+        if flat_correction_at(high)? - correction < 0.0 {
+            return None; // no bracket above (correction not reachable flat)
+        }
+        for _ in 0..60 {
+            let mid = 0.5 * (low + high);
+            let error = flat_correction_at(mid)? - correction;
+            if error.abs() == 0.0 {
+                return Some(mid);
+            }
+            if error < 0.0 {
+                low = mid;
+            } else {
+                high = mid;
+            }
+            if high - low < 0.01 {
+                break;
+            }
+        }
+        Some(0.5 * (low + high))
+    }
+
     /// Reject malformed state before it reaches an integration loop.
     ///
     /// `new` resolves powder-temperature velocity overrides and refreshes the imperial mirror

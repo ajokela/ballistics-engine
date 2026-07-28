@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Equivalent horizontal range (BDC shoot-to) for inclined shots** (MBA-1395). When a
+  look angle is set and a zero was solved, `trajectory` prints one summary line —
+  `Equivalent horizontal range: X yd (shoot-to for BDC)` — on the native CLI and the
+  WASM terminal, and solve-json v1 gains `summary.equivalent_horizontal_range_m`
+  (absent when undefined). Definition: the flat-fire range whose ANGULAR elevation
+  correction against the same zero matches the inclined solution's (SIG AMR / Leica
+  EHR / Gunwerks style; McDonald/Litz angular-match inversion over one extra flat
+  re-solve), deliberately not the rifleman's-rule cosine approximation. Omitted for
+  flat shots (byte-identical), targets at/inside the zero range, and non-positive
+  corrections. New public API `TrajectorySolver::equivalent_horizontal_range`.
 - **Drops-reference toggle: LOS vs target plane** (MBA-1403). New
   `--drops-reference {los|target}` on `trajectory` (native CLI and the WASM terminal)
   plus the solve-json v1 request field `shot.drops_reference`. `los` (the default) keeps

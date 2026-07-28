@@ -412,6 +412,13 @@ Summary fields have fixed evaluation frames:
 - `spin_drift_m` is the signed gyroscopic spin-drift contribution at the terminal sample, positive
   to the shooter's right. It excludes wind drift and is absent when enhanced spin drift is disabled
   or cannot be calculated.
+- `equivalent_horizontal_range_m` (MBA-1395) is the flat-fire range whose angular elevation
+  correction — against the same solved zero — matches the inclined solution's at the terminal
+  range: the BDC "shoot-to" range (SIG AMR / Leica EHR / Gunwerks style). It is defined by
+  angular match over a flat re-solve, not the rifleman's-rule cosine approximation. Present only
+  when `shot.shooting_angle_rad` is nonzero, a `zero_distance_m` was solved, and the inverse is
+  well-defined (terminal range past the zero range with a positive correction); absent otherwise,
+  so flat solves and pre-existing requests serialize byte-identically.
 
 `summary.termination` is one of `max_range`, `ground_threshold`, `time_limit`, or
 `velocity_floor`. The solve service must populate it from explicit termination metadata returned

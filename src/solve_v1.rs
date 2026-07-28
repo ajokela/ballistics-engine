@@ -182,6 +182,19 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         ));
     }
 
+    // MBA-1395: equivalent horizontal range (BDC shoot-to) — computed only for an
+    // inclined shot fired against a solved zero; None (field absent) otherwise, keeping
+    // every flat/pre-existing response byte-identical. The solver still holds the
+    // inclined, zeroed state here, so the angular-match inversion runs against the same
+    // zero the response describes.
+    let equivalent_horizontal_range_m = match (
+        zero_distance_m,
+        prepared.resolved_request.shot.shooting_angle_rad != 0.0,
+    ) {
+        (Some(zero_m), true) => solver.equivalent_horizontal_range(terminal.distance_m, zero_m),
+        _ => None,
+    };
+
     let summary = SolveSummaryV1 {
         actual_range_m: terminal.distance_m,
         maximum_height_m,
@@ -190,6 +203,7 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         terminal_energy_j: terminal.energy_j,
         stability_factor,
         spin_drift_m,
+        equivalent_horizontal_range_m,
         termination: termination_to_wire(result.termination),
     };
 

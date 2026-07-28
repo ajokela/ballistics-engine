@@ -2525,6 +2525,33 @@ impl WasmBallistics {
                         ));
                     }
                 }
+                // MBA-1395: equivalent horizontal range (BDC shoot-to) for inclined
+                // shots — table-only, pipe-free, and appended AFTER the row block, so it
+                // sits outside the ballistics.rs terminal chart parser's row format
+                // (the parser stops at "Max Range:"). Emitted only when a look angle is
+                // set AND --auto-zero solved a zero; ill-defined cases (target inside
+                // the zero range, non-positive correction) print nothing, and flat
+                // shots are byte-identical.
+                if inputs.shooting_angle != 0.0 && matches!(output_format, OutputFormat::Table) {
+                    if let Some(zero_distance) = auto_zero {
+                        let zero_distance_m = match units {
+                            UnitSystem::Imperial => zero_distance * 0.9144,
+                            UnitSystem::Metric => zero_distance,
+                        };
+                        if let Some(ehr_m) =
+                            solver.equivalent_horizontal_range(result.max_range, zero_distance_m)
+                        {
+                            let (ehr_display, ehr_unit) = match units {
+                                UnitSystem::Imperial => (ehr_m / 0.9144, "yd"),
+                                UnitSystem::Metric => (ehr_m, "m"),
+                            };
+                            combined.push_str(&format!(
+                                "\nEquivalent horizontal range: {:.0} {} (shoot-to for BDC)\n",
+                                ehr_display, ehr_unit
+                            ));
+                        }
+                    }
+                }
                 // MBA-1337 p3: table-only chart append, mirroring the native CLI's
                 // --plot block (72x12 cells; drop then lateral drift vs range). JSON
                 // and CSV stay pure machine output.
