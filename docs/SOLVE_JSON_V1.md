@@ -53,13 +53,27 @@ and deserializes only that integer.
 
 All objects reject unknown fields. A producer must therefore emit only fields documented for v1,
 and a consumer must not silently reinterpret a v1 field. Removing a field, changing a unit or
-sign, renaming an enum value, or changing a field's meaning requires a new schema version.
+sign, renaming an enum value, or changing a field's meaning requires a new schema version — these
+are the invariants v1 guarantees and they hold absolutely.
 
-The complete v1 wire surface is immutable: field names, JSON types, requiredness, omission and
-default behavior, units, sign/frame conventions, enum values, error and notice codes, and request
-and response object shapes cannot change under `schema_version: 1`. Because the response DTOs also
-reject unknown fields, even an additive wire-field change requires a v2 schema rather than a
-silent v1 extension.
+v1 does, however, grow by ADDITION under two strict rules, so that a feature need not force a
+whole new schema:
+
+1. A new REQUEST field must be optional and default to the exact pre-existing behavior when
+   omitted. Every request valid before the field remains valid and produces identical results
+   (`zero_poi_up_m`, `zero_poi_right_m`, `sight_offset_lateral_m`, `drops_reference`,
+   `wind_reference` were added this way).
+2. A new RESPONSE field must be omitted whenever its feature is inactive, so a response that does
+   not exercise the feature is byte-identical to one produced before the field existed
+   (`reticle_hold` appears only when the request carries a `reticle` block).
+
+Consumers must therefore tolerate response fields they do not recognize (ignore, do not reject) if
+they want to parse across engine versions; a consumer that pins a response DTO with
+`deny_unknown_fields` is pinning an engine version, not the v1 contract. **One documented
+exception to rule 2:** `summary.equivalent_horizontal_range_m` (MBA-1395) appears on any inclined
+shot (`shooting_angle_rad != 0`) without an explicit opt-in, because an incline-corrected shoot-to
+range is meaningful exactly when a look angle is set. A strict consumer that must reject unknown
+fields will see this on inclined-shot responses; flat-fire responses are unaffected.
 
 Object member order, indentation, insignificant whitespace, human-readable diagnostic messages,
 the engine version string, and the exact decimal spelling of floating-point values are not wire
