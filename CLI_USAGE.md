@@ -2497,6 +2497,86 @@ alone — for the same reason turret click graduations are left alone.
   recompile. `marks_len` is bounds-checked against `MAX_FFI_RETICLE_MARKS` before a single
   element is read.
 
+### Reticle/BDC Inverse Solvers — MBA-1362
+
+Three read-only solvers over an existing load. All three share **one** drop-vs-range
+helper — a single solved, finely sampled angular-drop curve with a forward lookup and a
+monotone bisection inverse — so none of them can disagree with the others (or with
+`reticle hold --range`) about what "the drop at 500 yards" is. They are CLI-only this
+train; WASM parity is a tracked follow-up.
+
+#### `mark-to-range` — what range is this mark good for?
+
+The inverse of a come-up table (Nightforce / Nikon Spot On / Swarovski / TRACT).
+
+```bash
+ballistics mark-to-range --mark 2 --mark 4 --mark 6 --mark 8 \
+  --focal-plane sfp --reference-mag 12 --mag 8 \
+  -v 2700 -b 0.475 -m 168 -d 0.308 --zero-distance 100
+```
+
+Each subtension is converted to TRUE angular for the focal plane and magnification in use
+(FFP: unchanged; SFP: `nominal × reference-mag ÷ mag`), then the range where angular drop
+equals it is found by bisection past the far zero — the only interval on which drop-vs-range
+is monotone. Each mark reports its range, time of flight, remaining velocity and energy.
+
+**Marks that do not map to a range are reported, never dropped**, so the table always has
+one row per mark and the reticle's usable limits are visible:
+
+- `not_a_holdover` — a subtension at or above the optical center. Angular drop is exactly
+  zero at the far zero and only grows past it, so these correspond to ranges *inside* the
+  zero, where the relationship is not single-valued.
+- `beyond_max_range` — the load's drop never grows that far within `--max-range`, and the
+  row says what the deepest reachable hold actually is.
+
+`--reticle-json <FILE>` takes the subtensions, focal plane and reference magnification from
+a description instead of `--mark` flags. Marks on the vertical stadium are all used
+(including any above center, which come back as `not_a_holdover`); the optical center and
+off-axis windage marks are excluded, and their count is printed.
+
+#### `bdc-match` — what magnification makes this BDC reticle fit?
+
+The Zeiss Rapid-Z question, and **second focal plane only** — an FFP reticle's subtensions
+do not depend on magnification, so no magnification fits better than another, and the
+command says so rather than returning a meaningless number.
+
+```bash
+ballistics bdc-match --mark-range 2:300 --mark-range 4:500 --mark-range 6:700 \
+  --reference-mag 12 -v 2700 -b 0.475 -m 168 -d 0.308 --zero-distance 100
+```
+
+Each `--mark-range MIL:RANGE` is a mark's etched subtension and the range it is meant to
+hit; at least two are required. The apparent subtension of mark *i* at magnification *M* is
+`s_i × reference_mag ÷ M`, so substituting `u = reference_mag ÷ M` makes the residual
+linear in `u` and the best fit is the ordinary least-squares slope through the origin,
+`u* = Σ(s_i·t_i) ÷ Σ(s_i²)`. It is closed form — exact, deterministic, and independent of
+any starting guess. The report gives the fitted magnification, the per-mark residuals, and
+a **warning above `--residual-warn`** (default 0.2 mil) saying in plain words that the
+reticle does not fit the load at any magnification and the answer is the least-bad
+compromise, not a calibration.
+
+#### `optimal-zero` — one zero for a whole stage
+
+GeoBallistics HDZ class. Unlike `mpbr`, which sizes one vital zone around one zero, this
+balances a specific list of ranges against each other.
+
+```bash
+ballistics optimal-zero --target 200:10 --target 400:12 --target 600:18 \
+  -v 2700 -b 0.475 -m 168 -d 0.308
+```
+
+`--target RANGE[:HEIGHT]` is repeatable, 2 to 16 entries; HEIGHT is the target's full
+vertical size (inches imperial / cm metric) and falls back to `--vital` when omitted. The
+search minimizes, over zero distance, the LARGEST hold any target needs — a golden-section
+search over a bracketed zero range with fixed constants, so the answer is reproducible
+bit for bit. The report gives the optimal zero, every target's hold, the signed miss a
+dead-center hold would produce (positive = the bullet lands low), and whether each target
+is inside its vital zone.
+
+Targets are sorted by range internally, so the answer does not depend on the order they
+were typed in. A correct min-max solution equalizes the extremes: the nearest and furthest
+targets end up needing the same magnitude of hold in opposite directions.
+
 ### DSF (Drop-Scale-Factor) Truing
 
 `dsf` is the second stage of Applied Ballistics' two-stage truing workflow (MBA-1357).
