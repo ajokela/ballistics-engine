@@ -68,6 +68,12 @@ fuzz_target!(|data: &[u8]| {
         enable_coriolis: 0,
         shot_azimuth: 0.0,
         cant_angle: 0.0,
+        // New 0.31.0 geometry inputs (MBA-1359/1396). Pinned to 0.0 like the other
+        // geometry fields above — this target fuzzes step-size/range robustness, not
+        // sight geometry, and the FFI mapping of these fields is still exercised.
+        zero_poi_vertical: 0.0,
+        zero_poi_horizontal: 0.0,
+        sight_offset_lateral: 0.0,
     };
     // Mix the exact invalid boundary classes with the documented valid band. `step_size` is
     // milliseconds; invalid/sub-minimum values must return null without starting integration.
