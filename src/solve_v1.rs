@@ -207,6 +207,13 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         termination: termination_to_wire(result.termination),
     };
 
+    // MBA-1361: a pure post-processing read of the samples above — it cannot change the
+    // trajectory, and `None` (no `reticle` block) keeps the response byte-identical.
+    let reticle_hold = match request.reticle.as_ref() {
+        Some(reticle) => Some(resolve_reticle_hold(reticle, &samples)?),
+        None => None,
+    };
+
     let success = SolveSuccessV1 {
         schema_version: SchemaVersionV1,
         engine_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -216,6 +223,7 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         warnings: prepared.warnings,
         summary,
         samples,
+        reticle_hold,
     };
     success.validate_for_serialization()?;
     Ok(success)
@@ -1199,6 +1207,87 @@ fn map_observation_error(error: TrajectoryObservationError) -> SolveErrorEnvelop
     }
 }
 
+/// Evaluate a request's reticle hold against the already-sampled trajectory (MBA-1361).
+///
+/// The angular drop/windage come from the SAME samples the response reports, linearly
+/// interpolated at `range_m`, so the hold and the sample rows can never describe different
+/// trajectories. Angles use the milliradian small-angle definition (1 mil subtends 1/1000
+/// of the range) — the same conversion every other surface uses.
+///
+/// A range outside the sampled span is a structured [`SolveErrorCodeV1::InvalidValue`], not
+/// a clamp or an extrapolation: a hold read off a trajectory that never got there is a
+/// fabricated number.
+fn resolve_reticle_hold(
+    request: &crate::solve_json::ReticleRequestV1,
+    samples: &[TrajectorySampleV1],
+) -> Result<crate::solve_json::ReticleHoldV1, SolveErrorEnvelopeV1> {
+    use crate::reticle::hold_point_in_reticle;
+
+    let path = "$.reticle.range_m";
+    let range_m = request.range_m;
+    if !range_m.is_finite() || range_m <= 0.0 {
+        return Err(invalid_value(
+            path,
+            "reticle.range_m must be finite and greater than zero",
+        ));
+    }
+    let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
+        return Err(internal_error(
+            "trajectory sampling produced no points to read a reticle hold from",
+        ));
+    };
+    if range_m < first.distance_m || range_m > last.distance_m {
+        return Err(invalid_value(
+            path,
+            format!(
+                "reticle.range_m {range_m} is outside the sampled trajectory ({} to {} m)",
+                first.distance_m, last.distance_m
+            ),
+        ));
+    }
+
+    let index = samples
+        .partition_point(|s| s.distance_m < range_m)
+        .min(samples.len() - 1);
+    let (lo, hi) = if index == 0 {
+        (&samples[0], &samples[0])
+    } else {
+        (&samples[index - 1], &samples[index])
+    };
+    let span = hi.distance_m - lo.distance_m;
+    let t = if span.abs() < f64::EPSILON {
+        0.0
+    } else {
+        (range_m - lo.distance_m) / span
+    };
+    let lerp = |a: f64, b: f64| a + (b - a) * t;
+    let drop_mil = lerp(lo.drop_m, hi.drop_m) / range_m * 1000.0;
+    let wind_mil = lerp(lo.windage_m, hi.windage_m) / range_m * 1000.0;
+
+    let hold = hold_point_in_reticle(
+        drop_mil,
+        wind_mil,
+        request.magnification,
+        &request.description,
+    )
+    .map_err(|e| invalid_value("$.reticle", e.to_string()))?;
+
+    let nearest = hold
+        .nearest_mark
+        .and_then(|index| request.description.marks.get(index));
+    Ok(crate::solve_json::ReticleHoldV1 {
+        range_m,
+        magnification: request.magnification,
+        down_mil: hold.down_mil,
+        right_mil: hold.right_mil,
+        mark_scale: hold.mark_scale,
+        nearest_mark_index: hold.nearest_mark,
+        nearest_mark_label: nearest.and_then(|mark| mark.label.clone()),
+        nearest_mark_distance_mil: hold.nearest_mark_distance_mil,
+        off_reticle: hold.off_reticle,
+    })
+}
+
 fn solve_failed(error: BallisticsError) -> SolveErrorEnvelopeV1 {
     solve_failed_message(error.to_string())
 }
@@ -1362,6 +1451,7 @@ mod tests {
             solver: SolverV1::default(),
             effects: EffectsV1::default(),
             sampling: SamplingV1::default(),
+            reticle: None,
         }
     }
 

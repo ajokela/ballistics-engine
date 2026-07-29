@@ -1209,6 +1209,138 @@ pub extern "C" fn ballistics_density_altitude_altitude_m(
     crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).0
 }
 
+/// Largest `marks_len` [`ballistics_hold_point_in_reticle`] will accept (MBA-1361).
+///
+/// Mirrors [`MAX_FFI_DRAG_TABLE_LEN`] and exists for the same reason (MBA-1407): the
+/// export copies a caller-owned array whose length it cannot otherwise verify, so an
+/// unbounded `len` would let one call request a multi-gigabyte read. It is also
+/// [`crate::reticle::MAX_RETICLE_MARKS`], so the C ABI and the Rust API reject the same
+/// inputs. Real reticles carry tens of marks; a dense tree carries a few hundred.
+pub const MAX_FFI_RETICLE_MARKS: c_int = crate::reticle::MAX_RETICLE_MARKS as c_int;
+
+/// `focal_plane` value selecting a FIRST-focal-plane reticle (subtensions constant across
+/// magnification). Any value other than [`FFI_RETICLE_SECOND_FOCAL_PLANE`] is treated as FFP.
+pub const FFI_RETICLE_FIRST_FOCAL_PLANE: c_int = 0;
+/// `focal_plane` value selecting a SECOND-focal-plane reticle (subtensions scale as
+/// `reference_magnification / magnification`).
+pub const FFI_RETICLE_SECOND_FOCAL_PLANE: c_int = 1;
+
+/// [`ballistics_hold_point_in_reticle`] succeeded and `out` was written.
+pub const FFI_RETICLE_OK: c_int = 0;
+/// A null pointer, or a `marks_len` outside `1..=`[`MAX_FFI_RETICLE_MARKS`].
+pub const FFI_RETICLE_ERR_INVALID_ARGUMENT: c_int = -1;
+/// `magnification` was not finite and greater than zero.
+pub const FFI_RETICLE_ERR_MAGNIFICATION: c_int = -2;
+/// A second-focal-plane call carried a non-finite or non-positive `reference_magnification`.
+pub const FFI_RETICLE_ERR_REFERENCE_MAGNIFICATION: c_int = -3;
+/// A mark coordinate, or the supplied firing solution, was not finite.
+pub const FFI_RETICLE_ERR_NON_FINITE: c_int = -4;
+
+/// Where a firing solution lands in a reticle (MBA-1361).
+///
+/// A NEW appended struct — no existing `repr(C)` layout is touched by this addition, so
+/// existing callers need no recompile. All angles are milliradians from the optical
+/// center; `down` is positive BELOW center and `right` is positive to the shooter's
+/// RIGHT (see [`crate::reticle`] for the full convention block).
+#[repr(C)]
+pub struct FFIReticleHold {
+    /// True angular milliradians below center. Equals the supplied `drop_mil`.
+    pub down_mil: c_double,
+    /// True angular milliradians right of center. Equals the supplied `wind_mil`.
+    pub right_mil: c_double,
+    /// Index of the nearest mark in the caller's array, or `-1` when there is none
+    /// (unreachable today: an empty mark array is rejected before the search).
+    pub nearest_mark: c_int,
+    /// Distance from the hold to that mark, milliradians, measured in TRUE angular space
+    /// (i.e. after second-focal-plane scaling).
+    pub nearest_mark_distance_mil: c_double,
+    /// `1` when the hold falls outside the marks' bounding box grown by 20% of its span
+    /// per axis, `0` otherwise.
+    pub off_reticle: c_int,
+    /// The subtension scale applied to the marks: `reference_magnification / magnification`
+    /// for a second-focal-plane reticle, exactly `1.0` for first focal plane.
+    pub mark_scale: c_double,
+}
+
+/// Place an angular firing solution in a reticle (MBA-1361).
+///
+/// `marks` is a FLAT array of `2 * marks_len` doubles laid out as
+/// `[down_0, right_0, down_1, right_1, ...]` in NOMINAL milliradians (as etched; for a
+/// second-focal-plane reticle that means "true at `reference_magnification`").
+/// `focal_plane` is [`FFI_RETICLE_FIRST_FOCAL_PLANE`] or
+/// [`FFI_RETICLE_SECOND_FOCAL_PLANE`]; `reference_magnification` is consulted only in the
+/// second-focal-plane case.
+///
+/// Returns [`FFI_RETICLE_OK`] and writes `out` on success, or one of the negative
+/// `FFI_RETICLE_ERR_*` codes, in which case `out` is left untouched.
+///
+/// # Safety
+///
+/// `marks` must point to at least `2 * marks_len` readable `double`s and `out` to one
+/// writable [`FFIReticleHold`]. `marks_len` is validated against
+/// `1..=`[`MAX_FFI_RETICLE_MARKS`] BEFORE any element is read (MBA-1407 lesson: the
+/// bound is the only thing standing between a caller typo and an out-of-range read).
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_hold_point_in_reticle(
+    drop_mil: c_double,
+    wind_mil: c_double,
+    magnification: c_double,
+    marks: *const c_double,
+    marks_len: c_int,
+    focal_plane: c_int,
+    reference_magnification: c_double,
+    out: *mut FFIReticleHold,
+) -> c_int {
+    use crate::reticle::{
+        hold_point_in_reticle, FocalPlane, MarkKind, ReticleDescription, ReticleError, ReticleMark,
+    };
+
+    if marks.is_null() || out.is_null() || !(1..=MAX_FFI_RETICLE_MARKS).contains(&marks_len) {
+        return FFI_RETICLE_ERR_INVALID_ARGUMENT;
+    }
+    let count = marks_len as usize;
+    // Length validated above, so this read stays inside the caller's declared array.
+    let flat = unsafe { std::slice::from_raw_parts(marks, count * 2) };
+
+    let description = ReticleDescription {
+        name: String::new(),
+        focal_plane: if focal_plane == FFI_RETICLE_SECOND_FOCAL_PLANE {
+            FocalPlane::Second
+        } else {
+            FocalPlane::First
+        },
+        reference_magnification,
+        marks: flat
+            .chunks_exact(2)
+            .map(|pair| ReticleMark::new(pair[0], pair[1], MarkKind::Dot))
+            .collect(),
+    };
+
+    let hold = match hold_point_in_reticle(drop_mil, wind_mil, magnification, &description) {
+        Ok(hold) => hold,
+        Err(ReticleError::NonPositiveMagnification { .. }) => return FFI_RETICLE_ERR_MAGNIFICATION,
+        Err(ReticleError::NonPositiveReferenceMagnification { .. }) => {
+            return FFI_RETICLE_ERR_REFERENCE_MAGNIFICATION
+        }
+        Err(ReticleError::NonFiniteMark { .. }) | Err(ReticleError::NonFiniteHold { .. }) => {
+            return FFI_RETICLE_ERR_NON_FINITE
+        }
+        Err(_) => return FFI_RETICLE_ERR_INVALID_ARGUMENT,
+    };
+
+    unsafe {
+        *out = FFIReticleHold {
+            down_mil: hold.down_mil,
+            right_mil: hold.right_mil,
+            nearest_mark: hold.nearest_mark.map_or(-1, |index| index as c_int),
+            nearest_mark_distance_mil: hold.nearest_mark_distance_mil,
+            off_reticle: c_int::from(hold.off_reticle),
+            mark_scale: hold.mark_scale,
+        };
+    }
+    FFI_RETICLE_OK
+}
+
 // Get library version
 #[no_mangle]
 pub extern "C" fn ballistics_get_version() -> *const c_char {
@@ -1281,6 +1413,161 @@ mod tests {
             std::mem::align_of::<FFIMonteCarloParams>(),
             std::mem::align_of::<LegacyFFIMonteCarloParams>()
         );
+    }
+
+    /// MBA-1361: the reticle export is APPEND-ONLY — a new struct and a new function.
+    /// This pins that no pre-existing `repr(C)` layout moved when it landed.
+    #[test]
+    fn reticle_addition_does_not_disturb_existing_layouts() {
+        assert_eq!(
+            std::mem::size_of::<FFIMonteCarloParams>(),
+            std::mem::size_of::<LegacyFFIMonteCarloParams>()
+        );
+        // The new struct is 6 fields: 4 doubles + 2 ints, C-laid-out.
+        assert_eq!(std::mem::align_of::<FFIReticleHold>(), 8);
+    }
+
+    fn zeroed_hold() -> FFIReticleHold {
+        FFIReticleHold {
+            down_mil: 0.0,
+            right_mil: 0.0,
+            nearest_mark: -99,
+            nearest_mark_distance_mil: -1.0,
+            off_reticle: -1,
+            mark_scale: -1.0,
+        }
+    }
+
+    #[test]
+    fn ffi_hold_point_matches_the_rust_api_on_both_focal_planes() {
+        // down/right pairs: center, 2 mil, 4 mil, and a windage dot.
+        let marks: [c_double; 8] = [0.0, 0.0, 2.0, 0.0, 4.0, 0.0, 2.0, 1.0];
+        let mut out = zeroed_hold();
+
+        // FFP at any magnification: marks are used as etched.
+        let code = unsafe {
+            ballistics_hold_point_in_reticle(
+                4.0,
+                0.0,
+                6.0,
+                marks.as_ptr(),
+                4,
+                FFI_RETICLE_FIRST_FOCAL_PLANE,
+                0.0,
+                &mut out,
+            )
+        };
+        assert_eq!(code, FFI_RETICLE_OK);
+        assert_eq!(out.down_mil, 4.0);
+        assert_eq!(out.nearest_mark, 2);
+        assert_eq!(out.nearest_mark_distance_mil, 0.0);
+        assert_eq!(out.mark_scale, 1.0);
+        assert_eq!(out.off_reticle, 0);
+
+        // SFP at half the reference magnification: the 2 mil mark reads 4 mil true.
+        let mut out = zeroed_hold();
+        let code = unsafe {
+            ballistics_hold_point_in_reticle(
+                4.0,
+                0.0,
+                5.0,
+                marks.as_ptr(),
+                4,
+                FFI_RETICLE_SECOND_FOCAL_PLANE,
+                10.0,
+                &mut out,
+            )
+        };
+        assert_eq!(code, FFI_RETICLE_OK);
+        assert_eq!(out.nearest_mark, 1);
+        assert_eq!(out.nearest_mark_distance_mil, 0.0);
+        assert_eq!(out.mark_scale, 2.0);
+    }
+
+    /// The MBA-1407 lesson applied to the new export: `marks_len` is validated against a
+    /// stated bound BEFORE a single element is read, and a null pointer is rejected.
+    #[test]
+    fn ffi_hold_point_bounds_check_marks_len_before_reading() {
+        let marks: [c_double; 4] = [0.0, 0.0, 2.0, 0.0];
+        let mut out = zeroed_hold();
+        let call = |len: c_int, ptr: *const c_double, out: &mut FFIReticleHold| unsafe {
+            ballistics_hold_point_in_reticle(
+                1.0,
+                0.0,
+                10.0,
+                ptr,
+                len,
+                FFI_RETICLE_FIRST_FOCAL_PLANE,
+                0.0,
+                out,
+            )
+        };
+
+        assert_eq!(call(0, marks.as_ptr(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
+        assert_eq!(call(-1, marks.as_ptr(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
+        assert_eq!(
+            call(MAX_FFI_RETICLE_MARKS + 1, marks.as_ptr(), &mut out),
+            FFI_RETICLE_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(call(c_int::MAX, marks.as_ptr(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
+        assert_eq!(call(2, std::ptr::null(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
+        // `out` is untouched on every rejection.
+        assert_eq!(out.nearest_mark, -99);
+
+        // A null `out` is rejected too, without reading the marks.
+        assert_eq!(
+            unsafe {
+                ballistics_hold_point_in_reticle(
+                    1.0,
+                    0.0,
+                    10.0,
+                    marks.as_ptr(),
+                    2,
+                    FFI_RETICLE_FIRST_FOCAL_PLANE,
+                    0.0,
+                    std::ptr::null_mut(),
+                )
+            },
+            FFI_RETICLE_ERR_INVALID_ARGUMENT
+        );
+    }
+
+    #[test]
+    fn ffi_hold_point_maps_each_error_class_to_its_own_code() {
+        let marks: [c_double; 4] = [0.0, 0.0, 2.0, 0.0];
+        let bad_marks: [c_double; 4] = [0.0, 0.0, f64::NAN, 0.0];
+        let mut out = zeroed_hold();
+        let call = |drop: c_double, mag: c_double, plane: c_int, ref_mag: c_double,
+                    m: &[c_double], out: &mut FFIReticleHold| unsafe {
+            ballistics_hold_point_in_reticle(
+                drop,
+                0.0,
+                mag,
+                m.as_ptr(),
+                (m.len() / 2) as c_int,
+                plane,
+                ref_mag,
+                out,
+            )
+        };
+
+        assert_eq!(
+            call(1.0, 0.0, FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &marks, &mut out),
+            FFI_RETICLE_ERR_MAGNIFICATION
+        );
+        assert_eq!(
+            call(1.0, 10.0, FFI_RETICLE_SECOND_FOCAL_PLANE, 0.0, &marks, &mut out),
+            FFI_RETICLE_ERR_REFERENCE_MAGNIFICATION
+        );
+        assert_eq!(
+            call(f64::NAN, 10.0, FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &marks, &mut out),
+            FFI_RETICLE_ERR_NON_FINITE
+        );
+        assert_eq!(
+            call(1.0, 10.0, FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &bad_marks, &mut out),
+            FFI_RETICLE_ERR_NON_FINITE
+        );
+        assert_eq!(out.nearest_mark, -99, "out stays untouched on every error");
     }
 
     /// MBA-1386 scope addition: `bc_type` gains an additive numeric slot (8) for the

@@ -71,6 +71,10 @@ pub mod truing_dsf;
 // truing). Carries its own shared table/JSON/CSV formatter so the native CLI and the WASM
 // terminal render identical bytes. No feature gate: must compile for wasm32.
 pub mod truing_wind;
+// MBA-1361: reticle schema, parametric generators, and the hold-point-in-reticle API,
+// shared by the CLI, the WASM terminal and the FFI. No feature gate: must compile for
+// wasm32; pure math + serde, no I/O (file reading stays in main.rs/wasm.rs).
+pub mod reticle;
 // MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
 pub mod wez;
 // MBA-1355: turret adjustment-unit conversions (SMOA/IPHY/clicks) and click-value parsing,

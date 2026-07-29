@@ -432,6 +432,53 @@ Summary fields have fixed evaluation frames:
   well-defined (terminal range past the zero range with a positive correction); absent otherwise,
   so flat solves and pre-existing requests serialize byte-identically.
 
+### Optional `reticle` block (MBA-1361)
+
+A request may carry an optional top-level `reticle` object. When it does — and only then —
+the success envelope gains a top-level `reticle_hold` object. Requests without it, and every
+response that predates the field, serialize byte-identically.
+
+```json
+"reticle": {
+  "range_m": 600.0,
+  "magnification": 5.0,
+  "description": {
+    "name": "MyScope MIL",
+    "focal_plane": "sfp",
+    "reference_magnification": 10.0,
+    "marks": [
+      {"down_mil": 0.0, "right_mil": 0.0, "kind": "center"},
+      {"down_mil": 2.0, "right_mil": 0.0, "kind": "hash", "label": "600"}
+    ]
+  }
+}
+```
+
+The envelope is strict (`range_m`, `magnification` and `description` are all required, and no
+other key is accepted). `description` is the shared reticle schema — the same JSON
+`ballistics reticle generate -o json` emits — and is deliberately permissive about extra keys
+inside it, so a front end's render metadata round-trips.
+
+`reticle_hold` reports, in milliradians from the optical center with `down_mil` positive BELOW
+center and `right_mil` positive to the shooter's RIGHT:
+
+```json
+"reticle_hold": {
+  "range_m": 600.0, "magnification": 5.0,
+  "down_mil": 3.18, "right_mil": 0.74, "mark_scale": 2.0,
+  "nearest_mark_index": 1, "nearest_mark_label": "600",
+  "nearest_mark_distance_mil": 0.22, "off_reticle": false
+}
+```
+
+The angular values are read from the response's OWN `samples` (linearly interpolated at
+`range_m`, milliradian small-angle definition), so the hold and the sample rows can never
+describe different trajectories. `mark_scale` is `reference_magnification / magnification` for a
+second-focal-plane reticle and exactly `1.0` for first focal plane; the hold coordinates are
+always true angular, and only the marks are rescaled. A `range_m` outside the sampled
+trajectory returns a structured `invalid_value` error at `$.reticle.range_m` — the service never
+extrapolates a hold off a trajectory that did not get there.
+
 `summary.termination` is one of `max_range`, `ground_threshold`, `time_limit`, or
 `velocity_floor`. The solve service must populate it from explicit termination metadata returned
 by the engine. It must not infer a reason heuristically from the last distance, height, or speed.

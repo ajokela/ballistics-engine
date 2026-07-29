@@ -244,6 +244,18 @@ fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
     }
 }
 
+/// Parse a numeric argument value, naming the flag it came from (MBA-1361).
+///
+/// The house convention elsewhere in this file is a per-flag `.parse().map_err(...)` with a
+/// hand-written message; this is the same thing factored out, for handlers with enough
+/// numeric flags that repeating it would be the larger risk.
+fn parse_f64_arg(value: &str, flag: &str) -> Result<f64, JsValue> {
+    value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| JsValue::from_str(&format!("Invalid value '{value}' for {flag}")))
+}
+
 /// MBA-1356: pairing-requirement text for `--cd-scale` without a loaded drag table, shared by
 /// every WASM terminal command that accepts it (trajectory/zero/monte-carlo). Mirrors the
 /// native CLI's `resolve_cd_scale` text — except the WASM terminal has no `--bc-adjustment`
@@ -1033,6 +1045,7 @@ impl WasmBallistics {
             "powder" => self.handle_powder_command(&args[1..], units),
             "recoil" => self.handle_recoil_command(&args[1..], units),
             "drag-curve" => Self::handle_drag_curve_command(&args[1..]),
+            "reticle" => Self::handle_reticle_command(&args[1..]),
             "power-factor" => self.handle_power_factor_command(&args[1..], units),
             _ => Ok(format!(
                 "Error: Unknown command '{}'\n\n{}",
@@ -6231,6 +6244,250 @@ impl WasmBallistics {
         Ok(crate::drag::format_reference_drag_curve(&drag_model, format))
     }
 
+    /// `reticle` in the browser terminal (MBA-1361).
+    ///
+    /// Renders through the SAME `reticle::format_reticle_*` functions the native CLI uses,
+    /// so identical inputs produce byte-identical output on both surfaces.
+    ///
+    /// **The one deliberate difference from native is the reticle SOURCE.** There is no
+    /// filesystem here, so `--reticle-json` takes the description as an inline JSON STRING
+    /// rather than a path — the same text-not-files split `drag_file`/`loadDragTable`
+    /// already use. `--profile` does not exist here either (saved profiles are a native-only
+    /// concept), and `reticle hold --range` is native-only: the browser terminal takes the
+    /// angular solution directly with `--drop-mil`/`--wind-mil`, which is what `trajectory`
+    /// above already prints. That gap is documented in CLI_USAGE and tracked with the
+    /// MBA-1362 WASM-parity follow-up.
+    fn handle_reticle_command(args: &[&str]) -> Result<String, JsValue> {
+        use crate::reticle::{
+            format_reticle_description, format_reticle_hold, hold_point_in_reticle, FocalPlane,
+            ReticleDescription, ReticleFormat,
+        };
+
+        let Some(verb) = args.first() else {
+            return Err(JsValue::from_str(
+                "reticle requires a subcommand: hold or generate",
+            ));
+        };
+        let rest = &args[1..];
+
+        // `-o`/`--output` and the generator's shared options are parsed the same way for
+        // every verb, so pull them out with one helper each time.
+        let parse_format = |token: &str| -> Result<ReticleFormat, JsValue> {
+            match token.to_lowercase().as_str() {
+                "table" => Ok(ReticleFormat::Table),
+                "json" => Ok(ReticleFormat::Json),
+                other => Err(JsValue::from_str(&format!(
+                    "Invalid output format '{other}' for reticle (expected table or json)"
+                ))),
+            }
+        };
+
+        match *verb {
+            "generate" => {
+                let Some(layout) = rest.first() else {
+                    return Err(JsValue::from_str(
+                        "reticle generate requires a layout: mil-grid, tree, or bdc",
+                    ));
+                };
+                let layout_args = &rest[1..];
+
+                let mut spacing = 1.0_f64;
+                let mut extent = 10.0_f64;
+                let mut rows = 5_usize;
+                let mut row_spacing = 1.0_f64;
+                let mut spread_step = 0.5_f64;
+                let mut drops: Vec<(f64, f64)> = Vec::new();
+                let mut name: Option<String> = None;
+                let mut focal_plane = FocalPlane::First;
+                let mut reference_mag = 1.0_f64;
+                let mut format = ReticleFormat::Table;
+
+                let mut i = 0;
+                while i < layout_args.len() {
+                    match layout_args[i] {
+                        "--spacing" => {
+                            spacing = parse_f64_arg(require_value(layout_args, i)?, "--spacing")?;
+                            i += 1;
+                        }
+                        "--extent" => {
+                            extent = parse_f64_arg(require_value(layout_args, i)?, "--extent")?;
+                            i += 1;
+                        }
+                        "--rows" => {
+                            let value = parse_f64_arg(require_value(layout_args, i)?, "--rows")?;
+                            if !value.is_finite() || value < 1.0 || value.fract() != 0.0 {
+                                return Err(JsValue::from_str(
+                                    "--rows must be a whole number of at least 1",
+                                ));
+                            }
+                            rows = value as usize;
+                            i += 1;
+                        }
+                        "--row-spacing" => {
+                            row_spacing =
+                                parse_f64_arg(require_value(layout_args, i)?, "--row-spacing")?;
+                            i += 1;
+                        }
+                        "--spread-step" => {
+                            spread_step =
+                                parse_f64_arg(require_value(layout_args, i)?, "--spread-step")?;
+                            i += 1;
+                        }
+                        "--drop" => {
+                            let token = require_value(layout_args, i)?;
+                            let parts: Vec<&str> = token.split(':').collect();
+                            if parts.len() != 2 {
+                                return Err(JsValue::from_str(&format!(
+                                    "invalid --drop '{token}': expected RANGE:DROP_MIL"
+                                )));
+                            }
+                            let range = parse_f64_arg(parts[0], "--drop range")?;
+                            let drop_mil = parse_f64_arg(parts[1], "--drop value")?;
+                            drops.push((range, drop_mil));
+                            i += 1;
+                        }
+                        "--name" => {
+                            name = Some(require_value(layout_args, i)?.to_string());
+                            i += 1;
+                        }
+                        "--focal-plane" => {
+                            focal_plane = match require_value(layout_args, i)?.to_lowercase().as_str()
+                            {
+                                "ffp" => FocalPlane::First,
+                                "sfp" => FocalPlane::Second,
+                                other => {
+                                    return Err(JsValue::from_str(&format!(
+                                        "invalid --focal-plane '{other}' (expected ffp or sfp)"
+                                    )))
+                                }
+                            };
+                            i += 1;
+                        }
+                        "--reference-mag" => {
+                            reference_mag =
+                                parse_f64_arg(require_value(layout_args, i)?, "--reference-mag")?;
+                            i += 1;
+                        }
+                        "-o" | "--output" => {
+                            format = parse_format(require_value(layout_args, i)?)?;
+                            i += 1;
+                        }
+                        other => {
+                            return Err(JsValue::from_str(&format!(
+                                "Unknown reticle generate argument '{other}'"
+                            )));
+                        }
+                    }
+                    i += 1;
+                }
+
+                let mut description = match layout {
+                    &"mil-grid" => ReticleDescription::mil_grid(spacing, extent),
+                    &"tree" => ReticleDescription::tree(rows, row_spacing, spread_step),
+                    &"bdc" => {
+                        if drops.is_empty() {
+                            return Err(JsValue::from_str(
+                                "reticle generate bdc requires at least one --drop RANGE:DROP_MIL",
+                            ));
+                        }
+                        ReticleDescription::bdc_from_drops(&drops)
+                    }
+                    other => {
+                        return Err(JsValue::from_str(&format!(
+                            "Unknown reticle layout '{other}' (expected mil-grid, tree, or bdc)"
+                        )))
+                    }
+                }
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+                description.focal_plane = focal_plane;
+                description.reference_magnification = reference_mag;
+                if let Some(name) = name {
+                    description.name = name;
+                }
+                description
+                    .validate()
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                Ok(format_reticle_description(&description, format))
+            }
+
+            "hold" => {
+                let mut reticle_json: Option<String> = None;
+                let mut drop_mil: Option<f64> = None;
+                let mut wind_mil = 0.0_f64;
+                let mut mag = 10.0_f64;
+                let mut format = ReticleFormat::Table;
+
+                let mut i = 0;
+                while i < rest.len() {
+                    match rest[i] {
+                        "--reticle-json" => {
+                            reticle_json = Some(require_value(rest, i)?.to_string());
+                            i += 1;
+                        }
+                        "--drop-mil" => {
+                            drop_mil = Some(parse_f64_arg(require_value(rest, i)?, "--drop-mil")?);
+                            i += 1;
+                        }
+                        "--wind-mil" => {
+                            wind_mil = parse_f64_arg(require_value(rest, i)?, "--wind-mil")?;
+                            i += 1;
+                        }
+                        "--mag" => {
+                            mag = parse_f64_arg(require_value(rest, i)?, "--mag")?;
+                            i += 1;
+                        }
+                        "-o" | "--output" => {
+                            format = parse_format(require_value(rest, i)?)?;
+                            i += 1;
+                        }
+                        "--range" => {
+                            return Err(JsValue::from_str(
+                                "reticle hold --range is native-only in this build; run \
+                                 `trajectory` to read the drop in mils and pass it with \
+                                 --drop-mil",
+                            ));
+                        }
+                        "--profile" => {
+                            return Err(JsValue::from_str(
+                                "the browser terminal has no saved profiles; pass the reticle \
+                                 inline with --reticle-json '<JSON>'",
+                            ));
+                        }
+                        other => {
+                            return Err(JsValue::from_str(&format!(
+                                "Unknown reticle hold argument '{other}'"
+                            )));
+                        }
+                    }
+                    i += 1;
+                }
+
+                let Some(text) = reticle_json else {
+                    return Err(JsValue::from_str(
+                        "reticle hold requires --reticle-json '<JSON>' (the description itself, \
+                         not a path — this build has no filesystem)",
+                    ));
+                };
+                let Some(drop_mil) = drop_mil else {
+                    return Err(JsValue::from_str("reticle hold requires --drop-mil <MIL>"));
+                };
+                let description: ReticleDescription = serde_json::from_str(&text)
+                    .map_err(|e| JsValue::from_str(&format!("invalid reticle JSON: {e}")))?;
+                description
+                    .validate()
+                    .map_err(|e| JsValue::from_str(&format!("invalid reticle: {e}")))?;
+                let hold = hold_point_in_reticle(drop_mil, wind_mil, mag, &description)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                Ok(format_reticle_hold(&hold, &description, mag, format))
+            }
+
+            other => Err(JsValue::from_str(&format!(
+                "Unknown reticle subcommand '{other}' (expected hold or generate)"
+            ))),
+        }
+    }
+
     fn format_trajectory_json(
         &self,
         result: &crate::cli_api::TrajectoryResult,
@@ -7383,6 +7640,7 @@ Commands:
   recoil         Free recoil energy/velocity/impulse (SAAMI momentum balance)
   power-factor   Power factor + USPSA/IDPA/SASS rulebook pass/fail
   drag-curve     Print a built-in reference drag function as (Mach, Cd) data
+  reticle        Reticle hold points and parametric reticle generation
   help           Show this help message
 
 Global Options:
@@ -7569,6 +7827,50 @@ Drag Curve Command:
     --drag-model <MODEL>         Model to print (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
                                  [default: g7]
     -o, --output <FORMAT>        table (default), csv, or json
+
+Reticle Command:
+  ballistics reticle generate <mil-grid|tree|bdc> [OPTIONS]
+  ballistics reticle hold --reticle-json '<JSON>' --drop-mil <MIL> [OPTIONS]
+
+  Places a firing solution where you actually read it: a point in your own
+  reticle, FFP/SFP aware. An SFP mark's true subtension is scaled by
+  reference-mag / magnification, so a 2 mil mark on a reticle calibrated at
+  10x covers 4 mil at 5x. The hold itself is always TRUE angular; only the
+  MARKS are rescaled. Excluded by design: Horus/TREMOR grid layouts and
+  wind-dot calibration (patented), and any vendor reticle catalog.
+
+  generate options (all layouts):
+    --name <NAME>                Name to store in the description
+    --focal-plane <ffp|sfp>      Focal plane [default: ffp]
+    --reference-mag <X>          Magnification the subtensions are true at
+                                 (sfp only) [default: 1.0]
+    -o, --output <FORMAT>        table (default) or json. json emits the schema
+                                 that `reticle hold --reticle-json` consumes
+
+  generate mil-grid:             A plain mil-hash CROSS, not a filled grid
+    --spacing <MIL>              Mark spacing [default: 1.0]
+    --extent <MIL>               Reach from center [default: 10.0]
+
+  generate tree:                 Generic widening holdover tree
+    --rows <N>                   Holdover rows below center [default: 5]
+    --row-spacing <MIL>          Vertical spacing between rows [default: 1.0]
+    --spread-step <MIL>          Windage step within a row [default: 0.5]
+
+  generate bdc:                  Ladder from ALREADY-SOLVED drops (no solve here)
+    --drop <RANGE:DROP_MIL>      One pair per mark; repeatable
+
+  hold options:
+    --reticle-json <JSON>        The reticle description ITSELF as inline JSON.
+                                 This build has no filesystem, so unlike the
+                                 native CLI this is text, not a path
+    --drop-mil <MIL>             Angular drop to hold (+ = below line of sight)
+    --wind-mil <MIL>             Angular wind deflection (+ = bullet goes right)
+                                 [default: 0]
+    --mag <X>                    Magnification in use [default: 10.0]
+    -o, --output <FORMAT>        table (default) or json
+
+  Native-only: `reticle hold --range` (solve the drop here first with
+  `trajectory` and pass it as --drop-mil) and `--profile`.
 
 Monte Carlo Command:
   ballistics monte-carlo [OPTIONS]
@@ -7854,6 +8156,11 @@ Examples:
     --observed 900:10.9 -b 0.475 -m 168 -d 0.308 --chrono-velocity 2700
   ballistics true-wind --miss 500:12.4 --miss 700:26.8 -v 2700 -b 0.475 -m 168 \
     -d 0.308 --drag-model g7 --twist-rate 11 --called-wind 6
+  ballistics reticle generate tree --rows 6 --row-spacing 1 --spread-step 0.5 -o json
+  ballistics reticle hold --mag 6 --drop-mil 4.2 --wind-mil 1.1 --reticle-json \
+    '{"name":"demo","focal_plane":"sfp","reference_magnification":12,
+      "marks":[{"down_mil":0,"right_mil":0,"kind":"center"},
+               {"down_mil":2,"right_mil":0,"kind":"hash"}]}'
   ballistics recoil -b 168 -c 43 -v 2700 -f 8.5
   ballistics power-factor -w 147 -v 900 --organization uspsa"#
             .to_string()

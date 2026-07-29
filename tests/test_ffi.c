@@ -78,6 +78,24 @@ typedef struct {
     double max_precession_angle;
 } FFITrajectoryResult;
 
+// MBA-1361: appended reticle hold-point export. A NEW struct and a NEW function -- no
+// pre-existing layout above is affected, so this mirror can be added without touching
+// anything else in this file.
+typedef struct {
+    double down_mil;
+    double right_mil;
+    int nearest_mark;
+    double nearest_mark_distance_mil;
+    int off_reticle;
+    double mark_scale;
+} FFIReticleHold;
+
+#define FFI_RETICLE_FIRST_FOCAL_PLANE 0
+#define FFI_RETICLE_SECOND_FOCAL_PLANE 1
+#define FFI_RETICLE_OK 0
+#define FFI_RETICLE_ERR_INVALID_ARGUMENT (-1)
+#define FFI_RETICLE_ERR_MAGNIFICATION (-2)
+
 // External FFI functions
 extern FFITrajectoryResult* ballistics_calculate_trajectory(
     const FFIBallisticInputs* inputs,
@@ -88,6 +106,73 @@ extern FFITrajectoryResult* ballistics_calculate_trajectory(
 );
 
 extern void ballistics_free_trajectory_result(FFITrajectoryResult* result);
+
+extern int ballistics_hold_point_in_reticle(
+    double drop_mil,
+    double wind_mil,
+    double magnification,
+    const double* marks,       // flat [down_0, right_0, down_1, right_1, ...], nominal mil
+    int marks_len,             // number of MARKS (half the array length)
+    int focal_plane,
+    double reference_magnification,
+    FFIReticleHold* out
+);
+
+// MBA-1361 smoke test: FFP invariance, SFP scaling, and the marks_len bounds guard.
+static int test_reticle_hold(void) {
+    // center, 2 mil, 4 mil, and one windage dot at (2, 1).
+    const double marks[8] = {0.0, 0.0, 2.0, 0.0, 4.0, 0.0, 2.0, 1.0};
+    FFIReticleHold hold;
+    int rc;
+
+    printf("Reticle Hold Point (MBA-1361):\n");
+    printf("------------------------------\n");
+
+    rc = ballistics_hold_point_in_reticle(4.0, 0.0, 6.0, marks, 4,
+                                          FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &hold);
+    if (rc != FFI_RETICLE_OK || hold.nearest_mark != 2 ||
+        fabs(hold.nearest_mark_distance_mil) > 1e-12 || hold.mark_scale != 1.0) {
+        printf("FATAL: FFP hold mismatch (rc=%d mark=%d dist=%.6f scale=%.6f)\n",
+               rc, hold.nearest_mark, hold.nearest_mark_distance_mil, hold.mark_scale);
+        return 1;
+    }
+    printf("FFP  4.00 mil drop -> mark #%d, %.3f mil away, scale %.2fx\n",
+           hold.nearest_mark, hold.nearest_mark_distance_mil, hold.mark_scale);
+
+    // SFP at half the reference magnification: the etched 2 mil mark reads 4 mil true.
+    rc = ballistics_hold_point_in_reticle(4.0, 0.0, 5.0, marks, 4,
+                                          FFI_RETICLE_SECOND_FOCAL_PLANE, 10.0, &hold);
+    if (rc != FFI_RETICLE_OK || hold.nearest_mark != 1 ||
+        fabs(hold.nearest_mark_distance_mil) > 1e-12 || hold.mark_scale != 2.0) {
+        printf("FATAL: SFP hold mismatch (rc=%d mark=%d dist=%.6f scale=%.6f)\n",
+               rc, hold.nearest_mark, hold.nearest_mark_distance_mil, hold.mark_scale);
+        return 1;
+    }
+    printf("SFP  4.00 mil drop at 5x (ref 10x) -> mark #%d, %.3f mil away, scale %.2fx\n",
+           hold.nearest_mark, hold.nearest_mark_distance_mil, hold.mark_scale);
+
+    // The marks_len guard (MBA-1407 lesson) must reject before reading anything.
+    if (ballistics_hold_point_in_reticle(1.0, 0.0, 10.0, marks, 0,
+                                         FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &hold)
+        != FFI_RETICLE_ERR_INVALID_ARGUMENT) {
+        printf("FATAL: marks_len 0 was not rejected\n");
+        return 1;
+    }
+    if (ballistics_hold_point_in_reticle(1.0, 0.0, 10.0, marks, 1 << 30,
+                                         FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &hold)
+        != FFI_RETICLE_ERR_INVALID_ARGUMENT) {
+        printf("FATAL: oversized marks_len was not rejected\n");
+        return 1;
+    }
+    if (ballistics_hold_point_in_reticle(1.0, 0.0, 0.0, marks, 4,
+                                         FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &hold)
+        != FFI_RETICLE_ERR_MAGNIFICATION) {
+        printf("FATAL: zero magnification was not rejected\n");
+        return 1;
+    }
+    printf("Bounds and magnification guards: OK\n\n");
+    return 0;
+}
 
 int main() {
     printf("Testing Ballistics Engine FFI with Advanced Features\n");
@@ -231,7 +316,12 @@ int main() {
     
     // Clean up
     ballistics_free_trajectory_result(result);
-    
+
+    printf("\n");
+    if (test_reticle_hold() != 0) {
+        return 1;
+    }
+
     printf("\n✓ FFI test completed successfully!\n");
     return 0;
 }

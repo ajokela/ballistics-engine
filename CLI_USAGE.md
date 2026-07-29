@@ -2392,6 +2392,111 @@ The command is entirely offline — there is no API for it and no flag that coul
 It is available on the WASM terminal with identical output (both surfaces render through
 one shared formatter).
 
+### Reticle Hold Points (`reticle`) — MBA-1361
+
+Most of this tool answers "what do I dial?". `reticle` answers the other question: *where
+in my reticle do I put the target?* It takes an angular firing solution and reports the
+hold point plus the nearest mark, FFP/SFP aware.
+
+```bash
+# Build a description (this one is pure geometry, no solve involved)
+ballistics reticle generate tree --rows 6 --row-spacing 1.0 --spread-step 0.5 \
+  --name "MyScope MIL" --focal-plane sfp --reference-mag 12 -o json > myscope.json
+
+# Ask where a solution lands in it, at the magnification you're actually on
+ballistics reticle hold --reticle-json myscope.json --mag 6 --drop-mil 4.2 --wind-mil 1.1
+
+# Or let it solve the trajectory for you
+ballistics reticle hold --reticle-json myscope.json --mag 6 --range 600 \
+  -v 2700 -b 0.475 -m 168 -d 0.308 --zero-distance 100 --wind-speed 10 --wind-direction 90
+```
+
+#### Angular conventions (all of them, in one place)
+
+Every angle is a **milliradian**, measured from the optical center:
+
+| Quantity | Positive means |
+|----------|----------------|
+| `down_mil` / `--drop-mil` | **below** center — a holdover point |
+| `right_mil` / `--wind-mil` | to the shooter's **right** of center |
+
+The mapping from a firing solution to a hold is deliberately direct: if the bullet falls
+`d` mil below the line of sight you put a point `d` mil *below* center on the target, and
+if the wind pushes it `w` mil right you put a point `w` mil *right* of center on the
+target. The command's real work is the mark search, not the coordinates.
+
+#### Focal plane
+
+Published optics-manual math, nothing more:
+
+- **FFP** — the reticle is magnified with the image, so a mark subtends the same angle at
+  every magnification. `--mag` is validated but changes nothing.
+- **SFP** — the reticle is a fixed size at the eyepiece while the image scales, so a
+  mark's **true** subtension is `nominal × reference-mag ÷ magnification`. A 2 mil mark on
+  a reticle calibrated at 10x covers **4 mil** of target at 5x, and 1 mil at 20x.
+
+The hold point is a property of the trajectory, so it is always **true angular**; only the
+MARKS are rescaled, and the nearest-mark distance is measured after that rescaling. A
+non-physical `--mag` (zero or negative) is rejected on both planes, and an SFP description
+with no usable `reference_magnification` is rejected too.
+
+`off_reticle` fires when the hold falls outside the marks' bounding box grown by **20 % of
+that box's span, per axis**. An axis on which every mark shares a coordinate (a pure BDC
+ladder has no windage marks) has zero margin, so any deviation there reads as off-reticle
+— which is honest: such a reticle offers nothing to hold on in that direction.
+
+#### Generators
+
+| Layout | Shape |
+|--------|-------|
+| `mil-grid --spacing --extent` | a plain mil-hash **cross** — marks along both stadia, *not* a filled 2-D grid |
+| `tree --rows --row-spacing --spread-step` | a generic widening holdover tree: row *N* carries windage dots at ±1..*N* steps |
+| `bdc --drop RANGE:DROP_MIL ...` | a labeled ladder from **already-solved** drops |
+
+`bdc` deliberately runs no solve of its own — produce the drops with `come-ups` or
+`trajectory` first, so the ladder's provenance (load, atmosphere, zero) stays yours.
+All three accept `--name`, `--focal-plane`, `--reference-mag` and `-o table|json`.
+`-o json` emits exactly what `reticle hold --reticle-json` and
+`profile save --reticle-json` consume.
+
+#### Intellectual-property exclusions
+
+Horus grid reticles and Time-of-Flight Wind Dots are actively patented, and Horus
+monetizes app integration through its own licensed app. So, by design and permanently
+unless licensed: **no TREMOR-family or Horus grid layouts**, **no wind-dot calibration**
+(wind enters only as an angular deflection you already solved), and **no vendor reticle
+catalog**. Manufacturer subtension sheets are published facts and a legally viable catalog
+source, but curating one is a separate per-vendor IP-reviewed data project.
+
+#### Saved profiles
+
+```bash
+ballistics profile save myrifle -v 2700 -b 0.475 -m 168 -d 0.308 --reticle-json myscope.json
+ballistics reticle hold --profile myrifle --mag 6 --drop-mil 4.2
+```
+
+The attachment is carried forward by an unrelated re-save (like the DSF table) and dropped
+by `--clear-reticle`. Mark coordinates are angular, so `--units` conversion leaves them
+alone — for the same reason turret click graduations are left alone.
+
+#### Other surfaces
+
+- **solve-json v1** gains an optional request block
+  `reticle: {range_m, magnification, description}` and, only when it is present, a
+  `reticle_hold` object in the response. Omitting it leaves every existing response
+  byte-identical. The hold is read from the response's own samples, so the two can never
+  describe different trajectories; a range outside the sampled trajectory is a structured
+  error, never an extrapolation.
+- **WASM terminal**: `reticle generate` (all three layouts) and `reticle hold`, rendering
+  through the *same* formatter as native, so identical inputs produce identical bytes.
+  Two deliberate differences: `--reticle-json` there takes the description as **inline
+  JSON text** (there is no filesystem in the browser), and `--range`/`--profile` are
+  native-only — run `trajectory` first and pass the drop as `--drop-mil`.
+- **FFI**: a new appended `FFIReticleHold` struct and
+  `ballistics_hold_point_in_reticle(...)`. Nothing existing moved, so no consumer needs a
+  recompile. `marks_len` is bounds-checked against `MAX_FFI_RETICLE_MARKS` before a single
+  element is read.
+
 ### DSF (Drop-Scale-Factor) Truing
 
 `dsf` is the second stage of Applied Ballistics' two-stage truing workflow (MBA-1357).
