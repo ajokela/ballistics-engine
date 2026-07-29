@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Three reticle/BDC inverse solvers: `mark-to-range`, `bdc-match`, `optimal-zero`**
+  (MBA-1362). Read-only solvers over an existing load — no new physics, no feature flag —
+  sharing **one** drop-vs-range helper (a single solved, finely sampled angular-drop curve
+  with a forward lookup and a monotone bisection inverse), so none of them can disagree
+  with each other, or with `reticle hold --range`, about what "the drop at 500 yards" is.
+  - **`mark-to-range`** (Nightforce / Nikon Spot On / Swarovski / TRACT) maps each
+    subtension to the range where it lands, converting nominal marks to TRUE angular for
+    the focal plane and magnification in use first. Marks that do not map to a range are
+    **reported** — `not_a_holdover` for a mark at or above center, `beyond_max_range` with
+    the deepest hold the load actually reaches — never silently dropped, so the table
+    always carries one row per mark. Takes `--mark <MIL>` flags or a whole
+    `--reticle-json` description.
+  - **`bdc-match`** (Zeiss Rapid-Z) fits the magnification that makes an SFP BDC ladder
+    match the load, from `--mark-range MIL:RANGE` pairs. Substituting `u = ref_mag ÷ mag`
+    makes the residual linear, so the fit is the closed-form least-squares slope through
+    the origin — exact and deterministic, with no starting guess. FFP is rejected with an
+    explanation (its subtensions do not depend on magnification, so nothing is solvable)
+    rather than returning a meaningless number, and a residual above `--residual-warn`
+    (default 0.2 mil) prints a warning that the reticle does not fit this load at ANY
+    magnification.
+  - **`optimal-zero`** (GeoBallistics HDZ) min-max searches the one zero that minimizes
+    the LARGEST hold a whole target list needs (`--target RANGE[:HEIGHT]`, 2 to 16, with
+    `--vital` as the default height), then reports each target's hold, the signed miss a
+    dead-center hold would produce, and whether every target stays inside its vital zone.
+    Golden-section over a bracketed zero range with hard-coded constants, so the answer is
+    reproducible bit for bit; targets are sorted internally so entry order cannot change
+    it.
+  All three are **native CLI only this train** — WASM parity for them is a tracked
+  follow-up, matching the precedent that `mpbr`/`come-ups`/`range-table` are CLI-only.
 - **Reticle hold points: schema, parametric generators, and a hold-point API**
   (MBA-1361; the Strelok Pro / Nikon Spot On / Hawke ChairGun / AB Quantum class, and the
   biggest UX gap we had against them for shooters who HOLD rather than dial). No reticle

@@ -2866,6 +2866,126 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Map each reticle mark to the range where it lands (MBA-1362)
+    ///
+    /// The inverse of a come-up table: instead of "what do I hold at 600?", it answers
+    /// "what range is this mark good for?" — the Nightforce / Nikon Spot On / Swarovski /
+    /// TRACT question. Each subtension is converted to TRUE angular for the focal plane and
+    /// magnification in use, then the range where angular drop equals it is found by
+    /// bisection over one solved trajectory.
+    ///
+    /// Marks the load cannot reach are REPORTED as such, not dropped from the table.
+    MarkToRange {
+        /// A mark subtension in milliradians below center; repeatable. Mutually exclusive
+        /// with --reticle-json. A non-positive value is accepted and reported as "not a
+        /// holdover" rather than rejected, so a whole reticle's marks can be passed
+        /// through without pre-filtering.
+        #[arg(long = "mark", value_name = "MIL", action = clap::ArgAction::Append, allow_hyphen_values = true)]
+        marks: Vec<f64>,
+
+        /// Take the subtensions (and the focal plane and reference magnification) from a
+        /// reticle description file instead. Marks on the vertical stadium are used,
+        /// including any above center (reported as "not a holdover"); the optical center
+        /// and off-axis windage marks are excluded and their count reported.
+        #[arg(long, value_name = "FILE")]
+        reticle_json: Option<PathBuf>,
+
+        /// Optic magnification in use
+        #[arg(long, default_value = "10.0", value_parser = f64_range(0.0001, 1000.0))]
+        mag: f64,
+
+        /// Focal plane of the supplied --mark subtensions (ignored with --reticle-json,
+        /// which carries its own)
+        #[arg(long, default_value = "ffp")]
+        focal_plane: FocalPlaneArg,
+
+        /// Magnification the --mark subtensions are true at (--focal-plane sfp only;
+        /// ignored with --reticle-json)
+        #[arg(long, default_value = "1.0", value_parser = f64_range(0.0001, 1000.0))]
+        reference_mag: f64,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        /// Furthest range to search (yards for imperial, meters for metric)
+        #[arg(long, default_value = "1500.0", value_parser = f64_range(1.0, 10000.0))]
+        max_range: f64,
+
+        #[command(flatten)]
+        load: InverseSolverLoadArgs,
+
+        /// Output format: table (default) or json
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Solve the magnification that makes an SFP BDC reticle match this load (MBA-1362)
+    ///
+    /// The Zeiss Rapid-Z question. Second-focal-plane subtensions scale as
+    /// reference-mag / magnification, so there is generally one magnification at which a
+    /// generic BDC ladder lines up with a particular load's drops. This is the 1-D least
+    /// squares fit of that magnification over the supplied (mark, nominal range) pairs.
+    ///
+    /// FFP reticles are rejected: their subtensions do not depend on magnification, so
+    /// there is nothing to solve.
+    BdcMatch {
+        /// One "MIL:RANGE" pair per mark: the mark's etched subtension in milliradians and
+        /// the range it is meant to hit. Repeatable; at least two are required. RANGE
+        /// follows --units.
+        #[arg(long = "mark-range", value_name = "MIL:RANGE", action = clap::ArgAction::Append, required = true)]
+        mark_ranges: Vec<String>,
+
+        /// Magnification the subtensions are true at (the reticle's calibration point)
+        #[arg(long, default_value = "1.0", value_parser = f64_range(0.0001, 1000.0))]
+        reference_mag: f64,
+
+        /// Focal plane. Only sfp can be fitted; ffp is rejected with an explanation.
+        #[arg(long, default_value = "sfp")]
+        focal_plane: FocalPlaneArg,
+
+        /// Warn when any mark's residual exceeds this many milliradians
+        #[arg(long, value_name = "MIL", default_value = "0.2", value_parser = f64_range(0.0, 100.0))]
+        residual_warn: f64,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        #[command(flatten)]
+        load: InverseSolverLoadArgs,
+
+        /// Output format: table (default) or json
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Solve the one zero that makes a whole stage of targets holdable (MBA-1362)
+    ///
+    /// GeoBallistics HDZ class: a min-max search over zero distance that minimizes the
+    /// LARGEST hold any listed target needs, then reports whether a dead-center hold keeps
+    /// every one of them inside its vital zone. Unlike `mpbr`, which sizes one vital zone
+    /// around one zero, this balances a specific list of ranges against each other.
+    OptimalZero {
+        /// A target as "RANGE" or "RANGE:HEIGHT_IN"; repeatable, 2 to 16 of them. RANGE
+        /// follows --units; HEIGHT is the target's full vertical size in inches (imperial)
+        /// or centimeters (metric), falling back to --vital when omitted.
+        #[arg(long = "target", value_name = "RANGE[:HEIGHT]", action = clap::ArgAction::Append, required = true)]
+        targets: Vec<String>,
+
+        /// Default target height for targets that do not carry their own (inches imperial
+        /// / cm metric)
+        #[arg(long, value_name = "SIZE", value_parser = f64_range(0.0, 1000.0))]
+        vital: Option<f64>,
+
+        #[command(flatten)]
+        load: InverseSolverLoadArgs,
+
+        /// Output format: table (default) or json
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Reticle hold points and parametric reticle generation (MBA-1361)
     ///
     /// Places a firing solution where a shooter actually reads it — a point in their own
@@ -3067,6 +3187,144 @@ struct ReticleGenerateCommon {
     /// `reticle hold --reticle-json` and `profile save --reticle-json` consume.
     #[arg(short = 'o', long, default_value = "table")]
     output: OutputFormat,
+}
+
+/// The rifle / load / atmosphere arguments every MBA-1362 inverse solver takes.
+///
+/// Flattened rather than triplicated: `mark-to-range`, `bdc-match` and `optimal-zero` all
+/// solve the same trajectory, and three hand-maintained copies of fourteen flags is three
+/// chances for them to drift apart on a default. Zero distance is deliberately NOT here —
+/// two of the three take it as an input and the third solves for it.
+#[derive(clap::Args, Debug, Clone)]
+struct InverseSolverLoadArgs {
+    /// Load parameters from a saved profile
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+
+    /// Initial velocity (fps or m/s based on --units)
+    #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
+    velocity: Option<f64>,
+
+    /// Ballistic coefficient
+    #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
+    bc: Option<f64>,
+
+    /// Mass (grains for imperial, grams for metric)
+    #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
+    mass: Option<f64>,
+
+    /// Diameter (inches for imperial, mm for metric)
+    #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
+    diameter: Option<f64>,
+
+    /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
+    #[arg(long, default_value = "g1")]
+    drag_model: DragModel,
+
+    /// Sight height above bore (inches for imperial, mm for metric)
+    #[arg(long)]
+    sight_height: Option<f64>,
+
+    /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+    #[arg(long)]
+    temperature: Option<f64>,
+
+    /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+    #[arg(long)]
+    pressure: Option<f64>,
+
+    /// How to interpret `--pressure` (MBA-1416): `absolute` (default) or `qnh`
+    #[arg(long, value_enum)]
+    pressure_type: Option<PressureReferenceMode>,
+
+    /// Humidity (0-100%)
+    #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+    humidity: f64,
+
+    /// Altitude (feet or meters based on --units)
+    #[arg(long, default_value = "0.0")]
+    altitude: f64,
+
+    /// Wind speed (mph or m/s based on --units)
+    #[arg(long, default_value = "0.0")]
+    wind_speed: f64,
+
+    /// Wind direction (MBA-1367: degrees or clock position, shared help const)
+    #[arg(long, default_value = "0.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+    wind_direction: ParsedWindDirection,
+}
+
+impl InverseSolverLoadArgs {
+    /// Resolve these flags (CLI over saved profile) into a metric [`HoldCurveLoad`] at
+    /// `zero_distance` in DISPLAY units.
+    ///
+    /// Returns the loaded profile too, so a caller that needs another field from it (a zero
+    /// distance, typically) does not load it a second time.
+    fn resolve(
+        &self,
+        zero_distance: Option<f64>,
+        units: UnitSystem,
+    ) -> Result<(HoldCurveLoad, Option<ProfileData>), Box<dyn Error>> {
+        let profile = match self.profile.as_deref() {
+            Some(name) => Some(load_profile(name)?),
+            None => None,
+        };
+        let require = |value: Option<f64>, flag: &str| -> Result<f64, Box<dyn Error>> {
+            value.ok_or_else(|| format!("{flag} is required (directly or from --profile)").into())
+        };
+        let velocity = require(
+            resolve_param(self.velocity, &profile, |p| p.velocity),
+            "--velocity",
+        )?;
+        let bc = require(resolve_param(self.bc, &profile, |p| p.bc), "--bc")?;
+        let mass = require(resolve_param(self.mass, &profile, |p| p.mass), "--mass")?;
+        let diameter = require(
+            resolve_param(self.diameter, &profile, |p| p.diameter),
+            "--diameter",
+        )?;
+        let zero_distance = require(
+            zero_distance.or_else(|| profile.as_ref().and_then(|p| p.zero_distance)),
+            "--zero-distance",
+        )?;
+        if zero_distance <= 0.0 {
+            return Err("--zero-distance must be greater than zero".into());
+        }
+        // Same fallback `trajectory --saved-profile`/`come-ups --profile` use.
+        let sight_height = self
+            .sight_height
+            .or_else(|| profile.as_ref().and_then(|p| p.sight_height))
+            .unwrap_or(match units {
+                UnitSystem::Imperial => 2.0,
+                UnitSystem::Metric => 50.0,
+            });
+        let temperature = UnitConverter::resolve_temperature(self.temperature, units)?;
+        // MBA-1416: a declared QNH reduces against this command's own --altitude.
+        let pressure = apply_pressure_mode(
+            UnitConverter::resolve_pressure(self.pressure, units)?,
+            self.altitude,
+            self.pressure_type,
+            units,
+        );
+
+        Ok((
+            HoldCurveLoad {
+                velocity_mps: UnitConverter::velocity_to_metric(velocity, units),
+                bc,
+                mass_kg: UnitConverter::mass_to_metric(mass, units),
+                diameter_m: UnitConverter::diameter_to_metric(diameter, units),
+                drag_model: self.drag_model,
+                sight_height_m: UnitConverter::sight_height_to_metric(sight_height, units),
+                zero_distance_m: UnitConverter::distance_to_metric(zero_distance, units),
+                temperature_c: UnitConverter::temperature_to_metric(temperature, units),
+                pressure_hpa: UnitConverter::pressure_to_metric(pressure, units),
+                humidity: self.humidity,
+                altitude_m: UnitConverter::altitude_to_metric(self.altitude, units),
+                wind_speed_mps: UnitConverter::wind_to_metric(self.wind_speed, units),
+                wind_direction_deg: self.wind_direction.degrees,
+            },
+            profile,
+        ))
+    }
 }
 
 /// CLI-facing mirror of `ballistics_engine::reticle::FocalPlane` (MBA-1361), the same thin
@@ -11700,6 +11958,61 @@ fn main() -> Result<(), Box<dyn Error>> {
             handle_reticle(action, cli.units)?;
         }
 
+        Commands::MarkToRange {
+            marks,
+            reticle_json,
+            mag,
+            focal_plane,
+            reference_mag,
+            zero_distance,
+            max_range,
+            load,
+            output,
+        } => {
+            handle_mark_to_range(
+                marks,
+                reticle_json,
+                mag,
+                focal_plane,
+                reference_mag,
+                zero_distance,
+                max_range,
+                load,
+                cli.units,
+                output,
+            )?;
+        }
+
+        Commands::BdcMatch {
+            mark_ranges,
+            reference_mag,
+            focal_plane,
+            residual_warn,
+            zero_distance,
+            load,
+            output,
+        } => {
+            handle_bdc_match(
+                mark_ranges,
+                reference_mag,
+                focal_plane,
+                residual_warn,
+                zero_distance,
+                load,
+                cli.units,
+                output,
+            )?;
+        }
+
+        Commands::OptimalZero {
+            targets,
+            vital,
+            load,
+            output,
+        } => {
+            handle_optimal_zero(targets, vital, load, cli.units, output)?;
+        }
+
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "ballistics", &mut std::io::stdout());
@@ -16212,14 +16525,42 @@ struct HoldPoint {
     time_s: f64,
 }
 
-/// A solved, sampled drop-vs-range curve expressed in ANGULAR units (MBA-1361).
+/// A solved, sampled drop-vs-range curve expressed in ANGULAR units (MBA-1361/MBA-1362).
 ///
 /// One solve, sampled finely, then read by interpolation — the same shape `come-ups` uses,
-/// but keyed on angle rather than linear drop because that is what a reticle mark is. This
-/// is the single place a hold curve is produced, so `reticle hold --range` and (MBA-1362)
-/// the three inverse solvers cannot disagree about what "the drop at 500 yards" means.
+/// but keyed on angle rather than linear drop because that is what a reticle mark is.
+///
+/// **This is THE drop-vs-range helper**, forward ([`Self::at_range`]) and inverse
+/// ([`Self::range_for_angular_drop_mil`]), and all four consumers go through it:
+/// `reticle hold --range` (MBA-1361) plus `mark-to-range`, `bdc-match` and `optimal-zero`
+/// (MBA-1362). Sharing it is the point — three separately-written root finds would be
+/// three chances for "the drop at 500 yards" to mean three different things. The future
+/// constant-drop range-card ticket is mark-to-range with uniformly spaced marks and should
+/// reuse it too rather than growing a fourth.
 struct HoldCurve {
     samples: Vec<trajectory_sampling::TrajectorySample>,
+}
+
+/// Result of inverting the hold curve for one mark subtension (MBA-1362).
+///
+/// The two failure arms are REPORTED, never silently dropped: a mark the load cannot reach
+/// is information a shooter needs (it is the reticle's usable range limit), and dropping it
+/// would quietly shorten the answer table.
+#[derive(Debug, Clone, PartialEq)]
+enum MarkToRangeOutcome {
+    /// The mark's subtension is matched at this range.
+    Reached(Box<HoldPoint>),
+    /// The subtension corresponds to no range past the far zero. Angular drop is exactly
+    /// zero AT the far zero and only grows past it, so a mark at or ABOVE the optical
+    /// center (a non-positive subtension) is never matched — those are under-holds for
+    /// ranges inside the zero, where drop-vs-range is not monotone and "the range for this
+    /// mark" is not well defined.
+    InsideZero { far_zero_range_m: f64 },
+    /// Angular drop never grows to the subtension within the searched trajectory.
+    BeyondSearch {
+        max_range_m: f64,
+        max_drop_mil: f64,
+    },
 }
 
 impl HoldCurve {
@@ -16337,6 +16678,81 @@ impl HoldCurve {
             energy_j: lerp(lo.energy_j, hi.energy_j),
             time_s: lerp(lo.time_s, hi.time_s),
         })
+    }
+
+    /// The downrange distance of the FAR zero crossing, meters — the point past which
+    /// angular drop grows monotonically with range.
+    ///
+    /// Angular drop is not monotone over the whole flight: it starts large and positive at
+    /// the muzzle (the bullet is a sight height below the line of sight, divided by a tiny
+    /// range), falls through zero at the near zero, goes negative while the bullet rides
+    /// above the line of sight, and returns through zero at the far zero. Only past that
+    /// second crossing is the inverse below single-valued, so the search domain starts
+    /// there rather than at the muzzle.
+    fn far_zero_range_m(&self) -> f64 {
+        let mut far = self.samples.first().map_or(0.0, |s| s.distance_m);
+        for sample in &self.samples {
+            if sample.distance_m > 0.0 && sample.drop_m <= 0.0 {
+                far = sample.distance_m;
+            }
+        }
+        far
+    }
+
+    /// Bisection cap for the inverse below. The curve is monotone on the searched interval,
+    /// so bisection halves the bracket every step; 80 iterations takes any realistic
+    /// bracket far below the tolerance and exists only as a runaway guard.
+    const INVERSE_MAX_ITERATIONS: u32 = 80;
+
+    /// Bracket width (meters) at which the inverse stops regardless of residual — a
+    /// hundredth of a millimeter, four orders below anything a range card resolves.
+    const INVERSE_TOLERANCE_M: f64 = 1.0e-5;
+
+    /// Invert the curve: the range at which the angular drop equals `target_mil`.
+    ///
+    /// Bisection over the interpolated curve on `[far zero, furthest sample]`, where drop
+    /// is monotone increasing in range. Both out-of-domain cases come back as their own
+    /// outcome rather than as a clamped range.
+    fn range_for_angular_drop_mil(&self, target_mil: f64) -> MarkToRangeOutcome {
+        let far_zero_range_m = self.far_zero_range_m();
+        let max_range_m = self.max_sampled_range_m();
+        let drop_at = |range_m: f64| self.at_range(range_m).map(|p| p.drop_mil);
+        let max_drop_mil = drop_at(max_range_m).unwrap_or(f64::NEG_INFINITY);
+
+        if !target_mil.is_finite() || target_mil <= 0.0 {
+            return MarkToRangeOutcome::InsideZero { far_zero_range_m };
+        }
+        if target_mil > max_drop_mil {
+            return MarkToRangeOutcome::BeyondSearch {
+                max_range_m,
+                max_drop_mil,
+            };
+        }
+        // Start the bracket just past the far zero: exactly at it the drop is 0, and any
+        // positive target is therefore bracketed.
+        let mut lo = far_zero_range_m.max(Self::SAMPLE_INTERVAL_M);
+        if drop_at(lo).is_none_or(|drop| drop >= target_mil) {
+            return MarkToRangeOutcome::InsideZero { far_zero_range_m };
+        }
+        let mut hi = max_range_m;
+        for _ in 0..Self::INVERSE_MAX_ITERATIONS {
+            if hi - lo <= Self::INVERSE_TOLERANCE_M {
+                break;
+            }
+            let mid = 0.5 * (lo + hi);
+            match drop_at(mid) {
+                Some(drop) if drop < target_mil => lo = mid,
+                Some(_) => hi = mid,
+                None => break,
+            }
+        }
+        match self.at_range(0.5 * (lo + hi)) {
+            Some(point) => MarkToRangeOutcome::Reached(Box::new(point)),
+            None => MarkToRangeOutcome::BeyondSearch {
+                max_range_m,
+                max_drop_mil,
+            },
+        }
     }
 }
 
@@ -21327,6 +21743,727 @@ mod dsf_cli_tests {
 /// does not have to re-vendor the numbers and then drift from the engine as tables are refined.
 /// Emitted verbatim from the table — no resampling, no interpolation onto a uniform grid — so
 /// what you plot is exactly what the solver interpolates.
+/// Golden ratio conjugate, the fixed step constant of the `optimal-zero` search
+/// (MBA-1362). Hard-coded rather than derived at run time so the search is bit-for-bit
+/// reproducible across builds.
+const GOLDEN_SECTION_RATIO: f64 = 0.618_033_988_749_894_9;
+
+/// Iteration cap for the `optimal-zero` golden-section search. Each step shrinks the
+/// bracket by [`GOLDEN_SECTION_RATIO`], so a 2000 m bracket reaches the tolerance below in
+/// about 25; the rest is runaway guard.
+const OPTIMAL_ZERO_MAX_ITERATIONS: u32 = 60;
+
+/// Bracket width (meters) at which the `optimal-zero` search stops. A centimeter of zero
+/// distance is far below what anyone can set a zero to.
+const OPTIMAL_ZERO_TOLERANCE_M: f64 = 0.01;
+
+/// Smallest and largest zero distance the `optimal-zero` bracket will consider, meters.
+const OPTIMAL_ZERO_MIN_M: f64 = 10.0;
+const OPTIMAL_ZERO_MAX_M: f64 = 2000.0;
+
+/// Convert one NOMINAL mark subtension to TRUE angular milliradians (MBA-1362).
+///
+/// The single conversion all three inverse solvers use, so none of them can disagree about
+/// what a second-focal-plane mark covers. FFP is an exact identity.
+fn true_subtension_mil(nominal_mil: f64, focal_plane: FocalPlane, scale: f64) -> f64 {
+    match focal_plane {
+        FocalPlane::First => nominal_mil,
+        FocalPlane::Second => nominal_mil * scale,
+    }
+}
+
+/// `mark-to-range` (MBA-1362).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable Clap command shape"
+)]
+fn handle_mark_to_range(
+    marks: Vec<f64>,
+    reticle_json: Option<PathBuf>,
+    mag: f64,
+    focal_plane: FocalPlaneArg,
+    reference_mag: f64,
+    zero_distance: Option<f64>,
+    max_range: f64,
+    load_args: InverseSolverLoadArgs,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    let format = reticle_format(output)?;
+
+    // Subtension source. A reticle file carries its OWN focal plane and reference
+    // magnification, which win over the flags — a description that says "SFP at 12x" is
+    // authoritative about itself.
+    let (nominal_marks, plane, reference_mag, excluded, source_name) = match &reticle_json {
+        Some(path) => {
+            if !marks.is_empty() {
+                return Err("--mark and --reticle-json are mutually exclusive".into());
+            }
+            let description = load_reticle_description(path)?;
+            // Marks on the vertical stadium, INCLUDING any above center: those come back
+            // as "not a holdover" rows rather than being quietly dropped. Only genuinely
+            // off-axis marks (windage dots) and the optical center itself are excluded,
+            // and the count of those is reported.
+            let holdovers: Vec<f64> = description
+                .marks
+                .iter()
+                .filter(|m| m.right_mil == 0.0 && m.down_mil != 0.0)
+                .map(|m| m.down_mil)
+                .collect();
+            let excluded = description.marks.len() - holdovers.len();
+            if holdovers.is_empty() {
+                return Err(format!(
+                    "reticle '{}' has no marks on the vertical stadium to map to a range \
+                     (only the optical center and off-axis windage marks)",
+                    description.name
+                )
+                .into());
+            }
+            (
+                holdovers,
+                description.focal_plane,
+                description.reference_magnification,
+                excluded,
+                description.name,
+            )
+        }
+        None => {
+            if marks.is_empty() {
+                return Err(
+                    "at least one --mark <MIL> is required (or --reticle-json <FILE>)".into(),
+                );
+            }
+            for mark in &marks {
+                if !mark.is_finite() {
+                    return Err(format!("--mark {mark} must be a finite subtension").into());
+                }
+            }
+            (
+                marks,
+                focal_plane.into(),
+                reference_mag,
+                0,
+                "supplied marks".to_string(),
+            )
+        }
+    };
+    if plane == FocalPlane::Second && (!reference_mag.is_finite() || reference_mag <= 0.0) {
+        return Err("an SFP reticle needs a positive reference magnification".into());
+    }
+    let scale = reference_mag / mag;
+
+    let (load, _) = load_args.resolve(zero_distance, units)?;
+    let max_range_m = UnitConverter::distance_to_metric(max_range, units);
+    // Search a little past the requested limit so a mark landing exactly at it still
+    // brackets.
+    let curve = HoldCurve::solve(&load, max_range_m * 1.02)?;
+
+    struct Row {
+        nominal_mil: f64,
+        true_mil: f64,
+        outcome: MarkToRangeOutcome,
+    }
+    let rows: Vec<Row> = nominal_marks
+        .iter()
+        .map(|&nominal_mil| {
+            let true_mil = true_subtension_mil(nominal_mil, plane, scale);
+            Row {
+                nominal_mil,
+                true_mil,
+                outcome: curve.range_for_angular_drop_mil(true_mil),
+            }
+        })
+        .collect();
+
+    let (dist_unit, vel_unit, energy_unit) = match units {
+        UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+        UnitSystem::Metric => ("m", "m/s", "J"),
+    };
+
+    match format {
+        ReticleFormat::Json => {
+            let entries: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| match &row.outcome {
+                    MarkToRangeOutcome::Reached(point) => serde_json::json!({
+                        "nominal_mil": row.nominal_mil,
+                        "true_mil": row.true_mil,
+                        "status": "reached",
+                        "range": UnitConverter::distance_from_metric(point.range_m, units),
+                        "time": point.time_s,
+                        "velocity": UnitConverter::velocity_from_metric(point.velocity_mps, units),
+                        "energy": UnitConverter::energy_from_metric(point.energy_j, units),
+                    }),
+                    MarkToRangeOutcome::InsideZero { far_zero_range_m } => serde_json::json!({
+                        "nominal_mil": row.nominal_mil,
+                        "true_mil": row.true_mil,
+                        "status": "not_a_holdover",
+                        "far_zero_range": UnitConverter::distance_from_metric(*far_zero_range_m, units),
+                    }),
+                    MarkToRangeOutcome::BeyondSearch { max_range_m, max_drop_mil } => {
+                        serde_json::json!({
+                            "nominal_mil": row.nominal_mil,
+                            "true_mil": row.true_mil,
+                            "status": "beyond_max_range",
+                            "max_range": UnitConverter::distance_from_metric(*max_range_m, units),
+                            "max_drop_mil": max_drop_mil,
+                        })
+                    }
+                })
+                .collect();
+            let value = serde_json::json!({
+                "reticle": source_name,
+                "focal_plane": plane.label(),
+                "reference_magnification": reference_mag,
+                "magnification": mag,
+                "mark_scale": if plane == FocalPlane::Second { scale } else { 1.0 },
+                "zero_distance": UnitConverter::distance_from_metric(load.zero_distance_m, units),
+                "distance_unit": dist_unit,
+                "velocity_unit": vel_unit,
+                "energy_unit": energy_unit,
+                "excluded_marks": excluded,
+                "marks": entries,
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        ReticleFormat::Table => {
+            println!("Mark-to-Range");
+            println!("=============\n");
+            println!("Reticle:      {source_name}");
+            println!("Focal plane:  {}", plane.label());
+            if plane == FocalPlane::Second {
+                println!("Reference:    {reference_mag:.2}x   In use: {mag:.2}x   Subtension scale: {scale:.4}x");
+            }
+            println!(
+                "Zero:         {:.0} {}\n",
+                UnitConverter::distance_from_metric(load.zero_distance_m, units),
+                dist_unit
+            );
+            if excluded > 0 {
+                println!(
+                    "Note: {excluded} mark(s) excluded — the optical center and off-axis \
+                     windage marks do not map to a range.\n"
+                );
+            }
+            println!(
+                "Mark(mil)  True(mil)  Range({dist_unit})  Time(s)  Vel({vel_unit})  Energy({energy_unit})"
+            );
+            println!("---------  ---------  ----------  -------  ----------  ------------");
+            for row in &rows {
+                match &row.outcome {
+                    MarkToRangeOutcome::Reached(point) => println!(
+                        "{:>9.2}  {:>9.3}  {:>10.0}  {:>7.3}  {:>10.0}  {:>12.0}",
+                        row.nominal_mil,
+                        row.true_mil,
+                        UnitConverter::distance_from_metric(point.range_m, units),
+                        point.time_s,
+                        UnitConverter::velocity_from_metric(point.velocity_mps, units),
+                        UnitConverter::energy_from_metric(point.energy_j, units)
+                    ),
+                    MarkToRangeOutcome::InsideZero { far_zero_range_m } => println!(
+                        "{:>9.2}  {:>9.3}  {:>10}  (not a holdover: drop is 0 at the far zero, {:.0} {}, and only grows past it)",
+                        row.nominal_mil,
+                        row.true_mil,
+                        "-",
+                        UnitConverter::distance_from_metric(*far_zero_range_m, units),
+                        dist_unit
+                    ),
+                    MarkToRangeOutcome::BeyondSearch {
+                        max_range_m,
+                        max_drop_mil,
+                    } => println!(
+                        "{:>9.2}  {:>9.3}  {:>10}  (never reached: {:.2} mil at {:.0} {} is the most this load drops)",
+                        row.nominal_mil,
+                        row.true_mil,
+                        "-",
+                        max_drop_mil,
+                        UnitConverter::distance_from_metric(*max_range_m, units),
+                        dist_unit
+                    ),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One `bdc-match --mark-range MIL:RANGE` pair, parsed (MBA-1362).
+struct BdcMatchPair {
+    nominal_mil: f64,
+    range_display: f64,
+    range_m: f64,
+}
+
+fn parse_bdc_match_pair(token: &str, units: UnitSystem) -> Result<BdcMatchPair, String> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "invalid --mark-range '{token}': expected MIL:RANGE (e.g. 2.0:300)"
+        ));
+    }
+    let nominal_mil: f64 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --mark-range subtension '{}' in '{token}'", parts[0]))?;
+    let range: f64 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --mark-range range '{}' in '{token}'", parts[1]))?;
+    if !nominal_mil.is_finite() || nominal_mil <= 0.0 {
+        return Err(format!(
+            "invalid --mark-range '{token}': the subtension must be a positive holdover in \
+             milliradians"
+        ));
+    }
+    if !range.is_finite() || range <= 0.0 {
+        return Err(format!(
+            "invalid --mark-range '{token}': the range must be finite and greater than zero"
+        ));
+    }
+    Ok(BdcMatchPair {
+        nominal_mil,
+        range_display: range,
+        range_m: UnitConverter::distance_to_metric(range, units),
+    })
+}
+
+/// `bdc-match` (MBA-1362).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable Clap command shape"
+)]
+fn handle_bdc_match(
+    mark_ranges: Vec<String>,
+    reference_mag: f64,
+    focal_plane: FocalPlaneArg,
+    residual_warn: f64,
+    zero_distance: Option<f64>,
+    load_args: InverseSolverLoadArgs,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    let format = reticle_format(output)?;
+    if FocalPlane::from(focal_plane) == FocalPlane::First {
+        return Err(
+            "bdc-match applies to SECOND focal plane reticles only: an FFP reticle's \
+             subtensions are the same at every magnification, so no magnification makes it \
+             match a load better than any other. Use `mark-to-range` to see where its marks \
+             land instead."
+                .into(),
+        );
+    }
+    let pairs: Vec<BdcMatchPair> = mark_ranges
+        .iter()
+        .map(|token| parse_bdc_match_pair(token, units))
+        .collect::<Result<_, _>>()?;
+    if pairs.len() < 2 {
+        return Err(
+            "bdc-match needs at least two --mark-range MIL:RANGE pairs to fit a magnification \
+             (one pair is satisfied exactly by some magnification and says nothing about fit)"
+                .into(),
+        );
+    }
+
+    let (load, _) = load_args.resolve(zero_distance, units)?;
+    let furthest_m = pairs.iter().fold(0.0_f64, |acc, p| acc.max(p.range_m));
+    let curve = HoldCurve::solve(&load, furthest_m * 1.05)?;
+
+    // Solved angular drop at each mark's nominal range.
+    let mut solved_mil = Vec::with_capacity(pairs.len());
+    for pair in &pairs {
+        let point = curve.at_range(pair.range_m).ok_or_else(|| {
+            format!(
+                "the trajectory does not reach {:.0} — it was solved only to {:.0}",
+                pair.range_display,
+                UnitConverter::distance_from_metric(curve.max_sampled_range_m(), units)
+            )
+        })?;
+        solved_mil.push(point.drop_mil);
+    }
+
+    // The fit. The apparent subtension of mark i at magnification M is
+    //     a_i(M) = s_i * reference_mag / M
+    // so substituting u = reference_mag / M makes the residual LINEAR in u:
+    //     minimize  sum_i (s_i * u - t_i)^2
+    // whose minimizer is the ordinary least-squares slope through the origin,
+    //     u* = sum(s_i t_i) / sum(s_i^2),
+    // and the fitted magnification is reference_mag / u*. Closed form, so it is exact,
+    // deterministic, and cannot depend on a starting guess or an iteration count.
+    let sum_st: f64 = pairs
+        .iter()
+        .zip(&solved_mil)
+        .map(|(pair, t)| pair.nominal_mil * t)
+        .sum();
+    let sum_ss: f64 = pairs.iter().map(|pair| pair.nominal_mil.powi(2)).sum();
+    if sum_ss <= 0.0 {
+        return Err("the supplied subtensions carry no information to fit".into());
+    }
+    let u = sum_st / sum_ss;
+    if !u.is_finite() || u <= 0.0 {
+        return Err(
+            "no positive magnification fits these marks: the solved drops and the supplied \
+             subtensions disagree in sign (check that the ranges pair with the right marks)"
+                .into(),
+        );
+    }
+    let fitted_mag = reference_mag / u;
+
+    struct Residual {
+        nominal_mil: f64,
+        range_display: f64,
+        apparent_mil: f64,
+        solved_mil: f64,
+        residual_mil: f64,
+    }
+    let residuals: Vec<Residual> = pairs
+        .iter()
+        .zip(&solved_mil)
+        .map(|(pair, &t)| {
+            let apparent = pair.nominal_mil * u;
+            Residual {
+                nominal_mil: pair.nominal_mil,
+                range_display: pair.range_display,
+                apparent_mil: apparent,
+                solved_mil: t,
+                residual_mil: apparent - t,
+            }
+        })
+        .collect();
+    let worst = residuals
+        .iter()
+        .fold(0.0_f64, |acc, r| acc.max(r.residual_mil.abs()));
+    let rms = (residuals
+        .iter()
+        .map(|r| r.residual_mil.powi(2))
+        .sum::<f64>()
+        / residuals.len() as f64)
+        .sqrt();
+
+    let dist_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+
+    match format {
+        ReticleFormat::Json => {
+            let value = serde_json::json!({
+                "fitted_magnification": fitted_mag,
+                "reference_magnification": reference_mag,
+                "subtension_scale": u,
+                "zero_distance": UnitConverter::distance_from_metric(load.zero_distance_m, units),
+                "distance_unit": dist_unit,
+                "worst_residual_mil": worst,
+                "rms_residual_mil": rms,
+                "residual_warn_mil": residual_warn,
+                "fit_warning": worst > residual_warn,
+                "marks": residuals.iter().map(|r| serde_json::json!({
+                    "nominal_mil": r.nominal_mil,
+                    "range": r.range_display,
+                    "apparent_mil": r.apparent_mil,
+                    "solved_drop_mil": r.solved_mil,
+                    "residual_mil": r.residual_mil,
+                })).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        ReticleFormat::Table => {
+            println!("BDC Magnification Match");
+            println!("=======================\n");
+            println!("Reference magnification: {reference_mag:.2}x");
+            println!("Fitted magnification:    {fitted_mag:.3}x");
+            println!("Subtension scale at fit: {u:.4}x");
+            println!(
+                "Zero:                    {:.0} {}\n",
+                UnitConverter::distance_from_metric(load.zero_distance_m, units),
+                dist_unit
+            );
+            println!(
+                "Mark(mil)  Range({dist_unit})  Apparent(mil)  Drop(mil)  Residual(mil)"
+            );
+            println!("---------  ----------  -------------  ---------  -------------");
+            for r in &residuals {
+                println!(
+                    "{:>9.2}  {:>10.0}  {:>13.3}  {:>9.3}  {:>13.3}",
+                    r.nominal_mil, r.range_display, r.apparent_mil, r.solved_mil, r.residual_mil
+                );
+            }
+            println!("\nWorst residual: {worst:.3} mil   RMS: {rms:.3} mil");
+            if worst > residual_warn {
+                println!(
+                    "\nWARNING: the worst residual exceeds {residual_warn:.3} mil — this reticle \
+                     does not fit this load well at ANY magnification. Treat the fitted value as \
+                     the least-bad compromise, not a BDC calibration."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One `optimal-zero --target RANGE[:HEIGHT]` entry, parsed (MBA-1362).
+struct OptimalZeroTarget {
+    range_display: f64,
+    range_m: f64,
+    /// Full vertical size, meters. `None` until `--vital` fills it in.
+    height_m: Option<f64>,
+}
+
+fn parse_optimal_zero_target(
+    token: &str,
+    units: UnitSystem,
+) -> Result<OptimalZeroTarget, String> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 1 && parts.len() != 2 {
+        return Err(format!(
+            "invalid --target '{token}': expected RANGE or RANGE:HEIGHT (e.g. 400 or 400:12)"
+        ));
+    }
+    let range: f64 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --target range '{}' in '{token}'", parts[0]))?;
+    if !range.is_finite() || range <= 0.0 {
+        return Err(format!(
+            "invalid --target '{token}': the range must be finite and greater than zero"
+        ));
+    }
+    let height = match parts.get(1) {
+        Some(token_height) => {
+            let value: f64 = token_height
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid --target height '{token_height}' in '{token}'"))?;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "invalid --target '{token}': the height must be finite and greater than zero"
+                ));
+            }
+            Some(value)
+        }
+        None => None,
+    };
+    Ok(OptimalZeroTarget {
+        range_display: range,
+        range_m: UnitConverter::distance_to_metric(range, units),
+        // Inches imperial / centimeters metric, matching `mpbr --vital-zone`.
+        height_m: height.map(|value| match units {
+            UnitSystem::Imperial => value * 0.0254,
+            UnitSystem::Metric => value * 0.01,
+        }),
+    })
+}
+
+/// `optimal-zero` (MBA-1362).
+fn handle_optimal_zero(
+    targets: Vec<String>,
+    vital: Option<f64>,
+    load_args: InverseSolverLoadArgs,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    const MIN_TARGETS: usize = 2;
+    const MAX_TARGETS: usize = 16;
+
+    let format = reticle_format(output)?;
+    let mut parsed: Vec<OptimalZeroTarget> = targets
+        .iter()
+        .map(|token| parse_optimal_zero_target(token, units))
+        .collect::<Result<_, _>>()?;
+    if parsed.len() < MIN_TARGETS || parsed.len() > MAX_TARGETS {
+        return Err(format!(
+            "optimal-zero needs {MIN_TARGETS} to {MAX_TARGETS} --target entries (got {}): one \
+             target is just a zero distance, and beyond {MAX_TARGETS} the min-max answer is \
+             dominated by the extremes anyway",
+            parsed.len()
+        )
+        .into());
+    }
+    let vital_m = vital.map(|value| match units {
+        UnitSystem::Imperial => value * 0.0254,
+        UnitSystem::Metric => value * 0.01,
+    });
+    for target in parsed.iter_mut() {
+        if target.height_m.is_none() {
+            target.height_m = vital_m;
+        }
+        if target.height_m.is_none() {
+            return Err(format!(
+                "--target {} carries no height and no --vital was given; one of the two must \
+                 say how big the target is",
+                target.range_display
+            )
+            .into());
+        }
+    }
+    // Sorted by range so the report reads in order regardless of entry order, and so the
+    // reported worst-case target is a deterministic choice among ties.
+    parsed.sort_by(|a, b| a.range_m.total_cmp(&b.range_m));
+
+    let furthest_m = parsed.iter().fold(0.0_f64, |acc, t| acc.max(t.range_m));
+    let nearest_m = parsed
+        .iter()
+        .fold(f64::INFINITY, |acc, t| acc.min(t.range_m));
+    let curve_max_m = furthest_m * 1.05;
+
+    // Resolve the load ONCE, so a missing flag is an error here rather than a mysterious
+    // "no zero could be solved" later, and so the saved profile is read once rather than
+    // once per search iteration. The zero distance handed in is a placeholder — this
+    // command solves for it, and every candidate below overwrites it.
+    let (base_load, _) = load_args.resolve(Some(1.0), units)?;
+
+    // Holds at every target for one candidate zero: one solve, read at each range.
+    let holds_at = |zero_m: f64| -> Option<Vec<f64>> {
+        let mut load = base_load.clone();
+        load.zero_distance_m = zero_m;
+        let curve = HoldCurve::solve(&load, curve_max_m).ok()?;
+        parsed
+            .iter()
+            .map(|target| curve.at_range(target.range_m).map(|p| p.drop_mil))
+            .collect()
+    };
+
+    // The objective: the LARGEST hold any target needs. It is quasiconvex in zero
+    // distance — increasing the zero shifts every range's required hold by very nearly the
+    // same angular amount, and the max of |linear functions| is convex — so golden-section
+    // search is valid and, with fixed constants, deterministic.
+    let objective = |zero_m: f64| -> f64 {
+        match holds_at(zero_m) {
+            Some(holds) => holds.iter().fold(0.0_f64, |acc, h| acc.max(h.abs())),
+            // An unsolvable candidate is pushed away from rather than crashing the search.
+            None => f64::INFINITY,
+        }
+    };
+
+    let mut lo = (nearest_m * 0.15).max(OPTIMAL_ZERO_MIN_M);
+    let mut hi = (furthest_m * 1.05).min(OPTIMAL_ZERO_MAX_M).max(lo + 1.0);
+    let mut x1 = hi - GOLDEN_SECTION_RATIO * (hi - lo);
+    let mut x2 = lo + GOLDEN_SECTION_RATIO * (hi - lo);
+    let mut f1 = objective(x1);
+    let mut f2 = objective(x2);
+    for _ in 0..OPTIMAL_ZERO_MAX_ITERATIONS {
+        if hi - lo <= OPTIMAL_ZERO_TOLERANCE_M {
+            break;
+        }
+        if f1 < f2 {
+            hi = x2;
+            x2 = x1;
+            f2 = f1;
+            x1 = hi - GOLDEN_SECTION_RATIO * (hi - lo);
+            f1 = objective(x1);
+        } else {
+            lo = x1;
+            x1 = x2;
+            f1 = f2;
+            x2 = lo + GOLDEN_SECTION_RATIO * (hi - lo);
+            f2 = objective(x2);
+        }
+    }
+    let best_zero_m = 0.5 * (lo + hi);
+    let holds = holds_at(best_zero_m).ok_or_else(|| {
+        format!(
+            "no trajectory could be solved at the fitted zero of {:.1} {}",
+            UnitConverter::distance_from_metric(best_zero_m, units),
+            match units {
+                UnitSystem::Imperial => "yd",
+                UnitSystem::Metric => "m",
+            }
+        )
+    })?;
+
+    struct TargetRow {
+        range_display: f64,
+        height_m: f64,
+        hold_mil: f64,
+        /// Signed vertical displacement of a DEAD-CENTER hold, meters. Positive = the
+        /// bullet lands low.
+        offset_m: f64,
+        fits: bool,
+    }
+    let rows: Vec<TargetRow> = parsed
+        .iter()
+        .zip(&holds)
+        .map(|(target, &hold_mil)| {
+            let height_m = target.height_m.expect("filled in above");
+            let offset_m = hold_mil / 1000.0 * target.range_m;
+            TargetRow {
+                range_display: target.range_display,
+                height_m,
+                hold_mil,
+                offset_m,
+                // Boundary contact counts as a fit.
+                fits: offset_m.abs() <= height_m / 2.0,
+            }
+        })
+        .collect();
+    let max_hold_mil = rows.iter().fold(0.0_f64, |acc, r| acc.max(r.hold_mil.abs()));
+    let all_fit = rows.iter().all(|r| r.fits);
+
+    let (dist_unit, size_unit) = match units {
+        UnitSystem::Imperial => ("yd", "in"),
+        UnitSystem::Metric => ("m", "cm"),
+    };
+    let size_from_m = |value: f64| match units {
+        UnitSystem::Imperial => value / 0.0254,
+        UnitSystem::Metric => value * 100.0,
+    };
+
+    match format {
+        ReticleFormat::Json => {
+            let value = serde_json::json!({
+                "optimal_zero": UnitConverter::distance_from_metric(best_zero_m, units),
+                "distance_unit": dist_unit,
+                "size_unit": size_unit,
+                "max_hold_mil": max_hold_mil,
+                "all_targets_fit": all_fit,
+                "targets": rows.iter().map(|r| serde_json::json!({
+                    "range": r.range_display,
+                    "height": size_from_m(r.height_m),
+                    "hold_mil": r.hold_mil,
+                    "offset": size_from_m(r.offset_m),
+                    "fits": r.fits,
+                })).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        ReticleFormat::Table => {
+            println!("Optimal Zero (min-max hold)");
+            println!("===========================\n");
+            println!(
+                "Optimal zero:  {:.1} {}",
+                UnitConverter::distance_from_metric(best_zero_m, units),
+                dist_unit
+            );
+            println!("Largest hold:  {max_hold_mil:.3} mil\n");
+            println!(
+                "Range({dist_unit})  Target({size_unit})  Hold(mil)  Center-hold miss({size_unit})  Fits"
+            );
+            println!("----------  ----------  ---------  ---------------------  ----");
+            for r in &rows {
+                println!(
+                    "{:>10.0}  {:>10.1}  {:>9.3}  {:>21.2}  {}",
+                    r.range_display,
+                    size_from_m(r.height_m),
+                    r.hold_mil,
+                    size_from_m(r.offset_m),
+                    if r.fits { "yes" } else { "NO" }
+                );
+            }
+            println!(
+                "\n{}",
+                if all_fit {
+                    "Every target is inside its vital zone with a dead-center hold."
+                } else {
+                    "At least one target needs a hold: no single zero keeps them all centered."
+                }
+            );
+            println!(
+                "Center-hold miss is signed: positive = the bullet lands LOW of the aim point."
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Map an `OutputFormat` onto the reticle formatter's two shapes (MBA-1361).
 ///
 /// CSV and PDF are rejected here rather than in the library, because each surface owns its
