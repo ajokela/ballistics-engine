@@ -2261,6 +2261,137 @@ Final Error:           0.001 MIL
 Calculated Drop:       5.10 MIL
 ```
 
+### Wind-Call Truing (`true-wind`) — MBA-1392
+
+`true-velocity` trues the VERTICAL axis. `true-wind` trues the other one: given where a
+group actually landed left or right of the aim point, it back-solves the constant
+crosswind that reproduces that miss through the real forward model — the number you
+compare against the wind you *called*, so wind calls get calibrated instead of guessed at.
+
+A horizontal miss is not purely wind, so the command insists on being able to separate it:
+
+- **`--twist-rate` is required.** Gyroscopic spin drift is a lateral effect of the same
+  order as a light wind at long range (a 1:11" .308 drifts ~3.5 in right at 700 yd), so
+  without a twist rate the fit would report spin drift as wind. It is modelled and
+  therefore subtracted, always.
+- **`--latitude` + `--shot-direction` are optional but travel together.** Supply both and
+  Coriolis is modelled and subtracted too; supply neither and it stays absorbed in the
+  solved wind, which the report says out loud. Supplying only one is a hard error — a
+  half-specified Earth frame is a mistake, not a partially usable input.
+
+Anything the model has no data for is listed under *NOT subtracted*, so a contaminated
+number is never presented as pure wind.
+
+#### Signs (all of them, in one place)
+
+| Quantity | Positive means |
+|----------|----------------|
+| `--miss` RIGHT value | the group landed **right** of the aim point |
+| solved crosswind | wind **FROM the shooter's LEFT** (9 o'clock), which pushes impacts **right** |
+| `--called-wind` | same convention as the solved value |
+| `--twist-right` | right-hand twist (drifts right); `--twist-right false` = left-hand |
+| `--shot-direction` | compass bearing fired *along*, 0 = North, 90 = East |
+
+The solved wind's sign follows the deflection it produces, and it is a **full-value**
+crosswind (a 90° wind), not a half-value component of some other bearing. Internally that
+is the engine's wind-FROM convention (`0` = headwind, `π/2` = from the right, `3π/2` = from
+the left) — the convention established by the **0.19.0 wind-direction sign fix**, which
+flipped `0` from tailwind to headwind.
+
+#### Units
+
+`--miss RANGE:RIGHT[:SIGMA]`: **RANGE follows `--units`** (yards imperial, meters metric),
+while **RIGHT and SIGMA are LINEAR INCHES in both unit systems** — a tape measurement off
+the target, exactly like `true-velocity --drop-unit in`. Wind speeds (`--called-wind` and
+the solved value) follow `--units` like `--wind-speed` does: mph imperial, m/s metric.
+
+Because `--miss` is a linear measurement and not a dial reading, the MBA-1358 scope
+tracking correction factors do **not** apply to it — only *dialed* observations are
+CF-converted. This command deliberately exposes no `--elevation-cf`/`--windage-cf`.
+
+#### Worked example
+
+```bash
+# Two groups, both right of aim: 14.0 in at 500 yd and 29.5 in at 700 yd.
+# You called a 9 mph left-to-right wind.
+./ballistics true-wind \
+  --miss 500:14.0 --miss 700:29.5 \
+  -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g7 \
+  --twist-rate 11 \
+  --called-wind 9
+```
+
+```
+=== EFFECTIVE WIND TRUING (from observed horizontal miss) ===
+
+  Range (yd)     Miss (in)   Spin/Cor (in)        Wind (mph)  Resid (in)
+  ----------------------------------------------------------------------
+       500.0        +14.00           +1.75            +12.68      -0.000
+       700.0        +29.50           +3.49            +13.23      +0.000
+  ----------------------------------------------------------------------
+
+  Effective crosswind:   +12.96 mph  (mean of 2 observations)
+  Called wind:            +9.00 mph   ->  wind-call correction factor 1.44
+    (multiply your wind calls by 1.44 to match what actually hit)
+  Effects subtracted:  spin drift
+  NOT subtracted (absorbed into the solved wind): Coriolis (supply --latitude and --shot-direction to subtract it)
+```
+
+Read that as: the wind was really ~13 mph, you called 9, so you habitually under-call by a
+factor of ~1.44. The *Spin/Cor* column is the part of each miss the model attributed to
+spin drift (and Coriolis, when an Earth frame is supplied) rather than to wind.
+
+```bash
+# Subtract Coriolis too, and weight the observation by its measurement error.
+./ballistics true-wind \
+  --miss 600:16.5:0.75 \
+  -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g7 --twist-rate 11 \
+  --latitude 45 --shot-direction 90 \
+  -o json
+```
+
+With a sigma on every `--miss`, the combined answer is inverse-variance weighted and
+carries its own 1σ; with a sigma on none, it is the plain mean. Mixing the two is a hard
+error rather than a silent blend of weighting schemes.
+
+#### `true-wind` Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--miss` | Observed horizontal miss `RANGE:RIGHT[:SIGMA]`, repeatable. RANGE follows `--units`; RIGHT/SIGMA are inches in both systems; RIGHT is signed (positive = right of aim) | Required |
+| `-v`, `--velocity` | **Known** muzzle velocity (true it up with `true-velocity` first if unsure) | Required |
+| `-b`, `--bc` | Ballistic coefficient | Required |
+| `--drag-model` | Drag model (G1/G7) | g1 |
+| `-m`, `--mass` | Bullet mass | Required |
+| `-d`, `--diameter` | Bullet diameter | Required |
+| `--twist-rate` | Barrel twist (in/turn imperial, mm/turn metric) | **Required** |
+| `--twist-right` | Right-hand twist (`--twist-right false` = left-hand) | true |
+| `--latitude` | Firing latitude, degrees. Needs `--shot-direction` | None |
+| `--shot-direction` | Shot azimuth, degrees (0 = N, 90 = E). Needs `--latitude` | None |
+| `--called-wind` | The wind you called (mph/m·s⁻¹) — adds the wind-call correction factor | None |
+| `--zero-distance` | Zero distance | 100 yd/m |
+| `--sight-height` | Sight height above bore | 2 in / 50 mm |
+| `--temperature`, `--pressure`, `--pressure-type`, `--humidity`, `--altitude` | Atmosphere (same meanings as elsewhere) | 59 °F / 29.92 inHg / 50% / 0 |
+| `--units` | Unit system | imperial |
+| `-o`, `--output` | `table`, `json`, or `csv` | table |
+
+#### Reported quantities
+
+- **Effective crosswind** — signed, mph or m/s. Per observation and combined.
+- **Spin/Cor** — the model's zero-wind lateral: what was attributed to spin drift, plus
+  Coriolis when an Earth frame was supplied.
+- **Wind-call correction factor** — `solved ÷ called`. Greater than 1 means you under-call
+  the wind; less than 1 that you over-call it; **negative means you called the wrong side**.
+- **Validity note** — an observation whose impact moves less than 0.25 in per mph of
+  crosswind is flagged as weakly identified (the same idea as `true-velocity`'s
+  MV-calibration window: short-range groups barely constrain the wind).
+- An observed miss no crosswind within ±100 mph can produce is **rejected** with a
+  diagnostic naming the solvable band, rather than clamped into a plausible-looking answer.
+
+The command is entirely offline — there is no API for it and no flag that could reach one.
+It is available on the WASM terminal with identical output (both surfaces render through
+one shared formatter).
+
 ### DSF (Drop-Scale-Factor) Truing
 
 `dsf` is the second stage of Applied Ballistics' two-stage truing workflow (MBA-1357).

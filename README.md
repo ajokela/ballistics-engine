@@ -441,6 +441,31 @@ propagated drop bands. Declared sigmas are treated as absolute known errors, so 
 covariance is not rescaled by residual RMS. With no uncertainty flags, the existing
 point estimate and output schema are unchanged.
 
+### Wind-Call Truing (`true-wind`)
+
+`true-velocity` trues the vertical axis; `true-wind` (MBA-1392) trues the other one.
+Give it where your groups actually landed left/right of the aim point and it back-solves
+the crosswind that reproduces that miss through the real forward model, plus a wind-call
+correction factor against the wind you *called*:
+
+```bash
+./ballistics true-wind \
+  --miss 500:14.0 --miss 700:29.5 \
+  -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g7 \
+  --twist-rate 11 --called-wind 9
+```
+
+A horizontal miss is not purely wind, so the command separates it: `--twist-rate` is
+**required** and gyroscopic spin drift is always modelled and subtracted (a 1:11" .308
+drifts ~3.5 in right at 700 yd — read as wind, that alone is several mph of error), and
+`--latitude` with `--shot-direction` adds Coriolis. Anything the model had no data for
+stays absorbed in the solved wind and is named in the report, so a contaminated number is
+never presented as pure wind. Signs are documented in one block: `--miss` positive =
+impact **right** of aim, solved wind positive = wind **from the shooter's left**
+(9 o'clock) pushing impacts right. `--miss` values are linear inches off the target, not
+dial readings, so scope tracking correction factors deliberately do not apply.
+See [CLI_USAGE.md](CLI_USAGE.md#wind-call-truing-true-wind--mba-1392).
+
 ### DSF (Drop-Scale-Factor) Truing
 
 Second stage of the Applied Ballistics-style two-stage truing workflow (MBA-1357).
