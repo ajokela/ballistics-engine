@@ -40,7 +40,22 @@ MIPS). This is non-negotiable: stale binaries have shipped-adjacent twice.
    plus lib/ballistics_engine.rb VERSION), `gem build` + container-validate + `gem push`.
 6. npm: passkey-gated, human-only until an automation token / OIDC trusted publishing
    is set up.
-7. `verify-channels.sh X.Y.Z` — the release is done when this exits 0, not before.
+7. **ballistics.tools** (the download hub) — the channel everyone forgets: it drifted from
+   0.22.0 to 0.31.0 unnoticed because it was not listed here. Source is
+   `~/projects/ballistics-tools-site` (NOT the stale duplicate under `ballistics.rs/`),
+   deployed with `cd ~/projects/ballistics && firebase deploy --only hosting:tools`.
+   Two real build artifacts live there, both of which must be REBUILT, not just relinked:
+   - **Node WASM package** (`downloads/ballistics-wasm-node/` + its `.zip`):
+     `wasm-pack build --target nodejs --no-default-features --out-dir /tmp/wasm-node-X.Y.Z`,
+     copy the five files over, re-zip. Smoke-test it with the site's OWN documented example
+     before publishing — the API is a consuming builder, so every setter must be chained.
+   - **Three BSD Python wheels** (FreeBSD/OpenBSD/NetBSD x86_64): PyPI cannot host these, so
+     the hub is the only way BSD users get the Python binding. Built with maturin on the BSD
+     hosts from `ballistics-engine-py` at the new version, so they are blocked on
+     crates.io + the binding bump (step 5) and land LAST.
+   Do NOT touch `downloads/bc5d*/manifest.json` — those carry the table/Flask versioning
+   (0.34.x), not the engine's.
+8. `verify-channels.sh X.Y.Z` — the release is done when this exits 0, not before.
 
 ## What the first automated release (0.30.1) taught
 
