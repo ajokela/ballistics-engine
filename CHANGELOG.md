@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Clock-position wind direction entry** (MBA-1367; Kestrel/ATrag/AB-class field
+  convention). Every `--wind-direction` flag (trajectory, monte-carlo, come-ups, lead,
+  range-table, compare, `profile save`) and both WASM terminal wind-direction args now
+  accept marked clock positions alongside plain degrees: `3oc` = 90°, `10h30` = 315°
+  (`(H % 12) × 30 + MM × 0.5`, wind-FROM, 12 o'clock = headwind = 0° per the
+  post-0.19.0 convention), and — on standalone flags only — the colon form `10:30`.
+  Inside `--wind-segment` the ANGLE field takes the colon-free marked forms
+  (`10:3oc:400`); `10:30:400` keeps its historical SPEED:ANGLE:DIST meaning. Bare
+  numbers remain degrees everywhere, so every existing invocation is unchanged.
+  One shared `wind::parse_wind_direction` helper (plus `parse_wind_direction_standalone`
+  and `parse_wind_segment_str_detailed`) backs the clap parsers, the segment grammar,
+  and the WASM arg loops; malformed clock tokens (hour outside 1-12, minutes outside
+  0-59) fail loudly with the rule in the message.
+
 - **Multiple named zeroes and per-load POI offsets in saved profiles** (MBA-1360;
   Lapua Sight-In POI / ATrag zero zones / Strelok multi-zero class). Profiles gain an
   optional `zero_sets` list — each set is a name plus an optional `zero_distance`
@@ -104,6 +118,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts via the new `profile import --zero-click <e.g. 0.1mil>` flag (the `.a7p` format
   does not store the device's click size, so without the flag the counts remain reported
   as unmapped, unchanged). Omitting every new input is byte-identical to 0.30.x.
+
+### Fixed
+- **`trajectory --wind-direction 0` no longer loses to a location CSV** (MBA-1367
+  sentinel fix). The dispatch treated `wind_direction != 0.0` as "user set", so an
+  explicit `--wind-direction 0` (and now `12oc`, which maps to 0°) was silently
+  replaced by a `--location` CSV's WIND_DIR column. Explicit flag presence now decides:
+  an explicit zero wins over the CSV; omitting the flag still inherits the CSV value
+  exactly as before (the only behavioral delta is the explicit-zero-plus-CSV
+  combination).
 
 ## [0.30.1] - 2026-07-28
 

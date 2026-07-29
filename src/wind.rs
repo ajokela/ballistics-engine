@@ -345,6 +345,19 @@ impl TryFrom<Vec<WindSegment>> for WindSock {
 /// (vertical wind 0.0). Shared by the CLI (`--wind-segment`) and the WASM
 /// front-ends so they parse identically.
 pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, String> {
+    parse_wind_segment_str_detailed(s, imperial).map(|(segment, _)| segment)
+}
+
+/// [`parse_wind_segment_str`] plus clock-form provenance (MBA-1367/MBA-1368): the
+/// second tuple element is true when the ANGLE token used a marked clock form
+/// (`3oc`, `10h30`) rather than plain degrees — earth-fixed compass mode must reject
+/// clock positions, which are shooter-relative by definition. Error strings stay in
+/// the legacy `String` family (pre-MBA-1338 boundary): the typed
+/// [`WindDirectionParseError`] converts to a plain message here.
+pub fn parse_wind_segment_str_detailed(
+    s: &str,
+    imperial: bool,
+) -> Result<(WindSegment, bool), String> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 3 && parts.len() != 4 {
         return Err(format!(
@@ -359,7 +372,20 @@ pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, St
         })
     };
     let speed = num(0, "speed")?;
-    let angle = num(1, "angle")?;
+    // ANGLE additionally accepts the colon-FREE marked clock forms (`3oc`, `10h30`) —
+    // the colon form is impossible here because this grammar is colon-delimited
+    // (`10:30` inside a segment stays SPEED=10, ANGLE=30, exactly as it always has).
+    let (angle, angle_was_clock) = match parse_wind_direction(parts[1]) {
+        Ok(parsed) => (parsed.degrees, parsed.was_clock),
+        Err(WindDirectionParseError::Unrecognized(_)) => {
+            return Err(format!(
+                "invalid wind segment '{s}': angle '{}' is not a number or a clock \
+                 position like 3oc or 10h30",
+                parts[1]
+            ))
+        }
+        Err(e) => return Err(format!("invalid wind segment '{s}': {e}")),
+    };
     let until = num(2, "until-distance")?;
     let vertical = if parts.len() == 4 {
         num(3, "vertical")?
@@ -385,7 +411,129 @@ pub fn parse_wind_segment_str(s: &str, imperial: bool) -> Result<WindSegment, St
     };
     let mut segment = WindSegment::new(speed_kmh, angle, until_m);
     segment.vertical_mps = vertical;
-    Ok(segment)
+    Ok((segment, angle_was_clock))
+}
+
+/// A wind direction as entered at an input boundary (MBA-1367): the resolved degrees
+/// in the wind-FROM convention (0 = headwind, 90 = from the right — post-0.19.0), plus
+/// whether it was entered as a clock position. Clock positions are shooter-relative
+/// BY DEFINITION (12 o'clock = dead ahead), so `was_clock` is what lets the
+/// earth-fixed compass mode (MBA-1368) reject them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParsedWindDirection {
+    pub degrees: f64,
+    pub was_clock: bool,
+}
+
+/// Typed parse errors for [`parse_wind_direction`] (internal family; legacy `String`
+/// boundaries like [`parse_wind_segment_str`] convert at the boundary per the
+/// MBA-1338 layering).
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum WindDirectionParseError {
+    #[error(
+        "invalid wind direction '{0}': expected degrees (e.g. 90) or a clock position \
+         like 3oc or 10h30 (12oc = headwind)"
+    )]
+    Unrecognized(String),
+    #[error("invalid clock position '{0}': hour must be 1-12")]
+    HourOutOfRange(String),
+    #[error("invalid clock position '{0}': minutes must be 00-59")]
+    MinutesOutOfRange(String),
+}
+
+/// Parses one wind-direction token (MBA-1367): a bare number is DEGREES exactly as it
+/// always was; marked clock forms are `<H>oc` (e.g. `3oc`) and `<H>h<MM>` (e.g.
+/// `10h30`), case-insensitive, mapping to `(H % 12) * 30 + MM * 0.5` degrees in the
+/// wind-FROM convention (12 o'clock = headwind = 0°, post-0.19.0). H must be 1-12 and
+/// MM 0-59. The colon form `<H>:<MM>` is deliberately NOT accepted here — it is legal
+/// only where a token cannot be colon-delimited grammar, i.e. standalone flags
+/// ([`parse_wind_direction_standalone`]); inside `--wind-segment`, `10:30` keeps its
+/// historical SPEED:ANGLE meaning.
+pub fn parse_wind_direction(token: &str) -> Result<ParsedWindDirection, WindDirectionParseError> {
+    let raw = token.trim();
+
+    // Bare number = degrees, byte-for-byte the pre-MBA-1367 acceptance (f64::from_str,
+    // exactly what the clap f64 args and the segment parser used).
+    if let Ok(degrees) = raw.parse::<f64>() {
+        return Ok(ParsedWindDirection {
+            degrees,
+            was_clock: false,
+        });
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    let clock = |hour_str: &str, minute_str: Option<&str>| -> Result<ParsedWindDirection, WindDirectionParseError> {
+        let hour: u32 = hour_str
+            .parse()
+            .map_err(|_| WindDirectionParseError::Unrecognized(raw.to_string()))?;
+        if !(1..=12).contains(&hour) {
+            return Err(WindDirectionParseError::HourOutOfRange(raw.to_string()));
+        }
+        let minutes: u32 = match minute_str {
+            Some(m) if !m.is_empty() && m.len() <= 2 && m.bytes().all(|b| b.is_ascii_digit()) => {
+                m.parse()
+                    .map_err(|_| WindDirectionParseError::Unrecognized(raw.to_string()))?
+            }
+            Some(_) => return Err(WindDirectionParseError::Unrecognized(raw.to_string())),
+            None => 0,
+        };
+        if minutes > 59 {
+            return Err(WindDirectionParseError::MinutesOutOfRange(raw.to_string()));
+        }
+        Ok(ParsedWindDirection {
+            degrees: f64::from(hour % 12) * 30.0 + f64::from(minutes) * 0.5,
+            was_clock: true,
+        })
+    };
+
+    if let Some(hour_str) = lower.strip_suffix("oc") {
+        // Reject a nested separator ("10h30oc" is nonsense, not hour "10h30").
+        if !hour_str.is_empty() && hour_str.bytes().all(|b| b.is_ascii_digit()) {
+            return clock(hour_str, None);
+        }
+        return Err(WindDirectionParseError::Unrecognized(raw.to_string()));
+    }
+    if let Some((hour_str, minute_str)) = lower.split_once('h') {
+        if !hour_str.is_empty() && hour_str.bytes().all(|b| b.is_ascii_digit()) {
+            return clock(hour_str, Some(minute_str));
+        }
+    }
+
+    Err(WindDirectionParseError::Unrecognized(raw.to_string()))
+}
+
+/// [`parse_wind_direction`] for STANDALONE flag contexts (`--wind-direction`), which
+/// additionally accept the `<H>:<MM>` colon clock form (`10:30` = 315°) — legal there
+/// because a flag value is never colon-delimited grammar (MBA-1367).
+pub fn parse_wind_direction_standalone(
+    token: &str,
+) -> Result<ParsedWindDirection, WindDirectionParseError> {
+    let raw = token.trim();
+    if let Some((hour_str, minute_str)) = raw.split_once(':') {
+        if !hour_str.is_empty()
+            && hour_str.bytes().all(|b| b.is_ascii_digit())
+            && !minute_str.is_empty()
+            && minute_str.len() <= 2
+            && minute_str.bytes().all(|b| b.is_ascii_digit())
+        {
+            let with_h = format!("{hour_str}h{minute_str}");
+            return match parse_wind_direction(&with_h) {
+                Ok(parsed) => Ok(parsed),
+                // Re-report range errors against the token as typed, not the rewrite.
+                Err(WindDirectionParseError::HourOutOfRange(_)) => {
+                    Err(WindDirectionParseError::HourOutOfRange(raw.to_string()))
+                }
+                Err(WindDirectionParseError::MinutesOutOfRange(_)) => {
+                    Err(WindDirectionParseError::MinutesOutOfRange(raw.to_string()))
+                }
+                Err(WindDirectionParseError::Unrecognized(_)) => {
+                    Err(WindDirectionParseError::Unrecognized(raw.to_string()))
+                }
+            };
+        }
+        return Err(WindDirectionParseError::Unrecognized(raw.to_string()));
+    }
+    parse_wind_direction(raw)
 }
 
 #[cfg(test)]
@@ -723,5 +871,113 @@ mod tests {
 
         // Too many fields is still rejected.
         assert!(parse_wind_segment_str("10:90:100:5:1", true).is_err());
+    }
+
+    /// MBA-1367: clock-position wind direction entry — the shared helper both the CLI
+    /// value parsers and the WASM hand-rolled arg loops call, so these host-run pins
+    /// ARE the WASM parity pins.
+    #[test]
+    fn clock_positions_map_to_wind_from_degrees() {
+        let deg = |t: &str| parse_wind_direction(t).unwrap();
+        assert_eq!(deg("3oc"), ParsedWindDirection { degrees: 90.0, was_clock: true });
+        assert_eq!(deg("6oc").degrees, 180.0);
+        assert_eq!(deg("9oc").degrees, 270.0);
+        assert_eq!(deg("12oc").degrees, 0.0); // 12 o'clock = headwind = 0° (post-0.19.0)
+        assert_eq!(deg("10h30").degrees, 315.0);
+        assert_eq!(deg("1h00").degrees, 30.0);
+        assert_eq!(deg("12h30").degrees, 15.0);
+        assert_eq!(deg("7h05").degrees, 212.5);
+        // Case-insensitive markers.
+        assert_eq!(deg("3OC").degrees, 90.0);
+        assert_eq!(deg("10H30").degrees, 315.0);
+
+        // Bare numbers stay degrees, byte-for-byte the old f64 acceptance.
+        assert_eq!(deg("90"), ParsedWindDirection { degrees: 90.0, was_clock: false });
+        assert_eq!(deg("-45").degrees, -45.0);
+        assert_eq!(deg("370.5").degrees, 370.5);
+
+        // Standalone flags additionally accept the colon form.
+        let sa = parse_wind_direction_standalone("10:30").unwrap();
+        assert_eq!(sa, ParsedWindDirection { degrees: 315.0, was_clock: true });
+        assert_eq!(parse_wind_direction_standalone("3oc").unwrap().degrees, 90.0);
+        assert!(!parse_wind_direction_standalone("90").unwrap().was_clock);
+        // ...but the non-standalone parser rejects the colon form (segment grammar).
+        assert!(matches!(
+            parse_wind_direction("10:30"),
+            Err(WindDirectionParseError::Unrecognized(_))
+        ));
+    }
+
+    #[test]
+    fn clock_positions_reject_bad_hours_and_minutes_with_helpful_messages() {
+        assert!(matches!(
+            parse_wind_direction("13oc"),
+            Err(WindDirectionParseError::HourOutOfRange(_))
+        ));
+        assert!(matches!(
+            parse_wind_direction("0oc"),
+            Err(WindDirectionParseError::HourOutOfRange(_))
+        ));
+        assert!(matches!(
+            parse_wind_direction("3h60"),
+            Err(WindDirectionParseError::MinutesOutOfRange(_))
+        ));
+        assert!(matches!(
+            parse_wind_direction_standalone("13:00"),
+            Err(WindDirectionParseError::HourOutOfRange(_))
+        ));
+        assert!(matches!(
+            parse_wind_direction_standalone("3:60"),
+            Err(WindDirectionParseError::MinutesOutOfRange(_))
+        ));
+        // Malformed shapes are Unrecognized, with a message naming the accepted forms.
+        for bad in ["oc", "hoc", "3.5oc", "3h", "3h123", "10h3x", "3:", ":30", "10:301", "x"] {
+            let err = parse_wind_direction_standalone(bad).unwrap_err();
+            assert!(
+                matches!(err, WindDirectionParseError::Unrecognized(_)),
+                "{bad}: {err}"
+            );
+        }
+        let msg = parse_wind_direction("bogus").unwrap_err().to_string();
+        assert!(msg.contains("3oc"), "{msg}");
+        assert!(msg.contains("degrees"), "{msg}");
+        let msg = parse_wind_direction("13oc").unwrap_err().to_string();
+        assert!(msg.contains("hour must be 1-12"), "{msg}");
+    }
+
+    /// MBA-1367 in the segment grammar: colon-free marked forms only; `10:30:400`
+    /// keeps its historical SPEED=10, ANGLE=30, DIST=400 meaning.
+    #[test]
+    fn segment_angle_accepts_colon_free_clock_forms_only() {
+        let clock = parse_wind_segment_str("10:3oc:400", true).unwrap();
+        let plain = parse_wind_segment_str("10:90:400", true).unwrap();
+        assert_eq!(clock, plain);
+
+        let (seg, was_clock) = parse_wind_segment_str_detailed("10:10h30:400", true).unwrap();
+        assert_eq!(seg.angle_deg, 315.0);
+        assert!(was_clock);
+        let (_, was_clock) = parse_wind_segment_str_detailed("10:90:400", true).unwrap();
+        assert!(!was_clock);
+
+        // The historical 3-numeric form is untouched (10:30 stays SPEED:ANGLE).
+        let legacy = parse_wind_segment_str("10:30:400", true).unwrap();
+        assert_eq!(legacy.angle_deg, 30.0);
+        assert!((legacy.speed_kmh - 10.0 * 1.609344).abs() < 1e-12);
+        assert!((legacy.until_m - 400.0 * 0.9144).abs() < 1e-9);
+
+        // Clock range errors surface through the legacy String boundary, typed text
+        // preserved; unrecognized angles get the extended legacy message.
+        let err = parse_wind_segment_str("10:13oc:400", true).unwrap_err();
+        assert!(err.contains("hour must be 1-12"), "{err}");
+        let err = parse_wind_segment_str("10:abc:400", true).unwrap_err();
+        assert!(
+            err.contains("angle 'abc' is not a number or a clock position"),
+            "{err}"
+        );
+        // A 4-field segment with a clock angle still parses (vertical rides along).
+        let (seg, was_clock) = parse_wind_segment_str_detailed("10:9oc:400:1.5", true).unwrap();
+        assert_eq!(seg.angle_deg, 270.0);
+        assert_eq!(seg.vertical_mps, 1.5);
+        assert!(was_clock);
     }
 }

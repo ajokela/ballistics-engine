@@ -60,6 +60,7 @@ use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs,
     BcReferenceStandard, DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
+use ballistics_engine::wind::{parse_wind_direction_standalone, ParsedWindDirection};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -68,6 +69,22 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use strsim::levenshtein;
+
+/// Shared `--wind-direction` help (MBA-1367): ONE string so the degrees+clock grammar
+/// cannot drift between the seven subcommands that take a wind direction.
+const WIND_DIRECTION_HELP: &str = "Wind direction: degrees (wind-FROM: 0=headwind, \
+    90=from right, 180=tailwind, 270=from left) or a clock position (3oc, 10h30, \
+    10:30; 12oc = headwind)";
+
+/// Clap value parser for every `--wind-direction` arg (MBA-1367): bare numbers stay
+/// degrees exactly as before; marked clock forms (`3oc`, `10h30`, and — legal on
+/// standalone flags — `10:30`) map through the shared [`parse_wind_direction_standalone`]
+/// helper, preserving `was_clock` for the earth-fixed mode's clock rejection.
+fn parse_wind_direction_arg(
+    s: &str,
+) -> Result<ParsedWindDirection, ballistics_engine::wind::WindDirectionParseError> {
+    parse_wind_direction_standalone(s)
+}
 
 // ============================================================================
 // Terms of Service Acceptance Module (for --online feature)
@@ -441,9 +458,11 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
 
-        /// Wind direction (degrees; wind-FROM: 0=headwind, 90=from right, 180=tailwind, 270=from left)
-        #[arg(long, default_value = "0.0")]
-        wind_direction: f64,
+        /// Wind direction (MBA-1367: shared help const; Option so an explicit entry —
+        /// including `12oc` == 0 degrees — is distinguishable from the 0.0 default,
+        /// replacing the old `!= 0.0` sentinel).
+        #[arg(long, value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: Option<ParsedWindDirection>,
 
         /// Vertical wind, mph (imperial) or m/s (metric); positive = updraft (raises POI)
         #[arg(
@@ -1049,9 +1068,9 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
 
-        /// Base wind direction (degrees; wind-FROM: 0=headwind, 90=from right, 180=tailwind)
-        #[arg(long, default_value = "0.0")]
-        wind_direction: f64,
+        /// Base wind direction (MBA-1367: degrees or clock position, shared help const)
+        #[arg(long, default_value = "0.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: ParsedWindDirection,
 
         /// Base vertical wind, mph (imperial) or m/s (metric); positive = updraft (raises POI)
         #[arg(
@@ -1892,9 +1911,9 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
 
-        /// Wind direction (degrees, 0=headwind, 90=from right)
-        #[arg(long, default_value = "0.0")]
-        wind_direction: f64,
+        /// Wind direction (MBA-1367: degrees or clock position, shared help const)
+        #[arg(long, default_value = "0.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: ParsedWindDirection,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -1992,9 +2011,9 @@ enum Commands {
         #[arg(long, default_value = "0.0")]
         wind_speed: f64,
 
-        /// Wind direction (degrees, 0=headwind, 90=from right)
-        #[arg(long, default_value = "0.0")]
-        wind_direction: f64,
+        /// Wind direction (MBA-1367: degrees or clock position, shared help const)
+        #[arg(long, default_value = "0.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: ParsedWindDirection,
 
         /// Enable powder temperature sensitivity
         #[arg(long)]
@@ -2437,9 +2456,9 @@ enum Commands {
         #[arg(long, default_value = "10.0")]
         wind_speed: f64,
 
-        /// Wind direction (degrees, 0=headwind, 90=from right)
-        #[arg(long, default_value = "90.0")]
-        wind_direction: f64,
+        /// Wind direction (MBA-1367: degrees or clock position, shared help const)
+        #[arg(long, default_value = "90.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: ParsedWindDirection,
 
         /// Adjustment unit (mil, moa, smoa, iphy, or clicks), applied to the Drop column
         /// (the elevation axis). `clicks` requires --elevation-click-value (or a saved
@@ -2566,9 +2585,9 @@ enum Commands {
         #[arg(long, default_value = "10.0")]
         wind_speed: f64,
 
-        /// Wind direction (degrees, 0=headwind, 90=from right)
-        #[arg(long, default_value = "90.0")]
-        wind_direction: f64,
+        /// Wind direction (MBA-1367: degrees or clock position, shared help const)
+        #[arg(long, default_value = "90.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: ParsedWindDirection,
 
         /// Adjustment unit (mil, moa, smoa, iphy, or clicks), applied to the Drop column
         /// (the elevation axis). `clicks` requires --elevation-click-value -- compare has
@@ -2787,9 +2806,10 @@ enum ProfileAction {
         #[arg(long)]
         wind_speed: Option<f64>,
 
-        /// Wind direction (degrees, 0=headwind, 90=from right)
-        #[arg(long)]
-        wind_direction: Option<f64>,
+        /// Wind direction (MBA-1367: degrees or clock position, shared help const;
+        /// stored in the profile as plain degrees)
+        #[arg(long, value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: Option<ParsedWindDirection>,
 
         /// Shooting angle (degrees, positive = uphill, negative = downhill)
         #[arg(long, allow_hyphen_values = true)]
@@ -6372,10 +6392,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .and_then(|p| p.wind_speed)
                     .unwrap_or(0.0)
             };
-            let final_wind_direction = if wind_direction != 0.0 {
-                wind_direction
-            } else {
-                csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0)
+            // MBA-1367 sentinel fix: explicit presence, not `!= 0.0`, decides whether
+            // the CLI value wins over the location CSV — so an explicit
+            // `--wind-direction 0` (or `12oc`, which maps to 0 degrees) now beats a
+            // CSV WIND_DIR instead of being silently dropped. Behavior change ONLY for
+            // the explicit-zero-plus-CSV combination, which previously (surprisingly)
+            // let the CSV win; omitted flag + CSV is unchanged.
+            let final_wind_direction = match wind_direction {
+                Some(d) => d.degrees,
+                None => csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0),
             };
 
             // Location overrides (environmental conditions).
@@ -8009,7 +8034,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     wind_std_metric,
                     wind_direction_std,
                     wind_speed_metric,
-                    wind_direction,
+                    wind_direction.degrees,
                     wind_vertical_metric,
                     wind_call_error_metric,
                     target_size_metric,
@@ -8038,7 +8063,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     wind_std_metric,
                     wind_direction_std,
                     wind_speed_metric,
-                    wind_direction,
+                    wind_direction.degrees,
                     wind_vertical_metric,
                     target_distance_metric,
                     target_radius_metric,
@@ -9474,7 +9499,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 humidity,
                 altitude,
                 wind_speed,
-                wind_direction,
+                wind_direction.degrees,
                 cli.units,
                 output,
                 bc_segments_data,
@@ -9793,7 +9818,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 humidity,
                 altitude,
                 wind_speed,
-                wind_direction,
+                wind_direction.degrees,
                 use_powder_sensitivity,
                 powder_temp_sensitivity,
                 powder_temp,
@@ -10274,7 +10299,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 end,
                 step,
                 wind_speed,
-                wind_direction,
+                wind_direction.degrees,
                 adjustment_unit,
                 windage_unit_resolved,
                 elevation_click,
@@ -10427,7 +10452,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 end,
                 step,
                 wind_speed,
-                wind_direction,
+                wind_direction.degrees,
                 adjustment_unit,
                 windage_unit_resolved,
                 elevation_click,
@@ -10547,7 +10572,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         bullet_name,
                         created: Some(timestamp_string()),
                         wind_speed,
-                        wind_direction,
+                        wind_direction: wind_direction.map(|d| d.degrees),
                         shooting_angle,
                         auto_zero,
                         twist_right,
