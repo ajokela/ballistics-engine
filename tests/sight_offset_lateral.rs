@@ -66,6 +66,23 @@ fn lateral_at(doc: &Value, at: f64) -> f64 {
     panic!("no bracketing points around {at} yd");
 }
 
+/// Vertical position (`y`, yards, positive = up) interpolated at downrange `at` yards.
+fn vertical_at(doc: &Value, at: f64) -> f64 {
+    let points = doc["trajectory"].as_array().expect("trajectory points");
+    let mut prev: Option<(f64, f64)> = None;
+    for p in points {
+        let z = p["z"].as_f64().expect("z");
+        let y = p["y"].as_f64().expect("y");
+        if let Some((pz, py)) = prev {
+            if pz <= at && z >= at && z > pz {
+                return py + (y - py) * (at - pz) / (z - pz);
+            }
+        }
+        prev = Some((z, y));
+    }
+    panic!("no bracketing points around {at} yd");
+}
+
 const OFFSET_IN: f64 = 0.5;
 const OFFSET_YD: f64 = OFFSET_IN / 36.0;
 
@@ -129,8 +146,38 @@ fn offset_without_zero_is_a_constant_displacement() {
     }
 }
 
-// (d) composes with cant: the offset still converges at the zero range on top of the
-// cant-induced drift (which the zero deliberately does not correct).
+/// A canted rifle rotates the WHOLE bore-to-sight displacement rigidly about the LOS, so a
+/// lateral mount offset couples into BOTH axes: it lifts the muzzle by `offset*sin(cant)`
+/// and reduces the lateral start to `offset*cos(cant)`. A steep cant with no zero solve
+/// isolates `initial_position` (the offset touches nothing else), so the cant+offset minus
+/// cant-only difference is exactly the coupling. The earlier code wrote a bare `-offset`
+/// lateral term and omitted the vertical term entirely, which every 5-degree test tolerated;
+/// at 45 degrees both errors are ~29% of the offset and unmissable. (MBA-1396 review fix.)
+#[test]
+fn cant_rotates_the_offset_rigidly_into_both_axes() {
+    let cant_only = full_json(&["--cant", "45"]);
+    let cant_and_offset = full_json(&["--cant", "45", "--sight-offset", "0.5"]);
+
+    // Near the muzzle, before drift/gravity diverge, read the pure geometric difference.
+    let near = 2.0;
+    let d_vert = vertical_at(&cant_and_offset, near) - vertical_at(&cant_only, near);
+    let d_lat = lateral_at(&cant_and_offset, near) - lateral_at(&cant_only, near);
+
+    let s = std::f64::consts::FRAC_1_SQRT_2; // sin(45) == cos(45)
+    // Vertical coupling MUST be present (the old code left it at 0).
+    assert!(
+        (d_vert - OFFSET_YD * s).abs() < OFFSET_YD * 0.1,
+        "cant must lift the muzzle by offset*sin(cant) ~= {}, got {d_vert}",
+        OFFSET_YD * s
+    );
+    // Lateral start MUST be cos-reduced, NOT the full offset.
+    assert!(
+        (d_lat + OFFSET_YD * s).abs() < OFFSET_YD * 0.1,
+        "lateral start must be -offset*cos(cant) ~= {}, got {d_lat}",
+        -OFFSET_YD * s
+    );
+}
+
 #[test]
 fn offset_composes_with_cant() {
     let cant_only = full_json(&["--auto-zero", "100", "--cant", "5"]);

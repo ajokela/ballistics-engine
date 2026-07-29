@@ -1260,12 +1260,17 @@ mod tests {
     // ---- Acceptance criterion 5: target fit, both shapes, including the boundary ----
     #[test]
     fn target_fit_is_correct_for_both_shapes_including_boundary_contact() {
-        // Two scenarios differing only in windage keeps the geometry checkable by hand.
+        // A GENUINELY TWO-AXIS spread: two crosswinds spread the hold in windage, and a
+        // third scenario carrying a strong vertical wind spreads it in elevation. Both
+        // axes must move, or the circle (L2) and rectangle (L-infinity) metrics coincide
+        // and the strict L2 > L-infinity assertion at the end proves nothing — an earlier
+        // pure-crosswind fixture made exactly that mistake.
         let base = || {
             request(
                 vec![
-                    scenario("a", &["4:90:1000"]),
-                    scenario("b", &["14:90:1000"]),
+                    scenario("cross-light", &["4:90:1000"]),
+                    scenario("cross-heavy", &["14:90:1000"]),
+                    scenario("updraft", &["4:90:1000:10"]),
                 ],
                 None,
             )
@@ -1276,6 +1281,12 @@ mod tests {
         let row = &report.rows[0];
         let half_span_wind = row.worst_case_windage_miss_mil;
         let half_span_elev = row.worst_case_elevation_miss_mil;
+        // Precondition: both axes really spread. If the vertical wind stopped moving the
+        // elevation hold this fails LOUDLY rather than letting the metric test degenerate.
+        assert!(
+            half_span_wind > 0.05 && half_span_elev > 0.05,
+            "fixture must spread BOTH axes: windage {half_span_wind}, elevation {half_span_elev}"
+        );
         let range_m = row.range_m;
         let wind_linear = half_span_wind / 1000.0 * range_m;
         let elev_linear = half_span_elev / 1000.0 * range_m;
@@ -1342,13 +1353,17 @@ mod tests {
         );
 
         // And the two metrics really are different: the circular objective is the
-        // Euclidean radius, which for a two-axis spread exceeds the larger half-span.
+        // Euclidean radius, which for a genuine two-axis spread STRICTLY exceeds the
+        // larger half-span (the L-infinity answer). With both axes confirmed nonzero
+        // above, a non-strict `>=` here would also pass if the code computed L-infinity,
+        // so the strict `>` is what actually distinguishes the two metrics.
+        let l_inf = half_span_wind.max(half_span_elev);
         assert!(
-            circle_row.worst_case_miss_mil
-                >= half_span_wind.max(half_span_elev) - 1e-12,
-            "L2 radius {} vs L-inf {}",
+            circle_row.worst_case_miss_mil > l_inf + 1e-6,
+            "circular metric must be a true L2 radius strictly above the L-inf half-span: \
+             L2 {} vs L-inf {}",
             circle_row.worst_case_miss_mil,
-            half_span_wind.max(half_span_elev)
+            l_inf
         );
     }
 

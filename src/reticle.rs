@@ -368,7 +368,9 @@ impl ReticleDescription {
             });
         }
         let steps = (extent_mil / spacing_mil).floor() as usize;
-        require_generated_size(1 + 4 * steps)?;
+        // 1 center + 4 hashes per step; checked so a huge extent cannot wrap the count
+        // below the cap and unleash the loop below.
+        require_generated_size_checked(4usize.checked_mul(steps).and_then(|v| v.checked_add(1)))?;
 
         let mut marks = Vec::with_capacity(1 + 4 * steps);
         marks.push(ReticleMark::new(0.0, 0.0, MarkKind::Center));
@@ -408,8 +410,14 @@ impl ReticleDescription {
         }
         require_generator_positive("row-spacing", row_spacing_mil)?;
         require_generator_positive("spread-step", spread_step_mil)?;
-        // 1 center + per row: the on-axis mark plus 2 windage dots per step.
-        require_generated_size(1 + rows + rows * (rows + 1))?;
+        // 1 center + per row: the on-axis mark plus 2 windage dots per step. Checked so a
+        // huge `rows` cannot wrap the product below the cap and unleash the loops below.
+        require_generated_size_checked(
+            rows.checked_add(1)
+                .and_then(|r1| rows.checked_mul(r1))
+                .and_then(|p| p.checked_add(rows))
+                .and_then(|p| p.checked_add(1)),
+        )?;
 
         let mut marks = Vec::new();
         marks.push(ReticleMark::new(0.0, 0.0, MarkKind::Center));
@@ -507,6 +515,21 @@ fn require_generated_size(count: usize) -> Result<(), ReticleError> {
         });
     }
     Ok(())
+}
+
+/// Same cap as [`require_generated_size`], but for a mark count assembled by `usize`
+/// arithmetic that could overflow (a huge `--extent`/`--rows`). A `None` — the caller's
+/// `checked_*` chain overflowed — is itself proof the count is far past the cap, so it is
+/// rejected. Without this, `1 + 4 * steps` (or the tree product) wraps to a small value
+/// and silently bypasses `MAX_RETICLE_MARKS`, then the generator loop runs unbounded.
+fn require_generated_size_checked(count: Option<usize>) -> Result<(), ReticleError> {
+    match count {
+        Some(c) => require_generated_size(c),
+        None => Err(ReticleError::TooManyMarks {
+            count: usize::MAX,
+            max: MAX_RETICLE_MARKS,
+        }),
+    }
 }
 
 /// Place a firing solution in a reticle (MBA-1361).
@@ -986,6 +1009,28 @@ mod tests {
         // The mark cap is enforced before a runaway grid is materialized.
         assert!(matches!(
             ReticleDescription::mil_grid(0.001, 10.0),
+            Err(ReticleError::TooManyMarks { .. })
+        ));
+    }
+
+    #[test]
+    fn generator_sizes_cannot_overflow_past_the_cap() {
+        // A step/row count large enough that the pre-cap `1 + 4*steps` (or the tree
+        // product) WRAPS usize back below MAX_RETICLE_MARKS. Before the checked-size
+        // guard these returned Ok and the generator loop ran unbounded (OOM/hang in
+        // release, multiply-overflow panic in debug). Now they are rejected.
+        let huge = (usize::MAX / 2) as f64; // exactly representable, cast without saturation
+        assert!(matches!(
+            ReticleDescription::mil_grid(1.0, huge),
+            Err(ReticleError::TooManyMarks { .. })
+        ));
+        assert!(matches!(
+            ReticleDescription::tree(usize::MAX / 2, 1.0, 0.5),
+            Err(ReticleError::TooManyMarks { .. })
+        ));
+        // And the ordinary over-cap case (no overflow) still reports cleanly.
+        assert!(matches!(
+            ReticleDescription::tree(1000, 1.0, 0.5),
             Err(ReticleError::TooManyMarks { .. })
         ));
     }
