@@ -2,10 +2,10 @@
 
 use arbitrary::{Result, Unstructured};
 use ballistics_engine::solve_json::{
-    AtmosphereV1, DragModelV1, EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedWindV1,
-    RifleV1, SamplingV1,
+    AtmosphereV1, DragModelV1, DropsReferenceV1, EffectsV1, PressureReferenceV1, ProjectileV1,
+    ResolvedWindV1, RifleV1, SamplingV1,
     SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
-    TwistDirectionV1, WindSegmentV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
 
 use crate::domain::{ranged, wild};
@@ -47,6 +47,33 @@ fn maybe_bool(u: &mut Unstructured<'_>) -> Result<Option<bool>> {
     } else {
         Ok(None)
     }
+}
+
+/// Generate an optional wind-reference mode (MBA-1368). `Compass` without a
+/// `shot_azimuth_rad` is a solver error the harness tolerates, so it is fuzzed freely.
+fn maybe_wind_reference(u: &mut Unstructured<'_>) -> Result<Option<WindReferenceV1>> {
+    Ok(if u.arbitrary()? {
+        Some(if u.arbitrary()? {
+            WindReferenceV1::Compass
+        } else {
+            WindReferenceV1::Shooter
+        })
+    } else {
+        None
+    })
+}
+
+/// Generate an optional drops-reference mode (MBA-1403).
+fn maybe_drops_reference(u: &mut Unstructured<'_>) -> Result<Option<DropsReferenceV1>> {
+    Ok(if u.arbitrary()? {
+        Some(if u.arbitrary()? {
+            DropsReferenceV1::Target
+        } else {
+            DropsReferenceV1::Los
+        })
+    } else {
+        None
+    })
 }
 
 fn maybe_ranged(u: &mut Unstructured<'_>, lo: f64, hi: f64) -> Result<Option<f64>> {
@@ -106,6 +133,7 @@ fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             direction_from_rad: Some(ranged(u, -std::f64::consts::TAU, std::f64::consts::TAU)?),
             vertical_speed_mps: maybe_ranged(u, -10.0, 10.0)?,
             segments: None,
+            wind_reference: maybe_wind_reference(u)?,
         },
         _ => {
             let count = usize::from(u.int_in_range(1u8..=4)?);
@@ -124,6 +152,7 @@ fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
                 direction_from_rad: None,
                 vertical_speed_mps: None,
                 segments: Some(segments),
+                wind_reference: maybe_wind_reference(u)?,
             }
         }
     };
@@ -152,6 +181,7 @@ fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             } else {
                 None
             },
+            sight_offset_lateral_m: maybe_ranged(u, -0.1, 0.1)?,
         },
         shot: ShotV1 {
             max_range_m,
@@ -163,6 +193,9 @@ fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             cant_angle_rad: maybe_ranged(u, -std::f64::consts::PI, std::f64::consts::PI)?,
             target_height_m: maybe_ranged(u, -5.0, 5.0)?,
             ground_threshold_m: Some(-100.0),
+            zero_poi_up_m: maybe_ranged(u, -0.05, 0.05)?,
+            zero_poi_right_m: maybe_ranged(u, -0.05, 0.05)?,
+            drops_reference: maybe_drops_reference(u)?,
         },
         atmosphere: AtmosphereV1 {
             altitude_m: maybe_ranged(u, -500.0, 5_000.0)?,
@@ -205,6 +238,9 @@ fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
         sampling: SamplingV1 {
             interval_m: Some(ranged(u, 0.05, 25.0)?),
         },
+        // A dedicated reticle-description generator is a separate harness; the reticle
+        // module carries its own unit + overflow-regression tests. Fuzzed as absent here.
+        reticle: None,
     })
 }
 
@@ -216,6 +252,7 @@ fn hostile_wind(u: &mut Unstructured<'_>) -> Result<WindV1> {
             direction_from_rad: maybe_wild(u)?,
             vertical_speed_mps: maybe_wild(u)?,
             segments: None,
+            wind_reference: maybe_wind_reference(u)?,
         },
         2 => WindV1 {
             // Exercise partial constant-wind and scalar/segment conflicts.
@@ -223,6 +260,7 @@ fn hostile_wind(u: &mut Unstructured<'_>) -> Result<WindV1> {
             direction_from_rad: maybe_wild(u)?,
             vertical_speed_mps: maybe_wild(u)?,
             segments: Some(Vec::new()),
+            wind_reference: maybe_wind_reference(u)?,
         },
         _ => {
             let count =
@@ -241,6 +279,7 @@ fn hostile_wind(u: &mut Unstructured<'_>) -> Result<WindV1> {
                 direction_from_rad: None,
                 vertical_speed_mps: None,
                 segments: Some(segments),
+                wind_reference: maybe_wind_reference(u)?,
             }
         }
     })
