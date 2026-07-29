@@ -1463,13 +1463,53 @@ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --wind-speed 10 --wind-se
 ```
 
 Clock positions are **shooter-relative by definition** (12 o'clock = dead ahead), so they
-cannot be combined with the earth-fixed compass mode described in the next section.
+cannot be combined with the earth-fixed compass mode described below.
 
 **Sentinel fix (behavior change, deliberate):** `trajectory` used to treat
 `--wind-direction 0` as "not set" and let a `--location` CSV's `WIND_DIR` column replace
 it. Explicit presence now decides: an explicit `--wind-direction 0` (or `12oc`, which
 maps to 0°) wins over the CSV; omitting the flag still inherits the CSV value exactly as
 before.
+
+#### Earth-Fixed Compass Bearings (`--wind-ref compass`) — MBA-1368
+
+Orthogonal to the SYNTAX above is the REFERENCE FRAME the direction is entered in
+(`--wind-ref {shooter|compass}` on `trajectory` and `monte-carlo`):
+
+* **`shooter`** (default) — wind-FROM angles relative to the line of fire, exactly as
+  always. Byte-identical to omitting the flag.
+* **`compass`** — every wind direction the run consumes (`--wind-direction`, a
+  `--location` CSV's `WIND_DIR`, and each `--wind-segment` angle) is an **absolute
+  earth-fixed bearing** (0 = north, 90 = east), the Vortex Wind Bearing Capture / Lapua
+  Ballistics convention. It is re-referenced against the shot azimuth once at the input
+  boundary — `relative = bearing − shot azimuth`, wind-FROM on both sides, normalized to
+  [0°, 360°) — so the solver's physics never sees a bearing.
+
+Compass mode **requires `--shot-direction`** (the shot's own compass bearing; a hard
+error names the flag when missing — silently treating bearings as shooter-relative is
+exactly the bug this mode exists to prevent). An explicit `--shot-direction 0` is a real
+bearing (due north), not "unset". Clock positions are rejected in compass mode: a
+"3 o'clock bearing" is meaningless, because clock positions are shooter-relative by
+definition.
+
+```bash
+# Wind FROM the north-east (bearing 45) on a shot fired due east (azimuth 90):
+# relative = 45 - 90 = -45 -> 315 = wind from the shooter's front-left.
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --wind-speed 10 \
+  --wind-ref compass --shot-direction 90 --wind-direction 45
+
+# Sanity anchor: wind FROM north, shot due north = pure headwind (relative 0).
+ballistics trajectory ... --wind-ref compass --shot-direction 0 --wind-direction 0
+```
+
+On `monte-carlo` the base wind bearing is converted **before** any dispersion sampling,
+so `--wind-direction-std` disperses around the converted shooter-relative direction
+(`monte-carlo` gains `--shot-direction` for exactly this; it models no Coriolis). The
+solve-json v1 surface takes the same mode as the optional `wind.wind_reference` field
+(`"compass"` requires an explicit `shot.shot_azimuth_rad`; see docs/SOLVE_JSON_V1.md).
+Commands without a shot-azimuth concept (`come-ups`, `lead`, `wind-card`,
+`range-table`, `compare`, `dsf`) stay shooter-relative only, as do the FFI bindings
+(convert bearings yourself as `bearing − shot azimuth` before the call).
 
 ### Vertical Wind
 

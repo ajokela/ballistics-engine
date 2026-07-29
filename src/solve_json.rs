@@ -399,6 +399,33 @@ pub struct WindV1 {
         deserialize_with = "deserialize_present"
     )]
     pub segments: Option<Vec<WindSegmentV1>>,
+    /// Which frame every wind direction in this request is entered in (MBA-1368).
+    /// Omitted (or `"shooter"`) = shooter-relative wind-FROM radians, byte-identical to
+    /// pre-1368 behavior. `"compass"` = earth-fixed bearings (0 = north) — the constant
+    /// `direction_from_rad` AND every segment's — derived shooter-relative at resolve
+    /// time as `bearing - shot.shot_azimuth_rad` (normalized to [0, 2π)); the RESOLVED
+    /// wind echo therefore reports the converted shooter-relative direction (the QNH
+    /// fold-into-resolved-value precedent). Compass mode requires an explicit
+    /// `shot.shot_azimuth_rad` (a hard error otherwise, never a silent
+    /// treat-as-shooter-relative), and there is no resolved-DTO echo of the mode
+    /// itself (request-side additive field — the response shape is unchanged).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub wind_reference: Option<WindReferenceV1>,
+}
+
+/// Wire values for [`WindV1::wind_reference`] (MBA-1368).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindReferenceV1 {
+    /// Shooter-relative wind-FROM directions (the historical default).
+    #[default]
+    Shooter,
+    /// Earth-fixed compass bearings, re-referenced against `shot.shot_azimuth_rad`.
+    Compass,
 }
 
 /// One wind segment, active through `until_distance_m`.
@@ -1300,11 +1327,16 @@ fn validate_wind(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "direction_from_rad",
             "vertical_speed_mps",
             "segments",
+            "wind_reference",
         ],
         &[],
     )?;
     for field in ["speed_mps", "direction_from_rad", "vertical_speed_mps"] {
         validate_optional_number(object, path, field)?;
+    }
+    // MBA-1368: wind_reference is a closed string enum (shooter | compass).
+    if let Some(reference) = object.get("wind_reference") {
+        validate_string_enum(reference, "$.wind.wind_reference", &["shooter", "compass"])?;
     }
 
     if let Some(segments) = object.get("segments") {

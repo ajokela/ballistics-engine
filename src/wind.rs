@@ -414,6 +414,47 @@ pub fn parse_wind_segment_str_detailed(
     Ok((segment, angle_was_clock))
 }
 
+/// Which frame wind directions are ENTERED in (MBA-1368). `Shooter` (the default) is
+/// today's behavior: wind-FROM angles relative to the line of fire (0 = headwind).
+/// `Compass` treats every entered wind direction — the single direction AND every
+/// segment — as an absolute earth-fixed bearing (0 = north), derived shooter-relative
+/// once at the input boundary as `bearing - shot_azimuth` (wind-FROM both sides), so
+/// the physics downstream of [`wind_vector`] never sees a bearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindReference {
+    #[default]
+    Shooter,
+    Compass,
+}
+
+impl WindReference {
+    /// Parses the CLI/WASM token (`shooter` | `compass`, case-insensitive).
+    pub fn parse(token: &str) -> Result<Self, String> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "shooter" => Ok(Self::Shooter),
+            "compass" => Ok(Self::Compass),
+            other => Err(format!(
+                "invalid wind reference '{other}': expected 'shooter' or 'compass'"
+            )),
+        }
+    }
+}
+
+/// Earth-fixed compass bearing (degrees, 0 = north) -> shooter-relative wind-FROM
+/// degrees against the shot azimuth (MBA-1368), normalized to [0, 360). A wind FROM
+/// north (bearing 0) with the shot fired due north (azimuth 0) is a pure headwind
+/// (relative 0 — the 0.19.0 sign convention); a bearing 90 (from east) on a northbound
+/// shot is wind from the shooter's RIGHT (relative 90).
+pub fn compass_bearing_to_shooter_relative_deg(bearing_deg: f64, shot_azimuth_deg: f64) -> f64 {
+    (bearing_deg - shot_azimuth_deg).rem_euclid(360.0)
+}
+
+/// [`compass_bearing_to_shooter_relative_deg`] in radians (the solve-json v1 surface
+/// is SI/radians end to end).
+pub fn compass_bearing_to_shooter_relative_rad(bearing_rad: f64, shot_azimuth_rad: f64) -> f64 {
+    (bearing_rad - shot_azimuth_rad).rem_euclid(2.0 * PI)
+}
+
 /// A wind direction as entered at an input boundary (MBA-1367): the resolved degrees
 /// in the wind-FROM convention (0 = headwind, 90 = from the right — post-0.19.0), plus
 /// whether it was entered as a clock position. Clock positions are shooter-relative

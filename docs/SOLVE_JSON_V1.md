@@ -318,6 +318,18 @@ Resolved wind is exactly one of two object shapes: a constant object with concre
 concrete vertical speed. Still air resolves to the constant shape with all three values set to
 zero.
 
+Optional `wind_reference` (MBA-1368) selects the frame every wind direction in the request is
+entered in: omitted or `"shooter"` means shooter-relative wind-FROM radians (byte-identical to
+requests that predate the field, with no assumption notice for its absence); `"compass"` means
+earth-fixed bearings (0 = north) — the constant `direction_from_rad` AND every segment's — which
+the service re-references against the shot azimuth at resolve time as
+`bearing - shot.shot_azimuth_rad`, normalized to `[0, 2π)`. The RESOLVED wind echo reports the
+converted shooter-relative direction (the same fold-into-the-resolved-value convention QNH
+pressure uses); there is no resolved echo of the mode itself. `"compass"` requires an explicit
+`shot.shot_azimuth_rad` — omitting it is a `conflicting_fields` error at
+`$.wind.wind_reference`, never a silent treat-as-shooter-relative. A wind FROM north
+(`direction_from_rad: 0`) on a shot fired due north (`shot_azimuth_rad: 0`) is a pure headwind.
+
 ### `solver`, `effects`, and `sampling`
 
 | Section and field | Default | Meaning |
