@@ -537,6 +537,21 @@ fn solve_input_schema() -> Value {
                 "properties": {
                     "interval_m": {"type": "number"}
                 }
+            },
+            // Optional reticle hold request (MBA-1361), mirroring solve-json's
+            // ReticleRequestV1. Without this the top-level additionalProperties:false above
+            // rejects a `reticle` block that the solve-json CLI path accepts. The envelope
+            // is strict; `description` stays permissive about extra keys, matching
+            // ReticleRequestV1 (front ends carry render metadata inside the description).
+            "reticle": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["range_m", "magnification", "description"],
+                "properties": {
+                    "range_m": {"type": "number"},
+                    "magnification": {"type": "number"},
+                    "description": {"type": "object"}
+                }
             }
         }
     })

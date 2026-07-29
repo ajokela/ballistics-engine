@@ -2339,22 +2339,28 @@ impl TrajectorySolver {
     /// plane for clockwise cant) and rises by `sight_height*(1-cos(cant))` toward the
     /// pivot. (MBA-1286)
     ///
-    /// A lateral sight-mount offset (MBA-1396) additionally starts the bore
-    /// `sight_offset_lateral_m` LEFT of the LOS (`z -= offset` — the LOS is the z = 0
-    /// axis, the cant convention above): a sight mounted right of the bore means the
-    /// bore sits left of the sight line. The windage-zero convergence that makes the
-    /// trajectory cross the LOS at the zero range lives in `windage_zero_bias_rad`, not
-    /// here. Exactly-0.0 cant AND offset return the historical position (bit-identical).
+    /// A lateral sight-mount offset (MBA-1396) additionally displaces the bore
+    /// `sight_offset_lateral_m` from the LOS (a sight mounted right of the bore puts the
+    /// bore left of the sight line). Cant rotates the WHOLE bore-to-sight displacement
+    /// vector rigidly about the LOS, so the vertical drop `-sight_height` and the lateral
+    /// offset `-sight_offset_lateral_m` couple: rotating `(u, w) = (-sh, -off)` by the
+    /// cant angle gives `y += sh*(1-cos) + off*sin` and `z = -sh*sin - off*cos`. Both the
+    /// cant-only case (off = 0) and the offset-only case (cos = 1, sin = 0) collapse to
+    /// the historical terms, so only a simultaneously canted AND offset rifle sees the
+    /// coupling. The windage-zero convergence that makes the trajectory cross the LOS at
+    /// the zero range lives in `windage_zero_bias_rad`, not here. Exactly-0.0 cant AND
+    /// offset return the historical position (bit-identical).
     fn initial_position(&self) -> Vector3<f64> {
         if self.inputs.cant_angle == 0.0 && self.inputs.sight_offset_lateral_m == 0.0 {
             return Vector3::new(0.0, self.inputs.muzzle_height, 0.0);
         }
         let (sin_c, cos_c) = self.inputs.cant_angle.sin_cos();
         let sh = self.inputs.sight_height;
+        let off = self.inputs.sight_offset_lateral_m;
         Vector3::new(
             0.0,
-            self.inputs.muzzle_height + sh * (1.0 - cos_c),
-            -sh * sin_c - self.inputs.sight_offset_lateral_m,
+            self.inputs.muzzle_height + sh * (1.0 - cos_c) + off * sin_c,
+            -sh * sin_c - off * cos_c,
         )
     }
 
