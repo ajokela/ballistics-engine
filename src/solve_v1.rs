@@ -11,8 +11,8 @@ use crate::solve_json::{
     ResolvedSolveRequestV1, ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, RifleV1,
     SampleFlagV1, SamplingV1, SchemaVersionV1, ShotV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
     SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SolverMethodV1,
-    SolverV1, SuccessStatusV1, TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1, WindV1,
-    MAX_SOLVE_JSON_SAMPLES_V1,
+    SolverV1, SuccessStatusV1, TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1,
+    WindReferenceV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
 use crate::trajectory_observation::{
     TrajectoryObservation, TrajectoryObservationError, TrajectoryObservationFlag,
@@ -233,6 +233,10 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
     let (resolved_wind, wind, wind_segments) = resolve_wind(
         &request.wind,
         wind_coverage_distance_m,
+        // MBA-1368: the RAW request option, not the resolved default — compass mode
+        // must reject an omitted shot azimuth, never silently re-reference against
+        // the 0.0 default.
+        request.shot.shot_azimuth_rad,
         &mut assumptions,
         &mut warnings,
     )?;
@@ -776,9 +780,40 @@ fn resolve_atmosphere(
 fn resolve_wind(
     wind: &WindV1,
     coverage_distance_m: f64,
+    request_shot_azimuth_rad: Option<f64>,
     assumptions: &mut Vec<SolveNoticeV1>,
     warnings: &mut Vec<SolveNoticeV1>,
 ) -> Result<(ResolvedWindV1, WindConditions, Vec<WindSegment>), SolveErrorEnvelopeV1> {
+    // MBA-1368: resolve the entry frame ONCE, before any direction is consumed.
+    // Omitted == shooter, byte-identical with no assumption notice (the Batch A
+    // additive-field precedent: a notice would change every pre-existing response).
+    // In compass mode every direction below passes through `to_relative` BEFORE the
+    // resolved echo and the engine structures are built, so downstream physics (and
+    // the response) only ever see shooter-relative wind-FROM radians — the QNH
+    // fold-into-the-resolved-value precedent.
+    let compass_azimuth_rad = match wind.wind_reference.unwrap_or_default() {
+        WindReferenceV1::Shooter => None,
+        WindReferenceV1::Compass => match request_shot_azimuth_rad {
+            Some(azimuth) => Some(azimuth),
+            None => {
+                return Err(conflicting_fields(
+                    "$.wind.wind_reference",
+                    "wind_reference \"compass\" requires shot.shot_azimuth_rad (earth-fixed \
+                     bearings are re-referenced against the shot azimuth; omitting it would \
+                     silently treat bearings as shooter-relative)",
+                ))
+            }
+        },
+    };
+    let to_relative = |bearing_rad: f64| -> f64 {
+        match compass_azimuth_rad {
+            Some(azimuth) => {
+                crate::wind::compass_bearing_to_shooter_relative_rad(bearing_rad, azimuth)
+            }
+            None => bearing_rad,
+        }
+    };
+
     if let Some(segments) = &wind.segments {
         if wind.speed_mps.is_some()
             || wind.direction_from_rad.is_some()
@@ -837,8 +872,11 @@ fn resolve_wind(
                 &format!("{base}.speed_mps"),
                 "wind speed conversion to kilometres per hour overflowed",
             )?;
+            // MBA-1368: compass bearings become shooter-relative HERE, so both the
+            // resolved echo and the engine segment carry the converted direction.
+            let direction_from_rad = to_relative(segment.direction_from_rad);
             let angle_deg = checked_conversion(
-                segment.direction_from_rad.to_degrees(),
+                direction_from_rad.to_degrees(),
                 &format!("{base}.direction_from_rad"),
                 "wind direction conversion to degrees overflowed",
             )?;
@@ -846,7 +884,7 @@ fn resolve_wind(
             resolved_segments.push(ResolvedWindSegmentV1 {
                 until_distance_m: segment.until_distance_m,
                 speed_mps: segment.speed_mps,
-                direction_from_rad: segment.direction_from_rad,
+                direction_from_rad,
                 vertical_speed_mps,
             });
             engine_segments.push(WindSegment {
@@ -918,7 +956,7 @@ fn resolve_wind(
                         0.0
                     }
                 };
-                (speed, direction, vertical)
+                (speed, to_relative(direction), vertical)
             } else {
                 assumptions.push(notice(
                     ASSUMPTION_DEFAULT_APPLIED,

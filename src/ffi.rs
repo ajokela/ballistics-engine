@@ -90,6 +90,11 @@ pub struct FFIWindConditions {
     pub speed: c_double, // m/s
     // radians, wind-FROM convention: 0 = headwind, PI/2 = from the right,
     // PI = tailwind, 3*PI/2 = from the left (matches WindConditions / WindSock).
+    // ALWAYS shooter-relative: the FFI deliberately has NO earth-fixed compass mode
+    // (MBA-1368 decision — bindings stay shooter-relative numeric); a caller holding a
+    // compass bearing converts it BEFORE the call as
+    // (bearing_rad - shot_azimuth_rad).rem_euclid(2*PI), which is exactly what the
+    // CLI/WASM/solve-json `--wind-ref compass` surfaces do internally.
     pub direction: c_double,
     // Appended (keeps existing field offsets): vertical wind m/s, positive = updraft;
     // 0.0 if unset.

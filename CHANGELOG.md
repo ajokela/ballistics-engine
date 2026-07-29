@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Earth-fixed compass wind bearings** (MBA-1368; Vortex Wind Bearing Capture /
+  Lapua Ballistics class). New `--wind-ref {shooter|compass}` on `trajectory` and
+  `monte-carlo` (native CLI and the WASM terminal's trajectory command): `shooter`
+  (the default) is today's behavior byte-identically; `compass` treats EVERY wind
+  direction the run consumes — `--wind-direction`, a location CSV's WIND_DIR, and
+  each `--wind-segment` angle — as an absolute bearing (0 = north), re-referenced
+  once at the input boundary as `relative = bearing - shot azimuth` (wind-FROM both
+  sides, normalized to [0, 360)) so downstream physics never sees a bearing. Compass
+  mode requires `--shot-direction` (hard error naming the flag — never a silent
+  treat-as-shooter-relative; `monte-carlo` gains the flag for exactly this) and
+  rejects clock positions (shooter-relative by definition). Monte Carlo converts the
+  base direction BEFORE any dispersion sampling (the direction sigma disperses
+  around the converted value). solve-json v1 gains the optional
+  `wind.wind_reference` field (`"shooter"`/`"compass"`; compass requires an explicit
+  `shot.shot_azimuth_rad` and folds the conversion into the resolved wind echo, the
+  QNH precedent), mirrored in the MCP schema. The WASM params builder gains additive
+  `setWindReference(mode)`/`setShotDirection(deg)` methods (no existing signature
+  changed). FFI deliberately unchanged: bindings stay shooter-relative numeric
+  degrees, documented on `FFIWindConditions`. Regression-pinned: wind FROM north on
+  a shot due north is a pure headwind (the 0.19.0 sign convention).
 - **Clock-position wind direction entry** (MBA-1367; Kestrel/ATrag/AB-class field
   convention). Every `--wind-direction` flag (trajectory, monte-carlo, come-ups, lead,
   range-table, compare, `profile save`) and both WASM terminal wind-direction args now

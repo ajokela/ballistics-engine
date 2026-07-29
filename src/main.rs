@@ -464,6 +464,15 @@ enum Commands {
         #[arg(long, value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
         wind_direction: Option<ParsedWindDirection>,
 
+        /// Reference frame for EVERY wind direction this run consumes (MBA-1368):
+        /// `shooter` (default; wind-FROM angles relative to the line of fire — today's
+        /// behavior) or `compass` (earth-fixed bearings, 0 = north, covering
+        /// --wind-direction, a location CSV's WIND_DIR, and every --wind-segment angle,
+        /// re-referenced against --shot-direction at solve time). Compass mode requires
+        /// --shot-direction and rejects clock positions (shooter-relative by definition).
+        #[arg(long, value_enum, default_value = "shooter")]
+        wind_ref: WindReferenceArg,
+
         /// Vertical wind, mph (imperial) or m/s (metric); positive = updraft (raises POI)
         #[arg(
             long,
@@ -1071,6 +1080,18 @@ enum Commands {
         /// Base wind direction (MBA-1367: degrees or clock position, shared help const)
         #[arg(long, default_value = "0.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
         wind_direction: ParsedWindDirection,
+
+        /// Reference frame for --wind-direction (MBA-1368): `shooter` (default) or
+        /// `compass` (an earth-fixed bearing, 0 = north, re-referenced against
+        /// --shot-direction BEFORE any dispersion sampling). Compass mode requires
+        /// --shot-direction and rejects clock positions.
+        #[arg(long, value_enum, default_value = "shooter")]
+        wind_ref: WindReferenceArg,
+
+        /// Compass bearing of the shot (degrees, 0 = north, 90 = east). Consumed ONLY
+        /// by --wind-ref compass on this command (monte-carlo models no Coriolis).
+        #[arg(long, value_name = "DEG")]
+        shot_direction: Option<f64>,
 
         /// Base vertical wind, mph (imperial) or m/s (metric); positive = updraft (raises POI)
         #[arg(
@@ -3047,6 +3068,62 @@ enum AdjustmentUnit {
     /// Whole turret clicks; requires an elevation click graduation
     /// (--elevation-click-value or the profile's elevation_click)
     Clicks,
+}
+
+/// CLI-facing mirror of `ballistics_engine::wind::WindReference` (MBA-1368), same
+/// thin-`ValueEnum`-wrapper pattern as `DropsReferenceArg` below.
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
+enum WindReferenceArg {
+    /// Wind directions are shooter-relative wind-FROM angles (0 = headwind) — the
+    /// historical default
+    #[default]
+    Shooter,
+    /// Wind directions are earth-fixed compass bearings (0 = north), re-referenced
+    /// against --shot-direction at solve time (relative = bearing - shot azimuth)
+    Compass,
+}
+
+/// Resolves the wind reference frame ONCE at the CLI boundary (MBA-1368): shooter mode
+/// returns the entered value untouched (bit-identical); compass mode requires a shot
+/// azimuth (hard error naming --shot-direction — never a silent
+/// treat-as-shooter-relative, MBA-1425) and rejects clock-position entries (a clock
+/// position is shooter-relative by definition, MBA-1367), then re-references the
+/// bearing as `bearing - shot azimuth`, normalized to [0, 360). Every wind direction a
+/// run consumes — the single --wind-direction (or its CSV fallback) and each
+/// --wind-segment angle — flows through here BEFORE any engine wind structure is
+/// built, so downstream physics never sees a bearing.
+fn resolve_wind_reference(
+    wind_ref: WindReferenceArg,
+    direction_deg: f64,
+    entered_as_clock: bool,
+    shot_direction: Option<f64>,
+) -> Result<f64, String> {
+    match wind_ref {
+        WindReferenceArg::Shooter => Ok(direction_deg),
+        WindReferenceArg::Compass => {
+            if entered_as_clock {
+                return Err(
+                    "clock positions are shooter-relative by definition; use degrees \
+                     with --wind-ref compass"
+                        .to_string(),
+                );
+            }
+            let Some(azimuth) = shot_direction else {
+                return Err(
+                    "--wind-ref compass requires --shot-direction (earth-fixed wind \
+                     bearings are re-referenced against the shot azimuth; omitting it \
+                     would silently treat bearings as shooter-relative)"
+                        .to_string(),
+                );
+            };
+            Ok(
+                ballistics_engine::wind::compass_bearing_to_shooter_relative_deg(
+                    direction_deg,
+                    azimuth,
+                ),
+            )
+        }
+    }
 }
 
 /// CLI-facing mirror of `ballistics_engine::DropsReference` (MBA-1403), following the
@@ -5497,16 +5574,9 @@ fn parse_powder_temp_curve(s: &str, units: UnitSystem) -> Result<Vec<(f64, f64)>
     Ok(pts)
 }
 
-/// Parse a `--wind-segment` value `"SPEED:ANGLE:UNTIL_DISTANCE"` into an engine
-/// `WindSegment` `(speed_kmh, angle_deg, until_distance_m)`. SPEED and UNTIL_DISTANCE
-/// are interpreted in the CLI display units (mph & yards imperial, m/s & meters
-/// metric); ANGLE is degrees in the wind-FROM convention (same as `--wind-direction`).
-fn parse_wind_segment(
-    s: &str,
-    units: UnitSystem,
-) -> Result<ballistics_engine::wind::WindSegment, String> {
-    ballistics_engine::wind::parse_wind_segment_str(s, matches!(units, UnitSystem::Imperial))
-}
+// (The old thin `parse_wind_segment` wrapper is gone: the trajectory dispatch now calls
+// `wind::parse_wind_segment_str_detailed` directly, which it needs for the MBA-1367
+// clock provenance + MBA-1368 per-segment compass re-referencing.)
 
 /// Parse a `--bc-segment` value `"VMIN:VMAX:BC"` into a velocity-keyed `BCSegmentData`.
 /// VMIN/VMAX are in the CLI display velocity units (fps imperial, m/s metric) and are
@@ -6106,6 +6176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             time_step,
             wind_speed,
             wind_direction,
+            wind_ref,
             wind_vertical,
             wind_segment,
             bc_segment,
@@ -6402,6 +6473,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some(d) => d.degrees,
                 None => csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0),
             };
+            // MBA-1368: compass bearings (from the flag OR the CSV) become
+            // shooter-relative HERE — before the zero solve, the per-atmo-segment
+            // winds, and TrajectoryConfig are built — so every downstream
+            // WindConditions inherits the converted value. Shooter mode returns the
+            // value untouched (bit-identical).
+            let final_wind_direction = resolve_wind_reference(
+                wind_ref,
+                final_wind_direction,
+                wind_direction.map(|d| d.was_clock).unwrap_or(false),
+                shot_direction,
+            )?;
 
             // Location overrides (environmental conditions).
             // Resolve the per-unit standard once so CSV-less runs use the right
@@ -7501,10 +7583,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                 angle
             };
 
-            // Parse downrange wind segments (display units -> engine units).
+            // Parse downrange wind segments (display units -> engine units). MBA-1368:
+            // in compass mode each segment's angle is an earth-fixed bearing too,
+            // re-referenced through the same shared resolver (which also rejects clock
+            // forms there — shooter-relative by definition).
             let wind_segments: Vec<ballistics_engine::wind::WindSegment> = wind_segment
                 .iter()
-                .map(|s| parse_wind_segment(s, cli.units))
+                .map(|s| {
+                    let (mut segment, was_clock) =
+                        ballistics_engine::wind::parse_wind_segment_str_detailed(
+                            s,
+                            matches!(cli.units, UnitSystem::Imperial),
+                        )?;
+                    segment.angle_deg = resolve_wind_reference(
+                        wind_ref,
+                        segment.angle_deg,
+                        was_clock,
+                        shot_direction,
+                    )?;
+                    Ok(segment)
+                })
                 .collect::<Result<Vec<_>, String>>()?;
 
             // Construct TrajectoryConfig once, used by all code paths
@@ -7944,6 +8042,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_direction_std,
             wind_speed,
             wind_direction,
+            wind_ref,
+            shot_direction,
             wind_vertical,
             target_distance,
             target_radius,
@@ -7991,6 +8091,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 });
 
+            // MBA-1368: a compass bearing becomes shooter-relative HERE — before
+            // MonteCarloParams is built and therefore before ANY dispersion sampling
+            // (the direction sigma disperses around the converted base). Shooter mode
+            // passes the entered degrees through untouched (bit-identical).
+            let wind_direction_relative_deg = resolve_wind_reference(
+                wind_ref,
+                wind_direction.degrees,
+                wind_direction.was_clock,
+                shot_direction,
+            )?;
+
             // MBA-1365: --bc-reference army-standard-metro has no effect once a custom
             // drag table replaces the BC-based retardation model entirely.
             if custom_drag_table.is_some()
@@ -8034,7 +8145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     wind_std_metric,
                     wind_direction_std,
                     wind_speed_metric,
-                    wind_direction.degrees,
+                    wind_direction_relative_deg,
                     wind_vertical_metric,
                     wind_call_error_metric,
                     target_size_metric,
@@ -8063,7 +8174,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     wind_std_metric,
                     wind_direction_std,
                     wind_speed_metric,
-                    wind_direction.degrees,
+                    wind_direction_relative_deg,
                     wind_vertical_metric,
                     target_distance_metric,
                     target_radius_metric,

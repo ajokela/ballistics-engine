@@ -1078,6 +1078,9 @@ impl WasmBallistics {
         // f64 is required: `wind_direction.to_radians()` below needs a known receiver
         // type (method resolution can't infer it from the field assignment alone).
         let mut wind_direction: f64 = 0.0;
+        // MBA-1367/1368: clock provenance + entry frame for every wind direction.
+        let mut wind_direction_was_clock = false;
+        let mut wind_ref = crate::wind::WindReference::Shooter;
         // Vertical wind (mph imperial / m/s metric); positive = updraft (raises POI).
         let mut wind_vertical: f64 = 0.0;
         // Raw "SPEED:ANGLE:UNTIL" strings; every --wind-segment occurrence is collected
@@ -1325,12 +1328,20 @@ impl WasmBallistics {
                     if i + 1 < args.len() {
                         // MBA-1367: the shared helper accepts degrees (unchanged) plus
                         // the marked clock forms (3oc, 10h30, 10:30).
-                        wind_direction =
-                            crate::wind::parse_wind_direction_standalone(args[i + 1])
-                                .map_err(|e| JsValue::from_str(&format!("Error: {e}")))?
-                                .degrees;
+                        let parsed = crate::wind::parse_wind_direction_standalone(args[i + 1])
+                            .map_err(|e| JsValue::from_str(&format!("Error: {e}")))?;
+                        wind_direction = parsed.degrees;
+                        wind_direction_was_clock = parsed.was_clock;
                         i += 1;
                     }
+                }
+                "--wind-ref" => {
+                    // MBA-1368 (require_value pattern for new arms per the MBA-1343
+                    // hardening direction — the neighboring legacy arms are raw i+1).
+                    let value = require_value(args, i)?;
+                    wind_ref = crate::wind::WindReference::parse(value)
+                        .map_err(|e| JsValue::from_str(&format!("Error: {e}")))?;
+                    i += 1;
                 }
                 "--wind-vertical" => {
                     if i + 1 < args.len() {
@@ -2046,6 +2057,26 @@ impl WasmBallistics {
                 wind.vertical_speed = wind_vertical; // already m/s
             }
         }
+        // MBA-1368: a compass bearing becomes shooter-relative HERE — before this
+        // WindConditions is built, so the zero solve and the flight both inherit the
+        // converted value. Shooter mode leaves the entered degrees untouched
+        // (bit-identical). Clock positions are shooter-relative by definition and are
+        // rejected in compass mode; an absent --shot-direction is a hard error (never
+        // a silent treat-as-shooter-relative).
+        if wind_ref == crate::wind::WindReference::Compass {
+            if wind_direction_was_clock {
+                return Err(JsValue::from_str(
+                    "Error: clock positions are shooter-relative by definition; use                      degrees with --wind-ref compass",
+                ));
+            }
+            let Some(azimuth) = shot_direction else {
+                return Err(JsValue::from_str(
+                    "Error: --wind-ref compass requires --shot-direction (earth-fixed                      wind bearings are re-referenced against the shot azimuth)",
+                ));
+            };
+            wind_direction =
+                crate::wind::compass_bearing_to_shooter_relative_deg(wind_direction, azimuth);
+        }
         // WindConditions.direction is RADIANS (0=North, PI/2=East); --wind-direction is degrees.
         // Convert (matches native CLI); previously a 90-degree crosswind was fed as 90 radians.
         wind.direction = wind_direction.to_radians();
@@ -2408,8 +2439,28 @@ impl WasmBallistics {
             let imperial = matches!(units, UnitSystem::Imperial);
             let mut segments = Vec::with_capacity(wind_segment_strs.len());
             for s in &wind_segment_strs {
-                let seg = crate::wind::parse_wind_segment_str(s, imperial)
-                    .map_err(|err| JsValue::from_str(&err))?;
+                // MBA-1368: in compass mode every segment angle is an earth-fixed
+                // bearing too; clock forms stay rejected there (shooter-relative by
+                // definition). Shooter mode is byte-identical to the plain parser.
+                let (mut seg, was_clock) =
+                    crate::wind::parse_wind_segment_str_detailed(s, imperial)
+                        .map_err(|err| JsValue::from_str(&err))?;
+                if wind_ref == crate::wind::WindReference::Compass {
+                    if was_clock {
+                        return Err(JsValue::from_str(
+                            "Error: clock positions are shooter-relative by definition;                              use degrees with --wind-ref compass",
+                        ));
+                    }
+                    let Some(azimuth) = shot_direction else {
+                        return Err(JsValue::from_str(
+                            "Error: --wind-ref compass requires --shot-direction                              (earth-fixed wind bearings are re-referenced against the                              shot azimuth)",
+                        ));
+                    };
+                    seg.angle_deg = crate::wind::compass_bearing_to_shooter_relative_deg(
+                        seg.angle_deg,
+                        azimuth,
+                    );
+                }
                 segments.push(seg);
             }
             solver.set_wind_segments(segments);
@@ -6989,6 +7040,10 @@ Trajectory Command:
     --wind-speed <SPEED>         Wind speed (mph/m/s)
     --wind-direction <DIR>       Wind direction (deg; 0=headwind, 90=from right) or a
                                  clock position (3oc, 10h30, 10:30; 12oc = headwind)
+    --wind-ref <shooter|compass> Wind direction frame (default shooter). compass =
+                                 earth-fixed bearings (0=N) for --wind-direction and
+                                 every --wind-segment angle, re-referenced against
+                                 --shot-direction; rejects clock positions
     --wind-vertical <SPEED>      Vertical wind (mph/m/s); positive = updraft (raises POI)
     --wind-segment <S:A:D[:V]>   Downrange wind seg speed:angle:until-dist[:vertical] (repeatable).
                                  ANGLE also takes colon-free clock forms (10:3oc:400).
@@ -7369,6 +7424,11 @@ pub struct Calculator {
     enable_coriolis: bool,
     twist_rate_inches: Option<f64>,
     latitude_deg: Option<f64>,
+
+    // MBA-1368: wind entry frame ("shooter" | "compass") and the shot's compass
+    // bearing. Both additive — no existing method signature changed (R6).
+    wind_reference: Option<String>,
+    shot_direction_deg: Option<f64>,
 }
 
 #[wasm_bindgen]
@@ -7400,6 +7460,9 @@ impl Calculator {
             enable_coriolis: false,
             twist_rate_inches: None,
             latitude_deg: None,
+
+            wind_reference: None,
+            shot_direction_deg: None,
         }
     }
 
@@ -7465,6 +7528,26 @@ impl Calculator {
     #[wasm_bindgen(js_name = clearWindSegments)]
     pub fn clear_wind_segments(mut self) -> Self {
         self.wind_segments.clear();
+        self
+    }
+
+    /// MBA-1368: choose the wind entry frame — "shooter" (default; wind-FROM angles
+    /// relative to the line of fire) or "compass" (earth-fixed bearings, 0 = north,
+    /// covering `setWind` AND every `addWindSegment` direction, re-referenced against
+    /// the shot azimuth at solve time). Compass mode requires `setShotDirection`;
+    /// invalid values surface when the command runs. Additive method — no existing
+    /// signature changed.
+    #[wasm_bindgen(js_name = setWindReference)]
+    pub fn set_wind_reference(mut self, mode: &str) -> Self {
+        self.wind_reference = Some(mode.to_string());
+        self
+    }
+
+    /// MBA-1368: compass bearing of the shot (degrees, 0 = north, 90 = east) —
+    /// required by `setWindReference("compass")`; also feeds Coriolis when enabled.
+    #[wasm_bindgen(js_name = setShotDirection)]
+    pub fn set_shot_direction(mut self, bearing_deg: f64) -> Self {
+        self.shot_direction_deg = Some(bearing_deg);
         self
     }
 
@@ -7557,6 +7640,14 @@ impl Calculator {
                 " --wind-segment {}:{}:{}",
                 speed_mph, direction_deg, until_yards
             ));
+        }
+        // MBA-1368: emit the entry frame + shot bearing whenever set (the trajectory
+        // handler validates the pairing and values).
+        if let Some(bearing) = self.shot_direction_deg {
+            cmd.push_str(&format!(" --shot-direction {}", bearing));
+        }
+        if let Some(reference) = &self.wind_reference {
+            cmd.push_str(&format!(" --wind-ref {}", reference));
         }
 
         cmd.push_str(&format!(
@@ -7709,6 +7800,14 @@ impl Calculator {
                 " --wind-segment {}:{}:{}",
                 speed_mph, direction_deg, until_yards
             ));
+        }
+        // MBA-1368: emit the entry frame + shot bearing whenever set (the trajectory
+        // handler validates the pairing and values).
+        if let Some(bearing) = self.shot_direction_deg {
+            cmd.push_str(&format!(" --shot-direction {}", bearing));
+        }
+        if let Some(reference) = &self.wind_reference {
+            cmd.push_str(&format!(" --wind-ref {}", reference));
         }
 
         cmd.push_str(&format!(

@@ -510,7 +510,8 @@ fn solve_input_schema() -> Value {
                                 "vertical_speed_mps": {"type": "number"}
                             }
                         }
-                    }
+                    },
+                    "wind_reference": {"type": "string", "enum": ["shooter", "compass"]}
                 }
             },
             "solver": {
