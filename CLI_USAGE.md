@@ -725,6 +725,70 @@ this flag adds the fixed mount displacement on top) and with the zero POI offset
 point in the zero solve). Saved profiles store it as `sight_offset_lateral_m` (always
 meters); the explicit CLI flag overrides the stored value.
 
+#### Named Zero Sets and Per-Load Offsets (`profile zero-set`, `--zero-set`)
+
+Saved profiles can carry **multiple named zero conditions** (MBA-1360 — the Lapua
+Sight-In POI / ATrag zero-zone / Strelok multi-zero feature class): alternate zero
+distances and constant per-load dial corrections, stored under the profile's
+`zero_sets` key and selected per run.
+
+```bash
+# Store a 200 yd suppressed zero that also needs 0.3 mil LESS elevation and
+# 0.1 mil MORE right windage than the master zero:
+ballistics profile zero-set add mycreedmoor --name suppressed \
+  --zero-distance 200 --poi-up -0.3 --poi-right 0.1 --notes "suppressed load"
+
+ballistics profile zero-set list mycreedmoor
+ballistics profile zero-set remove mycreedmoor --name suppressed
+
+# Use it:
+ballistics come-ups --profile mycreedmoor --zero-set suppressed \
+  --zero-distance 200 --start 200 --end 800 --step 100
+```
+
+Semantics:
+
+* `--poi-up` / `--poi-right` are **dial corrections in MILs**, ADDED to elevation /
+  windage adjustments when the set is selected: positive = dial UP / RIGHT more. A
+  load that impacts 0.25 mil HIGH relative to the master zero therefore stores
+  `--poi-up -0.25`. This is a *constant angular* correction (unlike the
+  linear-at-zero-range `--zero-poi-up` above, which biases the solved zero itself);
+  the two compose. In non-MIL display units the correction is rescaled through the
+  same locked factor table as every other dial conversion, and with a tracking CF
+  (MBA-1358) the order is fixed: `dial = (true need + set correction) / CF`.
+* A set's `zero_distance` (display units, converted with the profile) feeds the
+  auto-zero exactly as the profile's own zero would; **explicit CLI zero flags always
+  win** over the set.
+* `--zero-set NAME` exists on `trajectory`, `come-ups`, `wind-card`, `range-table`,
+  `dsf`, and `plan-truing`. The dial corrections reach *total-correction* dial outputs
+  (come-ups, wind-card drift, range-table Drop/Wind, the PDF dope card's Drop/Wind);
+  component holds (mover Ring, lead) deliberately stay uncorrected — they compose on
+  top of a wind dial that already carries the correction. On `dsf`/`plan-truing` only
+  the set's zero distance participates (a DSF observation is a physical impact, not a
+  dial value). `compare`, `lead`, `mpbr`, and `stability` take no `--zero-set` (no
+  single profile, no total dial output, or no fixed zero to select).
+* An unknown name is a **hard error listing the available sets**; nothing is ever
+  silently ignored.
+
+Data sources that feed sets automatically:
+
+* **Profile CSVs** (`trajectory --profile file.csv --profile-row R1`): the
+  long-allowlisted `V_OFFSET_MIL` / `H_OFFSET_MIL` columns now form an ephemeral zero
+  set named after the row (dial-correction convention, as above) — select it with
+  `--zero-set R1`. Without `--zero-set`, the columns remain inert exactly as before.
+* **`.a7p` import with `--zero-click`**: in addition to the MBA-1359 engine-field
+  mapping described above (unchanged), the file's `zero_x`/`zero_y` click state is
+  recorded as a set named `a7p-zero` in dial-correction convention (the negated
+  angular POI offset). Select it only on a profile whose `zero_poi_up_m`/
+  `zero_poi_right_m` fields have been cleared — the engine fields already shift the
+  whole solution, so applying both double-counts the same click state.
+
+Compatibility: profiles carrying `zero_sets` load and solve identically on older
+binaries **as long as no alternate set is requested** (the master zero is untouched;
+`--zero-set` is an unknown flag there and fails loudly). Re-saving a profile with an
+older binary drops the stored sets — the same documented one-way skew as
+`bc_segments`.
+
 ### Canted Shooting
 
 Model a rifle that is zeroed level but *fired* with the scope/receiver rotated about the

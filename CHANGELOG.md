@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Multiple named zeroes and per-load POI offsets in saved profiles** (MBA-1360;
+  Lapua Sight-In POI / ATrag zero zones / Strelok multi-zero class). Profiles gain an
+  optional `zero_sets` list — each set is a name plus an optional `zero_distance`
+  (display units, rescaled by unit conversion like the profile's own zero) and
+  optional `poi_up_mil`/`poi_right_mil` per-load DIAL corrections (constant angular
+  mils; positive = dial up/right more, so a load impacting high stores a negative
+  value). Managed with `profile zero-set add|remove|list`; selected per run with
+  `--zero-set NAME` on `trajectory`, `come-ups`, `wind-card`, `range-table`, `dsf`,
+  and `plan-truing`. A selected set's zero_distance feeds the auto-zero exactly as
+  the profile's zero would (explicit CLI zero flags always win); its dial corrections
+  are added to total-correction dial outputs (come-ups, wind-card drift, range-table
+  Drop/Wind, the PDF dope card's Drop/Wind) at the shared conversion boundary, BEFORE
+  the MBA-1358 tracking-CF division (`dial = (true + bias) / CF`); component holds
+  (mover Ring/lead) deliberately stay bias-free. Unknown set names are a hard error
+  listing the available sets. Data sources wired in: the `--profile` CSV row's
+  previously allowlisted-but-unused `V_OFFSET_MIL`/`H_OFFSET_MIL` columns now form a
+  selectable ephemeral set named after the row, and `.a7p` import with `--zero-click`
+  additionally records the file's zero click state as a set named `a7p-zero`
+  (dial-correction convention; the MBA-1359 engine-field mapping is unchanged).
+  Forward-compat follows the documented `bc_segments` pattern: old readers load and
+  solve the master zero identically (and reject `--zero-set` loudly as an unknown
+  flag); only an old reader's re-save drops the stored sets. Defaults (no `--zero-set`)
+  are byte-identical everywhere.
 - **Scope tracking correction factors from a tall-target test** (MBA-1358, Litz).
   Per-axis `--elevation-cf`/`--windage-cf` store the published tall-target ratio
   `actual measured travel / dialed travel` (0.95 = under-tracks 5%; strictly between

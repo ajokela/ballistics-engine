@@ -544,6 +544,17 @@ enum Commands {
         #[arg(long)]
         auto_zero: Option<f64>,
 
+        /// Select a named zero set (MBA-1360): a saved profile's `zero_sets` entry (see
+        /// `profile zero-set add`), or the set a --profile CSV row's
+        /// V_OFFSET_MIL/H_OFFSET_MIL columns define (named after the row). The set's
+        /// zero_distance (if any) feeds the auto-zero exactly as the profile's own
+        /// zero would (an explicit --auto-zero still wins); its poi_up_mil/poi_right_mil
+        /// are added to dial outputs (here: the PDF dope card's Drop/Wind columns) as a
+        /// constant angular correction. Unknown names are a hard error listing the
+        /// available sets.
+        #[arg(long, value_name = "NAME")]
+        zero_set: Option<String>,
+
         /// Deliberate vertical POI offset AT the zero range (inches for imperial, cm for
         /// metric; signed). Positive = the rifle is deliberately zeroed to impact HIGH by
         /// this much at the zero distance (Kestrel "zero height" semantics, MBA-1359).
@@ -1614,6 +1625,13 @@ enum Commands {
         #[arg(long)]
         zero_distance: Option<f64>,
 
+        /// Select a named zero set from the saved profile (MBA-1360, requires --profile).
+        /// Only the set's zero_distance participates here (an explicit --zero-distance
+        /// still wins); the set's dial corrections do not apply to a truing plan.
+        /// Unknown names are a hard error listing the available sets.
+        #[arg(long, value_name = "NAME")]
+        zero_set: Option<String>,
+
         /// Sight height (inches or millimeters based on global --units)
         #[arg(long)]
         sight_height: Option<f64>,
@@ -1779,6 +1797,13 @@ enum Commands {
         #[arg(long)]
         zero_distance: f64,
 
+        /// Select a named zero set from the saved profile (MBA-1360, requires --profile).
+        /// Its poi_up_mil is added to the come-up dial values as a constant angular
+        /// correction; --zero-distance (required here) always wins over the set's own
+        /// zero_distance. Unknown names are a hard error listing the available sets.
+        #[arg(long, value_name = "NAME")]
+        zero_set: Option<String>,
+
         /// Start range (yards or meters)
         #[arg(long, default_value = "100.0")]
         start: f64,
@@ -1900,6 +1925,14 @@ enum Commands {
         /// 42.0in). No separator between the number and the unit.
         #[arg(long, value_name = "VALUEUNIT")]
         observed_drop: String,
+
+        /// Select a named zero set from the saved profile (MBA-1360). Only the set's
+        /// zero_distance participates here (it feeds the profile solve's zero exactly as
+        /// the profile's own zero would); the set's dial corrections never touch a DSF
+        /// calibration — the observed drop is a physical impact, not a dial value.
+        /// Unknown names are a hard error listing the available sets.
+        #[arg(long, value_name = "NAME")]
+        zero_set: Option<String>,
     },
 
     /// Moving-target lead table (hold in the direction of target travel)
@@ -2193,6 +2226,13 @@ enum Commands {
         #[arg(long)]
         zero_distance: f64,
 
+        /// Select a named zero set from the saved profile (MBA-1360, requires --profile).
+        /// Its poi_right_mil is added to the drift dial values as a constant angular
+        /// correction; --zero-distance (required here) always wins over the set's own
+        /// zero_distance. Unknown names are a hard error listing the available sets.
+        #[arg(long, value_name = "NAME")]
+        zero_set: Option<String>,
+
         /// Comma-separated wind speeds to calculate (mph or m/s)
         #[arg(long, default_value = "5,10,15,20")]
         wind_speeds: String,
@@ -2372,6 +2412,14 @@ enum Commands {
         /// Zero distance (yards for imperial, meters for metric)
         #[arg(long)]
         zero_distance: f64,
+
+        /// Select a named zero set from the saved profile (MBA-1360, requires --profile).
+        /// Its poi_up_mil/poi_right_mil are added to the Drop/Wind dial columns as a
+        /// constant angular correction; --zero-distance (required here) always wins over
+        /// the set's own zero_distance. Unknown names are a hard error listing the
+        /// available sets.
+        #[arg(long, value_name = "NAME")]
+        zero_set: Option<String>,
 
         /// Start range (yards or meters)
         #[arg(long, default_value = "100.0")]
@@ -2823,6 +2871,65 @@ enum ProfileAction {
         /// Profile name
         name: String,
     },
+
+    /// Manage a profile's named zero sets (MBA-1360): alternate zero distances and
+    /// per-load dial corrections, selected at solve time with `--zero-set NAME`
+    ZeroSet {
+        #[command(subcommand)]
+        action: ZeroSetAction,
+    },
+}
+
+/// `profile zero-set` verbs (MBA-1360).
+#[derive(Subcommand)]
+enum ZeroSetAction {
+    /// Add (or replace, by name) a zero set on a saved profile
+    Add {
+        /// Profile name
+        profile: String,
+
+        /// Zero set name (selected later with `--zero-set NAME`)
+        #[arg(long)]
+        name: String,
+
+        /// This set's zero distance (yards imperial / meters metric, global --units) —
+        /// same convention as the profile's own zero_distance field. Omit for a
+        /// dial-correction-only set.
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        /// Elevation dial correction in MILs added to elevation adjustments when this
+        /// set is selected; positive = dial UP more. A load that impacts 0.25 mil HIGH
+        /// relative to the master zero needs -0.25 here.
+        #[arg(long, value_name = "MIL", allow_hyphen_values = true)]
+        poi_up: Option<f64>,
+
+        /// Windage dial correction in MILs added to windage adjustments when this set
+        /// is selected; positive = dial RIGHT more. A load that impacts 0.1 mil RIGHT
+        /// relative to the master zero needs -0.1 here.
+        #[arg(long, value_name = "MIL", allow_hyphen_values = true)]
+        poi_right: Option<f64>,
+
+        /// Free-form note stored with the set (e.g. "suppressed", "subsonic load")
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
+    /// Remove a named zero set from a saved profile
+    Remove {
+        /// Profile name
+        profile: String,
+
+        /// Zero set name to remove
+        #[arg(long)]
+        name: String,
+    },
+
+    /// List a saved profile's zero sets
+    List {
+        /// Profile name
+        profile: String,
+    },
 }
 
 // UnitSystem and DragModelArg moved to ballistics_engine::truing (MBA-1343).
@@ -3124,6 +3231,47 @@ struct ProfileData {
     /// lead/ring) are divided by it; overridden by `--windage-cf`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     windage_cf: Option<f64>,
+    /// Named zero sets (MBA-1360): alternate zero distances and per-load dial
+    /// corrections (Lapua Sight-In POI / ATrag zero zones / Strelok multi-zero class).
+    /// Managed by `profile zero-set add|remove|list`; selected at solve time with
+    /// `--zero-set NAME`. Nothing here applies unless a set is explicitly selected —
+    /// the profile's own `zero_distance`/`auto_zero` remain the master zero.
+    ///
+    /// FORWARD-COMPAT (the `bc_segments` pattern, deliberately): `#[serde(default)]`
+    /// means a reader that predates this field loads the profile cleanly and solves
+    /// with the master zero — which is exactly what a CURRENT reader does when no
+    /// `--zero-set` is selected, so an old reader can never silently produce a
+    /// different default answer. Requesting an alternate set on an old binary fails
+    /// loudly at the flag (`--zero-set` is an unknown argument there). The one-way
+    /// skew is re-SAVING: an old reader that rewrites the profile silently drops this
+    /// key (documented, like `bc_segments`; there is no sentinel trick available that
+    /// wouldn't corrupt the master-zero fields old readers rely on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zero_sets: Option<Vec<ProfileZeroSet>>,
+}
+
+/// One named zero condition / per-load dial correction (MBA-1360).
+///
+/// `zero_distance` uses the SAME display-unit convention as [`ProfileData::zero_distance`]
+/// (yards imperial / meters metric per the profile's `units` field), and
+/// [`ProfileData::converted_to`] rescales it identically. `poi_up_mil`/`poi_right_mil`
+/// are constant ANGULAR dial corrections in MILs (unit-invariant, untouched by
+/// `converted_to`), ADDED to the dial outputs (elevation/windage adjustments) when the
+/// set is selected — positive = dial UP/RIGHT more; a load that impacts high/right
+/// relative to the master zero therefore stores negative values. This is deliberately
+/// dial-side (a constant angular correction per the ticket), unlike the MBA-1359
+/// linear-at-zero-range POI offsets, which bias the solved zero itself; the two compose.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct ProfileZeroSet {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zero_distance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    poi_up_mil: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    poi_right_mil: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
 }
 
 /// One velocity-banded BC breakpoint (profile schema v2, MBA-1323 Phase 2). Stored as a raw
@@ -3410,6 +3558,13 @@ struct TrajectoryConfig {
     // wind/lead columns and every mover Ring dial output (table/JSON/CSV).
     elevation_cf: f64,
     windage_cf: f64,
+    // MBA-1360: the selected zero set's per-load dial corrections (MILs; 0.0 = no set
+    // selected, an exact no-op). Added to the PDF dope card's Drop/Wind dial columns
+    // (total-correction dials) BEFORE the CF division above; the Lead column and the
+    // mover Ring are COMPONENT holds and stay bias-free (the wind dial they compose
+    // with already carries the bias).
+    zero_set_elevation_bias_mil: f64,
+    zero_set_windage_bias_mil: f64,
 
     // Integration method
     use_rk4: bool,
@@ -3776,6 +3931,19 @@ impl ProfileData {
                 target,
             )
         });
+        // MBA-1360: a zero set's zero_distance shares the profile zero_distance convention
+        // above, so it rescales identically. The poi_*_mil dial corrections are angular
+        // (unit-invariant) and stay untouched, like elevation_click/windage_click below.
+        if let Some(sets) = self.zero_sets.as_mut() {
+            for set in sets.iter_mut() {
+                set.zero_distance = set.zero_distance.map(|value| {
+                    UnitConverter::distance_from_metric(
+                        UnitConverter::distance_to_metric(value, source),
+                        target,
+                    )
+                });
+            }
+        }
 
         // `bc_segments`, `drag_curve`, `elevation_click`, `windage_click`, `dsf_points`, and
         // `bc_reference` are INTENTIONALLY left untouched here — do not "complete" this by
@@ -4079,6 +4247,100 @@ fn resolve_tracking_cf(
 /// Load a profile for calculation, converting its stored display units to the active CLI units.
 fn load_profile_for_units(name: &str, units: UnitSystem) -> Result<ProfileData, Box<dyn Error>> {
     load_profile(name)?.converted_to(units)
+}
+
+/// The result of [`resolve_zero_selection`] (MBA-1360): which zero distance this run
+/// uses (display units of the active run) and the selected zero set's per-load dial
+/// corrections (MILs, 0.0 when no set is selected — an exact no-op at every dial site).
+struct ZeroSelection {
+    zero_distance: Option<f64>,
+    elevation_bias_mil: f64,
+    windage_bias_mil: f64,
+}
+
+/// The ONE zero-selection resolution shared by every profile-consuming solve path
+/// (MBA-1360, design R9) — trajectory's `final_auto_zero`, the `dsf` verb's profile
+/// solve, and `plan-truing`'s zero all flow through here, as does any dial-bias-only
+/// consumer (come-ups/wind-card/range-table).
+///
+/// Precedence: `explicit_zero` (an explicit CLI zero flag) > the selected set's
+/// `zero_distance` > `legacy_zero` (the call site's pre-1360 fallback chain, e.g.
+/// CSV ZERO_RANGE then profile `auto_zero`/`zero_distance`). With no `--zero-set`
+/// selected the set layer vanishes and the result is byte-identical to the legacy
+/// resolution. Unknown set names are a hard error listing the available names
+/// (MBA-1425: no silent fallback); so is `--zero-set` with no profile to look in.
+///
+/// `extra_set` is the trajectory command's CSV-derived ephemeral set (a `--profile`
+/// CSV row's V_OFFSET_MIL/H_OFFSET_MIL columns, named after the row); it participates
+/// in name lookup exactly like a stored set.
+fn resolve_zero_selection(
+    zero_set_name: Option<&str>,
+    profile: Option<&ProfileData>,
+    extra_set: Option<&ProfileZeroSet>,
+    explicit_zero: Option<f64>,
+    legacy_zero: Option<f64>,
+) -> Result<ZeroSelection, String> {
+    let Some(wanted) = zero_set_name else {
+        return Ok(ZeroSelection {
+            zero_distance: explicit_zero.or(legacy_zero),
+            elevation_bias_mil: 0.0,
+            windage_bias_mil: 0.0,
+        });
+    };
+
+    let stored: &[ProfileZeroSet] = profile
+        .and_then(|p| p.zero_sets.as_deref())
+        .unwrap_or(&[]);
+    let candidates: Vec<&ProfileZeroSet> = stored.iter().chain(extra_set).collect();
+    if candidates.is_empty() {
+        return Err(match profile {
+            Some(p) => format!(
+                "--zero-set '{wanted}': profile '{}' has no zero sets (add one with \
+                 `profile zero-set add {} --name {wanted} ...`)",
+                p.name, p.name
+            ),
+            None => format!(
+                "--zero-set '{wanted}' requires a profile to look the set up in \
+                 (pass the command's profile flag)"
+            ),
+        });
+    }
+    let Some(set) = candidates.iter().find(|s| s.name == wanted) else {
+        let names: Vec<&str> = candidates.iter().map(|s| s.name.as_str()).collect();
+        return Err(format!(
+            "zero set '{wanted}' not found; available zero sets: {}",
+            names.join(", ")
+        ));
+    };
+
+    Ok(ZeroSelection {
+        zero_distance: explicit_zero.or(set.zero_distance).or(legacy_zero),
+        elevation_bias_mil: set.poi_up_mil.unwrap_or(0.0),
+        windage_bias_mil: set.poi_right_mil.unwrap_or(0.0),
+    })
+}
+
+/// Builds the trajectory command's ephemeral zero set from a `--profile` CSV row's
+/// V_OFFSET_MIL/H_OFFSET_MIL columns (MBA-1360; the columns were allowlisted-but-unused
+/// since MBA-614). Named after the selected row (`--profile-row`), so
+/// `--zero-set <row name>` selects it. `None` when the row carries neither column —
+/// including every pre-existing CSV, so runs without `--zero-set` are untouched.
+fn zero_set_from_profile_csv(
+    csv: &HashMap<String, String>,
+    row_name: Option<&str>,
+) -> Option<ProfileZeroSet> {
+    let has_up = csv_has(csv, &["V_OFFSET_MIL"]);
+    let has_right = csv_has(csv, &["H_OFFSET_MIL"]);
+    if !has_up && !has_right {
+        return None;
+    }
+    Some(ProfileZeroSet {
+        name: row_name.unwrap_or("imported").to_string(),
+        zero_distance: None,
+        poi_up_mil: has_up.then(|| csv_get_f64(csv, &["V_OFFSET_MIL"], 0.0)),
+        poi_right_mil: has_right.then(|| csv_get_f64(csv, &["H_OFFSET_MIL"], 0.0)),
+        notes: None,
+    })
 }
 
 /// List all saved profiles
@@ -4427,6 +4689,7 @@ fn map_a7p_to_profile(
     // clicks x (click size / adjustment_factor(base)) [radians] x zero distance [m].
     let mut zero_poi_up_m: Option<f64> = None;
     let mut zero_poi_right_m: Option<f64> = None;
+    let mut zero_sets: Option<Vec<ProfileZeroSet>> = None;
     if src.zero_x_raw != 0 || src.zero_y_raw != 0 {
         match (zero_click, src.zero_distance_m) {
             (Some(click), Some(zero_distance_m)) if zero_distance_m > 0.0 => {
@@ -4438,6 +4701,19 @@ fn map_a7p_to_profile(
                 let right_m = right_clicks * click_rad * zero_distance_m;
                 zero_poi_up_m = Some(up_m);
                 zero_poi_right_m = Some(right_m);
+                // MBA-1360: ALSO record the click state as a zero set named "a7p-zero",
+                // in DIAL-CORRECTION convention (the negated angular POI offset: a zero
+                // state that impacts high/right needs less up/right dial). The engine-
+                // field path above stays the primary consumer; see CLI_USAGE for why
+                // selecting this set only makes sense on a profile whose zero_poi_*
+                // fields have been cleared (both applied at once double-counts).
+                zero_sets = Some(vec![ProfileZeroSet {
+                    name: "a7p-zero".to_string(),
+                    zero_distance: None,
+                    poi_up_mil: Some(-(up_clicks * click_rad * 1000.0)),
+                    poi_right_mil: Some(-(right_clicks * click_rad * 1000.0)),
+                    notes: Some("imported .a7p zero_x/zero_y click state".to_string()),
+                }]);
                 push(
                     "zero_x / zero_y",
                     format!(
@@ -4456,7 +4732,7 @@ fn map_a7p_to_profile(
                             ballistics_engine::adjustment::ClickBase::Smoa => "smoa",
                         },
                     ),
-                    "zero_poi_up_m + zero_poi_right_m",
+                    "zero_poi_up_m + zero_poi_right_m + zero_sets[a7p-zero]",
                 );
             }
             (Some(_), _) => {
@@ -4581,6 +4857,8 @@ fn map_a7p_to_profile(
         // MBA-1358: .a7p has no scope tracking-CF concept; derive with `tall-target`.
         elevation_cf: None,
         windage_cf: None,
+        // MBA-1360: Some only when --zero-click converted zero_x/zero_y (see above).
+        zero_sets,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -4707,18 +4985,65 @@ fn resolve_click_values(
 /// units, the number set on the dial must be `N / CF` — an under-tracking scope needs
 /// MORE dial, so outputs divide. `1.0` (no correction) is bit-exact — byte-identical
 /// output.
+///
+/// `bias_mil` is the selected zero set's per-load dial correction (MBA-1360), a
+/// constant ANGULAR mil value ADDED to the TRUE angular need BEFORE the CF division:
+/// the bias is a property of the load/zero relationship (true angular units), the CF a
+/// property of the scope's turret (dial units), so the corrected dial is
+/// `(true_need + bias) / CF`. `0.0` (no set selected) skips the addition entirely —
+/// bit-exact, byte-identical output (an unconditional `+ 0.0` would flip a `-0.0`
+/// angular value to `+0.0` and change rendered bytes).
 fn adjustment_display(
     drop_yd: f64,
     range_yd: f64,
     unit: AdjustmentUnit,
     click: Option<ClickValue>,
+    bias_mil: f64,
     cf: f64,
 ) -> f64 {
     match click {
         // Clicks convert from RAW drop (not from the angular value above), so the CF is
         // applied to the input drop — correcting the angle before click quantization.
-        Some(c) => clicks_for(drop_yd / cf, range_yd, &c) as f64,
-        None => drop_to_adjustment(drop_yd, range_yd, unit) / cf,
+        // The zero-set bias joins as its drop-equivalent at this range (1 mil =
+        // range/1000), keeping the ordering: (true + bias) first, / CF second, then
+        // quantize into whole clicks.
+        Some(c) => {
+            let biased_drop_yd = if bias_mil != 0.0 {
+                drop_yd + bias_mil / 1000.0 * range_yd
+            } else {
+                drop_yd
+            };
+            clicks_for(biased_drop_yd / cf, range_yd, &c) as f64
+        }
+        None => {
+            let true_need = drop_to_adjustment(drop_yd, range_yd, unit);
+            let biased = if bias_mil != 0.0 {
+                // Rescale the mil bias into the display unit via the shared factor
+                // table (MIL -> unit), so MOA/SMOA/IPHY columns get the same angular
+                // correction the MIL column does.
+                true_need
+                    + bias_mil * unit_factor_for_bias(unit) / adjustment_factor(ClickBase::Mil)
+            } else {
+                true_need
+            };
+            biased / cf
+        }
+    }
+}
+
+/// The `adjustment_factor` a non-clicks [`AdjustmentUnit`] renders in, for rescaling a
+/// MIL-denominated zero-set bias into the active display unit (MBA-1360). `Clicks`
+/// never reaches this (the clicks arm above works on raw drop); the MIL fallback
+/// mirrors `drop_to_adjustment`'s own release-safe arm.
+fn unit_factor_for_bias(unit: AdjustmentUnit) -> f64 {
+    match unit {
+        AdjustmentUnit::Mil => adjustment_factor(ClickBase::Mil),
+        AdjustmentUnit::Moa => adjustment_factor(ClickBase::Moa),
+        AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => adjustment_factor(ClickBase::Smoa),
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks bias is applied on raw drop, not here");
+            adjustment_factor(ClickBase::Mil)
+        }
     }
 }
 
@@ -4732,12 +5057,15 @@ fn adjustment_display(
 /// columns (Wind here, plus PDF's wind_adj/lead_adj) now go through this one function so
 /// the guard cannot be dropped a fourth time.
 /// `windage_cf` is the windage-axis tracking CF (MBA-1358), applied once via the shared
-/// `adjustment_display` boundary below.
+/// `adjustment_display` boundary below; `windage_bias_mil` is the selected zero set's
+/// windage dial correction (MBA-1360), added to the true angular need before that
+/// division — see `adjustment_display`.
 fn windage_adjustment_display(
     drift_yd: f64,
     range_yd: f64,
     windage_unit: AdjustmentUnit,
     windage_click: Option<ClickValue>,
+    windage_bias_mil: f64,
     windage_cf: f64,
 ) -> f64 {
     let click = if windage_unit == AdjustmentUnit::Clicks {
@@ -4745,7 +5073,7 @@ fn windage_adjustment_display(
     } else {
         None
     };
-    adjustment_display(drift_yd, range_yd, windage_unit, click, windage_cf)
+    adjustment_display(drift_yd, range_yd, windage_unit, click, windage_bias_mil, windage_cf)
 }
 
 /// Display label for an `AdjustmentUnit` header/column name (MBA-1355, generalized in
@@ -5422,6 +5750,11 @@ fn solve_profile_for_dsf(
     profile: &ProfileData,
     units: UnitSystem,
     max_range_m: f64,
+    // MBA-1360: the RESOLVED zero distance (display units) from resolve_zero_selection —
+    // the caller passes the profile's own auto_zero/zero_distance chain when no
+    // --zero-set is selected, so this stays byte-identical to the historical internal
+    // resolution; a selected set's zero_distance flows in the same way.
+    zero_distance_display: Option<f64>,
 ) -> Result<ballistics_engine::cli_api::TrajectoryResult, Box<dyn Error>> {
     let velocity_m = UnitConverter::velocity_to_metric(profile.velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(profile.mass, units);
@@ -5592,10 +5925,11 @@ fn solve_profile_for_dsf(
         bc_type_str: None,
     };
 
-    // Zero angle: profile.auto_zero, falling back to profile.zero_distance — matching
-    // `trajectory --saved-profile`'s own `final_auto_zero` resolution — else flat (0.0),
-    // same as a bare `trajectory --saved-profile NAME` with no --auto-zero.
-    if let Some(zero_distance_display) = profile.auto_zero.or(profile.zero_distance) {
+    // Zero angle: the caller-resolved zero (profile.auto_zero falling back to
+    // profile.zero_distance when no zero set is selected — matching `trajectory
+    // --saved-profile`'s own resolution) — else flat (0.0), same as a bare
+    // `trajectory --saved-profile NAME` with no --auto-zero.
+    if let Some(zero_distance_display) = zero_distance_display {
         let zero_distance_m = UnitConverter::distance_to_metric(zero_distance_display, units);
         inputs.muzzle_angle = ballistics_engine::calculate_zero_angle_with_conditions(
             inputs.clone(),
@@ -5765,6 +6099,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             full,
             plot,
             auto_zero,
+            zero_set,
             zero_poi_up,
             zero_poi_right,
             sight_height,
@@ -6207,8 +6542,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     None => (final_temperature, final_pressure, final_altitude, final_pressure_type),
                 };
 
-            // Get zero range: CLI --auto-zero overrides profile ZERO_RANGE
-            let final_auto_zero: Option<f64> = auto_zero.or_else(|| {
+            // Get zero range: CLI --auto-zero > selected zero set (MBA-1360) > profile
+            // CSV ZERO_RANGE > saved profile auto_zero/zero_distance — resolved through
+            // the shared zero-selection resolver. With no --zero-set the set layer
+            // vanishes and this is exactly the historical
+            // `auto_zero.or(csv).or(profile.auto_zero.or(zero_distance))` chain.
+            let csv_zero_set = zero_set_from_profile_csv(&profile_data, profile_row.as_deref());
+            let legacy_zero: Option<f64> = {
                 let zero_from_csv =
                     csv_get_f64(&profile_data, &["ZERO_RANGE", "ZERO_DISTANCE", "ZERO"], 0.0);
                 if zero_from_csv > 0.0 {
@@ -6218,7 +6558,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .as_ref()
                         .and_then(|p| p.auto_zero.or(p.zero_distance))
                 }
-            });
+            };
+            let zero_selection = resolve_zero_selection(
+                zero_set.as_deref(),
+                saved_profile_data.as_ref(),
+                csv_zero_set.as_ref(),
+                auto_zero,
+                legacy_zero,
+            )
+            .map_err(|e| -> Box<dyn Error> { e.into() })?;
+            let final_auto_zero: Option<f64> = zero_selection.zero_distance;
 
             // Resolve additional params from saved profile (if not explicitly set via CLI)
             let drag_model = if saved_profile_data.is_some() && velocity.is_none() && bc.is_none() {
@@ -7191,6 +7540,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 drops_reference,
                 elevation_cf,
                 windage_cf,
+                // MBA-1360: the selected zero set's dial corrections (0.0 when no
+                // --zero-set was given — exact no-op at the display boundary).
+                zero_set_elevation_bias_mil: zero_selection.elevation_bias_mil,
+                zero_set_windage_bias_mil: zero_selection.windage_bias_mil,
                 use_rk4: !use_euler,
                 use_rk45: !use_rk4_fixed,
                 twist_rate,
@@ -8671,6 +9024,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             measurement_resolution,
             drop_unit,
             zero_distance,
+            zero_set,
             sight_height,
             temperature,
             pressure,
@@ -8727,13 +9081,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .map(|profile| parse_drag_model_arg_for_truing(&profile.drag_model))
                 })
                 .unwrap_or(DragModelArg::G1);
-            let zero_distance = zero_distance
-                .or_else(|| {
-                    profile_data
-                        .as_ref()
-                        .and_then(|profile| profile.zero_distance.or(profile.auto_zero))
-                })
-                .unwrap_or(100.0);
+            // MBA-1360: explicit --zero-distance > selected zero set > the historical
+            // profile zero_distance/auto_zero chain, via the shared resolver (the set's
+            // dial corrections are irrelevant to a truing plan and are ignored here).
+            let zero_distance = resolve_zero_selection(
+                zero_set.as_deref(),
+                profile_data.as_ref(),
+                None,
+                zero_distance,
+                profile_data
+                    .as_ref()
+                    .and_then(|profile| profile.zero_distance.or(profile.auto_zero)),
+            )?
+            .zero_distance
+            .unwrap_or(100.0);
             let sight_height = sight_height
                 .or_else(|| {
                     profile_data
@@ -8938,6 +9299,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             diameter,
             drag_model,
             zero_distance,
+            zero_set,
             start,
             end,
             step,
@@ -8986,6 +9348,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 elevation_cf,
                 profile_data.as_ref().and_then(|p| p.elevation_cf),
                 "--elevation-cf",
+            )?;
+
+            // MBA-1360: selected zero set. --zero-distance is required on this command,
+            // so the set can never change the zero here — only its elevation dial
+            // correction applies (added to the come-up column before the CF division).
+            let zero_selection = resolve_zero_selection(
+                zero_set.as_deref(),
+                profile_data.as_ref(),
+                None,
+                Some(zero_distance),
+                None,
             )?;
 
             // MBA-1355: resolve the elevation click graduation FIRST — before any of the
@@ -9091,6 +9464,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 adjustment_unit,
                 elevation_click,
                 elevation_cf,
+                zero_selection.elevation_bias_mil,
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
@@ -9113,6 +9487,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             saved_profile,
             range,
             observed_drop,
+            zero_set,
         } => {
             let (observed_value, drop_unit) = parse_observed_drop(&observed_drop)
                 .unwrap_or_else(|e| {
@@ -9153,7 +9528,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                 default_envelope_m
             };
 
-            let result = solve_profile_for_dsf(&profile, cli.units, solve_max_range_m)?;
+            // MBA-1360: the profile solve's zero flows through the shared resolver — a
+            // selected set's zero_distance feeds it exactly as the profile's own zero
+            // would; with no --zero-set this IS the historical auto_zero/zero_distance
+            // chain. The set's dial corrections never touch a DSF calibration (the
+            // observed drop is a physical impact, not a dial value).
+            let dsf_zero_selection = resolve_zero_selection(
+                zero_set.as_deref(),
+                Some(&profile),
+                None,
+                None,
+                profile.auto_zero.or(profile.zero_distance),
+            )?;
+            let result = solve_profile_for_dsf(
+                &profile,
+                cli.units,
+                solve_max_range_m,
+                dsf_zero_selection.zero_distance,
+            )?;
 
             let (position_y, velocity_mag) =
                 interpolate_position_and_velocity(&result.points, range_m).unwrap_or_else(|| {
@@ -9491,6 +9883,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             diameter,
             drag_model,
             zero_distance,
+            zero_set,
             wind_speeds,
             wind_angle,
             wind_angles,
@@ -9633,6 +10026,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "--windage-cf",
             )?;
 
+            // MBA-1360: selected zero set. --zero-distance is required on this command,
+            // so only the set's windage dial correction applies (the whole card is a
+            // windage quantity).
+            let zero_selection = resolve_zero_selection(
+                zero_set.as_deref(),
+                profile_data.as_ref(),
+                None,
+                Some(zero_distance),
+                None,
+            )?;
+
             handle_wind_card(
                 final_velocity,
                 final_bc,
@@ -9649,6 +10053,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 adjustment_unit,
                 windage_click,
                 windage_cf,
+                zero_selection.windage_bias_mil,
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
@@ -9727,6 +10132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             diameter,
             drag_model,
             zero_distance,
+            zero_set,
             start,
             end,
             step,
@@ -9847,6 +10253,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "--windage-cf",
             )?;
 
+            // MBA-1360: selected zero set. --zero-distance is required on this command,
+            // so only the set's dial corrections apply (Drop/Wind columns).
+            let zero_selection = resolve_zero_selection(
+                zero_set.as_deref(),
+                profile_data.as_ref(),
+                None,
+                Some(zero_distance),
+                None,
+            )?;
+
             handle_range_table(
                 final_velocity,
                 final_bc,
@@ -9865,6 +10281,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 windage_click,
                 elevation_cf,
                 windage_cf,
+                zero_selection.elevation_bias_mil,
+                zero_selection.windage_bias_mil,
                 final_sight_height,
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
@@ -10095,6 +10513,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         existing_profile.as_ref().and_then(|p| p.elevation_cf);
                     let carried_windage_cf =
                         existing_profile.as_ref().and_then(|p| p.windage_cf);
+                    // MBA-1360: zero sets are managed by `profile zero-set`, which this
+                    // command cannot express — carry them forward like dsf_points.
+                    let carried_zero_sets =
+                        existing_profile.as_ref().and_then(|p| p.zero_sets.clone());
 
                     // MBA-1355: validate click graduations at save time so a saved profile
                     // can never store a value `resolve_click_values` would later reject.
@@ -10147,6 +10569,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         sight_offset_lateral_m: carried_sight_offset_lateral_m,
                         elevation_cf: carried_elevation_cf,
                         windage_cf: carried_windage_cf,
+                        zero_sets: carried_zero_sets,
                     };
 
                     let path = save_profile(&profile)?;
@@ -10414,6 +10837,133 @@ fn main() -> Result<(), Box<dyn Error>> {
                     delete_profile(&name)?;
                     eprintln!("Profile '{}' deleted.", name);
                 }
+
+                // MBA-1360: named zero-set management. Operates on the profile's OWN
+                // units (the stored file), converting flag distances from the global
+                // --units first, so a metric profile edited from an imperial shell
+                // stores a correctly-scaled value.
+                ProfileAction::ZeroSet { action } => match action {
+                    ZeroSetAction::Add {
+                        profile,
+                        name,
+                        zero_distance,
+                        poi_up,
+                        poi_right,
+                        notes,
+                    } => {
+                        let mut data = load_profile(&profile)?;
+                        for (flag, v) in [("--poi-up", poi_up), ("--poi-right", poi_right)] {
+                            if let Some(v) = v {
+                                if !v.is_finite() || v.abs() >= 100.0 {
+                                    return Err(format!(
+                                        "{flag} must be a finite dial correction smaller than \
+                                         100 mils (got {v})"
+                                    )
+                                    .into());
+                                }
+                            }
+                        }
+                        let profile_units = match data.units.trim().to_ascii_lowercase().as_str()
+                        {
+                            "metric" => UnitSystem::Metric,
+                            _ => UnitSystem::Imperial,
+                        };
+                        let zero_distance = zero_distance.map(|v| {
+                            if !v.is_finite() || v <= 0.0 {
+                                eprintln!(
+                                    "error: --zero-distance must be a positive, finite distance"
+                                );
+                                std::process::exit(1);
+                            }
+                            UnitConverter::distance_from_metric(
+                                UnitConverter::distance_to_metric(v, cli.units),
+                                profile_units,
+                            )
+                        });
+                        let set = ProfileZeroSet {
+                            name: name.clone(),
+                            zero_distance,
+                            poi_up_mil: poi_up,
+                            poi_right_mil: poi_right,
+                            notes,
+                        };
+                        let sets = data.zero_sets.get_or_insert_with(Vec::new);
+                        if let Some(existing) = sets.iter_mut().find(|s| s.name == name) {
+                            *existing = set;
+                            eprintln!("Replaced zero set '{name}' on profile '{profile}'.");
+                        } else {
+                            sets.push(set);
+                            eprintln!("Added zero set '{name}' to profile '{profile}'.");
+                        }
+                        save_profile(&data)?;
+                    }
+                    ZeroSetAction::Remove { profile, name } => {
+                        let mut data = load_profile(&profile)?;
+                        let sets = data.zero_sets.take().unwrap_or_default();
+                        let before = sets.len();
+                        let remaining: Vec<ProfileZeroSet> =
+                            sets.into_iter().filter(|s| s.name != name).collect();
+                        if remaining.len() == before {
+                            let names: Vec<&str> =
+                                remaining.iter().map(|s| s.name.as_str()).collect();
+                            return Err(format!(
+                                "zero set '{name}' not found on profile '{profile}'; {}",
+                                if names.is_empty() {
+                                    "the profile has no zero sets".to_string()
+                                } else {
+                                    format!("available zero sets: {}", names.join(", "))
+                                }
+                            )
+                            .into());
+                        }
+                        // Drop the key entirely when the last set is removed, so the
+                        // stored JSON round-trips back to its pre-zero-sets shape.
+                        data.zero_sets = if remaining.is_empty() {
+                            None
+                        } else {
+                            Some(remaining)
+                        };
+                        save_profile(&data)?;
+                        eprintln!("Removed zero set '{name}' from profile '{profile}'.");
+                    }
+                    ZeroSetAction::List { profile } => {
+                        let data = load_profile(&profile)?;
+                        let sets = data.zero_sets.as_deref().unwrap_or(&[]);
+                        if sets.is_empty() {
+                            println!("Profile '{profile}' has no zero sets.");
+                        } else {
+                            let dist_unit = if data.units.trim().eq_ignore_ascii_case("metric") {
+                                "m"
+                            } else {
+                                "yd"
+                            };
+                            println!("Zero sets for '{profile}':");
+                            for s in sets {
+                                let mut parts: Vec<String> = Vec::new();
+                                if let Some(zd) = s.zero_distance {
+                                    parts.push(format!("zero {zd:.0} {dist_unit}"));
+                                }
+                                if let Some(up) = s.poi_up_mil {
+                                    parts.push(format!("up {up:+.2} mil"));
+                                }
+                                if let Some(right) = s.poi_right_mil {
+                                    parts.push(format!("right {right:+.2} mil"));
+                                }
+                                if parts.is_empty() {
+                                    parts.push("(empty)".to_string());
+                                }
+                                match &s.notes {
+                                    Some(n) => println!(
+                                        "  {:<20} {} — {n}",
+                                        s.name,
+                                        parts.join(", ")
+                                    ),
+                                    None => println!("  {:<20} {}", s.name, parts.join(", ")),
+                                }
+                            }
+                        }
+                    }
+                },
             }
         }
 
@@ -10665,6 +11215,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         drops_reference,
         elevation_cf,
         windage_cf,
+        zero_set_elevation_bias_mil,
+        zero_set_windage_bias_mil,
         use_rk4,
         use_rk45,
         twist_rate,
@@ -11863,11 +12415,15 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         // Rendered in MIL/MOA/SMOA/IPHY (MBA-724) or whole clicks (MBA-1355) per
                         // its own axis unit (MBA-1410): drop uses the elevation unit/graduation,
                         // wind/lead the (possibly different) windage one.
-                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, elevation_cf),
+                        // MBA-1360: the selected zero set's dial corrections join the
+                        // Drop/Wind columns here (total-correction dials); the Lead
+                        // column is a COMPONENT hold (composed on top of the wind dial,
+                        // which already carries the bias) so it stays bias-free.
+                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf),
                         // Wind: positive = dial right for wind from right
-                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, windage_cf),
+                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf),
                         // Lead for a moving target (a dialed quantity — the windage CF divides it, MBA-1358)
-                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, windage_cf),
+                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf),
                     }
                 })
                 .collect();
@@ -15339,6 +15895,10 @@ fn handle_come_ups(
     // dispatch); the come-up column's dial values are divided by it exactly once via
     // adjustment_display.
     elevation_cf: f64,
+    // MBA-1360: the selected zero set's elevation dial correction (MILs; 0.0 = no set),
+    // added to the true angular need BEFORE the CF division, at the same shared
+    // adjustment_display boundary.
+    zero_set_elevation_bias_mil: f64,
     sight_height: f64,
     // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
     // CLI-over-profile and converted by the dispatch).
@@ -15488,6 +16048,7 @@ fn handle_come_ups(
                     range_display,
                     adjustment_unit,
                     elevation_click,
+                    zero_set_elevation_bias_mil,
                     elevation_cf,
                 );
                 let come_up = drop_adj - prev_drop_adj;
@@ -16589,6 +17150,9 @@ fn handle_wind_card(
     // exactly once via adjustment_display (the wind card's whole table is a windage
     // quantity).
     windage_cf: f64,
+    // MBA-1360: the selected zero set's windage dial correction (MILs; 0.0 = no set),
+    // added to the true angular need before the CF division at the same boundary.
+    zero_set_windage_bias_mil: f64,
     sight_height: f64,
     // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
     // CLI-over-profile and converted by the dispatch).
@@ -16723,11 +17287,13 @@ fn handle_wind_card(
                         let drift_yd =
                             UnitConverter::distance_from_metric(sample.wind_drift_m, units);
                         // MBA-1358: windage CF applied once at the conversion boundary.
+                        // MBA-1360: zero-set windage bias added before that division.
                         adjustment_display(
                             drift_yd,
                             range_display,
                             adjustment_unit,
                             windage_click,
+                            zero_set_windage_bias_mil,
                             windage_cf,
                         )
                     } else {
@@ -17075,6 +17641,10 @@ fn handle_range_table(
     // via the shared adjustment_display boundary. Raw inches never scale.
     elevation_cf: f64,
     windage_cf: f64,
+    // MBA-1360: the selected zero set's per-axis dial corrections (MILs; 0.0 = no
+    // set), added to the true angular need before each CF division above.
+    zero_set_elevation_bias_mil: f64,
+    zero_set_windage_bias_mil: f64,
     sight_height: f64,
     // MBA-1359: deliberate POI offset at the zero range, METERS (already resolved
     // CLI-over-profile and converted by the dispatch).
@@ -17240,7 +17810,7 @@ fn handle_range_table(
                 };
 
                 let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, elevation_cf);
+                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf);
 
                 let wind_linear = match units {
                     UnitSystem::Imperial => w.wind_drift_m / 0.0254,
@@ -17248,7 +17818,7 @@ fn handle_range_table(
                 };
 
                 let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, windage_cf);
+                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf);
 
                 rows.push(RangeRow {
                     range: current_range,
@@ -17635,13 +18205,15 @@ fn handle_compare(
                 UnitSystem::Metric => nw.drop_m * 1000.0,
             };
             let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, elevation_cf);
+            // MBA-1360: compare has no --zero-set (multiple loads, no single profile to
+            // look a set up in — the MBA-1358 flag-only precedent), so its bias is 0.0.
+            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, 0.0, elevation_cf);
             let wind_linear = match units {
                 UnitSystem::Imperial => w.wind_drift_m / 0.0254,
                 UnitSystem::Metric => w.wind_drift_m * 1000.0,
             };
             let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, windage_cf);
+            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, 0.0, windage_cf);
             rows.push(LoadRow {
                 drop_linear,
                 drop_adj,
@@ -17964,6 +18536,7 @@ mod profile_unit_tests {
             sight_offset_lateral_m: None,
             elevation_cf: None,
             windage_cf: None,
+            zero_sets: None,
         }
     }
 
@@ -18358,6 +18931,210 @@ mod profile_unit_tests {
         assert_eq!(imperial.elevation_click, profile.elevation_click);
         assert_eq!(imperial.windage_click, profile.windage_click);
     }
+
+    /// MBA-1360: zero sets round-trip through serde; a profile without the key loads
+    /// as `None` (every pre-1360 profile); an untouched profile serializes with no
+    /// `zero_sets` key at all.
+    #[test]
+    fn zero_sets_roundtrip_and_absent_key_stays_absent() {
+        let mut profile = metric_profile();
+        assert!(!serde_json::to_string(&profile).unwrap().contains("zero_sets"));
+
+        profile.zero_sets = Some(vec![
+            ProfileZeroSet {
+                name: "suppressed".to_string(),
+                zero_distance: Some(200.0),
+                poi_up_mil: Some(-0.3),
+                poi_right_mil: Some(0.1),
+                notes: Some("suppressed load".to_string()),
+            },
+            ProfileZeroSet {
+                name: "match".to_string(),
+                zero_distance: None,
+                poi_up_mil: Some(0.25),
+                poi_right_mil: None,
+                notes: None,
+            },
+        ]);
+        let json = serde_json::to_string_pretty(&profile).unwrap();
+        let back: ProfileData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.zero_sets, profile.zero_sets);
+    }
+
+    /// MBA-1360 forward-compat guard (the ticket's acceptance criterion, bc_segments
+    /// pattern): an OLD reader — simulated by a struct lacking the field — loads a
+    /// zero-set-bearing profile cleanly and solves with the master zero (identical to a
+    /// new reader with no `--zero-set`), and the documented one-way skew is that its
+    /// re-save DROPS the key. Requesting a set on an old binary fails loudly at the
+    /// unknown `--zero-set` flag; it can never silently select one.
+    #[test]
+    fn old_reader_drops_zero_sets_on_resave_and_keeps_master_zero() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct OldProfileData {
+            name: String,
+            velocity: f64,
+            bc: f64,
+            mass: f64,
+            diameter: f64,
+            drag_model: String,
+            #[serde(default)]
+            zero_distance: Option<f64>,
+            #[serde(default)]
+            auto_zero: Option<f64>,
+        }
+
+        let mut profile = metric_profile();
+        profile.zero_sets = Some(vec![ProfileZeroSet {
+            name: "alt".to_string(),
+            zero_distance: Some(300.0),
+            poi_up_mil: Some(-0.5),
+            poi_right_mil: None,
+            notes: None,
+        }]);
+        let json = serde_json::to_string_pretty(&profile).unwrap();
+
+        // The old reader loads cleanly (serde's non-deny_unknown_fields default) and
+        // sees the untouched MASTER zero, not the alternate set's.
+        let old: OldProfileData = serde_json::from_str(&json).expect("old reader loads");
+        assert_eq!(old.zero_distance, Some(91.44));
+        assert_eq!(old.auto_zero, Some(91.44));
+
+        // Its re-save silently drops the key (the documented bc_segments-class skew)...
+        let resaved = serde_json::to_string(&old).unwrap();
+        assert!(!resaved.contains("zero_sets"));
+        // ...which a new reader then loads as "no zero sets", so a later --zero-set
+        // fails loudly instead of silently solving with the master zero.
+        let reread: ProfileData = serde_json::from_str(&json).unwrap();
+        let err = resolve_zero_selection(Some("gone"), Some(&reread), None, None, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("available zero sets: alt"), "{err}");
+    }
+
+    /// MBA-1360: converted_to rescales each set's zero_distance exactly like the
+    /// profile's own zero_distance, and leaves the angular mil corrections untouched.
+    #[test]
+    fn converted_to_rescales_zero_set_distances_only() {
+        let mut profile = metric_profile();
+        profile.zero_sets = Some(vec![ProfileZeroSet {
+            name: "far".to_string(),
+            zero_distance: Some(91.44),
+            poi_up_mil: Some(-0.3),
+            poi_right_mil: Some(0.15),
+            notes: None,
+        }]);
+        let imperial = profile.converted_to(UnitSystem::Imperial).unwrap();
+        let set = &imperial.zero_sets.as_deref().unwrap()[0];
+        assert_close(set.zero_distance.unwrap(), 100.0);
+        assert_eq!(set.poi_up_mil, Some(-0.3));
+        assert_eq!(set.poi_right_mil, Some(0.15));
+    }
+
+    /// MBA-1360 resolver: precedence (explicit flag > selected set > legacy chain),
+    /// byte-identity shape with no set selected, unknown-name/no-sets hard errors, and
+    /// the CSV-derived ephemeral set participating in lookup.
+    #[test]
+    fn zero_selection_resolver_precedence_and_errors() {
+        let mut profile = metric_profile();
+        profile.zero_sets = Some(vec![ProfileZeroSet {
+            name: "far".to_string(),
+            zero_distance: Some(300.0),
+            poi_up_mil: Some(0.25),
+            poi_right_mil: Some(-0.1),
+            notes: None,
+        }]);
+
+        // No set selected: exactly the legacy chain, zero biases.
+        let sel = resolve_zero_selection(None, Some(&profile), None, None, Some(91.44)).unwrap();
+        assert_eq!(sel.zero_distance, Some(91.44));
+        assert_eq!(sel.elevation_bias_mil, 0.0);
+        assert_eq!(sel.windage_bias_mil, 0.0);
+
+        // Selected: the set's zero_distance beats the legacy chain; biases flow.
+        let sel =
+            resolve_zero_selection(Some("far"), Some(&profile), None, None, Some(91.44)).unwrap();
+        assert_eq!(sel.zero_distance, Some(300.0));
+        assert_eq!(sel.elevation_bias_mil, 0.25);
+        assert_eq!(sel.windage_bias_mil, -0.1);
+
+        // An explicit CLI zero still wins over the selected set.
+        let sel = resolve_zero_selection(Some("far"), Some(&profile), None, Some(150.0), None)
+            .unwrap();
+        assert_eq!(sel.zero_distance, Some(150.0));
+        assert_eq!(sel.elevation_bias_mil, 0.25);
+
+        // Unknown name: hard error listing every candidate, including a CSV-derived
+        // ephemeral set.
+        let mut csv = HashMap::new();
+        csv.insert("V_OFFSET_MIL".to_string(), "0.3".to_string());
+        csv.insert("H_OFFSET_MIL".to_string(), "-0.1".to_string());
+        let csv_set = zero_set_from_profile_csv(&csv, Some("R1")).expect("csv set");
+        assert_eq!(csv_set.poi_up_mil, Some(0.3));
+        assert_eq!(csv_set.poi_right_mil, Some(-0.1));
+        let err =
+            resolve_zero_selection(Some("nope"), Some(&profile), Some(&csv_set), None, None)
+                .map(|_| ())
+                .unwrap_err();
+        assert!(err.contains("available zero sets: far, R1"), "{err}");
+
+        // The CSV set itself is selectable by row name.
+        let sel = resolve_zero_selection(Some("R1"), None, Some(&csv_set), None, None).unwrap();
+        assert_eq!(sel.elevation_bias_mil, 0.3);
+        assert_eq!(sel.windage_bias_mil, -0.1);
+
+        // No profile and no CSV set: hard error naming the requirement.
+        let err = resolve_zero_selection(Some("x"), None, None, None, None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("requires a profile"), "{err}");
+
+        // A CSV row without either offset column yields no ephemeral set at all.
+        assert!(zero_set_from_profile_csv(&HashMap::new(), Some("R1")).is_none());
+    }
+
+    /// MBA-1360 x MBA-1358 ordering pin (the composition rule): the zero-set bias is
+    /// added to the TRUE angular need BEFORE the tracking-CF division —
+    /// display = (true + bias) / CF — on both the angular and the clicks arms.
+    #[test]
+    fn zero_set_bias_applies_before_the_cf_division() {
+        let drop_yd = 0.2; // 7.2 in at 200 yd = 1.0 mil
+        let range_yd = 200.0;
+        let base = drop_to_adjustment(drop_yd, range_yd, AdjustmentUnit::Mil);
+        assert!((base - 1.0).abs() < 1e-12);
+
+        let cf = 0.95;
+        let bias = 0.25;
+        let got = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Mil, None, bias, cf);
+        assert!(
+            ((got - (base + bias) / cf).abs()) < 1e-12,
+            "expected (true + bias)/cf, got {got}"
+        );
+        // NOT the other order:
+        assert!((got - (base / cf + bias)).abs() > 1e-3);
+
+        // MOA arm gets the same ANGULAR correction, rescaled through the shared factors.
+        let moa = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Moa, None, bias, cf);
+        let base_moa = drop_to_adjustment(drop_yd, range_yd, AdjustmentUnit::Moa);
+        let expected_moa = (base_moa + bias * 3.438) / cf;
+        assert!((moa - expected_moa).abs() < 1e-12, "moa = {moa}");
+
+        // Clicks arm: (true + bias)/cf first, quantized after.
+        let click = parse_click_value("0.1mil").unwrap();
+        let clicks = adjustment_display(
+            drop_yd,
+            range_yd,
+            AdjustmentUnit::Clicks,
+            Some(click),
+            bias,
+            cf,
+        );
+        let expected_clicks = (((base + bias) / cf) / 0.1).round();
+        assert_eq!(clicks, expected_clicks);
+
+        // Zero bias is an exact no-op on every arm.
+        let none = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Mil, None, 0.0, cf);
+        assert_eq!(none.to_bits(), (base / cf).to_bits());
+    }
 }
 
 #[cfg(test)]
@@ -18455,10 +19232,12 @@ mod a7p_import_mapping_tests {
         enc_bytes(1, &p, &mut payload);
         let doc = parse_a7p(&wrap_payload(&payload)).unwrap();
 
-        // Without --zero-click: the historical unmapped line, verbatim.
+        // Without --zero-click: the historical unmapped line, verbatim — and no
+        // zero set either (MBA-1360).
         let outcome = map_a7p_to_profile(&doc, None, None).unwrap();
         assert_eq!(outcome.profile.zero_poi_up_m, None);
         assert_eq!(outcome.profile.zero_poi_right_m, None);
+        assert_eq!(outcome.profile.zero_sets, None);
         assert!(outcome.report.unmapped.iter().any(|(f, msg)| f == "zero_x / zero_y"
             && msg == "scope zeroing click offsets (-20000, 10000) — click state is not modeled"));
 
@@ -18481,7 +19260,19 @@ mod a7p_import_mapping_tests {
             .mapped
             .iter()
             .any(|row| row[0] == "zero_x / zero_y"
-                && row[3] == "zero_poi_up_m + zero_poi_right_m"));
+                && row[3] == "zero_poi_up_m + zero_poi_right_m + zero_sets[a7p-zero]"));
+
+        // MBA-1360: the same click state is ALSO recorded as the "a7p-zero" zero set,
+        // in DIAL-CORRECTION convention (negated angular POI offset): zeroed 1.0 mil
+        // high / 2.0 mil right => dial corrections -1.0 mil up / -2.0 mil right.
+        let sets = outcome.profile.zero_sets.as_deref().expect("zero set stored");
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].name, "a7p-zero");
+        assert_eq!(sets[0].zero_distance, None);
+        let up_mil = sets[0].poi_up_mil.expect("up mil");
+        let right_mil = sets[0].poi_right_mil.expect("right mil");
+        assert!((up_mil - (-1.0)).abs() < 1e-12, "up_mil = {up_mil}");
+        assert!((right_mil - (-2.0)).abs() < 1e-12, "right_mil = {right_mil}");
     }
 
     #[test]
@@ -18784,6 +19575,7 @@ mod adjustment_unit_tests {
                 sight_offset_lateral_m: None,
                 elevation_cf: None,
                 windage_cf: None,
+                zero_sets: None,
             }
         }
 
