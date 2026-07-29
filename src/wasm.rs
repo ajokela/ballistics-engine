@@ -1323,9 +1323,12 @@ impl WasmBallistics {
                 }
                 "--wind-direction" => {
                     if i + 1 < args.len() {
-                        wind_direction = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid wind direction"))?;
+                        // MBA-1367: the shared helper accepts degrees (unchanged) plus
+                        // the marked clock forms (3oc, 10h30, 10:30).
+                        wind_direction =
+                            crate::wind::parse_wind_direction_standalone(args[i + 1])
+                                .map_err(|e| JsValue::from_str(&format!("Error: {e}")))?
+                                .degrees;
                         i += 1;
                     }
                 }
@@ -3490,10 +3493,11 @@ impl WasmBallistics {
                 }
                 "--wind-direction" => {
                     if i + 1 < args.len() {
+                        // MBA-1367: shared degrees+clock helper (same as trajectory's).
                         wind_direction = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid wind direction"))?,
+                            crate::wind::parse_wind_direction_standalone(args[i + 1])
+                                .map_err(|e| JsValue::from_str(&format!("Error: {e}")))?
+                                .degrees,
                         );
                         i += 1;
                     }
@@ -6983,9 +6987,11 @@ Trajectory Command:
 
   Environmental:
     --wind-speed <SPEED>         Wind speed (mph/m/s)
-    --wind-direction <DIR>       Wind direction (deg; 0=headwind, 90=from right)
+    --wind-direction <DIR>       Wind direction (deg; 0=headwind, 90=from right) or a
+                                 clock position (3oc, 10h30, 10:30; 12oc = headwind)
     --wind-vertical <SPEED>      Vertical wind (mph/m/s); positive = updraft (raises POI)
     --wind-segment <S:A:D[:V]>   Downrange wind seg speed:angle:until-dist[:vertical] (repeatable).
+                                 ANGLE also takes colon-free clock forms (10:3oc:400).
                                  Optional 4th field is ALWAYS m/s updraft-positive, unlike
                                  speed which follows --units
     --temperature <TEMP>         Temperature (F/C)
@@ -7221,7 +7227,8 @@ Lead Command:
     --altitude <A>                Altitude (ft/m) [default: 0]
     --wind-speed <SPEED>          Wind speed (mph/m/s) [default: 0]
     --wind-direction <DEG>        Wind direction, degrees, wind-FROM [default: 0]
-                                  0=headwind, 90=from right, 180=tailwind, 270=from left
+                                  0=headwind, 90=from right, 180=tailwind, 270=from left;
+                                  clock forms accepted (3oc, 10h30, 10:30; 12oc = headwind)
     --use-powder-sensitivity      Enable linear powder temperature sensitivity
     --powder-temp-sensitivity <S> Sensitivity (fps/°F or m/s/°C) [default: 1.0 fps/°F]
     --powder-temp <T>             Powder temperature (°F/°C); curve lookup temp, or

@@ -1432,6 +1432,45 @@ Wind Card (zero: 100 yd, MIL) — wind angle 45° (wind-FROM: 0=head, 90=right, 
 └──────────┴──────────┴──────────┴──────────┴──────────┘
 ```
 
+### Wind Direction Entry (degrees, clock positions) — MBA-1367
+
+Every `--wind-direction` flag (`trajectory`, `monte-carlo`, `come-ups`, `lead`,
+`range-table`, `compare`, `profile save`) accepts the same three forms:
+
+* **Bare number — degrees** (unchanged, always): wind-FROM convention, `0` = headwind,
+  `90` = from the right, `180` = tailwind, `270` = from the left. Any value that parsed
+  before still parses identically.
+* **`<H>oc`** — a 1-12 o'clock shooter-relative clock position: `3oc` = 90°, `6oc` =
+  180°, `9oc` = 270°, `12oc` = headwind = 0°.
+* **`<H>h<MM>`** — clock position with minutes: `10h30` = 315° (minutes count 0.5° each:
+  `(H % 12) × 30 + MM × 0.5`).
+* **`<H>:<MM>`** — the colon spelling of the same thing (`10:30` = 315°), legal on
+  **standalone flags only**.
+
+The markers are mandatory: a bare `3` is 3 degrees, never 3 o'clock — that ambiguity is
+why unmarked clock numbers are not accepted. Inside `--wind-segment`, whose grammar is
+colon-delimited (`SPEED:ANGLE:DIST[:VERTICAL]`), the ANGLE field takes the **colon-free**
+marked forms only: `--wind-segment 10:3oc:400` is a 10 mph wind from 3 o'clock out to
+400 yd, while `10:30:400` keeps its historical meaning (10 mph from 30 degrees).
+Malformed clock tokens (hour outside 1-12, minutes outside 0-59) are hard errors naming
+the rule.
+
+```bash
+# Identical solves, three spellings:
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --wind-speed 10 --wind-direction 90
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --wind-speed 10 --wind-direction 3oc
+ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --wind-speed 10 --wind-segment 10:3oc:1000
+```
+
+Clock positions are **shooter-relative by definition** (12 o'clock = dead ahead), so they
+cannot be combined with the earth-fixed compass mode described in the next section.
+
+**Sentinel fix (behavior change, deliberate):** `trajectory` used to treat
+`--wind-direction 0` as "not set" and let a `--location` CSV's `WIND_DIR` column replace
+it. Explicit presence now decides: an explicit `--wind-direction 0` (or `12oc`, which
+maps to 0°) wins over the CSV; omitting the flag still inherits the CSV value exactly as
+before.
+
 ### Vertical Wind
 
 Model wind with a vertical component — a thermal updraft, a downdraft off the lee side of
