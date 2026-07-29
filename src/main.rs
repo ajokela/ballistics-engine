@@ -66,6 +66,11 @@ use ballistics_engine::{
     BcReferenceStandard, DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
 use ballistics_engine::wind::{parse_wind_direction_standalone, ParsedWindDirection};
+// MBA-1349: robust hold corridors over named segmented-wind scenarios.
+use ballistics_engine::wind_scenarios::{
+    format_robust_hold_report, parse_target_spec, parse_wind_scenario_set, solve_robust_hold,
+    CorridorLoad, RobustHoldFormat, RobustHoldRequest,
+};
 // MBA-1361: reticle schema, generators and the hold-point API (shared with WASM/FFI).
 use ballistics_engine::reticle::{
     format_reticle_description, format_reticle_hold, hold_point_in_reticle, FocalPlane,
@@ -2863,6 +2868,93 @@ enum Commands {
 
         /// Output format: table (default), csv, or json
         #[arg(short, long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Robust hold corridors across named segmented-wind scenarios (MBA-1349)
+    ///
+    /// You usually have several concrete plausible wind calls, not a distribution you
+    /// believe. This solves each named scenario once through the existing segmented-wind
+    /// machinery and reports, at every requested range: every scenario's hold, the
+    /// min/max corridor they span, the minimax (Chebyshev-center) hold, the worst-case
+    /// miss from it, and whether one hold keeps every scenario inside the target.
+    ///
+    /// It assigns NO probabilities. The corridor is the span of the hypotheses you
+    /// supplied — it is not a confidence interval, and statistical dispersion remains
+    /// `monte-carlo --wez`'s job.
+    HoldCorridor {
+        /// Scenario set JSON file. Segments use the same "SPEED:ANGLE:UNTIL", or
+        /// "SPEED:ANGLE:UNTIL:VERTICAL", tokens as --wind-segment, e.g.
+        /// {"version":1,"nominal":"low","scenarios":[{"name":"low","segments":["5:90:400"]}]}
+        #[arg(long, value_name = "FILE")]
+        scenarios: PathBuf,
+
+        /// Comma-separated ranges to report (yards imperial / meters metric)
+        #[arg(long, value_name = "R1,R2,...")]
+        ranges: String,
+
+        /// Target to judge the corridor against: "rect:WIDTHxHEIGHT" or "circle:DIAMETER"
+        /// (inches imperial / cm metric). Omit it and no fit is reported; the minimax hold
+        /// then uses the per-axis metric.
+        #[arg(long, value_name = "SPEC")]
+        target: Option<String>,
+
+        /// Load parameters from a saved profile
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Initial velocity (fps or m/s based on --units)
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
+        velocity: Option<f64>,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
+        bc: Option<f64>,
+
+        /// Mass (grains for imperial, grams for metric)
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
+        mass: Option<f64>,
+
+        /// Diameter (inches for imperial, mm for metric)
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
+        diameter: Option<f64>,
+
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModel,
+
+        /// Zero distance (yards for imperial, meters for metric). The zero is solved ONCE,
+        /// in calm air, and reused by every scenario — a rifle has one zero, and
+        /// re-zeroing per scenario would collapse the very corridor this reports.
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
+
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
+
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) or `qnh`
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Output format: table (default) or json (versioned RobustHoldReportV1)
+        #[arg(short = 'o', long, default_value = "table")]
         output: OutputFormat,
     },
 
@@ -11956,6 +12048,47 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         Commands::Reticle { action } => {
             handle_reticle(action, cli.units)?;
+        }
+
+        Commands::HoldCorridor {
+            scenarios,
+            ranges,
+            target,
+            profile,
+            velocity,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            zero_distance,
+            sight_height,
+            temperature,
+            pressure,
+            pressure_type,
+            humidity,
+            altitude,
+            output,
+        } => {
+            handle_hold_corridor(
+                scenarios,
+                ranges,
+                target,
+                profile,
+                velocity,
+                bc,
+                mass,
+                diameter,
+                drag_model,
+                zero_distance,
+                sight_height,
+                temperature,
+                pressure,
+                pressure_type,
+                humidity,
+                altitude,
+                cli.units,
+                output,
+            )?;
         }
 
         Commands::MarkToRange {
@@ -21743,6 +21876,137 @@ mod dsf_cli_tests {
 /// does not have to re-vendor the numbers and then drift from the engine as tables are refined.
 /// Emitted verbatim from the table — no resampling, no interpolation onto a uniform grid — so
 /// what you plot is exactly what the solver interpolates.
+/// `hold-corridor` (MBA-1349).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable Clap command shape"
+)]
+fn handle_hold_corridor(
+    scenarios_path: PathBuf,
+    ranges: String,
+    target: Option<String>,
+    profile: Option<String>,
+    velocity: Option<f64>,
+    bc: Option<f64>,
+    mass: Option<f64>,
+    diameter: Option<f64>,
+    drag_model: DragModel,
+    zero_distance: Option<f64>,
+    sight_height: Option<f64>,
+    temperature: Option<f64>,
+    pressure: Option<f64>,
+    pressure_type: Option<PressureReferenceMode>,
+    humidity: f64,
+    altitude: f64,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    let format = match output {
+        OutputFormat::Table => RobustHoldFormat::Table,
+        OutputFormat::Json => RobustHoldFormat::Json,
+        OutputFormat::Csv => {
+            return Err(
+                "hold-corridor has no CSV form (a corridor row is a block, not a line); \
+                 use -o table or -o json"
+                    .into(),
+            )
+        }
+        OutputFormat::Pdf => {
+            return Err("hold-corridor has no PDF form; use -o table or -o json".into())
+        }
+    };
+
+    // File I/O lives here; `wind_scenarios` parses TEXT so it stays wasm32-clean.
+    let text = fs::read_to_string(&scenarios_path).map_err(|e| {
+        format!(
+            "could not read scenario file {}: {e}",
+            scenarios_path.display()
+        )
+    })?;
+    // `main` prints errors with Debug, so typed errors are rendered here through
+    // Display and handed on as strings — the same shape every other subcommand's
+    // messages take.
+    let scenario_set = parse_wind_scenario_set(&text, units).map_err(|e| e.to_string())?;
+
+    let ranges_m: Vec<f64> = ranges
+        .split(',')
+        .map(|token| {
+            let value: f64 = token.trim().parse().map_err(|_| {
+                format!("invalid --ranges entry '{}': expected a number", token.trim())
+            })?;
+            Ok::<f64, String>(UnitConverter::distance_to_metric(value, units))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let target = match target.as_deref() {
+        Some(spec) => Some(parse_target_spec(spec, units).map_err(|e| e.to_string())?),
+        None => None,
+    };
+
+    let profile_data = match profile.as_deref() {
+        Some(name) => Some(load_profile(name)?),
+        None => None,
+    };
+    let require = |value: Option<f64>, flag: &str| -> Result<f64, Box<dyn Error>> {
+        value.ok_or_else(|| format!("{flag} is required (directly or from --profile)").into())
+    };
+    let velocity = require(
+        resolve_param(velocity, &profile_data, |p| p.velocity),
+        "--velocity",
+    )?;
+    let bc = require(resolve_param(bc, &profile_data, |p| p.bc), "--bc")?;
+    let mass = require(resolve_param(mass, &profile_data, |p| p.mass), "--mass")?;
+    let diameter = require(
+        resolve_param(diameter, &profile_data, |p| p.diameter),
+        "--diameter",
+    )?;
+    let zero_distance = require(
+        zero_distance.or_else(|| profile_data.as_ref().and_then(|p| p.zero_distance)),
+        "--zero-distance",
+    )?;
+    // Same fallback `trajectory --saved-profile`/`come-ups --profile` use.
+    let sight_height = sight_height
+        .or_else(|| profile_data.as_ref().and_then(|p| p.sight_height))
+        .unwrap_or(match units {
+            UnitSystem::Imperial => 2.0,
+            UnitSystem::Metric => 50.0,
+        });
+    let temperature = UnitConverter::resolve_temperature(temperature, units)?;
+    // MBA-1416: a declared QNH reduces against this command's own --altitude.
+    let pressure = apply_pressure_mode(
+        UnitConverter::resolve_pressure(pressure, units)?,
+        altitude,
+        pressure_type,
+        units,
+    );
+
+    let mass_kg = UnitConverter::mass_to_metric(mass, units);
+    let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
+    let request = RobustHoldRequest {
+        scenarios: scenario_set,
+        ranges_m,
+        target,
+        load: CorridorLoad {
+            muzzle_velocity_mps: UnitConverter::velocity_to_metric(velocity, units),
+            bc,
+            drag_model,
+            mass_kg,
+            diameter_m,
+            bullet_length_m: fallback_bullet_length_m(diameter_m, mass_kg),
+            zero_distance_m: UnitConverter::distance_to_metric(zero_distance, units),
+            sight_height_m: UnitConverter::sight_height_to_metric(sight_height, units),
+            temperature_c: UnitConverter::temperature_to_metric(temperature, units),
+            pressure_hpa: UnitConverter::pressure_to_metric(pressure, units),
+            humidity_pct: humidity,
+            altitude_m: UnitConverter::altitude_to_metric(altitude, units),
+        },
+    };
+
+    let report = solve_robust_hold(&request).map_err(|e| e.to_string())?;
+    print!("{}", format_robust_hold_report(&report, format, units));
+    Ok(())
+}
+
 /// Golden ratio conjugate, the fixed step constant of the `optimal-zero` search
 /// (MBA-1362). Hard-coded rather than derived at run time so the search is bit-for-bit
 /// reproducible across builds.
@@ -22526,14 +22790,19 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                     spacing,
                     extent,
                     common,
-                } => (ReticleDescription::mil_grid(spacing, extent)?, common),
+                } => (
+                    ReticleDescription::mil_grid(spacing, extent)
+                        .map_err(|e| e.to_string())?,
+                    common,
+                ),
                 ReticleLayout::Tree {
                     rows,
                     row_spacing,
                     spread_step,
                     common,
                 } => (
-                    ReticleDescription::tree(rows, row_spacing, spread_step)?,
+                    ReticleDescription::tree(rows, row_spacing, spread_step)
+                        .map_err(|e| e.to_string())?,
                     common,
                 ),
                 ReticleLayout::Bdc { drops, common } => {
@@ -22545,7 +22814,8 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                         .iter()
                         .map(|&(_, range_m, drop_mil)| (range_m, drop_mil))
                         .collect();
-                    let mut description = ReticleDescription::bdc_from_drops(&metric)?;
+                    let mut description = ReticleDescription::bdc_from_drops(&metric)
+                        .map_err(|e| e.to_string())?;
                     // The library labels in meters (the schema is SI); this surface knows
                     // the user's display units, so it relabels with what they typed. The
                     // ladder's first mark is the center, hence the 1-offset.
@@ -22566,7 +22836,7 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
             if let Some(name) = common.name {
                 description.name = name;
             }
-            description.validate()?;
+            description.validate().map_err(|e| e.to_string())?;
             print!(
                 "{}",
                 format_reticle_description(&description, reticle_format(common.output)?)
@@ -22712,7 +22982,8 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                 }
             };
 
-            let hold = hold_point_in_reticle(hold_drop_mil, hold_wind_mil, mag, &description)?;
+            let hold = hold_point_in_reticle(hold_drop_mil, hold_wind_mil, mag, &description)
+                .map_err(|e| e.to_string())?;
             if let (Some(point), OutputFormat::Table) = (solved, output) {
                 let (dist_unit, vel_unit) = match units {
                     UnitSystem::Imperial => ("yd", "fps"),

@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Robust hold corridors across named segmented-wind scenarios** (MBA-1349). Field users
+  usually have several concrete plausible wind calls, not a distribution they believe; a
+  nominal trajectory hides that ambiguity and Monte Carlo demands a probability model they
+  do not have. New `hold-corridor` subcommand and a new `wind_scenarios` module: give it a
+  bounded set of NAMED scenarios (`WindScenarioSetV1`, whose segments are the same
+  `SPEED:ANGLE:UNTIL[:VERTICAL]` tokens `--wind-segment` takes) plus the ranges you care
+  about, and each scenario is solved ONCE through the existing segmented-wind machinery.
+  At every range it reports every scenario's hold, the min/max corridor they span, the
+  minimax hold, the worst-case miss from it (naming the scenario responsible), what
+  holding the designated `nominal` would have cost instead, and whether one hold keeps
+  every scenario on the target.
+  **Two documented metrics**, because the shapes genuinely differ: a rectangle
+  (`--target rect:WxH`, or no target at all) treats the axes independently, so the minimax
+  hold is the per-axis midpoint of the extremes; a circle (`--target circle:D`) minimizes
+  the largest Euclidean distance, so the hold is the center of the minimum enclosing
+  circle — computed exhaustively over the candidate circles, which is exact and
+  deterministic where the usual randomized construction is not. **Boundary contact counts
+  as a fit.**
+  **The zero is solved once, in calm air, and reused by every scenario** — a rifle has one
+  zero, and re-zeroing per scenario would collapse the very corridor this exists to show.
+  **Caps are enforced before any solving**: ≤ 8 scenarios and ≤ 64 ranges, alongside
+  malformed segments, unknown `nominal` names, duplicate names and ranges, and unsupported
+  versions — all structured, typed errors raised before a single trajectory runs.
+  **Reordering scenarios cannot change the answer**: they are sorted by name internally
+  before anything is solved.
+  **No probabilities anywhere** (an explicit non-goal): nothing is weighted, nothing is
+  interpolated between scenarios, and the finite set is never folded into a standard
+  deviation. A three-scenario corridor is not a confidence interval and the output says
+  so; statistical dispersion remains `monte-carlo --wez`'s job. `-o json` emits the
+  versioned `RobustHoldReportV1`. Native-only this train, alongside MBA-1362's three
+  solvers — the core and its shared formatter are already structured for the WASM
+  follow-up.
 - **Three reticle/BDC inverse solvers: `mark-to-range`, `bdc-match`, `optimal-zero`**
   (MBA-1362). Read-only solvers over an existing load — no new physics, no feature flag —
   sharing **one** drop-vs-range helper (a single solved, finely sampled angular-drop curve

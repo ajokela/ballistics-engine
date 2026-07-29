@@ -71,6 +71,11 @@ pub mod truing_dsf;
 // truing). Carries its own shared table/JSON/CSV formatter so the native CLI and the WASM
 // terminal render identical bytes. No feature gate: must compile for wasm32.
 pub mod truing_wind;
+// MBA-1349: robust hold corridors across named segmented-wind scenarios. No feature gate:
+// must compile for wasm32 (the CLI surface is native-only this train, but the core and its
+// shared formatter are ready for the WASM follow-up); fs-free — file reading stays in
+// main.rs, this module parses TEXT.
+pub mod wind_scenarios;
 // MBA-1361: reticle schema, parametric generators, and the hold-point-in-reticle API,
 // shared by the CLI, the WASM terminal and the FFI. No feature gate: must compile for
 // wasm32; pure math + serde, no I/O (file reading stays in main.rs/wasm.rs).
