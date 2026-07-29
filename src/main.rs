@@ -66,6 +66,11 @@ use ballistics_engine::{
     BcReferenceStandard, DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
 use ballistics_engine::wind::{parse_wind_direction_standalone, ParsedWindDirection};
+// MBA-1361: reticle schema, generators and the hold-point API (shared with WASM/FFI).
+use ballistics_engine::reticle::{
+    format_reticle_description, format_reticle_hold, hold_point_in_reticle, FocalPlane,
+    ReticleDescription, ReticleFormat,
+};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -2861,12 +2866,227 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Reticle hold points and parametric reticle generation (MBA-1361)
+    ///
+    /// Places a firing solution where a shooter actually reads it — a point in their own
+    /// reticle — FFP/SFP aware, with second-focal-plane subtensions rescaled for the
+    /// magnification in use. `reticle generate` emits descriptions in the shared schema
+    /// that `reticle hold --reticle-json` (and `profile save --reticle-json`) consume.
+    ///
+    /// Deliberately excluded: Horus/TREMOR grid layouts and wind-dot calibration (both
+    /// patented), and any vendor reticle catalog.
+    Reticle {
+        #[command(subcommand)]
+        action: ReticleAction,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+/// `reticle` verbs (MBA-1361).
+#[allow(
+    clippy::large_enum_variant,
+    reason = "variants intentionally mirror the stable flat Clap command shape"
+)]
+#[derive(Subcommand)]
+enum ReticleAction {
+    /// Place a firing solution in a reticle and name the nearest mark
+    Hold {
+        /// Reticle description JSON file (as emitted by `reticle generate ... -o json`).
+        /// Wins over --profile's attached reticle.
+        #[arg(long, value_name = "FILE")]
+        reticle_json: Option<PathBuf>,
+
+        /// Saved profile supplying the reticle (`profile save --reticle-json`) and, for
+        /// --range, the load and conditions
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Angular drop to hold, milliradians, positive = below the line of sight.
+        /// Mutually exclusive with --range.
+        #[arg(long, value_name = "MIL", allow_hyphen_values = true)]
+        drop_mil: Option<f64>,
+
+        /// Angular wind deflection, milliradians, positive = the bullet goes RIGHT (so the
+        /// hold is right of center). Defaults to 0 with --drop-mil.
+        #[arg(long, value_name = "MIL", allow_hyphen_values = true)]
+        wind_mil: Option<f64>,
+
+        /// Solve the trajectory and take the hold at this range (yards imperial / meters
+        /// metric) instead of supplying --drop-mil/--wind-mil directly
+        #[arg(long)]
+        range: Option<f64>,
+
+        /// Optic magnification in use. Ignored for an FFP reticle beyond validation
+        /// (subtensions are magnification-independent there).
+        #[arg(long, default_value = "10.0", value_parser = f64_range(0.0001, 1000.0))]
+        mag: f64,
+
+        /// Initial velocity (fps or m/s based on --units); required with --range
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
+        velocity: Option<f64>,
+
+        /// Ballistic coefficient; required with --range
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
+        bc: Option<f64>,
+
+        /// Mass (grains for imperial, grams for metric); required with --range
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
+        mass: Option<f64>,
+
+        /// Diameter (inches for imperial, mm for metric); required with --range
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
+        diameter: Option<f64>,
+
+        /// Drag model (G1, G2, G5, G6, G7, G8, GI, GS, RA4)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModel,
+
+        /// Zero distance (yards for imperial, meters for metric); required with --range
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        /// Sight height above bore (inches for imperial, mm for metric)
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        #[arg(long)]
+        temperature: Option<f64>,
+
+        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
+
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) or `qnh`
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        humidity: f64,
+
+        /// Altitude (feet or meters based on --units)
+        #[arg(long, default_value = "0.0")]
+        altitude: f64,
+
+        /// Wind speed (mph or m/s based on --units)
+        #[arg(long, default_value = "0.0")]
+        wind_speed: f64,
+
+        /// Wind direction (MBA-1367: degrees or clock position, shared help const)
+        #[arg(long, default_value = "0.0", value_parser = parse_wind_direction_arg, help = WIND_DIRECTION_HELP)]
+        wind_direction: ParsedWindDirection,
+
+        /// Output format: table (default) or json
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Build a parametric reticle description
+    Generate {
+        #[command(subcommand)]
+        layout: ReticleLayout,
+    },
+}
+
+/// `reticle generate` layouts (MBA-1361). All three are generic parametric geometry — no
+/// vendor layout is reproduced (see the `reticle` module's IP exclusions).
+#[derive(Subcommand)]
+enum ReticleLayout {
+    /// A plain mil-hash CROSS: marks along both stadia. Not a filled 2-D grid.
+    MilGrid {
+        /// Spacing between marks, milliradians
+        #[arg(long, default_value = "1.0")]
+        spacing: f64,
+
+        /// How far the marked area reaches from center, milliradians
+        #[arg(long, default_value = "10.0")]
+        extent: f64,
+
+        #[command(flatten)]
+        common: ReticleGenerateCommon,
+    },
+
+    /// A generic widening holdover tree: row N carries windage dots at +/- 1..N steps
+    Tree {
+        /// Number of holdover rows below center
+        #[arg(long, default_value = "5")]
+        rows: usize,
+
+        /// Vertical spacing between rows, milliradians
+        #[arg(long, default_value = "1.0")]
+        row_spacing: f64,
+
+        /// Windage step within a row, milliradians
+        #[arg(long, default_value = "0.5")]
+        spread_step: f64,
+
+        #[command(flatten)]
+        common: ReticleGenerateCommon,
+    },
+
+    /// A BDC ladder from ALREADY-SOLVED drops. This generator runs no solve of its own —
+    /// produce the drops with `come-ups`/`trajectory` first, so the ladder's provenance
+    /// (load, atmosphere, zero) stays the caller's.
+    Bdc {
+        /// One "RANGE:DROP_MIL" pair per mark; repeatable. RANGE follows --units
+        /// (yards imperial / meters metric); DROP_MIL is milliradians below the line of
+        /// sight.
+        #[arg(long = "drop", value_name = "RANGE:DROP_MIL", action = clap::ArgAction::Append, required = true, allow_hyphen_values = true)]
+        drops: Vec<String>,
+
+        #[command(flatten)]
+        common: ReticleGenerateCommon,
+    },
+}
+
+/// Fields every `reticle generate` layout shares (MBA-1361).
+#[derive(clap::Args)]
+struct ReticleGenerateCommon {
+    /// Name to store in the description (defaults to a generated one)
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Focal plane: ffp (subtensions constant) or sfp (subtensions scale with
+    /// magnification)
+    #[arg(long, default_value = "ffp")]
+    focal_plane: FocalPlaneArg,
+
+    /// The magnification the subtensions are true at. Meaningful for --focal-plane sfp
+    /// only.
+    #[arg(long, default_value = "1.0", value_parser = f64_range(0.0001, 1000.0))]
+    reference_mag: f64,
+
+    /// Output format: table (default) or json. `-o json` emits the schema that
+    /// `reticle hold --reticle-json` and `profile save --reticle-json` consume.
+    #[arg(short = 'o', long, default_value = "table")]
+    output: OutputFormat,
+}
+
+/// CLI-facing mirror of `ballistics_engine::reticle::FocalPlane` (MBA-1361), the same thin
+/// `ValueEnum` wrapper pattern as `WindReferenceArg`.
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
+enum FocalPlaneArg {
+    /// First focal plane: subtensions are the same at every magnification
+    #[default]
+    Ffp,
+    /// Second focal plane: subtensions scale as reference-mag / magnification
+    Sfp,
+}
+
+impl From<FocalPlaneArg> for FocalPlane {
+    fn from(arg: FocalPlaneArg) -> Self {
+        match arg {
+            FocalPlaneArg::Ffp => FocalPlane::First,
+            FocalPlaneArg::Sfp => FocalPlane::Second,
+        }
+    }
 }
 
 #[allow(
@@ -3007,6 +3227,18 @@ enum ProfileAction {
         /// calibration, just update these other fields".
         #[arg(long)]
         clear_dsf: bool,
+
+        /// Attach the optic's reticle from a JSON description file (MBA-1361), so
+        /// `reticle hold --profile NAME` can place a firing solution in it. Produce one
+        /// with `reticle generate ... -o json`. Validated at save time. Without this
+        /// flag, re-saving carries any attached reticle forward unchanged.
+        #[arg(long, value_name = "FILE")]
+        reticle_json: Option<PathBuf>,
+
+        /// Remove this profile's attached reticle, if any (MBA-1361) — the
+        /// `--clear-dsf` counterpart for the reticle field.
+        #[arg(long)]
+        clear_reticle: bool,
     },
 
     /// Import a profile from a third-party file (.a7p — ArcherBC2 format)
@@ -3484,6 +3716,22 @@ struct ProfileData {
     /// wouldn't corrupt the master-zero fields old readers rely on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     zero_sets: Option<Vec<ProfileZeroSet>>,
+    /// The optic's reticle (MBA-1361), so `reticle hold --profile NAME` can place a
+    /// firing solution without being handed a description every time. Set with
+    /// `profile save --reticle-json <file>`; carried forward untouched by a re-save.
+    ///
+    /// Angular data only (milliradians from the optical center), so
+    /// [`ProfileData::converted_to`] leaves it alone for the same reason it leaves
+    /// `elevation_click` alone — a subtension is not a linear measurement.
+    ///
+    /// FORWARD-COMPAT (the `bc_segments` pattern): `#[serde(default)]` means a reader that
+    /// predates this field loads the profile cleanly. Nothing about a trajectory depends
+    /// on it — it is a display/hold aid consumed only by the `reticle` command — so an old
+    /// reader cannot produce a different ballistic answer because of it; it simply has no
+    /// `reticle` verb. The one-way skew is re-SAVING, which drops the key, exactly as
+    /// documented for `bc_segments` and `zero_sets`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reticle: Option<ReticleDescription>,
 }
 
 /// One named zero condition / per-load dial correction (MBA-1360).
@@ -4195,6 +4443,8 @@ impl ProfileData {
         //     as the drag curve above.
         //   * `bc_reference` (MBA-1365) names a reference ATMOSPHERE, not a linear/angular
         //     display quantity — imperial/metric has no bearing on it either.
+        //   * `reticle`'s mark coordinates (MBA-1361) are milliradians from the optical
+        //     center — angular, like the click graduations above.
         // Converting them would silently rescale physically meaningful data (e.g. treating an
         // m/s breakpoint as if it were fps) rather than fix anything.
         self.units = match target {
@@ -4426,6 +4676,23 @@ fn save_profile(profile: &ProfileData) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 /// Load a profile by name
+/// Read and validate a reticle description from a JSON file (MBA-1361).
+///
+/// File I/O lives here, not in `ballistics_engine::reticle` — that module stays fs-free so
+/// it compiles for wasm32 (the same split `drag_file`/`truing_dsf` use). Validation runs at
+/// READ time so a malformed description is rejected at the flag that named the file rather
+/// than surfacing later as a confusing hold error.
+fn load_reticle_description(path: &std::path::Path) -> Result<ReticleDescription, Box<dyn Error>> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("could not read reticle file {}: {e}", path.display()))?;
+    let reticle: ReticleDescription = serde_json::from_str(&content)
+        .map_err(|e| format!("invalid reticle JSON in {}: {e}", path.display()))?;
+    reticle
+        .validate()
+        .map_err(|e| format!("invalid reticle in {}: {e}", path.display()))?;
+    Ok(reticle)
+}
+
 fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     let dir = get_profiles_dir()?;
     let path = dir.join(format!("{}.json", name));
@@ -5095,6 +5362,9 @@ fn map_a7p_to_profile(
         windage_cf: None,
         // MBA-1360: Some only when --zero-click converted zero_x/zero_y (see above).
         zero_sets,
+        // MBA-1361: .a7p carries no reticle description; attach one after import with
+        // `profile save --reticle-json`.
+        reticle: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -10915,6 +11185,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     elevation_click,
                     windage_click,
                     clear_dsf,
+                    reticle_json,
+                    clear_reticle,
                 } => {
                     let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
                     let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
@@ -10955,6 +11227,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // command cannot express — carry them forward like dsf_points.
                     let carried_zero_sets =
                         existing_profile.as_ref().and_then(|p| p.zero_sets.clone());
+                    // MBA-1361: an attached reticle is either supplied here as a JSON file,
+                    // explicitly cleared, or carried forward — same three-way treatment as
+                    // the DSF table above. Validated at save time so a profile can never
+                    // store a description `reticle hold` would later reject.
+                    if reticle_json.is_some() && clear_reticle {
+                        return Err(
+                            "--reticle-json and --clear-reticle are mutually exclusive".into()
+                        );
+                    }
+                    let carried_reticle = match (&reticle_json, clear_reticle) {
+                        (Some(path), _) => Some(load_reticle_description(path)?),
+                        (None, true) => None,
+                        (None, false) => existing_profile.as_ref().and_then(|p| p.reticle.clone()),
+                    };
 
                     // MBA-1355: validate click graduations at save time so a saved profile
                     // can never store a value `resolve_click_values` would later reject.
@@ -11008,6 +11294,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         elevation_cf: carried_elevation_cf,
                         windage_cf: carried_windage_cf,
                         zero_sets: carried_zero_sets,
+                        reticle: carried_reticle,
                     };
 
                     let path = save_profile(&profile)?;
@@ -11407,6 +11694,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         Commands::DragCurve { drag_model, output } => {
             run_drag_curve(drag_model, output)?;
+        }
+
+        Commands::Reticle { action } => {
+            handle_reticle(action, cli.units)?;
         }
 
         Commands::Completions { shell } => {
@@ -15887,6 +16178,168 @@ fn run_sampled_trajectory(
     Ok(samples)
 }
 
+/// Everything one sampled hold curve needs, already in METRIC (MBA-1361/MBA-1362).
+///
+/// Flat and small on purpose: it is built once at a CLI boundary and handed to
+/// [`HoldCurve::solve`], which owns the zero solve so every consumer zeroes identically.
+#[derive(Debug, Clone)]
+struct HoldCurveLoad {
+    velocity_mps: f64,
+    bc: f64,
+    mass_kg: f64,
+    diameter_m: f64,
+    drag_model: DragModel,
+    sight_height_m: f64,
+    zero_distance_m: f64,
+    temperature_c: f64,
+    pressure_hpa: f64,
+    humidity: f64,
+    altitude_m: f64,
+    wind_speed_mps: f64,
+    wind_direction_deg: f64,
+}
+
+/// One point read off a [`HoldCurve`], in the ANGULAR units a hold is expressed in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HoldPoint {
+    range_m: f64,
+    /// Milliradians below the line of sight (positive = the shooter holds over).
+    drop_mil: f64,
+    /// Milliradians of lateral deflection, positive = the bullet goes RIGHT.
+    wind_mil: f64,
+    velocity_mps: f64,
+    energy_j: f64,
+    time_s: f64,
+}
+
+/// A solved, sampled drop-vs-range curve expressed in ANGULAR units (MBA-1361).
+///
+/// One solve, sampled finely, then read by interpolation — the same shape `come-ups` uses,
+/// but keyed on angle rather than linear drop because that is what a reticle mark is. This
+/// is the single place a hold curve is produced, so `reticle hold --range` and (MBA-1362)
+/// the three inverse solvers cannot disagree about what "the drop at 500 yards" means.
+struct HoldCurve {
+    samples: Vec<trajectory_sampling::TrajectorySample>,
+}
+
+impl HoldCurve {
+    /// Sample interval used by every hold curve, meters (~1 yard).
+    ///
+    /// Fine enough that linear interpolation between neighbours is well below the
+    /// resolution any reticle can be read to, and coarse enough that a 1500 m curve is a
+    /// few thousand points.
+    const SAMPLE_INTERVAL_M: f64 = 0.9144;
+
+    /// Solve once and sample out to `max_range_m`.
+    fn solve(load: &HoldCurveLoad, max_range_m: f64) -> Result<Self, Box<dyn Error>> {
+        if !max_range_m.is_finite() || max_range_m <= 0.0 {
+            return Err("hold curve max range must be finite and greater than zero".into());
+        }
+        let zero_inputs = BallisticInputs {
+            bc_value: load.bc,
+            bc_type: load.drag_model,
+            bullet_mass: load.mass_kg,
+            muzzle_velocity: load.velocity_mps,
+            bullet_diameter: load.diameter_m,
+            bullet_length: fallback_bullet_length_m(load.diameter_m, load.mass_kg),
+            sight_height: load.sight_height_m,
+            use_rk4: true,
+            ..Default::default()
+        };
+        let atmosphere = AtmosphericConditions {
+            temperature: load.temperature_c,
+            pressure: load.pressure_hpa,
+            humidity: load.humidity,
+            altitude: load.altitude_m,
+        };
+        let zero_angle = ballistics_engine::calculate_zero_angle_with_conditions(
+            zero_inputs,
+            load.zero_distance_m,
+            load.sight_height_m,
+            WindConditions::default(),
+            atmosphere,
+        )?;
+
+        let samples = run_sampled_trajectory(
+            load.velocity_mps,
+            load.bc,
+            load.mass_kg,
+            load.diameter_m,
+            load.drag_model,
+            load.sight_height_m,
+            load.temperature_c,
+            load.pressure_hpa,
+            load.humidity,
+            load.altitude_m,
+            load.wind_speed_mps,
+            load.wind_direction_deg,
+            max_range_m,
+            Self::SAMPLE_INTERVAL_M,
+            zero_angle,
+            None,
+            None,
+            None,
+            0.0,
+            0.0,
+            0.0,
+            Some(load.zero_distance_m),
+        )?;
+        if samples.len() < 2 {
+            return Err(
+                "the trajectory produced too few sampled points to read a hold from".into(),
+            );
+        }
+        Ok(Self { samples })
+    }
+
+    /// The furthest range this curve reaches, meters.
+    fn max_sampled_range_m(&self) -> f64 {
+        self.samples.last().map_or(0.0, |s| s.distance_m)
+    }
+
+    /// Linearly interpolate the angular hold at `range_m`.
+    ///
+    /// `None` when the range is outside the sampled span or non-positive (an angular drop
+    /// is undefined at the muzzle — it divides by the range).
+    fn at_range(&self, range_m: f64) -> Option<HoldPoint> {
+        if !range_m.is_finite() || range_m <= 0.0 {
+            return None;
+        }
+        let first = self.samples.first()?;
+        let last = self.samples.last()?;
+        if range_m < first.distance_m || range_m > last.distance_m {
+            return None;
+        }
+        let index = self
+            .samples
+            .partition_point(|s| s.distance_m < range_m)
+            .min(self.samples.len() - 1);
+        let (lo, hi) = if index == 0 {
+            (&self.samples[0], &self.samples[0])
+        } else {
+            (&self.samples[index - 1], &self.samples[index])
+        };
+        let span = hi.distance_m - lo.distance_m;
+        let t = if span.abs() < f64::EPSILON {
+            0.0
+        } else {
+            (range_m - lo.distance_m) / span
+        };
+        let lerp = |a: f64, b: f64| a + (b - a) * t;
+        let drop_m = lerp(lo.drop_m, hi.drop_m);
+        let drift_m = lerp(lo.wind_drift_m, hi.wind_drift_m);
+        Some(HoldPoint {
+            range_m,
+            // Milliradian small-angle definition: 1 mil subtends 1/1000 of the range.
+            drop_mil: drop_m / range_m * 1000.0,
+            wind_mil: drift_m / range_m * 1000.0,
+            velocity_mps: lerp(lo.velocity_mps, hi.velocity_mps),
+            energy_j: lerp(lo.energy_j, hi.energy_j),
+            time_s: lerp(lo.time_s, hi.time_s),
+        })
+    }
+}
+
 /// MBA-1359: convert a `--zero-poi-up`/`--zero-poi-right` CLI value (inches for imperial,
 /// centimeters for metric — Kestrel-style small POI offsets) to meters.
 fn zero_poi_display_to_metric(value: f64, units: UnitSystem) -> f64 {
@@ -18975,6 +19428,7 @@ mod profile_unit_tests {
             elevation_cf: None,
             windage_cf: None,
             zero_sets: None,
+            reticle: None,
         }
     }
 
@@ -20014,6 +20468,7 @@ mod adjustment_unit_tests {
                 elevation_cf: None,
                 windage_cf: None,
                 zero_sets: None,
+                reticle: None,
             }
         }
 
@@ -20872,6 +21327,275 @@ mod dsf_cli_tests {
 /// does not have to re-vendor the numbers and then drift from the engine as tables are refined.
 /// Emitted verbatim from the table — no resampling, no interpolation onto a uniform grid — so
 /// what you plot is exactly what the solver interpolates.
+/// Map an `OutputFormat` onto the reticle formatter's two shapes (MBA-1361).
+///
+/// CSV and PDF are rejected here rather than in the library, because each surface owns its
+/// own error convention — the same split `run_drag_curve` uses.
+fn reticle_format(output: OutputFormat) -> Result<ReticleFormat, Box<dyn Error>> {
+    match output {
+        OutputFormat::Table => Ok(ReticleFormat::Table),
+        OutputFormat::Json => Ok(ReticleFormat::Json),
+        OutputFormat::Csv => {
+            Err("reticle output has no CSV form; use -o table or -o json".into())
+        }
+        OutputFormat::Pdf => {
+            Err("reticle output has no PDF form; use -o table or -o json".into())
+        }
+    }
+}
+
+/// Parse one `reticle generate bdc --drop RANGE:DROP_MIL` token into
+/// `(range_display, range_m, drop_mil)`.
+///
+/// RANGE follows `--units`; DROP_MIL is always milliradians (an angle, so unit-invariant —
+/// the same reasoning that keeps turret graduations out of `converted_to`). The display
+/// range comes back too so the caller can label marks in the units the user typed.
+fn parse_reticle_bdc_drop(token: &str, units: UnitSystem) -> Result<(f64, f64, f64), String> {
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "invalid --drop '{token}': expected RANGE:DROP_MIL (e.g. 400:2.7)"
+        ));
+    }
+    let range: f64 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --drop range '{}' in '{token}'", parts[0]))?;
+    let drop_mil: f64 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --drop value '{}' in '{token}'", parts[1]))?;
+    if !range.is_finite() || range <= 0.0 {
+        return Err(format!(
+            "invalid --drop '{token}': range must be finite and greater than zero"
+        ));
+    }
+    if !drop_mil.is_finite() {
+        return Err(format!("invalid --drop '{token}': drop must be finite"));
+    }
+    Ok((
+        range,
+        UnitConverter::distance_to_metric(range, units),
+        drop_mil,
+    ))
+}
+
+/// `reticle` dispatch (MBA-1361).
+fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dyn Error>> {
+    match action {
+        ReticleAction::Generate { layout } => {
+            let (mut description, common) = match layout {
+                ReticleLayout::MilGrid {
+                    spacing,
+                    extent,
+                    common,
+                } => (ReticleDescription::mil_grid(spacing, extent)?, common),
+                ReticleLayout::Tree {
+                    rows,
+                    row_spacing,
+                    spread_step,
+                    common,
+                } => (
+                    ReticleDescription::tree(rows, row_spacing, spread_step)?,
+                    common,
+                ),
+                ReticleLayout::Bdc { drops, common } => {
+                    let parsed = drops
+                        .iter()
+                        .map(|token| parse_reticle_bdc_drop(token, units))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let metric: Vec<(f64, f64)> = parsed
+                        .iter()
+                        .map(|&(_, range_m, drop_mil)| (range_m, drop_mil))
+                        .collect();
+                    let mut description = ReticleDescription::bdc_from_drops(&metric)?;
+                    // The library labels in meters (the schema is SI); this surface knows
+                    // the user's display units, so it relabels with what they typed. The
+                    // ladder's first mark is the center, hence the 1-offset.
+                    let dist_unit = match units {
+                        UnitSystem::Imperial => "yd",
+                        UnitSystem::Metric => "m",
+                    };
+                    for (mark, &(range_display, _, _)) in
+                        description.marks.iter_mut().skip(1).zip(parsed.iter())
+                    {
+                        mark.label = Some(format!("{range_display:.0} {dist_unit}"));
+                    }
+                    (description, common)
+                }
+            };
+            description.focal_plane = common.focal_plane.into();
+            description.reference_magnification = common.reference_mag;
+            if let Some(name) = common.name {
+                description.name = name;
+            }
+            description.validate()?;
+            print!(
+                "{}",
+                format_reticle_description(&description, reticle_format(common.output)?)
+            );
+            Ok(())
+        }
+
+        ReticleAction::Hold {
+            reticle_json,
+            profile,
+            drop_mil,
+            wind_mil,
+            range,
+            mag,
+            velocity,
+            bc,
+            mass,
+            diameter,
+            drag_model,
+            zero_distance,
+            sight_height,
+            temperature,
+            pressure,
+            pressure_type,
+            humidity,
+            altitude,
+            wind_speed,
+            wind_direction,
+            output,
+        } => {
+            let format = reticle_format(output)?;
+            let profile_data = match profile.as_deref() {
+                Some(name) => Some(load_profile(name)?),
+                None => None,
+            };
+
+            // Reticle source: an explicit file wins over the profile's attached one.
+            let description = match (&reticle_json, profile_data.as_ref()) {
+                (Some(path), _) => load_reticle_description(path)?,
+                (None, Some(data)) => data.reticle.clone().ok_or_else(|| {
+                    format!(
+                        "profile '{}' has no attached reticle; attach one with \
+                         `profile save {} --reticle-json <FILE>`, or pass --reticle-json here",
+                        data.name, data.name
+                    )
+                })?,
+                (None, None) => {
+                    return Err(
+                        "a reticle is required: pass --reticle-json <FILE> or --profile <NAME>"
+                            .into(),
+                    )
+                }
+            };
+
+            // Hold source: an explicit angular solution, or one solved at --range. Never
+            // both — silently preferring one would hide a contradictory invocation.
+            let (hold_drop_mil, hold_wind_mil, solved) = match (drop_mil, range) {
+                (Some(_), Some(_)) => {
+                    return Err(
+                        "--drop-mil and --range are mutually exclusive: give the angular \
+                         hold directly, or let --range solve for it"
+                            .into(),
+                    )
+                }
+                (Some(drop), None) => (drop, wind_mil.unwrap_or(0.0), None),
+                (None, Some(range)) => {
+                    if wind_mil.is_some() {
+                        return Err(
+                            "--wind-mil applies to --drop-mil only; with --range the wind \
+                             deflection comes from --wind-speed/--wind-direction"
+                                .into(),
+                        );
+                    }
+                    let require = |value: Option<f64>, flag: &str| -> Result<f64, Box<dyn Error>> {
+                        value.ok_or_else(|| {
+                            format!("--range requires {flag} (directly or from --profile)").into()
+                        })
+                    };
+                    let velocity = require(
+                        resolve_param(velocity, &profile_data, |p| p.velocity),
+                        "--velocity",
+                    )?;
+                    let bc = require(resolve_param(bc, &profile_data, |p| p.bc), "--bc")?;
+                    let mass = require(resolve_param(mass, &profile_data, |p| p.mass), "--mass")?;
+                    let diameter = require(
+                        resolve_param(diameter, &profile_data, |p| p.diameter),
+                        "--diameter",
+                    )?;
+                    let zero_distance = require(
+                        zero_distance.or_else(|| profile_data.as_ref().and_then(|p| p.zero_distance)),
+                        "--zero-distance",
+                    )?;
+                    // Same fallback `trajectory --saved-profile`/`come-ups --profile` use.
+                    let sight_height = sight_height
+                        .or_else(|| profile_data.as_ref().and_then(|p| p.sight_height))
+                        .unwrap_or(match units {
+                            UnitSystem::Imperial => 2.0,
+                            UnitSystem::Metric => 50.0,
+                        });
+                    let temperature = UnitConverter::resolve_temperature(temperature, units)?;
+                    // MBA-1416: a declared QNH reduces against this command's own --altitude.
+                    let pressure = apply_pressure_mode(
+                        UnitConverter::resolve_pressure(pressure, units)?,
+                        altitude,
+                        pressure_type,
+                        units,
+                    );
+
+                    let load = HoldCurveLoad {
+                        velocity_mps: UnitConverter::velocity_to_metric(velocity, units),
+                        bc,
+                        mass_kg: UnitConverter::mass_to_metric(mass, units),
+                        diameter_m: UnitConverter::diameter_to_metric(diameter, units),
+                        drag_model,
+                        sight_height_m: UnitConverter::sight_height_to_metric(sight_height, units),
+                        zero_distance_m: UnitConverter::distance_to_metric(zero_distance, units),
+                        temperature_c: UnitConverter::temperature_to_metric(temperature, units),
+                        pressure_hpa: UnitConverter::pressure_to_metric(pressure, units),
+                        humidity,
+                        altitude_m: UnitConverter::altitude_to_metric(altitude, units),
+                        wind_speed_mps: UnitConverter::wind_to_metric(wind_speed, units),
+                        wind_direction_deg: wind_direction.degrees,
+                    };
+                    let range_m = UnitConverter::distance_to_metric(range, units);
+                    let curve = HoldCurve::solve(&load, range_m * 1.05)?;
+                    let point = curve.at_range(range_m).ok_or_else(|| {
+                        format!(
+                            "the trajectory does not reach {range} — it was sampled only to {:.1}",
+                            UnitConverter::distance_from_metric(
+                                curve.max_sampled_range_m(),
+                                units
+                            )
+                        )
+                    })?;
+                    (point.drop_mil, point.wind_mil, Some(point))
+                }
+                (None, None) => {
+                    return Err(
+                        "a firing solution is required: pass --drop-mil (with optional \
+                         --wind-mil) or --range"
+                            .into(),
+                    )
+                }
+            };
+
+            let hold = hold_point_in_reticle(hold_drop_mil, hold_wind_mil, mag, &description)?;
+            if let (Some(point), OutputFormat::Table) = (solved, output) {
+                let (dist_unit, vel_unit) = match units {
+                    UnitSystem::Imperial => ("yd", "fps"),
+                    UnitSystem::Metric => ("m", "m/s"),
+                };
+                println!(
+                    "Solved at {:.0} {} — {:.1} {} remaining, {:.3} s time of flight\n",
+                    UnitConverter::distance_from_metric(point.range_m, units),
+                    dist_unit,
+                    UnitConverter::velocity_from_metric(point.velocity_mps, units),
+                    vel_unit,
+                    point.time_s
+                );
+            }
+            print!("{}", format_reticle_hold(&hold, &description, mag, format));
+            Ok(())
+        }
+    }
+}
+
 fn run_drag_curve(
     drag_model: DragModel,
     output: OutputFormat,

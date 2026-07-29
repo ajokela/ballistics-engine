@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Reticle hold points: schema, parametric generators, and a hold-point API**
+  (MBA-1361; the Strelok Pro / Nikon Spot On / Hawke ChairGun / AB Quantum class, and the
+  biggest UX gap we had against them for shooters who HOLD rather than dial). No reticle
+  concept existed anywhere in the stack before this. New `reticle` subcommand with two
+  verbs: `reticle generate {mil-grid|tree|bdc}` builds a description, and `reticle hold`
+  places a firing solution in one and names the nearest mark. Take the solution directly
+  (`--drop-mil` / `--wind-mil`) or let `--range` solve the trajectory for it.
+  **FFP/SFP aware, by published optics-manual math:** a first-focal-plane mark subtends
+  the same angle at every magnification, while a second-focal-plane mark's TRUE subtension
+  is `nominal × reference-mag ÷ magnification` — a 2 mil mark on a reticle calibrated at
+  10x covers 4 mil of target at 5x. The hold point is a property of the trajectory, so it
+  stays true angular; only the MARKS are rescaled, and the nearest-mark distance is
+  measured after that rescaling. An `off_reticle` flag fires when the hold runs outside the
+  marks' bounding box grown by 20 % of its span per axis. Non-physical magnifications are
+  rejected on both planes, with typed errors throughout.
+  **One schema, every surface:** `ReticleDescription` (`serde`, FFP/SFP, reference
+  magnification, marks with angular offsets and kinds) is shared by the CLI, an optional
+  saved-profile `reticle` field (`profile save --reticle-json` / `--clear-reticle`,
+  carried forward by an unrelated re-save like the DSF table), the browser terminal, and a
+  new optional solve-json v1 request block (`reticle: {range_m, magnification,
+  description}`) whose response adds `reticle_hold` — and only then, so every existing
+  response stays byte-identical. `reticle generate -o json` emits exactly what
+  `--reticle-json` consumes.
+  **FFI is append-only:** a new `FFIReticleHold` struct and
+  `ballistics_hold_point_in_reticle(...)`, with no change to any existing `repr(C)` layout,
+  so no consumer needs a recompile. `marks_len` is validated against a stated bound before
+  a single element is read (the MBA-1407 drag-table lesson applied).
+  **Hard IP exclusions, permanent unless licensed:** no Horus/TREMOR-family grid layouts
+  (`mil-grid` builds a plain mil-hash CROSS, not a filled 2-D grid), no Time-of-Flight
+  wind-dot calibration (wind enters only as an angular deflection the caller already
+  solved), and no vendor reticle catalog. The `bdc` generator takes ALREADY-SOLVED drops
+  and runs no solve of its own, so a ladder's provenance stays the caller's.
+  The browser terminal has the same two verbs through the *same* formatter (identical bytes
+  for identical inputs), with two documented differences: `--reticle-json` there takes the
+  description as inline JSON text rather than a path (no filesystem), and
+  `reticle hold --range` / `--profile` are native-only.
 - **Wind-call truing: back-solve the effective crosswind from an observed horizontal
   miss** (MBA-1392; Vortex Ace class, and the only competitor that had it). New
   `true-wind` subcommand on the native CLI and the WASM terminal: give it where your

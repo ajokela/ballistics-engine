@@ -119,6 +119,63 @@ pub struct SolveRequestV1 {
     pub solver: SolverV1,
     pub effects: EffectsV1,
     pub sampling: SamplingV1,
+    /// Optional reticle hold-point request (MBA-1361). Absent (the historical shape) leaves
+    /// both the solve and the response byte-identical; present adds
+    /// [`SolveSuccessV1::reticle_hold`] and nothing else. It is a pure post-processing read
+    /// of the solved samples — it cannot change the trajectory.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub reticle: Option<ReticleRequestV1>,
+}
+
+/// Ask for a reticle hold point alongside the trajectory (MBA-1361).
+///
+/// `description` is the shared [`crate::reticle::ReticleDescription`] schema — the very same
+/// JSON `ballistics reticle generate -o json` emits — so a service and a CLI user exchange
+/// one representation. It is deliberately permissive about extra keys inside the
+/// description (front ends carry render metadata there); the envelope around it stays
+/// strict.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReticleRequestV1 {
+    /// Range at which the hold is evaluated, meters. Must be inside the sampled trajectory.
+    pub range_m: f64,
+    /// The optic's magnification in use. Must be finite and greater than zero on both
+    /// focal planes.
+    pub magnification: f64,
+    pub description: crate::reticle::ReticleDescription,
+}
+
+/// The reticle hold point for a solved trajectory (MBA-1361).
+///
+/// Angles are milliradians from the optical center: `down_mil` positive BELOW center,
+/// `right_mil` positive to the shooter's RIGHT.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReticleHoldV1 {
+    /// Echo of the requested evaluation range, meters.
+    pub range_m: f64,
+    /// Echo of the requested magnification.
+    pub magnification: f64,
+    pub down_mil: f64,
+    pub right_mil: f64,
+    /// The subtension scale applied to the marks (`reference_magnification / magnification`
+    /// for SFP, exactly `1.0` for FFP).
+    pub mark_scale: f64,
+    /// Index into the request's `description.marks` of the nearest mark, in TRUE angular
+    /// space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nearest_mark_index: Option<usize>,
+    /// That mark's label, when it carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nearest_mark_label: Option<String>,
+    pub nearest_mark_distance_mil: f64,
+    /// True when the hold has run outside the marked area (see
+    /// [`crate::reticle::ReticleHold::off_reticle`] for the exact rule).
+    pub off_reticle: bool,
 }
 
 /// Projectile inputs supported by solve-json v1.
@@ -657,6 +714,11 @@ pub struct SolveSuccessV1 {
     pub summary: SolveSummaryV1,
     #[serde(default, serialize_with = "serialize_solve_samples_v1")]
     pub samples: Vec<TrajectorySampleV1>,
+    /// The reticle hold point (MBA-1361), present only when the request carried a
+    /// `reticle` block. Every response that predates the field, and every request without
+    /// one, is byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reticle_hold: Option<ReticleHoldV1>,
 }
 
 fn serialize_solve_samples_v1<S>(
@@ -1125,6 +1187,8 @@ fn validate_request_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "solver",
             "effects",
             "sampling",
+            // MBA-1361: optional, additive. Omitting it is the historical shape.
+            "reticle",
         ],
         &[
             "schema_version",
@@ -1147,6 +1211,29 @@ fn validate_request_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     validate_solver(required_value(root, "solver", "$")?)?;
     validate_effects(required_value(root, "effects", "$")?)?;
     validate_sampling(required_value(root, "sampling", "$")?)?;
+    if let Some(reticle) = root.get("reticle") {
+        validate_reticle(reticle)?;
+    }
+    Ok(())
+}
+
+/// Shape-validate an optional `reticle` block (MBA-1361).
+///
+/// The ENVELOPE is strict (exactly `range_m`, `magnification`, `description`, all
+/// required); the description itself is handed to the shared reticle schema, whose own
+/// `validate()` runs at solve time. Splitting it that way keeps the wire contract tight
+/// without making the engine the arbiter of a front end's render metadata.
+fn validate_reticle(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
+    let path = "$.reticle";
+    let object = require_object(value, path)?;
+    validate_members(
+        object,
+        path,
+        &["range_m", "magnification", "description"],
+        &["range_m", "magnification", "description"],
+    )?;
+    validate_required_numbers(object, path, &["range_m", "magnification"])?;
+    require_object(required_value(object, "description", path)?, "$.reticle.description")?;
     Ok(())
 }
 

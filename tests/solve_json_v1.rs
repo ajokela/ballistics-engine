@@ -171,6 +171,8 @@ fn success_for_resolved(resolved_request: ResolvedSolveRequestV1) -> SolveSucces
             mach: 1.06,
             flags: vec![SampleFlagV1::Transonic, SampleFlagV1::Terminal],
         }],
+        // MBA-1361: absent unless the request carried a `reticle` block.
+        reticle_hold: None,
     }
 }
 
