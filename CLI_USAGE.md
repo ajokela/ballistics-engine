@@ -2497,6 +2497,81 @@ alone — for the same reason turret click graduations are left alone.
   recompile. `marks_len` is bounds-checked against `MAX_FFI_RETICLE_MARKS` before a single
   element is read.
 
+### Robust Hold Corridors (`hold-corridor`) — MBA-1349
+
+You usually have a handful of concrete plausible wind calls — a low call and a high call,
+or two different downrange patterns — not a distribution you actually believe. A nominal
+trajectory hides that ambiguity, and Monte Carlo asks for a probability model you do not
+have. `hold-corridor` takes the middle path: it solves each *named* scenario exactly and
+reports all of them, plus the corridor they span.
+
+```bash
+cat > calls.json <<'JSON'
+{"version": 1, "nominal": "low",
+ "scenarios": [
+   {"name": "low",    "segments": ["4:90:1000"]},
+   {"name": "high",   "segments": ["14:90:1000"]},
+   {"name": "switch", "segments": ["10:90:400", "8:270:1000"]}]}
+JSON
+
+ballistics hold-corridor --scenarios calls.json --ranges 200,400,600 \
+  --target rect:12x18 -v 2700 -b 0.475 -m 168 -d 0.308 --zero-distance 100
+```
+
+Segments use exactly the `SPEED:ANGLE:UNTIL[:VERTICAL]` tokens `--wind-segment` takes, and
+`--units` applies to them identically (mph/yards imperial, m/s and meters metric). One
+grammar, one parser.
+
+#### What it reports, per range
+
+- **Every scenario's hold**, in milliradians: elevation positive = hold UP, windage
+  positive = hold RIGHT.
+- **The corridor** — the min and max over the scenarios, on each axis.
+- **The minimax hold** — the Chebyshev center of the scenario holds under the target's
+  metric, and the **worst-case miss** from it, naming the scenario that produces it.
+- **What the nominal would have cost**, when the set names one: the same worst-case
+  measure computed from holding that scenario instead.
+- **`fits_target`** — whether that one hold keeps every scenario on the target.
+  **Boundary contact counts as a fit.**
+
+#### The two metrics (both documented, because they differ)
+
+| `--target` | Metric | Minimax hold | Worst case |
+|---|---|---|---|
+| `rect:WIDTHxHEIGHT` or omitted | per-axis (L∞) | the **midpoint of the extremes on each axis independently** | the larger per-axis half-span |
+| `circle:DIAMETER` | Euclidean (L2) | the center of the **minimum enclosing circle** of the scenario holds | that circle's radius |
+
+The rectangle's axes are independent, so the per-axis midpoint is optimal for each and
+therefore for the rectangle. For the circle the objective is genuinely two-dimensional, so
+the answer is the 1-center of the point set — computed exhaustively over the candidate
+circles (one point, a pair's diameter, a triple's circumcircle), which with ≤8 scenarios is
+under a hundred candidates and, unlike the usual randomized construction, **deterministic**.
+With no `--target` there is no shape to judge against, so the per-axis metric is used and
+no fit is reported. Target dimensions are inches (imperial) or centimeters (metric).
+
+#### Guarantees
+
+- **The zero is solved once, in calm air**, and reused by every scenario. A rifle has one
+  zero; re-zeroing per scenario would fold each hypothesis into its own datum and collapse
+  the very corridor this exists to show.
+- **Caps are enforced before any solving**: ≤ 8 scenarios and ≤ 64 ranges, with structured
+  errors. A malformed segment, an unknown `nominal`, a duplicate scenario name, a duplicate
+  range and an unsupported `version` are all rejected the same way, before a single
+  trajectory runs.
+- **Reordering scenarios changes nothing.** They are sorted by name internally before
+  anything is solved, so the corridor, the minimax hold and the named worst-case scenario
+  are all independent of the order in the file.
+
+#### Non-goals (deliberate, permanent)
+
+No probability is assigned to any scenario, no continuous guarantee is claimed between
+them, and the finite set is never folded into a standard deviation. **A three-scenario
+corridor is not a confidence interval**, and the output says so. Statistical dispersion
+remains `monte-carlo --wez`'s job.
+
+`-o json` emits the versioned `RobustHoldReportV1` (SI throughout). Native-only this train;
+the core and its formatter are already shared-ready for the WASM follow-up.
+
 ### Reticle/BDC Inverse Solvers — MBA-1362
 
 Three read-only solvers over an existing load. All three share **one** drop-vs-range
