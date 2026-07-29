@@ -101,12 +101,88 @@ pub fn fallback_bullet_length_m(diameter_m: f64, mass_kg: f64) -> f64 {
     }
 }
 
+/// Barrel twist supplied to the truing forward model (MBA-1392).
+///
+/// Drop-only truing never needed a twist rate — gyroscopic spin drift is a purely
+/// lateral effect and the fit only ever looked at vertical drop. Back-solving wind from
+/// an observed HORIZONTAL miss does need it: the spin component of that miss has to be
+/// modelled, or it is mistaken for wind. Supplying this turns
+/// [`crate::BallisticInputs::use_enhanced_spin_drift`] on for the truing solves;
+/// omitting it leaves the flag off, exactly as every pre-MBA-1392 truing solve did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TruingTwist {
+    /// Twist rate in inches per turn, positive (e.g. `11.0` for a 1:11" barrel).
+    pub rate_in: f64,
+    /// `true` = right-hand twist (drifts RIGHT), `false` = left-hand (drifts LEFT).
+    pub right_hand: bool,
+}
+
+/// Earth-frame position and pointing supplied to the truing forward model (MBA-1392).
+///
+/// Coriolis needs BOTH latitude and the shot's compass bearing, so the two travel as one
+/// value: there is no meaningful "latitude but no azimuth" configuration, and modelling
+/// one without the other would silently invent the missing half.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TruingEarthFrame {
+    /// Firing latitude in degrees, north positive.
+    pub latitude_deg: f64,
+    /// Compass bearing the shot is fired ALONG, degrees, 0 = North, 90 = East. This is
+    /// [`crate::BallisticInputs::shot_azimuth`] expressed in degrees — NOT
+    /// `azimuth_angle`, which is a small horizontal aiming offset.
+    pub shot_azimuth_deg: f64,
+}
+
+/// Optional physics the truing forward model can include (MBA-1392).
+///
+/// [`TruingEnvironment::default()`] IS the historical truing forward model: calm air, no
+/// spin drift, no Coriolis — the state every truing solve hardcoded before MBA-1392, and
+/// therefore what every drop-only caller keeps passing. Each field is opt-in and is only
+/// enabled when the data that makes it meaningful is actually present; an absent field
+/// leaves the corresponding engine flag OFF rather than substituting a guess, so whatever
+/// that effect contributes stays absorbed into the fitted quantity. Callers that fit from
+/// a lateral observation are expected to say which effects they could not subtract.
+#[derive(Debug, Clone, Default)]
+pub struct TruingEnvironment {
+    /// Wind during the observed shots. The default (calm) reproduces the
+    /// `WindConditions::default()` that the truing solves have always hardcoded.
+    pub wind: WindConditions,
+    /// Barrel twist; `Some` enables gyroscopic spin drift on the truing solves.
+    pub twist: Option<TruingTwist>,
+    /// Latitude + shot azimuth; `Some` enables Coriolis on the truing solves.
+    pub earth: Option<TruingEarthFrame>,
+}
+
+impl TruingEnvironment {
+    /// Apply the opt-in physics to a freshly assembled truing [`BallisticInputs`].
+    ///
+    /// A bit-exact no-op for [`TruingEnvironment::default()`]: every mutation sits behind
+    /// an `if let Some(..)`, so the drop-only callers assemble byte-identical inputs to
+    /// the ones they assembled before MBA-1392.
+    fn apply_to(&self, inputs: &mut BallisticInputs) {
+        if let Some(twist) = self.twist {
+            inputs.twist_rate = twist.rate_in;
+            inputs.is_twist_right = twist.right_hand;
+            inputs.use_enhanced_spin_drift = true;
+        }
+        if let Some(earth) = self.earth {
+            inputs.latitude = Some(earth.latitude_deg);
+            inputs.shot_azimuth = earth.shot_azimuth_deg.to_radians();
+            inputs.enable_coriolis = true;
+        }
+    }
+}
+
 /// Shared solver assembly for the truing forward model (MBA-1316; extracted from
 /// [`solve_trajectory_drop`] for MBA-1405 so a second caller can read off the full
 /// [`crate::TrajectoryResult`] — e.g. its labeled Mach crossings — instead of just
 /// the drop/range pair. SI conversion, base [`BallisticInputs`], zero-angle solve,
 /// and `max_range`/`time_step` are all identical to what `solve_trajectory_drop`
 /// has always used, so both callers stay physically identical.
+///
+/// MBA-1392 threaded `env` through here (and through the second, batched assembly in
+/// [`TruingForwardModel::predict_many_in_unit`]) so wind / spin drift / Coriolis can be
+/// modelled when the caller has the data for them. `TruingEnvironment::default()` is the
+/// pre-MBA-1392 behaviour exactly.
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments preserve the existing velocity-truing compatibility helper"
@@ -125,6 +201,7 @@ fn solve_truing_trajectory(
     humidity: f64,
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
+    env: &TruingEnvironment,
 ) -> Result<crate::TrajectoryResult, Box<dyn Error>> {
     // Convert to SI units
     let velocity_ms = velocity_fps * 0.3048;
@@ -158,6 +235,8 @@ fn solve_truing_trajectory(
         muzzle_angle: 0.0,    // Will be set by zero angle calculation
         ..Default::default()  // Uses muzzle_height: 0.0 by default
     };
+    // MBA-1392: opt-in spin drift / Coriolis. No-op for the default environment.
+    env.apply_to(&mut inputs);
 
     // Set up atmospheric conditions
     // AtmosphericConditions expects: temperature in Celsius, pressure in hPa, humidity 0-100, altitude in meters
@@ -168,7 +247,9 @@ fn solve_truing_trajectory(
         altitude: altitude_m,
     };
 
-    let wind = WindConditions::default();
+    // MBA-1392: the observed shots' wind. `WindConditions::default()` (calm) for every
+    // drop-only caller, i.e. what this line was literally hardcoded to before.
+    let wind = env.wind.clone();
 
     // Calculate zero angle for the zero distance
     // Target height is sight_height because the bullet must cross the LOS at zero distance
@@ -193,22 +274,133 @@ fn solve_truing_trajectory(
     Ok(solver.solve()?)
 }
 
-/// Shared forward-model core for velocity/BC truing (MBA-1316).
+/// One sample of the truing forward model at a requested range (MBA-1392).
 ///
-/// Solves the real trajectory for the given `(velocity_fps, bc)` candidate under
-/// the supplied load/atmosphere and returns `(drop_m, z_m)` where `drop_m` is the
-/// linear vertical distance below the line of sight (positive = below LOS) at the
-/// target range and `z_m` is the horizontal distance actually reached (~range_m).
-/// Callers convert to MIL / MOA / inches as needed. This is the exact assembly
-/// the single-observation binary search has always used, factored out so the
-/// multi-observation joint fit reuses identical physics.
+/// The three axes are named after the McCoy frame the engine integrates in, because the
+/// historical code did not: `solve_trajectory_drop`'s second return value was a local
+/// called `z` that actually held `position.x` (the DOWNRANGE distance reached), while
+/// `position.z` — the real lateral axis, and the datum a wind fit reads — was never
+/// sampled at all. Naming both explicitly is what stops the two being confused again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TruingSample {
+    /// Vertical distance BELOW the line of sight, meters (positive = below LOS).
+    pub drop_m: f64,
+    /// DOWNRANGE distance of the sample (McCoy x), meters — `~range_m`.
+    pub downrange_m: f64,
+    /// LATERAL offset of the sample (McCoy z), meters, positive = RIGHT of the line of
+    /// sight. Identically zero for a calm / no-spin / no-Coriolis solve, which is why
+    /// drop-only truing never had to look at it.
+    pub lateral_m: f64,
+}
+
+/// Read a [`TruingSample`] off a solved truing trajectory at `range_m`.
 ///
-/// When `interpolate` is false the returned point is the first trajectory sample
-/// at or past the target range (the historical behaviour). When true, the drop
-/// and horizontal distance are linearly interpolated to land exactly on the
-/// target range, removing the ~v*dt spatial quantization that otherwise
-/// stair-steps the cost surface — essential for the multi-observation joint fit,
-/// whose finite-difference Jacobian would otherwise be dominated by that noise.
+/// Shared by every forward-model entry point so drop and lateral are always sampled the
+/// same way. `interpolate = false` returns the first trajectory sample at or past the
+/// target range (the historical behaviour); `true` linearly interpolates between the
+/// bracketing samples to land exactly on `range_m`, removing the ~v*dt spatial
+/// quantization that otherwise stair-steps the cost surface.
+fn sample_truing_result(
+    result: &crate::TrajectoryResult,
+    range_m: f64,
+    sight_height_m: f64,
+    interpolate: bool,
+) -> Result<TruingSample, Box<dyn Error>> {
+    // Find the first point at or past the target range.
+    let idx = result
+        .points
+        .iter()
+        .position(|p| p.position.x >= range_m)
+        .ok_or("Trajectory didn't reach target range")?;
+
+    // Determine the downrange distance, bullet height, and lateral offset at that range.
+    let (downrange_m, bullet_y, lateral_m) = if interpolate && idx > 0 {
+        // Linearly interpolate between the bracketing samples to land exactly on
+        // range_m (removes ~v*dt spatial quantization).
+        let p0 = &result.points[idx - 1];
+        let p1 = &result.points[idx];
+        let x0 = p0.position.x;
+        let x1 = p1.position.x;
+        let denom = x1 - x0;
+        if denom.abs() < f64::EPSILON {
+            (p1.position.x, p1.position.y, p1.position.z)
+        } else {
+            let frac = (range_m - x0) / denom;
+            let y = p0.position.y + frac * (p1.position.y - p0.position.y);
+            let z = p0.position.z + frac * (p1.position.z - p0.position.z);
+            (range_m, y, z)
+        }
+    } else {
+        let p = &result.points[idx];
+        (p.position.x, p.position.y, p.position.z)
+    };
+
+    // Calculate drop relative to the line of sight. The trajectory was already launched at the
+    // solved zero angle, so the LOS for this zero solve is horizontal at sight_height_m.
+    // Drop = LOS height - bullet position (positive = below LOS)
+    Ok(TruingSample {
+        drop_m: sight_height_m - bullet_y,
+        downrange_m,
+        lateral_m,
+    })
+}
+
+/// Shared forward-model core for velocity/BC truing (MBA-1316), sampled on all three
+/// axes (MBA-1392).
+///
+/// Solves the real trajectory for the given `(velocity_fps, bc)` candidate under the
+/// supplied load / atmosphere / [`TruingEnvironment`] and returns the [`TruingSample`] at
+/// the target range. This is the exact assembly the single-observation binary search has
+/// always used, factored out so the multi-observation joint fit and the MBA-1392 wind fit
+/// reuse identical physics.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing velocity-truing compatibility helper"
+)]
+pub(crate) fn solve_trajectory_sample(
+    velocity_fps: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_distance_yd: f64,
+    range_yd: f64,
+    sight_height_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    env: &TruingEnvironment,
+    interpolate: bool,
+) -> Result<TruingSample, Box<dyn Error>> {
+    let range_m = range_yd * 0.9144;
+    let sight_height_m = sight_height_in * 0.0254;
+
+    let result = solve_truing_trajectory(
+        velocity_fps,
+        bc,
+        drag_model,
+        mass_gr,
+        diameter_in,
+        zero_distance_yd,
+        range_yd,
+        sight_height_in,
+        temperature_f,
+        pressure_inhg,
+        humidity,
+        altitude_ft,
+        bc_segments,
+        env,
+    )?;
+
+    sample_truing_result(&result, range_m, sight_height_m, interpolate)
+}
+
+/// Drop-only view of [`solve_trajectory_sample`]: returns `(drop_m, downrange_m)` where
+/// `drop_m` is the linear vertical distance below the line of sight (positive = below
+/// LOS) at the target range and `downrange_m` is the downrange distance actually reached
+/// (~`range_m`). Callers convert to MIL / MOA / inches as needed.
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments preserve the existing velocity-truing compatibility helper"
@@ -227,12 +419,10 @@ pub(crate) fn solve_trajectory_drop(
     humidity: f64,
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
+    env: &TruingEnvironment,
     interpolate: bool,
 ) -> Result<(f64, f64), Box<dyn Error>> {
-    let range_m = range_yd * 0.9144;
-    let sight_height_m = sight_height_in * 0.0254;
-
-    let result = solve_truing_trajectory(
+    let sample = solve_trajectory_sample(
         velocity_fps,
         bc,
         drag_model,
@@ -246,42 +436,11 @@ pub(crate) fn solve_trajectory_drop(
         humidity,
         altitude_ft,
         bc_segments,
+        env,
+        interpolate,
     )?;
 
-    // Find the first point at or past the target range.
-    let idx = result
-        .points
-        .iter()
-        .position(|p| p.position.x >= range_m)
-        .ok_or("Trajectory didn't reach target range")?;
-
-    // Determine the horizontal distance z and bullet height at the target range.
-    let (z, bullet_y) = if interpolate && idx > 0 {
-        // Linearly interpolate between the bracketing samples to land exactly on
-        // range_m (removes ~v*dt spatial quantization).
-        let p0 = &result.points[idx - 1];
-        let p1 = &result.points[idx];
-        let x0 = p0.position.x;
-        let x1 = p1.position.x;
-        let denom = x1 - x0;
-        if denom.abs() < f64::EPSILON {
-            (p1.position.x, p1.position.y)
-        } else {
-            let frac = (range_m - x0) / denom;
-            let y = p0.position.y + frac * (p1.position.y - p0.position.y);
-            (range_m, y)
-        }
-    } else {
-        let p = &result.points[idx];
-        (p.position.x, p.position.y)
-    };
-
-    // Calculate drop relative to the line of sight. The trajectory was already launched at the
-    // solved zero angle, so the LOS for this zero solve is horizontal at sight_height_m.
-    // Drop = LOS height - bullet position (positive = below LOS)
-    let drop_m = sight_height_m - bullet_y;
-
-    Ok((drop_m, z))
+    Ok((sample.drop_m, sample.downrange_m))
 }
 
 /// Calculate drop at a given muzzle velocity using trajectory solver
@@ -307,8 +466,10 @@ pub(crate) fn calculate_drop_at_velocity(
 ) -> Result<f64, Box<dyn Error>> {
     // Preserve the historical MIL contract by delegating to the shared linear-drop
     // core (MBA-1316). `interpolate = false` reproduces the original "first point
-    // at or past the range" sampling, so this path stays byte-identical.
-    let (drop_m, z) = solve_trajectory_drop(
+    // at or past the range" sampling, and the default environment (MBA-1392) is the
+    // calm/no-spin/no-Coriolis model this path has always used, so it stays
+    // byte-identical.
+    let (drop_m, downrange_m) = solve_trajectory_drop(
         velocity_fps,
         bc,
         drag_model,
@@ -322,12 +483,13 @@ pub(crate) fn calculate_drop_at_velocity(
         humidity,
         altitude_ft,
         bc_segments,
+        &TruingEnvironment::default(),
         false,
     )?;
 
     // Convert to MILs: mil = (drop_inches / 36 / range_yards) * 1000
     // Or equivalently: mil = (drop_m / range_m) * 1000
-    let drop_mil = (drop_m / z) * 1000.0;
+    let drop_mil = (drop_m / downrange_m) * 1000.0;
 
     Ok(drop_mil)
 }
@@ -850,6 +1012,7 @@ impl TruingModelInputsV1 {
             alt_ft: self.altitude_ft,
             bc_segments: &no_bc_segments,
             drop_unit,
+            env: TruingEnvironment::default(),
         };
         f(&model)
     }
@@ -933,6 +1096,10 @@ pub(crate) struct TruingForwardModel<'a> {
     pub alt_ft: f64,
     pub bc_segments: &'a Option<Vec<BCSegmentData>>,
     pub drop_unit: DropUnit,
+    /// MBA-1392: opt-in wind / spin drift / Coriolis for the forward model. Every
+    /// drop-only fitter constructs this as [`TruingEnvironment::default()`], which is the
+    /// calm, effects-off model truing has always used.
+    pub env: TruingEnvironment,
 }
 
 impl TruingForwardModel<'_> {
@@ -956,7 +1123,7 @@ impl TruingForwardModel<'_> {
         range_yd: f64,
         unit: DropUnit,
     ) -> Result<f64, Box<dyn Error>> {
-        let (drop_m, z_m) = solve_trajectory_drop(
+        let (drop_m, downrange_m) = solve_trajectory_drop(
             mv_fps,
             bc,
             self.drag_model,
@@ -970,9 +1137,10 @@ impl TruingForwardModel<'_> {
             self.humidity,
             self.alt_ft,
             self.bc_segments,
+            &self.env,
             true, // interpolate: smooth forward model for the fitter
         )?;
-        Ok(unit.express_drop_m(drop_m, z_m))
+        Ok(unit.express_drop_m(drop_m, downrange_m))
     }
 
     /// Predict several ranges from one zero solve and one trajectory integration.
@@ -1031,13 +1199,17 @@ impl TruingForwardModel<'_> {
             muzzle_angle: 0.0,
             ..Default::default()
         };
+        // MBA-1392: same opt-in physics as the single-range assembly, so the batched and
+        // per-range predictors can never describe different trajectories. No-op for the
+        // default (drop-only) environment.
+        self.env.apply_to(&mut inputs);
         let atmosphere = AtmosphericConditions {
             temperature: temperature_c,
             pressure: pressure_hpa,
             humidity: self.humidity,
             altitude: altitude_m,
         };
-        let wind = WindConditions::default();
+        let wind = self.env.wind.clone();
         inputs.muzzle_angle = crate::calculate_zero_angle_with_conditions(
             inputs.clone(),
             zero_m,
@@ -1058,26 +1230,12 @@ impl TruingForwardModel<'_> {
                     return None;
                 }
                 let range_m = *range_yd * 0.9144;
-                let idx = result.points.iter().position(|p| p.position.x >= range_m)?;
-                let (z_m, bullet_y) = if idx > 0 {
-                    let p0 = &result.points[idx - 1];
-                    let p1 = &result.points[idx];
-                    let span = p1.position.x - p0.position.x;
-                    if span.abs() < f64::EPSILON {
-                        (p1.position.x, p1.position.y)
-                    } else {
-                        let fraction = (range_m - p0.position.x) / span;
-                        (
-                            range_m,
-                            p0.position.y + fraction * (p1.position.y - p0.position.y),
-                        )
-                    }
-                } else {
-                    let p = &result.points[idx];
-                    (p.position.x, p.position.y)
-                };
-                let drop_m = sight_height_m - bullet_y;
-                Some(unit.express_drop_m(drop_m, z_m))
+                // MBA-1392: one shared sampler (interpolating, exactly as this loop
+                // always did) rather than a third hand-rolled copy of the same
+                // interpolation. A range the trajectory never reached is a `None` row
+                // here, not an error, so the surrounding batch survives it.
+                let sample = sample_truing_result(&result, range_m, sight_height_m, true).ok()?;
+                Some(unit.express_drop_m(sample.drop_m, sample.downrange_m))
             })
             .collect();
         Ok(predictions)
@@ -1416,6 +1574,8 @@ pub fn run_multi_observation_truing_core(
         alt_ft,
         bc_segments,
         drop_unit,
+        // MBA-1392: drop-only truing keeps the historical calm / effects-off model.
+        env: TruingEnvironment::default(),
     };
 
     // Step 1: MV-only fit holding BC at the supplied value. This is always
@@ -1583,6 +1743,7 @@ fn truing_mv_window_mach_1_2_crossing(
         model.humidity,
         model.alt_ft,
         model.bc_segments,
+        &model.env,
     )?;
     let muzzle_mach = result.points.first().map_or(0.0, |p| {
         if result.station_speed_of_sound_mps > 0.0 {

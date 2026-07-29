@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Wind-call truing: back-solve the effective crosswind from an observed horizontal
+  miss** (MBA-1392; Vortex Ace class, and the only competitor that had it). New
+  `true-wind` subcommand on the native CLI and the WASM terminal: give it where your
+  groups actually landed left/right of the aim point
+  (`--miss RANGE:RIGHT[:SIGMA]`, repeatable) and it reports the constant crosswind that
+  reproduces that miss through the real forward trajectory model, plus a wind-call
+  correction factor (`solved ÷ called`) when you supply `--called-wind`. Each
+  observation is fitted independently by a bracketed root find over
+  ±100 mph — deflection is monotone and near-linear in crosswind speed (Didion) — and
+  the combined answer is the plain mean, or an inverse-variance weighted mean with its
+  own 1σ when every `--miss` carries a sigma (mixing the two is a hard error, not a
+  silent blend). A miss no wind in that band can produce is rejected with a diagnostic
+  naming the band rather than clamped into a plausible-looking number.
+  **A horizontal miss is not purely wind, so the command separates it:** `--twist-rate`
+  is REQUIRED and gyroscopic spin drift is always modelled and subtracted (without it a
+  1:11" .308's ~3.5 in of right drift at 700 yd would be read as wind); `--latitude` and
+  `--shot-direction` are optional but must be supplied TOGETHER, and add Coriolis.
+  Whatever the model had no data for stays absorbed in the solved wind and is named in
+  the report's "NOT subtracted" line, so a contaminated number is never presented as pure
+  wind. Signs, in one documented block: `--miss` positive = impact RIGHT of aim; solved
+  wind positive = wind FROM the shooter's LEFT (9 o'clock) pushing impacts right — the
+  wind-FROM convention (0 = headwind) established by the 0.19.0 sign fix — and a
+  right-hand twist drifts right. `RANGE` follows `--units`; the linear miss and its sigma
+  are INCHES in both unit systems (the `--drop-unit in` precedent); wind speeds follow
+  `--units` (mph/m·s⁻¹). Because `--miss` is a linear tape measurement and not a dial
+  reading, the MBA-1358 scope tracking correction factors do NOT apply and the command
+  exposes none. Fully offline (no API path exists), table/JSON/CSV, and native and WASM
+  render through ONE shared formatter so the two surfaces cannot drift.
+- **Truing forward model extended to wind, spin drift, and Coriolis** (MBA-1392,
+  enabling the above). The two duplicated truing solver assemblies now take an optional
+  `TruingEnvironment` (wind + `TruingTwist` + `TruingEarthFrame`), and the forward model
+  samples the LATERAL axis (`position.z`) alongside drop — the old return value named
+  `z` actually held the DOWNRANGE distance, which is now named `downrange_m` so the two
+  cannot be confused again. Every effect is opt-in and only enabled when the data that
+  makes it meaningful is present; `TruingEnvironment::default()` is the historical calm,
+  effects-off model, so `true-velocity` (single-observation, multi-observation joint
+  MV+BC, and uncertainty-aware), `plan-truing`, and `dsf` are byte-identical.
 - **Earth-fixed compass wind bearings** (MBA-1368; Vortex Wind Bearing Capture /
   Lapua Ballistics class). New `--wind-ref {shooter|compass}` on `trajectory` and
   `monte-carlo` (native CLI and the WASM terminal's trajectory command): `shooter`

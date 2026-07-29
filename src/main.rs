@@ -36,7 +36,12 @@ use ballistics_engine::truing::{
     calculate_true_velocity_local, correct_chrono_velocity_fps, dsf_window_start,
     fallback_bullet_length_m, mv_calibration_window, parse_truing_observation,
     run_multi_observation_truing_core, validate_truing_observations, DragModelArg, DropUnit,
-    MultiTruingReport, TruingModelInputsV1, TruingObservation,
+    MultiTruingReport, TruingEarthFrame, TruingModelInputsV1, TruingObservation, TruingTwist,
+};
+// MBA-1392: wind-call truing (back-solve the effective crosswind from an observed miss).
+use ballistics_engine::truing_wind::{
+    format_wind_truing_report, parse_wind_observation, solve_wind_truing, WindTruingOutput,
+    WindTruingRequest, MPH_TO_MPS,
 };
 use ballistics_engine::truing_dsf::{
     apply_dsf, DsfPoint, DsfTable, UpsertOutcome, DSF_MACH_CEILING,
@@ -1591,6 +1596,140 @@ enum Commands {
         /// Bullet length in inches (for BC table lookup; estimated from diameter if not provided)
         #[arg(long)]
         bullet_length: Option<f64>,
+
+        /// Output format
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Back-solve the effective crosswind from an observed horizontal miss (wind-call truing)
+    ///
+    /// SIGN CONVENTIONS (all of them, in one place):
+    ///   --miss             positive = the group landed RIGHT of the aim point.
+    ///   solved wind        positive = wind FROM the shooter's LEFT (9 o'clock), which
+    ///                      pushes impacts RIGHT; negative = FROM the right, pushing left.
+    ///                      The sign follows the deflection it produces. This is the
+    ///                      engine's wind-FROM convention (0 = headwind, PI/2 = from the
+    ///                      right), as established by the 0.19.0 wind-direction sign fix.
+    ///   --twist-right      a right-hand twist drifts RIGHT, left-hand drifts LEFT.
+    ///   --shot-direction   compass bearing fired ALONG, 0 = North, 90 = East.
+    ///
+    /// A horizontal miss is not purely wind. --twist-rate is REQUIRED so gyroscopic spin
+    /// drift is modelled and not mistaken for wind; --latitude with --shot-direction adds
+    /// Coriolis. Anything the model has no data for stays absorbed in the solved wind, and
+    /// the report says which effects those were. Fully offline: no network, no API.
+    ///
+    /// --miss values are LINEAR inches measured off the target, not dial readings, so scope
+    /// tracking correction factors (--elevation-cf / --windage-cf) do NOT apply to them and
+    /// this command deliberately has none.
+    // The sign table above only reads as a table if clap keeps the line breaks; without
+    // this it reflows into one dense paragraph.
+    #[command(verbatim_doc_comment)]
+    TrueWind {
+        /// Observed horizontal miss "RANGE:RIGHT", or "RANGE:RIGHT:SIGMA". Repeatable — each is solved
+        /// separately and the report adds the combined answer. RANGE follows --units
+        /// (yards imperial / meters metric); RIGHT and SIGMA are LINEAR INCHES in both
+        /// unit systems (a tape measurement off the target, matching --drop-unit in).
+        /// RIGHT is signed: positive = impact right of aim. SIGMA is the optional
+        /// one-standard-deviation error of that measurement; supply it on every --miss or
+        /// on none. Deliberately a separate flag from true-velocity's --observed, whose
+        /// RANGE:DROP:SIGMA grammar this would otherwise collide with.
+        #[arg(
+            long = "miss",
+            value_name = "RANGE:RIGHT[:SIGMA]",
+            action = clap::ArgAction::Append,
+            required = true,
+            allow_hyphen_values = true
+        )]
+        miss: Vec<String>,
+
+        /// Known muzzle velocity (fps for imperial, m/s for metric). Wind is the unknown
+        /// here, so velocity is an input — true it up with `true-velocity` first if unsure.
+        #[arg(short = 'v', long, value_parser = f64_range(0.0, 6000.0))]
+        velocity: f64,
+
+        /// Ballistic coefficient
+        #[arg(short = 'b', long, value_parser = f64_range(0.001, 2.0))]
+        bc: f64,
+
+        /// Drag model (G1, G7)
+        #[arg(long, default_value = "g1")]
+        drag_model: DragModelArg,
+
+        /// Bullet weight (grains for imperial, grams for metric)
+        #[arg(short = 'm', long, value_parser = f64_range(0.1, 2000.0))]
+        mass: f64,
+
+        /// Bullet diameter/caliber (inches for imperial, mm for metric)
+        #[arg(short = 'd', long, value_parser = f64_range(0.01, 60.0))]
+        diameter: f64,
+
+        /// Barrel twist rate (inches/turn for imperial, mm/turn for metric; e.g. imperial
+        /// 11 = 1:11"). REQUIRED: spin drift is a lateral effect of the same order as a
+        /// light wind at long range, so without it the fit would report spin drift as wind.
+        #[arg(long, value_parser = f64_range(0.1, 1000.0))]
+        twist_rate: f64,
+
+        /// Twist hand: `--twist-right` or `--twist-right true` = right-hand (default);
+        /// `--twist-right false` = left-hand
+        #[arg(
+            long,
+            num_args = 0..=1,
+            default_value_t = true,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set
+        )]
+        twist_right: bool,
+
+        /// Firing latitude (degrees, -90 to 90). With --shot-direction this models
+        /// Coriolis so it is subtracted from the miss instead of read as wind.
+        #[arg(long, value_parser = f64_range(-90.0, 90.0), allow_hyphen_values = true)]
+        latitude: Option<f64>,
+
+        /// Shot direction/azimuth (degrees, 0=North, 90=East). Pairs with --latitude.
+        #[arg(long, allow_hyphen_values = true)]
+        shot_direction: Option<f64>,
+
+        /// The wind you CALLED (mph for imperial, m/s for metric), same signed convention
+        /// as the solved value. Adds a wind-call correction factor (solved / called) to
+        /// the report: >1 means you under-call the wind, <1 that you over-call it, and a
+        /// negative factor means you called the wrong side.
+        #[arg(long, value_name = "SPEED", allow_hyphen_values = true)]
+        called_wind: Option<f64>,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long, default_value = "100.0")]
+        zero_distance: f64,
+
+        /// Sight height above bore (inches for imperial, mm for metric) [default: 2 in / 50 mm]
+        #[arg(long)]
+        sight_height: Option<f64>,
+
+        /// Temperature (Fahrenheit for imperial, Celsius for metric; default 59 F / 15 C)
+        #[arg(long, allow_hyphen_values = true)]
+        temperature: Option<f64>,
+
+        /// Pressure (inHg for imperial, hPa for metric; default 29.92 inHg / 1013.25 hPa)
+        #[arg(long)]
+        pressure: Option<f64>,
+
+        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station
+        /// pressure at your altitude; `qnh` is a sea-level-corrected altimeter setting,
+        /// reduced to station pressure using `--altitude`.
+        #[arg(long, value_enum)]
+        pressure_type: Option<PressureReferenceMode>,
+
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        humidity: f64,
+
+        /// Altitude (feet for imperial, meters for metric)
+        #[arg(long, default_value = "0.0", allow_hyphen_values = true)]
+        altitude: f64,
+
+        /// Unit system
+        #[arg(long, default_value = "imperial")]
+        units: UnitSystem,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "table")]
@@ -9144,6 +9283,169 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 }
             }
+        }
+
+        // MBA-1392: wind-call truing. Fully local by construction — there is no API for
+        // it and no flag that could reach one.
+        Commands::TrueWind {
+            miss,
+            velocity,
+            bc,
+            drag_model,
+            mass,
+            diameter,
+            twist_rate,
+            twist_right,
+            latitude,
+            shot_direction,
+            called_wind,
+            zero_distance,
+            sight_height,
+            temperature,
+            pressure,
+            pressure_type,
+            humidity,
+            altitude,
+            units,
+            output,
+        } => {
+            let temperature = UnitConverter::resolve_temperature(temperature, units)?;
+            // MBA-1416: a declared QNH reduces against this command's own --altitude,
+            // exactly as it does on `trajectory` and `true-velocity`.
+            let pressure = apply_pressure_mode(
+                UnitConverter::resolve_pressure(pressure, units)?,
+                altitude,
+                pressure_type,
+                units,
+            );
+
+            // Convert to the truing core's internal imperial units — factor-for-factor
+            // the `Commands::TrueVelocity` dispatch above.
+            let velocity_fps = match units {
+                UnitSystem::Imperial => velocity,
+                UnitSystem::Metric => velocity / 0.3048,
+            };
+            let weight_gr = match units {
+                UnitSystem::Imperial => mass,
+                UnitSystem::Metric => mass / GRAMS_PER_GRAIN,
+            };
+            let caliber_in = match units {
+                UnitSystem::Imperial => diameter,
+                UnitSystem::Metric => diameter / 25.4,
+            };
+            let zero_yd = match units {
+                UnitSystem::Imperial => zero_distance,
+                UnitSystem::Metric => zero_distance / 0.9144,
+            };
+            let sight_height_default = match units {
+                UnitSystem::Imperial => 2.0,
+                UnitSystem::Metric => 50.0,
+            };
+            let sight_height = sight_height.unwrap_or(sight_height_default);
+            let sight_in = match units {
+                UnitSystem::Imperial => sight_height,
+                UnitSystem::Metric => sight_height / 25.4,
+            };
+            let temp_f = match units {
+                UnitSystem::Imperial => temperature,
+                UnitSystem::Metric => temperature * 9.0 / 5.0 + 32.0,
+            };
+            let press_inhg = match units {
+                UnitSystem::Imperial => pressure,
+                UnitSystem::Metric => pressure / 33.8639,
+            };
+            let alt_ft = match units {
+                UnitSystem::Imperial => altitude,
+                UnitSystem::Metric => altitude / 0.3048,
+            };
+            // --twist-rate is mm/turn in metric and inches/turn in imperial (MBA-970);
+            // the engine treats twist as inches/turn everywhere.
+            let twist_in = match units {
+                UnitSystem::Imperial => twist_rate,
+                UnitSystem::Metric => twist_rate / 25.4,
+            };
+            // --called-wind follows --wind-speed's units: mph imperial, m/s metric.
+            let called_mph = called_wind.map(|v| match units {
+                UnitSystem::Imperial => v,
+                UnitSystem::Metric => v / MPH_TO_MPS,
+            });
+
+            // Coriolis needs BOTH halves; one without the other is a mistake, not a
+            // partially-usable input (MBA-1425: no silent fallback).
+            let earth = match (latitude, shot_direction) {
+                (Some(latitude_deg), Some(shot_azimuth_deg)) => Some(TruingEarthFrame {
+                    latitude_deg,
+                    shot_azimuth_deg,
+                }),
+                (None, None) => None,
+                (Some(_), None) => {
+                    return Err(
+                        "--latitude also needs --shot-direction before Coriolis can be \
+                         modelled (Earth rotation depends on which way downrange points)"
+                            .into(),
+                    )
+                }
+                (None, Some(_)) => {
+                    return Err(
+                        "--shot-direction also needs --latitude before Coriolis can be modelled"
+                            .into(),
+                    )
+                }
+            };
+
+            let observations = miss
+                .iter()
+                .map(|token| parse_wind_observation(token, units))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let request = WindTruingRequest {
+                observations,
+                muzzle_velocity_fps: velocity_fps,
+                bc,
+                drag_model,
+                mass_gr: weight_gr,
+                diameter_in: caliber_in,
+                zero_distance_yd: zero_yd,
+                sight_height_in: sight_in,
+                temperature_f: temp_f,
+                pressure_inhg: press_inhg,
+                humidity_pct: humidity,
+                altitude_ft: alt_ft,
+                twist: TruingTwist {
+                    rate_in: twist_in,
+                    right_hand: twist_right,
+                },
+                earth,
+                called_crosswind_mph: called_mph,
+            };
+            request.validate()?;
+
+            let wind_output = match output {
+                OutputFormat::Json => WindTruingOutput::Json,
+                OutputFormat::Csv => WindTruingOutput::Csv,
+                OutputFormat::Table => WindTruingOutput::Table,
+                OutputFormat::Pdf => {
+                    eprintln!("Error: PDF output is not supported for wind truing results.");
+                    eprintln!(
+                        "Hint: Use --output json, --output csv, or --output table instead."
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            eprintln!(
+                "Back-solving effective wind from {} observed miss{}...",
+                request.observations.len(),
+                if request.observations.len() == 1 {
+                    ""
+                } else {
+                    "es"
+                }
+            );
+            let report = solve_wind_truing(&request)?;
+            // Shared formatter: the WASM terminal renders the same bytes from the same
+            // function, so the two surfaces cannot drift.
+            print!("{}", format_wind_truing_report(&report, units, wind_output));
         }
 
         Commands::PlanTruing {

@@ -67,6 +67,10 @@ pub mod truing_uncertainty;
 // correction applied to a solved TrajectoryResult. No feature gate: must compile for wasm32;
 // fs-free (profile persistence lives in main.rs).
 pub mod truing_dsf;
+// MBA-1392: back-solve the effective crosswind from an observed horizontal miss (wind-call
+// truing). Carries its own shared table/JSON/CSV formatter so the native CLI and the WASM
+// terminal render identical bytes. No feature gate: must compile for wasm32.
+pub mod truing_wind;
 // MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
 pub mod wez;
 // MBA-1355: turret adjustment-unit conversions (SMOA/IPHY/clicks) and click-value parsing,

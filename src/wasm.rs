@@ -1027,6 +1027,7 @@ impl WasmBallistics {
             "zero" => self.handle_zero_command(&args[1..], units),
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
             "true-velocity" => self.handle_true_velocity_command(&args[1..], units),
+            "true-wind" => self.handle_true_wind_command(&args[1..], units),
             "estimate-bc" => self.handle_estimate_bc_command(&args[1..], units),
             "lead" => self.handle_lead_command(&args[1..], units),
             "powder" => self.handle_powder_command(&args[1..], units),
@@ -5121,6 +5122,427 @@ impl WasmBallistics {
         }
     }
 
+    /// `true-wind` (MBA-1392): the native command's wind-call truing on the WASM terminal.
+    ///
+    /// Back-solves the effective crosswind from one or more observed horizontal misses
+    /// ([`crate::truing_wind::solve_wind_truing`]) and renders it through the SHARED
+    /// formatter [`crate::truing_wind::format_wind_truing_report`] — the same function the
+    /// native CLI prints, so the two surfaces emit identical bytes by construction instead
+    /// of via a replicated printer. Unit conversions mirror the native
+    /// `Commands::TrueWind` dispatch factor for factor.
+    fn handle_true_wind_command(
+        &self,
+        args: &[&str],
+        units: UnitSystem,
+    ) -> Result<String, JsValue> {
+        use crate::truing::{DragModelArg, TruingEarthFrame, TruingTwist};
+        use crate::truing_wind::{
+            format_wind_truing_report, parse_wind_observation, solve_wind_truing, WindTruingOutput,
+            WindTruingRequest, MPH_TO_MPS,
+        };
+
+        // Default load follows this file's house convention (the native command
+        // clap-requires -v/-b/-m/-d/--twist-rate instead).
+        let (default_velocity, default_mass, default_diameter) = match units {
+            UnitSystem::Imperial => (2700.0, 168.0, 0.308),
+            UnitSystem::Metric => (823.0, 10.9, 7.82),
+        };
+
+        let mut miss: Vec<String> = Vec::new();
+        let mut velocity = default_velocity;
+        let mut bc = 0.475;
+        let mut drag_model = "g1";
+        let mut mass = default_mass;
+        let mut diameter = default_diameter;
+        let mut twist_rate: Option<f64> = None;
+        let mut twist_right = true;
+        let mut latitude: Option<f64> = None;
+        let mut shot_direction: Option<f64> = None;
+        let mut called_wind: Option<f64> = None;
+        let mut zero_distance = 100.0;
+        let mut sight_height: Option<f64> = None;
+        let mut temperature: Option<f64> = None;
+        let mut pressure: Option<f64> = None;
+        let mut pressure_type: Option<PressureReferenceMode> = None;
+        let mut humidity = 50.0;
+        let mut altitude = 0.0;
+        let mut output = "table";
+
+        // Every value-taking flag goes through `require_value`, so a flag dangling at the
+        // end of the line is an error, never a silent skip. `--twist-right` is the one
+        // exception and deliberately so: native clap declares it `num_args = 0..=1`, i.e.
+        // its value is genuinely optional, so a bare flag means "right-hand" and a
+        // following flag is left for the loop rather than swallowed.
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--miss" => {
+                    miss.push(require_value(args, i)?.to_string());
+                    i += 1;
+                }
+                "-v" | "--velocity" => {
+                    velocity = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid velocity"))?;
+                    i += 1;
+                }
+                "-b" | "--bc" => {
+                    bc = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid BC"))?;
+                    i += 1;
+                }
+                "--drag-model" => {
+                    drag_model = require_value(args, i)?;
+                    i += 1;
+                }
+                "-m" | "--mass" => {
+                    mass = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid mass"))?;
+                    i += 1;
+                }
+                "-d" | "--diameter" => {
+                    diameter = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid diameter"))?;
+                    i += 1;
+                }
+                "--twist-rate" => {
+                    twist_rate = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid twist rate"))?,
+                    );
+                    i += 1;
+                }
+                "--twist-right" => match args.get(i + 1) {
+                    Some(value) if !value.starts_with('-') => {
+                        twist_right = value.parse().map_err(|_| {
+                            JsValue::from_str("--twist-right must be true or false")
+                        })?;
+                        i += 1;
+                    }
+                    _ => twist_right = true,
+                },
+                "--latitude" => {
+                    latitude = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid latitude"))?,
+                    );
+                    i += 1;
+                }
+                "--shot-direction" => {
+                    shot_direction = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid shot direction"))?,
+                    );
+                    i += 1;
+                }
+                "--called-wind" => {
+                    called_wind = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid called wind"))?,
+                    );
+                    i += 1;
+                }
+                "--zero-distance" => {
+                    zero_distance = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid zero distance"))?;
+                    i += 1;
+                }
+                "--sight-height" => {
+                    sight_height = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid sight height"))?,
+                    );
+                    i += 1;
+                }
+                "--temperature" => {
+                    temperature = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid temperature"))?,
+                    );
+                    i += 1;
+                }
+                "--pressure" => {
+                    pressure = Some(
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid pressure"))?,
+                    );
+                    i += 1;
+                }
+                "--pressure-type" => {
+                    pressure_type = Some(parse_pressure_type_arg(require_value(args, i)?)?);
+                    i += 1;
+                }
+                "--humidity" => {
+                    humidity = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                    i += 1;
+                }
+                "--altitude" => {
+                    altitude = require_value(args, i)?
+                        .parse()
+                        .map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                    i += 1;
+                }
+                "-o" | "--output" => {
+                    output = require_value(args, i)?;
+                    i += 1;
+                }
+                // Native's --offline forces the local calculation; this command is local
+                // on both surfaces, so accept it as a harmless no-op for parity.
+                "--offline" => {}
+                // --units/-u (+ its value) is consumed globally in run_command.
+                "--units" | "-u" => {
+                    i += 1;
+                }
+                other if other.starts_with('-') => {
+                    return Err(JsValue::from_str(&format!("Unknown flag: {}", other)));
+                }
+                other => {
+                    return Err(JsValue::from_str(&format!(
+                        "Error: unexpected argument '{other}'"
+                    )));
+                }
+            }
+            i += 1;
+        }
+
+        if miss.is_empty() {
+            return Err(JsValue::from_str(
+                "--miss RANGE:RIGHT[:SIGMA] is required (repeatable)",
+            ));
+        }
+        let twist_rate = twist_rate.ok_or_else(|| {
+            JsValue::from_str(
+                "--twist-rate is required: spin drift is a lateral effect of the same order \
+                 as a light wind at long range, so without it the fit would report spin \
+                 drift as wind",
+            )
+        })?;
+
+        let drag_model_arg = match drag_model.to_lowercase().as_str() {
+            "g1" => DragModelArg::G1,
+            "g7" => DragModelArg::G7,
+            _ => return Err(JsValue::from_str("Invalid drag model (expected G1 or G7)")),
+        };
+
+        let wind_output = match output.to_lowercase().as_str() {
+            "table" => WindTruingOutput::Table,
+            "json" => WindTruingOutput::Json,
+            "csv" => WindTruingOutput::Csv,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid --output '{other}' (expected table, json, or csv)"
+                )))
+            }
+        };
+
+        if !(0.0..=100.0).contains(&humidity) {
+            return Err(JsValue::from_str("--humidity must be between 0 and 100"));
+        }
+        // Native clap's f64_range validators (same bounds under either unit system).
+        if !(0.0..=6000.0).contains(&velocity) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{velocity}' for '--velocity': must be in range 0..=6000"
+            )));
+        }
+        if !(0.001..=2.0).contains(&bc) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{bc}' for '--bc': must be in range 0.001..=2"
+            )));
+        }
+        if !(0.1..=2000.0).contains(&mass) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{mass}' for '--mass': must be in range 0.1..=2000"
+            )));
+        }
+        if !(0.01..=60.0).contains(&diameter) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{diameter}' for '--diameter': must be in range 0.01..=60"
+            )));
+        }
+        if !(0.1..=1000.0).contains(&twist_rate) {
+            return Err(JsValue::from_str(&format!(
+                "Error: invalid value '{twist_rate}' for '--twist-rate': must be in range 0.1..=1000"
+            )));
+        }
+        if latitude.is_some_and(|v| !(-90.0..=90.0).contains(&v)) {
+            return Err(JsValue::from_str(
+                "Error: invalid value for '--latitude': must be in range -90..=90",
+            ));
+        }
+
+        // Resolve temperature/pressure AFTER units are known — replicates the native
+        // UnitConverter::resolve_temperature / resolve_pressure defaults and range checks.
+        let temperature = match (temperature, units) {
+            (None, UnitSystem::Imperial) => 59.0,
+            (None, UnitSystem::Metric) => 15.0,
+            (Some(v), UnitSystem::Imperial) => {
+                if !(-148.0..=392.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--temperature {v} F is out of range (expected ~-148..392 F for imperial units)"
+                    )));
+                }
+                v
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(-100.0..=200.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--temperature {v} C is out of range (expected ~-100..200 C for metric units)"
+                    )));
+                }
+                v
+            }
+        };
+        let pressure = match (pressure, units) {
+            (None, UnitSystem::Imperial) => 29.92,
+            (None, UnitSystem::Metric) => 1013.25,
+            (Some(v), UnitSystem::Imperial) => {
+                if !(8.0..=33.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--pressure {v} inHg is out of range (expected ~8..33 inHg for imperial units)"
+                    )));
+                }
+                v
+            }
+            (Some(v), UnitSystem::Metric) => {
+                if !(250.0..=1100.0).contains(&v) {
+                    return Err(JsValue::from_str(&format!(
+                        "--pressure {v} hPa is out of range (expected ~250..1100 hPa for metric units)"
+                    )));
+                }
+                v
+            }
+        };
+        // A declared QNH reduces against this command's own --altitude (MBA-1416).
+        let pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
+            PressureReferenceMode::Absolute => pressure,
+            PressureReferenceMode::Qnh => {
+                let altitude_m = match units {
+                    UnitSystem::Imperial => altitude * 0.3048,
+                    UnitSystem::Metric => altitude,
+                };
+                crate::atmosphere::reduce_qnh_to_station_pressure(pressure, altitude_m)
+            }
+        };
+
+        // Convert to the truing core's internal imperial units — factor-for-factor the
+        // native `Commands::TrueWind` dispatch.
+        let velocity_fps = match units {
+            UnitSystem::Imperial => velocity,
+            UnitSystem::Metric => velocity / 0.3048,
+        };
+        let weight_gr = match units {
+            UnitSystem::Imperial => mass,
+            UnitSystem::Metric => mass / crate::constants::GRAMS_PER_GRAIN,
+        };
+        let caliber_in = match units {
+            UnitSystem::Imperial => diameter,
+            UnitSystem::Metric => diameter / 25.4,
+        };
+        let zero_yd = match units {
+            UnitSystem::Imperial => zero_distance,
+            UnitSystem::Metric => zero_distance / 0.9144,
+        };
+        let sight_height_default = match units {
+            UnitSystem::Imperial => 2.0,
+            UnitSystem::Metric => 50.0,
+        };
+        let sight_height = sight_height.unwrap_or(sight_height_default);
+        let sight_in = match units {
+            UnitSystem::Imperial => sight_height,
+            UnitSystem::Metric => sight_height / 25.4,
+        };
+        let temp_f = match units {
+            UnitSystem::Imperial => temperature,
+            UnitSystem::Metric => temperature * 9.0 / 5.0 + 32.0,
+        };
+        let press_inhg = match units {
+            UnitSystem::Imperial => pressure,
+            UnitSystem::Metric => pressure / 33.8639,
+        };
+        let alt_ft = match units {
+            UnitSystem::Imperial => altitude,
+            UnitSystem::Metric => altitude / 0.3048,
+        };
+        let twist_in = match units {
+            UnitSystem::Imperial => twist_rate,
+            UnitSystem::Metric => twist_rate / 25.4, // mm/turn -> inches/turn
+        };
+        let called_mph = called_wind.map(|v| match units {
+            UnitSystem::Imperial => v,
+            UnitSystem::Metric => v / MPH_TO_MPS,
+        });
+
+        // Coriolis needs BOTH halves; one without the other is a mistake, not a
+        // partially-usable input. Same error text as native.
+        let earth = match (latitude, shot_direction) {
+            (Some(latitude_deg), Some(shot_azimuth_deg)) => Some(TruingEarthFrame {
+                latitude_deg,
+                shot_azimuth_deg,
+            }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(JsValue::from_str(
+                    "--latitude also needs --shot-direction before Coriolis can be modelled \
+                     (Earth rotation depends on which way downrange points)",
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(JsValue::from_str(
+                    "--shot-direction also needs --latitude before Coriolis can be modelled",
+                ))
+            }
+        };
+
+        let mut observations = Vec::with_capacity(miss.len());
+        for token in &miss {
+            observations.push(
+                parse_wind_observation(token, engine_units(units))
+                    .map_err(|e| JsValue::from_str(&e))?,
+            );
+        }
+
+        let request = WindTruingRequest {
+            observations,
+            muzzle_velocity_fps: velocity_fps,
+            bc,
+            drag_model: drag_model_arg,
+            mass_gr: weight_gr,
+            diameter_in: caliber_in,
+            zero_distance_yd: zero_yd,
+            sight_height_in: sight_in,
+            temperature_f: temp_f,
+            pressure_inhg: press_inhg,
+            humidity_pct: humidity,
+            altitude_ft: alt_ft,
+            twist: TruingTwist {
+                rate_in: twist_in,
+                right_hand: twist_right,
+            },
+            earth,
+            called_crosswind_mph: called_mph,
+        };
+        let report =
+            solve_wind_truing(&request).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(format_wind_truing_report(
+            &report,
+            engine_units(units),
+            wind_output,
+        ))
+    }
+
     fn handle_estimate_bc_command(
         &self,
         args: &[&str],
@@ -6954,6 +7376,7 @@ Commands:
   zero           Calculate sight adjustment for zero
   monte-carlo    Run Monte Carlo simulation
   true-velocity  Calculate effective muzzle velocity from observed drop
+  true-wind      Back-solve effective crosswind from an observed horizontal miss
   estimate-bc    Estimate BC from trajectory data
   lead           Calculate moving-target lead (hold)
   powder         Resolve powder-temperature velocity shift (no trajectory)
@@ -7237,6 +7660,53 @@ True Velocity Command:
                                  terminal always calculates locally)
     -o, --output <FORMAT>        Output format (table/json/csv) [default: table]
 
+True Wind Command:
+  ballistics true-wind --miss <RANGE:RIGHT> --twist-rate <TWIST> [OPTIONS]
+
+  Back-solves the effective crosswind from an observed horizontal miss, so wind
+  CALLS can be calibrated instead of guessed at. Spin drift is always modelled
+  (hence the required twist rate); Coriolis is modelled when --latitude and
+  --shot-direction are both supplied. Anything the model has no data for stays
+  absorbed in the solved wind, and the report says which effects those were.
+
+  Signs: --miss positive = impact RIGHT of aim. Solved wind positive = wind FROM
+  the shooter's LEFT (9 o'clock) pushing impacts right; negative = FROM the right
+  pushing left. Wind-FROM convention (0 = headwind, per the 0.19.0 sign fix).
+  --miss values are LINEAR inches off the target, not dial readings, so scope
+  tracking correction factors do not apply and this command takes none.
+
+  Options:
+    --miss <RANGE:RIGHT[:SIGMA]> Observed horizontal miss (repeatable; e.g.
+                                 600:8.5 or 600:8.5:0.75). RANGE follows --units,
+                                 RIGHT/SIGMA are inches in BOTH unit systems.
+                                 Required. Supply SIGMA on every --miss or none
+    -v, --velocity <VEL>         Known muzzle velocity (fps/m/s) [default:
+                                 2700/823]
+    -b, --bc <BC>                Ballistic coefficient [default: 0.475]
+    --drag-model <MODEL>         Drag model (G1/G7) [default: g1]
+    -m, --mass <MASS>            Bullet weight (grains/grams)
+    -d, --diameter <DIA>         Bullet diameter (inches/mm)
+    --twist-rate <TWIST>         Barrel twist (in/turn imperial, mm/turn metric).
+                                 Required: without it spin drift would be read
+                                 as wind
+    --twist-right [<BOOL>]       Right-hand twist [default: true]
+    --latitude <LAT>             Firing latitude (degrees). With --shot-direction
+                                 this subtracts Coriolis
+    --shot-direction <AZ>        Shot azimuth (degrees, 0=N, 90=E). Pairs with
+                                 --latitude
+    --called-wind <SPEED>        The wind you CALLED (mph/m/s, same sign
+                                 convention). Adds a wind-call correction factor
+    --zero-distance <DIST>       Zero distance (yd/m) [default: 100]
+    --sight-height <HEIGHT>      Sight height above bore (in/mm) [default: 2/50]
+    --temperature <T>            Temperature (°F/°C) [default: 59/15]
+    --pressure <P>               Pressure (inHg/hPa) [default: 29.92/1013.25]
+    --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
+    --humidity <H>               Humidity (0-100%) [default: 50]
+    --altitude <A>               Altitude (ft/m) [default: 0]
+    --offline                    Accepted for native-command parity (this command
+                                 is local on both surfaces)
+    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]
+
 Estimate BC Command:
   ballistics estimate-bc [OPTIONS]
 
@@ -7382,6 +7852,8 @@ Examples:
   ballistics true-velocity --range 300 --measured-drop 1.8 -b 0.475 -m 168 -d 0.308
   ballistics true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
     --observed 900:10.9 -b 0.475 -m 168 -d 0.308 --chrono-velocity 2700
+  ballistics true-wind --miss 500:12.4 --miss 700:26.8 -v 2700 -b 0.475 -m 168 \
+    -d 0.308 --drag-model g7 --twist-rate 11 --called-wind 6
   ballistics recoil -b 168 -c 43 -v 2700 -f 8.5
   ballistics power-factor -w 147 -v 900 --organization uspsa"#
             .to_string()
