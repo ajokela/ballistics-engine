@@ -273,6 +273,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not store the device's click size, so without the flag the counts remain reported
   as unmapped, unchanged). Omitting every new input is byte-identical to 0.30.x.
 
+### Compatibility
+- **Two intentional default-output deltas** (everything else in this release is
+  byte-identical without its new flag). (1) The MBA-1367 sentinel fix below changes
+  output only for the explicit-`--wind-direction 0`-plus-location-CSV combination.
+  (2) `summary.equivalent_horizontal_range_m` and a matching CLI/WASM line (MBA-1395)
+  appear on ANY inclined shot (`shooting_angle != 0`) with no opt-in flag, because a
+  shoot-to range is meaningful exactly when a look angle is set; flat-fire output is
+  unchanged. A consumer that must reject unknown response fields will see this on
+  inclined-shot responses.
+- **solve-json v1 grows only by addition** (see `docs/SOLVE_JSON_V1.md`): new request
+  fields are optional and default to prior behavior; new response fields are omitted when
+  their feature is inactive (the one exception is the EHR field above). Removing,
+  renaming, re-signing, or re-unitting a field still requires v2.
+
 ### Fixed
 - **`trajectory --wind-direction 0` no longer loses to a location CSV** (MBA-1367
   sentinel fix). The dispatch treated `wind_direction != 0.0` as "user set", so an
