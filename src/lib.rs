@@ -80,6 +80,11 @@ pub mod wind_scenarios;
 // shared by the CLI, the WASM terminal and the FFI. No feature gate: must compile for
 // wasm32; pure math + serde, no I/O (file reading stays in main.rs/wasm.rs).
 pub mod reticle;
+// MBA-1440: import Bero's "Ventum" reticle spec into `reticle::ReticleDescription` so a
+// reticle drawn in that tool can be hold-solved by `reticle::hold_point_in_reticle`. Pure
+// transform + serde, no I/O; must compile for wasm32. Deliberately NOT wired into the
+// CLI / solve-json / WASM / FFI surfaces yet (that exposure is held for review).
+pub mod reticle_import;
 // MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
 pub mod wez;
 // MBA-1355: turret adjustment-unit conversions (SMOA/IPHY/clicks) and click-value parsing,

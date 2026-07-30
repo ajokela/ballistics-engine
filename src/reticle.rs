@@ -216,6 +216,10 @@ pub enum ReticleError {
         value: f64,
         rule: &'static str,
     },
+    /// An imported reticle specification (e.g. a Ventum spec, see
+    /// [`crate::reticle_import`]) could not be parsed or was structurally invalid. Carries
+    /// a human-readable reason such as the underlying deserializer's message.
+    InvalidSpec(String),
 }
 
 impl fmt::Display for ReticleError {
@@ -252,6 +256,9 @@ impl fmt::Display for ReticleError {
                 value,
                 rule,
             } => write!(f, "{parameter} must be {rule} (got {value})"),
+            ReticleError::InvalidSpec(reason) => {
+                write!(f, "invalid reticle specification: {reason}")
+            }
         }
     }
 }
