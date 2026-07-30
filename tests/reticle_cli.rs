@@ -17,6 +17,7 @@ use ballistics_engine::reticle::{
     format_reticle_description, format_reticle_hold, hold_point_in_reticle, FocalPlane, MarkKind,
     ReticleDescription, ReticleFormat, ReticleMark,
 };
+use ballistics_engine::reticle_import::import_ventum_reticle;
 
 const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
 
@@ -575,4 +576,103 @@ fn solve_json_rejects_a_reticle_range_outside_the_trajectory() {
     let (response, ok) = solve_json(&request);
     assert!(!ok, "{response}");
     assert_eq!(response["status"], "error");
+}
+
+/// MBA-1440: Bero's Vortex MBR dot-tree in the Ventum format — three `dot` rows, each a
+/// horizontal mirrored `repeat`, expanding to a 78-mark FFP tree.
+const VENTUM_MBR: &str = r#"{
+  "name": "MBR",
+  "plane": "ffp",
+  "unit": "mil",
+  "spec": [
+    { "type":"dot", "y":4,  "x":1, "r":0.12, "repeat":{ "axis":"x","step":1,"n":9,  "mirror":true } },
+    { "type":"dot", "y":8,  "x":1, "r":0.12, "repeat":{ "axis":"x","step":1,"n":13, "mirror":true } },
+    { "type":"dot", "y":12, "x":1, "r":0.12, "repeat":{ "axis":"x","step":1,"n":17, "mirror":true } }
+  ]
+}"#;
+
+/// `reticle import`'s stdout IS the shared formatter's string over the converter's own
+/// output, byte for byte — the same MBA-1418 verbatim contract the generators are held to
+/// above. Equality, not fragment checks, so a formatter drift can't slip through.
+#[test]
+fn import_output_is_the_shared_formatter_verbatim() {
+    let dir = tempfile_dir("import-fmt");
+    let path = dir.join("mbr.ventum.json");
+    std::fs::write(&path, VENTUM_MBR).unwrap();
+
+    let expected_desc = import_ventum_reticle(VENTUM_MBR).unwrap();
+    for (flag, format) in [("table", ReticleFormat::Table), ("json", ReticleFormat::Json)] {
+        let (stdout, stderr, ok) = run(&["reticle", "import", path.to_str().unwrap(), "-o", flag]);
+        assert!(ok, "import -o {flag} failed: {stderr}");
+        assert_eq!(
+            stdout,
+            format_reticle_description(&expected_desc, format),
+            "import -o {flag} must be the shared formatter"
+        );
+    }
+}
+
+/// `reticle import <ventum> -o json` emits exactly what `hold --reticle-json` consumes: the
+/// converted description drops straight into the hold surface with no reshaping. The MBR
+/// expands to 78 FFP dots; a hold on the y=4 row lands on a real dot (distance 0).
+#[test]
+fn import_json_round_trips_into_hold() {
+    let dir = tempfile_dir("import-roundtrip");
+    let ventum = dir.join("mbr.ventum.json");
+    std::fs::write(&ventum, VENTUM_MBR).unwrap();
+
+    let (stdout, stderr, ok) = run(&["reticle", "import", ventum.to_str().unwrap(), "-o", "json"]);
+    assert!(ok, "import failed: {stderr}");
+    let parsed: ReticleDescription = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed.name, "MBR");
+    assert_eq!(parsed.focal_plane, FocalPlane::First);
+    assert_eq!(parsed.marks.len(), 78);
+
+    let canonical = dir.join("mbr.json");
+    std::fs::write(&canonical, &stdout).unwrap();
+    // (down 4, right 2) is a dot in the first (y=4) row; the hold lands exactly on it.
+    let (hold_out, stderr, ok) = run(&[
+        "reticle",
+        "hold",
+        "--reticle-json",
+        canonical.to_str().unwrap(),
+        "--drop-mil",
+        "4.0",
+        "--wind-mil",
+        "2.0",
+        "--mag",
+        "10",
+    ]);
+    assert!(ok, "hold failed: {stderr}");
+    assert!(hold_out.contains("distance from hold: 0.000 mil"), "{hold_out}");
+}
+
+/// Import rejects file-level failures the way the rest of the surface does: a missing file,
+/// a decoration-only spec that yields no holdable marks (`validate` catches it as `NoMarks`
+/// rather than emitting an empty reticle), and malformed input.
+#[test]
+fn import_rejects_bad_inputs() {
+    let dir = tempfile_dir("import-reject");
+
+    // Missing file: the error names what it was reading.
+    let missing = dir.join("nope.json");
+    let (_, stderr, ok) = run(&["reticle", "import", missing.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(stderr.contains("reading reticle file"), "{stderr}");
+
+    // Decoration-only spec (a lone line) has no holdable marks -> rejected, not an empty reticle.
+    let deco = dir.join("deco.ventum.json");
+    std::fs::write(
+        &deco,
+        r#"{"name":"deco","plane":"ffp","unit":"mil","spec":[{"type":"line","x1":-5,"y1":0,"x2":5,"y2":0}]}"#,
+    )
+    .unwrap();
+    let (_, stderr, ok) = run(&["reticle", "import", deco.to_str().unwrap()]);
+    assert!(!ok, "decoration-only import should fail: {stderr}");
+
+    // Malformed Ventum JSON.
+    let bad = dir.join("bad.ventum.json");
+    std::fs::write(&bad, "{not json").unwrap();
+    let (_, stderr, ok) = run(&["reticle", "import", bad.to_str().unwrap()]);
+    assert!(!ok, "malformed import should fail: {stderr}");
 }

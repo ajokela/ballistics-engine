@@ -3205,6 +3205,21 @@ enum ReticleAction {
         #[command(subcommand)]
         layout: ReticleLayout,
     },
+
+    /// Convert a third-party "Ventum" reticle spec into the engine's reticle description
+    /// (MBA-1440). Emits the schema that `reticle hold --reticle-json` and
+    /// `profile save --reticle-json` consume, so a reticle authored in the Ventum tool can
+    /// be hold-solved here.
+    Import {
+        /// Path to the Ventum reticle JSON file
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Output format: table (default) or json. `-o json` emits the schema that
+        /// `reticle hold --reticle-json` and `profile save --reticle-json` consume.
+        #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
 }
 
 /// `reticle generate` layouts (MBA-1361). All three are generic parametric geometry — no
@@ -22840,6 +22855,22 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
             print!(
                 "{}",
                 format_reticle_description(&description, reticle_format(common.output)?)
+            );
+            Ok(())
+        }
+
+        ReticleAction::Import { file, output } => {
+            let json = std::fs::read_to_string(&file)
+                .map_err(|e| format!("reading reticle file '{}': {e}", file.display()))?;
+            let description = ballistics_engine::reticle_import::import_ventum_reticle(&json)
+                .map_err(|e| e.to_string())?;
+            // The converter builds but does not validate (matching `mil_grid`/`tree`/
+            // `bdc_from_drops`); validating here surfaces a decoration-only import as a clean
+            // `NoMarks` error rather than an empty reticle that silently fails downstream.
+            description.validate().map_err(|e| e.to_string())?;
+            print!(
+                "{}",
+                format_reticle_description(&description, reticle_format(output)?)
             );
             Ok(())
         }
