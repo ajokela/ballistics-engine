@@ -217,6 +217,21 @@ impl std::fmt::Display for ApiError {
     }
 }
 
+impl ApiError {
+    /// A CLI-friendly hint for auth/subscription failures, if applicable.
+    pub fn cli_hint(&self) -> Option<&'static str> {
+        match self {
+            ApiError::ServerError(401, _) => Some(
+                "Unauthorized - run `ballistics login` (create a token at https://ballisticsinsight.com/account).",
+            ),
+            ApiError::ServerError(402, _) => Some(
+                "This endpoint needs an active Ballistics Insight subscription: https://ballisticsinsight.com/subscribe",
+            ),
+            _ => None,
+        }
+    }
+}
+
 impl std::error::Error for ApiError {}
 
 /// HTTP client for Flask API communication
@@ -560,6 +575,40 @@ impl ApiClient {
         serde_json::from_str(&response_body)
             .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))
     }
+
+    /// Generic authenticated POST of a JSON body to `<base_url><path>`, returning the parsed JSON
+    /// response. Used by the online reverse-solver subcommands; sends the Bearer token.
+    #[cfg(feature = "online")]
+    pub fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}{}", self.base_url, path);
+        let body_str = serde_json::to_string(body)
+            .map_err(|e| ApiError::RequestError(format!("Failed to serialize request: {}", e)))?;
+        let mut req = ureq::post(&url)
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")));
+        if let Some((name, value)) = self.auth_header() {
+            req = req.header(name, &value);
+        }
+        let mut response = req.send(&body_str).map_err(map_ureq_error)?;
+        let status = response.status();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| ApiError::InvalidResponse(format!("Failed to read response: {}", e)))?;
+        if !status.is_success() {
+            return Err(ApiError::ServerError(status.as_u16(), text));
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))
+    }
 }
 
 /// Map a ureq 3.x transport/protocol error to an `ApiError`.
@@ -883,5 +932,15 @@ mod tests {
     fn auth_header_absent_without_token() {
         let c = ApiClient::new("https://x", 5);
         assert!(c.auth_header().is_none());
+    }
+
+    #[test]
+    fn cli_hint_maps_auth_errors() {
+        assert!(ApiError::ServerError(401, "x".into()).cli_hint().unwrap().contains("login"));
+        assert!(ApiError::ServerError(402, "x".into())
+            .cli_hint()
+            .unwrap()
+            .contains("subscription"));
+        assert!(ApiError::ServerError(500, "x".into()).cli_hint().is_none());
     }
 }
