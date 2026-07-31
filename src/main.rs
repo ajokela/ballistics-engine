@@ -420,6 +420,66 @@ enum Commands {
         api_url: String,
     },
 
+    /// Recommend an optimal barrel twist rate (online reverse solver)
+    #[cfg(feature = "online")]
+    RecommendTwist {
+        /// Bullet caliber in inches
+        #[arg(long)]
+        caliber: f64,
+        /// Bullet weight in grains
+        #[arg(long)]
+        weight: f64,
+        /// Total bullet length in inches
+        #[arg(long)]
+        overall_length: f64,
+        /// Nose length in inches
+        #[arg(long)]
+        nose_length: f64,
+        /// Muzzle velocity in fps (optional)
+        #[arg(long)]
+        muzzle_velocity: Option<f64>,
+        /// API base URL
+        #[arg(long, default_value = "https://api.ballistics.7.62x51mm.sh")]
+        api_url: String,
+    },
+
+    /// Recommend cartridge overall length (online reverse solver)
+    #[cfg(feature = "online")]
+    RecommendCol {
+        /// Cartridge name, e.g. "308 Winchester"
+        #[arg(long)]
+        cartridge: String,
+        /// Bullet weight in grains (optional)
+        #[arg(long)]
+        bullet_weight: Option<i64>,
+        /// Bullet type/model (optional)
+        #[arg(long)]
+        bullet_type: Option<String>,
+        /// API base URL
+        #[arg(long, default_value = "https://api.ballistics.7.62x51mm.sh")]
+        api_url: String,
+    },
+
+    /// Calibrate a bullet's BC from its dimensions (online reverse solver)
+    #[cfg(feature = "online")]
+    CalibrateBc {
+        /// Bullet diameter in inches
+        #[arg(long)]
+        diameter: f64,
+        /// Bullet overall length in inches
+        #[arg(long)]
+        length: f64,
+        /// Bullet weight in grains
+        #[arg(long)]
+        weight: f64,
+        /// Bullet type/model (optional)
+        #[arg(long)]
+        bullet_type: Option<String>,
+        /// API base URL
+        #[arg(long, default_value = "https://api.ballistics.7.62x51mm.sh")]
+        api_url: String,
+    },
+
     /// Calculate a single trajectory
     Trajectory {
         /// Load parameters from CSV profile file (gun_profiles.csv format).
@@ -6958,6 +7018,27 @@ fn dsf_transonic_gap_warning() -> String {
         .to_string()
 }
 
+#[cfg(feature = "online")]
+fn online_client(api_url: &str) -> ApiClient {
+    ApiClient::new(api_url, 30).with_token(ballistics_engine::credentials::load_token())
+}
+
+#[cfg(feature = "online")]
+fn online_render(result: Result<serde_json::Value, ballistics_engine::api_client::ApiError>) {
+    match result {
+        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+        Err(e) => {
+            eprintln!(
+                "{}",
+                e.cli_hint()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("Online request failed: {}", e))
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
@@ -7024,20 +7105,64 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(vt) = velocity_tolerance {
                 body["velocity_tolerance"] = serde_json::Value::from(vt);
             }
-            let client = ApiClient::new(&api_url, 30)
-                .with_token(ballistics_engine::credentials::load_token());
-            match client.post_json("/v1/recommend_powders", &body) {
-                Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
-                Err(e) => {
-                    eprintln!(
-                        "{}",
-                        e.cli_hint()
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| format!("Online request failed: {}", e))
-                    );
-                    std::process::exit(1);
-                }
+            online_render(online_client(&api_url).post_json("/v1/recommend_powders", &body));
+        }
+
+        #[cfg(feature = "online")]
+        Commands::RecommendTwist {
+            caliber,
+            weight,
+            overall_length,
+            nose_length,
+            muzzle_velocity,
+            api_url,
+        } => {
+            let mut body = serde_json::json!({
+                "caliber": caliber,
+                "weight": weight,
+                "overall_length": overall_length,
+                "nose_length": nose_length,
+            });
+            if let Some(mv) = muzzle_velocity {
+                body["muzzle_velocity"] = serde_json::Value::from(mv);
             }
+            online_render(online_client(&api_url).post_json("/v1/recommend_twist", &body));
+        }
+
+        #[cfg(feature = "online")]
+        Commands::RecommendCol {
+            cartridge,
+            bullet_weight,
+            bullet_type,
+            api_url,
+        } => {
+            let mut params: Vec<(String, String)> = vec![("cartridge".into(), cartridge)];
+            if let Some(bw) = bullet_weight {
+                params.push(("bullet_weight".into(), bw.to_string()));
+            }
+            if let Some(bt) = bullet_type {
+                params.push(("bullet_type".into(), bt));
+            }
+            online_render(online_client(&api_url).get_json("/v1/recommend_col", &params));
+        }
+
+        #[cfg(feature = "online")]
+        Commands::CalibrateBc {
+            diameter,
+            length,
+            weight,
+            bullet_type,
+            api_url,
+        } => {
+            let mut body = serde_json::json!({
+                "diameter": diameter,
+                "length": length,
+                "weight": weight,
+            });
+            if let Some(bt) = bullet_type {
+                body["bullet_type"] = serde_json::Value::from(bt);
+            }
+            online_render(online_client(&api_url).post_json("/v1/calibrate_bc", &body));
         }
 
         Commands::Trajectory {

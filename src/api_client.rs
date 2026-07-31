@@ -609,6 +609,40 @@ impl ApiClient {
         serde_json::from_str(&text)
             .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))
     }
+
+    /// Generic authenticated GET with query params to `<base_url><path>`, returning the parsed
+    /// JSON response. Sibling of `post_json` for GET reverse-solver endpoints. Sends the Bearer.
+    #[cfg(feature = "online")]
+    pub fn get_json(
+        &self,
+        path: &str,
+        params: &[(String, String)],
+    ) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = ureq::get(&url)
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .header("Accept", "application/json")
+            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")));
+        for (k, v) in params {
+            req = req.query(k.as_str(), v.as_str());
+        }
+        if let Some((name, value)) = self.auth_header() {
+            req = req.header(name, &value);
+        }
+        let mut response = req.call().map_err(map_ureq_error)?;
+        let status = response.status();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| ApiError::InvalidResponse(format!("Failed to read response: {}", e)))?;
+        if !status.is_success() {
+            return Err(ApiError::ServerError(status.as_u16(), text));
+        }
+        serde_json::from_str(&text)
+            .map_err(|e| ApiError::InvalidResponse(format!("JSON parse error: {}", e)))
+    }
 }
 
 /// Map a ureq 3.x transport/protocol error to an `ApiError`.
