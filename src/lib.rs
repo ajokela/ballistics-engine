@@ -147,6 +147,9 @@ pub mod stability_advanced;
 #[cfg(feature = "online")]
 pub mod api_client;
 
+#[cfg(feature = "online")]
+pub mod credentials;
+
 // BC5D table auto-download (feature-gated)
 #[cfg(feature = "online")]
 pub mod bc_table_download;
