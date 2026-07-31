@@ -397,6 +397,29 @@ enum Commands {
     #[cfg(feature = "online")]
     Logout,
 
+    /// Recommend powders for a load (online reverse solver; needs `login` + a subscription)
+    #[cfg(feature = "online")]
+    RecommendPowder {
+        /// Cartridge name, e.g. "308 Winchester"
+        #[arg(long)]
+        cartridge: String,
+        /// Bullet weight in grains
+        #[arg(long)]
+        bullet_weight: f64,
+        /// Desired muzzle velocity in fps
+        #[arg(long)]
+        desired_velocity: f64,
+        /// Barrel length in inches (optional)
+        #[arg(long)]
+        barrel_length: Option<f64>,
+        /// Velocity tolerance in fps (optional)
+        #[arg(long)]
+        velocity_tolerance: Option<i64>,
+        /// API base URL
+        #[arg(long, default_value = "https://api.ballistics.7.62x51mm.sh")]
+        api_url: String,
+    },
+
     /// Calculate a single trajectory
     Trajectory {
         /// Load parameters from CSV profile file (gun_profiles.csv format).
@@ -6980,6 +7003,42 @@ fn main() -> Result<(), Box<dyn Error>> {
                 std::process::exit(1);
             }
         },
+
+        #[cfg(feature = "online")]
+        Commands::RecommendPowder {
+            cartridge,
+            bullet_weight,
+            desired_velocity,
+            barrel_length,
+            velocity_tolerance,
+            api_url,
+        } => {
+            let mut body = serde_json::json!({
+                "cartridge": cartridge,
+                "bullet_weight": bullet_weight,
+                "desired_velocity": desired_velocity,
+            });
+            if let Some(bl) = barrel_length {
+                body["barrel_length"] = serde_json::Value::from(bl);
+            }
+            if let Some(vt) = velocity_tolerance {
+                body["velocity_tolerance"] = serde_json::Value::from(vt);
+            }
+            let client = ApiClient::new(&api_url, 30)
+                .with_token(ballistics_engine::credentials::load_token());
+            match client.post_json("/v1/recommend_powders", &body) {
+                Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        e.cli_hint()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("Online request failed: {}", e))
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
 
         Commands::Trajectory {
             profile,
