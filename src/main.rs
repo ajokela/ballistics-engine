@@ -385,6 +385,18 @@ enum Commands {
     /// Run a Model Context Protocol (MCP) server over stdio, exposing solve and engine_info tools
     Mcp,
 
+    /// Save a CLI access token (from ballisticsinsight.com/account) for the online reverse solvers
+    #[cfg(feature = "online")]
+    Login {
+        /// The token; if omitted, you'll be prompted to paste it
+        #[arg(long)]
+        token: Option<String>,
+    },
+
+    /// Remove the saved CLI access token
+    #[cfg(feature = "online")]
+    Logout,
+
     /// Calculate a single trajectory
     Trajectory {
         /// Load parameters from CSV profile file (gun_profiles.csv format).
@@ -6930,6 +6942,44 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::SolveJson => std::process::exit(solve_json_command::run_stdio()),
 
         Commands::Mcp => std::process::exit(mcp_command::run_stdio()),
+
+        #[cfg(feature = "online")]
+        Commands::Login { token } => {
+            let token = match token {
+                Some(t) => t,
+                None => {
+                    eprintln!("Paste your CLI token from https://ballisticsinsight.com/account:");
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line).ok();
+                    line.trim().to_string()
+                }
+            };
+            if token.is_empty() {
+                eprintln!("No token provided.");
+                std::process::exit(1);
+            }
+            match ballistics_engine::credentials::save_token(&token) {
+                Ok(()) => {
+                    let where_ = ballistics_engine::credentials::credentials_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "the credentials file".to_string());
+                    println!("Saved CLI token to {}", where_);
+                }
+                Err(e) => {
+                    eprintln!("Failed to save token: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        #[cfg(feature = "online")]
+        Commands::Logout => match ballistics_engine::credentials::clear_token() {
+            Ok(()) => println!("Removed saved CLI token."),
+            Err(e) => {
+                eprintln!("Failed to remove token: {}", e);
+                std::process::exit(1);
+            }
+        },
 
         Commands::Trajectory {
             profile,
