@@ -223,6 +223,8 @@ impl std::error::Error for ApiError {}
 pub struct ApiClient {
     base_url: String,
     timeout: Duration,
+    #[cfg_attr(not(feature = "online"), allow(dead_code))]
+    token: Option<String>,
 }
 
 impl ApiClient {
@@ -238,7 +240,22 @@ impl ApiClient {
         Self {
             base_url,
             timeout: Duration::from_secs(timeout_secs),
+            token: None,
         }
+    }
+
+    /// Attach a Personal Access Token; sent as `Authorization: Bearer <token>` on requests.
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// The Authorization header pair to attach, if a token is configured.
+    #[cfg(feature = "online")]
+    fn auth_header(&self) -> Option<(&'static str, String)> {
+        self.token
+            .as_ref()
+            .map(|t| ("Authorization", format!("Bearer {}", t)))
     }
 
     /// Calculate trajectory via Flask API
@@ -273,6 +290,10 @@ impl ApiClient {
             .query("bullet_mass", format!("{:.1}", mass_grains))
             .query("muzzle_velocity", format!("{:.1}", velocity_fps))
             .query("target_distance", format!("{:.1}", distance_yards));
+
+        if let Some((name, value)) = self.auth_header() {
+            req = req.header(name, &value);
+        }
 
         // Add optional parameters
         if let Some(zero_range) = request.zero_range {
@@ -512,15 +533,17 @@ impl ApiClient {
         let body = serde_json::to_string(request)
             .map_err(|e| ApiError::RequestError(format!("Failed to serialize request: {}", e)))?;
 
-        let mut response = ureq::post(&url)
+        let mut req = ureq::post(&url)
             .config()
             .timeout_global(Some(self.timeout))
             .build()
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
-            .send(&body)
-            .map_err(map_ureq_error)?;
+            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")));
+        if let Some((name, value)) = self.auth_header() {
+            req = req.header(name, &value);
+        }
+        let mut response = req.send(&body).map_err(map_ureq_error)?;
 
         // In ureq 3.x, 4xx/5xx responses are returned as Ok; check status explicitly.
         let status = response.status();
@@ -843,5 +866,22 @@ mod tests {
             format!("{}", ApiError::ServerError(500, "Internal error".to_string())),
             "Server error 500: Internal error"
         );
+    }
+
+    #[cfg(feature = "online")]
+    #[test]
+    fn auth_header_present_when_token_set() {
+        let c = ApiClient::new("https://x", 5).with_token(Some("bpat_abc".into()));
+        assert_eq!(
+            c.auth_header(),
+            Some(("Authorization", "Bearer bpat_abc".to_string()))
+        );
+    }
+
+    #[cfg(feature = "online")]
+    #[test]
+    fn auth_header_absent_without_token() {
+        let c = ApiClient::new("https://x", 5);
+        assert!(c.auth_header().is_none());
     }
 }
