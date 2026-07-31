@@ -8552,7 +8552,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         request.twist_rate = Some(twist);
                     }
 
-                    let api_client = ApiClient::new(&api_url, api_timeout);
+                    let api_client = ApiClient::new(&api_url, api_timeout)
+                        .with_token(ballistics_engine::credentials::load_token());
 
                     let api_result = api_client.calculate_trajectory(&request);
 
@@ -9807,7 +9808,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         use_bc_enhancement: Some(true),
                     };
 
-                    let api_client = ApiClient::new(&api_url, api_timeout);
+                    let api_client = ApiClient::new(&api_url, api_timeout)
+                        .with_token(ballistics_engine::credentials::load_token());
 
                     eprintln!("Calculating effective velocity via API...");
 
