@@ -5,6 +5,27 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Online reverse-solver subcommands** for the `ballistics` CLI, behind the default-on
+  `online` feature. `login` saves a CLI access token from your ballisticsinsight.com account
+  (the `BALLISTICS_API_TOKEN` environment variable overrides the on-disk
+  `~/.ballistics/credentials.toml`, which is written `0600`) and `logout` clears it; the saved
+  token is attached as a bearer credential when calling the hosted service:
+  - `recommend-powder` — powder and charge recommendations for a cartridge, bullet weight, and
+    desired muzzle velocity (`--barrel-length`, `--velocity-tolerance` optional).
+  - `recommend-twist` — an optimal barrel twist rate from bullet caliber, weight, overall
+    length, and nose length.
+  - `recommend-col` — a recommended cartridge overall length for a cartridge (and optional
+    bullet weight/type).
+  - `calibrate-bc` — a bullet's ballistic coefficient estimated from its diameter, length, and
+    weight.
+  Each targets `https://api.ballistics.7.62x51mm.sh` by default (override with `--api-url`) and
+  prints an actionable hint when the service asks the caller to sign in. These subcommands call
+  an online service; every local trajectory and analysis subcommand is unchanged and needs no
+  token or network access.
+
 ## [0.31.0] - 2026-07-29
 
 ### Added
