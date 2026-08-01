@@ -42,6 +42,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Multiple Output Formats** - JSON, CSV, formatted tables, and printable PDF dope cards
 - **Terminal Chart** - Inline drop, drift, velocity, and energy vs. range charts right in the terminal (`trajectory --plot`, Unicode braille-dot canvas by default, `--plot ascii` fallback); pure Rust, zero new dependencies, no ANSI colors — see [CLI_USAGE.md](CLI_USAGE.md#terminal-chart---plot)
 - **Profile import**: `ballistics profile import file.a7p` — imports ArcherBC2 `.a7p` profiles (rifle, bullet, atmosphere, zero) with a full mapping report; `--dry-run` previews without saving
+- **Online Reverse Solvers** - Optional `login` + `recommend-powder`/`recommend-twist`/`recommend-col`/`calibrate-bc` subcommands query the hosted service for load, twist, cartridge-overall-length, and BC suggestions using a CLI access token saved from your ballisticsinsight.com account (`BALLISTICS_API_TOKEN` env var, or `~/.ballistics/credentials.toml`); all local subcommands work offline with no token — see [CLI_USAGE.md](CLI_USAGE.md#online-reverse-solvers)
 
 ## Installation
 

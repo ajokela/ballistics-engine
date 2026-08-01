@@ -3757,6 +3757,41 @@ back to another curve:
 - **ICAO Standard Atmosphere**: Full implementation up to 84km
 - **CIPM Formula**: Precise air density calculations with humidity
 
+## Online Reverse Solvers
+
+These subcommands call the hosted service at `https://api.ballistics.7.62x51mm.sh` (override
+with `--api-url`) instead of computing locally. They require a CLI access token — create one at
+`ballisticsinsight.com/account` and save it with `login`. Every other subcommand is fully local
+and needs no token or network access.
+
+```bash
+# Save your CLI access token (or run `login` with no --token to be prompted)
+ballistics login --token bpat_XXXXXXXX
+# ...and remove it later
+ballistics logout
+```
+
+The token is read from the `BALLISTICS_API_TOKEN` environment variable if set, otherwise from
+`~/.ballistics/credentials.toml` (written with `0600` permissions).
+
+```bash
+# Powder/charge recommendations for a load
+ballistics recommend-powder --cartridge "308 Winchester" --bullet-weight 175 \
+    --desired-velocity 2600            # optional: --barrel-length 24 --velocity-tolerance 25
+
+# Optimal barrel twist rate
+ballistics recommend-twist --caliber 0.308 --weight 175 --overall-length 1.24 --nose-length 0.65
+
+# Recommended cartridge overall length
+ballistics recommend-col --cartridge "308 Winchester"   # optional: --bullet-weight 175 --bullet-type SST
+
+# Estimate a bullet's BC from its dimensions
+ballistics calibrate-bc --diameter 0.308 --length 1.24 --weight 175   # optional: --bullet-type "boat tail"
+```
+
+If the service asks you to sign in, the CLI prints an actionable hint. These subcommands are
+available whenever the `online` feature is enabled (on by default).
+
 ## Notes
 
 - Default units are Imperial (fps, grains, yards)
