@@ -5,9 +5,15 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.32.0] - 2026-07-31
 
 ### Added
+- **Import third-party Ventum reticle specs** (MBA-1440). `reticle import <ventum.json>` converts
+  a Ventum reticle definition into the engine's `ReticleDescription` and emits the canonical
+  schema that `reticle hold --reticle-json` and `profile save --reticle-json` already consume
+  (table output previews the marks; `-o json` produces the interchange form). The converted
+  description is validated before emit, so a decoration-only spec fails as `NoMarks` rather than
+  producing an empty reticle.
 - **Online reverse-solver subcommands** for the `ballistics` CLI, behind the default-on
   `online` feature. `login` saves a CLI access token from your ballisticsinsight.com account
   (the `BALLISTICS_API_TOKEN` environment variable overrides the on-disk
