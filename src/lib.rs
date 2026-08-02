@@ -150,6 +150,11 @@ pub mod stability_advanced;
 // 0.33.0 decision-support Phase 1: shared input taxonomy for perturbation kernel and
 // uncertainty propagation. No feature gate: must compile for wasm32 (pure data + serde).
 pub mod perturbation;
+// MBA-1347: erf/erfc/normal_cdf for hit-probability integration (mass of a bivariate
+// normal over a target). In-crate rather than a dependency: the crate ships to thirteen
+// platforms including big-endian MIPS and wasm32 and already hand-rolls its statistical
+// constants. No feature gate: must compile for wasm32; pure std float math, no I/O.
+pub mod special;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]
