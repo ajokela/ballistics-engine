@@ -28,6 +28,40 @@
 //! converted to milliradians with `1 MOA = 0.2908882 mil` ([`MOA_TO_MIL`]). Auto-numbered
 //! ladder labels are NOT unit-converted — a label is the reticle-unit value it names.
 //!
+//! Confirmed by the format's author (2026-08-01): `+y` is down because a reticle is numbered
+//! downward (a 4-unit holdover is `y: 4`; a stadia mark 5 up is `y: -5`), which is plain SVG
+//! screen convention and happens to match shooter intuition.
+//!
+//! ## Arc angles (not yet consumed — recorded so the mapping is not guessed later)
+//!
+//! Ventum draws arcs as a `circle` element carrying `start`/`end` angles. Those angles are
+//! measured from 3 o'clock (`0° = +x`, right) and sweep **CLOCKWISE**:
+//!
+//! ```text
+//!   0° = right      90° = down      180° = left      270° = UP
+//! ```
+//!
+//! The one counterintuitive consequence, worth stating because it is the opposite of a
+//! compass: since `+y` is down, the TOP of the reticle is 270°, not 90°. A horseshoe opening
+//! downward is therefore `start: 200, end: 340`. This is the same system as the coordinates
+//! (`+x` right, `+y` down, 0° at 3 o'clock, clockwise), so the format never mixes conventions.
+//!
+//! A point on an arc of radius `r` about the reticle center is therefore
+//!
+//! ```text
+//!   x = r * cos(θ)          y = r * sin(θ)          (θ in degrees, +y DOWN)
+//! ```
+//!
+//! Note the PLUS on the sine: in a y-up math convention this term is negated, and that single
+//! sign is the whole trap. Verified against the author's reference diagram — its 0/90/180/270
+//! markers and the `start: 200, end: 340` horseshoe endpoints reproduce exactly under the
+//! formula above, and the arc's 140° clockwise sweep passes through 270° (the top), leaving the
+//! gap at the bottom.
+//!
+//! This module currently drops `circle` as decoration (see above), so nothing here depends on
+//! these angles yet; the note exists so that whoever makes arcs hold-bearing does not have to
+//! re-derive the convention.
+//!
 //! # Safety
 //!
 //! The mark cap ([`crate::reticle::MAX_RETICLE_MARKS`]) is enforced *during* repeat
@@ -263,8 +297,9 @@ fn expand_point(
             // Emit the axis-negated twin as well, but never a duplicate at the center. Only
             // the stepped axis is negated. A mirrored labeled-text copy keeps the SAME label
             // as its positive twin (magnitude convention: the "5" on the right and the "5"
-            // on the left both read 5). The schema does not specify this; it is a deliberate
-            // assumption.
+            // on the left both read 5). The written schema does not specify this, so it began
+            // as a deliberate assumption; the format's author confirmed it on 2026-08-01
+            // ("mirrored numbers are without signs"). Do not "fix" this into signed labels.
             let (mirror_down, mirror_right) = match repeat.axis {
                 Axis::X => (down, -right),
                 Axis::Y => (-down, right),
