@@ -23,13 +23,29 @@ impl InputGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputAxis {
-    Mass, Diameter, Length, BallisticCoefficient,
+    Mass, Diameter, Length, BallisticCoefficient, TwistRate, TwistDirection, DragModel,
     MuzzleVelocityMps,
-    SightHeight, ZeroDistance, ZeroPoiUp, ZeroPoiRight, SightOffsetLateral, MuzzleAngle,
+    SightHeight, ZeroDistance, ZeroPoiUp, ZeroPoiRight, SightOffsetLateral, MuzzleHeight, MuzzleAngle,
     Altitude, Temperature, Pressure, RelativeHumidity, Latitude,
     WindSpeed, WindDirection, WindVertical,
-    TargetDistance, ShootingAngle, Cant, ShotAzimuth, AimAzimuth,
+    TargetDistance, ShootingAngle, Cant, ShotAzimuth, AimAzimuth, TargetHeight,
     MagnusEnabled, CoriolisEnabled, EnhancedSpinDriftEnabled,
+}
+
+impl InputAxis {
+    pub const ALL: &'static [InputAxis] = &[
+        InputAxis::Mass, InputAxis::Diameter, InputAxis::Length, InputAxis::BallisticCoefficient,
+        InputAxis::TwistRate, InputAxis::TwistDirection, InputAxis::DragModel,
+        InputAxis::MuzzleVelocityMps,
+        InputAxis::SightHeight, InputAxis::ZeroDistance, InputAxis::ZeroPoiUp, InputAxis::ZeroPoiRight,
+        InputAxis::SightOffsetLateral, InputAxis::MuzzleHeight, InputAxis::MuzzleAngle,
+        InputAxis::Altitude, InputAxis::Temperature, InputAxis::Pressure, InputAxis::RelativeHumidity,
+        InputAxis::Latitude,
+        InputAxis::WindSpeed, InputAxis::WindDirection, InputAxis::WindVertical,
+        InputAxis::TargetDistance, InputAxis::ShootingAngle, InputAxis::Cant, InputAxis::ShotAzimuth,
+        InputAxis::AimAzimuth, InputAxis::TargetHeight,
+        InputAxis::MagnusEnabled, InputAxis::CoriolisEnabled, InputAxis::EnhancedSpinDriftEnabled,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,13 +78,17 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
         Diameter             => (ProjectileDrag, cont("m", 1e-3, 1e-7), true),
         Length               => (ProjectileDrag, cont("m", 1e-3, 1e-6), false),
         BallisticCoefficient => (ProjectileDrag, cont("", 1e-3, 1e-4), true),
+        TwistRate            => (ProjectileDrag, cont("m/turn", 1e-3, 1e-5), false),
+        TwistDirection       => (ProjectileDrag, AxisKind::Categorical, false),
+        DragModel            => (ProjectileDrag, AxisKind::Categorical, true),
         MuzzleVelocityMps    => (MuzzleVelocity, cont("m/s", 1e-3, 0.15), true),
         SightHeight          => (ZeroSightGeometry, cont("m", 1e-3, 1e-5), true),
         ZeroDistance         => (ZeroSightGeometry, cont("m", 1e-3, 0.1), true),
         ZeroPoiUp            => (ZeroSightGeometry, cont("m", 1e-3, 1e-5), true),
         ZeroPoiRight         => (ZeroSightGeometry, cont("m", 1e-3, 1e-5), true),
         SightOffsetLateral   => (ZeroSightGeometry, cont("m", 1e-3, 1e-5), true),
-        MuzzleAngle          => (ZeroSightGeometry, cont("rad", 1e-3, 1e-7), false),
+        MuzzleHeight         => (ZeroSightGeometry, cont("m", 1e-3, 1e-5), true),
+        MuzzleAngle          => (ZeroSightGeometry, cont("rad", 1e-3, 1e-4), false),
         Altitude             => (Atmosphere, cont("m", 1e-3, 1.0), false),
         Temperature          => (Atmosphere, cont("K", 1e-3, 0.05), false),
         Pressure             => (Atmosphere, cont("Pa", 1e-3, 10.0), false),
@@ -82,6 +102,7 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
         Cant                 => (ShotGeometry, cont("rad", 1e-3, 1e-4), false),
         ShotAzimuth          => (ShotGeometry, cont("rad", 1e-3, 1e-4), false),
         AimAzimuth           => (ShotGeometry, cont("rad", 1e-3, 1e-4), false),
+        TargetHeight         => (ShotGeometry, cont("m", 1e-3, 1e-3), false),
         MagnusEnabled            => (Effects, AxisKind::Categorical, false),
         CoriolisEnabled          => (Effects, AxisKind::Categorical, false),
         EnhancedSpinDriftEnabled => (Effects, AxisKind::Categorical, false),
@@ -92,21 +113,21 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
 pub fn axes_in_group(group: InputGroup) -> &'static [InputAxis] {
     use InputAxis::*;
     match group {
-        InputGroup::ProjectileDrag => &[Mass, Diameter, Length, BallisticCoefficient],
+        InputGroup::ProjectileDrag => &[Mass, Diameter, Length, BallisticCoefficient, TwistRate, TwistDirection, DragModel],
         InputGroup::MuzzleVelocity => &[MuzzleVelocityMps],
         InputGroup::ZeroSightGeometry =>
-            &[SightHeight, ZeroDistance, ZeroPoiUp, ZeroPoiRight, SightOffsetLateral, MuzzleAngle],
+            &[SightHeight, ZeroDistance, ZeroPoiUp, ZeroPoiRight, SightOffsetLateral, MuzzleHeight, MuzzleAngle],
         InputGroup::Atmosphere => &[Altitude, Temperature, Pressure, RelativeHumidity, Latitude],
         InputGroup::Wind => &[WindSpeed, WindDirection, WindVertical],
         InputGroup::ShotGeometry =>
-            &[TargetDistance, ShootingAngle, Cant, ShotAzimuth, AimAzimuth],
+            &[TargetDistance, ShootingAngle, Cant, ShotAzimuth, AimAzimuth, TargetHeight],
         InputGroup::Effects =>
             &[MagnusEnabled, CoriolisEnabled, EnhancedSpinDriftEnabled],
     }
 }
 
-// KNOWN LIMITATIONS: Two axis/mode combinations are physically wrong for counterfactuals and
-// need guards in a later task (not this one — this task is data only):
+// KNOWN LIMITATIONS: Several axis/mode combinations require guards in a later task (not this one —
+// this task is data only):
 //
 // (a) Altitude when the original request used QNH pressure: the rebuilt request carries an
 //     absolute station pressure, so perturbing altitude changes density-by-altitude but NOT
@@ -115,12 +136,22 @@ pub fn axes_in_group(group: InputGroup) -> &'static [InputAxis] {
 // (b) ShotAzimuth when the original request used compass-referenced wind: the rebuilt request
 //     carries shooter-relative wind, so the wind rotates WITH the rifle instead of staying
 //     earth-fixed — the counterfactual is physically inverted.
+//
+// (c) WindSpeed/WindDirection/WindVertical when the original request used segmented wind: there
+//     is no single scalar to read or perturb. These axes return None from read_axis under
+//     segmented wind and the kernel treats them as absent.
+//
+// (d) Magnus + EnhancedSpinDrift together: validate_effects (src/solve_json.rs:1544-1552)
+//     rejects magnus: true + enhanced_spin_drift: true as ConflictingFields. A future with_axis
+//     that flips one to true while the other is already true produces a request that fails
+//     validation. This cross-category constraint cannot be expressed purely in the taxonomy.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Every axis belongs to exactly one group, and every group lists it.
+    /// Set equality: InputAxis::ALL == union of axes_in_group over all groups.
     #[test]
     fn taxonomy_is_a_partition() {
         let mut seen = Vec::new();
@@ -131,8 +162,17 @@ mod tests {
                 seen.push(*a);
             }
         }
-        assert!(seen.contains(&InputAxis::MuzzleVelocityMps));
-        assert!(seen.contains(&InputAxis::Cant));
+        // Set equality: every axis in ALL is listed exactly once, and every listed axis is in ALL.
+        assert_eq!(seen.len(), InputAxis::ALL.len(),
+                   "axes_in_group() covers {} axes; InputAxis::ALL has {}",
+                   seen.len(), InputAxis::ALL.len());
+        for axis in InputAxis::ALL {
+            assert!(seen.contains(axis), "{axis:?} is in InputAxis::ALL but not in any group");
+        }
+        // Also verify axis_meta is callable for every member of ALL.
+        for axis in InputAxis::ALL {
+            let _ = axis_meta(*axis);
+        }
     }
 
     /// Effects are boolean toggles and must never be differentiated (spec D7).
