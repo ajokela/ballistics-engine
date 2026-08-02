@@ -47,9 +47,10 @@
 
 use crate::perturbation::taxonomy::{axis_meta, InputAxis};
 use crate::solve_json::{
-    DragModelV1, PressureReferenceV1, ResolvedSolveRequestV1, ResolvedWindV1, SolveRequestV1,
-    TwistDirectionV1, WindReferenceV1,
+    DragModelV1, PressureReferenceV1, ResolvedSolveRequestV1, ResolvedWindV1, SolveErrorCodeV1,
+    SolveRequestV1, TwistDirectionV1, WindReferenceV1,
 };
+use crate::trajectory_observation::TrajectoryObservationError;
 
 /// One taxonomy axis's value, read from or written to a request.
 ///
@@ -89,12 +90,29 @@ pub enum KernelError {
     /// decision-support Task 6) is the constructor, uniformly for every stage that can fail
     /// (`solve_v1::prepare_request`, `solve_v1::build_zeroed_solver`, and
     /// `TrajectorySolver::solve`).
-    Solve(String),
+    ///
+    /// `code` is carried alongside `message` (review fix I4(a), `derive.rs`) specifically so a
+    /// caller -- most notably `central_difference`'s one-sided fallback -- can tell a domain
+    /// rejection (`SolveErrorCodeV1::InvalidValue`, produced by `require_range`/
+    /// `require_non_negative`/`require_positive` in `solve_v1.rs`) apart from a genuine solver
+    /// failure (`SolveFailed`, `ResourceLimit`, `InternalError`) or a malformed-request bug
+    /// (`ConflictingFields`, `MissingField`, `UnknownField`, ...) that merely happened to be
+    /// triggered by one particular perturbed value. Collapsing this to a `String` (the previous
+    /// shape) made that distinction unrecoverable except by parsing the message.
+    Solve {
+        code: SolveErrorCodeV1,
+        message: String,
+    },
     /// Post-solve observation extraction failed -- most notably a requested range outside the
     /// computed trajectory. Not constructed here for the same reason as `Solve`;
-    /// [`crate::perturbation::evaluate`] constructs it from
-    /// [`crate::trajectory_observation::TrajectoryObservationError`].
-    Observation(String),
+    /// [`crate::perturbation::evaluate`] constructs it directly from a
+    /// [`crate::trajectory_observation::TrajectoryObservationError`], preserved WHOLE (not
+    /// collapsed to its `Display` string) for the same reason as `Solve`'s `code` above: only
+    /// [`TrajectoryObservationError::OutOfRange`] is a domain rejection eligible for
+    /// `central_difference`'s one-sided fallback -- `NonMonotonicTrajectory`, `NonFiniteState`,
+    /// `SampleLimitExceeded`, `AllocationFailed`, and the rest are genuine bugs that must
+    /// propagate, not be silently reinterpreted as "this side left the domain."
+    Observation(TrajectoryObservationError),
     /// A `Scalar` value supplied to `with_axis` was not finite (NaN or infinite).
     NonFinite(InputAxis),
     /// Both perturbed sides of a central difference failed to produce a usable observation --
@@ -116,8 +134,8 @@ impl std::fmt::Display for KernelError {
             KernelError::AxisUnsupportedForRequest { axis, reason } => {
                 write!(f, "axis {axis:?} is not supported for this request: {reason}")
             }
-            KernelError::Solve(m) => write!(f, "solve failed: {m}"),
-            KernelError::Observation(m) => write!(f, "observation failed: {m}"),
+            KernelError::Solve { code, message } => write!(f, "solve failed ({code:?}): {message}"),
+            KernelError::Observation(e) => write!(f, "observation failed: {e}"),
             KernelError::NonFinite(a) => write!(f, "axis {a:?} produced a non-finite result"),
             KernelError::StepOutOfDomain { axis, attempted } => write!(
                 f,
@@ -128,6 +146,29 @@ impl std::fmt::Display for KernelError {
     }
 }
 impl std::error::Error for KernelError {}
+
+impl KernelError {
+    /// True when this error means the specific perturbed VALUE fell outside the axis's physical
+    /// domain -- an `InvalidValue` solve rejection (from `require_range`/`require_non_negative`/
+    /// `require_positive` in `solve_v1.rs`), or an `OutOfRange` observation query (a requested
+    /// range that fell outside a trajectory shrunk by the perturbation) -- as opposed to a
+    /// genuine solver or trajectory failure that merely happened to be triggered by one
+    /// particular perturbed value.
+    ///
+    /// This is the ONLY thing [`crate::perturbation::central_difference`]'s one-sided fallback
+    /// (`derive.rs`) may gate on. Review fix I4(a): an earlier revision gated on `Err(_)`
+    /// (any failure at all on one side), which silently reinterpreted genuine bugs -- a
+    /// non-convergent zero search, a non-finite trajectory state, a sample-limit overrun -- as
+    /// if they were domain boundaries, answering with a fabricated derivative instead of
+    /// reporting the real failure.
+    pub fn is_domain_rejection(&self) -> bool {
+        matches!(
+            self,
+            KernelError::Solve { code: SolveErrorCodeV1::InvalidValue, .. }
+                | KernelError::Observation(TrajectoryObservationError::OutOfRange { .. })
+        )
+    }
+}
 
 /// The request's wind-reference echo, whichever wind shape it resolved to.
 fn wind_reference_of(w: &ResolvedWindV1) -> Option<WindReferenceV1> {

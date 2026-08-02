@@ -65,20 +65,33 @@
 //! method must be able to tell them apart rather than silently trusting every [`Derivative`] as
 //! if it were central.
 //!
-//! Only VALUE-dependent failures trigger this fallback -- specifically, a failure from
-//! [`evaluate`] on an already-successfully-built perturbed request (a physically invalid
-//! quantity, or a query range that fell outside a shrunk `max_range_m`). Failures from
-//! [`with_axis`] itself (`AxisUnsupportedForRequest`, `AxisAbsent`, `TypeMismatch`) do not
-//! depend on the perturbed value at all -- they would occur identically for `x+h` and `x-h`,
-//! since they are checked from `axis` and `base`'s OTHER fields before the value is even
-//! considered -- so they continue to propagate immediately with no fallback attempted, exactly
-//! as before this fix.
+//! Only a DOMAIN REJECTION on one side triggers this fallback -- precisely,
+//! [`KernelError::is_domain_rejection`] must be true: a `Solve` failure whose
+//! [`SolveErrorCodeV1`](crate::solve_json::SolveErrorCodeV1) is `InvalidValue` (what
+//! `require_range`/`require_non_negative`/`require_positive` in `solve_v1.rs` produce), or an
+//! `Observation` failure that is specifically
+//! [`TrajectoryObservationError::OutOfRange`](crate::trajectory_observation::TrajectoryObservationError::OutOfRange).
+//! This is deliberately narrower than "any `evaluate` failure on one side" (an earlier revision
+//! of this function gated on exactly that -- a bare `Err(_)` -- which was a regression: it
+//! silently reinterpreted a genuine solver or trajectory bug on one side as if it were a domain
+//! boundary, answering with a plausible-looking fabricated one-sided derivative instead of
+//! reporting the real failure. `evaluate`'s own documented failure modes include a zero search
+//! that does not converge (`SolveFailed`, not `InvalidValue`) and a non-finite effective muzzle
+//! angle, and every `requires_rezero` axis runs that search on every perturbed solve, so this
+//! was not a hypothetical case). Any error that is NOT a domain rejection -- on EITHER side --
+//! propagates unchanged, exactly as it did before this function grew a fallback at all.
 //!
-//! If BOTH perturbed sides fail to evaluate, there is no data left to build even a one-sided
-//! difference from: [`central_difference`] returns [`KernelError::StepOutOfDomain`] rather than
-//! propagating whichever of the two solve errors happened to be checked first (arbitrary, and
-//! neither one alone explains the real problem, which is the step, not either individual
-//! solve).
+//! Failures from [`with_axis`] itself (`AxisUnsupportedForRequest`, `AxisAbsent`,
+//! `TypeMismatch`) are never domain rejections and so never trigger the fallback either, but for
+//! a different reason: they do not depend on the perturbed value at all -- they would occur
+//! identically for `x+h` and `x-h`, since they are checked from `axis` and `base`'s OTHER fields
+//! before the value is even considered -- so they always propagate immediately.
+//!
+//! If BOTH perturbed sides fail with a domain rejection, there is no data left to build even a
+//! one-sided difference from: [`central_difference`] returns [`KernelError::StepOutOfDomain`].
+//! If exactly one side's failure is NOT a domain rejection, that error propagates (preferring
+//! the plus side's error when both sides failed and neither qualifies, to match the evaluation
+//! order this function used before it grew a fallback at all).
 //!
 //! # Bisection contract
 //!
@@ -162,12 +175,15 @@ pub struct Derivative {
 /// - [`KernelError::AxisUnsupportedForRequest`] or [`KernelError::AxisAbsent`], propagated
 ///   unchanged from [`with_axis`] -- these depend only on `axis`/`base`, never on the perturbed
 ///   value, so they surface immediately with no fallback attempted (see the module doc).
-/// - [`KernelError::StepOutOfDomain`] if BOTH perturbed sides fail to evaluate -- there is no
-///   data left to build even a one-sided difference from.
+/// - [`KernelError::StepOutOfDomain`] if BOTH perturbed sides fail with a domain rejection
+///   ([`KernelError::is_domain_rejection`]) -- there is no data left to build even a one-sided
+///   difference from.
 /// - [`KernelError::Solve`] or [`KernelError::Observation`], propagated unchanged from
-///   [`evaluate`], if the UNPERTURBED value at `x` itself also fails to evaluate during a
-///   one-sided fallback (see the module doc) -- a degenerate case distinct from
-///   `StepOutOfDomain` in that even the base value is unusable, not just the step.
+///   [`evaluate`], for any failure that is NOT a domain rejection on either perturbed side (see
+///   the module doc's "One-sided fallback" -- this is the case the fallback must NOT swallow),
+///   or if the UNPERTURBED value at `x` itself also fails to evaluate during a one-sided
+///   fallback -- a degenerate case distinct from `StepOutOfDomain` in that even the base value
+///   is unusable, not just the step.
 pub fn central_difference(
     base: &ResolvedSolveRequestV1,
     axis: InputAxis,
@@ -200,30 +216,45 @@ pub fn central_difference(
 
     // Unlike with_axis's structural errors above, a failure HERE is about the specific
     // perturbed VALUE (e.g. a negative wind speed, or a query range that fell outside a shrunk
-    // max_range_m) -- see the module doc's "One-sided fallback".
+    // max_range_m) -- see the module doc's "One-sided fallback". But NOT every failure here
+    // qualifies for the fallback: only a genuine domain rejection does (review fix I4(a) -- see
+    // `KernelError::is_domain_rejection`'s doc for exactly why `Err(_)` alone is wrong here).
     let plus_result = evaluate(&plus_req, ranges_m);
     let minus_result = evaluate(&minus_req, ranges_m);
+
+    // Computed on borrowed references, BEFORE the match below moves `plus_result`/`minus_result`,
+    // so the match arms need no guard-vs-move subtlety.
+    let plus_is_domain_rejection = matches!(&plus_result, Err(e) if e.is_domain_rejection());
+    let minus_is_domain_rejection = matches!(&minus_result, Err(e) if e.is_domain_rejection());
 
     // `hi`/`lo` always mean "the sample at the higher x" / "the sample at the lower x", so the
     // derivative below is always (hi - lo) / denom regardless of which scheme produced them:
     //   Central:  hi = f(x+h), lo = f(x-h), denom = 2h
-    //   Forward:  hi = f(x+h), lo = f(x),   denom = h   (minus side left the domain)
-    //   Backward: hi = f(x),   lo = f(x-h), denom = h   (plus side left the domain)
+    //   Forward:  hi = f(x+h), lo = f(x),   denom = h   (minus side was a domain rejection)
+    //   Backward: hi = f(x),   lo = f(x-h), denom = h   (plus side was a domain rejection)
     let (hi, lo, denom, scheme) = match (plus_result, minus_result) {
         (Ok(p), Ok(m)) => (p, m, 2.0 * h, DifferenceScheme::Central),
-        (Ok(p), Err(_)) => {
+        (Ok(p), Err(_)) if minus_is_domain_rejection => {
             let base_req: crate::solve_json::SolveRequestV1 = base.into();
             let f_x = evaluate(&base_req, ranges_m)?;
             (p, f_x, h, DifferenceScheme::ForwardOneSided)
         }
-        (Err(_), Ok(m)) => {
+        (Err(_), Ok(m)) if plus_is_domain_rejection => {
             let base_req: crate::solve_json::SolveRequestV1 = base.into();
             let f_x = evaluate(&base_req, ranges_m)?;
             (f_x, m, h, DifferenceScheme::BackwardOneSided)
         }
-        (Err(_), Err(_)) => {
+        (Err(_), Err(_)) if plus_is_domain_rejection && minus_is_domain_rejection => {
             return Err(KernelError::StepOutOfDomain { axis, attempted: h });
         }
+        // At least one side's failure is NOT a domain rejection -- a genuine solver or
+        // trajectory bug, not a step that merely crossed a physical boundary. Propagate it
+        // unchanged rather than silently reinterpreting it as "no data on this side" (the exact
+        // regression review fix I4(a) describes): prefer the plus side's error, matching the
+        // evaluation order this function used before it grew a fallback at all (`plus` was
+        // always checked first, via `?`, before either side could fail differently).
+        (Ok(_), Err(e)) => return Err(e),
+        (Err(e), _) => return Err(e),
     };
 
     debug_assert_eq!(hi.len(), lo.len());
@@ -946,6 +977,46 @@ mod tests {
                 assert_eq!(attempted, 2.0);
             }
             other => panic!("expected StepOutOfDomain, got {other:?}"),
+        }
+    }
+
+    /// I4(a) review fix -- THE test that was missing, and that a bare `Err(_)` guard on either
+    /// perturbed side would pass incorrectly (an earlier revision had exactly that guard; see
+    /// the revert-verification note in the task report for confirmation that this test actually
+    /// fails under it). The fallback must trigger ONLY for a domain rejection
+    /// (`KernelError::is_domain_rejection`), never for a genuine solver failure that happens to
+    /// land on just one side.
+    ///
+    /// 10 m/s cannot reach a 100 m zero at ANY elevation angle: even the vacuum-ideal maximum
+    /// range at a 45-degree launch is `v^2/g` =~ 10.2 m, an order of magnitude short, and real
+    /// drag only shortens that further. `build_zeroed_solver`'s elevation search
+    /// (`calculate_and_set_zero_angle`, `src/solve_v1.rs`) reports that non-convergence via
+    /// `.map_err(solve_failed)`, which is `SolveErrorCodeV1::SolveFailed` -- NEVER
+    /// `InvalidValue`, since 10.0 m/s is a perfectly valid, positive velocity that
+    /// `require_positive` never rejects. The plus side (1636 m/s) is merely a fast, ordinary,
+    /// flat-shooting bullet that zeroes at 100 m without incident, so this is a genuine
+    /// (`Ok`, `Err`) split where the `Err` is NOT a domain rejection.
+    ///
+    /// `central_difference` must propagate that `SolveFailed` unchanged -- not answer with a
+    /// forward one-sided derivative computed from the plus side alone, which would be a
+    /// confident, plausible-looking, WRONG number silently standing in for a bug report.
+    #[test]
+    fn a_genuine_non_convergent_zero_search_on_one_side_propagates_not_falls_back() {
+        let r = resolved(823.0); // max_range_m: 900.0, zero_distance_m: 100.0
+        let e = central_difference(&r, InputAxis::MuzzleVelocityMps, &[50.0], Some(813.0));
+        match e {
+            Err(KernelError::Solve { code, .. }) => {
+                assert_eq!(
+                    code,
+                    crate::solve_json::SolveErrorCodeV1::SolveFailed,
+                    "expected the zero search's own non-convergence code, not a re-labeled \
+                     domain rejection"
+                );
+            }
+            other => panic!(
+                "expected the minus side's genuine SolveFailed to propagate unchanged, not be \
+                 swallowed into a one-sided fallback; got {other:?}"
+            ),
         }
     }
 }

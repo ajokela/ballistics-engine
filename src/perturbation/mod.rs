@@ -114,7 +114,7 @@ pub fn evaluate(req: &SolveRequestV1, ranges_m: &[f64]) -> Result<Vec<Observatio
     for &range_m in ranges_m {
         let o = result
             .observation_at_range_checked(range_m)
-            .map_err(|e| KernelError::Observation(e.to_string()))?;
+            .map_err(KernelError::Observation)?;
         out.push(Observation {
             range_m,
             drop_m: o.drop_m,
@@ -129,9 +129,12 @@ pub fn evaluate(req: &SolveRequestV1, ranges_m: &[f64]) -> Result<Vec<Observatio
 /// Convert a v1 solve-error envelope into a `KernelError::Solve`, uniformly across every stage
 /// `evaluate` can fail at (M3 review fix): `prepare_request`, `build_zeroed_solver`, and
 /// `TrajectorySolver::solve` (via `solve_v1::solve_failed`) all go through this one conversion
-/// instead of three independently hand-formatted strings.
+/// instead of three independently hand-formatted strings. Carries `e.error.code` through
+/// alongside the message (review fix I4(a)) rather than only formatting it into the string, so
+/// `KernelError::is_domain_rejection` can tell an `InvalidValue` domain rejection apart from a
+/// genuine solve failure without parsing text.
 fn kernel_solve_error(e: SolveErrorEnvelopeV1) -> KernelError {
-    KernelError::Solve(format!("{:?}: {}", e.error.code, e.error.message))
+    KernelError::Solve { code: e.error.code, message: e.error.message }
 }
 
 // 0.33.0 decision-support Task 7: derived numerics over the kernel -- central-difference
@@ -188,18 +191,24 @@ mod eval_tests {
         let req =
             crate::solve_json::decode_solve_request_v1(&base_request_json(300.0, 100.0, 25.0))
                 .unwrap();
-        // M1 review fix: `KernelError::Observation(String)` can carry any
-        // `TrajectoryObservationError` variant's message, so `matches!(.., Err(Observation(_)))`
-        // alone cannot distinguish an out-of-range query from, say, `NonMonotonicTrajectory`.
-        // Assert the message actually names this specific failure.
+        // M1 review fix: `KernelError::Observation` can carry any `TrajectoryObservationError`
+        // variant, so `matches!(.., Err(Observation(_)))` alone cannot distinguish an
+        // out-of-range query from, say, `NonMonotonicTrajectory`. Match the specific `OutOfRange`
+        // variant directly (I4(a) review fix: `Observation` now wraps the structured error
+        // itself rather than a pre-formatted string, so this checks the actual variant instead
+        // of substring-matching its rendered message).
         match evaluate(&req, &[5000.0]) {
-            Err(KernelError::Observation(message)) => assert!(
-                message.contains("outside the computed trajectory"),
-                "expected an out-of-range message, got: {message}"
-            ),
+            Err(KernelError::Observation(
+                crate::trajectory_observation::TrajectoryObservationError::OutOfRange {
+                    requested_m,
+                    ..
+                },
+            )) => {
+                assert_eq!(requested_m, 5000.0);
+            }
             other => panic!(
-                "expected Err(KernelError::Observation(_)) naming an out-of-range query, got \
-                 {other:?}"
+                "expected Err(KernelError::Observation(OutOfRange {{ .. }})) naming an \
+                 out-of-range query, got {other:?}"
             ),
         }
     }
@@ -442,10 +451,16 @@ mod eval_tests {
         })
         .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
-        assert!(matches!(
-            evaluate(&req, &[100.0]),
-            Err(KernelError::Solve(_))
-        ));
+        // I4(a) review fix: `Solve` now carries the structured `SolveErrorCodeV1` alongside the
+        // message; an out-of-range relative humidity is exactly the `InvalidValue` domain
+        // rejection `require_range` produces (`solve_v1.rs`), so pin that down too rather than
+        // only the outer variant.
+        match evaluate(&req, &[100.0]) {
+            Err(KernelError::Solve { code, .. }) => {
+                assert_eq!(code, crate::solve_json::SolveErrorCodeV1::InvalidValue);
+            }
+            other => panic!("expected Err(KernelError::Solve {{ .. }}), got {other:?}"),
+        }
     }
 
     /// I1 review fix: `evaluate` must ignore `shot.drops_reference` and always report the
