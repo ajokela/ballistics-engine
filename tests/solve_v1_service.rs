@@ -177,6 +177,47 @@ fn zero_distance_uses_the_same_scalar_wind_and_hits_absolute_target_height() {
     assert_relative_eq!(projectile_height_m, 1.25, epsilon = 1e-4);
 }
 
+/// 0.33.0 decision-support Task 2: an explicit `muzzle_angle_rad` must win over
+/// `zero_distance_m` end-to-end through `solve_v1`, not merely in `prepare_request`'s shape
+/// validation -- otherwise a request rebuilt from a resolved request
+/// (`request_roundtrip.rs`) would have its carried effective angle silently overwritten by
+/// a fresh zero search the moment it actually solves.
+#[test]
+fn explicit_muzzle_angle_is_not_overridden_by_a_present_zero_distance() {
+    let mut zero_only_value = request_value("rk45");
+    zero_only_value["shot"]
+        .as_object_mut()
+        .expect("shot object")
+        .remove("muzzle_angle_rad");
+    zero_only_value["shot"]["zero_distance_m"] = json!(100.0);
+    let natural = solve_v1(decode(&zero_only_value)).expect("zero-only solve");
+    let natural_angle = natural.resolved_request.shot.muzzle_angle_rad;
+
+    // An angle well away from the naturally-solved one, so a silent re-zero would be
+    // unmistakable rather than risking a coincidental match.
+    let distinct_angle = natural_angle + 0.05;
+
+    let mut both_value = request_value("rk45");
+    both_value["shot"]["zero_distance_m"] = json!(100.0);
+    both_value["shot"]["muzzle_angle_rad"] = json!(distinct_angle);
+    let both = solve_v1(decode(&both_value)).expect("both fields together must solve");
+
+    let mut angle_only_value = request_value("rk45");
+    angle_only_value["shot"]["muzzle_angle_rad"] = json!(distinct_angle);
+    let angle_only = solve_v1(decode(&angle_only_value)).expect("angle-only solve");
+
+    assert_eq!(
+        both.resolved_request.shot.muzzle_angle_rad, distinct_angle,
+        "an explicit muzzle_angle_rad must not be silently replaced by a zero search"
+    );
+    assert_eq!(both.resolved_request.shot.zero_distance_m, Some(100.0));
+    assert_eq!(
+        both.summary, angle_only.summary,
+        "zero_distance_m must have no effect on the solve once an explicit angle is present"
+    );
+    assert_eq!(both.samples, angle_only.samples);
+}
+
 #[test]
 fn calm_zeroed_service_matches_the_direct_configured_solver() {
     let mut value = request_value("rk45");

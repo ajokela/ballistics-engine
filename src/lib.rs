@@ -56,6 +56,11 @@ mod drag_model;
 pub mod ffi;
 pub mod solve_json;
 pub mod solve_v1;
+// 0.33.0 decision-support Task 2: reverse conversion from a resolved request back into a
+// solvable one (`impl From<&ResolvedSolveRequestV1> for SolveRequestV1`), the direction the
+// perturbation kernel needs to take a resolved request, change one input, and re-solve. No
+// public items of its own -- the trait impl is usable wherever solve_json's public types are.
+mod request_roundtrip;
 pub mod terminal_plot;
 // MBA-1343: multi-observation velocity/BC truing core, shared by the CLI and the WASM terminal.
 pub mod truing;

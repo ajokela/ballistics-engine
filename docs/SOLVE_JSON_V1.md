@@ -224,11 +224,17 @@ them rather than silently claiming a distinct model.
 | `zero_poi_right_m` | no | `0` | Deliberate horizontal POI offset AT the zero range (MBA-1359, Kestrel "zero offset"): positive = impacts RIGHT. Same bounds as `zero_poi_up_m`. |
 | `drops_reference` | no | `"los"` | Which plane sample `drop_m` values are referenced to (MBA-1403). `"los"` = perpendicular to the line of sight (the historical behavior); `"target"` = vertical in the target plane: `drop_m` divided by `cos(shooting_angle_rad)` (JBM's "target plane" reference). |
 
-`zero_distance_m` and `muzzle_angle_rad` conflict in an input request. A request supplies at most
-one. When neither is present, the service uses a zero muzzle angle and records that assumption in
-the response. In `resolved_request`, `muzzle_angle_rad` is always the effective angle used by the
-engine. If the caller requested a zero distance, the resolved shot contains both the original
-`zero_distance_m` intent and the muzzle angle calculated for it.
+`zero_distance_m` solves the muzzle elevation; `muzzle_angle_rad` supplies it directly. A request
+may supply either, both, or neither. With only `zero_distance_m` present, the service solves for
+the muzzle angle that hits it. With `muzzle_angle_rad` present — alone, or together with
+`zero_distance_m` (0.33.0 decision-support: this is exactly what rebuilding a request from a
+previous `resolved_request` produces, via `From<&ResolvedSolveRequestV1> for SolveRequestV1`) —
+it is used directly and no zero search runs; `zero_distance_m`, if also present, is then retained
+only as the caller's original zeroing intent and has no effect on the solve. When neither is
+present, the service uses a zero muzzle angle and records that assumption in the response. In
+`resolved_request`, `muzzle_angle_rad` is always the effective angle used by the engine. If the
+caller supplied a zero distance, the resolved shot contains both the original `zero_distance_m`
+intent and the muzzle angle used for it, whether that angle was solved or supplied directly.
 
 `zero_poi_up_m` and `zero_poi_right_m` describe an angular zero-state bias (offset divided by the
 zero distance, applied to the solved elevation and azimuth after the zero search converges). They

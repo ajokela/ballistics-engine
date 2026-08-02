@@ -624,6 +624,10 @@ pub struct ResolvedRifleV1 {
 ///
 /// `zero_distance_m` records caller zeroing intent, while `muzzle_angle_rad` is always the
 /// effective angle used by the engine. A zero-distance solve therefore populates both fields.
+/// A raw request may also supply both together (0.33.0 decision-support Task 2's
+/// `From<&ResolvedSolveRequestV1> for SolveRequestV1` always does, to round-trip a resolved
+/// request): `muzzle_angle_rad` then wins outright and no zero search runs, so
+/// `zero_distance_m` carries no effect beyond recording the original intent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedShotV1 {

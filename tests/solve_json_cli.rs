@@ -230,9 +230,14 @@ fn schema_shape_and_semantic_failures_use_request_exit_status() {
     invalid["projectile"]["mass_kg"] = json!(-1.0);
     cases.push((invalid, "invalid_value", "$.projectile.mass_kg"));
 
+    // Since 0.33.0 decision-support Task 2, `shot.zero_distance_m` and `shot.muzzle_angle_rad`
+    // may be supplied together (the explicit angle wins with no zero search run, and
+    // zero_distance_m is retained as caller intent -- see solve_v1.rs's resolve_shot), so that
+    // combination no longer demonstrates `conflicting_fields`. Effects still has one.
     let mut conflicting = request_value();
-    conflicting["shot"]["zero_distance_m"] = json!(25.0);
-    cases.push((conflicting, "conflicting_fields", "$.shot"));
+    conflicting["effects"]["magnus"] = json!(true);
+    conflicting["effects"]["enhanced_spin_drift"] = json!(true);
+    cases.push((conflicting, "conflicting_fields", "$.effects"));
 
     for (request, code, path) in cases {
         let output = run(&["solve-json"], &encode(&request));

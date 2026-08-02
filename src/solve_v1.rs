@@ -103,7 +103,12 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         solver.set_wind_segments(prepared.wind_segments);
     }
 
-    if let Some(distance_m) = zero_distance_m {
+    // 0.33.0 decision-support Task 2: an explicitly supplied muzzle_angle_rad always wins
+    // over zero_distance_m (resolve_shot's match already resolved it that way). Skip the
+    // zero search entirely in that case so a rebuilt request's carried effective angle is
+    // reused verbatim -- bit-identical, not just numerically re-converged -- instead of
+    // being silently recomputed under whatever conditions happen to surround it.
+    if let (Some(distance_m), None) = (zero_distance_m, request.shot.muzzle_angle_rad) {
         let effective_angle = solver
             .calculate_and_set_zero_angle(
                 distance_m,
@@ -577,12 +582,15 @@ fn resolve_shot(
     if let Some(value) = shot.muzzle_angle_rad {
         require_finite("$.shot.muzzle_angle_rad", value)?;
     }
-    if shot.zero_distance_m.is_some() && shot.muzzle_angle_rad.is_some() {
-        return Err(conflicting_fields(
-            "$.shot",
-            "zero_distance_m and muzzle_angle_rad cannot both be supplied",
-        ));
-    }
+    // 0.33.0 decision-support Task 2: both fields may be supplied together. This used to be
+    // a conflicting_fields error, but `From<&ResolvedSolveRequestV1> for SolveRequestV1`
+    // (request_roundtrip.rs) always carries both when the original request solved a zero --
+    // zero_distance_m as caller intent, muzzle_angle_rad as the effective angle already
+    // found -- so a rebuilt request can reuse that exact angle without re-running the zero
+    // search. The match below already gives muzzle_angle_rad priority whenever it is
+    // present, with or without zero_distance_m alongside it; solve_v1 mirrors that priority
+    // by skipping the zero search whenever an explicit angle was supplied. zero_distance_m is
+    // then retained only as the caller's original zeroing intent, with no effect on the solve.
 
     for (path, value) in [
         ("$.shot.aim_azimuth_rad", shot.aim_azimuth_rad),
@@ -621,6 +629,8 @@ fn resolve_shot(
     }
 
     let muzzle_angle_rad = match (shot.zero_distance_m, shot.muzzle_angle_rad) {
+        // An explicit angle always wins, whether or not zero_distance_m is also present
+        // (0.33.0 decision-support Task 2).
         (_, Some(angle)) => angle,
         (Some(_), None) => 0.0, // Replaced with the calculated effective angle before solving.
         (None, None) => {
@@ -1694,15 +1704,28 @@ mod tests {
         }));
     }
 
+    /// 0.33.0 decision-support Task 2: supplying both no longer conflicts. An explicit
+    /// muzzle_angle_rad always wins (no zero search runs to derive it), while
+    /// zero_distance_m is retained purely as the caller's original zeroing intent. This is
+    /// exactly what `From<&ResolvedSolveRequestV1> for SolveRequestV1`
+    /// (request_roundtrip.rs) produces for a zeroed solve, so a request rebuilt from a
+    /// resolved request can reuse the exact original angle instead of silently re-zeroing.
     #[test]
-    fn semantic_conflicts_and_invalid_values_keep_exact_paths() {
+    fn explicit_muzzle_angle_wins_over_zero_distance_when_both_are_supplied() {
         let mut request = minimal_request();
         request.shot.zero_distance_m = Some(100.0);
         request.shot.muzzle_angle_rad = Some(0.01);
-        let error = prepare_request(&request).expect_err("zero and angle conflict");
-        assert_eq!(error.error.code, SolveErrorCodeV1::ConflictingFields);
-        assert_eq!(error.error.path(), Some("$.shot"));
+        let prepared =
+            prepare_request(&request).expect("both fields together are no longer a conflict");
+        assert_eq!(prepared.resolved_request.shot.muzzle_angle_rad, 0.01);
+        assert_eq!(
+            prepared.resolved_request.shot.zero_distance_m,
+            Some(100.0)
+        );
+    }
 
+    #[test]
+    fn semantic_conflicts_and_invalid_values_keep_exact_paths() {
         let mut request = minimal_request();
         request.atmosphere.relative_humidity = Some(1.01);
         let error = prepare_request(&request).expect_err("humidity above one");
