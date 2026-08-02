@@ -134,6 +134,13 @@ fn kernel_solve_error(e: SolveErrorEnvelopeV1) -> KernelError {
     KernelError::Solve(format!("{:?}: {}", e.error.code, e.error.message))
 }
 
+// 0.33.0 decision-support Task 7: derived numerics over the kernel -- central-difference
+// derivatives (for an error budget) and monotone bisection (for tolerance envelopes), built
+// only on evaluate/read_axis/with_axis from Tasks 5-6. No feature gate: must compile for wasm32
+// (same unconditional dependency chain as Task 6).
+pub mod derive;
+pub use derive::{bisect_axis, central_difference, Derivative};
+
 #[cfg(test)]
 mod eval_tests {
     use super::*;
