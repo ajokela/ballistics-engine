@@ -626,8 +626,11 @@ pub struct ResolvedRifleV1 {
 /// effective angle used by the engine. A zero-distance solve therefore populates both fields.
 /// A raw request may also supply both together (0.33.0 decision-support Task 2's
 /// `From<&ResolvedSolveRequestV1> for SolveRequestV1` always does, to round-trip a resolved
-/// request): `muzzle_angle_rad` then wins outright and no zero search runs, so
-/// `zero_distance_m` carries no effect beyond recording the original intent.
+/// request): `muzzle_angle_rad` then wins outright for elevation and no elevation search
+/// runs, but `zero_distance_m` is not otherwise inert -- it still drives the
+/// windage-convergence bias (`sight_offset_lateral_m` / `zero_poi_right_m`), still gates
+/// `equivalent_horizontal_range_m`, and still widens the required wind coverage. A
+/// `zero_distance_elevation_not_resolved` warning names this whenever both are supplied.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedShotV1 {

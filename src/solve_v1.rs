@@ -60,6 +60,12 @@ pub const WARNING_PARTIAL_WIND_COVERAGE: &str = "partial_wind_coverage";
 pub const WARNING_EXPERIMENTAL_EFFECT: &str = "experimental_effect";
 /// Stable warning code for an explicitly supplied fixed step that adaptive RK45 ignores.
 pub const WARNING_RK45_TIME_STEP_IGNORED: &str = "rk45_time_step_ignored";
+/// Stable warning code for a request that supplies both `zero_distance_m` and
+/// `muzzle_angle_rad` (0.33.0 decision-support Task 2): the explicit angle is used directly
+/// and the elevation search does not run. `zero_distance_m` is retained in `resolved_request`
+/// and is not otherwise inert -- see the warning message for what it still affects.
+pub const WARNING_ZERO_DISTANCE_ELEVATION_NOT_RESOLVED: &str =
+    "zero_distance_elevation_not_resolved";
 
 #[derive(Debug)]
 struct PreparedSolveV1 {
@@ -104,24 +110,39 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
     }
 
     // 0.33.0 decision-support Task 2: an explicitly supplied muzzle_angle_rad always wins
-    // over zero_distance_m (resolve_shot's match already resolved it that way). Skip the
-    // zero search entirely in that case so a rebuilt request's carried effective angle is
-    // reused verbatim -- bit-identical, not just numerically re-converged -- instead of
-    // being silently recomputed under whatever conditions happen to surround it.
-    if let (Some(distance_m), None) = (zero_distance_m, request.shot.muzzle_angle_rad) {
-        let effective_angle = solver
-            .calculate_and_set_zero_angle(
-                distance_m,
-                target_height_m,
-                crate::cli_api::ZeroTargetFrame::WorldVertical,
-            )
-            .map_err(solve_failed)?;
-        if !effective_angle.is_finite() {
-            return Err(solve_failed_message(
-                "zero-angle calculation returned a non-finite effective muzzle angle",
-            ));
+    // over zero_distance_m for ELEVATION (resolve_shot's match already resolved it that
+    // way). Skip the elevation search in that case so a rebuilt request's carried effective
+    // angle is reused verbatim -- bit-identical, not just numerically re-converged --
+    // instead of being silently recomputed under whatever conditions happen to surround it.
+    //
+    // calculate_and_set_zero_angle also applies a SEPARATE windage-zero convergence bias
+    // (offset-mounted sights / MBA-1396, deliberate horizontal POI / MBA-1359) to azimuth,
+    // gated only on zero_distance_m -- not on whether the elevation was searched for or
+    // supplied directly. Skipping the whole call would silently drop that bias too, so when
+    // both fields are present, apply just the windage term on its own. It is deliberately
+    // never written back into resolved_request.shot.aim_azimuth_rad (unlike the elevation,
+    // which IS persisted via muzzle_angle_rad): zero_distance_m being present no longer
+    // implies "the search ran", so folding the bias into a persisted, echoed field would
+    // double-apply it on a second-generation round-trip (the same trap avoided for
+    // atmosphere.pressure_reference / wind.wind_reference in request_roundtrip.rs).
+    match (zero_distance_m, request.shot.muzzle_angle_rad) {
+        (Some(distance_m), None) => {
+            let effective_angle = solver
+                .calculate_and_set_zero_angle(
+                    distance_m,
+                    target_height_m,
+                    crate::cli_api::ZeroTargetFrame::WorldVertical,
+                )
+                .map_err(solve_failed)?;
+            if !effective_angle.is_finite() {
+                return Err(solve_failed_message(
+                    "zero-angle calculation returned a non-finite effective muzzle angle",
+                ));
+            }
+            prepared.resolved_request.shot.muzzle_angle_rad = effective_angle;
         }
-        prepared.resolved_request.shot.muzzle_angle_rad = effective_angle;
+        (Some(distance_m), Some(_)) => solver.apply_windage_zero_bias(distance_m),
+        (None, _) => {}
     }
 
     let result = solver.solve().map_err(solve_failed)?;
@@ -240,7 +261,12 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
 
     let (projectile, bullet_length_m) = resolve_projectile(&request.projectile, &mut assumptions)?;
     let rifle = resolve_rifle(&request.rifle, &mut assumptions)?;
-    let shot = resolve_shot(&request.shot, rifle.muzzle_height_m, &mut assumptions)?;
+    let shot = resolve_shot(
+        &request.shot,
+        rifle.muzzle_height_m,
+        &mut assumptions,
+        &mut warnings,
+    )?;
     let atmosphere = resolve_atmosphere(&request.atmosphere, &mut assumptions)?;
     let wind_coverage_distance_m = shot.zero_distance_m.unwrap_or(0.0).max(shot.max_range_m);
     let (resolved_wind, wind, wind_segments) = resolve_wind(
@@ -568,6 +594,7 @@ fn resolve_shot(
     shot: &ShotV1,
     muzzle_height_m: f64,
     assumptions: &mut Vec<SolveNoticeV1>,
+    warnings: &mut Vec<SolveNoticeV1>,
 ) -> Result<ResolvedShotV1, SolveErrorEnvelopeV1> {
     require_positive("$.shot.max_range_m", shot.max_range_m)?;
     if let Some(value) = shot.zero_distance_m {
@@ -586,11 +613,15 @@ fn resolve_shot(
     // a conflicting_fields error, but `From<&ResolvedSolveRequestV1> for SolveRequestV1`
     // (request_roundtrip.rs) always carries both when the original request solved a zero --
     // zero_distance_m as caller intent, muzzle_angle_rad as the effective angle already
-    // found -- so a rebuilt request can reuse that exact angle without re-running the zero
-    // search. The match below already gives muzzle_angle_rad priority whenever it is
-    // present, with or without zero_distance_m alongside it; solve_v1 mirrors that priority
-    // by skipping the zero search whenever an explicit angle was supplied. zero_distance_m is
-    // then retained only as the caller's original zeroing intent, with no effect on the solve.
+    // found -- so a rebuilt request can reuse that exact angle without re-running the
+    // elevation search. The match below already gives muzzle_angle_rad priority whenever it
+    // is present, with or without zero_distance_m alongside it; solve_v1 mirrors that
+    // priority by skipping the elevation search whenever an explicit angle was supplied.
+    // zero_distance_m no longer re-derives the elevation in that case, but it is not
+    // otherwise inert: solve_v1 still applies the separate windage-zero convergence bias
+    // (sight_offset_lateral_m / zero_poi_right_m) gated on it, it still widens the required
+    // wind coverage below, it is still validated above, and it still feeds
+    // summary.equivalent_horizontal_range_m. A warning names this explicitly (below).
 
     for (path, value) in [
         ("$.shot.aim_azimuth_rad", shot.aim_azimuth_rad),
@@ -629,9 +660,25 @@ fn resolve_shot(
     }
 
     let muzzle_angle_rad = match (shot.zero_distance_m, shot.muzzle_angle_rad) {
-        // An explicit angle always wins, whether or not zero_distance_m is also present
-        // (0.33.0 decision-support Task 2).
-        (_, Some(angle)) => angle,
+        // An explicit angle always wins over zero_distance_m for elevation (0.33.0
+        // decision-support Task 2). When both are supplied, note that the elevation search
+        // did not run -- zero_distance_m is still retained and still has other effects (see
+        // the warning message), but a caller relying on a stale muzzle_angle_rad while
+        // setting a new zero_distance_m should not mistake the echo for confirmation that a
+        // zero was actually solved.
+        (Some(_), Some(angle)) => {
+            warnings.push(notice(
+                WARNING_ZERO_DISTANCE_ELEVATION_NOT_RESOLVED,
+                "muzzle_angle_rad was supplied together with zero_distance_m: the elevation \
+                 was used directly and the elevation search did not run. zero_distance_m is \
+                 retained in resolved_request and still affects the windage-convergence bias \
+                 (sight_offset_lateral_m / zero_poi_right_m), summary.equivalent_horizontal_range_m, \
+                 and downrange wind-coverage validation.",
+                "$.shot.zero_distance_m",
+            ));
+            angle
+        }
+        (None, Some(angle)) => angle,
         (Some(_), None) => 0.0, // Replaced with the calculated effective angle before solving.
         (None, None) => {
             assumptions.push(notice(

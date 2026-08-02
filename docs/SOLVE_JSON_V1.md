@@ -229,17 +229,25 @@ may supply either, both, or neither. With only `zero_distance_m` present, the se
 the muzzle angle that hits it. With `muzzle_angle_rad` present — alone, or together with
 `zero_distance_m` (0.33.0 decision-support: this is exactly what rebuilding a request from a
 previous `resolved_request` produces, via `From<&ResolvedSolveRequestV1> for SolveRequestV1`) —
-it is used directly and no zero search runs; `zero_distance_m`, if also present, is then retained
-only as the caller's original zeroing intent and has no effect on the solve. When neither is
-present, the service uses a zero muzzle angle and records that assumption in the response. In
-`resolved_request`, `muzzle_angle_rad` is always the effective angle used by the engine. If the
-caller supplied a zero distance, the resolved shot contains both the original `zero_distance_m`
-intent and the muzzle angle used for it, whether that angle was solved or supplied directly.
+the elevation search does not run and the supplied angle is used directly. `zero_distance_m`, when
+also present in that case, no longer re-derives the elevation, but is not otherwise inert: it is
+still validated, still widens the required wind coverage, still gates
+`summary.equivalent_horizontal_range_m` (below), and still drives the windage-convergence bias
+described under `sight_offset_lateral_m` and `zero_poi_right_m`. The service emits a
+`zero_distance_elevation_not_resolved` warning whenever both fields are supplied together, naming
+exactly this. When neither field is present, the service uses a zero muzzle angle and records that
+assumption in the response. In `resolved_request`, `muzzle_angle_rad` is always the effective angle
+used by the engine. If the caller supplied a zero distance, the resolved shot contains both the
+original `zero_distance_m` intent and the muzzle angle used for it, whether that angle was solved
+or supplied directly.
 
 `zero_poi_up_m` and `zero_poi_right_m` describe an angular zero-state bias (offset divided by the
-zero distance, applied to the solved elevation and azimuth after the zero search converges). They
-are meaningful only together with `zero_distance_m`; with `muzzle_angle_rad` supplied directly (or
-neither field present) no zero is solved and they have no effect. They are echoed in
+zero distance). `zero_poi_up_m` is applied only by the elevation search itself, so it has no effect
+whenever `muzzle_angle_rad` is supplied directly, regardless of whether `zero_distance_m` is also
+present. `zero_poi_right_m` instead shares the windage-convergence bias `sight_offset_lateral_m`
+uses: it has no effect only when `zero_distance_m` is entirely absent (including when
+`muzzle_angle_rad` is supplied alone), and still applies whenever `zero_distance_m` is present,
+even alongside an explicit `muzzle_angle_rad`. They are echoed in
 `resolved_request.shot.zero_poi_up_m` / `zero_poi_right_m` when supplied; the resolved
 `muzzle_angle_rad` separately and always reports the biased effective angle regardless of whether
 the bias fields themselves were supplied. Omitting both fields is byte-identical to requests that
@@ -455,9 +463,10 @@ Summary fields have fixed evaluation frames:
   correction — against the same solved zero — matches the inclined solution's at the terminal
   range: the BDC "shoot-to" range (SIG AMR / Leica EHR / Gunwerks style). It is defined by
   angular match over a flat re-solve, not the rifleman's-rule cosine approximation. Present only
-  when `shot.shooting_angle_rad` is nonzero, a `zero_distance_m` was solved, and the inverse is
-  well-defined (terminal range past the zero range with a positive correction); absent otherwise,
-  so flat solves and pre-existing requests serialize byte-identically.
+  when `shot.shooting_angle_rad` is nonzero, `zero_distance_m` is present (whether or not it
+  re-derived the elevation — see above), and the inverse is well-defined (terminal range past the
+  zero range with a positive correction); absent otherwise, so flat solves and pre-existing
+  requests serialize byte-identically.
 
 ### Optional `reticle` block (MBA-1361)
 

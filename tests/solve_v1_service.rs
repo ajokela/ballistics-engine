@@ -1,6 +1,7 @@
 use approx::assert_relative_eq;
 use ballistics_engine::solve_json::{
-    decode_solve_request_v1, SampleFlagV1, SolveRequestV1, SolverMethodV1, TerminationReasonV1,
+    decode_solve_request_v1, SampleFlagV1, SolveRequestV1, SolveSummaryV1, SolverMethodV1,
+    TerminationReasonV1,
 };
 use ballistics_engine::wind::WindSegment;
 use ballistics_engine::{
@@ -184,25 +185,55 @@ fn zero_distance_uses_the_same_scalar_wind_and_hits_absolute_target_height() {
 /// a fresh zero search the moment it actually solves.
 #[test]
 fn explicit_muzzle_angle_is_not_overridden_by_a_present_zero_distance() {
+    // Nonzero, so equivalent_horizontal_range_m (gated on zero_distance_m being present,
+    // independent of whether it re-derived the elevation) is actually exercised below --
+    // pinned at 0.0 this test would pass even if zero_distance_m secretly still re-zeroed
+    // the elevation, because a flat shot's equivalent_horizontal_range_m is always absent.
+    let shooting_angle_rad = 0.3_f64;
+    let zero_distance_m = 100.0_f64;
+    // World-vertical target height consistent with an inclined zero at this angle (mirrors
+    // solve_v1_service.rs's inclined_zero_targets_world_vertical_height): a flat-fire
+    // target_height_m (1.25, request_value's default) does not bracket a convergent zero
+    // once shooting_angle_rad is nonzero.
+    let line_of_sight_y_m = 1.2 + 0.05; // rifle.muzzle_height_m + rifle.sight_height_m
+    let target_height_m =
+        zero_distance_m * shooting_angle_rad.sin() + line_of_sight_y_m * shooting_angle_rad.cos();
+
+    // request_value's default max_range_m (200.0) leaves only 100 m past the zero -- not
+    // enough room for a slightly over-elevated inclined shot to arc back below the line of
+    // sight, which equivalent_horizontal_range_m's "positive correction" requires. Widen it.
+    let max_range_m = 500.0_f64;
+
     let mut zero_only_value = request_value("rk45");
+    zero_only_value["shot"]["shooting_angle_rad"] = json!(shooting_angle_rad);
+    zero_only_value["shot"]["target_height_m"] = json!(target_height_m);
+    zero_only_value["shot"]["max_range_m"] = json!(max_range_m);
     zero_only_value["shot"]
         .as_object_mut()
         .expect("shot object")
         .remove("muzzle_angle_rad");
-    zero_only_value["shot"]["zero_distance_m"] = json!(100.0);
+    zero_only_value["shot"]["zero_distance_m"] = json!(zero_distance_m);
     let natural = solve_v1(decode(&zero_only_value)).expect("zero-only solve");
     let natural_angle = natural.resolved_request.shot.muzzle_angle_rad;
 
-    // An angle well away from the naturally-solved one, so a silent re-zero would be
-    // unmistakable rather than risking a coincidental match.
-    let distinct_angle = natural_angle + 0.05;
+    // An angle measurably away from the naturally-solved one (the zero search converges to
+    // ~1e-7 rad tolerance, so this is far outside coincidental-match range), but still small
+    // enough that the shot drops back below the line of sight before max_range_m -- required
+    // for equivalent_horizontal_range_m's "positive correction" to be well-defined below.
+    let distinct_angle = natural_angle + 0.002;
 
     let mut both_value = request_value("rk45");
-    both_value["shot"]["zero_distance_m"] = json!(100.0);
+    both_value["shot"]["shooting_angle_rad"] = json!(shooting_angle_rad);
+    both_value["shot"]["target_height_m"] = json!(target_height_m);
+    both_value["shot"]["max_range_m"] = json!(max_range_m);
+    both_value["shot"]["zero_distance_m"] = json!(zero_distance_m);
     both_value["shot"]["muzzle_angle_rad"] = json!(distinct_angle);
     let both = solve_v1(decode(&both_value)).expect("both fields together must solve");
 
     let mut angle_only_value = request_value("rk45");
+    angle_only_value["shot"]["shooting_angle_rad"] = json!(shooting_angle_rad);
+    angle_only_value["shot"]["target_height_m"] = json!(target_height_m);
+    angle_only_value["shot"]["max_range_m"] = json!(max_range_m);
     angle_only_value["shot"]["muzzle_angle_rad"] = json!(distinct_angle);
     let angle_only = solve_v1(decode(&angle_only_value)).expect("angle-only solve");
 
@@ -210,12 +241,36 @@ fn explicit_muzzle_angle_is_not_overridden_by_a_present_zero_distance() {
         both.resolved_request.shot.muzzle_angle_rad, distinct_angle,
         "an explicit muzzle_angle_rad must not be silently replaced by a zero search"
     );
-    assert_eq!(both.resolved_request.shot.zero_distance_m, Some(100.0));
     assert_eq!(
-        both.summary, angle_only.summary,
-        "zero_distance_m must have no effect on the solve once an explicit angle is present"
+        both.resolved_request.shot.zero_distance_m,
+        Some(zero_distance_m)
     );
-    assert_eq!(both.samples, angle_only.samples);
+
+    // zero_distance_m is not fully inert just because an explicit angle is also present
+    // (0.33.0 decision-support Task 2, review finding I2): it still gates
+    // equivalent_horizontal_range_m. Confirm that's exactly the one summary field that
+    // legitimately differs between "zero_distance_m present" and "absent", then require
+    // everything else -- including the actual solved trajectory, where zero_distance_m
+    // truly has no remaining effect once the elevation is explicit -- to match exactly.
+    assert!(
+        both.summary.equivalent_horizontal_range_m.is_some(),
+        "zero_distance_m present alongside an inclined shot should still gate \
+         equivalent_horizontal_range_m even though the elevation was supplied directly"
+    );
+    assert_eq!(angle_only.summary.equivalent_horizontal_range_m, None);
+    assert_eq!(
+        SolveSummaryV1 {
+            equivalent_horizontal_range_m: None,
+            ..both.summary.clone()
+        },
+        angle_only.summary,
+        "summary must be identical apart from equivalent_horizontal_range_m"
+    );
+    assert_eq!(
+        both.samples, angle_only.samples,
+        "zero_distance_m must have no effect on the solved trajectory once an explicit \
+         angle is present"
+    );
 }
 
 #[test]

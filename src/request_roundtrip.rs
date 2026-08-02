@@ -154,6 +154,11 @@ mod tests {
     /// Resolution is idempotent through a round-trip: re-solving a request
     /// rebuilt from a resolved request must resolve to exactly the same values.
     /// This is the acceptance gate for Phase 0.
+    ///
+    /// Compares the whole success envelope, not just `resolved_request`: some effects (the
+    /// windage-zero convergence bias, see `roundtrip_preserves_the_windage_zero_bias` below)
+    /// never appear in `resolved_request` at all -- on the very first solve, not only after a
+    /// round-trip -- so `resolved_request` equality alone cannot catch every regression.
     #[test]
     fn resolution_is_idempotent_through_roundtrip() {
         let first = solve_v1(decode_solve_request_v1(&sample_json()).unwrap()).unwrap();
@@ -163,6 +168,69 @@ mod tests {
             serde_json::to_value(&first.resolved_request).unwrap(),
             serde_json::to_value(&second.resolved_request).unwrap(),
             "resolved request changed after a round-trip"
+        );
+        assert_eq!(
+            first.summary, second.summary,
+            "summary changed after a round-trip"
+        );
+        assert_eq!(
+            first.samples, second.samples,
+            "samples changed after a round-trip"
+        );
+    }
+
+    /// The windage-zero convergence bias (`sight_offset_lateral_m` / `zero_poi_right_m`,
+    /// applied via `BallisticInputs::windage_zero_bias_rad`) is a term
+    /// `calculate_and_set_zero_angle` adds to azimuth ALONGSIDE the elevation search -- it is
+    /// not carried by `muzzle_angle_rad`, and (unlike the elevation) it never appears in
+    /// `resolved_request` at all, on the first solve or any later one. Skipping the elevation
+    /// search on a round-tripped request must not also skip this separate term, or an
+    /// offset-mounted sight / deliberate horizontal zero bias would silently stop converging
+    /// the moment a resolved request round-trips. `resolved_request` alone cannot see this
+    /// (compare `first.resolved_request` above with `second.resolved_request` below: they are
+    /// byte-identical even when this regresses), so this compares the solved trajectory too.
+    #[test]
+    fn roundtrip_preserves_the_windage_zero_bias() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05,
+                      "sight_offset_lateral_m": 0.03},
+            "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0, "zero_poi_right_m": 0.02},
+            "atmosphere": {"temperature_k": 288.0, "pressure_pa": 101325.0},
+            "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let first = solve_v1(decode_solve_request_v1(&json).unwrap()).unwrap();
+        let rebuilt: SolveRequestV1 = (&first.resolved_request).into();
+        let second = solve_v1(rebuilt).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&first.resolved_request).unwrap(),
+            serde_json::to_value(&second.resolved_request).unwrap(),
+            "resolved request changed after a round-trip"
+        );
+        assert_eq!(
+            first.summary, second.summary,
+            "summary changed after a round-trip -- the windage-zero bias may have been dropped"
+        );
+        assert_eq!(
+            first.samples, second.samples,
+            "samples changed after a round-trip -- the windage-zero bias may have been dropped"
+        );
+        // Sanity check: the bias is actually nonzero in this fixture, so the comparisons
+        // above are exercising the real thing rather than two agreeing zeros.
+        let windage_m = first
+            .samples
+            .last()
+            .expect("at least one sample")
+            .windage_m;
+        assert!(
+            windage_m.abs() > 0.1,
+            "fixture must produce a non-negligible windage-zero bias to be a meaningful test, \
+             got {windage_m} m"
         );
     }
 

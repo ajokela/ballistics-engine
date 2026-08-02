@@ -1141,8 +1141,25 @@ impl TrajectorySolver {
             angle
         };
         self.inputs.muzzle_angle = angle;
-        self.inputs.azimuth_angle += self.inputs.windage_zero_bias_rad(target_distance_m);
+        self.apply_windage_zero_bias(target_distance_m);
         Ok(angle)
+    }
+
+    /// Apply just the windage-zero convergence bias (see
+    /// [`BallisticInputs::windage_zero_bias_rad`]) to this solver's azimuth, for a zero at
+    /// `target_distance_m`, without searching for or installing an elevation.
+    ///
+    /// Used by [`Self::calculate_and_set_zero_angle`] above as part of a full zero search, and
+    /// by solve_v1's round-trip re-solve path (0.33.0 decision-support Task 2) on its own: when
+    /// an explicit `muzzle_angle_rad` already carries the correct elevation (round-tripped from
+    /// a previous `resolved_request`, which bakes any `zero_poi_vertical_m` bias into that
+    /// angle already), the elevation search does not run, but the windage term is a SEPARATE
+    /// quantity that depends only on `zero_distance_m` -- not on whether the elevation was
+    /// searched for or supplied directly -- so it must still be applied here or an
+    /// offset-mounted sight / deliberate horizontal zero bias would silently stop converging
+    /// once a request round-trips.
+    pub(crate) fn apply_windage_zero_bias(&mut self, target_distance_m: f64) {
+        self.inputs.azimuth_angle += self.inputs.windage_zero_bias_rad(target_distance_m);
     }
 
     fn find_zero_angle(
