@@ -97,6 +97,12 @@ pub enum KernelError {
     Observation(String),
     /// A `Scalar` value supplied to `with_axis` was not finite (NaN or infinite).
     NonFinite(InputAxis),
+    /// Both perturbed sides of a central difference failed to produce a usable observation --
+    /// neither `x + attempted` nor `x - attempted` evaluates -- so not even a one-sided
+    /// difference can be built (`central_difference`'s domain fallback,
+    /// `src/perturbation/derive.rs`). Distinct from a derivative of zero: this means
+    /// "undifferentiable with this step," never "no effect."
+    StepOutOfDomain { axis: InputAxis, attempted: f64 },
 }
 
 impl std::fmt::Display for KernelError {
@@ -113,6 +119,11 @@ impl std::fmt::Display for KernelError {
             KernelError::Solve(m) => write!(f, "solve failed: {m}"),
             KernelError::Observation(m) => write!(f, "observation failed: {m}"),
             KernelError::NonFinite(a) => write!(f, "axis {a:?} produced a non-finite result"),
+            KernelError::StepOutOfDomain { axis, attempted } => write!(
+                f,
+                "axis {axis:?} could not be differentiated with step {attempted}: both the \
+                 forward and backward perturbed values failed to evaluate"
+            ),
         }
     }
 }

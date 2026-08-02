@@ -139,7 +139,9 @@ fn kernel_solve_error(e: SolveErrorEnvelopeV1) -> KernelError {
 // only on evaluate/read_axis/with_axis from Tasks 5-6. No feature gate: must compile for wasm32
 // (same unconditional dependency chain as Task 6).
 pub mod derive;
-pub use derive::{bisect_axis, central_difference, Derivative};
+pub use derive::{
+    bisect_axis, central_difference, DifferenceScheme, Derivative, BISECTION_MAX_ITERATIONS,
+};
 
 #[cfg(test)]
 mod eval_tests {
