@@ -646,13 +646,14 @@ fn windage_bounds_at(u: f64, target: TargetGeometryV1) -> (f64, f64) {
 /// width/height, moderate correlation) target shapes measured one to two further orders of
 /// magnitude better than that worst case.
 ///
-/// This is a more careful IMPLEMENTATION of the pinned formula, not a different one: the maximum
-/// number of panels is fixed at compile time (at most 5: the two domain edges, the target's own
-/// edge only ever contributes 0 extra splits since it already bounds `[lo, hi]`, and up to two
-/// correlation-crossing points), each integrated by the exact same 20-node rule named in the
-/// spec, so the result stays deterministic and its cost stays bounded (at most 100 evaluations of
-/// [`normal_cdf`], negligible next to the real trajectory solves
-/// [`error_budget_with_target`] needs to build the covariance in the first place).
+/// This is a more careful IMPLEMENTATION of the pinned formula, not a different one: the number
+/// of panel BOUNDARIES is bounded at compile time (at most 4: the two domain edges -- the
+/// target's own edge only ever contributes 0 extra boundaries since it already bounds `[lo,
+/// hi]` -- plus up to two correlation-crossing points), so there are at most 3 panels, each
+/// integrated by the exact same 20-node rule named in the spec. The result therefore stays
+/// deterministic and its cost stays bounded (at most 3 panels * 20 nodes * 2 [`normal_cdf`]
+/// calls per node = 120 evaluations of [`normal_cdf`], negligible next to the real trajectory
+/// solves [`error_budget_with_target`] needs to build the covariance in the first place).
 ///
 /// # Bounded and monotone
 ///
