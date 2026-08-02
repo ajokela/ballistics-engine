@@ -254,12 +254,21 @@ fn solve_json_wire_fields_decode_and_apply() {
         windage_delta
     );
 
-    // Explicit 0.0 == omitted, byte-identical response.
-    let explicit_zero = solve(&request_json(Some((0.0, 0.0))));
+    // Explicit 0.0 == omitted, byte-identical apart from the Task 1 (0.33.0) resolved
+    // echo of the zero-POI fields themselves, present only when the caller actually
+    // supplied them.
+    let mut explicit_zero = solve(&request_json(Some((0.0, 0.0))));
+    assert!(baseline.resolved_request.shot.zero_poi_up_m.is_none());
+    assert!(baseline.resolved_request.shot.zero_poi_right_m.is_none());
+    assert_eq!(explicit_zero.resolved_request.shot.zero_poi_up_m, Some(0.0));
+    assert_eq!(explicit_zero.resolved_request.shot.zero_poi_right_m, Some(0.0));
+    explicit_zero.resolved_request.shot.zero_poi_up_m = None;
+    explicit_zero.resolved_request.shot.zero_poi_right_m = None;
     assert_eq!(
         serde_json::to_string(&baseline).unwrap(),
         serde_json::to_string(&explicit_zero).unwrap(),
-        "explicit 0.0 zero POI fields must be byte-identical to omitting them"
+        "explicit 0.0 zero POI fields must be byte-identical to omitting them, apart from \
+         the resolved echo of the fields themselves"
     );
 }
 

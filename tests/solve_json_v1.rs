@@ -74,12 +74,14 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
                     vertical_speed_mps: segment.vertical_speed_mps.unwrap_or(0.0),
                 })
                 .collect(),
+            wind_reference: request.wind.wind_reference,
         })
     } else {
         ResolvedWindV1::Constant(ResolvedConstantWindV1 {
             speed_mps: request.wind.speed_mps.unwrap_or(0.0),
             direction_from_rad: request.wind.direction_from_rad.unwrap_or(0.0),
             vertical_speed_mps: request.wind.vertical_speed_mps.unwrap_or(0.0),
+            wind_reference: request.wind.wind_reference,
         })
     };
 
@@ -98,6 +100,7 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
             muzzle_height_m: request.rifle.muzzle_height_m.unwrap_or(0.0),
             twist_rate_m_per_turn: request.rifle.twist_rate_m_per_turn.unwrap_or(0.3048),
             twist_direction: request.rifle.twist_direction.unwrap_or_default(),
+            sight_offset_lateral_m: request.rifle.sight_offset_lateral_m,
         },
         shot: ResolvedShotV1 {
             max_range_m: request.shot.max_range_m,
@@ -109,6 +112,9 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
             cant_angle_rad: request.shot.cant_angle_rad.unwrap_or(0.0),
             target_height_m: request.shot.target_height_m.unwrap_or(0.0),
             ground_threshold_m: request.shot.ground_threshold_m.unwrap_or(-100.0),
+            zero_poi_up_m: request.shot.zero_poi_up_m,
+            zero_poi_right_m: request.shot.zero_poi_right_m,
+            drops_reference: request.shot.drops_reference,
         },
         atmosphere: ResolvedAtmosphereV1 {
             altitude_m: request.atmosphere.altitude_m.unwrap_or(0.0),
@@ -116,6 +122,7 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
             pressure_pa: request.atmosphere.pressure_pa.unwrap_or(101_325.0),
             relative_humidity: request.atmosphere.relative_humidity.unwrap_or(0.5),
             latitude_rad: request.atmosphere.latitude_rad,
+            pressure_reference: request.atmosphere.pressure_reference,
         },
         wind,
         solver: ResolvedSolverV1 {
@@ -130,6 +137,7 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
         sampling: ResolvedSamplingV1 {
             interval_m: request.sampling.interval_m.unwrap_or(10.0),
         },
+        reticle: request.reticle.clone(),
     }
 }
 

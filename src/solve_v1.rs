@@ -267,6 +267,10 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
         solver,
         effects,
         sampling,
+        // MBA-1361: pure pass-through echo (Task 1 of the 0.33.0 decision-support train) — no
+        // defaulting, no unit conversion. The reticle hold itself is computed later in
+        // solve_v1 straight from `request.reticle`, unaffected by this echo.
+        reticle: request.reticle.clone(),
     };
 
     let temperature_c = checked_conversion(
@@ -541,6 +545,9 @@ fn resolve_rifle(
         muzzle_height_m,
         twist_rate_m_per_turn,
         twist_direction,
+        // MBA-1396: pure pass-through echo (Task 1 of the 0.33.0 decision-support train) — no
+        // defaulting, no unit conversion. Validated above.
+        sight_offset_lateral_m: rifle.sight_offset_lateral_m,
     })
 }
 
@@ -674,6 +681,11 @@ fn resolve_shot(
         cant_angle_rad,
         target_height_m,
         ground_threshold_m,
+        // MBA-1359/MBA-1403: pure pass-through echoes (Task 1 of the 0.33.0 decision-support
+        // train) — no defaulting, no unit conversion. Validated above.
+        zero_poi_up_m: shot.zero_poi_up_m,
+        zero_poi_right_m: shot.zero_poi_right_m,
+        drops_reference: shot.drops_reference,
     })
 }
 
@@ -782,6 +794,10 @@ fn resolve_atmosphere(
         pressure_pa,
         relative_humidity,
         latitude_rad: atmosphere.latitude_rad,
+        // MBA-1397: pure pass-through echo (Task 1 of the 0.33.0 decision-support train) — the
+        // mode itself is not resolved to a literal default; only its effect on `pressure_pa`
+        // above is (see the QNH-reduction branch).
+        pressure_reference: atmosphere.pressure_reference,
     })
 }
 
@@ -920,6 +936,10 @@ fn resolve_wind(
         Ok((
             ResolvedWindV1::Segmented(ResolvedSegmentedWindV1 {
                 segments: resolved_segments,
+                // MBA-1368: pure pass-through echo (Task 1 of the 0.33.0 decision-support
+                // train) — the mode itself is not resolved to a literal default; only its
+                // effect on each segment's `direction_from_rad` above is (see `to_relative`).
+                wind_reference: wind.wind_reference,
             }),
             WindConditions::default(),
             engine_segments,
@@ -979,6 +999,10 @@ fn resolve_wind(
                 speed_mps,
                 direction_from_rad,
                 vertical_speed_mps,
+                // MBA-1368: pure pass-through echo (Task 1 of the 0.33.0 decision-support
+                // train) — the mode itself is not resolved to a literal default; only its
+                // effect on `direction_from_rad` above is (see `to_relative`).
+                wind_reference: wind.wind_reference,
             }),
             WindConditions {
                 speed: speed_mps,

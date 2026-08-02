@@ -456,3 +456,35 @@ fn sample_ceiling_uses_actual_reached_range_and_keeps_exact_boundary() {
     );
     assert!(early_ground.samples.len() < 10_000);
 }
+
+/// Every field solve_v1 reads from the RAW request must have a resolved echo.
+/// This is the guard that keeps Phase 0 true as the schema grows: if you add a
+/// request field and consume it in solve_v1, add it here and to the resolved DTO.
+#[test]
+fn resolved_request_echoes_every_consumed_raw_field() {
+    let json = serde_json::json!({
+        "schema_version": 1,
+        "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                       "ballistic_coefficient": 0.243},
+        "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05,
+                  "sight_offset_lateral_m": 0.012},
+        "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0,
+                 "zero_poi_up_m": 0.01, "zero_poi_right_m": -0.005,
+                 "drops_reference": "target", "shot_azimuth_rad": 0.0},
+        "atmosphere": {"pressure_pa": 90000.0, "pressure_reference": "absolute"},
+        "wind": {"speed_mps": 3.0, "direction_from_rad": 1.57, "wind_reference": "compass"},
+        "solver": {}, "effects": {}, "sampling": {}
+    });
+    let req = ballistics_engine::decode_solve_request_v1(&json.to_string()).expect("decode");
+    let ok = ballistics_engine::solve_v1(req).expect("solve");
+    let r = &ok.resolved_request;
+
+    assert_eq!(r.rifle.sight_offset_lateral_m, Some(0.012));
+    assert_eq!(r.shot.zero_poi_up_m, Some(0.01));
+    assert_eq!(r.shot.zero_poi_right_m, Some(-0.005));
+    assert!(r.shot.drops_reference.is_some(), "drops_reference must be echoed");
+    assert!(
+        r.atmosphere.pressure_reference.is_some(),
+        "pressure_reference must be echoed"
+    );
+}

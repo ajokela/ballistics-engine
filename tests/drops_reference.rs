@@ -11,8 +11,9 @@
 //!       while still relabeling the column;
 //!   (d) table/CSV labels carry the active reference;
 //!   (e) solve-json wire: the field decodes (not unknown_field), scales `drop_m` by
-//!       exactly 1/cos, leaves `windage_m`/summary untouched, and omitted == explicit
-//!       "los" byte-identically; an invalid value is a structured error;
+//!       exactly 1/cos, leaves `windage_m`/summary untouched, and omitted and explicit
+//!       "los" solve identically (differing only in the Task 1 resolved echo of the
+//!       field itself); an invalid value is a structured error;
 //!   (f) target mode at |shooting angle| >= 90 degrees is rejected.
 
 use ballistics_engine::{
@@ -222,12 +223,20 @@ fn solve_json_wire_field_decodes_scales_and_defaults() {
         "the summary block is not a drop output and must not change"
     );
 
-    // Omitted == explicit "los", byte-identical response.
-    let explicit_los = solve(&request_json(r#", "drops_reference": "los""#));
+    // Omitted == explicit "los", byte-identical apart from the Task 1 (0.33.0) resolved
+    // echo of `drops_reference` itself, present only when the caller actually supplied it.
+    let mut explicit_los = solve(&request_json(r#", "drops_reference": "los""#));
+    assert!(baseline.resolved_request.shot.drops_reference.is_none());
+    assert_eq!(
+        explicit_los.resolved_request.shot.drops_reference,
+        Some(ballistics_engine::solve_json::DropsReferenceV1::Los)
+    );
+    explicit_los.resolved_request.shot.drops_reference = None;
     assert_eq!(
         serde_json::to_string(&baseline).unwrap(),
         serde_json::to_string(&explicit_los).unwrap(),
-        "explicit \"los\" must be byte-identical to omitting the field"
+        "explicit \"los\" must be byte-identical to omitting the field, apart from the \
+         resolved echo of the field itself"
     );
 
     // Invalid values are structured errors, not silent defaults.

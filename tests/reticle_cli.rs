@@ -539,10 +539,16 @@ fn solve_json_reticle_block_is_purely_additive() {
         "{hold} vs sample {at_600}"
     );
 
-    // Everything else is unchanged.
+    // Everything else is unchanged, apart from the Task 1 (0.33.0) resolved echo of the
+    // reticle request itself: present (mirroring the request) only when the request
+    // carried a reticle block.
+    assert!(plain["resolved_request"].get("reticle").is_none());
+    assert!(held["resolved_request"]["reticle"].is_object());
     held["reticle_hold"] = serde_json::Value::Null;
+    held["resolved_request"]["reticle"] = serde_json::Value::Null;
     let mut plain_padded = plain.clone();
     plain_padded["reticle_hold"] = serde_json::Value::Null;
+    plain_padded["resolved_request"]["reticle"] = serde_json::Value::Null;
     assert_eq!(held, plain_padded, "the reticle block must not move the solve");
 }
 

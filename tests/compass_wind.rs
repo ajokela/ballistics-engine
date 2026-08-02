@@ -8,8 +8,10 @@
 //! rejected in compass mode (shooter-relative by definition); a missing
 //! `--shot-direction` is a hard error naming the flag; Monte Carlo converts BEFORE
 //! sampling (seeded WEZ sweep equality); and the solve-json v1 `wind_reference` field
-//! (decode, conversion into the resolved echo, compass-without-azimuth error, omitted
-//! == explicit shooter byte-identity).
+//! (decode, conversion into the resolved echo, compass-without-azimuth error; omitted
+//! and explicit "shooter"/"compass" solve identically and differ ONLY in whether
+//! `resolved_request.wind.wind_reference` itself is echoed — the 0.33.0 Task 1
+//! resolved-request-completeness echo).
 
 use std::io::Write as _;
 use std::process::{Command, Output, Stdio};
@@ -250,6 +252,16 @@ fn solve_json(request: &serde_json::Value) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).expect("solve-json emits one JSON envelope")
 }
 
+/// Strip the Task 1 (0.33.0) `resolved_request.wind.wind_reference` echo so two
+/// responses that differ only in whether the caller explicitly named a wind reference
+/// mode can still be compared byte-for-byte on everything else.
+fn without_wind_reference_echo(mut response: serde_json::Value) -> serde_json::Value {
+    if let Some(wind) = response["resolved_request"]["wind"].as_object_mut() {
+        wind.remove("wind_reference");
+    }
+    response
+}
+
 fn base_request() -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
@@ -279,19 +291,32 @@ fn base_request() -> serde_json::Value {
 
 /// wind_reference decodes (not unknown_field); compass converts the constant direction
 /// into the resolved echo AND the physics (byte-identity with the pre-converted
-/// shooter request); explicit "shooter" == omitted byte-identically.
+/// shooter request); explicit "shooter"/"compass" and omitted solve identically and
+/// differ ONLY in whether `resolved_request.wind.wind_reference` itself is echoed (the
+/// 0.33.0 Task 1 resolved-request-completeness echo).
 #[test]
 fn solve_json_wind_reference_converts_at_the_wire() {
-    // Omitted == explicit "shooter", byte-for-byte.
+    // Omitted == explicit "shooter" apart from the Task 1 echo: strip
+    // `resolved_request.wind.wind_reference` and the two envelopes are byte-for-byte
+    // identical, because "shooter" is the behavioral default.
     let omitted = solve_json(&base_request());
     let mut shooter = base_request();
     shooter["wind"]["wind_reference"] = serde_json::json!("shooter");
-    assert_eq!(omitted, solve_json(&shooter));
+    let shooter_response = solve_json(&shooter);
+    assert!(omitted["resolved_request"]["wind"]
+        .get("wind_reference")
+        .is_none());
+    assert_eq!(
+        shooter_response["resolved_request"]["wind"]["wind_reference"],
+        "shooter"
+    );
+    assert_eq!(omitted, without_wind_reference_echo(shooter_response));
     assert_eq!(omitted["status"], "ok");
 
     // Compass: bearing PI (from south) on a shot fired at azimuth PI/2 (east) =
     // relative PI/2 (from the shooter's right) — identical to the shooter request
-    // with direction PI/2 and the same shot azimuth.
+    // with direction PI/2 and the same shot azimuth, apart from the same echo
+    // difference as above.
     let mut compass = base_request();
     compass["shot"]["shot_azimuth_rad"] = serde_json::json!(std::f64::consts::FRAC_PI_2);
     compass["wind"]["wind_reference"] = serde_json::json!("compass");
@@ -303,7 +328,17 @@ fn solve_json_wind_reference_converts_at_the_wire() {
     let reference_response = solve_json(&reference);
 
     assert_eq!(compass_response["status"], "ok", "{compass_response}");
-    assert_eq!(compass_response, reference_response);
+    assert!(reference_response["resolved_request"]["wind"]
+        .get("wind_reference")
+        .is_none());
+    assert_eq!(
+        compass_response["resolved_request"]["wind"]["wind_reference"],
+        "compass"
+    );
+    assert_eq!(
+        without_wind_reference_echo(compass_response.clone()),
+        reference_response
+    );
 
     // The resolved echo carries the CONVERTED shooter-relative direction.
     let resolved_dir = compass_response["resolved_request"]["wind"]["direction_from_rad"]

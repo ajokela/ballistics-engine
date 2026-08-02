@@ -121,8 +121,10 @@ pub struct SolveRequestV1 {
     pub sampling: SamplingV1,
     /// Optional reticle hold-point request (MBA-1361). Absent (the historical shape) leaves
     /// both the solve and the response byte-identical; present adds
-    /// [`SolveSuccessV1::reticle_hold`] and nothing else. It is a pure post-processing read
-    /// of the solved samples — it cannot change the trajectory.
+    /// [`SolveSuccessV1::reticle_hold`] and echoes itself at
+    /// [`ResolvedSolveRequestV1::reticle`] (0.33.0 decision-support Task 1), and nothing
+    /// else. It is a pure post-processing read of the solved samples — it cannot change
+    /// the trajectory.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -241,8 +243,8 @@ pub struct RifleV1 {
     /// starts that far left of the line of sight, and a solved zero adds the windage
     /// convergence (`offset / zero_distance`) so the trajectory crosses the LOS laterally
     /// at the zero range. Omitted (the default) is byte-identical to pre-MBA-1396
-    /// behavior; there is no resolved-DTO echo (request-side additive field — the
-    /// response shape is unchanged).
+    /// behavior. Echoed at [`ResolvedRifleV1::sight_offset_lateral_m`] when supplied
+    /// (0.33.0 decision-support Task 1).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -316,8 +318,8 @@ pub struct ShotV1 {
     /// Deliberate vertical POI offset AT the zero range, meters (MBA-1359, Kestrel "zero
     /// height"): positive = the rifle is deliberately zeroed to impact HIGH by this much at
     /// `zero_distance_m`. Meaningful only when `zero_distance_m` is supplied. Omitted (the
-    /// default) is byte-identical to pre-MBA-1359 behavior; there is no resolved-DTO echo
-    /// (request-side additive field — the response shape is unchanged).
+    /// default) is byte-identical to pre-MBA-1359 behavior. Echoed at
+    /// [`ResolvedShotV1::zero_poi_up_m`] when supplied (0.33.0 decision-support Task 1).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -338,8 +340,8 @@ pub struct ShotV1 {
     /// `"target"` reports drop as vertical in the target plane — the LOS-perpendicular
     /// drop scaled by `1 / cos(shooting_angle_rad)` (JBM's "target plane" reference).
     /// Output-mode toggle only: the solved trajectory, `windage_m`, the summary block and
-    /// zeroing semantics are unchanged, and there is no resolved-DTO echo (request-side
-    /// additive field — the response shape is unchanged).
+    /// zeroing semantics are unchanged. Echoed at [`ResolvedShotV1::drops_reference`]
+    /// when supplied (0.33.0 decision-support Task 1).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -464,8 +466,10 @@ pub struct WindV1 {
     /// wind echo therefore reports the converted shooter-relative direction (the QNH
     /// fold-into-resolved-value precedent). Compass mode requires an explicit
     /// `shot.shot_azimuth_rad` (a hard error otherwise, never a silent
-    /// treat-as-shooter-relative), and there is no resolved-DTO echo of the mode
-    /// itself (request-side additive field — the response shape is unchanged).
+    /// treat-as-shooter-relative). The mode itself is echoed at
+    /// [`ResolvedConstantWindV1::wind_reference`] /
+    /// [`ResolvedSegmentedWindV1::wind_reference`] when supplied (0.33.0
+    /// decision-support Task 1).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -582,6 +586,11 @@ pub struct ResolvedSolveRequestV1 {
     pub solver: ResolvedSolverV1,
     pub effects: ResolvedEffectsV1,
     pub sampling: ResolvedSamplingV1,
+    /// Echo of the reticle hold-point request (MBA-1361), when one was supplied. Present
+    /// only when the raw request supplied it — completes the resolved request as a
+    /// full description of the solve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reticle: Option<ReticleRequestV1>,
 }
 
 /// Resolved projectile inputs.
@@ -605,6 +614,10 @@ pub struct ResolvedRifleV1 {
     pub muzzle_height_m: f64,
     pub twist_rate_m_per_turn: f64,
     pub twist_direction: TwistDirectionV1,
+    /// Lateral sight offset for offset-mounted optics. Echoed so the resolved request
+    /// is a complete description of the solve (required for counterfactual re-solve).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sight_offset_lateral_m: Option<f64>,
 }
 
 /// Resolved shot geometry.
@@ -624,6 +637,18 @@ pub struct ResolvedShotV1 {
     pub cant_angle_rad: f64,
     pub target_height_m: f64,
     pub ground_threshold_m: f64,
+    /// Echo of the requested deliberate vertical POI offset at the zero range, meters
+    /// (MBA-1359). Present only when the raw request supplied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero_poi_up_m: Option<f64>,
+    /// Echo of the requested deliberate horizontal POI offset at the zero range, meters
+    /// (MBA-1359). Present only when the raw request supplied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero_poi_right_m: Option<f64>,
+    /// Echo of the requested drops-reference plane (MBA-1403). Present only when the raw
+    /// request supplied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drops_reference: Option<DropsReferenceV1>,
 }
 
 /// Resolved station conditions.
@@ -636,6 +661,10 @@ pub struct ResolvedAtmosphereV1 {
     pub relative_humidity: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latitude_rad: Option<f64>,
+    /// Echo of the requested pressure reference mode (MBA-1397). Present only when the raw
+    /// request supplied it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure_reference: Option<PressureReferenceV1>,
 }
 
 /// Resolved constant or segmented wind.
@@ -656,6 +685,11 @@ pub struct ResolvedConstantWindV1 {
     pub speed_mps: f64,
     pub direction_from_rad: f64,
     pub vertical_speed_mps: f64,
+    /// Echo of the requested wind-direction reference frame (MBA-1368). Present only when
+    /// the raw request supplied it. `direction_from_rad` above is always already converted
+    /// to shooter-relative, regardless of this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wind_reference: Option<WindReferenceV1>,
 }
 
 /// Resolved downrange wind segments.
@@ -663,6 +697,11 @@ pub struct ResolvedConstantWindV1 {
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSegmentedWindV1 {
     pub segments: Vec<ResolvedWindSegmentV1>,
+    /// Echo of the requested wind-direction reference frame (MBA-1368). Present only when
+    /// the raw request supplied it. Each segment's `direction_from_rad` above is always
+    /// already converted to shooter-relative, regardless of this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wind_reference: Option<WindReferenceV1>,
 }
 
 /// One resolved wind segment.
@@ -1385,6 +1424,7 @@ fn validate_atmosphere(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "altitude_m",
             "temperature_k",
             "pressure_pa",
+            "pressure_reference",
             "relative_humidity",
             "latitude_rad",
         ],
@@ -1400,7 +1440,20 @@ fn validate_atmosphere(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "relative_humidity",
             "latitude_rad",
         ],
-    )
+    )?;
+    // MBA-1397: string enum, not a number -- same shape-validation pattern as
+    // $.shot.drops_reference / $.wind.wind_reference. This field has existed on
+    // AtmosphereV1 and been consumed by resolve_atmosphere since MBA-1397, but was never
+    // added to this hand-maintained allowlist, so decode_solve_request_v1 rejected it as
+    // an unknown field even though direct SolveRequestV1 construction always accepted it.
+    if let Some(reference) = object.get("pressure_reference") {
+        validate_string_enum(
+            reference,
+            "$.atmosphere.pressure_reference",
+            &["absolute", "qnh"],
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_wind(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {

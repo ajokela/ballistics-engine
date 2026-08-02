@@ -306,11 +306,20 @@ fn solve_json_wire_field_decodes_and_applies() {
         w_zero - w_zero_base
     );
 
-    // Explicit 0.0 == omitted, byte-identical response.
-    let explicit_zero = solve(&request_json(Some(0.0)));
+    // Explicit 0.0 == omitted, byte-identical apart from the Task 1 (0.33.0) resolved
+    // echo of `sight_offset_lateral_m` itself, present only when the caller actually
+    // supplied it.
+    let mut explicit_zero = solve(&request_json(Some(0.0)));
+    assert!(baseline.resolved_request.rifle.sight_offset_lateral_m.is_none());
+    assert_eq!(
+        explicit_zero.resolved_request.rifle.sight_offset_lateral_m,
+        Some(0.0)
+    );
+    explicit_zero.resolved_request.rifle.sight_offset_lateral_m = None;
     assert_eq!(
         serde_json::to_string(&baseline).unwrap(),
         serde_json::to_string(&explicit_zero).unwrap(),
-        "explicit 0.0 sight_offset_lateral_m must be byte-identical to omitting it"
+        "explicit 0.0 sight_offset_lateral_m must be byte-identical to omitting it, apart \
+         from the resolved echo of the field itself"
     );
 }
