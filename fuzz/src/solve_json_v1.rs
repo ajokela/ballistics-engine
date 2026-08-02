@@ -112,7 +112,16 @@ fn maybe_bounded_or_invalid(u: &mut Unstructured<'_>, lo: f64, hi: f64) -> Resul
     }
 }
 
-fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
+/// A single, always solve-able request: every field is finite and inside the bounds
+/// `decode_solve_request_v1`'s range checks accept, so the service is expected to solve it
+/// successfully (barring a rare semantic conflict such as `Compass` wind without
+/// `shot_azimuth_rad`, see `maybe_wind_reference`).
+///
+/// `pub` so fuzz targets whose property only makes sense downstream of a successful solve
+/// (e.g. `roundtrip_resolved`) can reuse this generator directly instead of building their own
+/// -- see the memory note on this crate about hand-built DTO literals breaking CI on any
+/// schema change.
+pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
     let max_range_m = ranged(u, 20.0, MAX_FUZZ_RANGE_M)?;
     let zero_distance_m = if u.int_in_range(0u8..=7)? == 0 {
         Some(ranged(u, 20.0, max_range_m.clamp(20.0, 100.0))?)

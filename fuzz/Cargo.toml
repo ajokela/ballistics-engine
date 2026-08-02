@@ -105,3 +105,10 @@ path = "fuzz_targets/solve_v1_hostile.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "roundtrip_resolved"
+path = "fuzz_targets/roundtrip_resolved.rs"
+test = false
+doc = false
+bench = false

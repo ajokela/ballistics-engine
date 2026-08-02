@@ -10,7 +10,7 @@ fi
 cd "$(dirname "$0")/../fuzz"
 TARGETS=(robustness_inputs robustness_ffi robustness_montecarlo invariant_monotonic \
          invariant_symmetry differential_prev analytic_vacuum solver_zero \
-         solve_json_parser solve_v1_hostile)
+         solve_json_parser solve_v1_hostile roundtrip_resolved)
 # robustness_ffi fuzzes the current engine's C ABI, which lives behind the `ffi` feature. Every
 # other target must be built WITHOUT it: differential_prev also links the 0.21.5 reference engine,
 # whose ffi #[no_mangle] symbols would otherwise collide with the current engine's copy.
