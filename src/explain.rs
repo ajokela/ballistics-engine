@@ -1289,12 +1289,28 @@ mod tests {
     /// requests' altitudes actually differ, so comparing against an altitude that happens to
     /// MATCH `a`'s would stop excluding `Pressure` in that one leg and confound this test with a
     /// second, unrelated effect (see `pressure_exclusion_does_not_leak_a_partial_effect_into_atmosphere`'s
-    /// own doc comment for that failure mode in detail). `b`'s pressure here is a fixed,
-    /// altitude-INDEPENDENT absolute 98000 Pa (not QNH), so unlike that other test, changing
-    /// `b`'s altitude between 1200 and 900 changes nothing about `b`'s own actual physics either
-    /// (`calculate_atmosphere` ignores `altitude_m` whenever temperature and pressure are both
-    /// given directly, which they always are here) -- so this one tolerates NO residual at all,
-    /// not even the small second-order kind the Pressure test documents.
+    /// own doc comment for that failure mode in detail).
+    ///
+    /// This does NOT mean `altitude_m` is inert once the station temperature and pressure are
+    /// both given directly (review round 5): `calculate_atmosphere` (`atmosphere.rs`) only
+    /// skips altitude for the ONE-TIME station-level resolution in that case -- it is not the
+    /// only channel. `TrajectorySolver::calculate_acceleration` (`cli_api.rs`, MBA-1136)
+    /// separately recomputes a LOCAL atmosphere at every RK4/RK45 substep from the station
+    /// altitude and the bullet's current height via `shot_frame_altitude`/
+    /// `get_local_atmosphere_humid`, unconditionally, regardless of pressure-reference mode or
+    /// whether temperature/pressure were explicit -- `perturbation::evaluate` goes through this
+    /// same solver, so it is live here too. Because the geopotential-height conversion this
+    /// lapse computation uses is mildly nonlinear, comparing two DIFFERENT absolute station
+    /// altitudes (as this test's two `explain_difference` calls do) is not perfectly
+    /// scale-invariant even when the seed temperature/pressure are identical. Measured directly
+    /// (temporary, uncommitted probe) rather than assumed away: on this exact fixture (1200 m
+    /// vs 900 m, 300 m range), the residual is `~3.7e-12` -- about 270x below the `1e-9`
+    /// tolerance below, and about 9-10 significant digits of agreement on a ~4.3e-3 m baseline,
+    /// consistent with ordinary floating-point accumulation through an RK4 integration rather
+    /// than a physically resolvable effect. Pushing the gap to an unrealistic 900 m vs 5000 m
+    /// (still the same short 300 m query range) only grows it to `~5.0e-11` -- still comfortably
+    /// below `1e-9`. `< 1e-9` is kept as an effectively-exact bound for THIS fixture's altitude
+    /// range, not because the channel doesn't exist.
     #[test]
     fn altitude_exclusion_does_not_leak_a_partial_effect_into_atmosphere() {
         let qnh_json = serde_json::json!({
@@ -1399,17 +1415,22 @@ mod tests {
     /// difference would move Atmosphere's contribution; since Pressure is excluded in BOTH
     /// comparisons here (both `b` variants sit at 1200 m, never 500 m), it must not.
     ///
-    /// Unlike the Altitude test, this ONE still tolerates a small residual, not exact equality:
-    /// `Altitude`/`Pressure` are excluded from being SWAPPED, but each `b` variant's baseline
-    /// trajectory is still solved at ITS OWN real, unswapped (and, here, differing-by-QNH-value)
-    /// pressure, and the swapped `Temperature` axis's effect on drop is itself (very slightly) a
-    /// function of the ambient density it is evaluated in -- a genuine, small, second-order
-    /// interaction between a held-fixed axis and a swapped one, not a leak (unlike the Altitude
-    /// test, where `b`'s pressure is a FIXED absolute value that does not move with altitude at
-    /// all, so there is no equivalent second-order channel there). I measured both sides with a
-    /// temporary, uncommitted probe before choosing this test's tolerance: with the fix
-    /// disabled, this fixture's two comparisons differed by `~9.7e-3` (a first-order effect, the
-    /// shape a real leak takes). With the fix applied, they differ by `~1.8e-4` -- over 50x
+    /// Unlike the Altitude test, this ONE needs a much looser tolerance, not just a non-exact
+    /// one: `Altitude`/`Pressure` are excluded from being SWAPPED, but each `b` variant's
+    /// baseline trajectory is still solved at ITS OWN real, unswapped (and, here,
+    /// differing-by-QNH-value) pressure, and the swapped `Temperature` axis's effect on drop is
+    /// itself (very slightly) a function of the ambient density it is evaluated in -- a genuine,
+    /// small, second-order interaction between a held-fixed axis and a swapped one, not a leak.
+    /// The Altitude test's sibling comparison has an analogous channel too (the MBA-1136 local
+    /// altitude-lapse recompute, see that test's own doc comment, review round 5) -- it is not
+    /// that no such channel exists there, only that it is roughly nine orders of magnitude
+    /// smaller (measured `~3.7e-12` there vs `~1.8e-4` here), because THIS test's variation is a
+    /// real, first-derivative pressure difference at a FIXED altitude, where that one is a
+    /// second-derivative geopotential-conversion nonlinearity across two DIFFERENT altitudes.
+    /// I measured both sides with a temporary, uncommitted probe before choosing this test's
+    /// tolerance: with the fix disabled, this fixture's two comparisons differed by `~9.7e-3`
+    /// (a first-order effect, the shape a real leak takes). With the fix applied, they differ by
+    /// `~1.8e-4` -- over 50x
     /// smaller. `2e-3` sits with comfortable margin above the fixed residual and comfortably
     /// below the broken one.
     ///
