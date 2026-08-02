@@ -205,7 +205,7 @@ them rather than silently claiming a distinct model.
 | `muzzle_height_m` | no | `0` | Bore height above the ground reference. |
 | `twist_rate_m_per_turn` | no | `0.3048` | Rifling travel per full turn. |
 | `twist_direction` | no | `right` | `left` or `right`. |
-| `sight_offset_lateral_m` | no | `0` | Lateral sight-to-bore mount offset (MBA-1396): positive = sight RIGHT of bore. The trajectory starts that far left of the sight line; with `zero_distance_m` the windage zero converges it onto the sight line at the zero range. Must be finite and smaller than 0.5 m in magnitude. No resolved-DTO echo; omitting it is byte-identical to requests that predate it, with no assumption notice for its absence. |
+| `sight_offset_lateral_m` | no | `0` | Lateral sight-to-bore mount offset (MBA-1396): positive = sight RIGHT of bore. The trajectory starts that far left of the sight line; with `zero_distance_m` the windage zero converges it onto the sight line at the zero range. Must be finite and smaller than 0.5 m in magnitude. Echoed in `resolved_request.rifle.sight_offset_lateral_m` when supplied; omitting it is byte-identical to requests that predate it, with no assumption notice for its absence. |
 
 ### `shot`
 
@@ -233,10 +233,11 @@ engine. If the caller requested a zero distance, the resolved shot contains both
 `zero_poi_up_m` and `zero_poi_right_m` describe an angular zero-state bias (offset divided by the
 zero distance, applied to the solved elevation and azimuth after the zero search converges). They
 are meaningful only together with `zero_distance_m`; with `muzzle_angle_rad` supplied directly (or
-neither field present) no zero is solved and they have no effect. They have no resolved-DTO echo of
-their own: when `zero_poi_up_m` is used, the resolved `muzzle_angle_rad` simply reports the biased
-effective angle. Omitting both fields is byte-identical to requests that predate them, and no
-assumption notice is emitted for their absence.
+neither field present) no zero is solved and they have no effect. They are echoed in
+`resolved_request.shot.zero_poi_up_m` / `zero_poi_right_m` when supplied; the resolved
+`muzzle_angle_rad` separately and always reports the biased effective angle regardless of whether
+the bias fields themselves were supplied. Omitting both fields is byte-identical to requests that
+predate them, and no assumption notice is emitted for their absence.
 
 The zero search uses the request's resolved projectile, atmosphere, wind (including downrange
 segments), effects, and integration method. It follows the engine's level-rifle convention by
@@ -248,8 +249,11 @@ above; inclined zeroing projects the shot-frame trajectory back into that world 
 nothing else — not the solved trajectory, not `windage_m`, not the `summary` block, and not
 zeroing (which keeps its own `target_height_m` semantics). With `"target"` and
 `|shooting_angle_rad| >= 90 degrees` the transform is undefined and the request fails with a
-solve error. There is no resolved-DTO echo: omitting the field (or supplying `"los"`) is
-byte-identical to requests that predate it, and no assumption notice is emitted for its absence.
+solve error. It is echoed in `resolved_request.shot.drops_reference` when supplied. Omitting the
+field is byte-identical to requests that predate it, and no assumption notice is emitted for its
+absence; explicitly supplying `"los"` solves identically to omitting the field (`"los"` is the
+behavioral default), but is no longer byte-identical at the envelope level, since the echo itself
+then appears where an omitted-field response leaves it absent.
 
 ### `atmosphere`
 
@@ -333,14 +337,17 @@ concrete vertical speed. Still air resolves to the constant shape with all three
 zero.
 
 Optional `wind_reference` (MBA-1368) selects the frame every wind direction in the request is
-entered in: omitted or `"shooter"` means shooter-relative wind-FROM radians (byte-identical to
-requests that predate the field, with no assumption notice for its absence); `"compass"` means
-earth-fixed bearings (0 = north) — the constant `direction_from_rad` AND every segment's — which
-the service re-references against the shot azimuth at resolve time as
-`bearing - shot.shot_azimuth_rad`, normalized to `[0, 2π)`. The RESOLVED wind echo reports the
-converted shooter-relative direction (the same fold-into-the-resolved-value convention QNH
-pressure uses); there is no resolved echo of the mode itself. `"compass"` requires an explicit
-`shot.shot_azimuth_rad` — omitting it is a `conflicting_fields` error at
+entered in: omitted means shooter-relative wind-FROM radians, byte-identical to requests that
+predate the field, with no assumption notice for its absence; `"compass"` means earth-fixed
+bearings (0 = north) — the constant `direction_from_rad` AND every segment's — which the service
+re-references against the shot azimuth at resolve time as `bearing - shot.shot_azimuth_rad`,
+normalized to `[0, 2π)`. The RESOLVED wind echo always reports the converted shooter-relative
+direction (the same fold-into-the-resolved-value convention QNH pressure uses); the mode itself is
+separately echoed in `resolved_request.wind.wind_reference` whenever the request supplies one,
+including an explicit `"shooter"` — which therefore solves identically to omission (`"shooter"` is
+the behavioral default) but is no longer byte-identical at the envelope level, since the echo
+itself then appears where an omitted-field response leaves it absent. `"compass"` requires an
+explicit `shot.shot_azimuth_rad` — omitting it is a `conflicting_fields` error at
 `$.wind.wind_reference`, never a silent treat-as-shooter-relative. A wind FROM north
 (`direction_from_rad: 0`) on a shot fired due north (`shot_azimuth_rad: 0`) is a pure headwind.
 

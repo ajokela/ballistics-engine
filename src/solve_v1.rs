@@ -339,14 +339,18 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
         shooting_angle: resolved_request.shot.shooting_angle_rad,
         cant_angle: resolved_request.shot.cant_angle_rad,
         sight_height: resolved_request.rifle.sight_height_m,
-        // MBA-1396: consumed straight from the request (validated in resolve_rifle), no
-        // resolved-DTO echo — same contract as the zero-POI fields below.
+        // MBA-1396: consumed straight from the request (validated in resolve_rifle) for the
+        // engine inputs here. Separately echoed at ResolvedRifleV1::sight_offset_lateral_m
+        // when supplied (0.33.0 decision-support Task 1) — same contract as the zero-POI
+        // fields below.
         sight_offset_lateral_m: request.rifle.sight_offset_lateral_m.unwrap_or(0.0),
         muzzle_height: resolved_request.rifle.muzzle_height_m,
         target_height: resolved_request.shot.target_height_m,
-        // MBA-1359: consumed straight from the request (validated in resolve_shot). There is
-        // deliberately no resolved-DTO echo — see resolve_shot's comment. The zero solve in
-        // solve_v1 runs on THIS solver, so both the vertical and azimuth biases apply there.
+        // MBA-1359: consumed straight from the request (validated in resolve_shot) for the
+        // engine inputs here. Separately echoed at ResolvedShotV1::zero_poi_up_m /
+        // zero_poi_right_m when supplied (0.33.0 decision-support Task 1) — see
+        // resolve_shot's comment. The zero solve in solve_v1 runs on THIS solver, so both
+        // the vertical and azimuth biases apply there.
         zero_poi_vertical_m: request.shot.zero_poi_up_m.unwrap_or(0.0),
         zero_poi_horizontal_m: request.shot.zero_poi_right_m.unwrap_or(0.0),
         ground_threshold: resolved_request.shot.ground_threshold_m,
@@ -387,8 +391,10 @@ fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErr
         wind_shear_model: "none".to_owned(),
         enable_trajectory_sampling: false,
         sample_interval: resolved_request.sampling.interval_m,
-        // MBA-1403: consumed straight from the request (no resolved-DTO echo, matching the
-        // zero-POI fields above). The engine-side field is set for validation (target mode
+        // MBA-1403: consumed straight from the request for the engine inputs here.
+        // Separately echoed at ResolvedShotV1::drops_reference when supplied (0.33.0
+        // decision-support Task 1), matching the zero-POI fields above. The engine-side
+        // field is set for validation (target mode
         // rejects |shooting_angle| >= 90 deg inside validate_for_solve); the actual wire
         // transform is applied where observations map to samples in solve_v1, because this
         // solve path samples via TrajectoryResult::sample_observations, not the
@@ -493,8 +499,10 @@ fn resolve_rifle(
     }
     // MBA-1396: validated here but NOT resolved through `literal_default` — an absence
     // notice would change the response bytes of every request that predates the field.
-    // Consumed directly into the engine inputs with no resolved-DTO echo (additive
-    // request-side field, response shape unchanged — the MBA-1397 tolerance rule).
+    // Consumed directly into the engine inputs, and separately echoed on the resolved
+    // DTO at ResolvedRifleV1::sight_offset_lateral_m when supplied (0.33.0
+    // decision-support Task 1); omitting it still stays byte-identical to requests that
+    // predate the field.
     if let Some(value) = rifle.sight_offset_lateral_m {
         require_finite("$.rifle.sight_offset_lateral_m", value)?;
         if value.abs() >= 0.5 {
@@ -591,9 +599,11 @@ fn resolve_shot(
 
     // MBA-1359: deliberate POI offset at the zero range (Kestrel ZH/ZO). Validated here but
     // NOT resolved through `literal_default`: emitting an absence notice would change the
-    // response bytes of every request that predates these fields. They are consumed directly
-    // into the engine inputs and deliberately have no resolved-DTO echo (additive
-    // request-side field, response shape unchanged — the MBA-1397 tolerance rule).
+    // response bytes of every request that predates these fields. They are consumed
+    // directly into the engine inputs, and separately echoed on the resolved DTO at
+    // ResolvedShotV1::zero_poi_up_m / zero_poi_right_m when supplied (0.33.0
+    // decision-support Task 1); omitting them still stays byte-identical to requests that
+    // predate these fields.
     for (path, value) in [
         ("$.shot.zero_poi_up_m", shot.zero_poi_up_m),
         ("$.shot.zero_poi_right_m", shot.zero_poi_right_m),
