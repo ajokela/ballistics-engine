@@ -133,7 +133,12 @@ pub fn evaluate(req: &SolveRequestV1, ranges_m: &[f64]) -> Result<Vec<Observatio
 /// alongside the message (review fix I4(a)) rather than only formatting it into the string, so
 /// `KernelError::is_domain_rejection` can tell an `InvalidValue` domain rejection apart from a
 /// genuine solve failure without parsing text.
-fn kernel_solve_error(e: SolveErrorEnvelopeV1) -> KernelError {
+///
+/// `pub(crate)` (0.33.0 decision-support Task 9): `explain.rs`'s group-swap re-resolve
+/// (`swap_group`) needs the identical conversion when a `solve_v1` call made mid-swap fails --
+/// the same reasoning Task 6 already applied to widen `prepare_request`/`build_zeroed_solver`
+/// above, a structural share rather than a second hand-rolled copy.
+pub(crate) fn kernel_solve_error(e: SolveErrorEnvelopeV1) -> KernelError {
     KernelError::Solve { code: e.error.code, message: e.error.message }
 }
 

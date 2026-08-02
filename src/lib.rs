@@ -150,6 +150,10 @@ pub mod stability_advanced;
 // 0.33.0 decision-support Phase 1: shared input taxonomy for perturbation kernel and
 // uncertainty propagation. No feature gate: must compile for wasm32 (pure data + serde).
 pub mod perturbation;
+// MBA-1345: explain why two fully resolved solve results differ, by symmetric counterfactual
+// swap of each input group (built on `perturbation`'s Tasks 5-8 kernel). No feature gate: must
+// compile for wasm32 (depends only on perturbation/solve_json/solve_v1, all unconditional).
+pub mod explain;
 // MBA-1347: erf/erfc/normal_cdf for hit-probability integration (mass of a bivariate
 // normal over a target). In-crate rather than a dependency: the crate ships to thirteen
 // platforms including big-endian MIPS and wasm32 and already hand-rolls its statistical
