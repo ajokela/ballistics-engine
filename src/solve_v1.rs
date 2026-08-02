@@ -68,14 +68,14 @@ pub const WARNING_ZERO_DISTANCE_ELEVATION_NOT_RESOLVED: &str =
     "zero_distance_elevation_not_resolved";
 
 #[derive(Debug)]
-struct PreparedSolveV1 {
-    resolved_request: ResolvedSolveRequestV1,
+pub(crate) struct PreparedSolveV1 {
+    pub(crate) resolved_request: ResolvedSolveRequestV1,
     assumptions: Vec<SolveNoticeV1>,
     warnings: Vec<SolveNoticeV1>,
-    inputs: BallisticInputs,
-    wind: WindConditions,
-    wind_segments: Vec<WindSegment>,
-    atmosphere: AtmosphericConditions,
+    pub(crate) inputs: BallisticInputs,
+    pub(crate) wind: WindConditions,
+    pub(crate) wind_segments: Vec<WindSegment>,
+    pub(crate) atmosphere: AtmosphericConditions,
 }
 
 /// Execute one semantically validated solve-json v1 request.
@@ -125,6 +125,10 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
     // implies "the search ran", so folding the bias into a persisted, echoed field would
     // double-apply it on a second-generation round-trip (the same trap avoided for
     // atmosphere.pressure_reference / wind.wind_reference in request_roundtrip.rs).
+    //
+    // `perturbation::evaluate` (0.33.0 decision-support Task 6) mirrors this exact match on its
+    // own `TrajectorySolver` so it can read a `TrajectoryResult` without a second, independent
+    // solve. Keep the two in sync.
     match (zero_distance_m, request.shot.muzzle_angle_rad) {
         (Some(distance_m), None) => {
             let effective_angle = solver
@@ -255,7 +259,16 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
     Ok(success)
 }
 
-fn prepare_request(request: &SolveRequestV1) -> Result<PreparedSolveV1, SolveErrorEnvelopeV1> {
+// `pub(crate)` (0.33.0 decision-support Task 6): the perturbation kernel's `evaluate` needs the
+// same "resolve, build a solver, zero, solve" sequence as `solve_v1` below, to read observations
+// off the raw `TrajectoryResult` without going through the wire success DTO -- and, critically,
+// without a second, independent solve. See `perturbation::evaluate`'s doc comment: its zero
+// handling (the `match (zero_distance_m, request.shot.muzzle_angle_rad)` block) is intentionally
+// a line-for-line mirror of the one a few lines into `solve_v1` below. If that match ever
+// changes here, the mirror in `perturbation/mod.rs` must change with it.
+pub(crate) fn prepare_request(
+    request: &SolveRequestV1,
+) -> Result<PreparedSolveV1, SolveErrorEnvelopeV1> {
     let mut assumptions = Vec::new();
     let mut warnings = Vec::new();
 
