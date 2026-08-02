@@ -25,6 +25,25 @@
 //! Task 1 precisely so this is detectable) and rejected with
 //! [`KernelError::AxisUnsupportedForRequest`] rather than producing a silently-wrong request.
 //! See `taxonomy.rs`'s "KNOWN LIMITATIONS" comment, items (a) and (b).
+//!
+//! A third check keeps `with_axis` consistent with `read_axis` rather than physics-aware: the
+//! three wind axes have no single scalar to write when the resolved wind is
+//! [`ResolvedWindV1::Segmented`] (taxonomy.rs Known Limitation (c)). `read_axis` already
+//! returns `None` for that combination; `with_axis` now returns [`KernelError::AxisAbsent`]
+//! for the same combination instead of silently writing a constant-wind field (`speed_mps`
+//! etc.) alongside the still-present `wind.segments`, which `solve_v1`'s `resolve_wind` would
+//! otherwise reject downstream as an opaque `$.wind` "segments cannot be combined with
+//! constant-wind fields" error.
+//!
+//! The zero-affecting-axis rezero clear (see `with_axis`'s body) is evaluated from
+//! `req.shot.zero_distance_m` **after** the axis has been written, not before: for the
+//! `ZeroDistance` axis itself, the value that matters is the NEW distance being written, not
+//! whatever `zero_distance_m` was on the original request (which may have been absent).
+//! Gating on the pre-write value would let a request originally specified purely by
+//! `muzzle_angle_rad` silently keep that stale angle after a `ZeroDistance` write, so
+//! `solve_v1` would skip the elevation search entirely (it takes an explicit angle over a
+//! zero distance whenever both are present) and the new zero distance would have no effect on
+//! elevation at all.
 
 use crate::perturbation::taxonomy::{axis_meta, InputAxis};
 use crate::solve_json::{
@@ -47,8 +66,16 @@ pub enum AxisValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum KernelError {
+    /// Reserved for a later (differentiation) task: an axis whose `axis_meta(axis).kind` is
+    /// `AxisKind::Categorical` was asked to be treated as continuous. Not constructed by
+    /// `read_axis`/`with_axis` themselves, which accept categorical axes just like any other.
     CategoricalAxis(InputAxis),
+    /// The axis is structurally unavailable on THIS request's resolved shape -- currently only
+    /// the three wind axes when the resolved wind is `ResolvedWindV1::Segmented`, mirroring
+    /// `read_axis` returning `None` for the identical condition (see the module doc).
     AxisAbsent(InputAxis),
+    /// The `AxisValue` variant supplied to `with_axis` does not match what `axis` expects
+    /// (e.g. a `Scalar` for `DragModel`, or a `Flag` for any continuous axis).
     TypeMismatch(InputAxis),
     /// The axis is well-formed and present, but this particular request's OTHER inputs make
     /// perturbing it physically wrong rather than merely unrepresentable -- see the guards
@@ -57,8 +84,13 @@ pub enum KernelError {
         axis: InputAxis,
         reason: &'static str,
     },
+    /// Reserved for a later task: the rebuilt request failed to solve. Not constructed here --
+    /// `with_axis` only builds the request, it does not solve it.
     Solve(String),
+    /// Reserved for a later task: post-solve observation extraction failed. Not constructed
+    /// here for the same reason as `Solve`.
     Observation(String),
+    /// A `Scalar` value supplied to `with_axis` was not finite (NaN or infinite).
     NonFinite(InputAxis),
 }
 
@@ -89,6 +121,18 @@ fn wind_reference_of(w: &ResolvedWindV1) -> Option<WindReferenceV1> {
     }
 }
 
+/// Read the current value of one taxonomy axis off a resolved request.
+///
+/// Returns `None` in two DIFFERENT situations a caller should not conflate:
+/// - the axis is an optional request field that was never supplied (`Length`, `Latitude`,
+///   `ZeroPoiUp`/`ZeroPoiRight`, `SightOffsetLateral`) -- the axis exists, it just has no
+///   value on this particular request; or
+/// - the axis is structurally unavailable given how a sibling field resolved -- currently only
+///   `WindSpeed`/`WindDirection`/`WindVertical` under `ResolvedWindV1::Segmented`, where there
+///   is no single scalar wind value to read at all (taxonomy.rs Known Limitation (c)).
+///
+/// Either way, `None` means "there is nothing to perturb here": a caller sweeping
+/// `InputAxis::ALL` should skip the axis, never invent a value for it.
 pub fn read_axis(r: &ResolvedSolveRequestV1, axis: InputAxis) -> Option<AxisValue> {
     use InputAxis::*;
     let wind_speed = match &r.wind {
@@ -139,6 +183,26 @@ pub fn read_axis(r: &ResolvedSolveRequestV1, axis: InputAxis) -> Option<AxisValu
     })
 }
 
+/// Rebuild `r` as a solvable [`SolveRequestV1`] with exactly one axis overwritten to `v`.
+///
+/// Every other input is carried across unchanged via the reverse conversion
+/// (`request_roundtrip.rs`). Writing a `requires_rezero` axis (see
+/// [`crate::perturbation::axis_meta`]) while a `zero_distance_m` is present on the REBUILT
+/// request clears the carried effective `muzzle_angle_rad`, so the next solve re-zeroes at
+/// the (possibly just-changed) distance instead of reusing a stale angle -- see the module
+/// doc for why this is checked after the axis is written, not before.
+///
+/// # Errors
+///
+/// - [`KernelError::AxisUnsupportedForRequest`] if `axis` is well-formed and present, but this
+///   request's OTHER inputs make perturbing it physically wrong (the two guards in the module
+///   doc: `Altitude` under QNH pressure, `ShotAzimuth` under compass wind).
+/// - [`KernelError::AxisAbsent`] if `axis` is structurally unavailable on this request (the
+///   three wind axes under segmented wind), mirroring `read_axis` returning `None` for the
+///   same condition.
+/// - [`KernelError::TypeMismatch`] if `v`'s kind does not match `axis` (e.g. a `Scalar` for
+///   `DragModel`).
+/// - [`KernelError::NonFinite`] if `v` is a non-finite `Scalar`.
 pub fn with_axis(
     r: &ResolvedSolveRequestV1,
     axis: InputAxis,
@@ -171,9 +235,21 @@ pub fn with_axis(
                      earth-fixed",
         });
     }
+    // Third check (see the module doc): keeps with_axis consistent with read_axis, which
+    // already returns None for these three axes under segmented wind. Without this, writing
+    // e.g. WindSpeed here would set req.wind.speed_mps alongside the still-present
+    // req.wind.segments, which solve_v1's resolve_wind rejects downstream as an opaque
+    // "segments cannot be combined with constant-wind fields" error instead of this specific,
+    // named one.
+    if matches!(
+        axis,
+        InputAxis::WindSpeed | InputAxis::WindDirection | InputAxis::WindVertical
+    ) && matches!(r.wind, ResolvedWindV1::Segmented(_))
+    {
+        return Err(KernelError::AxisAbsent(axis));
+    }
 
     let mut req: SolveRequestV1 = r.into();
-    let meta = axis_meta(axis);
     let scalar = |v: AxisValue| -> Result<f64, KernelError> {
         match v {
             AxisValue::Scalar(x) if x.is_finite() => Ok(x),
@@ -199,11 +275,6 @@ pub fn with_axis(
             _ => Err(KernelError::TypeMismatch(axis)),
         }
     };
-    // Changing a zero-affecting axis invalidates the stored effective angle: drop it so
-    // the service re-zeroes from zero_distance_m rather than reusing a stale angle.
-    if meta.requires_rezero && req.shot.zero_distance_m.is_some() {
-        req.shot.muzzle_angle_rad = None;
-    }
     use InputAxis::*;
     match axis {
         Mass => req.projectile.mass_kg = scalar(v)?,
@@ -239,6 +310,14 @@ pub fn with_axis(
         CoriolisEnabled => req.effects.coriolis = Some(flag(v)?),
         EnhancedSpinDriftEnabled => req.effects.enhanced_spin_drift = Some(flag(v)?),
     }
+    // Changing a zero-affecting axis invalidates the stored effective angle: drop it so the
+    // service re-zeroes from zero_distance_m rather than reusing a stale angle. Checked AFTER
+    // the match (not before, which was a bug -- see the module doc): for the ZeroDistance axis
+    // itself, this must react to the NEW distance just written, not whatever zero_distance_m
+    // was on the original request.
+    if axis_meta(axis).requires_rezero && req.shot.zero_distance_m.is_some() {
+        req.shot.muzzle_angle_rad = None;
+    }
     Ok(req)
 }
 
@@ -247,20 +326,26 @@ mod tests {
     use super::*;
     use crate::perturbation::InputAxis;
 
-    /// Non-default values for every field this file's tests touch, including the five axes
-    /// added to the taxonomy after this task's brief was written (TwistRate, TwistDirection,
-    /// MuzzleHeight, DragModel, TargetHeight), so a mixed-up field mapping would show up as a
-    /// wrong value rather than hiding behind a coincidental default.
+    /// Non-default values for every axis this file's tests touch, INCLUDING the five
+    /// previously-omitted optional fields (`length_m`, `zero_poi_up_m`, `zero_poi_right_m`,
+    /// `sight_offset_lateral_m`, `latitude_rad`) so that all 32 taxonomy axes -- not just 27
+    /// of them -- read back `Some(..)` here. Without these five, `read_axis` returns `None`
+    /// for `Length`/`ZeroPoiUp`/`ZeroPoiRight`/`SightOffsetLateral`/`Latitude` on this fixture
+    /// and a naive per-axis loop (see `every_present_axis_round_trips_without_disturbing_any_other_field`
+    /// below) would silently skip exactly the pair -- `ZeroPoiUp`/`ZeroPoiRight` -- most likely
+    /// to be transposed by a future edit.
     fn resolved() -> crate::solve_json::ResolvedSolveRequestV1 {
         let json = serde_json::json!({
             "schema_version": 1,
             "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
-                           "ballistic_coefficient": 0.243},
+                           "ballistic_coefficient": 0.243, "length_m": 0.032},
             "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05,
                       "muzzle_height_m": 0.02, "twist_rate_m_per_turn": 0.2794,
-                      "twist_direction": "left"},
-            "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0, "target_height_m": 0.3},
-            "atmosphere": {}, "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
+                      "twist_direction": "left", "sight_offset_lateral_m": 0.03},
+            "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0, "target_height_m": 0.3,
+                     "zero_poi_up_m": 0.01, "zero_poi_right_m": 0.02},
+            "atmosphere": {"latitude_rad": 0.6},
+            "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
             "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
         }).to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
@@ -361,6 +446,23 @@ mod tests {
         assert!(matches!(e, Err(KernelError::TypeMismatch(InputAxis::Mass))));
     }
 
+    /// ...and the two enum-valued axes are not interchangeable with EACH OTHER either: both
+    /// are "enum-shaped" AxisValue variants now, so it's worth confirming DragModel's closure
+    /// rejects a TwistDirection value (and not just a Scalar/Flag) as a TypeMismatch.
+    #[test]
+    fn writing_a_twist_direction_into_the_drag_model_axis_is_a_type_error() {
+        let r = resolved();
+        let e = with_axis(
+            &r,
+            InputAxis::DragModel,
+            AxisValue::TwistDirection(TwistDirectionV1::Left),
+        );
+        assert!(matches!(
+            e,
+            Err(KernelError::TypeMismatch(InputAxis::DragModel))
+        ));
+    }
+
     /// Read/write identity for three of the five axes added after the brief was written,
     /// exercising each field mapping directly rather than only checking non-interference.
     #[test]
@@ -387,7 +489,9 @@ mod tests {
     /// read_axis returns None for the three wind axes under segmented wind: there is no
     /// single scalar to perturb (taxonomy.rs Known Limitation (c)). This is intended -- a
     /// caller must treat the None as "axis absent," never invent a uniform per-segment
-    /// perturbation.
+    /// perturbation. with_axis must AGREE with read_axis about this (I4): it must not
+    /// silently write a constant-wind field alongside the still-present wind.segments, which
+    /// solve_v1 would later reject downstream as an opaque, differently-worded error.
     #[test]
     fn wind_axes_are_absent_under_segmented_wind() {
         let json = serde_json::json!({
@@ -409,6 +513,167 @@ mod tests {
         assert_eq!(read_axis(&r, InputAxis::WindSpeed), None);
         assert_eq!(read_axis(&r, InputAxis::WindDirection), None);
         assert_eq!(read_axis(&r, InputAxis::WindVertical), None);
+
+        for axis in [
+            InputAxis::WindSpeed,
+            InputAxis::WindDirection,
+            InputAxis::WindVertical,
+        ] {
+            let e = with_axis(&r, axis, AxisValue::Scalar(1.0));
+            assert!(
+                matches!(e, Err(KernelError::AxisAbsent(a)) if a == axis),
+                "{axis:?}: expected AxisAbsent, got {e:?}"
+            );
+        }
+    }
+
+    /// Regression test (I1): the rezero-clear used to be gated on the PRE-write
+    /// `zero_distance_m`, evaluated before the match instead of after. For a request
+    /// originally specified purely by `muzzle_angle_rad` (no `zero_distance_m` at all),
+    /// writing `ZeroDistance` would then see the ORIGINAL (absent) zero distance, decide there
+    /// was nothing to gate on, and leave the carried angle in place. The rebuilt request would
+    /// carry both a brand new `zero_distance_m` AND the stale `muzzle_angle_rad`, and
+    /// `solve_v1` always prefers an explicit angle over a zero distance when both are present
+    /// (see the module doc), so the elevation search would never run: the new zero distance
+    /// would have zero effect on elevation, and a sensitivity sweep over `ZeroDistance` would
+    /// silently report "no effect" instead of the truth.
+    #[test]
+    fn writing_zero_distance_onto_an_angle_only_request_clears_the_carried_angle() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0, "muzzle_angle_rad": 0.01},
+            "atmosphere": {}, "wind": {},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
+        // Sanity check on the fixture: this request has NO zero_distance_m at all, only a
+        // directly-supplied angle, so the bug's precondition actually holds.
+        assert_eq!(r.shot.zero_distance_m, None);
+        assert_eq!(r.shot.muzzle_angle_rad, 0.01);
+
+        let rebuilt = with_axis(&r, InputAxis::ZeroDistance, AxisValue::Scalar(100.0)).unwrap();
+        assert_eq!(rebuilt.shot.zero_distance_m, Some(100.0));
+        assert_eq!(
+            rebuilt.shot.muzzle_angle_rad, None,
+            "the carried angle must be cleared so solve_v1 actually re-zeroes at the new \
+             distance instead of skipping the elevation search because an explicit angle was \
+             still present"
+        );
+    }
+
+    /// I2, assertion 1 of 3 ("clears"): a `requires_rezero` axis clears the carried
+    /// `muzzle_angle_rad` when a `zero_distance_m` is present.
+    #[test]
+    fn rezero_axis_clears_the_carried_muzzle_angle_when_a_zero_distance_is_present() {
+        let r = resolved(); // zero_distance_m = Some(100.0) in this fixture.
+        assert!(r.shot.zero_distance_m.is_some());
+        assert!(
+            axis_meta(InputAxis::Mass).requires_rezero,
+            "fixture assumption: Mass must be a requires_rezero axis for this test to mean \
+             anything"
+        );
+
+        let changed = with_axis(&r, InputAxis::Mass, AxisValue::Scalar(0.02)).unwrap();
+        assert_eq!(changed.shot.muzzle_angle_rad, None);
+    }
+
+    /// I2, assertion 2 of 3 ("preserves"): a non-`requires_rezero` axis leaves the carried
+    /// `muzzle_angle_rad` untouched, even when a `zero_distance_m` is present. (Perturbing
+    /// `MuzzleVelocityMps` in `writing_an_axis_changes_only_that_axis` does NOT demonstrate
+    /// this -- that axis IS a rezero axis, so its angle is expected to change; that test never
+    /// asserts on `muzzle_angle_rad` at all.)
+    #[test]
+    fn non_rezero_axis_preserves_the_carried_muzzle_angle() {
+        let r = resolved(); // zero_distance_m = Some(100.0) in this fixture.
+        assert!(r.shot.zero_distance_m.is_some());
+        assert!(
+            !axis_meta(InputAxis::WindSpeed).requires_rezero,
+            "fixture assumption: WindSpeed must NOT be a requires_rezero axis for this test to \
+             mean anything"
+        );
+
+        let changed = with_axis(&r, InputAxis::WindSpeed, AxisValue::Scalar(5.0)).unwrap();
+        assert_eq!(changed.shot.muzzle_angle_rad, Some(r.shot.muzzle_angle_rad));
+    }
+
+    /// I2, assertion 3 of 3 ("the gate"): a `requires_rezero` axis does NOT clear the carried
+    /// angle when there is no `zero_distance_m` to begin with -- the clearing is gated on
+    /// `zero_distance_m` being present, not on `requires_rezero` alone.
+    #[test]
+    fn rezero_axis_does_not_clear_the_angle_when_no_zero_distance_is_present() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0, "muzzle_angle_rad": 0.01},
+            "atmosphere": {}, "wind": {},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
+        assert_eq!(r.shot.zero_distance_m, None);
+        assert!(axis_meta(InputAxis::Mass).requires_rezero);
+
+        let changed = with_axis(&r, InputAxis::Mass, AxisValue::Scalar(0.02)).unwrap();
+        assert_eq!(changed.shot.muzzle_angle_rad, Some(r.shot.muzzle_angle_rad));
+    }
+
+    /// I3: every axis's mapping, checked mechanically instead of by hand. For each axis
+    /// present on the (now fully-populated) fixture, read its current value and write that
+    /// SAME value back. Since nothing numerically changes, the rebuilt request must be
+    /// identical to `SolveRequestV1::from(&r)` in EVERY field except `shot.muzzle_angle_rad`,
+    /// which a `requires_rezero` axis deliberately clears whenever `zero_distance_m` is
+    /// present (see the module doc). This is what protects the ~22 axes no other test here
+    /// checks a mapping for -- e.g. it would catch `ZeroPoiUp`/`ZeroPoiRight` being swapped
+    /// (both would still "round-trip" individually, since read-then-write-the-same-value would
+    /// put the right NUMBER back on the WRONG field, changing a field other than the one
+    /// requested), or `AimAzimuth` accidentally writing `shot_azimuth_rad`.
+    #[test]
+    fn every_present_axis_round_trips_without_disturbing_any_other_field() {
+        let r = resolved();
+        let baseline: crate::solve_json::SolveRequestV1 = (&r).into();
+        // In THIS fixture zero_distance_m is present, so "will the angle be cleared" reduces
+        // to "is this a requires_rezero axis" -- computed once, outside the loop, from the
+        // same (pre-write) state with_axis itself will see for every axis except
+        // ZeroDistance, whose own write cannot change whether zero_distance_m.is_some() (it
+        // was already Some, and it is written back Some).
+        assert!(r.shot.zero_distance_m.is_some());
+
+        let mut exercised = 0usize;
+        for &axis in InputAxis::ALL {
+            let Some(v) = read_axis(&r, axis) else {
+                continue;
+            };
+            exercised += 1;
+            let rebuilt = with_axis(&r, axis, v).unwrap();
+
+            let mut expected = baseline.clone();
+            if axis_meta(axis).requires_rezero {
+                expected.shot.muzzle_angle_rad = None;
+            }
+            assert_eq!(
+                rebuilt, expected,
+                "writing {axis:?} back onto its own current value changed a field other than \
+                 itself (and, for a rezero axis, the carried angle)"
+            );
+        }
+        // Prerequisite the fixture must satisfy for the loop above to mean anything: every one
+        // of the 32 taxonomy axes must actually be present (Some) on this fixture, or the loop
+        // would silently skip whichever axes read back None -- exactly how a naive version of
+        // this fixture would have skipped the ZeroPoiUp/ZeroPoiRight pair before it was
+        // enriched with the five previously-omitted optional fields (see `resolved`'s doc).
+        assert_eq!(
+            exercised,
+            InputAxis::ALL.len(),
+            "fixture does not make every axis readable -- this test is silently under-covering"
+        );
     }
 
     /// Physics guard (a): perturbing altitude on a QNH-pressure request would silently build
@@ -445,15 +710,45 @@ mod tests {
         }
     }
 
-    /// The QNH guard must be specific to QNH mode: an ordinary absolute-pressure request (the
-    /// default, and every request that predates MBA-1397) must still allow perturbing
-    /// altitude normally.
+    /// The QNH guard must be specific to QNH mode: an OMITTED pressure_reference (the default,
+    /// and every request that predates MBA-1397) must still allow perturbing altitude
+    /// normally. This only proves the guard doesn't fire on absence; see
+    /// `altitude_axis_is_perturbable_when_pressure_is_explicitly_absolute` below for the
+    /// stronger claim that it doesn't fire on an explicit non-QNH value either.
     #[test]
     fn altitude_axis_is_perturbable_when_pressure_is_absolute() {
         let r = resolved();
         assert_eq!(r.atmosphere.pressure_reference, None);
         let changed = with_axis(&r, InputAxis::Altitude, AxisValue::Scalar(1200.0)).unwrap();
         assert_eq!(changed.atmosphere.altitude_m, Some(1200.0));
+    }
+
+    /// Stronger version of the test above: an EXPLICIT `pressure_reference: "absolute"` (not
+    /// just an omitted field defaulting to it) must still allow perturbing altitude normally.
+    /// Guards against a hypothetical `!= Some(Qnh)` -> `== None` typo that happens to pass the
+    /// omitted-field test above but would reject this explicit-but-equivalent case.
+    #[test]
+    fn altitude_axis_is_perturbable_when_pressure_is_explicitly_absolute() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0},
+            "atmosphere": {"altitude_m": 500.0, "temperature_k": 288.0, "pressure_pa": 101325.0,
+                           "pressure_reference": "absolute"},
+            "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
+        assert_eq!(
+            r.atmosphere.pressure_reference,
+            Some(PressureReferenceV1::Absolute)
+        );
+
+        let changed = with_axis(&r, InputAxis::Altitude, AxisValue::Scalar(600.0)).unwrap();
+        assert_eq!(changed.atmosphere.altitude_m, Some(600.0));
     }
 
     /// Physics guard (b): perturbing shot azimuth on a compass-referenced-wind request would
@@ -492,11 +787,49 @@ mod tests {
         }
     }
 
-    /// The compass guard must be specific to compass mode: ordinary shooter-relative wind
-    /// (the default) must still allow perturbing shot azimuth normally.
+    /// The compass guard must be specific to compass mode: an OMITTED wind_reference (the
+    /// default) must still allow perturbing shot azimuth normally. This only proves the guard
+    /// doesn't fire on absence; see
+    /// `shot_azimuth_axis_is_perturbable_when_wind_is_explicitly_shooter_relative` below for
+    /// the stronger claim that it doesn't fire on an explicit non-compass value either.
     #[test]
     fn shot_azimuth_axis_is_perturbable_when_wind_is_shooter_relative() {
         let r = resolved();
+        assert_eq!(
+            match &r.wind {
+                ResolvedWindV1::Constant(c) => c.wind_reference,
+                ResolvedWindV1::Segmented(_) => panic!("constant wind expected"),
+            },
+            None
+        );
+        let changed = with_axis(&r, InputAxis::ShotAzimuth, AxisValue::Scalar(0.5)).unwrap();
+        assert_eq!(changed.shot.shot_azimuth_rad, Some(0.5));
+    }
+
+    /// Stronger version of the test above: an EXPLICIT `wind_reference: "shooter"` (not just
+    /// an omitted field defaulting to it) must still allow perturbing shot azimuth normally.
+    /// Guards against a hypothetical `!= Some(Compass)` -> `== None` typo that happens to pass
+    /// the omitted-field test above but would reject this explicit-but-equivalent case.
+    #[test]
+    fn shot_azimuth_axis_is_perturbable_when_wind_is_explicitly_shooter_relative() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0, "shot_azimuth_rad": 0.3},
+            "atmosphere": {},
+            "wind": {"speed_mps": 3.0, "direction_from_rad": 1.0, "wind_reference": "shooter"},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
+        let ResolvedWindV1::Constant(wind) = &r.wind else {
+            panic!("constant wind expected");
+        };
+        assert_eq!(wind.wind_reference, Some(WindReferenceV1::Shooter));
+
         let changed = with_axis(&r, InputAxis::ShotAzimuth, AxisValue::Scalar(0.5)).unwrap();
         assert_eq!(changed.shot.shot_azimuth_rad, Some(0.5));
     }
