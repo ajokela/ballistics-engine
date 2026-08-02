@@ -14,6 +14,12 @@
 //! attribute to a specific input at all. See [`error_budget`]'s doc comment for the full
 //! contract.
 //!
+//! On top of the covariance/ranking above, [`error_budget_with_target`] (Task 11) answers the
+//! decision a shooter actually faces: given a target size, what is the hit probability, and how
+//! much would it improve if one particular source were measured perfectly? See
+//! [`p_hit_bivariate`]'s doc comment for the hit-probability math and
+//! [`TargetGeometryV1`] for the target shapes it accepts.
+//!
 //! # Unavailable sources are recorded, never silently dropped
 //!
 //! [`central_difference`] can legitimately refuse to differentiate a declared axis:
