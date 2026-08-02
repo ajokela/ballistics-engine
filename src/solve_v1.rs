@@ -98,55 +98,24 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
     let station_temperature_c = prepared.atmosphere.temperature;
     let station_pressure_hpa = prepared.atmosphere.pressure;
 
-    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(
+    let (solver, effective_angle) = build_zeroed_solver(
         prepared.inputs,
         prepared.wind,
         prepared.atmosphere,
-    );
-    solver.set_max_range(max_range_m);
-    solver.set_time_step(time_step_s);
-    if !prepared.wind_segments.is_empty() {
-        solver.set_wind_segments(prepared.wind_segments);
-    }
-
-    // 0.33.0 decision-support Task 2: an explicitly supplied muzzle_angle_rad always wins
-    // over zero_distance_m for ELEVATION (resolve_shot's match already resolved it that
-    // way). Skip the elevation search in that case so a rebuilt request's carried effective
-    // angle is reused verbatim -- bit-identical, not just numerically re-converged --
-    // instead of being silently recomputed under whatever conditions happen to surround it.
-    //
-    // calculate_and_set_zero_angle also applies a SEPARATE windage-zero convergence bias
-    // (offset-mounted sights / MBA-1396, deliberate horizontal POI / MBA-1359) to azimuth,
-    // gated only on zero_distance_m -- not on whether the elevation was searched for or
-    // supplied directly. Skipping the whole call would silently drop that bias too, so when
-    // both fields are present, apply just the windage term on its own. It is deliberately
-    // never written back into resolved_request.shot.aim_azimuth_rad (unlike the elevation,
-    // which IS persisted via muzzle_angle_rad): zero_distance_m being present no longer
-    // implies "the search ran", so folding the bias into a persisted, echoed field would
-    // double-apply it on a second-generation round-trip (the same trap avoided for
-    // atmosphere.pressure_reference / wind.wind_reference in request_roundtrip.rs).
-    //
-    // `perturbation::evaluate` (0.33.0 decision-support Task 6) mirrors this exact match on its
-    // own `TrajectorySolver` so it can read a `TrajectoryResult` without a second, independent
-    // solve. Keep the two in sync.
-    match (zero_distance_m, request.shot.muzzle_angle_rad) {
-        (Some(distance_m), None) => {
-            let effective_angle = solver
-                .calculate_and_set_zero_angle(
-                    distance_m,
-                    target_height_m,
-                    crate::cli_api::ZeroTargetFrame::WorldVertical,
-                )
-                .map_err(solve_failed)?;
-            if !effective_angle.is_finite() {
-                return Err(solve_failed_message(
-                    "zero-angle calculation returned a non-finite effective muzzle angle",
-                ));
-            }
-            prepared.resolved_request.shot.muzzle_angle_rad = effective_angle;
-        }
-        (Some(distance_m), Some(_)) => solver.apply_windage_zero_bias(distance_m),
-        (None, _) => {}
+        prepared.wind_segments,
+        max_range_m,
+        time_step_s,
+        zero_distance_m,
+        target_height_m,
+        request.shot.muzzle_angle_rad,
+    )?;
+    // 0.33.0 decision-support Task 2: an explicitly supplied muzzle_angle_rad always wins over
+    // zero_distance_m for ELEVATION (resolve_shot's match already resolved it that way; see
+    // build_zeroed_solver's doc comment for the full zero-handling rationale, including the
+    // windage-zero bias). Persist the searched angle -- bit-identical, not just numerically
+    // re-converged, on a later round-trip -- only when the elevation search actually ran.
+    if let Some(angle) = effective_angle {
+        prepared.resolved_request.shot.muzzle_angle_rad = angle;
     }
 
     let result = solver.solve().map_err(solve_failed)?;
@@ -259,13 +228,83 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
     Ok(success)
 }
 
+/// Build a `TrajectorySolver` from prepared inputs, configure it, and apply `solve_v1`'s own
+/// zero handling -- shared by `solve_v1` above and by the perturbation kernel's `evaluate`
+/// (`src/perturbation/mod.rs`, 0.33.0 decision-support Task 6, I3 review fix), which reads
+/// observations directly off the resulting solver's `TrajectoryResult` without going through
+/// the wire success DTO, and without a second, independent implementation of this zero handling
+/// that could silently drift from this one.
+///
+/// Returns the configured solver (not yet solved -- callers run `TrajectorySolver::solve`
+/// themselves, since `solve_v1` needs the solver alive afterward too, for
+/// `equivalent_horizontal_range`) alongside the elevation search's effective angle when it ran
+/// (`Some`), so a caller that wants to persist it -- as `solve_v1` does, onto
+/// `resolved_request.shot.muzzle_angle_rad` -- can; `None` when it did not run at all (no
+/// `zero_distance_m`), or ran only for windage (`zero_distance_m` present alongside an explicit
+/// `explicit_angle`, which needs no persisting since it was already supplied).
+///
+/// `explicit_angle` is the ORIGINAL (unresolved) request's `shot.muzzle_angle_rad`: an
+/// explicitly supplied angle always wins over `zero_distance_m` for ELEVATION (`resolve_shot`'s
+/// match already resolved it that way). `calculate_and_set_zero_angle` also applies a SEPARATE
+/// windage-zero convergence bias (offset-mounted sights / MBA-1396, deliberate horizontal POI /
+/// MBA-1359) to azimuth, gated only on `zero_distance_m` -- not on whether the elevation was
+/// searched for or supplied directly -- so when both fields are present, this still applies just
+/// the windage term on its own rather than skipping the whole call. That bias is deliberately
+/// never returned/persisted (unlike the elevation): `zero_distance_m` being present no longer
+/// implies "the search ran", so folding the bias into a persisted, echoed field would
+/// double-apply it on a second-generation round-trip (the same trap avoided for
+/// `atmosphere.pressure_reference` / `wind.wind_reference` in `request_roundtrip.rs`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_zeroed_solver(
+    prepared_inputs: BallisticInputs,
+    wind: WindConditions,
+    atmosphere: AtmosphericConditions,
+    wind_segments: Vec<WindSegment>,
+    max_range_m: f64,
+    time_step_s: f64,
+    zero_distance_m: Option<f64>,
+    target_height_m: f64,
+    explicit_angle: Option<f64>,
+) -> Result<(TrajectorySolver, Option<f64>), SolveErrorEnvelopeV1> {
+    let mut solver =
+        TrajectorySolver::new_with_resolved_station_atmosphere(prepared_inputs, wind, atmosphere);
+    solver.set_max_range(max_range_m);
+    solver.set_time_step(time_step_s);
+    if !wind_segments.is_empty() {
+        solver.set_wind_segments(wind_segments);
+    }
+
+    let mut effective_angle = None;
+    match (zero_distance_m, explicit_angle) {
+        (Some(distance_m), None) => {
+            let angle = solver
+                .calculate_and_set_zero_angle(
+                    distance_m,
+                    target_height_m,
+                    crate::cli_api::ZeroTargetFrame::WorldVertical,
+                )
+                .map_err(solve_failed)?;
+            if !angle.is_finite() {
+                return Err(solve_failed_message(
+                    "zero-angle calculation returned a non-finite effective muzzle angle",
+                ));
+            }
+            effective_angle = Some(angle);
+        }
+        (Some(distance_m), Some(_)) => solver.apply_windage_zero_bias(distance_m),
+        (None, _) => {}
+    }
+
+    Ok((solver, effective_angle))
+}
+
 // `pub(crate)` (0.33.0 decision-support Task 6): the perturbation kernel's `evaluate` needs the
-// same "resolve, build a solver, zero, solve" sequence as `solve_v1` below, to read observations
-// off the raw `TrajectoryResult` without going through the wire success DTO -- and, critically,
-// without a second, independent solve. See `perturbation::evaluate`'s doc comment: its zero
-// handling (the `match (zero_distance_m, request.shot.muzzle_angle_rad)` block) is intentionally
-// a line-for-line mirror of the one a few lines into `solve_v1` below. If that match ever
-// changes here, the mirror in `perturbation/mod.rs` must change with it.
+// same request resolution `solve_v1` above starts from, to read observations off the raw
+// `TrajectoryResult` without going through the wire success DTO. Zero handling itself is shared
+// via `build_zeroed_solver` above (I3 review fix: an earlier revision hand-duplicated that match
+// in `perturbation/mod.rs` instead, verified consistent only by an outboard cross-check test --
+// a structural share removes that ongoing "keep two copies in sync" risk instead of relying on a
+// test to keep catching it).
 pub(crate) fn prepare_request(
     request: &SolveRequestV1,
 ) -> Result<PreparedSolveV1, SolveErrorEnvelopeV1> {
@@ -1392,7 +1431,11 @@ fn resolve_reticle_hold(
     })
 }
 
-fn solve_failed(error: BallisticsError) -> SolveErrorEnvelopeV1 {
+// `pub(crate)` (0.33.0 decision-support Task 6, I3 review fix): the perturbation kernel's
+// `evaluate` calls `TrajectorySolver::solve` itself (see `build_zeroed_solver` above) and needs
+// the identical `BallisticsError` -> `SolveErrorEnvelopeV1` conversion `solve_v1` uses for the
+// same call, so both report a solve failure in the same shape.
+pub(crate) fn solve_failed(error: BallisticsError) -> SolveErrorEnvelopeV1 {
     solve_failed_message(error.to_string())
 }
 

@@ -84,11 +84,16 @@ pub enum KernelError {
         axis: InputAxis,
         reason: &'static str,
     },
-    /// Reserved for a later task: the rebuilt request failed to solve. Not constructed here --
-    /// `with_axis` only builds the request, it does not solve it.
+    /// The rebuilt request failed to resolve or solve. Not constructed here -- `with_axis` only
+    /// builds the request, it does not solve it; [`crate::perturbation::evaluate`] (0.33.0
+    /// decision-support Task 6) is the constructor, uniformly for every stage that can fail
+    /// (`solve_v1::prepare_request`, `solve_v1::build_zeroed_solver`, and
+    /// `TrajectorySolver::solve`).
     Solve(String),
-    /// Reserved for a later task: post-solve observation extraction failed. Not constructed
-    /// here for the same reason as `Solve`.
+    /// Post-solve observation extraction failed -- most notably a requested range outside the
+    /// computed trajectory. Not constructed here for the same reason as `Solve`;
+    /// [`crate::perturbation::evaluate`] constructs it from
+    /// [`crate::trajectory_observation::TrajectoryObservationError`].
     Observation(String),
     /// A `Scalar` value supplied to `with_axis` was not finite (NaN or infinite).
     NonFinite(InputAxis),
