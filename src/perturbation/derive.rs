@@ -113,6 +113,8 @@
 //! (`src/main.rs`), which instead reports each out-of-domain case as its own distinct outcome;
 //! `bisect_axis` does not do that here, so its caller must.
 
+use serde::{Deserialize, Serialize};
+
 use crate::perturbation::access::{read_axis, with_axis, AxisValue, KernelError};
 use crate::perturbation::taxonomy::{axis_meta, AxisKind, InputAxis};
 use crate::perturbation::{evaluate, Observation};
@@ -125,7 +127,13 @@ use crate::solve_json::ResolvedSolveRequestV1;
 /// each one is chosen. This is part of the public contract precisely so a caller building an
 /// error budget (or reporting a method, MBA-1347) does not have to silently assume every
 /// [`Derivative`] is central.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` (0.33.0 decision-support Task 10, MBA-1347): `error_budget`'s
+/// `SourceContributionV1` carries this scheme directly in its wire payload, per that task's
+/// requirement that a one-sided derivative's larger truncation error be visible in the report
+/// itself, not just in prose documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DifferenceScheme {
     /// `(f(x+h) - f(x-h)) / 2h` -- both perturbed sides evaluated successfully.
     Central,

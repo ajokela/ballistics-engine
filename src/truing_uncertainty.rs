@@ -303,11 +303,23 @@ pub enum UncertaintyTruingErrorV1 {
     ForwardModel(String),
 }
 
+/// A symmetric 2x2 matrix -- posterior/information matrices in this module, and (0.33.0
+/// decision-support Task 10, MBA-1347) an impact-space covariance in the `error_budget` module.
+///
+/// `pub(crate)` together with its three fields and `add_assign`: `error_budget` needs to
+/// accumulate several declared sources' contributions into one covariance and then read its
+/// eigenvalues, reusing this type's existing, reviewed eigenvalue arithmetic (see
+/// `largest_smallest_eigenvalues` below) rather than writing a third copy of it
+/// (`crate::monte_carlo::calculate_confidence_ellipse` already has its own, sample-based copy).
+/// This is the same precedent as `kernel_solve_error`/`wind_reference_of` in
+/// `crate::perturbation`, widened from private for the identical reason in earlier tasks on this
+/// branch. Widening is behavior-preserving: every existing use of this type is within this same
+/// module, where field/method privacy was never enforced against it anyway.
 #[derive(Debug, Clone, Copy, Default)]
-struct Symmetric2 {
-    a00: f64,
-    a01: f64,
-    a11: f64,
+pub(crate) struct Symmetric2 {
+    pub(crate) a00: f64,
+    pub(crate) a01: f64,
+    pub(crate) a11: f64,
 }
 
 impl Symmetric2 {
@@ -315,10 +327,40 @@ impl Symmetric2 {
         self.a00 * self.a11 - self.a01 * self.a01
     }
 
-    fn add_assign(&mut self, rhs: Self) {
+    pub(crate) fn add_assign(&mut self, rhs: Self) {
         self.a00 += rhs.a00;
         self.a01 += rhs.a01;
         self.a11 += rhs.a11;
+    }
+
+    /// Eigenvalues of this symmetric 2x2 matrix, largest first, each clamped to non-negative.
+    /// Never fails.
+    ///
+    /// `pub(crate)` (0.33.0 decision-support Task 10, MBA-1347): shares `inverse_with_condition`
+    /// below's eigenvalue arithmetic (trace, `hypot`-based discriminant, and the
+    /// `determinant = largest * smallest` division -- more accurate than subtracting two nearly
+    /// equal values in the naive quadratic formula) but with different error semantics.
+    /// `inverse_with_condition` treats a singular or non-positive-definite matrix as a hard
+    /// failure, because it specifically inverts an information matrix that this module's MAP fit
+    /// needs to be well-conditioned. An error-budget impact covariance is routinely and
+    /// legitimately singular (exactly one nonzero-sigma source produces an exact rank-1
+    /// covariance, since it is a single outer product `sigma^2 * v * v^T`) or exactly zero
+    /// (every declared sigma is zero) -- both normal, expected inputs there, not failures. This
+    /// method never errors: a negative discriminant or determinant can only arise here from
+    /// floating-point rounding on a matrix that is mathematically positive-semidefinite by
+    /// construction (a sum of such outer products), so it is clamped to zero rather than
+    /// reported as a failure.
+    pub(crate) fn largest_smallest_eigenvalues(self) -> (f64, f64) {
+        let trace = self.a00 + self.a11;
+        let discriminant = (self.a00 - self.a11).hypot(2.0 * self.a01);
+        let largest = (0.5 * (trace + discriminant)).max(0.0);
+        let determinant = self.determinant();
+        let smallest = if largest > 0.0 {
+            (determinant / largest).max(0.0)
+        } else {
+            0.0
+        };
+        (largest, smallest)
     }
 
     fn inverse_with_condition(self) -> Result<(Self, f64), TruingApproximationFailureCodeV1> {

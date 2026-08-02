@@ -159,6 +159,13 @@ pub mod explain;
 // platforms including big-endian MIPS and wasm32 and already hand-rolls its statistical
 // constants. No feature gate: must compile for wasm32; pure std float math, no I/O.
 pub mod special;
+// 0.33.0 decision-support Task 10, MBA-1347: propagate declared per-input uncertainty to
+// impact covariance via the perturbation kernel's central differences, and rank sources by
+// variance share into a measurement-priority report. Built on `perturbation` (Tasks 5-8) and
+// reuses `truing_uncertainty::Symmetric2` for the 2x2 covariance/eigenvalue arithmetic. No
+// feature gate: must compile for wasm32 (depends only on perturbation/solve_json/
+// truing_uncertainty, all unconditional).
+pub mod error_budget;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]
