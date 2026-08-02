@@ -625,16 +625,24 @@ mod tests {
         assert_eq!(changed.shot.muzzle_angle_rad, Some(r.shot.muzzle_angle_rad));
     }
 
-    /// I3: every axis's mapping, checked mechanically instead of by hand. For each axis
-    /// present on the (now fully-populated) fixture, read its current value and write that
-    /// SAME value back. Since nothing numerically changes, the rebuilt request must be
-    /// identical to `SolveRequestV1::from(&r)` in EVERY field except `shot.muzzle_angle_rad`,
-    /// which a `requires_rezero` axis deliberately clears whenever `zero_distance_m` is
-    /// present (see the module doc). This is what protects the ~22 axes no other test here
-    /// checks a mapping for -- e.g. it would catch `ZeroPoiUp`/`ZeroPoiRight` being swapped
-    /// (both would still "round-trip" individually, since read-then-write-the-same-value would
-    /// put the right NUMBER back on the WRONG field, changing a field other than the one
-    /// requested), or `AimAzimuth` accidentally writing `shot_azimuth_rad`.
+    /// Guards the "changes only that axis" property: for each axis present on the fixture,
+    /// read its current value and write that SAME value back. Since nothing numerically
+    /// changes, the rebuilt request must be identical to `SolveRequestV1::from(&r)` in EVERY
+    /// field except `shot.muzzle_angle_rad`, which a `requires_rezero` axis deliberately
+    /// clears whenever `zero_distance_m` is present (see the module doc).
+    ///
+    /// CORRECTNESS CAVEAT (found by review, do not re-widen this claim): this loop is
+    /// structurally BLIND to a *self-consistent* transposition, where `read_axis` and
+    /// `with_axis` are both wrong about the same axis in the same way -- e.g. both mapping
+    /// `ZeroPoiUp` to `zero_poi_right_m`. In that case `read_axis(ZeroPoiUp)` returns
+    /// `zero_poi_right_m`'s current value, `with_axis` writes that SAME value back onto that
+    /// SAME (wrong) field, and the result is a byte-identical no-op: there is nothing for a
+    /// whole-struct diff to see. The same blindness covers a two-axis alias (e.g. `AimAzimuth`
+    /// reading AND writing `shot_azimuth_rad`). This loop therefore does NOT prove the mapping
+    /// is correct, only that whichever field each axis actually touches, it touches only that
+    /// one. `every_axis_writes_to_its_own_named_destination_field` below is what actually
+    /// pins each axis to its correct field, via a hardcoded per-axis destination that is
+    /// independent of (and so cannot silently agree with) a bug in `read_axis`.
     #[test]
     fn every_present_axis_round_trips_without_disturbing_any_other_field() {
         let r = resolved();
@@ -674,6 +682,179 @@ mod tests {
             InputAxis::ALL.len(),
             "fixture does not make every axis readable -- this test is silently under-covering"
         );
+    }
+
+    /// The actual mapping check (I3, corrected): for every one of the 32 axes, write a
+    /// SENTINEL value distinct from whatever that axis's own field currently holds, then
+    /// assert -- via a hardcoded, explicitly-named `match axis { .. }`, the same pattern
+    /// `twist_rate_and_muzzle_height_and_target_height_round_trip` already uses for three
+    /// axes -- that the sentinel landed in that axis's OWN specific destination field.
+    ///
+    /// This is a second, independent statement of the axis -> field mapping, written directly
+    /// against the real `SolveRequestV1` field paths rather than derived from `read_axis`. That
+    /// independence is the whole point: `every_present_axis_round_trips_without_disturbing_any_other_field`
+    /// above reads a value FROM `read_axis` and writes it back, so if `read_axis` and
+    /// `with_axis` are both wrong about the same axis in the same way, that loop's read and
+    /// write agree with each other and the bug is invisible. This test never calls `read_axis`
+    /// at all: the expected destination for every axis is spelled out here by hand, so it
+    /// cannot silently agree with a mistake made in `access.rs`'s implementation.
+    ///
+    /// Distinctness matters: a sentinel MUST differ from the field's pre-write value, or a
+    /// transposition that leaves the correct field untouched (because it wrote the sentinel to
+    /// the WRONG field instead) would go unnoticed -- the untouched field would coincidentally
+    /// already equal the "expected" value. `MuzzleAngle`/`Temperature`/`Pressure` add a fixed
+    /// delta to whatever the fixture's resolved value happens to be (avoiding a dependency on
+    /// the exact auto-zeroed angle or ICAO default) instead of a hardcoded literal.
+    #[test]
+    fn every_axis_writes_to_its_own_named_destination_field() {
+        let r = resolved();
+        use InputAxis::*;
+
+        for &axis in InputAxis::ALL {
+            match axis {
+                Mass => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.0199)).unwrap();
+                    assert_eq!(rebuilt.projectile.mass_kg, 0.0199, "{axis:?}");
+                }
+                Diameter => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.0090)).unwrap();
+                    assert_eq!(rebuilt.projectile.diameter_m, 0.0090, "{axis:?}");
+                }
+                Length => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.040)).unwrap();
+                    assert_eq!(rebuilt.projectile.length_m, Some(0.040), "{axis:?}");
+                }
+                BallisticCoefficient => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.300)).unwrap();
+                    assert_eq!(rebuilt.projectile.ballistic_coefficient, 0.300, "{axis:?}");
+                }
+                TwistRate => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.3556)).unwrap();
+                    assert_eq!(rebuilt.rifle.twist_rate_m_per_turn, Some(0.3556), "{axis:?}");
+                }
+                TwistDirection => {
+                    let rebuilt = with_axis(
+                        &r,
+                        axis,
+                        AxisValue::TwistDirection(TwistDirectionV1::Right),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        rebuilt.rifle.twist_direction,
+                        Some(TwistDirectionV1::Right),
+                        "{axis:?}"
+                    );
+                }
+                DragModel => {
+                    let rebuilt =
+                        with_axis(&r, axis, AxisValue::DragModel(DragModelV1::G1)).unwrap();
+                    assert_eq!(rebuilt.projectile.drag_model, DragModelV1::G1, "{axis:?}");
+                }
+                MuzzleVelocityMps => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(900.0)).unwrap();
+                    assert_eq!(rebuilt.rifle.muzzle_velocity_mps, 900.0, "{axis:?}");
+                }
+                SightHeight => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.06)).unwrap();
+                    assert_eq!(rebuilt.rifle.sight_height_m, Some(0.06), "{axis:?}");
+                }
+                ZeroDistance => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(200.0)).unwrap();
+                    assert_eq!(rebuilt.shot.zero_distance_m, Some(200.0), "{axis:?}");
+                }
+                ZeroPoiUp => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.05)).unwrap();
+                    assert_eq!(rebuilt.shot.zero_poi_up_m, Some(0.05), "{axis:?}");
+                }
+                ZeroPoiRight => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.06)).unwrap();
+                    assert_eq!(rebuilt.shot.zero_poi_right_m, Some(0.06), "{axis:?}");
+                }
+                SightOffsetLateral => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.10)).unwrap();
+                    assert_eq!(rebuilt.rifle.sight_offset_lateral_m, Some(0.10), "{axis:?}");
+                }
+                MuzzleHeight => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.05)).unwrap();
+                    assert_eq!(rebuilt.rifle.muzzle_height_m, Some(0.05), "{axis:?}");
+                }
+                MuzzleAngle => {
+                    let sentinel = r.shot.muzzle_angle_rad + 0.01;
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(sentinel)).unwrap();
+                    assert_eq!(rebuilt.shot.muzzle_angle_rad, Some(sentinel), "{axis:?}");
+                }
+                Altitude => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(1500.0)).unwrap();
+                    assert_eq!(rebuilt.atmosphere.altitude_m, Some(1500.0), "{axis:?}");
+                }
+                Temperature => {
+                    let sentinel = r.atmosphere.temperature_k + 5.0;
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(sentinel)).unwrap();
+                    assert_eq!(rebuilt.atmosphere.temperature_k, Some(sentinel), "{axis:?}");
+                }
+                Pressure => {
+                    let sentinel = r.atmosphere.pressure_pa + 500.0;
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(sentinel)).unwrap();
+                    assert_eq!(rebuilt.atmosphere.pressure_pa, Some(sentinel), "{axis:?}");
+                }
+                RelativeHumidity => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.7)).unwrap();
+                    assert_eq!(rebuilt.atmosphere.relative_humidity, Some(0.7), "{axis:?}");
+                }
+                Latitude => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.3)).unwrap();
+                    assert_eq!(rebuilt.atmosphere.latitude_rad, Some(0.3), "{axis:?}");
+                }
+                WindSpeed => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(7.0)).unwrap();
+                    assert_eq!(rebuilt.wind.speed_mps, Some(7.0), "{axis:?}");
+                }
+                WindDirection => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.4)).unwrap();
+                    assert_eq!(rebuilt.wind.direction_from_rad, Some(0.4), "{axis:?}");
+                }
+                WindVertical => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(1.5)).unwrap();
+                    assert_eq!(rebuilt.wind.vertical_speed_mps, Some(1.5), "{axis:?}");
+                }
+                TargetDistance => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(1000.0)).unwrap();
+                    assert_eq!(rebuilt.shot.max_range_m, 1000.0, "{axis:?}");
+                }
+                ShootingAngle => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.2)).unwrap();
+                    assert_eq!(rebuilt.shot.shooting_angle_rad, Some(0.2), "{axis:?}");
+                }
+                Cant => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.15)).unwrap();
+                    assert_eq!(rebuilt.shot.cant_angle_rad, Some(0.15), "{axis:?}");
+                }
+                ShotAzimuth => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.25)).unwrap();
+                    assert_eq!(rebuilt.shot.shot_azimuth_rad, Some(0.25), "{axis:?}");
+                }
+                AimAzimuth => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.35)).unwrap();
+                    assert_eq!(rebuilt.shot.aim_azimuth_rad, Some(0.35), "{axis:?}");
+                }
+                TargetHeight => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.5)).unwrap();
+                    assert_eq!(rebuilt.shot.target_height_m, Some(0.5), "{axis:?}");
+                }
+                MagnusEnabled => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Flag(true)).unwrap();
+                    assert_eq!(rebuilt.effects.magnus, Some(true), "{axis:?}");
+                }
+                CoriolisEnabled => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Flag(true)).unwrap();
+                    assert_eq!(rebuilt.effects.coriolis, Some(true), "{axis:?}");
+                }
+                EnhancedSpinDriftEnabled => {
+                    let rebuilt = with_axis(&r, axis, AxisValue::Flag(true)).unwrap();
+                    assert_eq!(rebuilt.effects.enhanced_spin_drift, Some(true), "{axis:?}");
+                }
+            }
+        }
     }
 
     /// Physics guard (a): perturbing altitude on a QNH-pressure request would silently build
