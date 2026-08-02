@@ -20,10 +20,12 @@
 //! [`KernelError::AxisUnsupportedForRequest`] (`Altitude` under a QNH-referenced atmosphere,
 //! `ShotAzimuth` under compass-referenced wind), [`KernelError::AxisAbsent`] (a wind axis under
 //! segmented wind), [`KernelError::CategoricalAxis`] (an effect toggle), or
-//! [`KernelError::StepOutOfDomain`] (both perturbed sides left the axis's physical domain, e.g.
-//! a declared sigma larger than the distance from the nominal value to a hard boundary). Every
-//! one of these is recorded as an
-//! [`UnavailableSourceV1`] (axis, declared sigma, and a human-readable reason) in
+//! [`KernelError::StepOutOfDomain`] (both perturbed sides, using the axis's OWN default step --
+//! `error_budget` always requests [`central_difference`]'s `None`-step formula, never a custom
+//! one, so the declared sigma has no bearing on whether this fires -- left the axis's physical
+//! domain). Every one of these is recorded as an
+//! [`UnavailableSourceV1`] (axis, declared sigma, a machine-readable
+//! [`UnavailableReasonCodeV1`], and a human-readable reason) in
 //! [`ErrorBudgetReportV1::unavailable_sources`], and the rest of the report is still produced
 //! from whatever sources DID evaluate.
 //!
@@ -41,7 +43,29 @@
 //! (see the private `unavailable_reason` below) is an exhaustive match with no wildcard arm, so
 //! a future [`KernelError`] variant fails to compile here until it is explicitly placed in one
 //! bucket or the other, rather than silently defaulting into whichever this match's last arm
-//! happens to be.
+//! happens to be. [`KernelError::DuplicateAxis`] is classified there too even though
+//! `error_budget` itself constructs and returns it before that match ever runs (see "Sources are
+//! validated up front" below) -- the exhaustiveness is over the whole `KernelError` type, not
+//! only the subset `central_difference` can produce.
+//!
+//! One caller mistake is deliberately NOT laundered through this mechanism: a range in
+//! `ranges_m` beyond `base.shot.max_range_m` would otherwise fail BOTH perturbed sides of EVERY
+//! axis identically (an [`KernelError::Observation`] domain rejection on each side becomes
+//! [`KernelError::StepOutOfDomain`]), recording every declared source as unavailable with a
+//! misleading reason that blames the axis's own step when the real problem is that the caller
+//! queried past the trajectory. See "Sources and ranges are validated up front" below --
+//! `error_budget` rejects that case directly instead.
+//!
+//! # Sources and ranges are validated up front
+//!
+//! Before any [`central_difference`] call: every `range_m` in `ranges_m` must be finite and in
+//! `[0, base.shot.max_range_m]`, or [`error_budget`] returns [`KernelError::Observation`]
+//! immediately (an honest "this range cannot be observed on this trajectory," not a per-axis
+//! "unavailable" that hides the real cause). Every declared `sigma` must be finite and
+//! non-negative, and the same [`InputAxis`] must not appear twice in `sources` (two entries
+//! would double-count that axis's variance and make its own leave-one-out counterfactual
+//! ambiguous), or [`error_budget`] returns [`KernelError::NonFinite`] /
+//! [`KernelError::DuplicateAxis`] respectively.
 //!
 //! # Ranking is deterministic
 //!
@@ -95,6 +119,22 @@
 //!   perturbed side beyond the one real solve (`(37 - 2) / 2 = 17.5` average,
 //!   `(40 - 2) / 2 = 19` average) -- well under the 60-iteration cap, not close to it, for this
 //!   fixture's zero geometry.
+//!
+//! # Why the differencing step ignores the declared sigma
+//!
+//! `error_budget` always calls [`central_difference`] with `step: None` -- the axis's own small
+//! default, never `Some(sigma)`. The delta method's Jacobian is the local SLOPE of impact at the
+//! nominal point; the declared sigma only enters afterward, scaling that slope via
+//! `J * Sigma * J^T`. The consequence: a large declared sigma is linearly extrapolated from a
+//! slope measured over a much SMALLER window (`WindSpeed`'s own default step is 0.05 m/s,
+//! regardless of whether the caller declared a 1 m/s or a 10 m/s wind-call sigma) -- this is
+//! exactly the local-linearity limitation the `assumptions` payload already discloses, not a
+//! separate concern. Using `Some(sigma)` instead was considered and rejected: it would push
+//! `WindSpeed`/`RelativeHumidity`-style sigmas straight out of their physical domain on an
+//! ordinary still-air or dry-air request (see the "One-sided fallback" section in
+//! `crate::perturbation::derive`'s own module doc), making sources vanish into one-sided
+//! fallbacks or `StepOutOfDomain` far more often -- the opposite of what a report whose whole
+//! purpose is surfacing every declared source should do.
 
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +142,7 @@ use crate::perturbation::access::KernelError;
 use crate::perturbation::derive::{central_difference, DifferenceScheme, Derivative};
 use crate::perturbation::taxonomy::InputAxis;
 use crate::solve_json::ResolvedSolveRequestV1;
+use crate::trajectory_observation::TrajectoryObservationError;
 use crate::truing_uncertainty::Symmetric2;
 
 /// Schema version for [`ErrorBudgetReportV1`].
@@ -148,19 +189,52 @@ pub struct SourceContributionV1 {
     pub variance_share: f64,
     /// Reduction in the row's 95% ellipse area if this source alone were measured perfectly
     /// (its sigma set to zero, every other source unchanged). Always `>= 0.0`.
+    ///
+    /// **Degenerate with two or fewer sources.** The remaining covariance after removing any ONE
+    /// of exactly two declared sources is an outer product (rank <= 1, area exactly 0 -- see
+    /// `Symmetric2::largest_smallest_eigenvalues`'s doc for why that is normal, not a
+    /// bug), so with exactly two sources BOTH report a reduction equal to the FULL ellipse area,
+    /// even when one dominates the variance share overwhelmingly (e.g. a 99%/1% split). That is
+    /// literally true (perfecting either one alone does leave a zero-area ellipse) but reads, next
+    /// to a ranking, as a tie where none exists on `variance_share`. A declaration of two sources
+    /// (e.g. muzzle velocity and wind call, the most likely pair this ticket sees) always has this
+    /// property; prefer `variance_share` to distinguish sources when `sources.len() <= 2`. With
+    /// three or more sources the reduction is generically discriminating.
     pub ellipse_area_reduction_m2: f64,
+}
+
+/// Which structural refusal made a source unavailable -- the machine-readable counterpart to
+/// [`UnavailableSourceV1::reason`]'s prose. Named identically to the [`KernelError`] variant it
+/// comes from. Added at the same time as the rest of this `V1` type (not held back for a later
+/// schema revision) specifically because adding a field to an already-shipped `V1` wire type
+/// would be a breaking change; this crate had not shipped `error_budget` on any released version
+/// when this field was added, so there is no such constraint yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableReasonCodeV1 {
+    AxisUnsupportedForRequest,
+    AxisAbsent,
+    CategoricalAxis,
+    StepOutOfDomain,
 }
 
 /// A declared source [`error_budget`] could not evaluate for this request, and why.
 ///
 /// See this module's "Unavailable sources" doc section. An axis appearing here never also
 /// appears in any row's `sources` -- the two are disjoint by construction. This list is the same
-/// for every row: whether `central_difference` can differentiate a given axis on a given request
-/// does not depend on which ranges were requested (see this module's "Cost" section).
+/// for every row for the three refusals that depend only on `axis` and `base`'s OTHER fields
+/// (`code` other than `StepOutOfDomain`): those never depend on which ranges were requested.
+/// `StepOutOfDomain` specifically COULD in principle depend on range (a query near a perturbed
+/// request's own shrunk domain -- see `crate::perturbation::derive`'s
+/// `target_distance_falls_back_to_one_sided_when_queried_near_its_own_max_range`), but
+/// `error_budget` rejects the common, obvious version of that (a range beyond the BASE request's
+/// own `max_range_m`) up front instead of letting it reach this list at all -- see
+/// `error_budget`'s "Sources and ranges are validated up front" doc section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnavailableSourceV1 {
     pub axis: InputAxis,
     pub sigma: f64,
+    pub code: UnavailableReasonCodeV1,
     pub reason: String,
 }
 
@@ -218,37 +292,49 @@ struct Entry {
 }
 
 /// Classify a `central_difference` failure as either "this source is unavailable, but the rest
-/// of the report should still be produced" (`Some(reason)`) or "this is a genuine failure the
-/// caller must see" (`None`).
+/// of the report should still be produced" (`Some((code, reason))`) or "this is a genuine
+/// failure the caller must see" (`None`).
 ///
 /// `Some` for the four structural refusals this module's doc names explicitly
 /// (`AxisUnsupportedForRequest`, `AxisAbsent`, `CategoricalAxis`, `StepOutOfDomain`); `None` for
-/// everything else (`Solve`, `Observation`, `TypeMismatch`, `NonFinite`), which the caller must
-/// propagate. Exhaustive over every `KernelError` variant with no wildcard arm, so a future
-/// variant fails to compile here until it is explicitly placed in one bucket or the other.
-fn unavailable_reason(e: &KernelError) -> Option<String> {
+/// everything else (`Solve`, `Observation`, `TypeMismatch`, `NonFinite`, `DuplicateAxis`), which
+/// the caller must propagate. Exhaustive over every `KernelError` variant with no wildcard arm,
+/// so a future variant fails to compile here until it is explicitly placed in one bucket or the
+/// other -- this is what forced `DuplicateAxis` to be classified here even though
+/// `error_budget`'s own up-front validation constructs and returns it directly, never through
+/// `central_difference` at all.
+fn unavailable_reason(e: &KernelError) -> Option<(UnavailableReasonCodeV1, String)> {
     match e {
-        KernelError::AxisUnsupportedForRequest { reason, .. } => Some(reason.to_string()),
-        KernelError::AxisAbsent(_) => Some(
+        KernelError::AxisUnsupportedForRequest { reason, .. } => {
+            Some((UnavailableReasonCodeV1::AxisUnsupportedForRequest, reason.to_string()))
+        }
+        KernelError::AxisAbsent(_) => Some((
+            UnavailableReasonCodeV1::AxisAbsent,
             "this axis has no single scalar value on this request (for the three wind axes, \
              this means the wind is declared as a segmented profile rather than a constant \
              speed/direction)"
                 .to_string(),
-        ),
-        KernelError::CategoricalAxis(_) => Some(
+        )),
+        KernelError::CategoricalAxis(_) => Some((
+            UnavailableReasonCodeV1::CategoricalAxis,
             "this axis is categorical (a toggle or an enumerated choice), not a continuous \
              quantity, and cannot be assigned a one-sigma uncertainty or differentiated"
                 .to_string(),
-        ),
-        KernelError::StepOutOfDomain { attempted, .. } => Some(format!(
-            "central differencing needs to perturb this axis by {attempted:.6} in both \
-             directions from its nominal value, and both directions left its physical domain; \
-             its sensitivity could not be measured at this operating point"
+        )),
+        KernelError::StepOutOfDomain { attempted, .. } => Some((
+            UnavailableReasonCodeV1::StepOutOfDomain,
+            format!(
+                "central differencing needs to perturb this axis by {attempted:.6} in both \
+                 directions from its nominal value, using the axis's own default step (this does \
+                 not depend on the declared sigma), and both directions left its physical \
+                 domain; its sensitivity could not be measured at this operating point"
+            ),
         )),
         KernelError::Solve { .. }
         | KernelError::Observation(_)
         | KernelError::TypeMismatch(_)
-        | KernelError::NonFinite(_) => None,
+        | KernelError::NonFinite(_)
+        | KernelError::DuplicateAxis(_) => None,
     }
 }
 
@@ -292,11 +378,17 @@ fn ellipse_95(cov: Symmetric2) -> Ellipse95V1 {
 /// Rank by [`SourceContributionV1::variance_share`], descending, breaking ties on the axis's own
 /// `Debug` name so the order never depends on how the caller declared `sources` -- see this
 /// module's "Ranking is deterministic" doc section.
+///
+/// Uses `f64::total_cmp` rather than `partial_cmp` -- `variance_share` is finite and
+/// non-negative for any ordinarily-sized declared sigma, but an astronomically large (still
+/// finite) sigma can overflow `sigma * sigma` to infinity and produce a NaN share
+/// (`inf / inf`); this crate ships a fuzz suite, and a library function must not panic on an
+/// extreme-but-technically-valid input. `total_cmp` gives NaN a well-defined (if not physically
+/// meaningful) place in the order instead.
 fn sort_by_variance_share_desc(sources: &mut [SourceContributionV1]) {
     sources.sort_by(|x, y| {
         y.variance_share
-            .partial_cmp(&x.variance_share)
-            .expect("variance_share is always finite and non-negative by construction")
+            .total_cmp(&x.variance_share)
             .then_with(|| format!("{:?}", x.axis).cmp(&format!("{:?}", y.axis)))
     });
 }
@@ -327,7 +419,7 @@ fn build_priority_statement(
                 ""
             };
             format!(
-                "{:?} dominates at {range_m:.0} m ({:.0}% of impact variance){caveat}. \
+                "{:?} dominates at {range_m:.0} m ({:.1}% of impact variance){caveat}. \
                  Measuring it better is the highest-value single improvement here.{}",
                 top.axis,
                 top.variance_share * 100.0,
@@ -352,21 +444,24 @@ fn build_priority_statement(
 /// ([`central_difference`]), and rank the sources by their share of impact variance.
 ///
 /// `sources` is `(axis, sigma)` pairs: `sigma` is the caller's one-sigma uncertainty for that
-/// axis, in the axis's own physical unit (`crate::perturbation::axis_meta(axis).kind`).
-/// Declaring the same axis twice is neither
-/// detected nor rejected -- the two entries are treated as fully independent sources, so their
-/// variance would be double-counted, which is not physically meaningful. Callers must not do
-/// this.
+/// axis, in the axis's own physical unit (`crate::perturbation::axis_meta(axis).kind`). Every
+/// `sigma` must be finite and non-negative and every axis must appear at most once -- both are
+/// validated up front, before any solve; see "Sources and ranges are validated up front" and
+/// `# Errors` below. (Declaring the same axis twice would double-count its variance and make its
+/// own leave-one-out counterfactual ambiguous -- which of the two entries would "removing this
+/// source" mean? -- so it is rejected rather than given an arbitrary answer.)
 ///
 /// # Honesty
 ///
 /// [`ErrorBudgetReportV1::method`] and [`ErrorBudgetReportV1::assumptions`] state, in the
 /// payload itself (not only in prose documentation), that: sources are treated as INDEPENDENT
 /// (no correlation between them is modelled); propagation is FIRST-ORDER/local-linear about the
-/// nominal solution (not exact for large or non-Gaussian input uncertainty); the 95% ellipse
-/// assumes an approximately Gaussian impact distribution; a source's derivative may be one-sided
-/// rather than central; and an unavailable source is not the same fact as a zero-contribution
-/// one. See `the_report_declares_independence_and_linearity` in this module's tests.
+/// nominal solution, using the axis's own small default differencing step regardless of the
+/// declared sigma (not exact for large or non-Gaussian input uncertainty -- see "Why the
+/// differencing step ignores the declared sigma" above); the 95% ellipse assumes an
+/// approximately Gaussian impact distribution; a source's derivative may be one-sided rather
+/// than central; and an unavailable source is not the same fact as a zero-contribution one. See
+/// `the_report_declares_independence_and_linearity` in this module's tests.
 ///
 /// # Unavailable sources
 ///
@@ -374,29 +469,66 @@ fn build_priority_statement(
 ///
 /// # Errors
 ///
-/// Propagates any [`KernelError`] from [`central_difference`] that is not one of the four
-/// structural refusals recorded in [`ErrorBudgetReportV1::unavailable_sources`] instead -- a
-/// genuine solver or trajectory failure, not a normal "this input cannot be perturbed here"
-/// fact. Also returns [`KernelError::NonFinite`] immediately, before any solve is attempted, if
-/// any declared `sigma` is not finite or is negative.
+/// - [`KernelError::Observation`] immediately, before any solve, if any `range_m` in `ranges_m`
+///   is not finite or falls outside `[0, base.shot.max_range_m]` -- see "Sources and ranges are
+///   validated up front" above.
+/// - [`KernelError::NonFinite`] immediately if any declared `sigma` is not finite or is
+///   negative.
+/// - [`KernelError::DuplicateAxis`] immediately if the same axis appears more than once in
+///   `sources`.
+/// - Otherwise, propagates any [`KernelError`] from [`central_difference`] that is not one of
+///   the four structural refusals recorded in [`ErrorBudgetReportV1::unavailable_sources`]
+///   instead -- a genuine solver or trajectory failure, not a normal "this input cannot be
+///   perturbed here" fact.
 pub fn error_budget(
     base: &ResolvedSolveRequestV1,
     sources: &[(InputAxis, f64)],
     ranges_m: &[f64],
 ) -> Result<ErrorBudgetReportV1, KernelError> {
+    // Validate ranges_m up front (review I3): an out-of-range query would otherwise fail BOTH
+    // perturbed sides of EVERY axis identically (a genuine Observation domain rejection on each
+    // side collapses to StepOutOfDomain), recording every declared source as unavailable with a
+    // reason that blames the axis's own step -- laundering a caller mistake (a range beyond the
+    // trajectory) into a plausible-looking per-axis explanation. Reject it directly instead, the
+    // same way `evaluate`'s own `observation_at_range_checked` would once a solve actually ran.
+    for &range_m in ranges_m {
+        if !range_m.is_finite() {
+            return Err(KernelError::Observation(TrajectoryObservationError::NonFiniteQuery {
+                distance_m: range_m,
+            }));
+        }
+        if range_m < 0.0 || range_m > base.shot.max_range_m {
+            return Err(KernelError::Observation(TrajectoryObservationError::OutOfRange {
+                requested_m: range_m,
+                minimum_m: 0.0,
+                maximum_m: base.shot.max_range_m,
+            }));
+        }
+    }
+
+    // Validate sources up front (review I4 + pre-existing sigma check): every sigma finite and
+    // non-negative, and no axis declared twice. Checked together, before any solve.
+    for (i, &(axis, sigma)) in sources.iter().enumerate() {
+        if !(sigma.is_finite() && sigma >= 0.0) {
+            return Err(KernelError::NonFinite(axis));
+        }
+        if sources[..i].iter().any(|&(earlier_axis, _)| earlier_axis == axis) {
+            return Err(KernelError::DuplicateAxis(axis));
+        }
+    }
+
     let mut jac: Vec<AxisJacobian> = Vec::with_capacity(sources.len());
     let mut unavailable: Vec<UnavailableSourceV1> = Vec::new();
 
     for &(axis, sigma) in sources {
-        if !(sigma.is_finite() && sigma >= 0.0) {
-            return Err(KernelError::NonFinite(axis));
-        }
         // One central_difference call per DECLARED source, covering every range in ranges_m at
         // once -- never re-derived per range. See this module's "Cost" doc section.
         match central_difference(base, axis, ranges_m, None) {
             Ok(derivatives) => jac.push(AxisJacobian { axis, sigma, derivatives }),
             Err(e) => match unavailable_reason(&e) {
-                Some(reason) => unavailable.push(UnavailableSourceV1 { axis, sigma, reason }),
+                Some((code, reason)) => {
+                    unavailable.push(UnavailableSourceV1 { axis, sigma, code, reason })
+                }
                 None => return Err(e),
             },
         }
@@ -467,8 +599,11 @@ pub fn error_budget(
              modelled."
                 .to_string(),
             "Propagation is first-order (local linear) about the nominal solution, evaluated by \
-             central differences through the real solver. It is not exact for large or \
-             non-Gaussian input uncertainty."
+             central differences through the real solver using each axis's own small default \
+             step -- independent of the declared sigma, never a step scaled to it. A large \
+             declared sigma is therefore a linear extrapolation from a slope measured over a \
+             much smaller window, which is not exact for large or non-Gaussian input \
+             uncertainty."
                 .to_string(),
             "The 95% ellipse uses the chi-square 2-dof critical value 5.991 and assumes an \
              approximately Gaussian impact distribution."
@@ -676,6 +811,7 @@ mod tests {
             .find(|u| u.axis == InputAxis::Altitude)
             .expect("Altitude must be recorded as unavailable, not dropped");
         assert_eq!(skipped.sigma, 50.0);
+        assert_eq!(skipped.code, UnavailableReasonCodeV1::AxisUnsupportedForRequest);
         assert!(skipped.reason.to_lowercase().contains("qnh"), "{}", skipped.reason);
         // The unavailable list is not merely non-empty by accident -- it must be EXACTLY the one
         // axis that was actually refused, not every declared axis.
@@ -704,6 +840,10 @@ mod tests {
         assert!(rep.rows[0].sources.is_empty());
         assert_eq!(rep.unavailable_sources.len(), 1);
         assert_eq!(rep.unavailable_sources[0].axis, InputAxis::Altitude);
+        assert_eq!(
+            rep.unavailable_sources[0].code,
+            UnavailableReasonCodeV1::AxisUnsupportedForRequest
+        );
         assert_eq!(rep.rows[0].ellipse_95.area_m2, 0.0);
         assert!(rep.rows[0].priority_statement.contains("None of the declared sources"));
     }
@@ -718,22 +858,43 @@ mod tests {
     /// exhaustive match in production code (no wildcard arm) is the stronger guarantee here,
     /// since it also protects a FUTURE `KernelError` variant at compile time. See the task
     /// report for the full reasoning.
+    ///
+    /// (Review I4): `DuplicateAxis` is in the GENUINE bucket, not the structural one --
+    /// `error_budget` constructs and returns it directly from its own up-front validation
+    /// (never through `central_difference`), so by the time anything reaches this
+    /// classification it must propagate, exactly like a malformed request.
+    ///
+    /// Also verifies the SPECIFIC `UnavailableReasonCodeV1` returned for each structural
+    /// refusal, not just that one was returned -- `is_some()` alone would not catch two codes
+    /// swapped between variants (e.g. `AxisAbsent` mistakenly tagged `CategoricalAxis`).
     #[test]
     fn unavailable_reason_classifies_every_kernel_error_variant() {
         use crate::solve_json::SolveErrorCodeV1;
         use crate::trajectory_observation::TrajectoryObservationError;
 
         let structural = [
-            KernelError::AxisUnsupportedForRequest { axis: InputAxis::Altitude, reason: "x" },
-            KernelError::AxisAbsent(InputAxis::WindSpeed),
-            KernelError::CategoricalAxis(InputAxis::CoriolisEnabled),
-            KernelError::StepOutOfDomain { axis: InputAxis::RelativeHumidity, attempted: 2.0 },
+            (
+                KernelError::AxisUnsupportedForRequest { axis: InputAxis::Altitude, reason: "x" },
+                UnavailableReasonCodeV1::AxisUnsupportedForRequest,
+            ),
+            (KernelError::AxisAbsent(InputAxis::WindSpeed), UnavailableReasonCodeV1::AxisAbsent),
+            (
+                KernelError::CategoricalAxis(InputAxis::CoriolisEnabled),
+                UnavailableReasonCodeV1::CategoricalAxis,
+            ),
+            (
+                KernelError::StepOutOfDomain { axis: InputAxis::RelativeHumidity, attempted: 2.0 },
+                UnavailableReasonCodeV1::StepOutOfDomain,
+            ),
         ];
-        for e in &structural {
-            assert!(
-                unavailable_reason(e).is_some(),
-                "{e:?} must be classified as unavailable (recorded), not propagated"
-            );
+        for (e, expected_code) in &structural {
+            match unavailable_reason(e) {
+                Some((code, _)) => assert_eq!(
+                    code, *expected_code,
+                    "{e:?} classified with the wrong UnavailableReasonCodeV1"
+                ),
+                None => panic!("{e:?} must be classified as unavailable (recorded), not propagated"),
+            }
         }
 
         let genuine = [
@@ -745,6 +906,7 @@ mod tests {
             }),
             KernelError::TypeMismatch(InputAxis::Mass),
             KernelError::NonFinite(InputAxis::Mass),
+            KernelError::DuplicateAxis(InputAxis::Mass),
         ];
         for e in &genuine {
             assert!(
@@ -906,6 +1068,202 @@ mod tests {
         assert!((share_sum - 1.0).abs() < 1e-9, "shares summed to {share_sum}");
     }
 
+    /// (I6, review round) FOUR previously-unasserted public payload fields --
+    /// `sigma_drop_m`, `sigma_windage_m`, `covariance_m2`, and `ellipse_95.rotation_rad` -- each
+    /// checked against an INDEPENDENTLY computed value, never against `error_budget`'s own
+    /// internal `Symmetric2`/`accumulate` bookkeeping. Each of these mutations passes all of this
+    /// module's OTHER tests: swapping `sigma_drop_m`/`sigma_windage_m`; forcing `rotation_rad` to
+    /// `0.0` unconditionally; forcing `covariance_m2` to `0.0` unconditionally. (The fifth
+    /// previously-unasserted field, `ellipse_area_reduction_m2`, is covered by the next test,
+    /// which needs 3+ sources to be discriminating at all -- see that field's own doc comment.)
+    ///
+    /// `Cant` is declared at a NONZERO baseline (`cant_angle_rad: 0.5`, ~29 degrees) specifically
+    /// so its derivative has comparable, clearly nonzero components in BOTH drop and windage: at
+    /// a baseline cant of exactly zero, canting the rifle by an infinitesimal `dtheta` rotates a
+    /// purely-vertical drop vector into windage to FIRST order while changing its own magnitude
+    /// only to SECOND order (`d(drop)/d(cant) ~ 0`, `d(windage)/d(cant) ~ drop`), which would
+    /// make the covariance term a floating-point-noise-sized artifact rather than a robustly
+    /// nonzero cross term -- at a nonzero baseline, both `sin(cant)` and `cos(cant)` are
+    /// appreciable, giving `Cant` a genuinely mixed drop/windage sensitivity.
+    #[test]
+    fn sigma_covariance_and_rotation_are_verified_independently_not_against_themselves() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0, "cant_angle_rad": 0.5},
+            "atmosphere": {},
+            "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
+
+        let declared = [
+            (InputAxis::MuzzleVelocityMps, 5.0),
+            (InputAxis::WindSpeed, 1.0),
+            (InputAxis::Cant, 0.01),
+        ];
+        let rep = error_budget(&r, &declared, &[600.0]).unwrap();
+
+        // Independent oracle: direct central_difference calls, summed by hand right here -- not
+        // error_budget's own accumulate()/Symmetric2 code path.
+        let mut var_drop = 0.0_f64;
+        let mut var_wind = 0.0_f64;
+        let mut cov = 0.0_f64;
+        for &(axis, sigma) in &declared {
+            let d = central_difference(&r, axis, &[600.0], None).unwrap()[0];
+            let s2 = sigma * sigma;
+            var_drop += d.d_drop_d_x * d.d_drop_d_x * s2;
+            var_wind += d.d_windage_d_x * d.d_windage_d_x * s2;
+            cov += d.d_drop_d_x * d.d_windage_d_x * s2;
+        }
+
+        let row = &rep.rows[0];
+
+        // sigma_drop_m / sigma_windage_m: independently computed AND distinguishably different
+        // (measured ~0.045 vs ~0.217 for this fixture), so a swap between them is not invisible.
+        assert!(
+            (row.sigma_drop_m - var_drop.sqrt()).abs() < 1e-9,
+            "sigma_drop_m: got {}, expected {}",
+            row.sigma_drop_m,
+            var_drop.sqrt()
+        );
+        assert!(
+            (row.sigma_windage_m - var_wind.sqrt()).abs() < 1e-9,
+            "sigma_windage_m: got {}, expected {}",
+            row.sigma_windage_m,
+            var_wind.sqrt()
+        );
+        assert!(
+            (row.sigma_drop_m - row.sigma_windage_m).abs()
+                > 0.1 * row.sigma_drop_m.max(row.sigma_windage_m),
+            "fixture must give sigma_drop_m and sigma_windage_m distinguishably different \
+             values, or a swap between them would be invisible here: drop={}, wind={}",
+            row.sigma_drop_m,
+            row.sigma_windage_m
+        );
+
+        // covariance_m2: independently computed, and clearly nonzero (measured ~ -1.5e-4, about
+        // 7.7% of var_drop -- not a floating-point-noise-sized artifact).
+        assert!(
+            (row.covariance_m2 - cov).abs() < 1e-9 * cov.abs().max(1.0),
+            "covariance_m2: got {}, expected {}",
+            row.covariance_m2,
+            cov
+        );
+        assert!(cov.abs() > 1e-5, "fixture must give a clearly nonzero covariance: {cov}");
+
+        // rotation_rad: verified via the DEFINITION of the major-axis angle (a Rayleigh-quotient
+        // check), not by re-deriving the same atan2 formula error_budget itself uses to compute
+        // it -- the variance PROJECTED along the direction rotation_rad points must equal the
+        // ellipse's own major-axis eigenvalue (semi_major_m^2 / CHI2_95_2DOF). Forcing
+        // rotation_rad to 0.0 would project onto the drop axis instead, giving var_drop
+        // (~0.002) rather than the true lambda_max (~0.047 for this fixture) -- clearly caught.
+        let (s, c) = row.ellipse_95.rotation_rad.sin_cos();
+        let var_along_major = c * c * var_drop + 2.0 * c * s * cov + s * s * var_wind;
+        let lambda_max = row.ellipse_95.semi_major_m.powi(2) / CHI2_95_2DOF;
+        assert!(
+            (var_along_major - lambda_max).abs() < 1e-9 * lambda_max.max(1.0),
+            "rotation_rad ({}) does not point along the major axis: variance projected along it \
+             is {}, but the major-axis eigenvalue is {}",
+            row.ellipse_95.rotation_rad,
+            var_along_major,
+            lambda_max
+        );
+        assert_ne!(
+            row.ellipse_95.rotation_rad, 0.0,
+            "fixture must give a genuinely nonzero rotation"
+        );
+    }
+
+    /// (I7, review round) `ellipse_area_reduction_m2` is DEGENERATE with two or fewer declared
+    /// sources (documented on the field: removing either of exactly two leaves a rank-1
+    /// covariance, area exactly zero, so BOTH report the full ellipse area as their own
+    /// reduction even at a lopsided variance split). With three or more sources it is
+    /// generically discriminating; this proves that, and checks every source's value against an
+    /// INDEPENDENT oracle that does not call `Symmetric2`/`ellipse_95` at all (a hand-rolled
+    /// trace/determinant formula -- the same shape `monte_carlo::calculate_confidence_ellipse`
+    /// uses, deliberately a DIFFERENT numerical path than this module's own).
+    #[test]
+    fn ellipse_area_reduction_is_nonzero_and_discriminating_with_three_or_more_sources() {
+        fn independent_ellipse_area(var_drop: f64, var_wind: f64, cov: f64) -> f64 {
+            let trace = var_drop + var_wind;
+            let det = (var_drop * var_wind - cov * cov).max(0.0);
+            let disc = ((trace * trace / 4.0) - det).max(0.0).sqrt();
+            let l1 = (trace / 2.0 + disc).max(0.0);
+            let l2 = (trace / 2.0 - disc).max(0.0);
+            std::f64::consts::PI * (CHI2_95_2DOF * l1).sqrt() * (CHI2_95_2DOF * l2).sqrt()
+        }
+
+        let r = resolved();
+        // One dominant source (MV) plus two much smaller ones -- a realistic "mostly one input
+        // matters" declaration, exactly the shape I7 warns reads as a false tie under the
+        // two-source degeneracy above.
+        let declared = [
+            (InputAxis::MuzzleVelocityMps, 5.0),
+            (InputAxis::WindSpeed, 0.3),
+            (InputAxis::BallisticCoefficient, 0.001),
+        ];
+        let rep = error_budget(&r, &declared, &[600.0]).unwrap();
+        assert_eq!(rep.rows[0].sources.len(), 3);
+
+        let mut derivs = std::collections::HashMap::new();
+        for &(axis, sigma) in &declared {
+            let d = central_difference(&r, axis, &[600.0], None).unwrap()[0];
+            derivs.insert(axis, (sigma, d.d_drop_d_x, d.d_windage_d_x));
+        }
+        let variance_excluding = |exclude: Option<InputAxis>| -> (f64, f64, f64) {
+            let mut vd = 0.0;
+            let mut vw = 0.0;
+            let mut cv = 0.0;
+            for (&axis, &(sigma, dd, dw)) in &derivs {
+                if Some(axis) == exclude {
+                    continue;
+                }
+                let s2 = sigma * sigma;
+                vd += dd * dd * s2;
+                vw += dw * dw * s2;
+                cv += dd * dw * s2;
+            }
+            (vd, vw, cv)
+        };
+        let (fvd, fvw, fcv) = variance_excluding(None);
+        let full_area = independent_ellipse_area(fvd, fvw, fcv);
+
+        let mut reductions = Vec::new();
+        for s in &rep.rows[0].sources {
+            let (vd, vw, cv) = variance_excluding(Some(s.axis));
+            let reduced_area = independent_ellipse_area(vd, vw, cv);
+            let expected_reduction = (full_area - reduced_area).max(0.0);
+            assert!(
+                (s.ellipse_area_reduction_m2 - expected_reduction).abs()
+                    < 1e-9 * expected_reduction.max(1.0),
+                "{:?}: got {}, independently expected {}",
+                s.axis,
+                s.ellipse_area_reduction_m2,
+                expected_reduction
+            );
+            reductions.push((s.axis, s.ellipse_area_reduction_m2));
+        }
+
+        // Discriminating, not a "0.0 unconditionally" mutation (which would fail the exact
+        // check above already) nor a same-for-everyone tie (the I7 degeneracy, which no longer
+        // applies with 3+ sources).
+        assert!(
+            reductions.iter().all(|&(_, red)| red > 0.0),
+            "every reduction should be positive with 3+ sources: {reductions:?}"
+        );
+        let first = reductions[0].1;
+        assert!(
+            reductions.iter().any(|&(_, red)| (red - first).abs() > 1e-6 * first.max(1.0)),
+            "reductions must discriminate between sources with 3+ declared, not all be equal: \
+             {reductions:?}"
+        );
+    }
+
     /// (4) Jacobian reuse across ranges: each row must carry its OWN correctly-indexed
     /// derivative (checked against an independent `central_difference` call at that same single
     /// range), and different ranges must give genuinely different numbers -- catching a bug that
@@ -934,9 +1292,13 @@ mod tests {
         );
     }
 
-    /// Declaring a non-finite or negative sigma is rejected up front, before any solve --
-    /// otherwise a NaN sigma would silently poison `variance_share`'s comparator in the sort
-    /// (`partial_cmp` returns `None` for NaN, and the implementation unwraps it).
+    /// Declaring a non-finite or negative sigma is rejected up front, before any solve -- it is
+    /// not a real one-sigma uncertainty regardless of whether anything downstream would panic on
+    /// it. (An earlier revision of this comment cited `variance_share`'s sort comparator
+    /// panicking on NaN as the reason; that specific mechanism no longer applies now that the
+    /// sort uses `f64::total_cmp` (review M1), but the input is still nonsensical and still
+    /// rejected -- see `an_astronomically_large_sigma_does_not_panic_the_sort` below for the
+    /// remaining, more extreme case `total_cmp` exists to handle instead of panicking on.)
     #[test]
     fn a_non_finite_or_negative_sigma_is_rejected() {
         let r = resolved();
@@ -946,6 +1308,137 @@ mod tests {
         assert!(matches!(neg, Err(KernelError::NonFinite(InputAxis::WindSpeed))));
         let inf = error_budget(&r, &[(InputAxis::WindSpeed, f64::INFINITY)], &[600.0]);
         assert!(matches!(inf, Err(KernelError::NonFinite(InputAxis::WindSpeed))));
+    }
+
+    /// (M1, review round) An astronomically large (but finite, non-negative -- so it PASSES the
+    /// validation above) declared sigma can overflow `sigma * sigma` to infinity, making
+    /// `variance_share` a NaN (`inf / inf`). `sort_by_variance_share_desc` must not panic on
+    /// that: this crate ships a fuzz suite, and a library function panicking on an
+    /// extreme-but-technically-valid input is a real failure mode.
+    #[test]
+    fn an_astronomically_large_sigma_does_not_panic_the_sort() {
+        let r = resolved();
+        let huge = 1e200_f64;
+        assert!(
+            huge.is_finite() && (huge * huge).is_infinite(),
+            "fixture assumption: sigma^2 must overflow to infinity"
+        );
+        let rep = error_budget(
+            &r,
+            &[(InputAxis::MuzzleVelocityMps, huge), (InputAxis::WindSpeed, 1.0)],
+            &[600.0],
+        )
+        .unwrap();
+        // Does not panic; the NaN share's exact placement by total_cmp is not physically
+        // meaningful for this pathological input and is not asserted, only that the call
+        // returns normally with every declared source still present.
+        assert_eq!(rep.rows[0].sources.len(), 2);
+    }
+
+    /// (I4, review round) The same axis declared twice must be rejected up front, not silently
+    /// double-counted -- with duplicates, `accumulate(&entries, Some(axis))` (keyed on axis)
+    /// would exclude BOTH entries when pricing "if this source were measured perfectly" for
+    /// EITHER one, computing a counterfactual against a baseline where the caller's OTHER
+    /// declaration of the same axis was ALSO perfected -- not what either individual declaration
+    /// means.
+    #[test]
+    fn a_duplicate_axis_declaration_is_rejected() {
+        let r = resolved();
+        let e = error_budget(
+            &r,
+            &[(InputAxis::WindSpeed, 1.0), (InputAxis::WindSpeed, 2.0)],
+            &[600.0],
+        );
+        assert!(matches!(e, Err(KernelError::DuplicateAxis(InputAxis::WindSpeed))));
+    }
+
+    /// (I4, continued) The duplicate check finds a repeat anywhere in the list, not just
+    /// adjacent entries, and names the axis that was actually repeated.
+    #[test]
+    fn a_duplicate_axis_is_found_even_when_not_adjacent() {
+        let r = resolved();
+        let e = error_budget(
+            &r,
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::BallisticCoefficient, 0.005),
+                (InputAxis::MuzzleVelocityMps, 6.0),
+            ],
+            &[600.0],
+        );
+        assert!(matches!(e, Err(KernelError::DuplicateAxis(InputAxis::MuzzleVelocityMps))));
+    }
+
+    /// (I3, review round) A range beyond the BASE request's own `max_range_m` must be rejected
+    /// directly as `Observation(OutOfRange)`, not silently converted into "every declared source
+    /// is unavailable" -- without this check, `central_difference` would fail BOTH perturbed
+    /// sides of EVERY axis identically on the same out-of-range observation
+    /// (`StepOutOfDomain`), recording each one as unavailable with a reason blaming that axis's
+    /// own step, when the real cause is the query itself and has nothing to do with any axis.
+    #[test]
+    fn a_range_beyond_max_range_m_is_rejected_directly_not_laundered_per_axis() {
+        let r = resolved(); // max_range_m: 900.0
+        let e = error_budget(
+            &r,
+            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.0)],
+            &[600.0, 5000.0],
+        );
+        match e {
+            Err(KernelError::Observation(TrajectoryObservationError::OutOfRange {
+                requested_m,
+                maximum_m,
+                ..
+            })) => {
+                assert_eq!(requested_m, 5000.0);
+                assert_eq!(maximum_m, 900.0);
+            }
+            other => panic!(
+                "expected Err(KernelError::Observation(OutOfRange {{ .. }})) naming the \
+                 out-of-range query, got {other:?}"
+            ),
+        }
+    }
+
+    /// (I3, continued) A negative range is likewise rejected directly, matching
+    /// `observation_at_range_checked`'s own `distance_m < minimum_m` check.
+    #[test]
+    fn a_negative_range_is_rejected_directly() {
+        let r = resolved();
+        let e = error_budget(&r, &[(InputAxis::WindSpeed, 1.0)], &[-1.0]);
+        assert!(matches!(
+            e,
+            Err(KernelError::Observation(TrajectoryObservationError::OutOfRange {
+                requested_m,
+                ..
+            })) if requested_m == -1.0
+        ));
+    }
+
+    /// (I1, review round) The `StepOutOfDomain` reason names the REAL trigger (the axis's own
+    /// default differencing step) and does not blame the declared sigma, which has zero
+    /// influence on whether this fires -- `error_budget` always requests `central_difference`'s
+    /// default step, never a custom one.
+    #[test]
+    fn step_out_of_domain_reason_blames_the_default_step_not_the_sigma() {
+        let e = KernelError::StepOutOfDomain { axis: InputAxis::RelativeHumidity, attempted: 2.0 };
+        let (code, reason) = unavailable_reason(&e).unwrap();
+        assert_eq!(code, UnavailableReasonCodeV1::StepOutOfDomain);
+        // Names the real trigger (the axis's own default step)...
+        assert!(reason.to_lowercase().contains("default step"), "{reason}");
+        // ...and explicitly disclaims sigma as the cause, rather than implying sigma's
+        // MAGNITUDE is what pushed the step out of domain (the false claim I1 found in this
+        // module's top-of-file doc comment, now corrected there too). The word "sigma" appearing
+        // at all is fine and expected here -- the message says "does not depend on the declared
+        // sigma" precisely to rule that out -- so this checks for the wrong-causation PHRASING,
+        // not for the word's mere presence.
+        assert!(
+            !reason.to_lowercase().contains("sigma larger"),
+            "reason should not claim the declared sigma's SIZE caused this: {reason}"
+        );
+        assert!(
+            reason.to_lowercase().contains("does not depend on the declared sigma"),
+            "{reason}"
+        );
     }
 
     /// Declaring zero sources is well-defined, not a panic or a spurious error.
@@ -964,6 +1457,18 @@ mod tests {
     /// `sigma^2 * [dd, dw] * [dd, dw]^T`, whose only nonzero eigenvalue is
     /// `sigma^2 * (dd^2 + dw^2)` -- an independent check on `Symmetric2::largest_smallest_eigenvalues`
     /// and `ellipse_95` together, not just on `error_budget`'s own bookkeeping.
+    ///
+    /// (Review I5): the minor axis and area are zero in EXACT arithmetic for a rank-1 covariance,
+    /// but NOT bit-exactly in IEEE-754: `determinant = fl(dd^2 s^2 * dw^2 s^2) -
+    /// fl((dd * dw * s^2)^2)` is two differently-rounded computations of the same mathematical
+    /// product and can land a few ULP to either side of zero depending on `dd`/`dw`'s exact bit
+    /// pattern (a catastrophic-cancellation difference of two near-equal drops, hence
+    /// libm/compiler/platform sensitive) -- this file's own tests run on Darwin, CI's
+    /// `ci.yml` runs on `ubuntu-latest`/glibc. A prior version of this test asserted bit-exact
+    /// `== 0.0`, which is a genuine, unverified CI coin-flip, not a property this code actually
+    /// guarantees (`largest_smallest_eigenvalues` clamps a NEGATIVE determinant to exactly zero,
+    /// but a tiny POSITIVE one survives as a tiny nonzero `smallest`). Bound both RELATIVE to the
+    /// major axis instead.
     #[test]
     fn single_source_ellipse_matches_the_closed_form_rank_one_case() {
         let r = resolved();
@@ -972,15 +1477,26 @@ mod tests {
         let d = central_difference(&r, InputAxis::WindSpeed, &[600.0], None).unwrap()[0];
 
         let expected_largest = sigma * sigma * (d.d_drop_d_x.powi(2) + d.d_windage_d_x.powi(2));
-        // The minor axis is exactly zero for a rank-1 covariance, so the area (semi_major *
-        // semi_minor * pi) is exactly zero too, regardless of how large the major axis is.
-        assert_eq!(rep.rows[0].ellipse_95.semi_minor_m, 0.0);
-        assert_eq!(rep.rows[0].ellipse_95.area_m2, 0.0);
         let expected_major = (CHI2_95_2DOF * expected_largest).sqrt();
+        let ellipse = rep.rows[0].ellipse_95;
         assert!(
-            (rep.rows[0].ellipse_95.semi_major_m - expected_major).abs() < 1e-9,
+            ellipse.semi_minor_m <= 1e-9 * expected_major,
+            "semi_minor_m should be negligible relative to the major axis for a rank-1 \
+             covariance, got minor={}, major={}",
+            ellipse.semi_minor_m,
+            expected_major
+        );
+        assert!(
+            ellipse.area_m2 <= 1e-9 * std::f64::consts::PI * expected_major * expected_major,
+            "area_m2 should be negligible relative to a major-axis-radius circle for a rank-1 \
+             covariance, got area={}, major={}",
+            ellipse.area_m2,
+            expected_major
+        );
+        assert!(
+            (ellipse.semi_major_m - expected_major).abs() < 1e-9,
             "got {}, expected {}",
-            rep.rows[0].ellipse_95.semi_major_m,
+            ellipse.semi_major_m,
             expected_major
         );
     }

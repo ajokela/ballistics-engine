@@ -121,6 +121,15 @@ pub enum KernelError {
     /// `src/perturbation/derive.rs`). Distinct from a derivative of zero: this means
     /// "undifferentiable with this step," never "no effect."
     StepOutOfDomain { axis: InputAxis, attempted: f64 },
+    /// The same axis was declared more than once in a caller-supplied source list. Not
+    /// constructed by `read_axis`/`with_axis`/`central_difference` (none of which see more than
+    /// one axis at a time) -- `crate::error_budget::error_budget` (0.33.0 decision-support Task
+    /// 10, MBA-1347 review) constructs this from its own up-front validation, because two
+    /// entries for the same axis would double-count that axis's variance and corrupt its
+    /// leave-one-out counterfactual (removing "the" declaration for that axis is ambiguous when
+    /// there are two). `KernelError` had not shipped on any released version when this variant
+    /// was added, so there is no compatibility concern in extending it.
+    DuplicateAxis(InputAxis),
 }
 
 impl std::fmt::Display for KernelError {
@@ -142,6 +151,9 @@ impl std::fmt::Display for KernelError {
                 "axis {axis:?} could not be differentiated with step {attempted}: both the \
                  forward and backward perturbed values failed to evaluate"
             ),
+            KernelError::DuplicateAxis(a) => {
+                write!(f, "axis {a:?} was declared more than once")
+            }
         }
     }
 }
