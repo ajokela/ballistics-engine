@@ -115,8 +115,21 @@ pub fn axes_in_group(group: InputGroup) -> &'static [InputAxis] {
     match group {
         InputGroup::ProjectileDrag => &[Mass, Diameter, Length, BallisticCoefficient, TwistRate, TwistDirection, DragModel],
         InputGroup::MuzzleVelocity => &[MuzzleVelocityMps],
+        // MuzzleAngle is listed FIRST, unlike every other group's more arbitrary order (0.33.0
+        // decision-support Task 9, MBA-1345 review C1). On a RESOLVED request, muzzle_angle_rad
+        // is not an independent input whenever zero_distance_m is also present -- it is the
+        // ALREADY-SEARCHED elevation, a function of muzzle velocity and atmosphere as much as of
+        // anything in this group. A caller that applies a group's axes in turn and re-resolves
+        // between writes (explain.rs's swap_group/plan_exclusions) needs a LATER
+        // requires_rezero axis's own re-zero to overwrite whatever MuzzleAngle wrote, with a
+        // freshly re-derived, destination-consistent angle -- not the source's baked-in one.
+        // Putting MuzzleAngle first guarantees SightHeight (always present, requires_rezero,
+        // listed second) does exactly that. For an angle-only request (zero_distance_m absent
+        // on the destination), nothing later clears it, so MuzzleAngle's own write correctly
+        // stands as the swapped input in that case -- see explain.rs's module doc for the full
+        // account of why this needed fixing and how it was verified.
         InputGroup::ZeroSightGeometry =>
-            &[SightHeight, ZeroDistance, ZeroPoiUp, ZeroPoiRight, SightOffsetLateral, MuzzleHeight, MuzzleAngle],
+            &[MuzzleAngle, SightHeight, ZeroDistance, ZeroPoiUp, ZeroPoiRight, SightOffsetLateral, MuzzleHeight],
         InputGroup::Atmosphere => &[Altitude, Temperature, Pressure, RelativeHumidity, Latitude],
         InputGroup::Wind => &[WindSpeed, WindDirection, WindVertical],
         InputGroup::ShotGeometry =>

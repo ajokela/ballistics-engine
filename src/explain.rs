@@ -7,70 +7,104 @@
 //! distributed across groups: for correlated inputs there is no unique causal attribution, and
 //! pretending otherwise is the failure this design exists to avoid.
 //!
-//! # Axes `with_axis` refuses, and axes that are simply absent
+//! # `MuzzleAngle` is derived, not independent, once a zero distance is present
 //!
-//! Swapping a whole group means writing every one of its axes in turn (`axes_in_group`), and
-//! [`with_axis`] can legitimately refuse an individual axis for a specific request:
+//! `ZeroSightGeometry` lists `MuzzleAngle` -- but on a RESOLVED request, `muzzle_angle_rad` is
+//! not an independent input whenever `zero_distance_m` is also present: it is the
+//! ALREADY-SEARCHED elevation, a function of muzzle velocity and atmosphere as much as of any
+//! sight/zero knob in this group (review C1). Naively applying it as an ordinary axis would
+//! import muzzle-velocity's and atmosphere's own differences into `ZeroSightGeometry`'s bucket
+//! -- concretely, swapping a group in which every visible sight/zero setting is byte-identical
+//! between the two requests would still report a non-zero contribution, because the group also
+//! carried the OTHER request's fully-baked elevation. A shooter reading "5 cm of this is your
+//! zero/sight geometry" would go check a scope that never moved.
+//!
+//! `taxonomy.rs`'s `axes_in_group(ZeroSightGeometry)` lists `MuzzleAngle` FIRST specifically to
+//! fix this: `SightHeight` (always present, `requires_rezero`) is applied second, and its own
+//! re-resolve clears and re-derives the elevation for the DESTINATION's own muzzle velocity and
+//! atmosphere, overwriting whatever `MuzzleAngle`'s write introduced -- see that match arm's own
+//! comment for the full mechanism, and `every_groups_contribution_matches_an_independent_recomputation`
+//! below for the acceptance test (identical sight/zero inputs must report an EXACTLY zero
+//! `ZeroSightGeometry`, not merely a small one). For an angle-only request (no `zero_distance_m`
+//! on the destination), nothing later in the group clears the angle, so `MuzzleAngle`'s own
+//! write correctly stands: there it genuinely IS the independent input.
+//!
+//! # Symmetric exclusion: an axis unusable on either side must be excluded on BOTH legs
+//!
+//! [`with_axis`] can refuse an axis for a request-specific structural reason:
 //! `KernelError::AxisUnsupportedForRequest` for `Altitude` under a QNH-referenced atmosphere or
-//! `ShotAzimuth` under compass-referenced wind (`access.rs`'s module doc), and
-//! `KernelError::AxisAbsent` for the three wind axes when the request being written TO uses
-//! segmented wind. [`read_axis`] separately returns `None` for the same three wind axes when
-//! the request being read FROM is segmented, and also for a handful of ordinarily-optional
-//! scalar fields (`length_m`, `latitude_rad`, the two zero-POI offsets, the lateral sight
-//! offset, and -- true of the code though not named in `read_axis`'s own doc comment --
-//! `zero_distance_m` on a request zeroed purely by an explicit angle) that just were not
-//! supplied on this particular request.
+//! `ShotAzimuth` under compass-referenced wind, and `KernelError::AxisAbsent` for the three wind
+//! axes when the request being written TO uses segmented wind (`access.rs`'s module doc).
+//! [`read_axis`] separately returns `None` for the same three wind axes when the request being
+//! read FROM is segmented, and also for a handful of ordinarily-optional scalar fields
+//! (`length_m`, `latitude_rad`, the two zero-POI offsets, the lateral sight offset, and -- true
+//! of the code though not named in `read_axis`'s own doc comment -- `zero_distance_m` on a
+//! request zeroed purely by an explicit angle) that just were not supplied on a request.
 //!
-//! This module treats those two kinds of "nothing to copy" differently, deliberately:
+//! An earlier revision of this module decided this PER LEG: forward excluded an axis only if
+//! `A` itself refused it (or lacked a value to read from `B`), and backward only if `B` did.
+//! That is wrong (review I1): if only ONE leg excludes an axis, the two legs stop measuring the
+//! same counterfactual. A QNH-referenced `A` compared against a non-QNH `B`, for instance, has
+//! forward keep `A`'s own altitude (refused) while backward hands `B` the whole of `A`'s
+//! altitude (not refused) -- so `contribution(Atmosphere)` ends up as the full
+//! temperature/pressure/humidity effect PLUS HALF of a completely separate altitude difference,
+//! while the report's own `assumptions` claim that effect went to the interaction remainder.
 //!
-//! - An axis `with_axis` refuses, or one of the three wind axes with no scalar to read or write
-//!   because either side uses segmented wind, is recorded in
-//!   [`SolutionDiffReportV1::skipped_axes`] with the reason and which swap direction hit it,
-//!   then left out of that one swap -- the rest of the group's axes are still attempted.
-//!   Recording it matters: a silently skipped axis would let part of the real difference get
-//!   folded into the interaction remainder with no indication that anything was left out, which
-//!   is exactly the kind of unmarked gap this feature exists to prevent.
-//! - An ordinarily-optional axis simply absent from the source request is skipped WITHOUT a
-//!   report. There is nothing to attribute either way: the field does not exist on that
-//!   request, the same as if the caller had never asked about it.
+//! `plan_exclusions` fixes this by deciding exclusions for a WHOLE group ONCE, from the two
+//! ORIGINAL requests together, before either swap direction runs: an axis is excluded from BOTH
+//! legs if EITHER `a` or `b` would refuse it as a destination, or if it is present on exactly
+//! one of `a`/`b` (review I2 -- the same splitting hazard, via `read_axis` instead of
+//! `with_axis`: an ordinarily-optional field supplied on one saved profile and omitted on the
+//! other, such as `latitude_rad`, would otherwise have forward keep `A`'s own value while
+//! backward overwrites `B` with it, again half-attributing a real difference with no record of
+//! it at all). Both cases are recorded in [`SolutionDiffReportV1::skipped_axes`] -- ALWAYS as a
+//! pair, one entry per direction, so the report always explains both legs' identical treatment
+//! of that axis -- with a `reason` reworded for this whole-group context rather than reused
+//! verbatim from `with_axis`'s own per-axis-perturbation wording (review I1's second point: a
+//! reason like "perturbing altitude would move air density without moving pressure" is
+//! misleading here, where `Pressure` is a SEPARATE axis in the same group and IS copied
+//! normally). An axis absent on BOTH `a` and `b` is not reported at all: there is nothing to
+//! attribute either way, the same as if neither request had ever mentioned it.
 //!
-//! Either way, a refusal or an absence never aborts the comparison -- only that one axis is
-//! left out of that one group, for that one swap direction. A GENUINE failure (most notably a
-//! `solve_v1` re-resolve failing partway through applying a group -- for instance the
-//! pre-existing magnus/enhanced-spin-drift conflict noted in `taxonomy.rs`'s Known Limitation
-//! (d), which a group swap can walk straight into by turning one flag on while the request
-//! still carries the other from before) is NOT one of these two cases and propagates as an
-//! error, uncaught, exactly as `central_difference` and `bisect_axis` already do for their own
-//! non-refusal failures.
+//! Either way, an exclusion never aborts the comparison -- only that one axis is left out of
+//! that one group, on both legs. A GENUINE failure (most notably a `solve_v1` re-resolve failing
+//! partway through applying a group -- for instance the pre-existing magnus/enhanced-spin-drift
+//! conflict noted in `taxonomy.rs`'s Known Limitation (d), which a group swap can walk straight
+//! into by turning one flag on while the request still carries the other from before) is NOT one
+//! of these cases and propagates as an error, uncaught, exactly as `central_difference` and
+//! `bisect_axis` already do for their own non-refusal failures.
 //!
-//! # Why the refusal check reads the request as originally given, not the accumulated one
+//! # Why exclusions are decided from the original requests, not the accumulated one
 //!
-//! A group with more than one axis applies its writes one at a time, re-resolving between them
-//! (`swap_group` below, via a real `solve_v1` call) so each subsequent [`with_axis`] call sees
-//! the previous write -- most importantly so a `requires_rezero` axis's cleared
-//! `muzzle_angle_rad` is replaced by an ACTUALLY re-zeroed angle, not a placeholder, before the
-//! next axis reads it back. That re-resolve goes through the reverse conversion
-//! (`request_roundtrip.rs`), which ALWAYS clears `pressure_reference` and `wind_reference` back
-//! to the omitted-field default (see that module's doc: the resolved values already have the
-//! transform baked in, so echoing the mode back would apply it a second time). That is correct
-//! for solving, but it means the very fact [`with_axis`]'s guards key on -- "was this request
-//! originally QNH- or compass-referenced" -- is erased by the FIRST re-resolve within a group,
-//! not preserved across it.
+//! `plan_exclusions` probes [`with_axis`] against `a` and `b` exactly as passed into
+//! [`explain_difference`] -- never a request `swap_group` has already partly rewritten. This
+//! matters because a group with more than one axis applies its writes one at a time,
+//! re-resolving between them (`swap_group`, via a real `solve_v1` call) so each subsequent
+//! [`with_axis`] call sees the previous write. That re-resolve goes through the reverse
+//! conversion (`request_roundtrip.rs`), which ALWAYS clears `pressure_reference` and
+//! `wind_reference` back to the omitted-field default (that module's own doc: the resolved
+//! values already have the transform baked in, so echoing the mode back would apply it a second
+//! time). That is correct for solving, but it means the very fact `with_axis`'s guards key on --
+//! "was this request originally QNH- or compass-referenced" -- would be erased by the FIRST
+//! re-resolve within a group, not preserved across it, if it were checked against that
+//! progressively-modified request instead.
 //!
-//! `ShotGeometry` lists `ShotAzimuth` fourth (`TargetDistance`, `ShootingAngle`, `Cant`,
-//! `ShotAzimuth`, `AimAzimuth`, `TargetHeight`): three unrelated axes, each triggering a
-//! re-resolve, are applied before it. Checking the compass guard against the
-//! progressively-modified request would have it silently pass by the time `ShotAzimuth` is
-//! reached, building exactly the physically-inverted counterfactual the guard exists to
-//! prevent -- with no error and no skip recorded, because from `with_axis`'s point of view at
-//! that moment the request no longer looks compass-referenced at all. `swap_group` avoids this
-//! by probing every axis's refusal against the group's `dst` argument exactly as passed in --
-//! captured once, never itself round-tripped -- before applying the write to the accumulated
-//! request. A refusal can only become MORE permissive as a group's axes are applied
-//! (round-tripping only ever clears a reference-mode echo, it never introduces one), so an axis
-//! that passes the probe is guaranteed to still be writable on the accumulated request. The test
+//! `ShotGeometry` lists `TargetDistance`, `ShootingAngle` and `Cant` before `ShotAzimuth`: three
+//! unrelated axes, each triggering a re-resolve, would be applied before it. Checking the
+//! compass guard against a progressively-modified request would have it silently pass by the
+//! time `ShotAzimuth` is reached, building exactly the physically-inverted counterfactual the
+//! guard exists to prevent -- with no error and no skip recorded, because from `with_axis`'s
+//! point of view at that moment the request no longer looks compass-referenced at all. Deciding
+//! every axis's exclusion up front, from `a`/`b` as originally given, makes this impossible by
+//! construction: there is no accumulated, partly-laundered request for the check to see in the
+//! first place. `swap_group` itself never re-derives a refusal at all -- it trusts the
+//! `excluded` list `plan_exclusions` already computed, safely, because a refusal can only become
+//! MORE permissive as a group's later axes are applied (round-tripping only ever clears a
+//! reference-mode echo, it never introduces one): an axis `plan_exclusions` already cleared for
+//! both `a` and `b` is guaranteed to still be writable on `swap_group`'s running request,
+//! however many earlier axes in the same group have already re-resolved it. The test
 //! `shot_azimuth_is_refused_even_when_other_shot_geometry_axes_are_applied_first` pins this down
-//! by exercising exactly the four-axis ordering above.
+//! by exercising exactly that four-axis ordering.
 
 use serde::{Deserialize, Serialize};
 
@@ -142,8 +176,10 @@ pub enum SwapDirectionV1 {
     Backward,
 }
 
-/// One taxonomy axis that could not be carried across during a group's counterfactual swap,
-/// and why -- see the module doc's "Axes `with_axis` refuses, and axes that are simply absent".
+/// One taxonomy axis that could not be carried across during a group's counterfactual swap, and
+/// why -- see the module doc's "Symmetric exclusion" section. Always recorded in pairs, one per
+/// [`SwapDirectionV1`], even when only one direction independently hit the refusal or absence:
+/// the OTHER direction is excluded too, to keep both legs measuring the same counterfactual.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkippedAxisV1 {
     pub group: InputGroup,
@@ -171,96 +207,222 @@ pub struct SolutionDiffReportV1 {
     pub schema_version: u32,
     pub method: String,
     pub assumptions: Vec<String>,
-    /// Axes that could not be carried across for one or both swap directions of some group --
-    /// see the module doc. Never distributed or hidden: whatever effect a skipped axis would
-    /// have had is left inside `SolutionDiffRowV1::interaction_remainder`, not silently
-    /// absorbed into that axis's own group.
+    /// Axes excluded from a group's swap because one or both requests could not carry them --
+    /// see the module doc's "Symmetric exclusion". Always excluded from BOTH swap directions,
+    /// and reported as a pair (one `SkippedAxisV1` per direction), even when only one direction
+    /// independently hit the refusal or absence. Never distributed or hidden: whatever effect a
+    /// skipped axis would have had is left inside `SolutionDiffRowV1::interaction_remainder`,
+    /// not silently absorbed into that axis's own group.
     pub skipped_axes: Vec<SkippedAxisV1>,
     pub rows: Vec<SolutionDiffRowV1>,
 }
 
-/// Build the [`SolveRequestV1`] representing `dst` with every axis of `group` copied from
-/// `src`, applying each axis one at a time and re-resolving between writes (via a real
-/// `solve_v1` call) so a later axis in the same group sees the effect of an earlier one. Does
-/// not itself evaluate a trajectory -- the caller does that once, over the whole `ranges_m`
-/// slice, exactly as [`central_difference`](crate::perturbation::central_difference) already
-/// does for its own pair of counterfactual requests.
+/// Word an axis's exclusion reason for the whole-group context, rather than reusing
+/// `with_axis`'s own per-axis-perturbation wording verbatim (review I1): `with_axis`'s own
+/// `Altitude` reason talks about perturbing altitude "without moving" pressure, which is
+/// misleading here, where `Pressure` is a SEPARATE axis in the same group that DOES get copied
+/// normally. `own_refusal` is this DIRECTION's own refusal (if any); `other_refusal` is the
+/// OTHER direction's, used to explain a "sympathetic" exclusion -- one leg that would not have
+/// refused on its own, excluded anyway to keep both legs measuring the same counterfactual.
+fn describe_refusal(axis: InputAxis, own_refusal: &Option<String>, other_refusal: &Option<String>) -> String {
+    let context = match axis {
+        InputAxis::Altitude => {
+            "altitude is tied to pressure under a QNH-referenced atmosphere; this group swap \
+             cannot re-derive that relationship for a different altitude, even though \
+             Pressure/Temperature/RelativeHumidity/Latitude in the same group ARE copied \
+             normally"
+        }
+        InputAxis::ShotAzimuth => {
+            "the shot azimuth is tied to an earth-fixed wind bearing under compass-referenced \
+             wind; this group swap cannot re-derive that bearing for a different azimuth, even \
+             though TargetDistance/ShootingAngle/Cant/AimAzimuth/TargetHeight in the same group \
+             ARE copied normally"
+        }
+        _ => "this axis cannot be swapped for one of the two requests being compared",
+    };
+    match own_refusal {
+        Some(reason) => format!("{context} ({reason})"),
+        None => format!(
+            "excluded to match the other swap direction, which cannot swap this axis: {context} \
+             ({})",
+            other_refusal.as_deref().unwrap_or("no further detail available")
+        ),
+    }
+}
+
+/// Word a wind axis's exclusion reason (taxonomy.rs Known Limitation (c)): `own_segmented` is
+/// whether THIS direction's destination is segmented (blocking the write); `other_segmented` is
+/// whether the OTHER direction's destination is segmented (which, as this direction's source,
+/// blocks reading a value to copy).
+fn describe_wind_absence(own_segmented: bool, other_segmented: bool) -> String {
+    match (own_segmented, other_segmented) {
+        (true, true) => "both requests being compared use segmented wind; neither has a \
+                         single scalar value for this axis"
+            .to_string(),
+        (true, false) => "this request's wind is segmented, so there is no single scalar \
+                          field to write this axis into"
+            .to_string(),
+        (false, true) => "the other request's wind is segmented, so there is no single \
+                          scalar value to read for this axis"
+            .to_string(),
+        (false, false) => {
+            unreachable!("describe_wind_absence called when neither side is segmented")
+        }
+    }
+}
+
+/// Decide, for one group, which axes must be excluded from BOTH legs of the symmetric swap
+/// between `a` and `b`, and produce the [`SkippedAxisV1`] entries explaining why -- see the
+/// module doc's "Symmetric exclusion" section for why a per-leg decision is not good enough.
 ///
-/// Every axis's refusal is probed against `dst` exactly as passed in here, never the
-/// accumulated running request -- see the module doc's "Why the refusal check reads the request
-/// as originally given" section for why checking the accumulated request instead would silently
-/// miss a refusal that should fire once an earlier axis in the SAME group has triggered a
-/// re-resolve.
+/// Three structurally different reasons exclude an axis, each checked directly against `a` and
+/// `b` as originally given (see the module doc's "Why exclusions are decided from the original
+/// requests"):
 ///
-/// A refused or structurally-absent axis (`with_axis`'s `AxisUnsupportedForRequest`/
-/// `AxisAbsent`, or `read_axis` returning `None` for one of the three wind axes because the
-/// SOURCE request uses segmented wind) is pushed onto `skipped`, tagged with `group` and
-/// `direction`, and left out of this swap -- the running request simply keeps `dst`'s own value
-/// for that one axis. Every other axis in `group` is still attempted. Any OTHER error
-/// propagates via `?`: it is a genuine failure (a `read_axis`/`with_axis` mismatch that should
-/// not be reachable here, or a `solve_v1` re-resolve failing for a reason unrelated to this
-/// taxonomy, such as the magnus/enhanced-spin-drift conflict noted in `taxonomy.rs`'s Known
-/// Limitation (d)), never a structurally unrepresentable axis, and must be reported, not
-/// swallowed.
+/// - One of the three wind axes, where either request's wind is segmented (taxonomy.rs Known
+///   Limitation (c)) -- detected via [`read_axis`] returning `None`.
+/// - An ordinarily-optional axis present on exactly one of `a`/`b` (review I2).
+/// - [`with_axis`] refusing the axis as a destination for `a` XOR `b` (review I1) -- a
+///   QNH-referenced `Altitude` or a compass-referenced `ShotAzimuth`. Probed with each
+///   request's OWN current value for that axis (guaranteed well-typed and finite), since
+///   `with_axis`'s guards depend only on `axis` and the request's own structural fields, never
+///   on the value being written.
+///
+/// An axis absent on BOTH `a` and `b` triggers none of these and is silently left out of both
+/// the exclusion list and the report: there is nothing to attribute either way.
+///
+/// # Errors
+///
+/// Only an UNEXPECTED `with_axis` failure (not `AxisUnsupportedForRequest`) propagates -- for
+/// instance a `TypeMismatch`/`NonFinite`, which should not be reachable here at all, since every
+/// probed value came from `read_axis` for the identical axis on the identical request.
+fn plan_exclusions(
+    a: &ResolvedSolveRequestV1,
+    b: &ResolvedSolveRequestV1,
+    group: InputGroup,
+) -> Result<(Vec<InputAxis>, Vec<SkippedAxisV1>), KernelError> {
+    let mut excluded = Vec::new();
+    let mut skipped = Vec::new();
+
+    for &axis in axes_in_group(group) {
+        let a_value = read_axis(a, axis);
+        let b_value = read_axis(b, axis);
+
+        if matches!(
+            axis,
+            InputAxis::WindSpeed | InputAxis::WindDirection | InputAxis::WindVertical
+        ) {
+            if a_value.is_none() || b_value.is_none() {
+                excluded.push(axis);
+                skipped.push(SkippedAxisV1 {
+                    group,
+                    axis,
+                    direction: SwapDirectionV1::Forward,
+                    reason: describe_wind_absence(a_value.is_none(), b_value.is_none()),
+                });
+                skipped.push(SkippedAxisV1 {
+                    group,
+                    axis,
+                    direction: SwapDirectionV1::Backward,
+                    reason: describe_wind_absence(b_value.is_none(), a_value.is_none()),
+                });
+            }
+            continue;
+        }
+
+        if a_value.is_some() != b_value.is_some() {
+            excluded.push(axis);
+            let reason = "this axis is present on only one of the two requests being compared \
+                          (absent on the other), so there is no symmetric value to swap in \
+                          either direction"
+                .to_string();
+            skipped.push(SkippedAxisV1 {
+                group,
+                axis,
+                direction: SwapDirectionV1::Forward,
+                reason: reason.clone(),
+            });
+            skipped.push(SkippedAxisV1 {
+                group,
+                axis,
+                direction: SwapDirectionV1::Backward,
+                reason,
+            });
+            continue;
+        }
+        let (Some(a_value), Some(b_value)) = (a_value, b_value) else {
+            continue; // absent on BOTH sides -- nothing to attribute, not reported.
+        };
+
+        let a_refusal = match with_axis(a, axis, a_value) {
+            Ok(_) => None,
+            Err(KernelError::AxisUnsupportedForRequest { reason, .. }) => Some(reason.to_string()),
+            Err(other) => return Err(other),
+        };
+        let b_refusal = match with_axis(b, axis, b_value) {
+            Ok(_) => None,
+            Err(KernelError::AxisUnsupportedForRequest { reason, .. }) => Some(reason.to_string()),
+            Err(other) => return Err(other),
+        };
+        if a_refusal.is_some() || b_refusal.is_some() {
+            excluded.push(axis);
+            skipped.push(SkippedAxisV1 {
+                group,
+                axis,
+                direction: SwapDirectionV1::Forward,
+                reason: describe_refusal(axis, &a_refusal, &b_refusal),
+            });
+            skipped.push(SkippedAxisV1 {
+                group,
+                axis,
+                direction: SwapDirectionV1::Backward,
+                reason: describe_refusal(axis, &b_refusal, &a_refusal),
+            });
+        }
+    }
+    Ok((excluded, skipped))
+}
+
+/// Build the [`SolveRequestV1`] representing `dst` with every NON-EXCLUDED axis of `group`
+/// copied from `src`, applying each axis one at a time and re-resolving between writes (via a
+/// real `solve_v1` call) so a later axis in the same group sees the effect of an earlier one --
+/// most importantly, so `ZeroSightGeometry`'s `SightHeight` re-derives the elevation for the
+/// destination's own physics after `MuzzleAngle` (listed first specifically for this) has
+/// written the source's (see the module doc's "`MuzzleAngle` is derived" section). Does not
+/// itself evaluate a trajectory -- the caller does that once, over the whole `ranges_m` slice,
+/// exactly as [`central_difference`](crate::perturbation::central_difference) already does for
+/// its own pair of counterfactual requests.
+///
+/// `excluded` is computed ONCE per group by `plan_exclusions`, from `a`/`b` exactly as passed
+/// into [`explain_difference`], before either swap direction runs -- never re-derived here. See
+/// the module doc's "Why exclusions are decided from the original requests" for why that
+/// ordering is required for correctness, not just convenience: every axis reaching this loop is
+/// guaranteed still writable on the running request, however many earlier axes in this same
+/// group have already re-resolved it.
+///
+/// # Errors
+///
+/// Any [`with_axis`] or `solve_v1` failure propagates via `?` unchanged: by the time an axis
+/// reaches this loop it is not supposed to be refusable, so a failure here is either a genuine
+/// bug (a `read_axis`/`with_axis` mismatch) or an unrelated solve failure (such as the
+/// magnus/enhanced-spin-drift conflict noted in `taxonomy.rs`'s Known Limitation (d)) -- never a
+/// structurally unrepresentable axis, which `plan_exclusions` has already filtered out.
 fn swap_group(
     dst: &ResolvedSolveRequestV1,
     src: &ResolvedSolveRequestV1,
     group: InputGroup,
-    direction: SwapDirectionV1,
-    skipped: &mut Vec<SkippedAxisV1>,
+    excluded: &[InputAxis],
 ) -> Result<SolveRequestV1, KernelError> {
     let mut current = dst.clone();
     for &axis in axes_in_group(group) {
+        if excluded.contains(&axis) {
+            continue;
+        }
         let Some(v) = read_axis(src, axis) else {
-            // The three wind axes read back `None` under segmented wind (taxonomy.rs Known
-            // Limitation (c)) -- structurally absent, not merely unsupplied -- and that is the
-            // ONLY reason read_axis ever returns None for one of these three specifically (see
-            // access.rs: `wind_speed`/`wind_dir`/`wind_vert` are `Some` for every constant-wind
-            // request, never `None` for any other reason). Worth recording, unlike every other
-            // axis read_axis skips here, which is a genuinely-absent optional field with no
-            // bearing on wind shape at all (module doc).
-            if matches!(
-                axis,
-                InputAxis::WindSpeed | InputAxis::WindDirection | InputAxis::WindVertical
-            ) {
-                skipped.push(SkippedAxisV1 {
-                    group,
-                    axis,
-                    direction,
-                    reason: "the source request's wind is segmented; there is no single \
-                             scalar value for this axis to copy"
-                        .to_string(),
-                });
-            }
+            // plan_exclusions already excludes any axis present on exactly one side; a `None`
+            // reaching here means it is absent on BOTH sides -- a plain no-op, nothing to copy.
             continue;
         };
-        // Probe against `dst` EXACTLY as first passed in, never the running `current` -- see
-        // the module doc's "Why the refusal check reads the request as originally given".
-        if let Err(e) = with_axis(dst, axis, v) {
-            match e {
-                KernelError::AxisUnsupportedForRequest { reason, .. } => {
-                    skipped.push(SkippedAxisV1 {
-                        group,
-                        axis,
-                        direction,
-                        reason: reason.to_string(),
-                    });
-                    continue;
-                }
-                KernelError::AxisAbsent(_) => {
-                    skipped.push(SkippedAxisV1 {
-                        group,
-                        axis,
-                        direction,
-                        reason: "the destination request's wind is segmented; there is no \
-                                 single scalar field for this axis to overwrite"
-                            .to_string(),
-                    });
-                    continue;
-                }
-                other => return Err(other),
-            }
-        }
         let req = with_axis(&current, axis, v)?;
         current = crate::solve_v1::solve_v1(req)
             .map_err(kernel_solve_error)?
@@ -283,28 +445,39 @@ fn swap_group(
 /// failure this design exists to avoid.
 ///
 /// `ranges_m` is passed straight through to two calls to [`evaluate`] per group (one per swap
-/// direction), plus two more for `a`/`b` themselves -- 16 solves total for the fixed
-/// seven-group taxonomy, each covering every range in `ranges_m` at once rather than once per
-/// range (see [`evaluate`]'s own cost note). A `requires_rezero` axis inside a multi-axis group
-/// additionally costs one re-resolve per axis while that group's own counterfactual request is
-/// being built (`swap_group`) -- unavoidable here, since only a real solve produces the
-/// correctly re-zeroed angle the next axis in the same group needs to start from.
+/// direction), plus two more for `a`/`b` themselves -- 16 solves for the fixed seven-group
+/// taxonomy, each covering every range in `ranges_m` at once rather than once per range (see
+/// [`evaluate`]'s own cost note). That 16 is NOT the total, though: building each group's
+/// counterfactual (`swap_group`) re-resolves via a full `solve_v1` call after EVERY applied
+/// axis, regardless of whether that specific axis is `requires_rezero` -- not just the ones that
+/// invalidate a zero -- because [`with_axis`] always needs a freshly resolved request to apply
+/// its NEXT write onto. For a request with N present axes (up to the full 32; 5-6 are commonly
+/// absent, e.g. `length_m`/`latitude_rad`/the POI offsets, so N is often closer to 27), that is
+/// up to N solves per direction, 2N total, ON TOP of the 16 -- so a typical call costs on the
+/// order of 16 + 2*27 = 70 solves, not 16. `plan_exclusions` itself adds no solves (it only
+/// calls [`read_axis`]/[`with_axis`], never `solve_v1`), so excluding an axis only ever reduces
+/// this total, never increases it.
 ///
 /// # Axes that cannot be swapped
 ///
-/// See the module doc for the full explanation. In short: [`with_axis`] can refuse an axis for
-/// a structural reason specific to `a` or `b` (a QNH-referenced altitude, a compass-referenced
-/// shot azimuth, one of the three wind axes under segmented wind). A refused or structurally
-/// absent axis is recorded in the returned report's `skipped_axes`, and the rest of that axis's
-/// group is still attributed normally -- a refusal never aborts the comparison. An
-/// ordinarily-optional axis that is simply absent from `a` or `b` (no `length_m` supplied, for
-/// instance) is skipped without being recorded: there is nothing there to attribute either way.
+/// See the module doc's "Symmetric exclusion" section for the full explanation. In short:
+/// [`with_axis`] can refuse an axis for a structural reason specific to `a` or `b` (a
+/// QNH-referenced altitude, a compass-referenced shot azimuth, one of the three wind axes under
+/// segmented wind), and an ordinarily-optional axis can be present on only one of `a`/`b`. An
+/// axis affected by either is recorded in the returned report's `skipped_axes` -- one entry per
+/// swap direction, always both together, even though only one direction may have hit the
+/// refusal or absence directly -- and excluded from BOTH legs of that group's swap, so the two
+/// legs keep measuring the same counterfactual; the rest of that axis's group is still
+/// attributed normally, and a refusal never aborts the comparison. An axis absent from BOTH `a`
+/// and `b` (no `length_m` supplied on either, for instance) is skipped without being recorded:
+/// there is nothing there to attribute either way.
 ///
 /// # Errors
 ///
-/// Returns whatever [`evaluate`] or [`with_axis`] error on `a`, `b`, or either swapped
-/// counterfactual, MINUS the two refusal cases above (`KernelError::AxisUnsupportedForRequest`,
-/// `KernelError::AxisAbsent`), which are caught and recorded rather than returned. Every other
+/// Returns whatever [`evaluate`], [`with_axis`], or `plan_exclusions` error on `a`, `b`, or
+/// either swapped counterfactual, MINUS the refusal/absence cases above
+/// (`KernelError::AxisUnsupportedForRequest`, and the presence-asymmetry case, which never even
+/// reaches a `KernelError`), which are caught and recorded rather than returned. Every other
 /// error -- most notably a `solve_v1` re-resolve failing validation partway through building a
 /// group's counterfactual, such as the pre-existing magnus/enhanced-spin-drift conflict noted in
 /// `taxonomy.rs`'s Known Limitation (d) -- propagates unchanged: it is a genuine failure, not a
@@ -324,11 +497,14 @@ pub fn explain_difference(
     let mut skipped_axes = Vec::new();
     let mut per_group: Vec<(InputGroup, Vec<DeltaV1>)> = Vec::with_capacity(InputGroup::ALL.len());
     for &group in InputGroup::ALL {
+        let (excluded, mut group_skips) = plan_exclusions(a, b, group)?;
+        skipped_axes.append(&mut group_skips);
+
         // Each swapped request is evaluated exactly ONCE over the whole `ranges_m` slice below
         // -- never once per range -- so N ranges do not multiply the cost of a
         // `requires_rezero` axis's zero search inside `swap_group`.
-        let fwd_req = swap_group(a, b, group, SwapDirectionV1::Forward, &mut skipped_axes)?;
-        let bwd_req = swap_group(b, a, group, SwapDirectionV1::Backward, &mut skipped_axes)?;
+        let fwd_req = swap_group(a, b, group, &excluded)?;
+        let bwd_req = swap_group(b, a, group, &excluded)?;
         let fwd_obs = evaluate(&fwd_req, ranges_m)?;
         let bwd_obs = evaluate(&bwd_req, ranges_m)?;
 
@@ -374,8 +550,10 @@ pub fn explain_difference(
              causal attribution exists."
                 .to_string(),
             "An axis that could not be swapped for one or both requests (see skipped_axes) is \
-             left out of its group's contribution for that direction; any real effect it would \
-             have had is folded into the interaction remainder, not silently dropped."
+             excluded from BOTH directions of that axis's group, so the two directions keep \
+             measuring the same counterfactual; any real effect the axis would have had is \
+             folded into the interaction remainder, not silently dropped and not partially \
+             attributed to its group."
                 .to_string(),
         ],
         skipped_axes,
@@ -396,6 +574,29 @@ mod tests {
             "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0},
             "atmosphere": {"temperature_k": temp}, "wind": {"speed_mps": 3.0,
                            "direction_from_rad": std::f64::consts::FRAC_PI_2},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        crate::solve_v1::solve_v1(req).unwrap().resolved_request
+    }
+
+    /// Varies ONLY `ballistic_coefficient` (ProjectileDrag) and wind speed (Wind), holding
+    /// muzzle velocity, temperature, and every sight/zero knob identical to `resolved()`'s own
+    /// baseline -- see `every_groups_contribution_matches_an_independent_recomputation_bc_and_wind_fixture`.
+    fn resolved_with_bc_and_wind_speed(
+        ballistic_coefficient: f64,
+        wind_speed_mps: f64,
+    ) -> crate::solve_json::ResolvedSolveRequestV1 {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": ballistic_coefficient},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0},
+            "atmosphere": {"temperature_k": 288.0},
+            "wind": {"speed_mps": wind_speed_mps,
+                     "direction_from_rad": std::f64::consts::FRAC_PI_2},
             "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
         })
         .to_string();
@@ -511,6 +712,13 @@ mod tests {
     /// using the same building blocks `explain_difference` uses internally, and confirm (a) they
     /// genuinely differ here -- or averaging them would be indistinguishable from reporting
     /// either alone -- and (b) the reported contribution is exactly their mean, not either one.
+    ///
+    /// The sanity gate below requires `|forward - backward| > 2e-6`, not `1e-6`: since
+    /// `mean - forward == (backward - forward) / 2` (and symmetrically for `mean - backward`),
+    /// a gate of exactly `1e-6` on `|forward - backward|` would only guarantee
+    /// `|mean - forward| > 5e-7`, half of the `1e-6` margin the two endpoint assertions below
+    /// actually need -- a value that just cleared the old, looser gate could still trip a
+    /// false failure on those. `2e-6` is the smallest gate that genuinely implies both.
     #[test]
     fn contribution_is_the_mean_of_a_genuinely_different_forward_and_backward() {
         let a = resolved(823.0, 288.0);
@@ -519,30 +727,17 @@ mod tests {
 
         let obs_a = evaluate(&(&a).into(), &ranges).unwrap();
         let obs_b = evaluate(&(&b).into(), &ranges).unwrap();
-        let mut skipped = Vec::new();
-        let fwd_req = swap_group(
-            &a,
-            &b,
-            InputGroup::MuzzleVelocity,
-            SwapDirectionV1::Forward,
-            &mut skipped,
-        )
-        .unwrap();
-        let bwd_req = swap_group(
-            &b,
-            &a,
-            InputGroup::MuzzleVelocity,
-            SwapDirectionV1::Backward,
-            &mut skipped,
-        )
-        .unwrap();
+        let (excluded, _skipped) =
+            plan_exclusions(&a, &b, InputGroup::MuzzleVelocity).unwrap();
+        let fwd_req = swap_group(&a, &b, InputGroup::MuzzleVelocity, &excluded).unwrap();
+        let bwd_req = swap_group(&b, &a, InputGroup::MuzzleVelocity, &excluded).unwrap();
         let fwd_obs = evaluate(&fwd_req, &ranges).unwrap();
         let bwd_obs = evaluate(&bwd_req, &ranges).unwrap();
         let forward = fwd_obs[0].drop_m - obs_a[0].drop_m;
         let backward = obs_b[0].drop_m - bwd_obs[0].drop_m;
 
         assert!(
-            (forward - backward).abs() > 1e-6,
+            (forward - backward).abs() > 2e-6,
             "forward ({forward}) and backward ({backward}) must genuinely differ here, or this \
              test cannot distinguish 'the mean of the two' from 'either endpoint alone'"
         );
@@ -571,32 +766,33 @@ mod tests {
     }
 
     /// Cross-checks EVERY group's reported contribution against an independent recomputation
-    /// (same primitives -- `swap_group` + `evaluate` -- but the mean is taken here, outside
-    /// `explain_difference`'s own code path) and the remainder against the same total-minus-sum
-    /// formula computed independently. This would fail under: a forward-only computation (the
-    /// independent mean would disagree with a forward-only report), a remainder silently zeroed
-    /// or redistributed into the groups (the independent remainder would disagree with a
-    /// tampered report), or two groups' contributions swapped (checked BY GROUP IDENTITY, and
-    /// MuzzleVelocity/Atmosphere are the only two groups with a non-negligible true contribution
-    /// in this fixture, so a swap involving either is a large, unmissable mismatch).
-    #[test]
-    fn every_groups_contribution_matches_an_independent_recomputation() {
-        let a = resolved(823.0, 288.0);
-        let b = resolved(870.0, 300.0);
-        let ranges = [600.0];
-        let rep = explain_difference(&a, &b, &ranges).unwrap();
+    /// (same primitives -- `plan_exclusions` + `swap_group` + `evaluate` -- but the mean is
+    /// taken here, outside `explain_difference`'s own code path) and the remainder against the
+    /// same total-minus-sum formula computed independently. This is the check that would fail
+    /// under: a forward-only computation (the independent mean would disagree with a
+    /// forward-only report), a remainder silently zeroed or redistributed into the groups (the
+    /// independent remainder would disagree with a tampered report), or two groups'
+    /// contributions swapped (checked BY GROUP IDENTITY). Returns the report so callers can
+    /// layer their own fixture-specific "this group must be zero/non-negligible" assertions on
+    /// top, since which groups should be non-negligible depends on which axes the caller's own
+    /// fixture actually varies.
+    fn assert_matches_independent_recomputation(
+        a: &crate::solve_json::ResolvedSolveRequestV1,
+        b: &crate::solve_json::ResolvedSolveRequestV1,
+        range_m: f64,
+    ) -> SolutionDiffReportV1 {
+        let ranges = [range_m];
+        let rep = explain_difference(a, b, &ranges).unwrap();
         let row = &rep.rows[0];
 
-        let obs_a = evaluate(&(&a).into(), &ranges).unwrap();
-        let obs_b = evaluate(&(&b).into(), &ranges).unwrap();
+        let obs_a = evaluate(&a.into(), &ranges).unwrap();
+        let obs_b = evaluate(&b.into(), &ranges).unwrap();
 
         let mut independent_sum = DeltaV1::default();
         for &group in InputGroup::ALL {
-            let mut skipped = Vec::new();
-            let fwd_req =
-                swap_group(&a, &b, group, SwapDirectionV1::Forward, &mut skipped).unwrap();
-            let bwd_req =
-                swap_group(&b, &a, group, SwapDirectionV1::Backward, &mut skipped).unwrap();
+            let (excluded, _skipped) = plan_exclusions(a, b, group).unwrap();
+            let fwd_req = swap_group(a, b, group, &excluded).unwrap();
+            let bwd_req = swap_group(b, a, group, &excluded).unwrap();
             let fwd_obs = evaluate(&fwd_req, &ranges).unwrap();
             let bwd_obs = evaluate(&bwd_req, &ranges).unwrap();
             let forward = DeltaV1::between(&obs_a[0], &fwd_obs[0]);
@@ -639,20 +835,32 @@ mod tests {
             expected_remainder.drop_m
         );
 
-        // `resolved()` only ever varies `mv` and `temp`, so a group whose axes are entirely
-        // independent of both -- ProjectileDrag, Wind, ShotGeometry, Effects -- must come back
-        // EXACTLY zero (nothing to swap, since every one of its axis values is identical on a
-        // and b). MuzzleVelocity and Atmosphere differ directly; ZeroSightGeometry is NOT
-        // independent despite `sight_height_m`/`zero_distance_m` etc. being identical, because
-        // it also carries `MuzzleAngle` -- the RESOLVED, already-zeroed elevation, which is a
-        // function of muzzle velocity and air density and therefore genuinely differs between a
-        // and b even though every explicit zero/sight knob does not. All three -- MuzzleVelocity,
-        // Atmosphere, ZeroSightGeometry -- must be non-negligible AND pairwise distinguishable in
-        // magnitude, so a label swap among any pair of the seven groups would be an unmissable
-        // mismatch against the per-group check above, not something these sanity bounds could
-        // mask by coincidence.
+        rep
+    }
+
+    /// `resolved()` only ever varies `mv` and `temp`, so a group whose axes are entirely
+    /// independent of both -- ProjectileDrag, Wind, ShotGeometry, Effects, AND (review C1)
+    /// ZeroSightGeometry -- must come back EXACTLY zero: nothing to swap, since every one of its
+    /// axis VALUES is identical on `a` and `b`. Before the C1 fix, `ZeroSightGeometry` was NOT
+    /// zero here despite that: it also carried `MuzzleAngle`, the RESOLVED elevation, which is a
+    /// function of muzzle velocity and air density -- so it silently imported the OTHER
+    /// request's baked-in elevation even though every explicit sight/zero knob was identical.
+    /// `axes_in_group(ZeroSightGeometry)` now lists `MuzzleAngle` first specifically so a
+    /// following `requires_rezero` axis re-derives the elevation for the destination's own
+    /// physics instead (see the module doc). MuzzleVelocity and Atmosphere differ directly and
+    /// must be non-negligible and pairwise distinguishable, so a label swap involving either
+    /// would be an unmissable mismatch against the per-group check inside
+    /// `assert_matches_independent_recomputation`.
+    #[test]
+    fn every_groups_contribution_matches_an_independent_recomputation() {
+        let a = resolved(823.0, 288.0);
+        let b = resolved(870.0, 300.0);
+        let rep = assert_matches_independent_recomputation(&a, &b, 600.0);
+        let row = &rep.rows[0];
+
         for g in [
             InputGroup::ProjectileDrag,
+            InputGroup::ZeroSightGeometry,
             InputGroup::Wind,
             InputGroup::ShotGeometry,
             InputGroup::Effects,
@@ -660,8 +868,8 @@ mod tests {
             let c = row.contributions.iter().find(|x| x.group == g).unwrap();
             assert!(
                 c.delta.drop_m.abs() < 1e-9,
-                "{g:?} does not differ between a and b in this fixture at all, expected exactly \
-                 0, got {}",
+                "{g:?} does not differ between a and b in this fixture at all, expected \
+                 exactly 0, got {}",
                 c.delta.drop_m
             );
         }
@@ -675,16 +883,7 @@ mod tests {
             .iter()
             .find(|c| c.group == InputGroup::Atmosphere)
             .unwrap();
-        let zero_sight_geometry = row
-            .contributions
-            .iter()
-            .find(|c| c.group == InputGroup::ZeroSightGeometry)
-            .unwrap();
-        for (name, c) in [
-            ("MuzzleVelocity", mv),
-            ("Atmosphere", atmosphere),
-            ("ZeroSightGeometry", zero_sight_geometry),
-        ] {
+        for (name, c) in [("MuzzleVelocity", mv), ("Atmosphere", atmosphere)] {
             assert!(
                 c.delta.drop_m.abs() > 0.01,
                 "{name} should have a substantial, non-negligible contribution here, got {}",
@@ -698,26 +897,98 @@ mod tests {
             mv.delta.drop_m,
             atmosphere.delta.drop_m
         );
-        assert!(
-            (mv.delta.drop_m - zero_sight_geometry.delta.drop_m).abs() > 0.01,
-            "MuzzleVelocity ({}) and ZeroSightGeometry ({}) should be distinguishable",
-            mv.delta.drop_m,
-            zero_sight_geometry.delta.drop_m
-        );
 
         // The remainder itself must also be genuinely nonzero here (real second-order
         // interaction between muzzle velocity and temperature/elevation) -- not identically
         // zero, and not silently redistributed into the groups above (which would make THIS
-        // remainder read back as zero while the groups' sum still matched `total`).
+        // remainder read back as zero while the groups' sum still matched `total`). Measured at
+        // ~9.2e-4 after the C1 fix (it was ~4.9e-2 before: MuzzleVelocity's own re-zero and
+        // Atmosphere's own "not re-zeroed" treatment now correctly explain almost all of the
+        // elevation response themselves, instead of a chunk of it being force-fed through a
+        // ZeroSightGeometry that should have been zero) -- 1e-4 stays comfortably below that
+        // measured value while remaining far above floating-point noise (~1e-9-1e-12).
         assert!(
-            row.interaction_remainder.drop_m.abs() > 0.01,
+            row.interaction_remainder.drop_m.abs() > 1e-4,
             "expected a non-negligible interaction remainder in this fixture, got {}",
             row.interaction_remainder.drop_m
         );
     }
 
+    /// Review minor: `resolved()`'s fixture never varies `ballistic_coefficient` or wind speed,
+    /// so a mislabeling among ProjectileDrag/Wind (or between either of them and any of the
+    /// other always-zero groups) would be INVISIBLE to the test above -- every one of those
+    /// groups reports zero there either way. A second fixture, varying only BC and wind speed
+    /// (holding mv/temp/sight/zero geometry identical), exercises ProjectileDrag and Wind with a
+    /// substantial, distinguishable value instead, closing that gap.
+    #[test]
+    fn every_groups_contribution_matches_an_independent_recomputation_bc_and_wind_fixture() {
+        let a = resolved_with_bc_and_wind_speed(0.243, 3.0);
+        let b = resolved_with_bc_and_wind_speed(0.300, 6.0);
+        let rep = assert_matches_independent_recomputation(&a, &b, 600.0);
+        let row = &rep.rows[0];
+
+        for g in [
+            InputGroup::MuzzleVelocity,
+            InputGroup::ZeroSightGeometry,
+            InputGroup::Atmosphere,
+            InputGroup::ShotGeometry,
+            InputGroup::Effects,
+        ] {
+            let c = row.contributions.iter().find(|x| x.group == g).unwrap();
+            assert!(
+                c.delta.drop_m.abs() < 1e-9,
+                "{g:?} does not differ between a and b in this fixture at all, expected \
+                 exactly 0, got {}",
+                c.delta.drop_m
+            );
+        }
+        let drag = row
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::ProjectileDrag)
+            .unwrap();
+        let wind = row
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::Wind)
+            .unwrap();
+        // ProjectileDrag (a higher BC) is measured on drop, its dominant effect; Wind (a
+        // stronger crosswind) is measured on windage, ITS dominant effect -- checking each
+        // group in the quantity it actually moves, rather than requiring both to be large in
+        // the SAME quantity, so this does not depend on the two effects happening to be
+        // comparable in magnitude.
+        assert!(
+            drag.delta.drop_m.abs() > 0.01,
+            "ProjectileDrag should have a substantial drop contribution here, got {}",
+            drag.delta.drop_m
+        );
+        assert!(
+            wind.delta.windage_m.abs() > 0.01,
+            "Wind should have a substantial windage contribution here, got {}",
+            wind.delta.windage_m
+        );
+        // And each group must not be silently carrying the OTHER's signature: ProjectileDrag's
+        // own windage move and Wind's own drop move should both be comparatively small, which
+        // is what a labeling swap between these two specific groups would violate.
+        assert!(
+            drag.delta.windage_m.abs() < wind.delta.windage_m.abs(),
+            "ProjectileDrag's windage move ({}) should be smaller than Wind's own ({})",
+            drag.delta.windage_m,
+            wind.delta.windage_m
+        );
+        assert!(
+            wind.delta.drop_m.abs() < drag.delta.drop_m.abs(),
+            "Wind's drop move ({}) should be smaller than ProjectileDrag's own ({})",
+            wind.delta.drop_m,
+            drag.delta.drop_m
+        );
+    }
+
     /// Requirement (1): `with_axis` refuses `Altitude` under a QNH-referenced atmosphere. The
-    /// refusal must be recorded, not silently dropped, and must not abort the comparison.
+    /// refusal must be recorded, not silently dropped, and must not abort the comparison. Per
+    /// review I1, exclusion must apply to BOTH swap directions (`b` is not itself QNH-referenced,
+    /// so only the Forward leg would refuse Altitude on its own -- Backward must be excluded
+    /// anyway, to keep the two legs measuring the same counterfactual).
     #[test]
     fn altitude_is_skipped_and_recorded_under_qnh_pressure() {
         let qnh_json = serde_json::json!({
@@ -737,37 +1008,198 @@ mod tests {
         .unwrap()
         .resolved_request;
         let b = resolved(870.0, 300.0);
+        assert_eq!(
+            b.atmosphere.pressure_reference, None,
+            "fixture assumption: b is NOT QNH-referenced, so only a's QNH-ness drives this test"
+        );
 
         let rep = explain_difference(&a, &b, &[300.0])
             .expect("a refused axis must not abort the whole comparison");
-        let hit = rep
-            .skipped_axes
-            .iter()
-            .find(|s| {
-                s.group == InputGroup::Atmosphere
-                    && s.axis == InputAxis::Altitude
-                    && s.direction == SwapDirectionV1::Forward
+        for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
+            let hit = rep
+                .skipped_axes
+                .iter()
+                .find(|s| {
+                    s.group == InputGroup::Atmosphere
+                        && s.axis == InputAxis::Altitude
+                        && s.direction == direction
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected a {direction:?}-direction Altitude skip under QNH pressure \
+                         (review I1: both directions must be excluded, not just the one that \
+                         independently refused), got {:?}",
+                        rep.skipped_axes
+                    )
+                });
+            assert!(
+                hit.reason.to_lowercase().contains("qnh"),
+                "reason should name QNH: {}",
+                hit.reason
+            );
+        }
+    }
+
+    /// Review I1's explicit ask: not just that Altitude is recorded as skipped, but that the
+    /// resulting Atmosphere CONTRIBUTION is actually correct -- reflecting ONLY the other four
+    /// atmosphere axes, with no partial leakage from the excluded Altitude difference. Proven by
+    /// showing the reported contribution is UNCHANGED when b's altitude is moved to match a's:
+    /// if Altitude's difference were still (even partially) leaking into the contribution,
+    /// closing that difference would change the reported number; since Altitude is excluded
+    /// from BOTH legs either way, it must not.
+    #[test]
+    fn altitude_exclusion_does_not_leak_a_partial_effect_into_atmosphere() {
+        let qnh_json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0},
+            "atmosphere": {"altitude_m": 500.0, "temperature_k": 288.0, "pressure_pa": 101325.0,
+                           "pressure_reference": "qnh"},
+            "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let a = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&qnh_json).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+
+        let b_json = |altitude_m: f64| {
+            serde_json::json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                               "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+                "shot": {"max_range_m": 900.0},
+                "atmosphere": {"altitude_m": altitude_m, "temperature_k": 300.0,
+                               "pressure_pa": 98000.0},
+                "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
             })
-            .unwrap_or_else(|| {
-                panic!(
-                    "expected a Forward-direction Altitude skip under QNH pressure, got {:?}",
-                    rep.skipped_axes
-                )
-            });
+            .to_string()
+        };
+        let b_different_altitude = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&b_json(1200.0)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        let b_same_altitude = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&b_json(500.0)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+
+        let rep_different = explain_difference(&a, &b_different_altitude, &[300.0]).unwrap();
+        let rep_same = explain_difference(&a, &b_same_altitude, &[300.0]).unwrap();
+
+        // Sanity: Altitude must be excluded on BOTH directions in BOTH comparisons, so this is
+        // a fair, apples-to-apples check of the same code path (not, say, one comparison
+        // exercising the exclusion and the other happening to skip it because the values
+        // coincided).
+        for rep in [&rep_different, &rep_same] {
+            for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
+                assert!(
+                    rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
+                        && s.axis == InputAxis::Altitude
+                        && s.direction == direction),
+                    "expected Altitude excluded on {direction:?} in both comparisons"
+                );
+            }
+        }
+
+        let atmosphere_different = rep_different.rows[0]
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::Atmosphere)
+            .unwrap();
+        let atmosphere_same = rep_same.rows[0]
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::Atmosphere)
+            .unwrap();
         assert!(
-            hit.reason.to_lowercase().contains("qnh"),
-            "reason should name QNH: {}",
-            hit.reason
+            (atmosphere_different.delta.drop_m - atmosphere_same.delta.drop_m).abs() < 1e-9,
+            "Atmosphere's contribution changed when b's altitude changed (1200 -> 500 m) even \
+             though Altitude is excluded from both comparisons -- {} vs {} -- a partial \
+             altitude effect must be leaking through",
+            atmosphere_different.delta.drop_m,
+            atmosphere_same.delta.drop_m
+        );
+        // And it must be genuinely non-zero (temperature/pressure alone are a real effect
+        // here), or the equality above would be trivially true for the wrong reason (both
+        // sides zero).
+        assert!(
+            atmosphere_same.delta.drop_m.abs() > 0.001,
+            "expected a non-negligible Atmosphere contribution from temperature/pressure \
+             alone, got {}",
+            atmosphere_same.delta.drop_m
         );
     }
 
-    /// Requirement (1) plus the ordering hazard documented in this module's doc comment:
-    /// `ShotGeometry` lists `TargetDistance`, `ShootingAngle` and `Cant` before `ShotAzimuth`,
-    /// each triggering a re-resolve that launders away the compass-wind echo `with_axis`'s
-    /// guard depends on. If the refusal were probed against the progressively-modified request
-    /// instead of `dst` as originally given, this specific ordering would silently defeat the
-    /// guard -- ShotAzimuth would swap normally, building a physically-inverted counterfactual
-    /// with no error and no skip. This test would fail under exactly that regression.
+    /// Review I2: an ordinarily-optional axis present on exactly one of the two requests splits
+    /// the two legs exactly like a `with_axis` refusal does -- forward would keep A's own value
+    /// (nothing to copy from B) while backward would overwrite B with A's, silently
+    /// half-attributing whatever that value's effect is, with NO record at all. `latitude_rad`
+    /// is a convenient example: present here on `a`, absent on `b` -- an ordinary difference
+    /// between two saved profiles, nothing to do with Coriolis specifically (Coriolis is left
+    /// disabled on both, so this is not entangled with `resolve_effects`'s separate requirement
+    /// that Coriolis needs a latitude on any request that enables it).
+    #[test]
+    fn an_axis_present_on_only_one_side_is_skipped_and_recorded_symmetrically() {
+        let with_latitude_json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0},
+            "atmosphere": {"temperature_k": 288.0, "latitude_rad": 0.7},
+            "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let a = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&with_latitude_json).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        assert_eq!(
+            a.atmosphere.latitude_rad,
+            Some(0.7),
+            "fixture assumption: a supplies latitude_rad"
+        );
+
+        let b = resolved(870.0, 300.0);
+        assert_eq!(
+            b.atmosphere.latitude_rad, None,
+            "fixture assumption: b omits latitude_rad entirely"
+        );
+
+        let rep = explain_difference(&a, &b, &[300.0])
+            .expect("a presence-only-on-one-side axis must not abort the whole comparison");
+
+        for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
+            assert!(
+                rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
+                    && s.axis == InputAxis::Latitude
+                    && s.direction == direction),
+                "expected a {direction:?} Latitude skip when it is present on only one side; \
+                 got {:?}",
+                rep.skipped_axes
+            );
+        }
+    }
+
+    /// This fixture's shape comes from the ordering hazard documented in this module's doc
+    /// comment: `ShotGeometry` lists `TargetDistance`, `ShootingAngle` and `Cant` before
+    /// `ShotAzimuth`. Deciding exclusions from `a`/`b` directly (`plan_exclusions`, never a
+    /// request `swap_group` has already partly rewritten) makes that hazard structurally
+    /// impossible now -- there is no accumulated, partly-laundered request for a check to see,
+    /// regardless of axis order -- so this specific fixture can no longer directly exercise an
+    /// order-dependent failure the way an earlier, per-swap_group-call revision of this module
+    /// could. What it still usefully pins down is review I1's symmetric-exclusion fix: `b`'s
+    /// wind is shooter-relative, so ONLY the Forward leg independently refuses `ShotAzimuth` (a
+    /// compass-referenced `a`), yet Backward must be excluded too, with a reason that still
+    /// names the compass refusal that drove it.
     #[test]
     fn shot_azimuth_is_refused_even_when_other_shot_geometry_axes_are_applied_first() {
         let compass_json = serde_json::json!({
@@ -839,12 +1271,29 @@ mod tests {
             "reason should name compass wind: {}",
             hit.reason
         );
-        // The backward leg's destination (b) is shooter-relative, so ShotAzimuth must swap
-        // normally there -- no Backward-direction skip for this axis.
+        // Review I1: even though `b` is shooter-relative and would not refuse ShotAzimuth on
+        // its own, Backward must ALSO be excluded -- otherwise forward keeps A's azimuth
+        // (refused) while backward hands B the whole of A's azimuth (not refused), splitting
+        // the two legs into different counterfactuals.
+        let backward_hit = rep
+            .skipped_axes
+            .iter()
+            .find(|s| s.group == InputGroup::ShotGeometry
+                && s.axis == InputAxis::ShotAzimuth
+                && s.direction == SwapDirectionV1::Backward)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a Backward-direction ShotAzimuth skip too (review I1: symmetric \
+                     exclusion), even though b's wind is shooter-relative; got skipped_axes = \
+                     {:?}",
+                    rep.skipped_axes
+                )
+            });
         assert!(
-            !rep.skipped_axes.iter().any(|s| s.axis == InputAxis::ShotAzimuth
-                && s.direction == SwapDirectionV1::Backward),
-            "did not expect a Backward-direction ShotAzimuth skip: b is shooter-relative"
+            backward_hit.reason.to_lowercase().contains("compass"),
+            "the sympathetic Backward exclusion's reason should still explain the compass \
+             refusal that drove it: {}",
+            backward_hit.reason
         );
     }
 
