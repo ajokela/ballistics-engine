@@ -41,8 +41,8 @@ pub struct Observation {
 /// `samples: Vec<TrajectorySampleV1>` (the brief's option (a), ruled out for that reason).
 ///
 /// Instead this follows the brief's fallback (option (b)), sharing `solve_v1`'s own building
-/// blocks rather than re-implementing them: [`crate::solve_v1::prepare_request`] resolves `req`
-/// exactly as `solve_v1` does, and [`crate::solve_v1::build_zeroed_solver`] builds and zeroes a
+/// blocks rather than re-implementing them: `solve_v1::prepare_request` resolves `req`
+/// exactly as `solve_v1` does, and `solve_v1::build_zeroed_solver` builds and zeroes a
 /// `TrajectorySolver` exactly as `solve_v1` does (both widened from module-private to
 /// `pub(crate)` for this task). This function then calls `TrajectorySolver::solve` itself and
 /// reads observations straight off the result: one solve per `evaluate` call, not two, and not
