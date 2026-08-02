@@ -171,7 +171,13 @@ impl KernelError {
 }
 
 /// The request's wind-reference echo, whichever wind shape it resolved to.
-fn wind_reference_of(w: &ResolvedWindV1) -> Option<WindReferenceV1> {
+///
+/// `pub(crate)` (0.33.0 decision-support Task 9, review round 4): `explain.rs`'s
+/// `is_compass_referenced` needs the identical lookup to detect the `WindDirection` derived-
+/// value hazard under compass wind (a different axis than the `ShotAzimuth` guard just below,
+/// which is what this function was written for), so it shares this one instead of duplicating
+/// the two-arm match a second time.
+pub(crate) fn wind_reference_of(w: &ResolvedWindV1) -> Option<WindReferenceV1> {
     match w {
         ResolvedWindV1::Constant(c) => c.wind_reference,
         ResolvedWindV1::Segmented(s) => s.wind_reference,

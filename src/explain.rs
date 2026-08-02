@@ -189,9 +189,7 @@ use serde::{Deserialize, Serialize};
 use crate::perturbation::access::{read_axis, with_axis, KernelError};
 use crate::perturbation::taxonomy::{axes_in_group, InputAxis, InputGroup};
 use crate::perturbation::{evaluate, kernel_solve_error, Observation};
-use crate::solve_json::{
-    PressureReferenceV1, ResolvedSolveRequestV1, ResolvedWindV1, SolveRequestV1, WindReferenceV1,
-};
+use crate::solve_json::{PressureReferenceV1, ResolvedSolveRequestV1, SolveRequestV1, WindReferenceV1};
 
 /// The difference between two [`Observation`]s at one range, `b - a`. SI throughout, same sign
 /// convention as [`Observation`] itself.
@@ -308,9 +306,11 @@ fn describe_refusal(axis: InputAxis, own_refusal: &Option<String>, other_refusal
     let context = match axis {
         InputAxis::Altitude => {
             "altitude is tied to pressure under a QNH-referenced atmosphere; this group swap \
-             cannot re-derive that relationship for a different altitude, even though \
-             Pressure/Temperature/RelativeHumidity/Latitude in the same group ARE copied \
-             normally"
+             cannot re-derive that relationship for a different altitude. \
+             Temperature/RelativeHumidity/Latitude in the same group ARE copied normally; \
+             Pressure is ALSO excluded whenever the two requests' altitudes actually differ \
+             (see Pressure's own skipped_axes entry when that applies), but is copied normally \
+             alongside Altitude's exclusion when the altitudes happen to match"
         }
         InputAxis::ShotAzimuth => {
             "the shot azimuth is tied to an earth-fixed wind bearing under compass-referenced \
@@ -351,16 +351,13 @@ fn describe_wind_absence(own_segmented: bool, other_segmented: bool) -> String {
     }
 }
 
-/// True when `r`'s wind was entered compass-referenced. Read directly from the public
-/// `Resolved{Constant,Segmented}WindV1::wind_reference` echo -- the same fact [`with_axis`]
-/// checks to refuse `ShotAzimuth` (`access.rs`) -- because `WindDirection`'s OWN resolved value
-/// depends on it too (module doc, "The derived-value exclusion rule", Instance 2).
+/// True when `r`'s wind was entered compass-referenced. Shares `access.rs`'s own
+/// `wind_reference_of` (review round 4 -- widened to `pub(crate)` for exactly this reuse)
+/// rather than re-matching the two wind shapes a second time -- the same fact [`with_axis`]
+/// checks to refuse `ShotAzimuth` there, because `WindDirection`'s OWN resolved value depends on
+/// it too (module doc, "The derived-value exclusion rule", Instance 2).
 fn is_compass_referenced(r: &ResolvedSolveRequestV1) -> bool {
-    let wind_reference = match &r.wind {
-        ResolvedWindV1::Constant(c) => c.wind_reference,
-        ResolvedWindV1::Segmented(s) => s.wind_reference,
-    };
-    wind_reference == Some(WindReferenceV1::Compass)
+    crate::perturbation::access::wind_reference_of(&r.wind) == Some(WindReferenceV1::Compass)
 }
 
 /// True when `r`'s atmosphere was entered as a QNH altimeter setting. Read directly from the
@@ -435,12 +432,21 @@ fn plan_exclusions(
                 });
                 continue;
             }
-            // N1 (review round 3): WindDirection's resolved value is ALSO derived from
-            // ShotAzimuth -- ShotGeometry, a DIFFERENT group -- whenever either side is
-            // compass-referenced, regardless of whether the raw bearing or the azimuth values
-            // themselves differ (module doc, derived-value rule, Instance 2).
+            // N1 (review round 3, narrowed by F1): WindDirection's resolved value is ALSO
+            // derived from ShotAzimuth -- ShotGeometry, a DIFFERENT group -- whenever either
+            // side is compass-referenced (module doc, derived-value rule, Instance 2). But the
+            // derivation only actually CONTAMINATES the swap when the azimuths differ: if
+            // a.shot.shot_azimuth_rad == b.shot.shot_azimuth_rad, the compass-to-shooter-relative
+            // shift is the SAME on both sides, so the difference between the two resolved
+            // directions is exactly the difference between the two raw bearings -- a genuine
+            // Wind-group effect, not azimuth contamination (F1: excluding unconditionally on the
+            // mode flag over-fires, under-attributing Wind on the most natural same-shot-
+            // direction compass comparison). `with_axis`'s OWN Altitude/ShotAzimuth guards do
+            // not need this refinement -- they only ever see ONE request, so they cannot compare
+            // -- but `plan_exclusions` has both and must.
             if axis == InputAxis::WindDirection
                 && (is_compass_referenced(a) || is_compass_referenced(b))
+                && a.shot.shot_azimuth_rad != b.shot.shot_azimuth_rad
             {
                 excluded.push(axis);
                 let reason = "the resolved wind direction is derived from shot_azimuth_rad (a \
@@ -464,12 +470,21 @@ fn plan_exclusions(
             continue;
         }
 
-        // N2 (review round 3): Pressure's resolved value is derived from Altitude -- the SAME
-        // group, but Altitude is itself excluded whenever either side is QNH-referenced, so the
-        // pairing that would ordinarily make same-group derivation harmless is broken (module
-        // doc, derived-value rule, Instance 3). Checked unconditionally on the QNH mode, like
-        // the with_axis guards, not on whether pressure_pa or altitude_m actually differ.
-        if axis == InputAxis::Pressure && (is_qnh_referenced(a) || is_qnh_referenced(b)) {
+        // N2 (review round 3, narrowed by F1): Pressure's resolved value is derived from
+        // Altitude -- the SAME group, but Altitude is itself excluded whenever either side is
+        // QNH-referenced, so the pairing that would ordinarily make same-group derivation
+        // harmless is broken (module doc, derived-value rule, Instance 3). But this only
+        // actually breaks the pairing when the altitudes differ: if
+        // a.atmosphere.altitude_m == b.atmosphere.altitude_m, the QNH-reduced pressures differ
+        // only by the raw altimeter setting, and the swapped value stays physically valid at
+        // the (unmoved) destination altitude -- excluding unconditionally on the mode flag
+        // over-fires, under-attributing Atmosphere on the most natural same-location QNH
+        // comparison (F1). See the WindDirection guard above for why `with_axis`'s own
+        // unconditional guards do not need (and cannot use) this same refinement.
+        if axis == InputAxis::Pressure
+            && (is_qnh_referenced(a) || is_qnh_referenced(b))
+            && a.atmosphere.altitude_m != b.atmosphere.altitude_m
+        {
             excluded.push(axis);
             let reason = "the resolved station pressure is derived from altitude_m under a \
                           QNH-referenced atmosphere, and Altitude is excluded from this same \
@@ -1262,12 +1277,24 @@ mod tests {
     }
 
     /// Review I1's explicit ask: not just that Altitude is recorded as skipped, but that the
-    /// resulting Atmosphere CONTRIBUTION is actually correct -- reflecting ONLY the other four
-    /// atmosphere axes, with no partial leakage from the excluded Altitude difference. Proven by
-    /// showing the reported contribution is UNCHANGED when b's altitude is moved to match a's:
+    /// resulting Atmosphere CONTRIBUTION is actually correct -- reflecting ONLY the other axes,
+    /// with no partial leakage from the excluded Altitude difference. Proven by showing the
+    /// reported contribution is UNCHANGED when b's altitude is moved from one value to ANOTHER:
     /// if Altitude's difference were still (even partially) leaking into the contribution,
-    /// closing that difference would change the reported number; since Altitude is excluded
-    /// from BOTH legs either way, it must not.
+    /// moving it would change the reported number; since Altitude is excluded from BOTH legs
+    /// either way, it must not.
+    ///
+    /// Deliberately compares TWO altitudes that BOTH differ from `a`'s (1200 and 900), neither
+    /// equal to `a`'s own 500 -- review round 4, F1 excludes `Pressure` only when the two
+    /// requests' altitudes actually differ, so comparing against an altitude that happens to
+    /// MATCH `a`'s would stop excluding `Pressure` in that one leg and confound this test with a
+    /// second, unrelated effect (see `pressure_exclusion_does_not_leak_a_partial_effect_into_atmosphere`'s
+    /// own doc comment for that failure mode in detail). `b`'s pressure here is a fixed,
+    /// altitude-INDEPENDENT absolute 98000 Pa (not QNH), so unlike that other test, changing
+    /// `b`'s altitude between 1200 and 900 changes nothing about `b`'s own actual physics either
+    /// (`calculate_atmosphere` ignores `altitude_m` whenever temperature and pressure are both
+    /// given directly, which they always are here) -- so this one tolerates NO residual at all,
+    /// not even the small second-order kind the Pressure test documents.
     #[test]
     fn altitude_exclusion_does_not_leak_a_partial_effect_into_atmosphere() {
         let qnh_json = serde_json::json!({
@@ -1300,25 +1327,29 @@ mod tests {
             })
             .to_string()
         };
-        let b_different_altitude = crate::solve_v1::solve_v1(
+        let b_altitude_1200 = crate::solve_v1::solve_v1(
             crate::solve_json::decode_solve_request_v1(&b_json(1200.0)).unwrap(),
         )
         .unwrap()
         .resolved_request;
-        let b_same_altitude = crate::solve_v1::solve_v1(
-            crate::solve_json::decode_solve_request_v1(&b_json(500.0)).unwrap(),
+        let b_altitude_900 = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&b_json(900.0)).unwrap(),
         )
         .unwrap()
         .resolved_request;
+        // Fixture assumption: NEITHER b variant's altitude may equal a's 500 -- see the doc
+        // comment above for why that specific coincidence would confound this test.
+        assert_ne!(b_altitude_1200.atmosphere.altitude_m, a.atmosphere.altitude_m);
+        assert_ne!(b_altitude_900.atmosphere.altitude_m, a.atmosphere.altitude_m);
 
-        let rep_different = explain_difference(&a, &b_different_altitude, &[300.0]).unwrap();
-        let rep_same = explain_difference(&a, &b_same_altitude, &[300.0]).unwrap();
+        let rep_1200 = explain_difference(&a, &b_altitude_1200, &[300.0]).unwrap();
+        let rep_900 = explain_difference(&a, &b_altitude_900, &[300.0]).unwrap();
 
         // Sanity: Altitude must be excluded on BOTH directions in BOTH comparisons, so this is
         // a fair, apples-to-apples check of the same code path (not, say, one comparison
         // exercising the exclusion and the other happening to skip it because the values
         // coincided).
-        for rep in [&rep_different, &rep_same] {
+        for rep in [&rep_1200, &rep_900] {
             for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
                 assert!(
                     rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
@@ -1329,64 +1360,67 @@ mod tests {
             }
         }
 
-        let atmosphere_different = rep_different.rows[0]
+        let atmosphere_1200 = rep_1200.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Atmosphere)
             .unwrap();
-        let atmosphere_same = rep_same.rows[0]
+        let atmosphere_900 = rep_900.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Atmosphere)
             .unwrap();
         assert!(
-            (atmosphere_different.delta.drop_m - atmosphere_same.delta.drop_m).abs() < 1e-9,
-            "Atmosphere's contribution changed when b's altitude changed (1200 -> 500 m) even \
+            (atmosphere_1200.delta.drop_m - atmosphere_900.delta.drop_m).abs() < 1e-9,
+            "Atmosphere's contribution changed when b's altitude changed (1200 -> 900 m) even \
              though Altitude is excluded from both comparisons -- {} vs {} -- a partial \
              altitude effect must be leaking through",
-            atmosphere_different.delta.drop_m,
-            atmosphere_same.delta.drop_m
+            atmosphere_1200.delta.drop_m,
+            atmosphere_900.delta.drop_m
         );
-        // And it must be genuinely non-zero (temperature/pressure alone are a real effect
-        // here), or the equality above would be trivially true for the wrong reason (both
-        // sides zero).
+        // And it must be genuinely non-zero (temperature alone is a real effect here), or the
+        // equality above would be trivially true for the wrong reason (both sides zero).
         assert!(
-            atmosphere_same.delta.drop_m.abs() > 0.001,
-            "expected a non-negligible Atmosphere contribution from temperature/pressure \
-             alone, got {}",
-            atmosphere_same.delta.drop_m
+            atmosphere_900.delta.drop_m.abs() > 0.001,
+            "expected a non-negligible Atmosphere contribution from temperature alone, got {}",
+            atmosphere_900.delta.drop_m
         );
     }
 
-    /// Review round 3, N2 (derived-value exclusion rule, Instance 3): the test above only
-    /// exercises a QNH-vs-ABSOLUTE comparison, where `b`'s plain absolute pressure has no
+    /// Review round 3, N2 (derived-value exclusion rule, Instance 3): the Altitude test above
+    /// only exercises a QNH-vs-ABSOLUTE comparison, where `b`'s plain absolute pressure has no
     /// altitude dependency to leak in the first place -- it cannot catch Pressure itself still
-    /// being swapped. This uses a QNH-vs-QNH comparison instead: both requests share the
-    /// IDENTICAL raw QNH value but differ in altitude, so if Pressure were still being copied
-    /// (the bug this fix addresses), `b`'s resolved `pressure_pa` would differ from `a`'s purely
-    /// from the altitude difference (`reduce_qnh_to_station_pressure` is a function of both),
-    /// even though neither side's RAW pressure setting differs at all -- leaking an
-    /// altitude-driven effect into `Atmosphere` through `Pressure` instead of `Altitude`. Proven
-    /// the same way as the Altitude test above: closing `b`'s altitude gap to match `a`'s should
-    /// leave `Atmosphere`'s reported contribution ALMOST unchanged.
+    /// being swapped. This uses a QNH-vs-QNH comparison instead: both `b` variants share the
+    /// SAME altitude (1200 m, always different from `a`'s 500 m -- review round 4, F1, the same
+    /// reasoning as the Altitude test's own doc comment: comparing against an altitude that
+    /// happens to match `a`'s would stop excluding `Pressure` in that leg and confound the
+    /// comparison) but differ in their RAW QNH value, so their resolved `pressure_pa` differs
+    /// too. If Pressure were still being copied (the bug this fix addresses), that resolved
+    /// difference would move Atmosphere's contribution; since Pressure is excluded in BOTH
+    /// comparisons here (both `b` variants sit at 1200 m, never 500 m), it must not.
     ///
-    /// Unlike the Altitude test, "almost" is not "exactly": `Altitude`/`Pressure` are excluded
-    /// from being SWAPPED, but `b`'s baseline trajectory is still solved at `b`'s own REAL,
-    /// unswapped altitude, and the swapped `Temperature` axis's effect on drop is itself
-    /// (very slightly) a function of the ambient density it is evaluated in -- a genuine, small,
-    /// second-order interaction between a held-fixed axis and a swapped one, not a leak. I
-    /// measured both sides with a temporary, uncommitted probe before choosing this test's
-    /// tolerance: with the fix disabled, this exact fixture's two comparisons differed by
-    /// `~9.7e-3` (the "different altitude" case very roughly TRIPLING the "same altitude"
-    /// case's own `~-4.2e-3`) -- a first-order effect, the shape a real leak takes. With the fix
-    /// applied, they differ by `~1.8e-4` -- over 50x smaller, and small relative to the `~4.2e-3`
-    /// baseline itself, consistent with an ordinary nonlinear interaction rather than a leak.
-    /// `2e-3` sits with comfortable margin above the fixed residual and comfortably below the
-    /// broken one, so it distinguishes the two without being so tight that ordinary floating
-    /// point or a future minor solver change could make this flaky.
+    /// Unlike the Altitude test, this ONE still tolerates a small residual, not exact equality:
+    /// `Altitude`/`Pressure` are excluded from being SWAPPED, but each `b` variant's baseline
+    /// trajectory is still solved at ITS OWN real, unswapped (and, here, differing-by-QNH-value)
+    /// pressure, and the swapped `Temperature` axis's effect on drop is itself (very slightly) a
+    /// function of the ambient density it is evaluated in -- a genuine, small, second-order
+    /// interaction between a held-fixed axis and a swapped one, not a leak (unlike the Altitude
+    /// test, where `b`'s pressure is a FIXED absolute value that does not move with altitude at
+    /// all, so there is no equivalent second-order channel there). I measured both sides with a
+    /// temporary, uncommitted probe before choosing this test's tolerance: with the fix
+    /// disabled, this fixture's two comparisons differed by `~9.7e-3` (a first-order effect, the
+    /// shape a real leak takes). With the fix applied, they differ by `~1.8e-4` -- over 50x
+    /// smaller. `2e-3` sits with comfortable margin above the fixed residual and comfortably
+    /// below the broken one.
+    ///
+    /// See `pressure_and_altitude_exclusion_give_an_exactly_zero_atmosphere_contribution_when_nothing_else_differs`
+    /// below for a complementary, bit-EXACT version of this same property (the reviewer's own
+    /// suggestion): when the two requests differ ONLY in altitude, every remaining Atmosphere
+    /// axis is identical, so there is no second-order channel left and the contribution must be
+    /// precisely `0.0`.
     #[test]
     fn pressure_exclusion_does_not_leak_a_partial_effect_into_atmosphere() {
-        let qnh_json = |altitude_m: f64, temperature_k: f64| {
+        let qnh_json = |altitude_m: f64, temperature_k: f64, raw_qnh_pa: f64| {
             serde_json::json!({
                 "schema_version": 1,
                 "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
@@ -1394,47 +1428,46 @@ mod tests {
                 "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
                 "shot": {"max_range_m": 900.0},
                 "atmosphere": {"altitude_m": altitude_m, "temperature_k": temperature_k,
-                               "pressure_pa": 101325.0, "pressure_reference": "qnh"},
+                               "pressure_pa": raw_qnh_pa, "pressure_reference": "qnh"},
                 "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
             })
             .to_string()
         };
         let a = crate::solve_v1::solve_v1(
-            crate::solve_json::decode_solve_request_v1(&qnh_json(500.0, 288.0)).unwrap(),
+            crate::solve_json::decode_solve_request_v1(&qnh_json(500.0, 288.0, 101_325.0))
+                .unwrap(),
         )
         .unwrap()
         .resolved_request;
-        let b_different_altitude = crate::solve_v1::solve_v1(
-            crate::solve_json::decode_solve_request_v1(&qnh_json(1200.0, 300.0)).unwrap(),
+        let b_qnh_101325 = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&qnh_json(1200.0, 300.0, 101_325.0))
+                .unwrap(),
         )
         .unwrap()
         .resolved_request;
-        let b_same_altitude = crate::solve_v1::solve_v1(
-            crate::solve_json::decode_solve_request_v1(&qnh_json(500.0, 300.0)).unwrap(),
+        let b_qnh_105000 = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&qnh_json(1200.0, 300.0, 105_000.0))
+                .unwrap(),
         )
         .unwrap()
         .resolved_request;
 
-        // Sanity: both b variants are QNH-referenced with the SAME raw pressure_pa (101325.0)
-        // as a, so any difference in the RESOLVED pressure_pa comes purely from altitude --
-        // confirming this fixture actually exercises the QNH/altitude entanglement, not a
-        // difference in the raw pressure setting.
+        // Fixture assumptions: both b variants sit at the SAME altitude (1200 m), which must
+        // NOT equal a's (500 m) -- see the doc comment above -- and their resolved pressure_pa
+        // must differ, purely from the raw QNH value, confirming this fixture actually
+        // exercises "does the specific excluded Pressure value leak."
+        assert_eq!(b_qnh_101325.atmosphere.altitude_m, b_qnh_105000.atmosphere.altitude_m);
+        assert_ne!(b_qnh_101325.atmosphere.altitude_m, a.atmosphere.altitude_m);
         assert_ne!(
-            a.atmosphere.pressure_pa, b_different_altitude.atmosphere.pressure_pa,
-            "fixture assumption: different altitude under the same raw QNH must resolve to a \
+            b_qnh_101325.atmosphere.pressure_pa, b_qnh_105000.atmosphere.pressure_pa,
+            "fixture assumption: different raw QNH at the same altitude must resolve to a \
              different station pressure"
         );
-        assert_ne!(
-            b_different_altitude.atmosphere.pressure_pa,
-            b_same_altitude.atmosphere.pressure_pa,
-            "fixture assumption: the two b variants must resolve to different station \
-             pressures (they differ only in altitude, holding raw QNH fixed)"
-        );
 
-        let rep_different = explain_difference(&a, &b_different_altitude, &[300.0]).unwrap();
-        let rep_same = explain_difference(&a, &b_same_altitude, &[300.0]).unwrap();
+        let rep_101325 = explain_difference(&a, &b_qnh_101325, &[300.0]).unwrap();
+        let rep_105000 = explain_difference(&a, &b_qnh_105000, &[300.0]).unwrap();
 
-        for rep in [&rep_different, &rep_same] {
+        for rep in [&rep_101325, &rep_105000] {
             for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
                 assert!(
                     rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
@@ -1446,12 +1479,12 @@ mod tests {
             }
         }
 
-        let atmosphere_different = rep_different.rows[0]
+        let atmosphere_101325 = rep_101325.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Atmosphere)
             .unwrap();
-        let atmosphere_same = rep_same.rows[0]
+        let atmosphere_105000 = rep_105000.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Atmosphere)
@@ -1460,18 +1493,164 @@ mod tests {
         // empirically at ~1.8e-4 with the fix applied vs. ~9.7e-3 with it disabled, on this
         // exact fixture.
         assert!(
-            (atmosphere_different.delta.drop_m - atmosphere_same.delta.drop_m).abs() < 2e-3,
+            (atmosphere_101325.delta.drop_m - atmosphere_105000.delta.drop_m).abs() < 2e-3,
             "Atmosphere's contribution changed by more than the expected small second-order \
-             residual when b's altitude changed (1200 -> 500 m) under a QNH-vs-QNH comparison, \
+             residual when b's raw QNH value changed (101325 -> 105000 Pa) at the SAME altitude, \
              even though Pressure and Altitude are both excluded -- {} vs {} -- a first-order \
-             altitude-driven pressure effect looks like it is leaking through Pressure",
-            atmosphere_different.delta.drop_m,
-            atmosphere_same.delta.drop_m
+             pressure effect looks like it is leaking through",
+            atmosphere_101325.delta.drop_m,
+            atmosphere_105000.delta.drop_m
         );
         assert!(
-            atmosphere_same.delta.drop_m.abs() > 0.001,
+            atmosphere_105000.delta.drop_m.abs() > 0.001,
             "expected a non-negligible Atmosphere contribution from temperature alone, got {}",
-            atmosphere_same.delta.drop_m
+            atmosphere_105000.delta.drop_m
+        );
+    }
+
+    /// The reviewer's own suggestion (review round 4): a bit-EXACT complement to the tolerance
+    /// test above. Two QNH-referenced requests differing ONLY in altitude (same explicit
+    /// temperature, same everything else) exclude both `Altitude` and `Pressure`, leaving every
+    /// OTHER `Atmosphere` axis byte-identical between them -- so `swap_group` reproduces the
+    /// destination exactly, both legs are exact no-ops, and the contribution must be precisely
+    /// `0.0`, not merely small. This is the same shape as
+    /// `wind_direction_is_excluded_under_compass_wind_even_with_an_identical_raw_bearing` and the
+    /// post-C1 `ZeroSightGeometry` assertion in `every_groups_contribution_matches_an_independent_recomputation`:
+    /// a real leak would produce a large, first-order non-zero here, not a rounding-sized one.
+    #[test]
+    fn pressure_and_altitude_exclusion_give_an_exactly_zero_atmosphere_contribution_when_nothing_else_differs(
+    ) {
+        let qnh_json = |altitude_m: f64| {
+            serde_json::json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                               "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+                "shot": {"max_range_m": 900.0},
+                "atmosphere": {"altitude_m": altitude_m, "temperature_k": 288.0,
+                               "pressure_pa": 101_325.0, "pressure_reference": "qnh"},
+                "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+            })
+            .to_string()
+        };
+        let a = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&qnh_json(500.0)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        let b = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&qnh_json(1200.0)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        assert_ne!(a.atmosphere.altitude_m, b.atmosphere.altitude_m, "fixture assumption");
+        assert_eq!(
+            a.atmosphere.temperature_k, b.atmosphere.temperature_k,
+            "fixture assumption: temperature must be identical, or Atmosphere would have a \
+             real, non-excluded axis to report and the contribution would not be zero"
+        );
+
+        let rep = explain_difference(&a, &b, &[300.0])
+            .expect("Altitude/Pressure exclusion must not abort the comparison");
+        let atmosphere = rep.rows[0]
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::Atmosphere)
+            .unwrap();
+        assert_eq!(
+            atmosphere.delta.drop_m, 0.0,
+            "Atmosphere's drop contribution must be exactly zero when altitude is the ONLY \
+             thing that differs and both Altitude and Pressure are excluded, got {}",
+            atmosphere.delta.drop_m
+        );
+        assert_eq!(
+            atmosphere.delta.windage_m, 0.0,
+            "Atmosphere's windage contribution must be exactly zero for the same reason, got {}",
+            atmosphere.delta.windage_m
+        );
+
+        // Non-triviality: unlike the other exact-zero tests in this file, a nonzero TOTAL isn't
+        // the right guard here -- altitude alone, once excluded, is expected to affect nothing
+        // at all, so a zero total is normal, not suspicious. What WOULD be suspicious is the
+        // exclusion mechanism never actually engaging (e.g. a refactor that silently turned
+        // plan_exclusions into a no-op, which would ALSO report an exact zero here, for the
+        // wrong reason). Guard against that directly: both axes must actually appear in
+        // skipped_axes.
+        for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
+            for axis in [InputAxis::Altitude, InputAxis::Pressure] {
+                assert!(
+                    rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
+                        && s.axis == axis
+                        && s.direction == direction),
+                    "expected {axis:?} excluded on {direction:?}; got {:?}",
+                    rep.skipped_axes
+                );
+            }
+        }
+    }
+
+    /// Review round 4, F1: the Pressure exclusion must NOT fire when the two requests'
+    /// altitudes MATCH -- only a differing altitude actually breaks the QNH-to-station-pressure
+    /// pairing. Two QNH-referenced requests at the SAME altitude but DIFFERENT raw altimeter
+    /// settings must attribute that difference to `Atmosphere` normally: excluding `Pressure`
+    /// unconditionally on the QNH mode flag alone (the bug this test guards against) would
+    /// UNDER-attribute a genuine altimeter-setting difference into the interaction remainder on
+    /// the most natural same-location QNH comparison anyone would run.
+    #[test]
+    fn pressure_is_still_swapped_when_the_altitude_matches() {
+        let build = |raw_qnh_pa: f64| {
+            serde_json::json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                               "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+                "shot": {"max_range_m": 900.0},
+                "atmosphere": {"altitude_m": 500.0, "temperature_k": 288.0,
+                               "pressure_pa": raw_qnh_pa, "pressure_reference": "qnh"},
+                "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
+            })
+            .to_string()
+        };
+        let a = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&build(101_325.0)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        let b = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&build(98_000.0)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        assert_eq!(
+            a.atmosphere.altitude_m, b.atmosphere.altitude_m,
+            "fixture assumption: identical altitude on both sides"
+        );
+        assert_ne!(
+            a.atmosphere.pressure_pa, b.atmosphere.pressure_pa,
+            "fixture assumption: different raw QNH must still resolve to different station \
+             pressure at the same altitude"
+        );
+
+        let rep = explain_difference(&a, &b, &[300.0]).unwrap();
+
+        assert!(
+            !rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
+                && s.axis == InputAxis::Pressure),
+            "Pressure must not be excluded when altitude matches on both sides; got {:?}",
+            rep.skipped_axes
+        );
+
+        let atmosphere = rep
+            .rows[0]
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::Atmosphere)
+            .unwrap();
+        assert!(
+            atmosphere.delta.drop_m.abs() > 0.001,
+            "Atmosphere's contribution must be substantial and non-zero here -- the raw QNH \
+             genuinely differs and the shared altitude means Pressure is safe to swap -- got {}",
+            atmosphere.delta.drop_m
         );
     }
 
@@ -1675,9 +1854,10 @@ mod tests {
         // directions, purely from the azimuth difference -- confirming this fixture actually
         // exercises the hazard, not a fixture that happens to agree for an unrelated reason.
         let (a_dir, b_dir) = match (&a.wind, &b.wind) {
-            (ResolvedWindV1::Constant(ca), ResolvedWindV1::Constant(cb)) => {
-                (ca.direction_from_rad, cb.direction_from_rad)
-            }
+            (
+                crate::solve_json::ResolvedWindV1::Constant(ca),
+                crate::solve_json::ResolvedWindV1::Constant(cb),
+            ) => (ca.direction_from_rad, cb.direction_from_rad),
             _ => panic!("constant wind expected on both sides"),
         };
         assert!(
@@ -1688,6 +1868,20 @@ mod tests {
 
         let rep = explain_difference(&a, &b, &[300.0])
             .expect("a derived-value exclusion must not abort the whole comparison");
+
+        // Non-triviality (small consistency note, review round 4): the total must be genuinely
+        // non-zero, or a fixture that collapsed to two identical trajectories overall would also
+        // report Wind == 0.0 for the wrong reason (matching the pattern the Pressure tests
+        // already use). This fixture's total IS expected to differ: a's and b's OWN effective
+        // (shooter-relative) wind angle differ, since the SAME raw bearing is transformed by
+        // DIFFERENT shot azimuths -- the sanity check above already pins that resolved-direction
+        // difference down; this confirms it actually shows up in the un-swapped baseline too.
+        assert!(
+            rep.rows[0].total.windage_m.abs() > 0.01,
+            "expected a's and b's own (un-swapped) trajectories to differ meaningfully in \
+             windage, since their effective wind angles differ -- got total windage {}",
+            rep.rows[0].total.windage_m
+        );
 
         let wind = rep
             .rows[0]
@@ -1729,6 +1923,72 @@ mod tests {
                 hit.reason
             );
         }
+    }
+
+    /// Review round 4, F1: the WindDirection exclusion must NOT fire when the two requests'
+    /// shot azimuths MATCH -- only a differing azimuth actually entangles the compass-to-
+    /// shooter-relative transform. Two compass-referenced requests with the SAME
+    /// `shot_azimuth_rad` but DIFFERENT raw wind bearings must attribute that difference to
+    /// `Wind` normally: excluding `WindDirection` unconditionally on the compass mode flag
+    /// alone (the bug this test guards against) would UNDER-attribute a genuine wind-bearing
+    /// difference into the interaction remainder on the most natural same-shot-direction
+    /// compass comparison anyone would run.
+    #[test]
+    fn wind_direction_is_still_swapped_when_the_shot_azimuth_matches() {
+        let build = |bearing_rad: f64| {
+            serde_json::json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                               "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+                "shot": {"max_range_m": 900.0, "shot_azimuth_rad": 0.3},
+                "atmosphere": {"temperature_k": 288.0},
+                "wind": {"speed_mps": 3.0, "direction_from_rad": bearing_rad,
+                         "wind_reference": "compass"},
+                "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
+            })
+            .to_string()
+        };
+        let a = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&build(std::f64::consts::FRAC_PI_2))
+                .unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        let b = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&build(std::f64::consts::FRAC_PI_4))
+                .unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        assert_eq!(
+            a.shot.shot_azimuth_rad, b.shot.shot_azimuth_rad,
+            "fixture assumption: identical shot azimuth on both sides"
+        );
+
+        let rep = explain_difference(&a, &b, &[300.0]).unwrap();
+
+        assert!(
+            !rep.skipped_axes.iter().any(|s| s.group == InputGroup::Wind
+                && s.axis == InputAxis::WindDirection),
+            "WindDirection must not be excluded when the shot azimuth matches on both sides; \
+             got {:?}",
+            rep.skipped_axes
+        );
+
+        let wind = rep
+            .rows[0]
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::Wind)
+            .unwrap();
+        assert!(
+            wind.delta.windage_m.abs() > 0.01,
+            "Wind's windage contribution must be substantial and non-zero here -- the raw \
+             bearing genuinely differs and the shared azimuth means WindDirection is safe to \
+             swap -- got {}",
+            wind.delta.windage_m
+        );
     }
 
     /// Requirement (1)'s third example, both detection paths at once: `a` is constant wind and
