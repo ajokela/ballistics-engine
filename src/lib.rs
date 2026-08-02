@@ -147,6 +147,9 @@ pub mod cluster_bc;
 pub mod monte_carlo;
 pub mod stability;
 pub mod stability_advanced;
+// 0.33.0 decision-support Phase 1: shared input taxonomy for perturbation kernel and
+// uncertainty propagation. No feature gate: must compile for wasm32 (pure data + serde).
+pub mod perturbation;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]
