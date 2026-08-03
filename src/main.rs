@@ -69,8 +69,14 @@ use ballistics_engine::wind::{parse_wind_direction_standalone, ParsedWindDirecti
 // MBA-1349: robust hold corridors over named segmented-wind scenarios.
 use ballistics_engine::wind_scenarios::{
     format_robust_hold_report, parse_target_spec, parse_wind_scenario_set, solve_robust_hold,
-    CorridorLoad, RobustHoldFormat, RobustHoldRequest,
+    CorridorLoad, RobustHoldFormat, RobustHoldRequest, TargetSpec,
 };
+// 0.33.0 decision-support Task 14: `explain`/`tolerance` CLI surfaces for MBA-1345/MBA-1350.
+use ballistics_engine::error_budget::TargetGeometryV1;
+use ballistics_engine::explain::{explain_difference, DeltaV1, SolutionDiffReportV1};
+use ballistics_engine::perturbation::{axis_meta, AxisKind, InputAxis};
+use ballistics_engine::solve_json::{decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorEnvelopeV1};
+use ballistics_engine::tolerance::{tolerance_envelope, LimitingBoundaryV1, ToleranceReportV1};
 // MBA-1361: reticle schema, generators and the hold-point API (shared with WASM/FFI).
 use ballistics_engine::reticle::{
     format_reticle_description, format_reticle_hold, hold_point_in_reticle, FocalPlane,
@@ -82,7 +88,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use strsim::levenshtein;
 
 /// Shared `--wind-direction` help (MBA-1367): ONE string so the degrees+clock grammar
@@ -3170,6 +3176,72 @@ enum Commands {
 
         /// Output format: table (default) or json
         #[arg(short = 'o', long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Explain why two resolved firing solutions differ, attributed by input group (MBA-1345)
+    ///
+    /// Takes two solve-json v1 request files, resolves each independently, and attributes the
+    /// difference in the observed impact -- at each requested range -- to a symmetric
+    /// counterfactual swap of each of the seven input groups (drag, muzzle velocity, zero/sight
+    /// geometry, atmosphere, wind, shot geometry, effects). Whatever nonlinear interaction
+    /// between groups the seven do not explain is reported once per range as an explicit
+    /// interaction remainder, and is never distributed across groups.
+    Explain {
+        /// Baseline solve-json v1 request file
+        #[arg(long, value_name = "FILE")]
+        a: PathBuf,
+
+        /// Comparison solve-json v1 request file
+        #[arg(long, value_name = "FILE")]
+        b: PathBuf,
+
+        /// Comma-separated ranges to explain, in meters. Solve-json requests are already SI,
+        /// so this is NOT affected by --units.
+        #[arg(long, value_name = "R1,R2,...", value_delimiter = ',', num_args = 1.., required = true)]
+        ranges: Vec<f64>,
+
+        /// Output format: table (default) or json
+        #[arg(short, long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Bound how wrong one input may be before the shot leaves the target (MBA-1350)
+    ///
+    /// Takes a solve-json v1 request file, resolves it, and bisects each requested axis
+    /// outward -- toward its own configured domain's lower bound and, independently, its
+    /// upper bound -- until the impact crosses the target boundary. Bounds are ONE VARIABLE
+    /// AT A TIME: two inputs each at their own individual limit will generally miss even
+    /// though neither alone would, and no bound reported here implies any probability.
+    Tolerance {
+        /// solve-json v1 request file
+        #[arg(long, value_name = "FILE")]
+        request: PathBuf,
+
+        /// Range to evaluate the impact at, in meters (not affected by --units)
+        #[arg(long)]
+        range: f64,
+
+        /// Target geometry: rect:WIDTHxHEIGHT or circle:DIAMETER (inches imperial / cm
+        /// metric, per --units -- same convention as hold-corridor --target and
+        /// mpbr --vital-zone; converted to meters internally)
+        #[arg(long)]
+        target: String,
+
+        /// Axis to bound, kebab-case (e.g. wind-speed, muzzle-velocity-mps, cant); repeatable,
+        /// at least one required. An unrecognized name is rejected with the full accepted list.
+        #[arg(long = "axis", value_name = "AXIS", action = clap::ArgAction::Append, required = true)]
+        axes: Vec<String>,
+
+        /// Per-axis search domain as AXIS=LO:HI, in that axis's own physical unit (e.g.
+        /// wind-speed=0:20 for m/s, cant=-0.05:0.05 for radians). Repeatable; required once for
+        /// every --axis given -- there is no default domain, even for a categorical axis
+        /// (whose bounds then simply go unused).
+        #[arg(long = "domain", value_name = "AXIS=LO:HI", action = clap::ArgAction::Append)]
+        domains: Vec<String>,
+
+        /// Output format: table (default) or json
+        #[arg(short, long, default_value = "table")]
         output: OutputFormat,
     },
 
@@ -12395,6 +12467,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             output,
         } => {
             handle_optimal_zero(targets, vital, load, cli.units, output)?;
+        }
+
+        Commands::Explain { a, b, ranges, output } => {
+            handle_explain(a, b, ranges, output)?;
+        }
+
+        Commands::Tolerance {
+            request,
+            range,
+            target,
+            axes,
+            domains,
+            output,
+        } => {
+            handle_tolerance(request, range, target, axes, domains, cli.units, output)?;
         }
 
         Commands::Completions { shell } => {
@@ -23320,5 +23407,580 @@ fn apply_pressure_mode(
             let altitude_m = UnitConverter::altitude_to_metric(altitude_display, units);
             ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(pressure_hpa, altitude_m)
         }
+    }
+}
+
+// ============================================================================
+// `explain` / `tolerance` (0.33.0 decision-support Task 14, MBA-1345 / MBA-1350)
+// ============================================================================
+
+/// Render a solve-json v1 protocol error for CLI display.
+///
+/// `main` prints its top-level error through `Debug`, which for a plain `String` renders far
+/// more readably than a nested typed error's own derived `Debug` would -- so, matching every
+/// other subcommand's convention (see `handle_hold_corridor`'s identical note), a protocol
+/// error is rendered through its own `Display`-ish accessors into a `String` right here, rather
+/// than propagated as `SolveErrorEnvelopeV1` itself.
+fn describe_solve_error(e: &SolveErrorEnvelopeV1) -> String {
+    match e.error.path() {
+        Some(path) => format!("{:?} at {path}: {}", e.error.code, e.error.message),
+        None => format!("{:?}: {}", e.error.code, e.error.message),
+    }
+}
+
+/// Read a solve-json v1 request file, decode it, solve it, and return the RESOLVED request --
+/// the one entry point `handle_explain`/`handle_tolerance` both use, so a firing solution is
+/// only ever described to this CLI surface one way (a solve-json v1 file), never a second
+/// flag-based shape.
+fn load_resolved_request(path: &Path) -> Result<ResolvedSolveRequestV1, Box<dyn Error>> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| format!("could not read solve-json request file {}: {e}", path.display()))?;
+    let request = decode_solve_request_v1(&text).map_err(|e| describe_solve_error(&e))?;
+    let success = ballistics_engine::solve_v1(request).map_err(|e| describe_solve_error(&e))?;
+    Ok(success.resolved_request)
+}
+
+/// Canonical kebab-case CLI spelling for one taxonomy axis.
+///
+/// This is the single source of truth: [`parse_input_axis`] is DERIVED from this match plus
+/// [`InputAxis::ALL`], rather than a second, independently hand-maintained match mapping
+/// strings back to variants. The match below is exhaustive over `InputAxis`, so a future 33rd
+/// variant fails to COMPILE here until it is given a spelling, instead of silently becoming
+/// unparseable on the CLI -- see `axis_kebab_names_round_trip_every_member_of_all` below.
+fn axis_kebab_name(axis: InputAxis) -> &'static str {
+    use InputAxis::*;
+    match axis {
+        Mass => "mass",
+        Diameter => "diameter",
+        Length => "length",
+        BallisticCoefficient => "ballistic-coefficient",
+        TwistRate => "twist-rate",
+        TwistDirection => "twist-direction",
+        DragModel => "drag-model",
+        MuzzleVelocityMps => "muzzle-velocity-mps",
+        SightHeight => "sight-height",
+        ZeroDistance => "zero-distance",
+        ZeroPoiUp => "zero-poi-up",
+        ZeroPoiRight => "zero-poi-right",
+        SightOffsetLateral => "sight-offset-lateral",
+        MuzzleHeight => "muzzle-height",
+        MuzzleAngle => "muzzle-angle",
+        Altitude => "altitude",
+        Temperature => "temperature",
+        Pressure => "pressure",
+        RelativeHumidity => "relative-humidity",
+        Latitude => "latitude",
+        WindSpeed => "wind-speed",
+        WindDirection => "wind-direction",
+        WindVertical => "wind-vertical",
+        TargetDistance => "target-distance",
+        ShootingAngle => "shooting-angle",
+        Cant => "cant",
+        ShotAzimuth => "shot-azimuth",
+        AimAzimuth => "aim-azimuth",
+        TargetHeight => "target-height",
+        MagnusEnabled => "magnus-enabled",
+        CoriolisEnabled => "coriolis-enabled",
+        EnhancedSpinDriftEnabled => "enhanced-spin-drift-enabled",
+    }
+}
+
+/// Parse one `--axis`/`--domain` axis token (kebab-case) into an [`InputAxis`].
+///
+/// Derived from [`axis_kebab_name`] plus [`InputAxis::ALL`] rather than a hand-maintained
+/// reverse list -- see that function's own doc. An unrecognized name is a hard error listing
+/// every accepted spelling, sorted for a stable, greppable message.
+fn parse_input_axis(s: &str) -> Result<InputAxis, String> {
+    InputAxis::ALL
+        .iter()
+        .copied()
+        .find(|&axis| axis_kebab_name(axis) == s)
+        .ok_or_else(|| {
+            let mut names: Vec<&str> = InputAxis::ALL.iter().copied().map(axis_kebab_name).collect();
+            names.sort_unstable();
+            format!("unknown axis '{s}'; accepted axis names are: {}", names.join(", "))
+        })
+}
+
+/// The physical unit `axis`'s resolved value (and any `--domain` bound for it) is expressed
+/// in on this CLI surface -- `""` for a dimensionless or categorical axis.
+fn axis_unit_suffix(axis: InputAxis) -> &'static str {
+    match axis_meta(axis).kind {
+        AxisKind::Continuous { unit, .. } => unit,
+        AxisKind::Categorical => "",
+    }
+}
+
+/// Parse one `--domain AXIS=LO:HI` token into an axis and its (unconverted, axis-native-unit)
+/// bounds. Only shape is validated here (a number on each side of one `:`, one `=`); whether
+/// the bounds are finite, ordered, and actually bracket the axis's nominal value is
+/// `tolerance_envelope`'s own job (`KernelError::InvalidDomain`).
+fn parse_domain_arg(s: &str) -> Result<(InputAxis, (f64, f64)), String> {
+    let malformed = || format!("invalid --domain '{s}': expected AXIS=LO:HI (e.g. wind-speed=0:20)");
+    let (axis_part, range_part) = s.split_once('=').ok_or_else(malformed)?;
+    let axis = parse_input_axis(axis_part.trim())?;
+    let (lo_str, hi_str) = range_part.split_once(':').ok_or_else(malformed)?;
+    let (lo_str, hi_str) = (lo_str.trim(), hi_str.trim());
+    let lo: f64 = lo_str
+        .parse()
+        .map_err(|_| format!("invalid --domain '{s}': lower bound '{lo_str}' is not a number"))?;
+    let hi: f64 = hi_str
+        .parse()
+        .map_err(|_| format!("invalid --domain '{s}': upper bound '{hi_str}' is not a number"))?;
+    Ok((axis, (lo, hi)))
+}
+
+/// One [`DeltaV1`] as a fixed-width, aligned line -- shared by every group-contribution row,
+/// the total, and the interaction remainder so the four numbers line up down the table.
+fn format_delta(d: &DeltaV1) -> String {
+    format!(
+        "drop {:+9.6} m   windage {:+9.6} m   time {:+9.6} s   velocity {:+9.4} m/s",
+        d.drop_m, d.windage_m, d.time_s, d.velocity_mps
+    )
+}
+
+/// Render a [`SolutionDiffReportV1`] as a human-readable table: one block per range, with the
+/// interaction remainder on its OWN labelled line (never mistakable for a group's own
+/// contribution), then any skipped axes and the report's own stated assumptions.
+fn render_explain_table(report: &SolutionDiffReportV1) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "explain -- method: {}", report.method);
+
+    for row in &report.rows {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "range {:.3} m", row.range_m);
+        let _ = writeln!(out, "  {:<22} {}", "total", format_delta(&row.total));
+        for c in &row.contributions {
+            let group_name = format!("{:?}", c.group);
+            let _ = writeln!(out, "  {group_name:<22} {}", format_delta(&c.delta));
+        }
+        // Deliberately its own line, with its own label and a trailing explanation, so it
+        // cannot be skimmed as an eighth group contribution.
+        let _ = writeln!(
+            out,
+            "  {:<22} {}   (unexplained by any single group)",
+            "interaction remainder",
+            format_delta(&row.interaction_remainder)
+        );
+    }
+
+    if !report.skipped_axes.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "skipped axes (excluded from that group's swap on both directions):");
+        for s in &report.skipped_axes {
+            let direction = format!("{:?}", s.direction);
+            let group = format!("{:?}", s.group);
+            let axis = axis_kebab_name(s.axis);
+            let _ = writeln!(out, "  [{direction}] {group} / {axis} -- {}", s.reason);
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "assumptions:");
+    for a in &report.assumptions {
+        let _ = writeln!(out, "  - {a}");
+    }
+    out
+}
+
+/// `explain` dispatch (MBA-1345).
+fn handle_explain(
+    a_path: PathBuf,
+    b_path: PathBuf,
+    ranges_m: Vec<f64>,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    // Checked before either request is even read: this command runs on the order of 70 solves
+    // (see `explain_difference`'s own cost note), so an unsupported output format should fail
+    // for free, not after paying for the comparison.
+    if matches!(output, OutputFormat::Csv | OutputFormat::Pdf) {
+        return Err(format!("explain has no {output:?} form; use -o table or -o json").into());
+    }
+
+    let a = load_resolved_request(&a_path)?;
+    let b = load_resolved_request(&b_path)?;
+
+    let report = explain_difference(&a, &b, &ranges_m).map_err(|e| e.to_string())?;
+
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render_explain_table(&report));
+    }
+    Ok(())
+}
+
+/// One axis's near/far search outcome as a table line -- the five situations a shooter must be
+/// able to tell apart (an axis unavailable at all is handled by the caller, one level up, since
+/// it never reaches a per-direction search): a real bound, no bound within the configured
+/// domain, no measurable effect at all, and (via the caller's own early return before this is
+/// called) the nominal itself sitting outside the target.
+fn render_tolerance_direction(
+    bound: Option<f64>,
+    has_no_effect: bool,
+    boundary: Option<LimitingBoundaryV1>,
+    unit: &str,
+) -> String {
+    let unit_sp = if unit.is_empty() { "" } else { " " };
+    if let Some(v) = bound {
+        let edge = boundary.expect("a found bound always carries a limiting boundary");
+        format!("bound at {v:.6}{unit_sp}{unit} -- crosses the {edge:?} edge")
+    } else if has_no_effect {
+        "no measurable effect on the impact (this axis is provably irrelevant here)".to_string()
+    } else {
+        "no bound within the configured domain (the impact stays inside the target)".to_string()
+    }
+}
+
+/// Render a [`ToleranceReportV1`] as a human-readable table.
+fn render_tolerance_table(report: &ToleranceReportV1) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "tolerance -- method: {}", report.method);
+    let _ = writeln!(out, "range {:.3} m", report.range_m);
+
+    for axis in &report.axes {
+        let _ = writeln!(out);
+        let name = axis_kebab_name(axis.axis);
+        let unit = axis_unit_suffix(axis.axis);
+        let unit_sp = if unit.is_empty() { "" } else { " " };
+        let _ = writeln!(
+            out,
+            "axis {name} (nominal {:.6}{unit_sp}{unit}, target margin {:.4} m)",
+            axis.nominal, axis.margin_linear_m
+        );
+        if !axis.nominal_inside_target {
+            let _ = writeln!(
+                out,
+                "  nominal OUTSIDE target -- target has no positive area; no bound was \
+                 searched in either direction"
+            );
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "  near (toward the domain's lower bound): {}",
+            render_tolerance_direction(
+                axis.near_bound,
+                axis.near_has_no_effect,
+                axis.near_limiting_boundary,
+                unit
+            )
+        );
+        let _ = writeln!(
+            out,
+            "  far  (toward the domain's upper bound): {}",
+            render_tolerance_direction(
+                axis.far_bound,
+                axis.far_has_no_effect,
+                axis.far_limiting_boundary,
+                unit
+            )
+        );
+        if axis.unbounded_in_domain {
+            let _ = writeln!(
+                out,
+                "  unbounded in domain: the impact stays inside the target across the whole \
+                 configured domain"
+            );
+        }
+    }
+
+    if !report.unavailable_axes.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "unavailable axes (could not be searched at all):");
+        for u in &report.unavailable_axes {
+            let name = axis_kebab_name(u.axis);
+            let code = format!("{:?}", u.code);
+            let _ = writeln!(out, "  {name} [{code}] -- {}", u.reason);
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "assumptions:");
+    for a in &report.assumptions {
+        let _ = writeln!(out, "  - {a}");
+    }
+    out
+}
+
+/// `tolerance` dispatch (MBA-1350).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable Clap command shape"
+)]
+fn handle_tolerance(
+    request_path: PathBuf,
+    range_m: f64,
+    target: String,
+    axes_raw: Vec<String>,
+    domains_raw: Vec<String>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    if matches!(output, OutputFormat::Csv | OutputFormat::Pdf) {
+        return Err(format!("tolerance has no {output:?} form; use -o table or -o json").into());
+    }
+
+    let axes: Vec<InputAxis> = axes_raw
+        .iter()
+        .map(|s| parse_input_axis(s))
+        .collect::<Result<_, _>>()?;
+    for (i, &axis) in axes.iter().enumerate() {
+        if axes[..i].contains(&axis) {
+            return Err(format!("--axis {} was given more than once", axis_kebab_name(axis)).into());
+        }
+    }
+
+    let mut domains: Vec<(InputAxis, (f64, f64))> = Vec::with_capacity(domains_raw.len());
+    for raw in &domains_raw {
+        let (axis, bounds) = parse_domain_arg(raw)?;
+        if domains.iter().any(|(a, _)| *a == axis) {
+            return Err(format!(
+                "--domain for axis '{}' was given more than once",
+                axis_kebab_name(axis)
+            )
+            .into());
+        }
+        domains.push((axis, bounds));
+    }
+    // tolerance_envelope never invents a domain (a silent default would misrepresent how far an
+    // axis was actually searched), so the CLI insists every --axis has a matching --domain up
+    // front, naming the specific axis and the flag syntax -- clearer than forwarding
+    // KernelError::InvalidDomain's "no domain was configured for this axis", which cannot
+    // mention --domain at all.
+    for &axis in &axes {
+        if !domains.iter().any(|(a, _)| *a == axis) {
+            let unit = axis_unit_suffix(axis);
+            let hint = if unit.is_empty() { String::new() } else { format!(" (in {unit})") };
+            let name = axis_kebab_name(axis);
+            return Err(format!(
+                "--axis {name} has no matching --domain; supply one as --domain {name}=LO:HI{hint}"
+            )
+            .into());
+        }
+    }
+    for (axis, _) in &domains {
+        if !axes.contains(axis) {
+            return Err(format!(
+                "--domain was given for axis '{}', which was not requested with --axis",
+                axis_kebab_name(*axis)
+            )
+            .into());
+        }
+    }
+
+    let resolved = load_resolved_request(&request_path)?;
+
+    let target_spec = parse_target_spec(&target, units).map_err(|e| e.to_string())?;
+    let geometry = match target_spec {
+        TargetSpec::Rect { width_m, height_m } => TargetGeometryV1::Rect { width_m, height_m },
+        TargetSpec::Circle { diameter_m } => TargetGeometryV1::Circle { radius_m: diameter_m / 2.0 },
+    };
+
+    let report = tolerance_envelope(&resolved, &axes, range_m, geometry, &domains)
+        .map_err(|e| e.to_string())?;
+
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render_tolerance_table(&report));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod decision_support_axis_tests {
+    use super::*;
+
+    /// A future 33rd `InputAxis` variant cannot silently become unparseable: `axis_kebab_name`
+    /// is an exhaustive match (a compile error catches an unhandled variant), and this pins
+    /// down that `parse_input_axis` -- built from that same function plus `InputAxis::ALL` --
+    /// actually round-trips every one of them, not just the ones a hand-picked sample covers.
+    #[test]
+    fn axis_kebab_names_round_trip_every_member_of_all() {
+        for &axis in InputAxis::ALL {
+            let name = axis_kebab_name(axis);
+            assert_eq!(
+                parse_input_axis(name),
+                Ok(axis),
+                "'{name}' (from {axis:?}) did not parse back to the same axis"
+            );
+        }
+    }
+
+    /// Every accepted name is unique -- otherwise two different axes would silently share one
+    /// CLI spelling and `parse_input_axis` would always return whichever comes first in `ALL`.
+    #[test]
+    fn every_axis_kebab_name_is_unique() {
+        let mut names: Vec<&str> = InputAxis::ALL.iter().copied().map(axis_kebab_name).collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "two axes share a kebab-case name");
+    }
+
+    #[test]
+    fn unknown_axis_lists_every_accepted_name() {
+        let err = parse_input_axis("not-a-real-axis").unwrap_err();
+        assert!(err.contains("unknown axis 'not-a-real-axis'"), "{err}");
+        for &axis in InputAxis::ALL {
+            assert!(
+                err.contains(axis_kebab_name(axis)),
+                "error is missing '{}': {err}",
+                axis_kebab_name(axis)
+            );
+        }
+    }
+
+    #[test]
+    fn domain_arg_parses_axis_and_bounds() {
+        assert_eq!(
+            parse_domain_arg("wind-speed=0:20"),
+            Ok((InputAxis::WindSpeed, (0.0, 20.0)))
+        );
+        assert_eq!(
+            parse_domain_arg("cant=-0.05:0.05"),
+            Ok((InputAxis::Cant, (-0.05, 0.05)))
+        );
+    }
+
+    #[test]
+    fn domain_arg_rejects_malformed_tokens() {
+        assert!(parse_domain_arg("wind-speed").is_err(), "missing '='");
+        assert!(parse_domain_arg("wind-speed=0").is_err(), "missing ':'");
+        assert!(parse_domain_arg("wind-speed=lo:20").is_err(), "non-numeric lower bound");
+        assert!(parse_domain_arg("nope=0:20").is_err(), "unknown axis");
+    }
+}
+
+#[cfg(test)]
+mod decision_support_render_tests {
+    use super::*;
+    use ballistics_engine::error_budget::UnavailableReasonCodeV1;
+    use ballistics_engine::tolerance::{ToleranceAxisV1, UnavailableAxisV1};
+
+    /// Delta #3's "nominal outside target" situation cannot be driven through this CLI's own
+    /// `--target` flag at all: `parse_target_spec` (`wind_scenarios.rs`) rejects a non-positive
+    /// width/height/diameter at the STRING-parsing stage, before a `TargetGeometryV1` is even
+    /// built, and `nominal_inside_target` can only be `false` for a target with no positive
+    /// area (`tolerance.rs`'s own module doc, "The central hazard") -- so this CLI can never
+    /// hand `tolerance_envelope` a degenerate target to reproduce it end-to-end (see the
+    /// task-14 report). The renderer must still get it right, so this builds a
+    /// `ToleranceReportV1` by hand -- covering all five situations in one table, with a
+    /// distinct marker phrase expected EXACTLY once per situation -- and checks
+    /// `render_tolerance_table` directly. A mutation that rendered two situations identically
+    /// (e.g. collapsing "no measurable effect" into the generic "no bound" text) would change a
+    /// count from 1 to 0 or 2, not just move text around.
+    #[test]
+    fn table_distinguishes_all_five_axis_situations() {
+        let report = ToleranceReportV1 {
+            schema_version: 1,
+            method: "one_variable_deterministic_bisection".to_string(),
+            assumptions: vec!["test assumption".to_string()],
+            range_m: 600.0,
+            unavailable_axes: vec![UnavailableAxisV1 {
+                axis: InputAxis::MagnusEnabled,
+                code: UnavailableReasonCodeV1::CategoricalAxis,
+                reason: "this axis is categorical and cannot be assigned a domain".to_string(),
+            }],
+            axes: vec![
+                // 1. A real bound in both directions.
+                ToleranceAxisV1 {
+                    axis: InputAxis::WindSpeed,
+                    nominal: 3.0,
+                    nominal_inside_target: true,
+                    near_bound: Some(1.2),
+                    far_bound: Some(5.4),
+                    near_limiting_boundary: Some(LimitingBoundaryV1::Left),
+                    far_limiting_boundary: Some(LimitingBoundaryV1::Right),
+                    unbounded_in_domain: false,
+                    near_has_no_effect: false,
+                    far_has_no_effect: false,
+                    margin_linear_m: 0.15,
+                },
+                // 2. No bound within the domain, but the axis does move the impact.
+                ToleranceAxisV1 {
+                    axis: InputAxis::WindVertical,
+                    nominal: 0.0,
+                    nominal_inside_target: true,
+                    near_bound: None,
+                    far_bound: None,
+                    near_limiting_boundary: None,
+                    far_limiting_boundary: None,
+                    unbounded_in_domain: true,
+                    near_has_no_effect: false,
+                    far_has_no_effect: false,
+                    margin_linear_m: 0.15,
+                },
+                // 3. No measurable effect at all -- same `None`/`None` shape as #2, must render
+                // differently.
+                ToleranceAxisV1 {
+                    axis: InputAxis::TargetDistance,
+                    nominal: 900.0,
+                    nominal_inside_target: true,
+                    near_bound: None,
+                    far_bound: None,
+                    near_limiting_boundary: None,
+                    far_limiting_boundary: None,
+                    unbounded_in_domain: true,
+                    near_has_no_effect: true,
+                    far_has_no_effect: true,
+                    margin_linear_m: 0.15,
+                },
+                // 4. Nominal outside the target -- structurally unreachable via the CLI (see
+                // this test's own doc comment), but the renderer must still handle it.
+                ToleranceAxisV1 {
+                    axis: InputAxis::Cant,
+                    nominal: 0.01,
+                    nominal_inside_target: false,
+                    near_bound: None,
+                    far_bound: None,
+                    near_limiting_boundary: None,
+                    far_limiting_boundary: None,
+                    unbounded_in_domain: false,
+                    near_has_no_effect: false,
+                    far_has_no_effect: false,
+                    margin_linear_m: 0.0,
+                },
+            ],
+        };
+
+        let table = render_tolerance_table(&report);
+
+        assert_eq!(table.matches("crosses the Left edge").count(), 1, "{table}");
+        assert_eq!(table.matches("crosses the Right edge").count(), 1, "{table}");
+        // Each of these fires once per DIRECTION (near and far), both directions being
+        // identical in this synthetic fixture -- so 2, not 1, per axis; the point of the count
+        // is that it is the SAME 2 either way, never mixed between the two axes below.
+        assert_eq!(
+            table.matches("no bound within the configured domain").count(),
+            2,
+            "exactly one axis (wind-vertical), both directions, is merely unbounded: {table}"
+        );
+        assert_eq!(
+            table.matches("no measurable effect on the impact").count(),
+            2,
+            "exactly one axis (target-distance), both directions, has no effect -- must not \
+             share text with the merely-unbounded axis: {table}"
+        );
+        assert_eq!(
+            table.matches("nominal OUTSIDE target").count(),
+            1,
+            "exactly one axis (cant) has its nominal outside the target: {table}"
+        );
+        assert_eq!(
+            table.matches("could not be searched at all").count(),
+            1,
+            "exactly one axis (magnus-enabled) is structurally unavailable: {table}"
+        );
+
+        // Each marker attaches to the RIGHT axis, not just somewhere in the output.
+        assert!(table.contains("axis wind-speed"), "{table}");
+        assert!(table.contains("axis wind-vertical"), "{table}");
+        assert!(table.contains("axis target-distance"), "{table}");
+        assert!(table.contains("axis cant"), "{table}");
+        assert!(table.contains("magnus-enabled ["), "{table}");
     }
 }
