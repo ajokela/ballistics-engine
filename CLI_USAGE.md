@@ -2055,10 +2055,26 @@ range. A WEZ sweep does not assume that; it uses the elevation you pass with `-a
 # └────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘
 ```
 
-Past a range the (undispersed) trajectory can no longer physically reach — because a nearly
-flat shot from a normal bore height eventually crosses the ground plane — `Dominant` and the
-share columns read `n/a`: the variance attribution isn't meaningful there, though `P(hit)` is
-still correct (and will simply read 0%, since every sample is a miss).
+`Dominant` and the three share columns read `n/a` instead of a value whenever the variance
+attribution isn't meaningful for that row, for any of three different reasons that the table
+does not distinguish between:
+
+- **The range is past where the (undispersed) trajectory can reach at all** — a nearly flat
+  shot from a normal bore height eventually crosses the ground plane, e.g. the `600`-`1000` yd
+  rows above.
+- **The shared attribution kernel hit a structural refusal** on one of the shot's error sources
+  for that particular range — an input combination the underlying sensitivity solve can't
+  evaluate.
+- **The drag configuration has no representation in the kernel's wire format at all** — a
+  loaded `--drag-table`, or a `--drag-model` of `G2`, `G5`, `GI`, `GS`, or `RA4` (only `G1`,
+  `G6`, `G7`, and `G8` are supported). This is the case most likely to catch you off guard:
+  every row of a `--drag-table` sweep, or a sweep using one of those unsupported drag models,
+  reads `n/a` on every range — including ranges the bullet clears easily. It is NOT a claim
+  that your bullet fails to reach the target.
+
+`P(hit)` is unaffected in all three cases — it always comes from the fully-dispersed Monte Carlo
+run directly, never from the attribution kernel (and will simply read 0% under the first case,
+since every sample there is a miss).
 
 **Wind call vs. ballistic wind.** `--wind-call-error` is the shooter's own uncertainty in
 *reading* the wind (e.g. "I think it's 8-10 mph, call it 9") — a human estimation error. It is
@@ -2087,14 +2103,17 @@ variance at that range, and their approximate shares (they sum to ~100%). `Other
 mechanical/ammo group dispersion (`--angle-std`, the derived azimuth spread, `--bc-std`) with
 the *ballistic* (non-call) share of wind uncertainty (`--wind-std`, `--wind-direction-std`).
 
-This is computed **analytically** from a linearized (one-standard-deviation finite-difference)
-sensitivity of the impact point to each independent source, rather than by re-running the full
-Monte Carlo sample set once per bucket with that source zeroed out. A full decomposed re-run
-would multiply the sweep's cost by the number of buckets; the linearized estimate instead costs
-a handful of extra deterministic trajectory solves per range and keeps the default sweep's
-runtime in the same ballpark as the base `monte-carlo` command (a few seconds for the default
-9-step sweep). At the magnitude of a single sigma the ballistic response is close enough to
-linear for this to be a reasonable first-order error budget — not an exact decomposition.
+This is computed **analytically** from a central-difference derivative of the impact point with
+respect to each independent source's own input, rather than by re-running the full Monte Carlo
+sample set once per bucket with that source zeroed out. Each derivative is taken at a small step
+size intrinsic to that input — independent of the sigma you configured for it — and only
+afterward scaled by the source's declared standard deviation (`--wind-std`, `--angle-std`, etc.)
+to turn it into a displacement, so the differencing step and the uncertainty being attributed are
+deliberately two different numbers. A full decomposed re-run would multiply the sweep's cost by
+the number of buckets; this instead costs a handful of extra deterministic trajectory solves per
+range and keeps the default sweep's runtime in the same ballpark as the base `monte-carlo`
+command (a few seconds for the default 9-step sweep). This is a first-order (linear-response)
+error budget, not an exact decomposition of the Monte Carlo variance.
 
 **Sweep range**: `--wez-start`, `--wez-end` (inclusive), `--wez-step` (all in yards for
 imperial, meters for metric; defaults `200`/`1000`/`100`).

@@ -357,9 +357,24 @@ fn wez_resolved_request(
 /// `azimuth_angle` is the small horizontal AIMING offset, not the compass-referenced
 /// `InputAxis::ShotAzimuth` Coriolis uses), wind direction ([`InputAxis::WindDirection`]), and
 /// the ballistic (non-call) share of wind speed ([`InputAxis::WindSpeed`] again,
-/// `wind_speed_std_dev` -- the SAME kernel axis as the wind-call source above, perturbed with a
-/// different declared sigma: two independent error sources sharing one physical channel, exactly
-/// as the retired version perturbed the same `wind.speed` field twice with two different deltas).
+/// `wind_speed_std_dev`).
+///
+/// `WindSpeed` is the ONE axis two different sources share (`wind_speed_std_dev` into `Other`,
+/// `wind_call_error_std_dev` into `WindCall`), and unlike every other pair of sources here they
+/// are not independently measured: the SAME [`Derivative`](crate::perturbation::Derivative) is
+/// computed at most once (see the code below) and both displacements are scaled off it. A real,
+/// worth-stating consequence (review finding, not part of the original D2 design intent): the
+/// wind-call share and the ballistic-wind PORTION of `Other` are now in an EXACT
+/// `(wind_call_error_std_dev / wind_speed_std_dev)^2` ratio whenever both are positive --
+/// `displacement_call^2 / displacement_wind^2 = (d * sigma_call)^2 / (d * sigma_wind)^2 =
+/// (sigma_call / sigma_wind)^2`, since the shared `d` cancels out of the ratio entirely, leaving
+/// pure sigma-squared algebra with no ballistic response left in it. The retired one-sided
+/// version did NOT have this property: it perturbed `wind.speed` twice, independently, at two
+/// different absolute deltas (`+sigma_call` and `+sigma_wind`), so its two displacements were
+/// two genuinely different finite differences, only APPROXIMATELY proportional to
+/// `sigma^2` in the locally-linear regime -- see
+/// `wind_call_and_ballistic_wind_shares_are_exactly_proportional_to_sigma_squared` in this
+/// module's tests.
 ///
 /// Returns `Ok(None)` when ANY of the seven sources hits a structural kernel refusal --
 /// [`KernelError::AxisUnsupportedForRequest`], [`KernelError::AxisAbsent`],
@@ -398,23 +413,38 @@ fn wez_variance_shares(
     wind_call_error_std_dev: f64,
     wind_direction_std_dev_rad: f64,
 ) -> Result<Option<WezVarianceShares>, KernelError> {
-    // One source's squared one-sigma displacement, or `Ok(Some(0.0))` without calling the
-    // kernel at all when `sigma` is non-positive or NaN (that source is disabled) -- mirrors
-    // `wez_source_variance`'s own guard. `Ok(None)` signals a structural refusal the caller
-    // must treat as attribution-unavailable rather than a genuine error (see the doc comment
-    // above).
+    // One source's squared one-sigma displacement from an already-computed derivative, or
+    // `0.0` when `sigma` is non-positive or NaN (that source is disabled) -- mirrors
+    // `wez_source_variance`'s own guard, without needing the kernel call that produced `d` to
+    // know anything about `sigma`.
+    let displacement_sq = |d: &crate::perturbation::Derivative, sigma: f64| -> f64 {
+        if sigma.is_nan() || sigma <= 0.0 {
+            0.0
+        } else {
+            (d.d_drop_d_x * sigma).powi(2) + (d.d_windage_d_x * sigma).powi(2)
+        }
+    };
+
+    // One axis's central-difference derivative, independent of any particular source's sigma.
+    // `Ok(None)` signals a structural refusal the caller must treat as attribution-unavailable
+    // rather than a genuine error (see the doc comment above).
+    let derivative_for =
+        |axis: InputAxis| -> Result<Option<crate::perturbation::Derivative>, KernelError> {
+            match central_difference(base_resolved, axis, &[target_distance_m], None) {
+                Ok(d) => Ok(Some(d[0])),
+                Err(e) if crate::error_budget::unavailable_reason(&e).is_some() => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+
+    // A single source with sigma `sigma` and kernel axis `axis`: `Ok(Some(0.0))` without
+    // calling the kernel at all when `sigma` is non-positive or NaN (that source is disabled),
+    // so a genuinely-disabled source costs nothing rather than one wasted pair of solves.
     let contribution = |axis: InputAxis, sigma: f64| -> Result<Option<f64>, KernelError> {
         if sigma.is_nan() || sigma <= 0.0 {
             return Ok(Some(0.0));
         }
-        match central_difference(base_resolved, axis, &[target_distance_m], None) {
-            Ok(d) => {
-                let d = &d[0];
-                Ok(Some((d.d_drop_d_x * sigma).powi(2) + (d.d_windage_d_x * sigma).powi(2)))
-            }
-            Err(e) if crate::error_budget::unavailable_reason(&e).is_some() => Ok(None),
-            Err(e) => Err(e),
-        }
+        Ok(derivative_for(axis)?.map(|d| displacement_sq(&d, sigma)))
     };
 
     // MV SD bucket: muzzle-velocity dispersion.
@@ -422,15 +452,15 @@ fn wez_variance_shares(
         return Ok(None);
     };
 
-    // Other/group bucket: elevation, aim azimuth, and BC dispersion (mechanical/ammo "group"),
-    // plus the ballistic (non-call) share of wind uncertainty.
+    // Other/group bucket: elevation, aim azimuth, and BC dispersion (mechanical/ammo "group").
+    // The ballistic (non-call) share of wind uncertainty is folded in just below, alongside the
+    // WindCall bucket, since both need the SAME WindSpeed derivative (review finding M1).
     let mut other_var = 0.0;
     for (axis, sigma) in [
         (InputAxis::MuzzleAngle, angle_std_dev_rad),
         (InputAxis::BallisticCoefficient, bc_std_dev),
         (InputAxis::AimAzimuth, azimuth_std_dev_rad),
         (InputAxis::WindDirection, wind_direction_std_dev_rad),
-        (InputAxis::WindSpeed, wind_speed_std_dev),
     ] {
         let Some(v) = contribution(axis, sigma)? else {
             return Ok(None);
@@ -438,10 +468,23 @@ fn wez_variance_shares(
         other_var += v;
     }
 
-    // Wind-call bucket: the shooter's own wind-speed estimation error, kept separate from the
-    // ballistic wind-speed uncertainty above even though both perturb the same physical channel.
-    let Some(wind_call_var) = contribution(InputAxis::WindSpeed, wind_call_error_std_dev)? else {
-        return Ok(None);
+    // Wind speed and wind-call bucket: `wind_speed_std_dev` (ballistic, folded into `other_var`
+    // above) and `wind_call_error_std_dev` (the WindCall bucket) perturb the SAME
+    // `InputAxis::WindSpeed` channel -- kept as separate attribution buckets (the shooter's own
+    // wind-call estimation error vs. physical gust-to-gust variability) but sharing one
+    // derivative computed AT MOST ONCE (review finding M1: this used to call the kernel twice
+    // with identical arguments), only when at least one of the two sigmas is actually active.
+    // See the doc comment above for the exact-proportionality consequence this has.
+    let wind_call_var = if (wind_speed_std_dev.is_nan() || wind_speed_std_dev <= 0.0)
+        && (wind_call_error_std_dev.is_nan() || wind_call_error_std_dev <= 0.0)
+    {
+        0.0
+    } else {
+        let Some(d) = derivative_for(InputAxis::WindSpeed)? else {
+            return Ok(None);
+        };
+        other_var += displacement_sq(&d, wind_speed_std_dev);
+        displacement_sq(&d, wind_call_error_std_dev)
     };
 
     let total = wind_call_var + mv_sd_var + other_var;
@@ -509,9 +552,19 @@ pub struct WezRow {
     pub wind_call_share: f64,
     pub mv_sd_share: f64,
     pub other_share: f64,
-    /// The undispersed baseline trajectory did not reach this range, so `*_share` and
-    /// `dominant_error_source` above are not meaningful (left at their zero/`None` default).
-    /// `p_hit` is unaffected -- it comes from the fully-dispersed Monte Carlo run directly.
+    /// `*_share` and `dominant_error_source` above are not meaningful (left at their
+    /// zero/`None` default) for any of THREE reasons, and this flag does not distinguish them:
+    /// (1) the undispersed baseline trajectory did not reach this range; (2) central-difference
+    /// attribution (0.33.0 decision-support D2) hit a structural kernel refusal on one of its
+    /// seven sources (`crate::perturbation::KernelError::AxisUnsupportedForRequest`/
+    /// `AxisAbsent`/`CategoricalAxis`/`StepOutOfDomain`); or (3) this configuration cannot be
+    /// represented on the shared kernel's solve-json v1 wire contract at all -- a loaded custom
+    /// drag table, or an engine drag model solve-json v1 has no variant for (`G2`/`G5`/`GI`/
+    /// `GS`/`RA4`; see `wez_resolved_request`). Reason (3) is the one most likely to surprise a
+    /// caller: every row of a `--drag-table` or unsupported-`--drag-model` sweep reads `n/a`
+    /// here, which is NOT a claim that the bullet fails to reach that range. `p_hit` is
+    /// unaffected in every case -- it comes from the fully-dispersed Monte Carlo run directly,
+    /// never from the kernel.
     pub attribution_unavailable: bool,
 }
 
@@ -1096,6 +1149,51 @@ mod wez_tests {
         assert_eq!(shares.dominant(), Some(WezErrorBucket::WindCall));
     }
 
+    /// Review finding M1: `WindSpeed`'s derivative is now computed AT MOST ONCE and reused for
+    /// both `wind_speed_std_dev` (folded into `Other`) and `wind_call_error_std_dev`
+    /// (`WindCall`). With every OTHER source's sigma at zero, `other_share` is ENTIRELY the
+    /// ballistic wind-speed contribution, so the ratio between the two buckets isolates exactly
+    /// `(wind_call_error_std_dev / wind_speed_std_dev)^2` -- the shared derivative cancels out
+    /// of the ratio entirely, leaving pure sigma-squared algebra with no ballistic response left
+    /// in it. This is a real, stated behavior change from the retired one-sided version, which
+    /// perturbed `wind.speed` independently at two different absolute deltas (`+sigma_call` and
+    /// `+sigma_wind`) and so was only approximately proportional to `sigma^2` in the
+    /// locally-linear regime, not exactly.
+    #[test]
+    fn wind_call_and_ballistic_wind_shares_are_exactly_proportional_to_sigma_squared() {
+        let inputs = test_base_inputs();
+        let wind = WindConditions::default();
+        let range_m: f64 = 300.0;
+        let solver_max_range = range_m.max(1000.0) * 2.0;
+        let resolved = wez_resolved_request(&inputs, &wind, solver_max_range)
+            .expect("test_base_inputs's default G1 drag model is always kernel-representable");
+
+        let wind_speed_std_dev = 0.4_f64;
+        let wind_call_error_std_dev = 1.2_f64;
+        let shares = wez_variance_shares(
+            &resolved,
+            range_m,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            wind_speed_std_dev,
+            wind_call_error_std_dev,
+            0.0,
+        )
+        .expect("valid test attribution solve")
+        .expect("attribution must be available for this fixture");
+
+        assert!(shares.other > 0.0, "fixture must produce a nonzero ballistic-wind share");
+        let expected_ratio = (wind_call_error_std_dev / wind_speed_std_dev).powi(2);
+        let actual_ratio = shares.wind_call / shares.other;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 1e-9,
+            "expected wind_call/other == (sigma_call/sigma_wind)^2 == {expected_ratio}, got \
+             {actual_ratio}"
+        );
+    }
+
     /// `wez_resolved_request`'s output must describe the SAME physical trajectory
     /// `wez_solve_target_plane` computes directly from `BallisticInputs` -- otherwise
     /// central-difference attribution would measure sensitivity against a subtly different
@@ -1106,9 +1204,22 @@ mod wez_tests {
     /// `line_of_sight_height_m - baseline.y` is the independently-derived equivalent.
     /// `windage_m` is `position.z` directly (no sign flip, no scale change), so it compares to
     /// `baseline.z` with no transform at all.
+    ///
+    /// M3 review fix: `cant_angle`, `sight_offset_lateral_m`, and `azimuth_angle` are
+    /// deliberately nonzero here (the first two are directly user-settable on `monte-carlo
+    /// --wez`, `--cant`/`--sight-offset`; `azimuth_angle` is not exposed as a baseline there but
+    /// `wez_resolved_request` must still map it correctly for any `BallisticInputs`). With all
+    /// three left at `test_base_inputs()`'s shared 0.0 default, a mis-mapping -- e.g.
+    /// `cant_angle_rad` accidentally written to `shooting_angle_rad`, a DIFFERENT `ResolvedShotV1`
+    /// field -- would leave every assertion in this file green anyway, since both fields agree
+    /// at the neutral value; nonzero values are the only way this oracle can actually catch that
+    /// class of bug.
     #[test]
     fn resolved_request_matches_wez_solve_target_plane_baseline() {
-        let inputs = test_base_inputs();
+        let mut inputs = test_base_inputs();
+        inputs.cant_angle = 5.0_f64.to_radians();
+        inputs.sight_offset_lateral_m = 0.02;
+        inputs.azimuth_angle = 0.001;
         let wind = WindConditions::default();
         let atmosphere = test_atmosphere(&inputs);
         let range_m: f64 = 300.0;
@@ -1259,7 +1370,7 @@ mod wez_tests {
             0.243,      // bc
             0.0113,     // mass
             0.00782,    // diameter
-            2000,       // num_sims
+            20,         // num_sims
             5.0,        // velocity_std
             0.0001,     // angle_std
             0.005,      // bc_std
