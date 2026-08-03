@@ -155,6 +155,55 @@ fn tolerance_unknown_axis_lists_valid_names() {
     assert!(stderr.contains("muzzle-velocity-mps"), "{stderr}");
 }
 
+/// Review minor (b): a repeated `--axis` would otherwise double a real bisection for no reason
+/// (the cost note's whole concern) -- rejected instead of silently deduplicated.
+#[test]
+fn tolerance_rejects_a_repeated_axis() {
+    let dir = tempfile_dir();
+    let a = write_json(&dir, "a.json", &small_request(823.0));
+    let (_, stderr, ok) = run(&[
+        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
+        "--target", "rect:0.5x0.75",
+        "--axis", "wind-speed", "--axis", "wind-speed", "--domain", "wind-speed=0:20",
+    ]);
+    assert!(!ok, "a repeated --axis must be rejected");
+    assert!(stderr.contains("wind-speed"), "{stderr}");
+    assert!(stderr.contains("more than once"), "{stderr}");
+}
+
+/// Review minor (b): a repeated `--domain` for the same axis is rejected rather than silently
+/// last-wins -- a caller who fat-fingered a second `--domain` should not get an unexplained,
+/// possibly different, search domain.
+#[test]
+fn tolerance_rejects_a_repeated_domain_for_one_axis() {
+    let dir = tempfile_dir();
+    let a = write_json(&dir, "a.json", &small_request(823.0));
+    let (_, stderr, ok) = run(&[
+        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
+        "--target", "rect:0.5x0.75", "--axis", "wind-speed",
+        "--domain", "wind-speed=0:20", "--domain", "wind-speed=1:19",
+    ]);
+    assert!(!ok, "a repeated --domain for one axis must be rejected");
+    assert!(stderr.contains("wind-speed"), "{stderr}");
+    assert!(stderr.contains("more than once"), "{stderr}");
+}
+
+/// Review minor (b): a `--domain` for an axis never requested via `--axis` is rejected rather
+/// than silently ignored -- most likely a typo'd or forgotten `--axis` on the caller's part.
+#[test]
+fn tolerance_rejects_a_domain_for_an_axis_not_requested() {
+    let dir = tempfile_dir();
+    let a = write_json(&dir, "a.json", &small_request(823.0));
+    let (_, stderr, ok) = run(&[
+        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
+        "--target", "rect:0.5x0.75", "--axis", "wind-speed",
+        "--domain", "wind-speed=0:20", "--domain", "temperature=250:310",
+    ]);
+    assert!(!ok, "a --domain for an axis outside --axis must be rejected");
+    assert!(stderr.contains("temperature"), "{stderr}");
+    assert!(stderr.contains("not requested"), "{stderr}");
+}
+
 /// Delta #2: a skipped axis (here, `latitude_rad` supplied on `a` only) must show up in the
 /// TABLE output, not just the JSON -- and the interaction remainder must be unmistakable for an
 /// eighth group contribution. `a`/`b` are otherwise byte-identical, so this is cleanly isolated:
@@ -194,6 +243,42 @@ fn explain_table_labels_the_remainder_and_renders_skipped_axes() {
     assert!(skipped.iter().any(|s| s["axis"] == "latitude"), "{json}");
 }
 
+/// Review I2: `explain` reads TWO files, so a decode/solve error must name WHICH one failed --
+/// `describe_solve_error` alone has no path, so without this the error for a broken `--a` is
+/// indistinguishable from the same error for a broken `--b`. Checked in both positions so the
+/// fix is not just "always blames --a" (or always blames whichever is read first).
+#[test]
+fn explain_names_which_of_the_two_files_is_broken() {
+    let dir = tempfile_dir();
+    let mut broken = small_request(823.0);
+    // The same "g7" lowercase defect this file's own `small_request` doc warns about --
+    // reused here deliberately, since it is a real, guaranteed-to-fail `InvalidValue`.
+    broken["projectile"]["drag_model"] = serde_json::json!("g7");
+    let broken_path = write_json(&dir, "broken.json", &broken);
+    let good_path = write_json(&dir, "good.json", &small_request(870.0));
+    let (broken_str, good_str) = (broken_path.to_str().unwrap(), good_path.to_str().unwrap());
+
+    let (_, stderr, ok) = run(&["explain", "--a", broken_str, "--b", good_str, "--ranges", "600"]);
+    assert!(!ok, "a broken --a must be rejected");
+    assert!(
+        stderr.contains(broken_str),
+        "the error must name the broken file's own path: {stderr}"
+    );
+    assert!(
+        !stderr.contains(good_str),
+        "the error must not also name the OTHER, valid file: {stderr}"
+    );
+
+    let (_, stderr, ok) = run(&["explain", "--a", good_str, "--b", broken_str, "--ranges", "600"]);
+    assert!(!ok, "a broken --b must be rejected");
+    assert!(
+        stderr.contains(broken_str),
+        "the error must name the broken file's own path regardless of which flag carried it: \
+         {stderr}"
+    );
+    assert!(!stderr.contains(good_str), "{stderr}");
+}
+
 /// Delta #3, situations 1 and 3 together (a found bound vs. no measurable effect at all): the
 /// vacuum fixture gives an ANALYTICALLY known crossing for `muzzle-velocity-mps` (drop-only,
 /// since there is no wind), paired with `target-distance` in the SAME call, which -- being
@@ -223,6 +308,16 @@ fn tolerance_table_distinguishes_a_found_bound_from_no_measurable_effect() {
         !table.contains("no bound within the configured domain"),
         "neither axis in this fixture is merely unbounded-with-effect, so that phrase must not \
          appear at all here (it would make the two situations indistinguishable): {table}"
+    );
+    // Review I1: target-distance is ALSO `unbounded_in_domain: true` (both bounds `None`), but
+    // with NO effect in either direction -- it must not additionally get the "stays inside the
+    // target" summary line, which would misread as reassurance about a change that provably
+    // does nothing at all. muzzle-velocity-mps has real bounds, so it was never eligible for
+    // that line either; this fixture's whole table should therefore contain it zero times.
+    assert!(
+        !table.contains("unbounded in domain:"),
+        "no axis in this fixture should get the unbounded-in-domain summary line -- \
+         muzzle-velocity-mps has real bounds, and target-distance has no effect at all: {table}"
     );
 
     let mut json_args: Vec<&str> = args.to_vec();
@@ -280,6 +375,14 @@ fn tolerance_table_distinguishes_unbounded_from_unavailable() {
         !table.contains("no measurable effect on the impact"),
         "wind-speed does move the impact within this domain, it just never leaves this huge \
          target: {table}"
+    );
+    // Review I1's positive counterpart: wind-speed IS a genuine "unbounded but has effect" axis
+    // (unlike target-distance in the sibling test above), so it must still get the summary
+    // line -- the fix must not over-suppress this, only the both-no-effect case.
+    assert!(
+        table.contains("unbounded in domain:"),
+        "wind-speed has a real effect in both directions and never leaves this huge target, so \
+         it must still get the summary line: {table}"
     );
     assert!(table.contains("unavailable axes"), "{table}");
     assert!(table.contains("could not be searched at all"), "{table}");

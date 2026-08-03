@@ -23435,8 +23435,13 @@ fn describe_solve_error(e: &SolveErrorEnvelopeV1) -> String {
 fn load_resolved_request(path: &Path) -> Result<ResolvedSolveRequestV1, Box<dyn Error>> {
     let text = fs::read_to_string(path)
         .map_err(|e| format!("could not read solve-json request file {}: {e}", path.display()))?;
-    let request = decode_solve_request_v1(&text).map_err(|e| describe_solve_error(&e))?;
-    let success = ballistics_engine::solve_v1(request).map_err(|e| describe_solve_error(&e))?;
+    // Every failure mode below is prefixed with `path` too (review I2): `explain` reads TWO
+    // files, and without this a decode/solve error is indistinguishable between `--a` and
+    // `--b` -- `describe_solve_error` alone has no way to know which file it came from.
+    let request = decode_solve_request_v1(&text)
+        .map_err(|e| format!("{}: {}", path.display(), describe_solve_error(&e)))?;
+    let success = ballistics_engine::solve_v1(request)
+        .map_err(|e| format!("{}: {}", path.display(), describe_solve_error(&e)))?;
     Ok(success.resolved_request)
 }
 
@@ -23594,8 +23599,10 @@ fn handle_explain(
     // Checked before either request is even read: this command runs on the order of 70 solves
     // (see `explain_difference`'s own cost note), so an unsupported output format should fail
     // for free, not after paying for the comparison.
-    if matches!(output, OutputFormat::Csv | OutputFormat::Pdf) {
-        return Err(format!("explain has no {output:?} form; use -o table or -o json").into());
+    match output {
+        OutputFormat::Csv => return Err("explain has no CSV form; use -o table or -o json".into()),
+        OutputFormat::Pdf => return Err("explain has no PDF form; use -o table or -o json".into()),
+        OutputFormat::Table | OutputFormat::Json => {}
     }
 
     let a = load_resolved_request(&a_path)?;
@@ -23678,7 +23685,16 @@ fn render_tolerance_table(report: &ToleranceReportV1) -> String {
                 unit
             )
         );
-        if axis.unbounded_in_domain {
+        // Review I1: `near_has_no_effect`/`far_has_no_effect` can each only be `true` when the
+        // matching bound is `None` (`ToleranceAxisV1`'s own doc), so an axis with NO EFFECT IN
+        // EITHER DIRECTION also reads `unbounded_in_domain == true` -- the exact "no effect" vs.
+        // "unbounded" conflation this pair of fields exists to prevent (module doc,
+        // "`TargetDistance` cannot answer..."). Printing "stays inside" there would read as
+        // reassurance about a change that provably does nothing at all, undoing the very
+        // distinction the two lines above it just made. Only print the summary when at least
+        // one direction genuinely has an effect; the both-no-effect case is already fully
+        // stated by those two per-direction lines and needs no "stays inside" recap.
+        if axis.unbounded_in_domain && !(axis.near_has_no_effect && axis.far_has_no_effect) {
             let _ = writeln!(
                 out,
                 "  unbounded in domain: the impact stays inside the target across the whole \
@@ -23719,8 +23735,10 @@ fn handle_tolerance(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    if matches!(output, OutputFormat::Csv | OutputFormat::Pdf) {
-        return Err(format!("tolerance has no {output:?} form; use -o table or -o json").into());
+    match output {
+        OutputFormat::Csv => return Err("tolerance has no CSV form; use -o table or -o json".into()),
+        OutputFormat::Pdf => return Err("tolerance has no PDF form; use -o table or -o json".into()),
+        OutputFormat::Table | OutputFormat::Json => {}
     }
 
     let axes: Vec<InputAxis> = axes_raw
@@ -23974,6 +23992,18 @@ mod decision_support_render_tests {
             table.matches("could not be searched at all").count(),
             1,
             "exactly one axis (magnus-enabled) is structurally unavailable: {table}"
+        );
+        // Review I1: the "unbounded in domain" summary is a RECAP of a genuine effect, not a
+        // blanket consequence of `unbounded_in_domain` alone -- target-distance is ALSO
+        // `unbounded_in_domain: true` (both bounds `None`), but both directions are
+        // `*_has_no_effect: true`, so it must NOT get the summary line (that would read as
+        // reassurance about a change that provably does nothing). Exactly one summary line is
+        // expected: wind-vertical's.
+        assert_eq!(
+            table.matches("unbounded in domain:").count(),
+            1,
+            "only wind-vertical (unbounded WITH effect) may print the summary line -- \
+             target-distance (unbounded with NO effect) must not: {table}"
         );
 
         // Each marker attaches to the RIGHT axis, not just somewhere in the output.
