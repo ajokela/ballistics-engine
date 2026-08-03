@@ -22,6 +22,9 @@ mod solve_json_command;
 use ballistics_engine::adjustment::{
     adjustment_factor, clicks_for, parse_click_value, ClickBase, ClickValue, Quantized,
 };
+// MBA-1348: the saved-profile turret/reticle model (Plan B Task 5) -- ProfileData::optic_profile
+// assembles one of these from the profile's twelve turret/hold fields.
+use ballistics_engine::optic::{HoldBounds, OpticProfile, TravelLimits, TurretState};
 use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
 use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
@@ -3833,6 +3836,67 @@ enum ProfileAction {
         /// `--clear-dsf` counterpart for the reticle field.
         #[arg(long)]
         clear_reticle: bool,
+
+        /// Elevation turret's click detents per full revolution (MBA-1348), e.g. 12 on a
+        /// turret whose cap marks whole revolutions. Omit when the turret has no
+        /// revolution markings, or the count isn't known.
+        #[arg(long)]
+        clicks_per_rev: Option<u32>,
+
+        /// Whether the elevation turret hard-stops at its lowest travel so it cannot be
+        /// dialed below zero (MBA-1348): `true` or `false`. Purely descriptive.
+        #[arg(long)]
+        zero_stop: Option<bool>,
+
+        /// Elevation travel remaining UP from the current zero, e.g. 28mil or 96moa
+        /// (MBA-1348); stored in mil. Required together with --travel-down.
+        #[arg(long, value_parser = parse_angular_mil)]
+        travel_up: Option<f64>,
+
+        /// Elevation travel remaining DOWN from the current zero (MBA-1348); stored in
+        /// mil. Required together with --travel-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        travel_down: Option<f64>,
+
+        /// Windage travel remaining LEFT from the current zero (MBA-1348); stored in mil.
+        /// Required together with --windage-travel-right.
+        #[arg(long, value_parser = parse_angular_mil)]
+        windage_travel_left: Option<f64>,
+
+        /// Windage travel remaining RIGHT from the current zero (MBA-1348); stored in
+        /// mil. Required together with --windage-travel-left.
+        #[arg(long, value_parser = parse_angular_mil)]
+        windage_travel_right: Option<f64>,
+
+        /// The reticle's usable hold extent ABOVE center (MBA-1348); stored in mil.
+        /// Required together with --hold-down/--hold-left/--hold-right.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_up: Option<f64>,
+
+        /// The reticle's usable hold extent BELOW center (MBA-1348); stored in mil. See
+        /// --hold-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_down: Option<f64>,
+
+        /// The reticle's usable hold extent LEFT of center (MBA-1348); stored in mil.
+        /// See --hold-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_left: Option<f64>,
+
+        /// The reticle's usable hold extent RIGHT of center (MBA-1348); stored in mil.
+        /// See --hold-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_right: Option<f64>,
+
+        /// The elevation turret's current dialed offset from zero, signed: positive is
+        /// dialed UP (MBA-1348); stored in mil. Required together with --turret-wind.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
+        turret_elev: Option<f64>,
+
+        /// The windage turret's current dialed offset from zero, signed: positive is
+        /// dialed RIGHT (MBA-1348); stored in mil. Required together with --turret-elev.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
+        turret_wind: Option<f64>,
     },
 
     /// Import a profile from a third-party file (.a7p — ArcherBC2 format)
@@ -4326,6 +4390,92 @@ struct ProfileData {
     /// documented for `bc_segments` and `zero_sets`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reticle: Option<ReticleDescription>,
+    /// Turret mechanics and reticle hold bounds (MBA-1348): twelve fields (this one
+    /// through `hold_bound_right_mil` below) assembled by `ProfileData::optic_profile`
+    /// into a `ballistics_engine::optic::OpticProfile` for the dial/hold/hybrid
+    /// correction planner. Every one is independently `Option` and, like
+    /// `elevation_click`/`windage_click` above, ALWAYS stored in mil (or its own natural
+    /// type for `clicks_per_revolution`/`zero_stop`) regardless of this profile's `units`
+    /// field — angular turret/reticle geometry, not a linear measurement — so
+    /// `converted_to` leaves all twelve untouched. Set with `profile save
+    /// --clicks-per-rev/--zero-stop/--travel-up/--travel-down/--windage-travel-left/
+    /// --windage-travel-right/--turret-elev/--turret-wind/--hold-up/--hold-down/
+    /// --hold-left/--hold-right`; validated at save time via `optic_profile()` +
+    /// `OpticProfile::validate()` (a profile can never be saved with, say, a dialed
+    /// turret state outside its own declared travel, or a non-positive click size).
+    ///
+    /// FORWARD-COMPAT (the `bc_segments` pattern, deliberately): `#[serde(default)]`
+    /// means a reader that predates these fields loads the profile cleanly with every one
+    /// of them absent — identical to what a CURRENT reader does for a profile that never
+    /// set them, so an old reader can never silently produce a different ballistic
+    /// answer because of them (nothing about a trajectory solve reads them; only a later
+    /// dial/hold planner does). The one-way skew is re-SAVING on an old binary, which
+    /// silently drops all twelve keys, exactly as documented for `bc_segments`/
+    /// `zero_sets`/`reticle` above.
+    ///
+    /// This field specifically: click detents per full turret revolution, for turrets
+    /// whose cap marks revolutions at all (many hunting turrets do not). `None` means
+    /// unknown/not applicable, never a specific count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clicks_per_revolution: Option<u32>,
+    /// Whether the elevation turret hard-stops at its lowest travel so it cannot be
+    /// dialed below zero (MBA-1348) — purely descriptive metadata, never read by
+    /// `plan_corrections` (see `OpticProfile::zero_stop`'s own doc comment for why).
+    /// `None` (the omitted-field default) means not recorded; `optic_profile()` treats
+    /// that the same as `Some(false)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zero_stop: Option<bool>,
+    /// Elevation travel remaining UP from the current zero (not the turret's mechanical
+    /// bottom), DIAL-space mil (MBA-1348). Required together with
+    /// `elevation_travel_down_mil` — `optic_profile()` returns a named-field `Err` if
+    /// only one of the pair is set, rather than silently treating the unset half as zero
+    /// travel (a specific, likely-false physical claim, not an honest "unknown").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    elevation_travel_up_mil: Option<f64>,
+    /// Elevation travel remaining DOWN from the current zero, DIAL-space mil (MBA-1348).
+    /// See `elevation_travel_up_mil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    elevation_travel_down_mil: Option<f64>,
+    /// Windage travel remaining LEFT from the current zero, DIAL-space mil (MBA-1348) —
+    /// `TravelLimits::down_mil` on the windage axis (see that type's doc comment for the
+    /// left/down convention). Required together with `windage_travel_right_mil`, like
+    /// `elevation_travel_up_mil`/`_down_mil` above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windage_travel_left_mil: Option<f64>,
+    /// Windage travel remaining RIGHT from the current zero, DIAL-space mil (MBA-1348) —
+    /// `TravelLimits::up_mil` on the windage axis. See `windage_travel_left_mil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windage_travel_right_mil: Option<f64>,
+    /// The elevation turret's current dialed offset from zero, DIAL-space mil, signed:
+    /// positive is dialed UP (MBA-1348). Required together with
+    /// `turret_windage_dialed_mil` — `optic_profile()` returns a named-field `Err` if
+    /// only one axis of the pair is set, rather than silently assuming the other reads
+    /// zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turret_elevation_dialed_mil: Option<f64>,
+    /// The windage turret's current dialed offset from zero, DIAL-space mil, signed:
+    /// positive is dialed RIGHT (MBA-1348). See `turret_elevation_dialed_mil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turret_windage_dialed_mil: Option<f64>,
+    /// The reticle's usable hold extent ABOVE center, TRUE angular mil (MBA-1348) — see
+    /// `HoldBounds`, an explicit spec input (manufacturer spec sheet or bench
+    /// measurement), never derived from this profile's own `reticle` field. Required
+    /// together with `hold_bound_down_mil`/`hold_bound_left_mil`/`hold_bound_right_mil`
+    /// — all four or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold_bound_up_mil: Option<f64>,
+    /// The reticle's usable hold extent BELOW center, TRUE angular mil (MBA-1348). See
+    /// `hold_bound_up_mil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold_bound_down_mil: Option<f64>,
+    /// The reticle's usable hold extent LEFT of center, TRUE angular mil (MBA-1348). See
+    /// `hold_bound_up_mil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold_bound_left_mil: Option<f64>,
+    /// The reticle's usable hold extent RIGHT of center, TRUE angular mil (MBA-1348). See
+    /// `hold_bound_up_mil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold_bound_right_mil: Option<f64>,
 }
 
 /// One named zero condition / per-load dial correction (MBA-1360).
@@ -4925,6 +5075,107 @@ impl UnitConverter {
     }
 }
 
+/// Parses a suffixed angular value into milliradians (MBA-1348): `28mil`, `96moa`,
+/// `3.5smoa`, `0.5iphy`. The unit suffix is mandatory, mirroring `parse_click_value`'s
+/// accepted suffix set (`iphy` aliases `smoa`, the identical unit) — a bare number is
+/// rejected naming the accepted suffixes rather than silently guessing a unit. Converts
+/// via the same LOCKED factor-ratio table `click_size_mil` uses
+/// (`ballistics_engine::adjustment::adjustment_factor`): `value * adjustment_factor(Mil)
+/// / adjustment_factor(base)`.
+///
+/// Unlike `parse_click_value` — which parses a click GRADUATION and must be positive —
+/// an angular value here may be zero or negative: turret dialed state
+/// (`--turret-elev`/`--turret-wind`) is signed, so this function does not reject sign or
+/// magnitude, only shape (a valid finite number with a recognized suffix).
+fn parse_angular_mil(s: &str) -> Result<f64, String> {
+    let t = s.trim().to_ascii_lowercase();
+    let (num, base) = if let Some(n) = t.strip_suffix("smoa") {
+        (n, ClickBase::Smoa)
+    } else if let Some(n) = t.strip_suffix("iphy") {
+        (n, ClickBase::Smoa)
+    } else if let Some(n) = t.strip_suffix("moa") {
+        (n, ClickBase::Moa)
+    } else if let Some(n) = t.strip_suffix("mil") {
+        (n, ClickBase::Mil)
+    } else {
+        return Err(format!(
+            "angular value '{s}' needs a unit suffix: mil, moa, smoa, or iphy (e.g. 28mil, 96moa)"
+        ));
+    };
+    let value: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("angular value '{s}' has an invalid number '{num}'"))?;
+    if !value.is_finite() {
+        return Err(format!("angular value '{s}' must be finite"));
+    }
+    Ok(value * adjustment_factor(ClickBase::Mil) / adjustment_factor(base))
+}
+
+/// Assembles an all-or-nothing pair of angular profile fields — `OpticProfile`'s
+/// `TravelLimits`/`TurretState` axes — from two independently-`Option` values (MBA-1348).
+/// `None` only when NEITHER is set; `Some` only when BOTH are; a named-field `Err` when
+/// exactly one is. A silently-defaulted `0.0` for the missing half would assert a
+/// specific, likely-false physical fact (e.g. "zero down travel from zero") rather than
+/// "not recorded" — exactly the silent fabrication `OpticProfile`'s own doc comments
+/// warn against — so an incomplete pair is rejected by name instead of guessed at.
+fn require_angular_pair(
+    a_field: &'static str,
+    a: Option<f64>,
+    b_field: &'static str,
+    b: Option<f64>,
+) -> Result<Option<(f64, f64)>, String> {
+    match (a, b) {
+        (None, None) => Ok(None),
+        (Some(a), Some(b)) => Ok(Some((a, b))),
+        (Some(_), None) => Err(format!(
+            "{a_field} is set but {b_field} is not — both are required together (or neither)"
+        )),
+        (None, Some(_)) => Err(format!(
+            "{b_field} is set but {a_field} is not — both are required together (or neither)"
+        )),
+    }
+}
+
+/// The `require_angular_pair` all-or-nothing rule extended to `HoldBounds`' four fields
+/// (MBA-1348): all four or none, any other combination is a named-field `Err` (same
+/// no-silent-fabrication rationale — see `require_angular_pair`).
+fn require_hold_bounds(
+    up: Option<f64>,
+    down: Option<f64>,
+    left: Option<f64>,
+    right: Option<f64>,
+) -> Result<Option<HoldBounds>, String> {
+    let fields = [
+        ("hold_bound_up_mil", up),
+        ("hold_bound_down_mil", down),
+        ("hold_bound_left_mil", left),
+        ("hold_bound_right_mil", right),
+    ];
+    let set_count = fields.iter().filter(|(_, v)| v.is_some()).count();
+    if set_count == 0 {
+        return Ok(None);
+    }
+    if set_count < 4 {
+        let missing: Vec<&str> = fields
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(name, _)| *name)
+            .collect();
+        return Err(format!(
+            "reticle hold bounds are incomplete — missing {} (all four hold_bound_*_mil \
+             fields are required together, or none)",
+            missing.join(", ")
+        ));
+    }
+    Ok(Some(HoldBounds {
+        up_mil: up.unwrap(),
+        down_mil: down.unwrap(),
+        left_mil: left.unwrap(),
+        right_mil: right.unwrap(),
+    }))
+}
+
 impl ProfileData {
     /// Convert a loaded profile's display-unit values into the active CLI unit system before
     /// merging them with explicit arguments. The persisted profile remains unchanged.
@@ -5048,6 +5299,102 @@ impl ProfileData {
         .to_string();
 
         Ok(self)
+    }
+
+    /// Assembles this profile's `OpticProfile` (MBA-1348) from `elevation_click`/
+    /// `windage_click` (parsed via `parse_click_value`, windage falling back to the
+    /// resolved elevation graduation — the same precedence `resolve_click_values` uses)
+    /// plus the twelve turret/hold fields declared alongside `reticle` above.
+    ///
+    /// Returns `Ok(None)` only when NONE of the twelve fields are set: the profile has
+    /// never been given any turret model at all. Every other combination either succeeds
+    /// (`Ok(Some(..))`) or is a named-field `Err` — including `elevation_click` itself
+    /// being unset while ANY of the other eleven fields IS set, since those eleven are
+    /// meaningless without a click graduation (`OpticProfile` cannot be constructed
+    /// without one, structurally) and silently ignoring them would let a save persist
+    /// turret/hold data no downstream code could ever use.
+    ///
+    /// Does NOT call `OpticProfile::validate()` itself — callers that need a
+    /// pre-validated profile (`profile save`) call it explicitly, so a validation
+    /// failure is attributed to the operation asking for it rather than to assembly.
+    fn optic_profile(&self) -> Result<Option<OpticProfile>, String> {
+        // Shape/pairing checks run FIRST and UNCONDITIONALLY -- before the elevation_click
+        // gate below -- so an incomplete travel/turret-state/hold-bound pair is rejected by
+        // name even on a profile that never set elevation_click at all (MBA-1348 review
+        // fix: a save with, e.g., only --travel-up and no --elevation-click previously
+        // skipped every one of these checks via the early `Ok(None)` return, silently
+        // persisting an incomplete pair no downstream code could ever have used anyway).
+        let elevation_travel = require_angular_pair(
+            "elevation_travel_up_mil",
+            self.elevation_travel_up_mil,
+            "elevation_travel_down_mil",
+            self.elevation_travel_down_mil,
+        )?
+        .map(|(up, down)| TravelLimits { up_mil: up, down_mil: down });
+
+        let windage_travel = require_angular_pair(
+            "windage_travel_left_mil",
+            self.windage_travel_left_mil,
+            "windage_travel_right_mil",
+            self.windage_travel_right_mil,
+        )?
+        .map(|(left, right)| TravelLimits { down_mil: left, up_mil: right });
+
+        let turret_state = require_angular_pair(
+            "turret_elevation_dialed_mil",
+            self.turret_elevation_dialed_mil,
+            "turret_windage_dialed_mil",
+            self.turret_windage_dialed_mil,
+        )?
+        .map(|(elevation_mil, windage_mil)| TurretState { elevation_mil, windage_mil });
+
+        let reticle_hold_bounds = require_hold_bounds(
+            self.hold_bound_up_mil,
+            self.hold_bound_down_mil,
+            self.hold_bound_left_mil,
+            self.hold_bound_right_mil,
+        )?;
+
+        let Some(elev_str) = &self.elevation_click else {
+            // MBA-1348 review fix: every one of the other eleven fields is meaningless
+            // without a click graduation -- `OpticProfile` cannot even be constructed
+            // without one, structurally -- so silently accepting them here (the way a
+            // bare `Ok(None)` would) lets a save persist turret/hold data that no
+            // downstream code, including this profile's own future re-saves, could ever
+            // use. A profile that has genuinely never touched any of the twelve fields
+            // still returns Ok(None), unchanged.
+            if self.clicks_per_revolution.is_some()
+                || self.zero_stop.is_some()
+                || elevation_travel.is_some()
+                || windage_travel.is_some()
+                || turret_state.is_some()
+                || reticle_hold_bounds.is_some()
+            {
+                return Err(
+                    "turret/hold fields are set but elevation_click is not -- a turret \
+                     model needs a click graduation to be usable at all; set \
+                     --elevation-click (or clear the other fields)"
+                        .to_string(),
+                );
+            }
+            return Ok(None);
+        };
+        let elevation_click = parse_click_value(elev_str)?;
+        let windage_click = match &self.windage_click {
+            Some(s) => parse_click_value(s)?,
+            None => elevation_click,
+        };
+
+        Ok(Some(OpticProfile {
+            elevation_click,
+            windage_click,
+            clicks_per_revolution: self.clicks_per_revolution,
+            zero_stop: self.zero_stop.unwrap_or(false),
+            elevation_travel,
+            windage_travel,
+            turret_state,
+            reticle_hold_bounds,
+        }))
     }
 }
 
@@ -5528,6 +5875,18 @@ fn sanitize_profile_name(raw: &str) -> String {
     }
 }
 
+/// `ClickValue`'s canonical suffixed profile-field string (MBA-1348), e.g. `"0.1mil"` —
+/// exactly what `parse_click_value` parses back, produced via the type's own
+/// `Serialize` impl rather than a second, hand-rolled suffix match that could drift
+/// from it.
+#[cfg(feature = "profile-import")]
+fn click_value_to_profile_string(click: ClickValue) -> String {
+    serde_json::to_string(&click)
+        .expect("ClickValue serialization is infallible")
+        .trim_matches('"')
+        .to_string()
+}
+
 #[cfg(feature = "profile-import")]
 fn map_a7p_to_profile(
     doc: &ballistics_engine::profile_import::A7pDocument,
@@ -5771,7 +6130,9 @@ fn map_a7p_to_profile(
         report.unmapped.push((
             "c_zero_w_pitch".to_string(),
             format!(
-                "zeroing pitch value ({}) — sight-pitch state is not modeled",
+                "zeroing pitch value ({}) — base pitch is rifle-mount geometry outside \
+                 the turret model (OpticProfile has no base-pitch concept); its effect \
+                 is already absorbed by zeroing, not a turret setting left to store",
                 src.w_pitch_raw
             ),
         ));
@@ -5784,6 +6145,23 @@ fn map_a7p_to_profile(
     // `zero_y += round(y_offset * 1000)`): user-facing right-offset clicks = -zero_x/1000,
     // up-offset clicks = zero_y/1000. Linear offset at the zero range =
     // clicks x (click size / adjustment_factor(base)) [radians] x zero distance [m].
+    // MBA-1348: whenever the caller supplies the device's click graduation
+    // (--zero-click), that is itself a modeled fact regardless of whether the file's
+    // zero_x/zero_y counts can ALSO be converted to a POI offset below (which
+    // additionally needs a zero distance) -- so it is recorded as the profile's turret
+    // click graduation independently of that offset conversion. "only when not already
+    // set" is always satisfied here since map_a7p_to_profile always builds a fresh
+    // ProfileData (elevation_click starts unset), stated for the same defensive reason
+    // resolve_click_values documents its own precedence.
+    let click_from_zero_click: Option<String> = zero_click.map(click_value_to_profile_string);
+    if let Some(click_str) = &click_from_zero_click {
+        push(
+            "--zero-click",
+            format!("{click_str} (device click size, supplied on the command line)"),
+            click_str.clone(),
+            "elevation_click + windage_click",
+        );
+    }
     let mut zero_poi_up_m: Option<f64> = None;
     let mut zero_poi_right_m: Option<f64> = None;
     let mut zero_sets: Option<Vec<ProfileZeroSet>> = None;
@@ -5848,7 +6226,9 @@ fn map_a7p_to_profile(
                 report.unmapped.push((
                     "zero_x / zero_y".to_string(),
                     format!(
-                        "scope zeroing click offsets ({}, {}) — click state is not modeled",
+                        "scope zeroing click offsets ({}, {}) — device click size not \
+                         supplied; pass --zero-click to record the profile's turret \
+                         graduation and convert this offset",
                         src.zero_x_raw, src.zero_y_raw
                     ),
                 ));
@@ -5925,10 +6305,11 @@ fn map_a7p_to_profile(
         // overloaded by import.
         use_bc_segments: None,
         bullet_length: Some(src.bullet_length_in * IN_TO_MM),
-        // .a7p has no click-graduation concept; the profile leaves these for
-        // `profile save --elevation-click/--windage-click` (or a later edit) to fill in.
-        elevation_click: None,
-        windage_click: None,
+        // MBA-1348: populated only when --zero-click supplied a device click size (see
+        // the mapping above); otherwise left for `profile save
+        // --elevation-click/--windage-click` (or a later edit) to fill in.
+        elevation_click: click_from_zero_click.clone(),
+        windage_click: click_from_zero_click,
         bc_segments,
         drag_curve,
         // .a7p carries no DSF concept; that's the `dsf` verb's job post-import.
@@ -5959,6 +6340,21 @@ fn map_a7p_to_profile(
         // MBA-1361: .a7p carries no reticle description; attach one after import with
         // `profile save --reticle-json`.
         reticle: None,
+        // MBA-1348: .a7p carries no turret-mechanics or reticle-hold-bounds concept
+        // beyond the click graduation above; these are for `profile save` (or a hand
+        // edit) to fill in after import.
+        clicks_per_revolution: None,
+        zero_stop: None,
+        elevation_travel_up_mil: None,
+        elevation_travel_down_mil: None,
+        windage_travel_left_mil: None,
+        windage_travel_right_mil: None,
+        turret_elevation_dialed_mil: None,
+        turret_windage_dialed_mil: None,
+        hold_bound_up_mil: None,
+        hold_bound_down_mil: None,
+        hold_bound_left_mil: None,
+        hold_bound_right_mil: None,
     };
 
     Ok(A7pImportOutcome { profile, report })
@@ -11949,6 +12345,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     clear_dsf,
                     reticle_json,
                     clear_reticle,
+                    clicks_per_rev,
+                    zero_stop,
+                    travel_up,
+                    travel_down,
+                    windage_travel_left,
+                    windage_travel_right,
+                    hold_up,
+                    hold_down,
+                    hold_left,
+                    hold_right,
+                    turret_elev,
+                    turret_wind,
                 } => {
                     let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
                     let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
@@ -12057,7 +12465,39 @@ fn main() -> Result<(), Box<dyn Error>> {
                         windage_cf: carried_windage_cf,
                         zero_sets: carried_zero_sets,
                         reticle: carried_reticle,
+                        // MBA-1348: like elevation_click/windage_click above, these twelve
+                        // fields are a direct overwrite from this invocation's flags, not
+                        // carried forward from an existing profile -- omitting one of a
+                        // required pair on a later re-save resets it to None (validated
+                        // below), the same contract elevation_click/windage_click already
+                        // have.
+                        clicks_per_revolution: clicks_per_rev,
+                        zero_stop,
+                        elevation_travel_up_mil: travel_up,
+                        elevation_travel_down_mil: travel_down,
+                        windage_travel_left_mil: windage_travel_left,
+                        windage_travel_right_mil: windage_travel_right,
+                        turret_elevation_dialed_mil: turret_elev,
+                        turret_windage_dialed_mil: turret_wind,
+                        hold_bound_up_mil: hold_up,
+                        hold_bound_down_mil: hold_down,
+                        hold_bound_left_mil: hold_left,
+                        hold_bound_right_mil: hold_right,
                     };
+
+                    // MBA-1348: assemble + validate the optic profile (turret mechanics +
+                    // reticle hold bounds) at save time too -- the same save-time guarantee
+                    // as the elevation/windage click checks above -- so a profile can never
+                    // be saved with, e.g., a dialed turret state outside its own declared
+                    // travel, a non-positive click size, or an incomplete travel/hold pair.
+                    if let Some(optic) = profile
+                        .optic_profile()
+                        .map_err(|e| format!("optic profile: {e}"))?
+                    {
+                        optic
+                            .validate()
+                            .map_err(|e| format!("optic profile: {e}"))?;
+                    }
 
                     let path = save_profile(&profile)?;
                     eprintln!("Profile '{}' saved to {:?}", name, path);
@@ -20417,6 +20857,18 @@ mod profile_unit_tests {
             windage_cf: None,
             zero_sets: None,
             reticle: None,
+            clicks_per_revolution: None,
+            zero_stop: None,
+            elevation_travel_up_mil: None,
+            elevation_travel_down_mil: None,
+            windage_travel_left_mil: None,
+            windage_travel_right_mil: None,
+            turret_elevation_dialed_mil: None,
+            turret_windage_dialed_mil: None,
+            hold_bound_up_mil: None,
+            hold_bound_down_mil: None,
+            hold_bound_left_mil: None,
+            hold_bound_right_mil: None,
         }
     }
 
@@ -20812,6 +21264,230 @@ mod profile_unit_tests {
         assert_eq!(imperial.windage_click, profile.windage_click);
     }
 
+    #[test]
+    fn parse_angular_mil_converts_suffixed_values_exactly() {
+        assert_eq!(parse_angular_mil("28mil").unwrap(), 28.0);
+        // Same expression order as the implementation (adjustment_factor(Mil) /
+        // adjustment_factor(base)), so this is a bit-exact pin, not just "close enough".
+        assert_eq!(parse_angular_mil("34.38moa").unwrap(), 34.38 * 1000.0 / 3438.0);
+        assert_eq!(parse_angular_mil("3.5smoa").unwrap(), 3.5 * 1000.0 / 3600.0);
+        // iphy aliases smoa exactly, like parse_click_value's suffix set.
+        assert_eq!(
+            parse_angular_mil("3.5iphy").unwrap(),
+            parse_angular_mil("3.5smoa").unwrap()
+        );
+        // Signed and zero values are accepted -- unlike parse_click_value's click
+        // GRADUATION rule, an angular value here is not a magnitude (turret dialed
+        // state is signed).
+        assert_eq!(parse_angular_mil("-5.2mil").unwrap(), -5.2);
+        assert_eq!(parse_angular_mil("0mil").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn parse_angular_mil_requires_a_suffix() {
+        let e = parse_angular_mil("5").unwrap_err();
+        assert!(e.contains("mil") && e.contains("moa") && e.contains("smoa"), "{e}");
+        assert!(parse_angular_mil("").is_err());
+        assert!(parse_angular_mil("mil").is_err()); // no numeric part
+        assert!(parse_angular_mil("nanmil").is_err()); // must be finite
+        assert!(parse_angular_mil("infmil").is_err()); // must be finite
+    }
+
+    /// MBA-1348: all twelve turret/hold fields round-trip through save/load (serde), and
+    /// `optic_profile()` assembles + validates a well-formed `OpticProfile` from them —
+    /// windage-falls-back-to-elevation is exercised separately below, so here both click
+    /// fields are set explicitly.
+    #[test]
+    fn optic_fields_round_trip_and_assemble_into_a_valid_optic_profile() {
+        let profile = ProfileData {
+            elevation_click: Some("0.1mil".to_string()),
+            windage_click: Some("0.2mil".to_string()),
+            clicks_per_revolution: Some(12),
+            zero_stop: Some(true),
+            elevation_travel_up_mil: Some(28.0),
+            elevation_travel_down_mil: Some(5.0),
+            windage_travel_left_mil: Some(10.0),
+            windage_travel_right_mil: Some(11.0),
+            turret_elevation_dialed_mil: Some(3.5),
+            turret_windage_dialed_mil: Some(-1.2),
+            hold_bound_up_mil: Some(4.0),
+            hold_bound_down_mil: Some(12.0),
+            hold_bound_left_mil: Some(6.0),
+            hold_bound_right_mil: Some(6.5),
+            ..metric_profile()
+        };
+
+        let json = serde_json::to_string_pretty(&profile).unwrap();
+        let reloaded: ProfileData = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.clicks_per_revolution, Some(12));
+        assert_eq!(reloaded.zero_stop, Some(true));
+        assert_eq!(reloaded.elevation_travel_up_mil, Some(28.0));
+        assert_eq!(reloaded.elevation_travel_down_mil, Some(5.0));
+        assert_eq!(reloaded.windage_travel_left_mil, Some(10.0));
+        assert_eq!(reloaded.windage_travel_right_mil, Some(11.0));
+        assert_eq!(reloaded.turret_elevation_dialed_mil, Some(3.5));
+        assert_eq!(reloaded.turret_windage_dialed_mil, Some(-1.2));
+        assert_eq!(reloaded.hold_bound_up_mil, Some(4.0));
+        assert_eq!(reloaded.hold_bound_down_mil, Some(12.0));
+        assert_eq!(reloaded.hold_bound_left_mil, Some(6.0));
+        assert_eq!(reloaded.hold_bound_right_mil, Some(6.5));
+
+        let optic = reloaded.optic_profile().unwrap().expect("elevation_click set");
+        optic.validate().expect("well-formed optic profile");
+        assert_eq!(optic.elevation_click, parse_click_value("0.1mil").unwrap());
+        assert_eq!(optic.windage_click, parse_click_value("0.2mil").unwrap());
+        assert_eq!(optic.clicks_per_revolution, Some(12));
+        assert!(optic.zero_stop);
+        assert_eq!(optic.elevation_travel, Some(TravelLimits { up_mil: 28.0, down_mil: 5.0 }));
+        assert_eq!(optic.windage_travel, Some(TravelLimits { up_mil: 11.0, down_mil: 10.0 }));
+        assert_eq!(
+            optic.turret_state,
+            Some(TurretState { elevation_mil: 3.5, windage_mil: -1.2 })
+        );
+        assert_eq!(
+            optic.reticle_hold_bounds,
+            Some(HoldBounds { up_mil: 4.0, down_mil: 12.0, left_mil: 6.0, right_mil: 6.5 })
+        );
+
+        // Unit-invariant (angular turret/reticle geometry, not linear) -- converted_to
+        // must leave all twelve untouched, like elevation_click/windage_click.
+        let imperial = reloaded.clone().converted_to(UnitSystem::Imperial).unwrap();
+        assert_eq!(imperial.elevation_travel_up_mil, reloaded.elevation_travel_up_mil);
+        assert_eq!(imperial.hold_bound_right_mil, reloaded.hold_bound_right_mil);
+        assert_eq!(
+            imperial.turret_windage_dialed_mil,
+            reloaded.turret_windage_dialed_mil
+        );
+    }
+
+    /// Absent fields: `optic_profile()` still assembles (elevation_click alone is
+    /// enough), with `None` for everything else and `zero_stop` defaulting to `false`.
+    #[test]
+    fn optic_profile_with_only_elevation_click_set_has_none_for_the_rest() {
+        let profile = ProfileData {
+            elevation_click: Some("0.25moa".to_string()),
+            ..metric_profile()
+        };
+        let optic = profile.optic_profile().unwrap().expect("elevation_click set");
+        assert_eq!(optic.windage_click, optic.elevation_click); // windage falls back
+        assert_eq!(optic.clicks_per_revolution, None);
+        assert!(!optic.zero_stop); // absent -> false default
+        assert_eq!(optic.elevation_travel, None);
+        assert_eq!(optic.windage_travel, None);
+        assert_eq!(optic.turret_state, None);
+        assert_eq!(optic.reticle_hold_bounds, None);
+        optic.validate().expect("a minimal optic profile is still valid");
+    }
+
+    /// `optic_profile()` returns `Ok(None)` only when NONE of the twelve fields are set
+    /// -- a completely untouched profile has never been given a turret model, which is a
+    /// harmless, common (every pre-MBA-1348 profile) case, not an error.
+    #[test]
+    fn optic_profile_is_none_for_a_completely_untouched_profile() {
+        assert_eq!(metric_profile().optic_profile().unwrap(), None);
+    }
+
+    /// `OpticProfile::elevation_click` is mandatory, not `Option` -- so the other eleven
+    /// fields are meaningless without it (MBA-1348 review fix): setting any of them
+    /// without also setting `elevation_click` is a save-time `Err`, not a silent `Ok(None)`
+    /// that would otherwise let turret/hold data no downstream code can use slip through
+    /// unvalidated (this was caught by a manual CLI smoke test of `profile save
+    /// --travel-up ... --turret-elev ...` with no `--elevation-click`, which saved
+    /// successfully despite the dialed state exceeding the declared travel -- the
+    /// cross-field check in `OpticProfile::validate()` never ran because assembly bailed
+    /// out to `Ok(None)` before reaching it).
+    #[test]
+    fn optic_profile_errors_when_other_fields_are_set_without_an_elevation_click() {
+        let profile = ProfileData {
+            elevation_travel_up_mil: Some(10.0),
+            elevation_travel_down_mil: Some(10.0),
+            ..metric_profile()
+        };
+        let err = profile.optic_profile().unwrap_err();
+        assert!(err.contains("elevation_click"), "{err}");
+    }
+
+    /// The specific scenario the smoke test caught: a complete travel pair AND a
+    /// complete (but out-of-range) turret-state pair, with no `elevation_click` at all,
+    /// must still be rejected at `optic_profile()` -- not silently accepted because the
+    /// state-vs-travel cross-check in `validate()` never got a chance to run.
+    #[test]
+    fn optic_profile_errors_on_out_of_range_state_even_without_an_elevation_click() {
+        let profile = ProfileData {
+            elevation_travel_up_mil: Some(10.0),
+            elevation_travel_down_mil: Some(10.0),
+            turret_elevation_dialed_mil: Some(15.0), // outside +-10, but never checked
+            turret_windage_dialed_mil: Some(0.0),
+            ..metric_profile()
+        };
+        let err = profile.optic_profile().unwrap_err();
+        assert!(err.contains("elevation_click"), "{err}");
+    }
+
+    /// The save-time guarantee (MBA-1348): a dialed turret state outside its own
+    /// declared travel fails `OpticProfile::validate()`, naming the axis -- exactly the
+    /// check `profile save` runs (via `optic_profile()` + `validate()`) before writing
+    /// anything to disk.
+    #[test]
+    fn optic_profile_validation_fails_naming_the_axis_when_dialed_state_exceeds_travel() {
+        let profile = ProfileData {
+            elevation_click: Some("0.1mil".to_string()),
+            elevation_travel_up_mil: Some(10.0),
+            elevation_travel_down_mil: Some(10.0),
+            turret_elevation_dialed_mil: Some(15.0), // outside +-10
+            turret_windage_dialed_mil: Some(0.0),
+            ..metric_profile()
+        };
+        let optic = profile.optic_profile().unwrap().expect("elevation_click set");
+        let err = optic.validate().unwrap_err().to_string();
+        assert!(err.contains("elevation"), "{err}");
+        assert!(err.contains("outside its travel"), "{err}");
+    }
+
+    /// A travel pair set on only one side is a named-field `Err`, not a silent "0.0 on
+    /// the other side" guess (see `require_angular_pair`'s own doc comment for why).
+    #[test]
+    fn optic_profile_errors_naming_the_field_when_a_travel_pair_is_incomplete() {
+        let profile = ProfileData {
+            elevation_click: Some("0.1mil".to_string()),
+            elevation_travel_up_mil: Some(10.0),
+            ..metric_profile()
+        };
+        let err = profile.optic_profile().unwrap_err();
+        assert!(err.contains("elevation_travel_up_mil"), "{err}");
+        assert!(err.contains("elevation_travel_down_mil"), "{err}");
+    }
+
+    /// Same all-or-nothing rule for `HoldBounds`' four fields, naming every field still
+    /// missing (see `require_hold_bounds`).
+    #[test]
+    fn optic_profile_errors_naming_missing_fields_when_hold_bounds_are_incomplete() {
+        let profile = ProfileData {
+            elevation_click: Some("0.1mil".to_string()),
+            hold_bound_up_mil: Some(4.0),
+            hold_bound_left_mil: Some(6.0),
+            ..metric_profile()
+        };
+        let err = profile.optic_profile().unwrap_err();
+        assert!(err.contains("hold_bound_down_mil"), "{err}");
+        assert!(err.contains("hold_bound_right_mil"), "{err}");
+    }
+
+    /// Another `OpticProfile::validate()` rule reachable through the save-time wiring
+    /// (a manual CLI smoke test of `profile save --clicks-per-rev 0` confirmed this end
+    /// to end): `clicks_per_revolution` must be at least 1 when present.
+    #[test]
+    fn optic_profile_validation_fails_for_zero_clicks_per_revolution() {
+        let profile = ProfileData {
+            elevation_click: Some("0.1mil".to_string()),
+            clicks_per_revolution: Some(0),
+            ..metric_profile()
+        };
+        let optic = profile.optic_profile().unwrap().expect("elevation_click set");
+        let err = optic.validate().unwrap_err().to_string();
+        assert!(err.contains("clicks_per_revolution"), "{err}");
+    }
+
     /// MBA-1360: zero sets round-trip through serde; a profile without the key loads
     /// as `None` (every pre-1360 profile); an untouched profile serializes with no
     /// `zero_sets` key at all.
@@ -21205,14 +21881,20 @@ mod a7p_import_mapping_tests {
         enc_bytes(1, &p, &mut payload);
         let doc = parse_a7p(&wrap_payload(&payload)).unwrap();
 
-        // Without --zero-click: the historical unmapped line, verbatim — and no
-        // zero set either (MBA-1360).
+        // Without --zero-click: the historical unmapped line (reworded by MBA-1348 to
+        // say WHY -- no device click size was supplied -- rather than the old blanket
+        // "click state is not modeled", now that --zero-click CAN model it) — and no
+        // zero set, and no click graduation stored either (MBA-1360/MBA-1348).
         let outcome = map_a7p_to_profile(&doc, None, None).unwrap();
         assert_eq!(outcome.profile.zero_poi_up_m, None);
         assert_eq!(outcome.profile.zero_poi_right_m, None);
         assert_eq!(outcome.profile.zero_sets, None);
+        assert_eq!(outcome.profile.elevation_click, None);
+        assert_eq!(outcome.profile.windage_click, None);
         assert!(outcome.report.unmapped.iter().any(|(f, msg)| f == "zero_x / zero_y"
-            && msg == "scope zeroing click offsets (-20000, 10000) — click state is not modeled"));
+            && msg == "scope zeroing click offsets (-20000, 10000) — device click size not \
+                        supplied; pass --zero-click to record the profile's turret \
+                        graduation and convert this offset"));
 
         // With --zero-click 0.1mil at a 100 m zero:
         //   up:    10 clicks * 0.1/1000 rad * 100 m = 0.1  m high
@@ -21235,6 +21917,20 @@ mod a7p_import_mapping_tests {
             .any(|row| row[0] == "zero_x / zero_y"
                 && row[3] == "zero_poi_up_m + zero_poi_right_m + zero_sets[a7p-zero]"));
 
+        // MBA-1348: --zero-click is ALSO recorded as the profile's own turret click
+        // graduation. Both elevation_click and windage_click are set directly to the
+        // identical supplied click (not via optic_profile()'s windage-falls-back-to-
+        // elevation precedent, which only applies when windage_click is left unset) --
+        // .a7p exposes only one device click size, for one physical turret.
+        assert_eq!(outcome.profile.elevation_click, outcome.profile.windage_click);
+        assert_eq!(outcome.profile.elevation_click.as_deref(), Some("0.1mil"));
+        assert_eq!(outcome.profile.windage_click.as_deref(), Some("0.1mil"));
+        assert!(outcome
+            .report
+            .mapped
+            .iter()
+            .any(|row| row[0] == "--zero-click" && row[3] == "elevation_click + windage_click"));
+
         // MBA-1360: the same click state is ALSO recorded as the "a7p-zero" zero set,
         // in DIAL-CORRECTION convention (negated angular POI offset): zeroed 1.0 mil
         // high / 2.0 mil right => dial corrections -1.0 mil up / -2.0 mil right.
@@ -21246,6 +21942,38 @@ mod a7p_import_mapping_tests {
         let right_mil = sets[0].poi_right_mil.expect("right mil");
         assert!((up_mil - (-1.0)).abs() < 1e-12, "up_mil = {up_mil}");
         assert!((right_mil - (-2.0)).abs() < 1e-12, "right_mil = {right_mil}");
+    }
+
+    /// MBA-1348: `c_zero_w_pitch` (base pitch established at zeroing) stays unmapped --
+    /// `OpticProfile` has no base-pitch concept, it is rifle-mount geometry outside the
+    /// turret model -- but the report must now say WHY, not just assert it isn't modeled.
+    #[test]
+    fn w_pitch_is_reported_unmapped_with_the_reason_it_is_out_of_scope() {
+        // Minimal fixture: a bc_type + one coef row is enough for map_a7p_to_profile to
+        // reach the honest-unmapped-fields section (see custom_bc_type_rejects_a_degenerate_curve
+        // for the same minimal-fixture style), plus field 18 = w_pitch_raw.
+        let mut p = Vec::new();
+        enc_i32(24, 0, &mut p); // G1
+        let mut row = Vec::new();
+        enc_i32(1, 5000, &mut row);
+        enc_i32(2, 5000, &mut row);
+        enc_bytes(27, &row, &mut p);
+        enc_i32(18, 250, &mut p); // w_pitch_raw
+        let mut payload = Vec::new();
+        enc_bytes(1, &p, &mut payload);
+        let doc = parse_a7p(&wrap_payload(&payload)).unwrap();
+
+        let outcome = map_a7p_to_profile(&doc, None, None).unwrap();
+        let (_, msg) = outcome
+            .report
+            .unmapped
+            .iter()
+            .find(|(f, _)| f == "c_zero_w_pitch")
+            .expect("w_pitch reported unmapped");
+        assert!(msg.contains("250"), "{msg}");
+        assert!(msg.contains("rifle-mount geometry"), "{msg}");
+        assert!(msg.contains("outside the turret model"), "{msg}");
+        assert!(msg.contains("absorbed by zeroing"), "{msg}");
     }
 
     #[test]
@@ -21550,6 +22278,18 @@ mod adjustment_unit_tests {
                 windage_cf: None,
                 zero_sets: None,
                 reticle: None,
+                clicks_per_revolution: None,
+                zero_stop: None,
+                elevation_travel_up_mil: None,
+                elevation_travel_down_mil: None,
+                windage_travel_left_mil: None,
+                windage_travel_right_mil: None,
+                turret_elevation_dialed_mil: None,
+                turret_windage_dialed_mil: None,
+                hold_bound_up_mil: None,
+                hold_bound_down_mil: None,
+                hold_bound_left_mil: None,
+                hold_bound_right_mil: None,
             }
         }
 
