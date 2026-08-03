@@ -113,6 +113,33 @@
 //! that shortfall, by construction), so a missing or exceeded TRAVEL limit is recorded on
 //! a `Hybrid` plan purely for disclosure and never by itself makes it infeasible — only
 //! its own hold not fitting does.
+//!
+//! `OpticProfile::zero_stop` is never read by `plan_corrections` at all, at travel-known or
+//! travel-`None` alike: it is descriptive turret metadata (see its own doc comment), and
+//! this module's ONLY source of truth for what the turret can physically reach is
+//! `elevation_travel`/`windage_travel` being `Some` or `None` — a zero-stopped turret with
+//! no declared `elevation_travel` is treated exactly like a non-zero-stopped one with no
+//! declared travel: unverifiable, not "safely bounded at zero because it says zero_stop."
+//!
+//! # Correction-space is not reticle-space (the hold-bound mapping)
+//!
+//! `hold_mil` above is this module's own correction-space: `+` means "the point of impact
+//! needs to move up/right," matching `AngularCorrection` and a dial's own convention (a
+//! positive dial adjustment moves point of impact up/right). `HoldBounds`
+//! (`up_mil`/`down_mil`/`left_mil`/`right_mil`) is `crate::reticle`'s RETICLE-space
+//! instead, pinned at `src/reticle.rs:30-42`: `down_mil` is positive BELOW the optical
+//! center, `right_mil` is positive to the shooter's RIGHT of it, and a holdover mark
+//! (compensating a bullet that falls) sits at POSITIVE `down_mil` — below center. These
+//! two spaces are OPPOSITELY signed on BOTH axes, not just one: a positive (UP)
+//! correction's hold mark sits BELOW center (consumes `down_mil`), exactly like every BDC
+//! reticle's long-range holdover marks, which sit below center, never above it; a positive
+//! (RIGHT) correction's hold mark sits to the LEFT of center (consumes `left_mil`) by the
+//! identical argument, mirrored. `AxisComputation` names its two fields
+//! `bound_for_positive_correction` / `bound_for_negative_correction` (rather than e.g.
+//! "`hold_up`") specifically so this mapping is stated at the type level and cannot
+//! silently re-invert; see the
+//! `hold_bound_mapping_matches_reticle_space_not_correction_space` test, which is built to
+//! fail if it does.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -229,6 +256,19 @@ pub enum OpticError {
         down_mil: f64,
         up_mil: f64,
     },
+    /// A tracking correction factor (`elevation_cf`/`windage_cf` in [`plan_corrections`])
+    /// was zero, negative, or non-finite (MBA-1348 review fix). `plan_corrections` divides
+    /// a TRUE angular correction by the CF to get a DIAL target (see the module's "CF
+    /// rule" doc section); a zero or negative CF turns that into infinity, NaN, or a
+    /// direction-inverting garbage value that would silently propagate into a "plan" that
+    /// looks like ordinary output. Rejected outright rather than merely warned about --
+    /// `crate::adjustment::tracking_cf_in_range`'s tighter `(0.5, 1.5)` plausibility band
+    /// is deliberately NOT re-enforced here, matching this crate's existing precedent
+    /// (`crate::truing::scale_report_dial_values` also takes a bare, unchecked `dial_cf`)
+    /// of treating that band as an advisory, caller/CLI-level concern, not a hard
+    /// library-level bound.
+    #[error("{field} must be a positive, finite tracking factor (got {value})")]
+    NonPositiveTrackingFactor { field: &'static str, value: f64 },
 }
 
 impl OpticProfile {
@@ -320,6 +360,19 @@ fn require_positive_click_size(field: &'static str, size: f64) -> Result<(), Opt
         Ok(())
     } else {
         Err(OpticError::NonPositiveClickSize { field, size })
+    }
+}
+
+/// `value` must be a strictly positive, finite tracking correction factor, or `field` is
+/// reported via [`OpticError::NonPositiveTrackingFactor`] (MBA-1348 review fix). A single
+/// check for both finiteness and positivity, since a CF is consumed by DIVISION
+/// (`plan_corrections`' "the CF rule"): zero divides to infinity, negative flips every
+/// direction, and either would otherwise reach `quantize_angle` as silent garbage.
+fn require_positive_tracking_factor(field: &'static str, value: f64) -> Result<(), OpticError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(OpticError::NonPositiveTrackingFactor { field, value })
     }
 }
 
@@ -417,7 +470,12 @@ pub struct AngularCorrection {
 /// Caller preferences steering [`plan_corrections`]'s ranking -- never its underlying
 /// arithmetic, which is identical regardless of these values. See "Ranking is
 /// deterministic" in [`plan_corrections`]'s own doc comment.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// `#[derive(Default)]` (`prefer_hold: false, max_hold_mil: None` -- prefer dial, no extra
+/// hold cap) rather than a hand-written impl: `bool`'s and `Option`'s own defaults already
+/// produce exactly this (MBA-1348 review fix -- confirmed equivalent, not just
+/// clippy-driven).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct Preferences {
     /// When ranking ties on `residual_linear_at_range_m`, prefer holding over dialing.
     /// `false` (the [`Default`] impl's value) prefers dialing.
@@ -426,13 +484,6 @@ pub struct Preferences {
     /// applied together with (the tighter of it and) `OpticProfile::reticle_hold_bounds`.
     /// `None` (the default) applies no cap beyond `reticle_hold_bounds` itself.
     pub max_hold_mil: Option<f64>,
-}
-
-impl Default for Preferences {
-    /// `prefer_hold: false, max_hold_mil: None` -- prefer dial, no extra hold cap.
-    fn default() -> Self {
-        Self { prefer_hold: false, max_hold_mil: None }
-    }
 }
 
 /// Which of a shot's two independent angular axes an [`AxisInstruction`] or
@@ -493,13 +544,29 @@ pub struct LimitViolation {
     pub available_mil: Option<f64>,
 }
 
+/// `AxisInstruction::direction`: which way the DELTA actually dialed turns the turret
+/// (MBA-1348). Wire form is lowercase (`"up"`/`"down"`/`"left"`/`"right"`) via
+/// `#[serde(rename_all)]` -- unchanged from this type's original plain-`&str` form (MBA-1348
+/// review fix M1), but now a real enum so `AxisInstruction`/`DialPlan`/`DialPlanReportV1`
+/// can derive `Deserialize` again (a `&'static str` field cannot: serde's blanket impl for
+/// `&'a str` ties `'a` to the deserializer's own input lifetime, which is essentially never
+/// `'static`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 /// One axis's executable instruction within a [`DialPlan`] (MBA-1348).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AxisInstruction {
     pub axis: Axis,
-    /// `"up"`/`"down"` (elevation) or `"left"`/`"right"` (windage) for the DELTA actually
-    /// dialed (`delta_clicks`'s sign) -- not for the correction's own sign.
-    pub direction: &'static str,
+    /// For the DELTA actually dialed (`delta_clicks`'s sign) -- not for the correction's
+    /// own sign.
+    pub direction: Direction,
     /// Clicks to turn from `OpticProfile::turret_state` (or zero, if absent) to
     /// `target_clicks_from_zero`. Positive is up/right, matching `direction`.
     pub delta_clicks: i64,
@@ -525,12 +592,13 @@ pub struct AxisInstruction {
 
 /// One ranked, executable plan for delivering a two-axis [`AngularCorrection`] (MBA-1348).
 /// `instructions` is always exactly `[elevation, windage]`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DialPlan {
     pub strategy: Strategy,
     pub instructions: [AxisInstruction; 2],
     /// RSS of both axes' `residual_mil`, mil-to-linear at `DialPlanReportV1::range_m` by
-    /// the small-angle approximation (assumption 0). The PRIMARY ranking key -- see
+    /// the small-angle approximation (assumption 0). The ranking key AMONG EQUALLY-FEASIBLE
+    /// plans -- `feasible` itself is checked first (MBA-1348 review fix I4) -- see
     /// [`plan_corrections`]'s doc comment.
     pub residual_linear_at_range_m: f64,
     /// `false` whenever a [`LimitViolation`] this strategy's OWN promise depends on is
@@ -544,12 +612,12 @@ pub struct DialPlan {
 /// in the payload itself -- this train's cross-cutting honesty principle (spec §2) -- not
 /// only in prose documentation.
 ///
-/// Deliberately `Serialize`-only, not `Deserialize`: `AxisInstruction::direction` is a
-/// `&'static str`, which cannot be deserialized in the general case (there is no way to
-/// hand back a `'static`-lived string from an arbitrary, non-`'static` deserializer input).
-/// Nothing in this train reads a `DialPlanReportV1` back from JSON; Task 6's CLI only ever
-/// writes one out.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Derives `Deserialize` as well as `Serialize` (MBA-1348 review fix M1): the original
+/// `AxisInstruction::direction: &'static str` field made this impossible (see
+/// [`Direction`]'s own doc), which is why that field is now a proper enum. Nothing in this
+/// train currently reads a `DialPlanReportV1` back from JSON -- Task 6's CLI only ever
+/// writes one out -- but there is no longer a structural reason it couldn't.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DialPlanReportV1 {
     pub schema_version: u32,
     pub method: String,
@@ -563,12 +631,13 @@ pub struct DialPlanReportV1 {
 /// The largest whole-click count reachable within `boundary_mil` of DIAL-space travel
 /// without exceeding it (MBA-1348).
 ///
-/// Ordinarily `(boundary_mil / click_mil).floor()`, EXCEPT when that ratio is within a
-/// click-thousandth of a whole number, where it rounds to that whole number instead -- so
-/// floating-point noise in the division (e.g. `0.4 / 0.1` landing a hair under `4.0`)
-/// cannot silently discard a click of real, declared travel. A genuinely fractional
-/// boundary (e.g. 0.45 mil of travel on a 0.1 mil click) still floors: 4, never rounding UP
-/// past a hard mechanical limit to 5.
+/// Ordinarily `(boundary_mil / click_mil).floor()`, EXCEPT when that ratio is within one
+/// billionth (`1e-9`) of a click of a whole number, where it rounds to that whole number
+/// instead -- so floating-point noise in the division (e.g. `0.4 / 0.1` landing a hair
+/// under `4.0`) cannot silently discard a click of real, declared travel (MBA-1348 review
+/// fix M2: corrected from an earlier, wrong "click-thousandth" description of this same
+/// `1e-9` tolerance). A genuinely fractional boundary (e.g. 0.45 mil of travel on a 0.1 mil
+/// click) still floors: 4, never rounding UP past a hard mechanical limit to 5.
 fn max_clicks_within(boundary_mil: f64, click_mil: f64) -> i64 {
     let raw = boundary_mil / click_mil;
     let nearest = raw.round();
@@ -678,15 +747,15 @@ fn end_revolution_for(target_clicks: i64, cpr: Option<u32>) -> Option<(u32, u32)
     cpr.and_then(|c| revolution_annotation(target_clicks, c))
 }
 
-/// `"up"`/`"down"` for elevation, `"left"`/`"right"` for windage, from the sign of
-/// `delta_clicks`. Zero is reported as the positive word (`"up"`/`"right"`) -- an
+/// `Direction::Up`/`Down` for elevation, `Left`/`Right` for windage, from the sign of
+/// `delta_clicks`. Zero is reported as the positive variant (`Up`/`Right`) -- an
 /// instruction to turn zero clicks has no natural direction of its own.
-fn direction_str(axis: Axis, delta_clicks: i64) -> &'static str {
+fn direction_for(axis: Axis, delta_clicks: i64) -> Direction {
     match (axis, delta_clicks < 0) {
-        (Axis::Elevation, true) => "down",
-        (Axis::Elevation, false) => "up",
-        (Axis::Windage, true) => "left",
-        (Axis::Windage, false) => "right",
+        (Axis::Elevation, true) => Direction::Down,
+        (Axis::Elevation, false) => Direction::Up,
+        (Axis::Windage, true) => Direction::Left,
+        (Axis::Windage, false) => Direction::Right,
     }
 }
 
@@ -705,10 +774,14 @@ struct AxisComputation {
     /// `OpticProfile::turret_state`'s click-quantized position on this axis, or 0.
     state_clicks: i64,
     cpr: Option<u32>,
-    /// `HoldBounds`'s magnitude in the positive direction (elevation up / windage right).
-    hold_bound_positive: Option<f64>,
-    /// `HoldBounds`'s magnitude in the negative direction (elevation down / windage left).
-    hold_bound_negative: Option<f64>,
+    /// The `HoldBounds` magnitude that bounds a POSITIVE `hold_mil` on this axis --
+    /// `down_mil` for elevation, `left_mil` for windage (MBA-1348 review fix C1: NOT
+    /// `up_mil`/`right_mil` -- correction-space and reticle-space are opposite-signed
+    /// conventions, see the module's "Honesty" doc section, which cites `src/reticle.rs`).
+    bound_for_positive_correction: Option<f64>,
+    /// The `HoldBounds` magnitude that bounds a NEGATIVE `hold_mil` on this axis --
+    /// `up_mil` for elevation, `right_mil` for windage. See `bound_for_positive_correction`.
+    bound_for_negative_correction: Option<f64>,
 }
 
 // Private per-axis helper: every parameter is a distinct, independently-varying input this
@@ -723,8 +796,8 @@ fn compute_axis(
     cf: f64,
     travel: Option<&TravelLimits>,
     state_mil: Option<f64>,
-    hold_bound_positive: Option<f64>,
-    hold_bound_negative: Option<f64>,
+    bound_for_positive_correction: Option<f64>,
+    bound_for_negative_correction: Option<f64>,
     cpr: Option<u32>,
 ) -> AxisComputation {
     let click_mil = click_size_mil(click);
@@ -742,8 +815,8 @@ fn compute_axis(
         travel_violation,
         state_clicks,
         cpr,
-        hold_bound_positive,
-        hold_bound_negative,
+        bound_for_positive_correction,
+        bound_for_negative_correction,
     }
 }
 
@@ -767,7 +840,7 @@ fn build_axis_instruction(
             let violations = ac.travel_violation.into_iter().collect();
             let instr = AxisInstruction {
                 axis: ac.axis,
-                direction: direction_str(ac.axis, delta_clicks),
+                direction: direction_for(ac.axis, delta_clicks),
                 delta_clicks,
                 target_clicks_from_zero: clicks,
                 end_revolution: end_revolution_for(clicks, ac.cpr),
@@ -782,8 +855,8 @@ fn build_axis_instruction(
             let hold_violation = check_hold_bounds(
                 ac.axis,
                 hold,
-                ac.hold_bound_positive,
-                ac.hold_bound_negative,
+                ac.bound_for_positive_correction,
+                ac.bound_for_negative_correction,
                 prefs.max_hold_mil,
             );
             let feasible = hold_violation.is_none();
@@ -792,7 +865,7 @@ fn build_axis_instruction(
             let violations = hold_violation.into_iter().collect();
             let instr = AxisInstruction {
                 axis: ac.axis,
-                direction: direction_str(ac.axis, delta_clicks),
+                direction: direction_for(ac.axis, delta_clicks),
                 delta_clicks,
                 target_clicks_from_zero: target_clicks,
                 end_revolution: end_revolution_for(target_clicks, ac.cpr),
@@ -810,8 +883,8 @@ fn build_axis_instruction(
             let hold_violation = check_hold_bounds(
                 ac.axis,
                 hold,
-                ac.hold_bound_positive,
-                ac.hold_bound_negative,
+                ac.bound_for_positive_correction,
+                ac.bound_for_negative_correction,
                 prefs.max_hold_mil,
             );
             // Hybrid's OWN promise is that dial+hold reconstruct the correction exactly
@@ -824,7 +897,7 @@ fn build_axis_instruction(
             violations.extend(hold_violation);
             let instr = AxisInstruction {
                 axis: ac.axis,
-                direction: direction_str(ac.axis, delta_clicks),
+                direction: direction_for(ac.axis, delta_clicks),
                 delta_clicks,
                 target_clicks_from_zero: clicks,
                 end_revolution: end_revolution_for(clicks, ac.cpr),
@@ -896,18 +969,27 @@ fn declaration_rank(strategy: Strategy) -> u8 {
 /// rule" and "Honesty" doc sections for the conventions this function follows in every arm.
 ///
 /// Returns exactly three plans, one per [`Strategy`], in `DialPlanReportV1::plans`, ranked
-/// best-first by ascending [`DialPlan::residual_linear_at_range_m`] (via `f64::total_cmp`,
-/// so ranking never panics regardless of input); ties are broken by `prefs.prefer_hold`
-/// (`false` ranks `DialAll < Hybrid < HoldAll`, `true` reverses that), and any remaining
-/// tie by `Strategy`'s own declaration order (`DialAll, HoldAll, Hybrid`) -- see
-/// `ranking_is_deterministic_and_preference_respected`.
+/// best-first: `feasible: true` plans always sort before `feasible: false` ones (MBA-1348
+/// review fix I4 -- `HoldAll`/`Hybrid` carry a residual of exactly `0.0` even when
+/// infeasible, so residual alone cannot be the primary key without risking an unexecutable
+/// `plans[0]`); among equally-feasible plans, ascending
+/// [`DialPlan::residual_linear_at_range_m`] (via `f64::total_cmp`, so ranking never panics
+/// regardless of input); ties are broken by `prefs.prefer_hold` (`false` ranks
+/// `DialAll < Hybrid < HoldAll`, `true` reverses that), and any remaining tie by
+/// `Strategy`'s own declaration order (`DialAll, HoldAll, Hybrid`) -- see
+/// `ranking_is_deterministic_and_preference_respected` and
+/// `infeasible_plans_never_outrank_a_feasible_one`.
 ///
-/// `Err(OpticError)` when `optic.validate()` fails, or when `correction`, `range_m`,
-/// `elevation_cf`, `windage_cf`, or `prefs.max_hold_mil` is not finite, or `range_m` /
-/// `max_hold_mil` is negative. `elevation_cf`/`windage_cf` are otherwise trusted exactly as
-/// given, like `crate::truing::scale_report_dial_values` -- this function does not re-apply
-/// `crate::adjustment::tracking_cf_in_range`'s plausibility band; enforcing that band (if
-/// at all) is a caller/CLI concern, matching that existing precedent.
+/// `Err(OpticError)` when `optic.validate()` fails; when `correction`, `range_m`, or
+/// `prefs.max_hold_mil` is not finite; when `range_m` / `max_hold_mil` is negative; or when
+/// `elevation_cf` / `windage_cf` is zero, negative, or non-finite
+/// ([`OpticError::NonPositiveTrackingFactor`], MBA-1348 review fix I5 -- the CF rule
+/// divides by it, so a non-positive value is not merely implausible, it is a hard
+/// arithmetic failure). Otherwise `elevation_cf`/`windage_cf` are trusted exactly as given,
+/// like `crate::truing::scale_report_dial_values` -- this function does not re-apply
+/// `crate::adjustment::tracking_cf_in_range`'s tighter `(0.5, 1.5)` plausibility band;
+/// enforcing that band (if at all) remains a caller/CLI concern, matching that existing
+/// precedent.
 pub fn plan_corrections(
     correction: AngularCorrection,
     optic: &OpticProfile,
@@ -921,8 +1003,8 @@ pub fn plan_corrections(
     require_finite("correction.windage_mil", correction.windage_mil)?;
     require_finite("range_m", range_m)?;
     require_non_negative("range_m", range_m)?;
-    require_finite("elevation_cf", elevation_cf)?;
-    require_finite("windage_cf", windage_cf)?;
+    require_positive_tracking_factor("elevation_cf", elevation_cf)?;
+    require_positive_tracking_factor("windage_cf", windage_cf)?;
     if let Some(max_hold) = prefs.max_hold_mil {
         require_finite("max_hold_mil", max_hold)?;
         require_non_negative("max_hold_mil", max_hold)?;
@@ -933,6 +1015,12 @@ pub fn plan_corrections(
         None => (None, None, None, None),
     };
 
+    // MBA-1348 review fix (C1, CRITICAL): a POSITIVE (up/right) correction-space
+    // `hold_mil` is realized by a reticle mark on the OPPOSITE-named side -- a holdover
+    // for an UP correction sits BELOW center (`down_mil`); a hold for a RIGHT correction
+    // sits to the LEFT of center (`left_mil`). See the module's "Honesty" doc section
+    // (which cites `src/reticle.rs:30-42`) for the full derivation. `hold_up`/`hold_down`/
+    // `hold_left`/`hold_right` below are therefore passed CROSSED, not straight.
     let elevation = compute_axis(
         Axis::Elevation,
         correction.elevation_mil,
@@ -940,8 +1028,8 @@ pub fn plan_corrections(
         elevation_cf,
         optic.elevation_travel.as_ref(),
         optic.turret_state.as_ref().map(|s| s.elevation_mil),
-        hold_up,
         hold_down,
+        hold_up,
         optic.clicks_per_revolution,
     );
     let windage = compute_axis(
@@ -951,8 +1039,8 @@ pub fn plan_corrections(
         windage_cf,
         optic.windage_travel.as_ref(),
         optic.turret_state.as_ref().map(|s| s.windage_mil),
-        hold_right,
         hold_left,
+        hold_right,
         optic.clicks_per_revolution,
     );
 
@@ -961,9 +1049,15 @@ pub fn plan_corrections(
         build_plan(Strategy::HoldAll, &elevation, &windage, prefs, range_m),
         build_plan(Strategy::Hybrid, &elevation, &windage, prefs, range_m),
     ];
+    // MBA-1348 review fix (I4): `feasible` must be the PRIMARY key. `HoldAll`/`Hybrid`
+    // carry a residual of exactly 0.0 even when INFEASIBLE (residual is about
+    // reconstruction, not achievability), so without this, an infeasible plan could rank
+    // ahead of the one plan that actually works -- and Task 6's CLI surfaces `plans[0]` as
+    // THE recommendation. `false < true`, so `!feasible` sorts feasible plans first.
     plans.sort_by(|a, b| {
-        a.residual_linear_at_range_m
-            .total_cmp(&b.residual_linear_at_range_m)
+        (!a.feasible)
+            .cmp(&!b.feasible)
+            .then_with(|| a.residual_linear_at_range_m.total_cmp(&b.residual_linear_at_range_m))
             .then_with(|| {
                 preference_rank(a.strategy, prefs.prefer_hold)
                     .cmp(&preference_rank(b.strategy, prefs.prefer_hold))
@@ -1567,12 +1661,14 @@ mod plan_corrections_tests {
             "{:?}",
             hybrid.limits_hit
         );
-        // ...but Hybrid's own feasibility depends ONLY on whether the hold fits bounds
-        // (baseline's down_mil hold bound is 10.0; |-0.6| fits comfortably), NOT on the
-        // travel clamp -- this is the crux of the brief's "feasible iff hold fits bounds".
+        // ...but Hybrid's own feasibility depends ONLY on whether the hold fits bounds, NOT
+        // on the travel clamp -- this is the crux of the brief's "feasible iff hold fits
+        // bounds". The hold is -0.6 (a DOWN hold), which consumes baseline's up_mil bound
+        // (5.0, the mark ABOVE center a downward correction's hold sits at -- see the
+        // module's "Honesty" doc section) -- |-0.6| fits comfortably within 5.0.
         assert!(
             hybrid.feasible,
-            "Hybrid must remain feasible: the hold (-0.6) fits within the 10.0 mil hold \
+            "Hybrid must remain feasible: the hold (-0.6) fits within the 5.0 mil up_mil \
              bound, even though its dial component was travel-clamped: {hybrid:?}"
         );
     }
@@ -1593,15 +1689,17 @@ mod plan_corrections_tests {
         // the requested -1.0. The reported residual must equal the REAL shortfall against
         // what was actually executed, never something smaller that pretends the clamp
         // didn't happen.
+        // Review fix M4: tightened from a 1e-12 tolerance to bit-exact -- hand-verified
+        // (Python, identical IEEE-754 semantics) that `-4.0 * 0.1 == -0.4` and
+        // `-1.0 - (-0.4) == -0.6` are both exact for these specific numbers, so an
+        // approximate assert here was strictly weaker than what the numbers actually give.
         let clamped_dial_true = e.target_clicks_from_zero as f64 * 0.1 * 1.0;
-        assert!((clamped_dial_true - (-0.4)).abs() < 1e-12);
+        assert_eq!(clamped_dial_true, -0.4);
         let honest_residual = corr.elevation_mil - clamped_dial_true;
-        assert!(
-            (e.residual_mil - honest_residual).abs() < 1e-12,
-            "residual_mil {} must equal corr_true - clamped_dial_true = {} exactly, not a \
-             smaller, optimistic number",
-            e.residual_mil,
-            honest_residual
+        assert_eq!(
+            e.residual_mil, honest_residual,
+            "residual_mil must equal corr_true - clamped_dial_true exactly, not a smaller, \
+             optimistic number"
         );
         assert!(
             e.residual_mil.abs() > 0.5,
@@ -1752,6 +1850,19 @@ mod plan_corrections_tests {
             dial_dialed.instructions[0].delta_clicks, 13,
             "1.0 mil dialed = 10 clicks of state; delta_clicks must drop by exactly 10 (23 -> 13)"
         );
+
+        // Review fix I3: `end_revolution` must be computed from `target_clicks_from_zero`
+        // (23, unchanged by turret_state -- cpr 10 -> revolution_annotation(23, 10) ==
+        // (2, 3)), never from `delta_clicks` (23 for the zeroed case but 13 for the dialed
+        // one, which at cpr 10 would give the WRONG (1, 3)). A silent switch to delta would
+        // misreport a real, dialed-scope shooter's revolution count.
+        assert_eq!(dial_zeroed.instructions[0].end_revolution, Some((2, 3)));
+        assert_eq!(
+            dial_dialed.instructions[0].end_revolution,
+            Some((2, 3)),
+            "end_revolution must stay (2, 3) with turret_state dialed, not shift to \
+             delta_clicks=13's (1, 3)"
+        );
     }
 
     // ---- Beyond the brief: NoTravelData / NoHoldBoundData disclosure ----
@@ -1870,5 +1981,361 @@ mod plan_corrections_tests {
         let corr = AngularCorrection { elevation_mil: 1.0, windage_mil: 0.0 };
         let result = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default());
         assert!(matches!(result, Err(OpticError::NonPositiveClickSize { .. })), "{result:?}");
+    }
+
+    // ==== 2026-08 review fixes ====
+    //
+    // A reviewer hand-verified the CF rule and found the arithmetic core correct, but
+    // found the hold-bound mapping inverted on BOTH axes (C1, critical) and several gaps
+    // this task's original 14 tests could not have caught because nothing exercised an
+    // asymmetric hold bound, a nonzero windage correction, HoldAll's own hold value, an
+    // infeasible-but-zero-residual plan, a non-positive CF, or a non-unit-CF travel
+    // violation. Every test below is a discriminating test for one of those gaps: each is
+    // built so the specific bug it targets makes it fail, not just a generic re-assertion
+    // of already-covered behavior.
+
+    // C1 (CRITICAL): `hold_mil` is correction-space (+ = up/right, matching a dial's own
+    // convention); `HoldBounds` is `crate::reticle`'s RETICLE-space (`src/reticle.rs:30-42`:
+    // `down_mil` positive BELOW center, `right_mil` positive to the shooter's RIGHT). These
+    // are OPPOSITELY signed on both axes: a positive (up) correction's hold mark sits BELOW
+    // center (consumes `down_mil`, not `up_mil`) -- exactly how a BDC reticle's long-range
+    // holdover marks sit below center, never above. A positive (right) correction's hold
+    // mark sits to the LEFT of center (consumes `left_mil`, not `right_mil`) by the mirrored
+    // argument. See the module's "Honesty" doc section for the full derivation.
+    //
+    // Baseline's elevation hold bounds are deliberately asymmetric (5.0 up / 10.0 down), so
+    // this test actually discriminates the two possible mappings: a +7.0 mil correction
+    // fits (7.0 <= 10.0 available below center) while a -7.0 mil correction does not
+    // (7.0 > 5.0 available above center) -- the OLD, inverted mapping gets BOTH of these
+    // backwards (it would have accepted -7.0 and rejected +7.0). Windage needs its own
+    // asymmetric profile since baseline's windage bounds (6.0/6.0) are symmetric and
+    // therefore cannot discriminate the mapping on their own.
+    #[test]
+    fn hold_bound_mapping_matches_reticle_space_not_correction_space() {
+        let optic = baseline_profile(); // elevation hold bounds: up 5.0 / down 10.0
+        let prefs = Preferences::default();
+
+        let up_report = plan_corrections(
+            AngularCorrection { elevation_mil: 7.0, windage_mil: 0.0 },
+            &optic,
+            100.0,
+            1.0,
+            1.0,
+            &prefs,
+        )
+        .unwrap();
+        let up_hold_all = plan_for(Strategy::HoldAll, &up_report);
+        assert!(
+            up_hold_all.feasible,
+            "+7.0 mil (up) consumes down_mil=10.0 (available) and must fit: {up_hold_all:?}"
+        );
+        assert!(up_hold_all.limits_hit.is_empty(), "{:?}", up_hold_all.limits_hit);
+
+        let down_report = plan_corrections(
+            AngularCorrection { elevation_mil: -7.0, windage_mil: 0.0 },
+            &optic,
+            100.0,
+            1.0,
+            1.0,
+            &prefs,
+        )
+        .unwrap();
+        let down_hold_all = plan_for(Strategy::HoldAll, &down_report);
+        assert!(
+            !down_hold_all.feasible,
+            "-7.0 mil (down) consumes up_mil=5.0 (available) and must NOT fit: {down_hold_all:?}"
+        );
+        let down_violation = down_hold_all
+            .limits_hit
+            .iter()
+            .find(|v| v.axis == Axis::Elevation && matches!(v.kind, LimitKind::HoldBoundExceeded))
+            .unwrap_or_else(|| panic!("{:?}", down_hold_all.limits_hit));
+        assert_eq!(down_violation.available_mil, Some(5.0));
+
+        // Windage: same asymmetry, mirrored -- a +right correction consumes left_mil, a
+        // -left correction consumes right_mil.
+        let mut windage_optic = baseline_profile();
+        {
+            let bounds = windage_optic.reticle_hold_bounds.as_mut().unwrap();
+            bounds.left_mil = 8.0;
+            bounds.right_mil = 3.0;
+        }
+
+        let right_report = plan_corrections(
+            AngularCorrection { elevation_mil: 0.0, windage_mil: 7.0 },
+            &windage_optic,
+            100.0,
+            1.0,
+            1.0,
+            &prefs,
+        )
+        .unwrap();
+        let right_hold_all = plan_for(Strategy::HoldAll, &right_report);
+        assert!(
+            right_hold_all.feasible,
+            "+7.0 mil (right) consumes left_mil=8.0 (available) and must fit: {right_hold_all:?}"
+        );
+
+        let left_report = plan_corrections(
+            AngularCorrection { elevation_mil: 0.0, windage_mil: -7.0 },
+            &windage_optic,
+            100.0,
+            1.0,
+            1.0,
+            &prefs,
+        )
+        .unwrap();
+        let left_hold_all = plan_for(Strategy::HoldAll, &left_report);
+        assert!(
+            !left_hold_all.feasible,
+            "-7.0 mil (left) consumes right_mil=3.0 (available) and must NOT fit: {left_hold_all:?}"
+        );
+        let left_violation = left_hold_all
+            .limits_hit
+            .iter()
+            .find(|v| v.axis == Axis::Windage && matches!(v.kind, LimitKind::HoldBoundExceeded))
+            .unwrap_or_else(|| panic!("{:?}", left_hold_all.limits_hit));
+        assert_eq!(left_violation.available_mil, Some(3.0));
+    }
+
+    // The "danger case" the review specifically flagged: a travel-clamped Hybrid whose
+    // hold the glass genuinely cannot support must be `feasible: false` -- the inverted
+    // mapping could certify exactly that as feasible (whichever bound is larger always
+    // "fits", regardless of which side the hold is actually on).
+    #[test]
+    fn travel_clamped_hybrid_with_an_unsupportable_hold_is_infeasible() {
+        let optic = baseline_profile(); // down travel 0.4 mil; hold bounds up 5.0 / down 10.0
+        // -7.4 mil needs -74 clicks; only 4 clicks (0.4 mil) of down travel exist, so
+        // Hybrid clamps to -4 clicks (-0.4 true mil) and must hold the remaining exactly
+        // -7.0 (hand-verified: -4.0*0.1 == -0.4 exactly, -7.4-(-0.4) == -7.0 exactly).
+        // This magnitude is chosen to land BETWEEN the two candidate bounds and so
+        // genuinely discriminate them: the CORRECT mapping checks a down-hold against
+        // up_mil=5.0 (7.0 > 5.0 -> infeasible, correctly, since the glass cannot show 7.0
+        // mil of upward hold), while the OLD, inverted mapping checked it against
+        // down_mil=10.0 (7.0 <= 10.0 -> would have wrongly certified this feasible). See
+        // the fault-injection transcript in the task report: re-inverting the mapping
+        // makes this test fail, exactly as this comment predicts.
+        let corr = AngularCorrection { elevation_mil: -7.4, windage_mil: 0.0 };
+        let report =
+            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
+        let hybrid = plan_for(Strategy::Hybrid, &report);
+        let e = &hybrid.instructions[0];
+        assert_eq!(e.target_clicks_from_zero, -4);
+        assert_eq!(e.hold_mil, -7.0, "hold_mil = {}", e.hold_mil);
+        assert!(
+            !hybrid.feasible,
+            "a -7.0 mil hold exceeds the correct up_mil=5.0 bound and must be infeasible, \
+             even though it would fit the WRONG down_mil=10.0 bound an inverted mapping \
+             would have checked it against: {hybrid:?}"
+        );
+    }
+
+    // I1: the original 14 tests all used `windage_mil: 0.0`, so `instructions[1]` was never
+    // read -- a bug that transposed elevation's click/CF into the windage arm (or dropped
+    // the windage term from the RSS) would have passed every one of them. Deliberately
+    // different per-axis click gradutions and CFs so a transposition changes the numbers.
+    //
+    // Hand-derived (Python-verified against IEEE-754 binary64 arithmetic):
+    //   Elevation: 2.34 true mil / cf 0.98 -> corr_dial = 2.387755102040816
+    //              / 0.1 mil click -> round to 24 clicks
+    //              dial_true = 24*0.1*0.98 = 2.3520000000000003
+    //              residual  = 2.34 - 2.352 = -0.012000000000000455 (elevation_cf != 1.0
+    //              here, unlike most other tests, so this residual differs from the
+    //              cf=1.0, 23-click result used elsewhere in this file)
+    //   Windage:  -1.3 true mil / cf 1.05 -> corr_dial = -1.2380952380952381
+    //              0.25 MOA click -> click_mil = 0.25*1000/3438 = 0.07271669575334497
+    //              corr_dial / click_mil = -17.026... -> round to -17 clicks
+    //              dial_true = -17*0.07271669575334497*1.05 = -1.2979930191972078
+    //              residual  = -1.3 - (-1.2979930191972078) = -0.0020069808027922686
+    //   residual_linear_at_range_m @ 400 m:
+    //              e_lin = 0.012000000000000455/1000*400 = 0.0048000000000000004
+    //              w_lin = 0.0020069808027922686/1000*400 = 0.0008027923211169075
+    //              rss   = sqrt(e_lin^2 + w_lin^2) = 0.004866669858419206
+    #[test]
+    fn windage_arm_uses_its_own_click_cf_and_contributes_to_the_rss() {
+        let mut optic = baseline_profile();
+        optic.windage_click = ClickValue { size: 0.25, base: ClickBase::Moa };
+        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: -1.3 };
+        let report = plan_corrections(corr, &optic, 400.0, 0.98, 1.05, &Preferences::default())
+            .unwrap();
+
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        let e = &dial_all.instructions[0];
+        assert_eq!(e.axis, Axis::Elevation);
+        assert_eq!(e.target_clicks_from_zero, 24);
+        assert_eq!(e.direction, Direction::Up);
+
+        let w = &dial_all.instructions[1];
+        assert_eq!(w.axis, Axis::Windage);
+        assert_eq!(w.target_clicks_from_zero, -17);
+        assert!(
+            (w.dial_mil_true - (-1.2979930191972078)).abs() < 1e-12,
+            "windage dial_mil_true = {}",
+            w.dial_mil_true
+        );
+        assert_eq!(w.hold_mil, 0.0, "DialAll never holds");
+        assert_eq!(w.direction, Direction::Left, "-17 clicks must read as Left, not Up/Down");
+
+        assert!(
+            (dial_all.residual_linear_at_range_m - 0.004866669858419206).abs() < 1e-9,
+            "residual_linear_at_range_m = {} -- both axes' residuals are nonzero here, so \
+             this must be a real two-term RSS, not a single-axis pass-through",
+            dial_all.residual_linear_at_range_m
+        );
+
+        // Hybrid's windage hold is nonzero and independently exercises the SAME per-axis
+        // parameters through `build_axis_instruction`'s separate Hybrid arm.
+        let hybrid = plan_for(Strategy::Hybrid, &report);
+        let wh = &hybrid.instructions[1];
+        assert!(
+            (wh.hold_mil - (-0.0020069808027922686)).abs() < 1e-9,
+            "hybrid windage hold_mil = {}",
+            wh.hold_mil
+        );
+        assert_eq!(wh.residual_mil, 0.0);
+    }
+
+    // I2: HoldAll's hold was never asserted in the original 14 tests, so CF-scaling it
+    // (`corr_true / cf` instead of `corr_true`) would have passed all of them -- the exact
+    // bug the brief names ("Reticle holds are TRUE angular and are NEVER CF-scaled").
+    // Checked at cf = 0.98 specifically: at cf == 1.0 a scaling bug is invisible (dividing
+    // by 1.0 is a no-op).
+    #[test]
+    fn hold_all_hold_is_never_cf_scaled() {
+        let optic = baseline_profile();
+        let corr = AngularCorrection { elevation_mil: 5.0, windage_mil: 0.0 };
+        let report = plan_corrections(corr, &optic, 100.0, 0.98, 1.0, &Preferences::default())
+            .unwrap();
+        let hold_all = plan_for(Strategy::HoldAll, &report);
+        assert_eq!(
+            hold_all.instructions[0].hold_mil, 5.0,
+            "must equal corr_true exactly (bit-exact copy, no arithmetic at all) -- NOT \
+             corr_true / cf = {}",
+            5.0_f64 / 0.98
+        );
+    }
+
+    // I4: `HoldAll`/`Hybrid` carry `residual_mil == 0.0` (and therefore
+    // `residual_linear_at_range_m == 0.0`) even when INFEASIBLE -- residual is about exact
+    // reconstruction, not achievability. Without `feasible` as the PRIMARY ranking key, an
+    // infeasible zero-residual plan could rank ahead of the only plan that actually works,
+    // and Task 6's CLI surfaces `plans[0]` as THE recommendation.
+    #[test]
+    fn infeasible_plans_never_outrank_a_feasible_one() {
+        let optic = baseline_profile();
+        // 2.34 (not an exact click multiple) so Hybrid's hold is nonzero, and DialAll's
+        // residual is nonzero -- both meaningfully exercised, not vacuously all-zero.
+        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        // max_hold_mil: Some(0.0) makes ANY nonzero hold infeasible on HoldAll and Hybrid.
+        // DialAll never touches hold at all, so its feasibility depends only on travel,
+        // which comfortably fits (23 clicks * 0.1 mil = 2.3 <= 28.0 mil up travel).
+        let prefs = Preferences { prefer_hold: false, max_hold_mil: Some(0.0) };
+        let report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        let hold_all = plan_for(Strategy::HoldAll, &report);
+        let hybrid = plan_for(Strategy::Hybrid, &report);
+        assert!(dial_all.feasible, "{dial_all:?}");
+        assert!(!hold_all.feasible, "{hold_all:?}");
+        assert!(!hybrid.feasible, "{hybrid:?}");
+        assert_eq!(hold_all.residual_linear_at_range_m, 0.0);
+        assert_eq!(hybrid.residual_linear_at_range_m, 0.0);
+        assert!(dial_all.residual_linear_at_range_m > 0.0);
+
+        assert_eq!(
+            report.plans[0].strategy,
+            Strategy::DialAll,
+            "the only feasible plan must rank first, never an infeasible zero-residual one \
+             (a residual-only ranking would put Hybrid or HoldAll here instead): {:?}",
+            report.plans
+        );
+        assert!(report.plans[0].feasible);
+    }
+
+    // I5: a zero, negative, or non-finite CF divides `corr_true` into infinity, NaN, or a
+    // direction-inverting result -- a hard arithmetic failure, not merely an implausible
+    // tracking factor, so it is rejected outright rather than only warned about.
+    #[test]
+    fn non_positive_or_non_finite_tracking_factor_is_rejected() {
+        let optic = baseline_profile();
+        let corr = AngularCorrection { elevation_mil: 1.0, windage_mil: 0.0 };
+        for bad_cf in [0.0, -1.0, -0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let elevation_result =
+                plan_corrections(corr, &optic, 100.0, bad_cf, 1.0, &Preferences::default());
+            assert!(
+                matches!(
+                    elevation_result,
+                    Err(OpticError::NonPositiveTrackingFactor { field: "elevation_cf", .. })
+                ),
+                "cf={bad_cf}: {elevation_result:?}"
+            );
+            let windage_result =
+                plan_corrections(corr, &optic, 100.0, 1.0, bad_cf, &Preferences::default());
+            assert!(
+                matches!(
+                    windage_result,
+                    Err(OpticError::NonPositiveTrackingFactor { field: "windage_cf", .. })
+                ),
+                "cf={bad_cf}: {windage_result:?}"
+            );
+        }
+        // A positive CF far outside `tracking_cf_in_range`'s advisory (0.5, 1.5) band is
+        // NOT rejected here -- only <= 0 or non-finite is a hard library-level error; the
+        // plausibility band stays an advisory, caller/CLI-level concern (see the module doc
+        // and `OpticError::NonPositiveTrackingFactor`'s own doc comment).
+        let lenient = plan_corrections(corr, &optic, 100.0, 0.001, 1.0, &Preferences::default());
+        assert!(lenient.is_ok(), "{lenient:?}");
+    }
+
+    // M3: `LimitViolation::needed_mil` must be DIAL-space (`corr_true / cf`), never
+    // TRUE-space (`corr_true`) -- indistinguishable at cf == 1.0 (every other test in this
+    // file happens to use cf == 1.0 for its travel-violation checks), so this must run at
+    // cf != 1.0 to actually discriminate the two.
+    #[test]
+    fn travel_violation_needed_mil_is_dial_space_not_true_space_at_nonunit_cf() {
+        let mut optic = baseline_profile();
+        optic.elevation_travel = Some(TravelLimits { down_mil: 0.1, up_mil: 0.1 });
+        let corr = AngularCorrection { elevation_mil: 1.0, windage_mil: 0.0 }; // TRUE mil
+        let cf = 0.5;
+        let report =
+            plan_corrections(corr, &optic, 100.0, cf, 1.0, &Preferences::default()).unwrap();
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        assert!(!dial_all.feasible, "{dial_all:?}");
+        let violation = dial_all
+            .limits_hit
+            .iter()
+            .find(|v| matches!(v.kind, LimitKind::TravelExceeded))
+            .unwrap_or_else(|| panic!("{:?}", dial_all.limits_hit));
+        let corr_dial = corr.elevation_mil / cf; // 2.0
+        assert_eq!(
+            violation.needed_mil, corr_dial,
+            "needed_mil must be DIAL-space (corr_true/cf = {corr_dial}), not TRUE-space \
+             ({})",
+            corr.elevation_mil
+        );
+    }
+
+    // M1: `direction` moved from `&'static str` to a real `Direction` enum specifically so
+    // `AxisInstruction`/`DialPlan`/`DialPlanReportV1` could derive `Deserialize` again.
+    // Pins that the wire form is UNCHANGED (still lowercase `"up"`/`"down"`/`"left"`/
+    // `"right"`) and that a full report now genuinely round-trips through JSON.
+    #[test]
+    fn direction_wire_form_is_unchanged_and_the_full_report_round_trips() {
+        for (direction, expected_json) in [
+            (Direction::Up, "\"up\""),
+            (Direction::Down, "\"down\""),
+            (Direction::Left, "\"left\""),
+            (Direction::Right, "\"right\""),
+        ] {
+            assert_eq!(serde_json::to_string(&direction).unwrap(), expected_json);
+        }
+
+        let optic = baseline_profile();
+        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: -1.3 };
+        let report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default())
+            .unwrap();
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: DialPlanReportV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report);
     }
 }
