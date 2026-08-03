@@ -138,7 +138,7 @@ jobs:
 
     - name: Set up QEMU (for the aarch64 version gate)
       if: matrix.use_cross
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
 
     - name: Build with cargo
       if: '!matrix.use_cross'
