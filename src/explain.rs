@@ -144,12 +144,18 @@
 //! normally). An axis absent on BOTH `a` and `b` is not reported at all: there is nothing to
 //! attribute either way, the same as if neither request had ever mentioned it.
 //!
-//! Either way, an exclusion never aborts the comparison -- only that one axis is left out of
-//! that one group, on both legs. A GENUINE failure (most notably a `solve_v1` re-resolve failing
-//! partway through applying a group -- for instance the pre-existing magnus/enhanced-spin-drift
-//! conflict noted in `taxonomy.rs`'s Known Limitation (d), which a group swap can walk straight
-//! into by turning one flag on while the request still carries the other from before) is NOT one
-//! of these cases and propagates as an error, uncaught, exactly as `central_difference` and
+//! Either way, an exclusion never aborts the comparison -- only that one axis (or, for the
+//! magnus/enhanced_spin_drift pair below, both together) is left out of that one group, on both
+//! legs. Two cross-axis conflicts are excluded this same way even though neither is a "derived
+//! value" in the sense above (F2, 0.33.0 final-review fix wave): `CoriolisEnabled` differing
+//! while either request lacks `latitude_rad` (`solve_v1` requires it whenever coriolis is
+//! enabled), and `MagnusEnabled`/`EnhancedSpinDriftEnabled` swapping between two requests with
+//! opposite flags set (`solve_v1` rejects both true on one request, `taxonomy.rs`'s Known
+//! Limitation (d)) -- see `plan_exclusions`'s own two guards for the full mechanism, and for why
+//! the magnus/ESD case excludes BOTH axes together rather than just the one whose write would
+//! fail first. A GENUINE failure -- some OTHER `solve_v1` re-resolve failure partway through
+//! applying a group, not one of the cases `plan_exclusions` already recognizes -- is NOT one of
+//! these cases and propagates as an error, uncaught, exactly as `central_difference` and
 //! `bisect_axis` already do for their own non-refusal failures.
 //!
 //! # Why exclusions are decided from the original requests, not the accumulated one
@@ -190,6 +196,9 @@ use crate::perturbation::access::{read_axis, with_axis, KernelError};
 use crate::perturbation::taxonomy::{axes_in_group, InputAxis, InputGroup};
 use crate::perturbation::{evaluate, kernel_solve_error, Observation};
 use crate::solve_json::{PressureReferenceV1, ResolvedSolveRequestV1, SolveRequestV1, WindReferenceV1};
+
+/// Schema version for [`SolutionDiffReportV1`].
+pub const EXPLAIN_SCHEMA_VERSION_V1: u32 = 1;
 
 /// The difference between two [`Observation`]s at one range, `b - a`. SI throughout, same sign
 /// convention as [`Observation`] itself.
@@ -409,6 +418,14 @@ fn plan_exclusions(
     let mut skipped = Vec::new();
 
     for &axis in axes_in_group(group) {
+        // F2 (0.33.0 final-review fix wave): an axis can be pre-excluded by an EARLIER axis in
+        // this same group's iteration -- currently only EnhancedSpinDriftEnabled, excluded
+        // alongside MagnusEnabled below when the two conflict -- in which case its own turn has
+        // nothing left to decide or record.
+        if excluded.contains(&axis) {
+            continue;
+        }
+
         let a_value = read_axis(a, axis);
         let b_value = read_axis(b, axis);
 
@@ -506,6 +523,97 @@ fn plan_exclusions(
             continue;
         }
 
+        // F2 (0.33.0 final-review fix wave): magnus and enhanced_spin_drift cannot both be true
+        // on any ONE resolved request (`solve_v1`'s `validate_effects` rejects that combination
+        // outright, `taxonomy.rs`'s Known Limitation (d)), so two requests that each solve fine
+        // alone -- one with magnus on, the other with enhanced_spin_drift on -- make
+        // `swap_group`'s fixed axis-at-a-time order (`MagnusEnabled` always applied before
+        // `EnhancedSpinDriftEnabled`, `axes_in_group` above) walk straight into that conflict:
+        // writing the destination's NEW magnus value lands on a request that still carries its
+        // OWN unswapped enhanced_spin_drift (not yet overwritten), transiently combining two
+        // "true"s whenever the source's magnus and the destination's enhanced_spin_drift are
+        // both true. Excluding only ONE of the two axes does not fix this in general -- it
+        // merely relocates the identical hazard to the OTHER axis's write on the OTHER leg
+        // (confirmed by direct construction, not assumed: excluding just `MagnusEnabled` leaves
+        // `EnhancedSpinDriftEnabled`'s own later write to collide with the untouched destination
+        // magnus on whichever leg was previously safe), so both axes are excluded together
+        // whenever EITHER leg could conflict (`(b.magnus && a.esd) || (a.magnus && b.esd)`; at
+        // most one of the two can ever be true at once, since neither `a` nor `b` can have both
+        // flags true individually, but either alone is enough to require excluding both axes) --
+        // their real difference falls to the interaction remainder instead of aborting the
+        // report. Decided once, from both ORIGINALS, when the loop reaches `MagnusEnabled`
+        // (first in this group's fixed axis order); the `excluded.contains` guard at the top of
+        // this loop skips `EnhancedSpinDriftEnabled`'s own turn once this fires.
+        if axis == InputAxis::MagnusEnabled
+            && ((a.effects.magnus && b.effects.enhanced_spin_drift)
+                || (b.effects.magnus && a.effects.enhanced_spin_drift))
+        {
+            let reason = "magnus and enhanced_spin_drift cannot both be enabled on one resolved \
+                          request, and one of these two requests has magnus enabled while the \
+                          other has enhanced_spin_drift enabled; swapping either flag alone \
+                          would transiently combine a newly-written true with the destination's \
+                          own still-unswapped true on the other flag, which solve_v1 rejects as \
+                          a conflict, so both effects are excluded together rather than aborting \
+                          the comparison"
+                .to_string();
+            for excluded_axis in
+                [InputAxis::MagnusEnabled, InputAxis::EnhancedSpinDriftEnabled]
+            {
+                excluded.push(excluded_axis);
+                skipped.push(SkippedAxisV1 {
+                    group,
+                    axis: excluded_axis,
+                    direction: SwapDirectionV1::Forward,
+                    reason: reason.clone(),
+                });
+                skipped.push(SkippedAxisV1 {
+                    group,
+                    axis: excluded_axis,
+                    direction: SwapDirectionV1::Backward,
+                    reason: reason.clone(),
+                });
+            }
+            continue;
+        }
+
+        // F2 (0.33.0 final-review fix wave): `with_axis` performs no cross-field validation at
+        // all -- it only ever builds the DTO -- so writing `CoriolisEnabled` onto a request that
+        // lacks `latitude_rad` does not fail HERE; it fails later, inside `swap_group`'s own
+        // re-resolve (`solve_v1`'s "latitude_rad is required when the Coriolis effect is
+        // enabled"), a genuine `KernelError::Solve`, not one of the refusal cases this function
+        // otherwise catches -- so, uncaught, it aborts `explain_difference` ENTIRELY, even when
+        // `a` and `b` each solve fine on their own. Only a risk when the flags actually DIFFER
+        // (swapping an identical flag is a no-op regardless of latitude_rad) and either side
+        // lacks `latitude_rad` -- a request that itself already has coriolis enabled is
+        // guaranteed, by its own prior validation, to already carry `latitude_rad`, so the only
+        // way this validation can newly fail is turning the flag ON for a destination that never
+        // supplied one.
+        if axis == InputAxis::CoriolisEnabled
+            && a.effects.coriolis != b.effects.coriolis
+            && (a.atmosphere.latitude_rad.is_none() || b.atmosphere.latitude_rad.is_none())
+        {
+            excluded.push(axis);
+            let reason = "the coriolis flag differs between the two requests and at least one \
+                          of them has no latitude_rad; solve_v1 requires latitude_rad whenever \
+                          the coriolis effect is enabled, so swapping this flag onto the request \
+                          that lacks one would fail re-resolution rather than build a valid \
+                          counterfactual"
+                .to_string();
+            skipped.push(SkippedAxisV1 {
+                group,
+                axis,
+                direction: SwapDirectionV1::Forward,
+                reason: reason.clone(),
+            });
+            skipped.push(SkippedAxisV1 {
+                group,
+                axis,
+                direction: SwapDirectionV1::Backward,
+                reason,
+            });
+            continue;
+        }
+
         if a_value.is_some() != b_value.is_some() {
             excluded.push(axis);
             let reason = "this axis is present on only one of the two requests being compared \
@@ -579,10 +687,12 @@ fn plan_exclusions(
 /// # Errors
 ///
 /// Any [`with_axis`] or `solve_v1` failure propagates via `?` unchanged: by the time an axis
-/// reaches this loop it is not supposed to be refusable, so a failure here is either a genuine
-/// bug (a `read_axis`/`with_axis` mismatch) or an unrelated solve failure (such as the
-/// magnus/enhanced-spin-drift conflict noted in `taxonomy.rs`'s Known Limitation (d)) -- never a
-/// structurally unrepresentable axis, which `plan_exclusions` has already filtered out.
+/// reaches this loop it is not supposed to be refusable -- `plan_exclusions` has already
+/// filtered out every conflict known to reach here, including the magnus/enhanced-spin-drift
+/// pair (`taxonomy.rs`'s Known Limitation (d)) and the coriolis/latitude dependency (F2, 0.33.0
+/// final-review fix wave) -- so a failure here is either a genuine bug (a `read_axis`/
+/// `with_axis` mismatch) or a new, not-yet-recognized conflict, never a structurally
+/// unrepresentable axis or one of the cases already known and excluded.
 fn swap_group(
     dst: &ResolvedSolveRequestV1,
     src: &ResolvedSolveRequestV1,
@@ -652,13 +762,16 @@ fn swap_group(
 ///
 /// Returns whatever [`evaluate`], [`with_axis`], or `plan_exclusions` error on `a`, `b`, or
 /// either swapped counterfactual, MINUS the refusal/absence cases above
-/// (`KernelError::AxisUnsupportedForRequest`, and the presence-asymmetry case, which never even
-/// reaches a `KernelError`), which are caught and recorded rather than returned. Every other
-/// error -- most notably a `solve_v1` re-resolve failing validation partway through building a
-/// group's counterfactual, such as the pre-existing magnus/enhanced-spin-drift conflict noted in
-/// `taxonomy.rs`'s Known Limitation (d) -- propagates unchanged: it is a genuine failure, not a
-/// structurally unrepresentable axis, and must not be silently absorbed into a skip or a zero
-/// contribution.
+/// (`KernelError::AxisUnsupportedForRequest`, the presence-asymmetry case, which never even
+/// reaches a `KernelError`, and the two cross-axis conflicts `plan_exclusions` now also catches
+/// up front -- `CoriolisEnabled` differing while either request lacks `latitude_rad`, and
+/// `MagnusEnabled`/`EnhancedSpinDriftEnabled` swapping between requests with opposite flags,
+/// `taxonomy.rs`'s Known Limitation (d) -- both F2, 0.33.0 final-review fix wave), which are
+/// caught and recorded rather than returned. Every OTHER error -- some other `solve_v1`
+/// re-resolve failing validation partway through building a group's counterfactual, not one of
+/// the cases `plan_exclusions` already recognizes -- propagates unchanged: it is a genuine
+/// failure, not a structurally unrepresentable axis, and must not be silently absorbed into a
+/// skip or a zero contribution.
 ///
 /// `a` and `b` are read-only throughout: every counterfactual request is built from a clone
 /// (`swap_group`), never a mutation of either input.
@@ -715,7 +828,7 @@ pub fn explain_difference(
     }
 
     Ok(SolutionDiffReportV1 {
-        schema_version: 1,
+        schema_version: EXPLAIN_SCHEMA_VERSION_V1,
         method: "symmetric_group_counterfactual".to_string(),
         assumptions: vec![
             "Group contributions are symmetric counterfactuals: the mean of swapping the group \
@@ -867,6 +980,16 @@ mod tests {
         let rep = explain_difference(&a, &a, &[300.0]).unwrap();
         assert_eq!(rep.method, "symmetric_group_counterfactual");
         assert!(rep.assumptions.iter().any(|s| s.contains("interaction")));
+    }
+
+    /// (S8, 0.33.0 final-review fix wave) `schema_version` must be the crate's declared
+    /// constant, not a stray literal that could silently drift from it -- see
+    /// `crate::tolerance`'s identical `schema_version_matches_the_declared_constant`.
+    #[test]
+    fn schema_version_matches_the_declared_constant() {
+        let a = resolved(823.0, 288.0);
+        let rep = explain_difference(&a, &a, &[300.0]).unwrap();
+        assert_eq!(rep.schema_version, EXPLAIN_SCHEMA_VERSION_V1);
     }
 
     /// The two source requests must never be mutated by the comparison -- `explain_difference`
@@ -1727,6 +1850,134 @@ mod tests {
         }
     }
 
+    /// (F2, 0.33.0 final-review fix wave) `a` and `b` each solve fine individually -- `a` has
+    /// coriolis enabled with a supplied `latitude_rad`, `b` has coriolis left disabled and
+    /// omits `latitude_rad` entirely, an ordinary difference between two saved profiles. Before
+    /// this fix, comparing them aborted the WHOLE report with a bare `solve_v1` error
+    /// ("latitude_rad is required when the Coriolis effect is enabled") the moment the backward
+    /// leg tried to write coriolis=true onto `b`'s clone: `with_axis` performs no cross-field
+    /// validation, so the write itself always "succeeds," and the failure only surfaces on the
+    /// re-resolve inside `swap_group`, well after `plan_exclusions`'s existing refusal checks
+    /// had already passed it through. `plan_exclusions` must now catch this up front instead.
+    #[test]
+    fn coriolis_conflict_with_missing_latitude_is_excluded_not_a_hard_abort() {
+        let with_coriolis_json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0},
+            "atmosphere": {"temperature_k": 288.0, "latitude_rad": 0.7},
+            "wind": {}, "solver": {}, "effects": {"coriolis": true},
+            "sampling": {"interval_m": 50.0}
+        })
+        .to_string();
+        let a = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&with_coriolis_json).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        assert!(a.effects.coriolis, "fixture assumption: a has coriolis enabled");
+        assert_eq!(
+            a.atmosphere.latitude_rad,
+            Some(0.7),
+            "fixture assumption: a supplies latitude_rad"
+        );
+
+        let b = resolved(823.0, 288.0);
+        assert!(!b.effects.coriolis, "fixture assumption: b has coriolis disabled");
+        assert_eq!(
+            b.atmosphere.latitude_rad, None,
+            "fixture assumption: b omits latitude_rad entirely"
+        );
+
+        let rep = explain_difference(&a, &b, &[600.0]).expect(
+            "a coriolis/latitude conflict must be excluded, not abort the whole comparison",
+        );
+
+        for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
+            assert!(
+                rep.skipped_axes.iter().any(|s| s.group == InputGroup::Effects
+                    && s.axis == InputAxis::CoriolisEnabled
+                    && s.direction == direction),
+                "expected a {direction:?} CoriolisEnabled skip when the flags differ and one \
+                 side lacks latitude_rad; got {:?}",
+                rep.skipped_axes
+            );
+        }
+        let reason = &rep
+            .skipped_axes
+            .iter()
+            .find(|s| s.group == InputGroup::Effects && s.axis == InputAxis::CoriolisEnabled)
+            .unwrap()
+            .reason;
+        assert!(
+            reason.to_lowercase().contains("latitude"),
+            "reason must name latitude_rad as the cause: {reason}"
+        );
+
+        assert_eq!(rep.rows.len(), 1);
+    }
+
+    /// (F2, continued) The guard above must fire on the actual CONFLICT, not blanket-exclude
+    /// `CoriolisEnabled` whenever the flags merely differ: here both `a` and `b` supply the
+    /// identical `latitude_rad`, so turning coriolis on for either destination is always safe,
+    /// and the axis must still be swapped and contribute normally.
+    #[test]
+    fn coriolis_still_swaps_when_both_requests_have_latitude() {
+        let build = |coriolis: bool| {
+            serde_json::json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                               "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+                "shot": {"max_range_m": 900.0},
+                "atmosphere": {"temperature_k": 288.0, "latitude_rad": 0.7},
+                "wind": {}, "solver": {}, "effects": {"coriolis": coriolis},
+                "sampling": {"interval_m": 50.0}
+            })
+            .to_string()
+        };
+        let a = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&build(true)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        let b = crate::solve_v1::solve_v1(
+            crate::solve_json::decode_solve_request_v1(&build(false)).unwrap(),
+        )
+        .unwrap()
+        .resolved_request;
+        assert_eq!(
+            a.atmosphere.latitude_rad, b.atmosphere.latitude_rad,
+            "fixture assumption: identical latitude_rad on both sides"
+        );
+        assert_ne!(a.effects.coriolis, b.effects.coriolis, "fixture assumption: flags differ");
+
+        let rep = explain_difference(&a, &b, &[600.0]).unwrap();
+
+        assert!(
+            !rep.skipped_axes.iter().any(|s| s.group == InputGroup::Effects
+                && s.axis == InputAxis::CoriolisEnabled),
+            "CoriolisEnabled must not be excluded when both sides supply the same latitude_rad; \
+             got {:?}",
+            rep.skipped_axes
+        );
+
+        let effects = rep
+            .rows[0]
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::Effects)
+            .unwrap();
+        assert!(
+            effects.delta.drop_m.abs() > 1e-6 || effects.delta.windage_m.abs() > 1e-6,
+            "Effects' contribution must be substantial and non-zero here -- coriolis genuinely \
+             differs and both sides can safely carry it -- got {:?}",
+            effects.delta
+        );
+    }
+
     /// This fixture's shape comes from the ordering hazard documented in this module's doc
     /// comment: `ShotGeometry` lists `TargetDistance`, `ShootingAngle` and `Cant` before
     /// `ShotAzimuth`. Deciding exclusions from `a`/`b` directly (`plan_exclusions`, never a
@@ -2065,25 +2316,47 @@ mod tests {
         }
     }
 
-    /// A genuine, non-refusal solve failure caused by the counterfactual construction itself
-    /// must propagate, never be silently caught like a `with_axis` refusal. `Effects` lists
-    /// `MagnusEnabled` before `EnhancedSpinDriftEnabled`; swapping Magnus on (from B into A)
-    /// while A still carries its own `enhanced_spin_drift = true` from before produces an
-    /// intermediate request with both flags true, which `solve_v1` rejects as `ConflictingFields`
+    /// (F2, 0.33.0 final-review fix wave) `Effects` lists `MagnusEnabled` before
+    /// `EnhancedSpinDriftEnabled`; naively swapping Magnus on (from B into A) while A still
+    /// carries its own `enhanced_spin_drift = true` from before would produce an intermediate
+    /// request with both flags true, which `solve_v1` rejects as `ConflictingFields`
     /// (`taxonomy.rs`'s Known Limitation (d)) -- even though the FINAL state after the whole
-    /// group is applied (magnus on, enhanced spin drift off) would have been perfectly valid.
+    /// group is applied (magnus on, enhanced spin drift off) would have been perfectly valid,
+    /// and even though `a` and `b` each solve fine individually. Before this fix,
+    /// `explain_difference` let that intermediate failure propagate and abort the ENTIRE
+    /// report; `plan_exclusions`'s own principle is that an exclusion never aborts the
+    /// comparison, so this must instead exclude both conflicting axes together (see
+    /// `plan_exclusions`'s `MagnusEnabled` guard for why BOTH, not just one) and let the
+    /// comparison succeed.
     #[test]
-    fn a_genuine_solve_conflict_from_group_swap_propagates_not_silently_skipped() {
-        let a = resolved_with_effects(823.0, false, true);
-        let b = resolved_with_effects(823.0, true, false);
-        let e = explain_difference(&a, &b, &[300.0]);
-        match e {
-            Err(KernelError::Solve { code, .. }) => {
-                assert_eq!(code, crate::solve_json::SolveErrorCodeV1::ConflictingFields);
+    fn magnus_and_enhanced_spin_drift_conflict_is_excluded_not_a_hard_abort() {
+        let a = resolved_with_effects(823.0, false, true); // magnus off, enhanced_spin_drift on
+        let b = resolved_with_effects(823.0, true, false); // magnus on, enhanced_spin_drift off
+        let rep = explain_difference(&a, &b, &[300.0]).expect(
+            "a magnus/enhanced_spin_drift conflict must be excluded, not abort the whole report",
+        );
+
+        for axis in [InputAxis::MagnusEnabled, InputAxis::EnhancedSpinDriftEnabled] {
+            for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
+                assert!(
+                    rep.skipped_axes.iter().any(|s| s.group == InputGroup::Effects
+                        && s.axis == axis
+                        && s.direction == direction),
+                    "{axis:?} {direction:?}: expected a skip naming the magnus/\
+                     enhanced_spin_drift conflict; got {:?}",
+                    rep.skipped_axes
+                );
             }
-            other => panic!(
-                "expected a genuine ConflictingFields solve error to propagate, got {other:?}"
-            ),
         }
+        // The reason names the real conflict, not a placeholder.
+        let reason = &rep
+            .skipped_axes
+            .iter()
+            .find(|s| s.group == InputGroup::Effects && s.axis == InputAxis::MagnusEnabled)
+            .unwrap()
+            .reason;
+        assert!(reason.contains("enhanced_spin_drift"), "{reason}");
+
+        assert_eq!(rep.rows.len(), 1);
     }
 }

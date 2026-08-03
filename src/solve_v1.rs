@@ -1825,6 +1825,18 @@ mod tests {
             prepared.resolved_request.shot.zero_distance_m,
             Some(100.0)
         );
+        // S5 (0.33.0 final-review fix wave): the elevation search did not run -- a caller must
+        // be told so, not left to assume the echoed zero_distance_m confirms a zero was
+        // actually solved for it.
+        assert!(
+            prepared.warnings.iter().any(|notice| {
+                notice.code == WARNING_ZERO_DISTANCE_ELEVATION_NOT_RESOLVED
+                    && notice.path.as_deref() == Some("$.shot.zero_distance_m")
+            }),
+            "expected a {WARNING_ZERO_DISTANCE_ELEVATION_NOT_RESOLVED} warning naming \
+             $.shot.zero_distance_m; got {:?}",
+            prepared.warnings
+        );
     }
 
     #[test]

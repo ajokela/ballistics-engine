@@ -55,23 +55,38 @@
 //! only the subset `central_difference` can produce.
 //!
 //! One caller mistake is deliberately NOT laundered through this mechanism: a range in
-//! `ranges_m` beyond `base.shot.max_range_m` would otherwise fail BOTH perturbed sides of EVERY
+//! `ranges_m` that cannot actually be observed -- either beyond the declared
+//! `base.shot.max_range_m`, or (less obviously) still inside `max_range_m` but past where THIS
+//! trajectory actually terminates, e.g. a steep downward shot that strikes the ground at 95 m
+//! under a declared `max_range_m: 900` -- would otherwise fail BOTH perturbed sides of EVERY
 //! axis identically (an [`KernelError::Observation`] domain rejection on each side becomes
 //! [`KernelError::StepOutOfDomain`]), recording every declared source as unavailable with a
 //! misleading reason that blames the axis's own step when the real problem is that the caller
 //! queried past the trajectory. See "Sources and ranges are validated up front" below --
-//! `error_budget` rejects that case directly instead.
+//! `error_budget` rejects both forms of that mistake directly instead.
 //!
 //! # Sources and ranges are validated up front
 //!
-//! Before any [`central_difference`] call: every `range_m` in `ranges_m` must be finite and in
-//! `[0, base.shot.max_range_m]`, or [`error_budget`] returns [`KernelError::Observation`]
-//! immediately (an honest "this range cannot be observed on this trajectory," not a per-axis
-//! "unavailable" that hides the real cause). Every declared `sigma` must be finite and
-//! non-negative, and the same [`InputAxis`] must not appear twice in `sources` (two entries
-//! would double-count that axis's variance and make its own leave-one-out counterfactual
-//! ambiguous), or [`error_budget`] returns [`KernelError::NonFinite`] /
-//! [`KernelError::DuplicateAxis`] respectively.
+//! Before any [`central_difference`] call, in two stages:
+//!
+//! 1. Every `range_m` in `ranges_m` must be finite and in `[0, base.shot.max_range_m]`, or
+//!    [`error_budget`] returns [`KernelError::Observation`] immediately -- a cheap check against
+//!    the DECLARED bound, requiring no solve, that rejects the unambiguous cases (negative,
+//!    non-finite, or past the caller's own stated `max_range_m`).
+//! 2. `base` is then solved once via [`evaluate`], over the whole of `ranges_m` at once -- the
+//!    same nominal-reference-point pattern `crate::tolerance::tolerance_envelope` and
+//!    `crate::explain::explain_difference` already use. A range that passed stage 1 but lies
+//!    past where THIS trajectory actually terminates is rejected here with an honest
+//!    [`KernelError::Observation`] naming the REAL computed trajectory extent, not a per-axis
+//!    "unavailable" that blames the wrong cause. The observations `evaluate` returns are
+//!    otherwise unused in this function -- this call exists for its validation, not its output;
+//!    see "Cost" below for what it adds.
+//!
+//! Every declared `sigma` must also be finite and non-negative, and the same [`InputAxis`] must
+//! not appear twice in `sources` (two entries would double-count that axis's variance and make
+//! its own leave-one-out counterfactual ambiguous), or [`error_budget`] returns
+//! [`KernelError::NonFinite`] / [`KernelError::DuplicateAxis`] respectively -- checked
+//! immediately after the two range stages above, still before any [`central_difference`] call.
 //!
 //! # Ranking is deterministic
 //!
@@ -89,20 +104,31 @@
 //!
 //! # Cost
 //!
-//! One [`central_difference`] call per DECLARED source, covering every requested range at once
-//! -- never once per source per range. `ranges_m` is passed through to the kernel unchanged and
-//! the resulting `Vec<Derivative>` is indexed by range when building each row, so the cost of a
-//! report is independent of how many ranges are requested and scales only with the number of
-//! DECLARED sources.
+//! Two parts: one fixed pre-check, then one [`central_difference`] call per DECLARED source.
 //!
-//! Per source, that is 2 real trajectory solves in the common (central-difference) case, or 3 if
-//! one side fell outside the axis's physical domain and the kernel fell back to a one-sided
-//! difference (see [`DifferenceScheme`]). If the axis `requires_rezero`
+//! **The pre-check** (added by the F1 fix, 0.33.0 final-review wave): one call to [`evaluate`]
+//! on the nominal, unperturbed `base` request, covering every range in `ranges_m` at once -- see
+//! "Sources and ranges are validated up front" above. This costs exactly ONE real trajectory
+//! solve, paid once per call to [`error_budget`]/[`error_budget_with_target`] regardless of how
+//! many sources are declared or how many ranges are requested, and regardless of whether `base`
+//! carries a `zero_distance_m`: `base`'s own `muzzle_angle_rad` is already the resolved angle
+//! (`request_roundtrip`'s `From<&ResolvedSolveRequestV1> for SolveRequestV1` always carries it
+//! alongside `zero_distance_m`), so `build_zeroed_solver`'s `(Some, Some)` arm applies only a
+//! cheap windage bias rather than re-running the elevation search -- unlike the per-source
+//! solves below, which perturb an axis away from where `base` was resolved and so, for a
+//! `requires_rezero` axis, must re-search from scratch.
+//!
+//! **Per declared source**, that is 2 real trajectory solves in the common (central-difference)
+//! case, or 3 if one side fell outside the axis's physical domain and the kernel fell back to a
+//! one-sided difference (see [`DifferenceScheme`]). If the axis `requires_rezero`
 //! (`crate::perturbation::axis_meta(axis).requires_rezero`) and the request
 //! carries a `zero_distance_m`, each of those solves is itself preceded by a fresh elevation
 //! search of up to 60 trial solves (`find_zero_angle`, `src/cli_api.rs`) -- unavoidable, and not
 //! something this module changes; see `crate::perturbation::derive`'s own module doc for where
-//! that number comes from.
+//! that number comes from. `ranges_m` is passed through to the kernel unchanged and the
+//! resulting `Vec<Derivative>` is indexed by range when building each row, so this part of the
+//! cost, like the pre-check, is independent of how many ranges are requested and scales only
+//! with the number of DECLARED sources.
 //!
 //! Measured, not guessed (a previous task's cost doc on this branch understated its own number
 //! by 5x before being corrected by direct measurement, so this number was obtained the same
@@ -111,20 +137,29 @@
 //! (`every_declared_source_appears_individually`: `MuzzleVelocityMps` and
 //! `BallisticCoefficient`, both `requires_rezero`, plus `WindSpeed`, which is not), then removed
 //! (the working tree was diffed against the pre-instrumentation state afterward to confirm a
-//! byte-for-byte revert of `src/cli_api.rs`). Measured results:
+//! byte-for-byte revert of `src/cli_api.rs`). Measured results, with the F1 pre-check included:
 //!
-//! - All three sources together at a single range: **79 low-level solves.**
-//! - The IDENTICAL three sources requested over FOUR ranges instead of one: **79 again** --
-//!   confirming the per-range independence above empirically, not just structurally.
+//! - All three sources together at a single range: **80 low-level solves** (79 before the F1
+//!   fix added the pre-check -- exactly the expected `+1`).
+//! - The IDENTICAL three sources requested over FOUR ranges instead of one: **80 again** --
+//!   confirming the per-range independence above still holds with the pre-check included (the
+//!   pre-check itself covers all four ranges from that same one solve).
 //! - Decomposed by declaring each source alone (also at one range): `WindSpeed` (not
-//!   `requires_rezero`) cost 2 (exactly the "2 solves, common case" above); `MuzzleVelocityMps`
-//!   cost 37; `BallisticCoefficient` cost 40. `37 + 40 + 2 = 79`, matching the three-source
-//!   total exactly -- confirming each declared source's cost is independent of, and additive
-//!   with, every other declared source's, as the "one central_difference call per source" design
-//!   above requires. The two `requires_rezero` axes each cost roughly 17-19 trial solves per
-//!   perturbed side beyond the one real solve (`(37 - 2) / 2 = 17.5` average,
-//!   `(40 - 2) / 2 = 19` average) -- well under the 60-iteration cap, not close to it, for this
-//!   fixture's zero geometry.
+//!   `requires_rezero`) now costs 3; `MuzzleVelocityMps` costs 38; `BallisticCoefficient` costs
+//!   41 -- each exactly one more than its pre-F1 figure, since every SEPARATE call now pays its
+//!   own copy of the fixed pre-check. Summing these three single-source figures
+//!   (`38 + 41 + 3 = 82`) therefore OVERCOUNTS the combined three-source total (80) by 2: the
+//!   pre-check is a fixed cost per CALL, not per source, so declaring the three sources as three
+//!   separate calls pays it three times, while declaring them together in one call pays it once.
+//!   Subtracting the pre-check from each isolated figure recovers the pre-F1 per-source numbers
+//!   exactly (`38 - 1 = 37`, `41 - 1 = 40`, `3 - 1 = 2`), which still sum additively
+//!   (`37 + 40 + 2 = 79`) and, with the combined call's own single pre-check added back once
+//!   (`79 + 1 = 80`), match its measured total exactly -- confirming each declared source's cost
+//!   remains independent of, and additive with, every other declared source's, exactly as before
+//!   F1; only the fixed one-time pre-check is new, and it does not multiply with source count.
+//!   The two `requires_rezero` axes each still cost roughly 17-19 trial solves per perturbed side
+//!   beyond their one real solve (`(37 - 2) / 2 = 17.5` average, `(40 - 2) / 2 = 19` average) --
+//!   well under the 60-iteration cap, not close to it, for this fixture's zero geometry.
 //!
 //! # Why the differencing step ignores the declared sigma
 //!
@@ -146,6 +181,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::perturbation::access::KernelError;
 use crate::perturbation::derive::{central_difference, DifferenceScheme, Derivative};
+use crate::perturbation::evaluate;
 use crate::perturbation::taxonomy::InputAxis;
 use crate::solve_json::ResolvedSolveRequestV1;
 use crate::special::normal_cdf;
@@ -493,9 +529,10 @@ fn build_priority_statement(
             };
             format!(
                 "{:?} dominates at {range_m:.0} m ({:.1}% of impact variance){caveat}. \
-                 Measuring it better is the highest-value single improvement here.{}",
+                 Measuring it better is the highest-value single improvement here.{}{}",
                 top.axis,
                 top.variance_share * 100.0,
+                gain_divergence_note(sources, top),
                 unavailable_note(),
             )
         }
@@ -510,6 +547,74 @@ fn build_priority_statement(
         ),
         None => format!("No sources were declared for this report at {range_m:.0} m."),
     }
+}
+
+/// (F3, 0.33.0 final-review fix wave) The variance leader (`top`, `sources[0]` after
+/// [`sort_by_variance_share_desc`]) is the source that contributes the most to the impact
+/// ELLIPSE'S SIZE -- but with a target supplied, that is not necessarily the source that most
+/// improves the odds of hitting THIS target: a source can dominate variance while displacing
+/// impact mostly in a direction the target is wide in (so perfecting it barely moves `p_hit`),
+/// while a lower-variance source displaces impact across the target's NARROW dimension (so
+/// perfecting it moves `p_hit` substantially). Left unremarked, the statement above would
+/// recommend measuring a provably near-worthless input for the shooter's actual goal --
+/// hitting THIS target -- while staying silent about a source that would help far more.
+///
+/// Returns `""` (the statement above is left exactly as it was before a target argument
+/// existed) in the two cases where there is nothing to add: no target was supplied at all (no
+/// source in `sources` carries a `Some` `p_hit_gain_if_perfect`), or the variance leader and the
+/// gain leader are the SAME axis (measuring the top-variance source is already the right advice
+/// for hitting the target too). Only ever compares sources whose gain is `Some`, and only
+/// speaks up when the gain leader's gain is STRICTLY greater than `top`'s own -- a tie (most
+/// concretely, every declared source having an identical, often zero, gain) breaks
+/// deterministically in [`top_by_gain`] but is not a genuine "this one is better" claim, and the
+/// sentence below asserts exactly that comparison, so a mere tie-break must not trigger it. See
+/// `the_priority_statement_names_the_gain_leader_when_it_diverges_from_the_variance_leader` and
+/// `the_priority_statement_is_unchanged_when_the_leaders_coincide` in this module's tests.
+fn gain_divergence_note(sources: &[SourceContributionV1], top: &SourceContributionV1) -> String {
+    let Some(gain_leader) = top_by_gain(sources) else {
+        return String::new(); // no target was supplied at all
+    };
+    let Some(top_gain) = top.p_hit_gain_if_perfect else {
+        debug_assert!(
+            false,
+            "a target is supplied (top_by_gain found a source with Some gain) so EVERY source, \
+             including the variance leader, must also carry a Some gain -- see \
+             error_budget_with_target's own doc comment"
+        );
+        return String::new();
+    };
+    let gain_leader_gain = gain_leader
+        .p_hit_gain_if_perfect
+        .expect("top_by_gain only ever returns a source with a Some gain");
+    if gain_leader.axis == top.axis || gain_leader_gain <= top_gain {
+        return String::new();
+    }
+    format!(
+        " However, perfecting {:?} yields the larger hit-probability gain (+{:.1}% vs +{:.1}%); \
+         if hitting this target is the goal, improve {:?} first.",
+        gain_leader.axis,
+        gain_leader_gain * 100.0,
+        top_gain * 100.0,
+        gain_leader.axis,
+    )
+}
+
+/// Among `sources` with a `Some` [`SourceContributionV1::p_hit_gain_if_perfect`], the one with
+/// the LARGEST gain -- ties break on the axis's own `Debug` name (the alphabetically-first name
+/// wins), the same declaration-order-independent key [`sort_by_variance_share_desc`] uses, for
+/// the same reason: two sources with an identical gain must resolve to the same answer
+/// regardless of the order the caller declared them in. `None` iff no source has a gain at all
+/// (no target was supplied), or `sources` is empty.
+fn top_by_gain(sources: &[SourceContributionV1]) -> Option<&SourceContributionV1> {
+    sources
+        .iter()
+        .filter(|s| s.p_hit_gain_if_perfect.is_some())
+        .max_by(|x, y| {
+            x.p_hit_gain_if_perfect
+                .expect("filtered to Some above")
+                .total_cmp(&y.p_hit_gain_if_perfect.expect("filtered to Some above"))
+                .then_with(|| format!("{:?}", y.axis).cmp(&format!("{:?}", x.axis)))
+        })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -905,6 +1010,25 @@ pub fn error_budget_with_target(
         }
     }
 
+    // Evaluate the nominal (unperturbed) request over ranges_m once, before touching any
+    // source. The loop above only rejects a range against the DECLARED base.shot.max_range_m,
+    // which says nothing about where THIS bullet actually lands: a request that terminates
+    // early (a ground strike, a velocity floor, any other cause short of max_range_m) can have
+    // every range in `ranges_m` pass that check while still lying past the real trajectory.
+    // Left unchecked, such a range would fail BOTH perturbed sides of EVERY axis identically (a
+    // genuine Observation::OutOfRange on each side collapsing to StepOutOfDomain), reporting
+    // "successfully" that every source is unavailable for a step-size reason that has nothing to
+    // do with the real cause -- exactly the failure mode the loop above's own comment already
+    // disclaims. `evaluate` solves once and checks every range against the REAL computed
+    // trajectory via `observation_at_range_checked`, so an out-of-range query fails here with an
+    // honest `Observation(OutOfRange { .. })` naming the actual trajectory extent, before any
+    // axis is perturbed -- the identical nominal-reference-point pattern
+    // `crate::tolerance::tolerance_envelope` and `crate::explain::explain_difference` already
+    // use. The returned observations are otherwise unused here: this call exists for its
+    // validation, not its output. See "Sources and ranges are validated up front" above and
+    // "Cost" below for what this adds.
+    evaluate(&base.into(), ranges_m)?;
+
     // Validate sources up front (review I4 + pre-existing sigma check): every sigma finite and
     // non-negative, and no axis declared twice. Checked together, before any solve.
     for (i, &(axis, sigma)) in sources.iter().enumerate() {
@@ -1159,6 +1283,120 @@ mod tests {
                                      (InputAxis::WindSpeed, 1.0)], &[600.0]).unwrap();
         let sum: f64 = rep.rows[0].sources.iter().map(|s| s.variance_share).sum();
         assert!((sum - 1.0).abs() < 1e-9, "shares summed to {sum}");
+    }
+
+    /// (F3, 0.33.0 final-review fix wave) A tall, narrow target (`height_m` generous, `width_m`
+    /// tight) constructed so `MuzzleVelocityMps`'s large drop-only variance dominates the
+    /// ellipse's SIZE (91.5% of variance share) while barely touching `p_hit` (the target's
+    /// generous height absorbs almost all of it: perfecting it gains only ~4.1 points), and
+    /// `WindSpeed`'s much smaller windage variance (8.5% share) is exactly what the target's
+    /// narrow width makes precious (perfecting it gains ~39.5 points -- nearly ten times more).
+    /// Before this fix, the statement named only the variance leader, `MuzzleVelocityMps`,
+    /// recommending a measurement that is nearly worthless for actually hitting this target
+    /// while staying silent about `WindSpeed`, which would help far more.
+    #[test]
+    fn the_priority_statement_names_the_gain_leader_when_it_diverges_from_the_variance_leader() {
+        let r = resolved();
+        let declared =
+            [(InputAxis::MuzzleVelocityMps, 40.0), (InputAxis::WindSpeed, 0.5)];
+        let target = TargetGeometryV1::Rect { width_m: 0.15, height_m: 3.0 };
+        let rep = error_budget_with_target(&r, &declared, &[600.0], Some(target)).unwrap();
+        let row = &rep.rows[0];
+
+        let mv = row.sources.iter().find(|s| s.axis == InputAxis::MuzzleVelocityMps).unwrap();
+        let ws = row.sources.iter().find(|s| s.axis == InputAxis::WindSpeed).unwrap();
+        // Fixture assumptions, pinned so a future change to the physics or the quadrature that
+        // breaks the divergence this test relies on fails HERE with a clear message, not with a
+        // confusing failure deeper in the statement assertions below.
+        assert!(
+            mv.variance_share > ws.variance_share,
+            "fixture assumption: MuzzleVelocityMps must be the variance leader; got MV={} \
+             WS={}",
+            mv.variance_share,
+            ws.variance_share
+        );
+        assert_eq!(row.sources[0].axis, InputAxis::MuzzleVelocityMps, "sorted by variance share");
+        let (mv_gain, ws_gain) =
+            (mv.p_hit_gain_if_perfect.unwrap(), ws.p_hit_gain_if_perfect.unwrap());
+        assert!(
+            ws_gain > mv_gain + 0.1,
+            "fixture assumption: WindSpeed's gain must diverge sharply from the variance \
+             leader's own -- got MV gain={mv_gain} WS gain={ws_gain}"
+        );
+
+        let statement = &row.priority_statement;
+        assert!(
+            statement.starts_with("MuzzleVelocityMps dominates"),
+            "the variance leader's own sentence must still be stated first: {statement}"
+        );
+        assert!(
+            statement.contains("perfecting WindSpeed yields the larger hit-probability gain"),
+            "expected the statement to name the gain leader when it diverges from the variance \
+             leader: {statement}"
+        );
+        assert!(
+            statement.contains("improve WindSpeed first"),
+            "expected a concrete recommendation naming the gain leader: {statement}"
+        );
+    }
+
+    /// (F3, continued) When a target is supplied but the two leaders COINCIDE (the variance
+    /// leader is also the gain leader, the ordinary case), the statement must read exactly as it
+    /// did before this ticket -- no added sentence, nothing implying a divergence that is not
+    /// there.
+    #[test]
+    fn the_priority_statement_is_unchanged_when_the_leaders_coincide() {
+        let r = resolved();
+        let declared = [(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.5)];
+        let target = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.75 };
+        let rep = error_budget_with_target(&r, &declared, &[600.0], Some(target)).unwrap();
+        let row = &rep.rows[0];
+        assert_eq!(
+            row.sources[0].axis,
+            InputAxis::WindSpeed,
+            "fixture assumption: WindSpeed is both the variance leader and (per \
+             p_hit_gain_if_perfect_discriminates_with_only_two_sources) the gain leader here"
+        );
+        assert_eq!(
+            row.priority_statement,
+            "WindSpeed dominates at 600 m (98.2% of impact variance). Measuring it better is \
+             the highest-value single improvement here."
+        );
+    }
+
+    /// (F3, continued) Without a target at all, the statement must be completely unaffected by
+    /// this ticket -- `gain_divergence_note` must return `""` whenever no source carries a
+    /// `p_hit_gain_if_perfect` at all, exactly reproducing every pre-existing, no-target
+    /// statement. Same declared sigmas as the divergence fixture above (so this covers the
+    /// identical numeric case with the target simply omitted), asserted structurally rather than
+    /// by hardcoding the variance percentage: the statement must end exactly where it always did
+    /// and must never contain the new sentence's tell -- "However".
+    #[test]
+    fn the_priority_statement_is_unchanged_with_no_target_supplied() {
+        let r = resolved();
+        let rep = error_budget(
+            &r,
+            &[(InputAxis::MuzzleVelocityMps, 40.0), (InputAxis::WindSpeed, 0.5)],
+            &[600.0],
+        )
+        .unwrap();
+        let statement = &rep.rows[0].priority_statement;
+        assert!(
+            statement.starts_with("MuzzleVelocityMps dominates at 600 m ("),
+            "{statement}"
+        );
+        assert!(
+            statement.ends_with(
+                "Measuring it better is the highest-value single improvement here."
+            ),
+            "the statement must end exactly where it always did when no target is supplied (no \
+             extra sentence appended): {statement}"
+        );
+        assert!(
+            !statement.contains("However"),
+            "no target was supplied, so no divergence sentence should ever be appended: \
+             {statement}"
+        );
     }
 
     #[test]
@@ -1846,6 +2084,69 @@ mod tests {
             other => panic!(
                 "expected Err(KernelError::Observation(OutOfRange {{ .. }})) naming the \
                  out-of-range query, got {other:?}"
+            ),
+        }
+    }
+
+    /// (F1, 0.33.0 final-review fix wave) A request that terminates well short of its own
+    /// declared `max_range_m` -- here, a steep downward `muzzle_angle_rad` that strikes the
+    /// ground at roughly 17 m -- must be rejected the same way a range beyond `max_range_m`
+    /// already is: an honest `Observation(OutOfRange)` naming the REAL computed trajectory
+    /// extent, not a per-axis `StepOutOfDomain` report. Before this fix, the manual
+    /// `range_m > base.shot.max_range_m` check up front let `900.0` through unchallenged (it IS
+    /// `<= max_range_m`), so `central_difference` went on to fail BOTH perturbed sides of every
+    /// declared source identically on the same real out-of-range observation, and
+    /// `error_budget` returned `Ok(..)` with every source in `unavailable_sources` blaming its
+    /// own differencing step -- a "successful" report with a fabricated per-axis explanation for
+    /// what was actually just a query past where the bullet landed.
+    #[test]
+    fn a_range_within_max_range_m_but_beyond_the_actual_trajectory_is_rejected_with_the_real_extent()
+    {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            // Steeply downward and unzeroed: strikes the ground at roughly 17 m, far short of
+            // the 900 m declared below.
+            "shot": {"max_range_m": 900.0, "muzzle_angle_rad": -1.4},
+            "atmosphere": {}, "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
+
+        let e = error_budget(
+            &r,
+            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.0)],
+            &[900.0], // == max_range_m, so the cheap declared-bound check alone lets it through
+        );
+        match e {
+            Err(KernelError::Observation(
+                inner @ TrajectoryObservationError::OutOfRange { requested_m, maximum_m, .. },
+            )) => {
+                assert_eq!(requested_m, 900.0);
+                // Names the REAL trajectory extent (~17 m), not the declared max_range_m (900).
+                assert!(
+                    maximum_m < 900.0 && maximum_m > 0.0,
+                    "expected the actual short trajectory's extent, got maximum_m = {maximum_m}"
+                );
+                let msg = inner.to_string();
+                assert!(
+                    msg.contains("outside the computed trajectory"),
+                    "message did not name the computed trajectory: {msg}"
+                );
+                assert!(
+                    !msg.to_lowercase().contains("step"),
+                    "message must not blame a per-axis differencing step: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Err(KernelError::Observation(OutOfRange {{ .. }})) naming the actual \
+                 computed trajectory extent -- got {other:?} (an Ok(..) here would mean every \
+                 declared source was laundered into a fabricated per-axis StepOutOfDomain \
+                 explanation instead)"
             ),
         }
     }
