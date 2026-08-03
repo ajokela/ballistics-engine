@@ -3809,12 +3809,20 @@ enum ProfileAction {
         bullet_length: Option<f64>,
 
         /// Turret elevation click graduation for `--adjustment-unit clicks` (MBA-1355), e.g. 0.1mil
-        /// or 0.25moa. Validated at save time so a profile can't store garbage.
+        /// or 0.25moa. Validated at save time so a profile can't store garbage. Without
+        /// this flag, re-saving carries the stored value forward unchanged (MBA-1348
+        /// review fix) — the twelve turret/hold fields below depend on a click
+        /// graduation existing at all, so leaving just this one field on the old
+        /// reset-on-omit contract would silently break every carried-forward turret
+        /// profile on its very next unrelated re-save.
         #[arg(long)]
         elevation_click: Option<String>,
 
         /// Turret windage click graduation for `--adjustment-unit clicks` (MBA-1355); falls back to
-        /// the elevation graduation when omitted, e.g. 0.1mil or 0.25moa.
+        /// the elevation graduation when neither this flag nor a stored value is
+        /// present (see `resolve_click_values`/`ProfileData::optic_profile`). Without
+        /// this flag, re-saving carries the stored value forward unchanged, like
+        /// `--elevation-click` above.
         #[arg(long)]
         windage_click: Option<String>,
 
@@ -3839,64 +3847,85 @@ enum ProfileAction {
 
         /// Elevation turret's click detents per full revolution (MBA-1348), e.g. 12 on a
         /// turret whose cap marks whole revolutions. Omit when the turret has no
-        /// revolution markings, or the count isn't known.
+        /// revolution markings, or the count isn't known. Without this flag, re-saving
+        /// carries the stored value forward unchanged.
         #[arg(long)]
         clicks_per_rev: Option<u32>,
 
         /// Whether the elevation turret hard-stops at its lowest travel so it cannot be
-        /// dialed below zero (MBA-1348): `true` or `false`. Purely descriptive.
+        /// dialed below zero (MBA-1348): `true` or `false`. Purely descriptive. Without
+        /// this flag, re-saving carries the stored value forward unchanged.
         #[arg(long)]
         zero_stop: Option<bool>,
 
         /// Elevation travel remaining UP from the current zero, e.g. 28mil or 96moa
-        /// (MBA-1348); stored in mil. Required together with --travel-down.
+        /// (MBA-1348); stored in mil. Required together with --travel-down. Without
+        /// this flag, re-saving carries the stored value forward unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         travel_up: Option<f64>,
 
         /// Elevation travel remaining DOWN from the current zero (MBA-1348); stored in
-        /// mil. Required together with --travel-up.
+        /// mil. Required together with --travel-up. Without this flag, re-saving
+        /// carries the stored value forward unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         travel_down: Option<f64>,
 
         /// Windage travel remaining LEFT from the current zero (MBA-1348); stored in mil.
-        /// Required together with --windage-travel-right.
+        /// Required together with --windage-travel-right. Without this flag, re-saving
+        /// carries the stored value forward unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         windage_travel_left: Option<f64>,
 
         /// Windage travel remaining RIGHT from the current zero (MBA-1348); stored in
-        /// mil. Required together with --windage-travel-left.
+        /// mil. Required together with --windage-travel-left. Without this flag,
+        /// re-saving carries the stored value forward unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         windage_travel_right: Option<f64>,
 
         /// The reticle's usable hold extent ABOVE center (MBA-1348); stored in mil.
-        /// Required together with --hold-down/--hold-left/--hold-right.
+        /// Required together with --hold-down/--hold-left/--hold-right. Without this
+        /// flag, re-saving carries the stored value forward unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         hold_up: Option<f64>,
 
         /// The reticle's usable hold extent BELOW center (MBA-1348); stored in mil. See
-        /// --hold-up.
+        /// --hold-up. Without this flag, re-saving carries the stored value forward
+        /// unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         hold_down: Option<f64>,
 
         /// The reticle's usable hold extent LEFT of center (MBA-1348); stored in mil.
-        /// See --hold-up.
+        /// See --hold-up. Without this flag, re-saving carries the stored value forward
+        /// unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         hold_left: Option<f64>,
 
         /// The reticle's usable hold extent RIGHT of center (MBA-1348); stored in mil.
-        /// See --hold-up.
+        /// See --hold-up. Without this flag, re-saving carries the stored value forward
+        /// unchanged.
         #[arg(long, value_parser = parse_angular_mil)]
         hold_right: Option<f64>,
 
         /// The elevation turret's current dialed offset from zero, signed: positive is
         /// dialed UP (MBA-1348); stored in mil. Required together with --turret-wind.
+        /// Without this flag, re-saving carries the stored value forward unchanged.
         #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
         turret_elev: Option<f64>,
 
         /// The windage turret's current dialed offset from zero, signed: positive is
         /// dialed RIGHT (MBA-1348); stored in mil. Required together with --turret-elev.
+        /// Without this flag, re-saving carries the stored value forward unchanged.
         #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
         turret_wind: Option<f64>,
+
+        /// Remove all twelve turret-mechanics/reticle-hold-bound fields (MBA-1348 review
+        /// fix) — the `--clear-dsf`/`--clear-reticle` counterpart for the turret block.
+        /// Mutually exclusive with any of the twelve flags above in the same invocation
+        /// (ambiguous intent: clear or set is not a decision this command guesses at).
+        /// Does NOT clear `--elevation-click`/`--windage-click`, which are a separate
+        /// field pair with their own carry-forward contract.
+        #[arg(long)]
+        clear_turret: bool,
     },
 
     /// Import a profile from a third-party file (.a7p — ArcherBC2 format)
@@ -5119,52 +5148,62 @@ fn parse_angular_mil(s: &str) -> Result<f64, String> {
 /// specific, likely-false physical fact (e.g. "zero down travel from zero") rather than
 /// "not recorded" — exactly the silent fabrication `OpticProfile`'s own doc comments
 /// warn against — so an incomplete pair is rejected by name instead of guessed at.
+///
+/// `a_flag`/`b_flag` name the CLI FLAGS (e.g. `"--travel-up"`), not the internal
+/// `ProfileData` struct fields (MBA-1348 review fix I2): the field↔flag mapping is not
+/// mechanical (`--travel-up` drops the axis prefix `elevation_travel_up_mil` carries;
+/// `--turret-elev` abbreviates `turret_elevation_dialed_mil`), and a user who typed
+/// `--travel-up` has no reason to recognize `elevation_travel_up_mil` in an error. This
+/// matches the convention two call sites above already use
+/// (`"--elevation-click '{v}' is invalid"`).
 fn require_angular_pair(
-    a_field: &'static str,
+    a_flag: &'static str,
     a: Option<f64>,
-    b_field: &'static str,
+    b_flag: &'static str,
     b: Option<f64>,
 ) -> Result<Option<(f64, f64)>, String> {
     match (a, b) {
         (None, None) => Ok(None),
         (Some(a), Some(b)) => Ok(Some((a, b))),
         (Some(_), None) => Err(format!(
-            "{a_field} is set but {b_field} is not — both are required together (or neither)"
+            "{a_flag} is set but {b_flag} is not — both are required together (or neither)"
         )),
         (None, Some(_)) => Err(format!(
-            "{b_field} is set but {a_field} is not — both are required together (or neither)"
+            "{b_flag} is set but {a_flag} is not — both are required together (or neither)"
         )),
     }
 }
 
 /// The `require_angular_pair` all-or-nothing rule extended to `HoldBounds`' four fields
 /// (MBA-1348): all four or none, any other combination is a named-field `Err` (same
-/// no-silent-fabrication rationale — see `require_angular_pair`).
+/// no-silent-fabrication rationale — see `require_angular_pair`). Names the four CLI
+/// FLAGS in any error, not the internal struct fields (MBA-1348 review fix I2) — see
+/// `require_angular_pair`'s own doc comment for why that distinction matters.
 fn require_hold_bounds(
     up: Option<f64>,
     down: Option<f64>,
     left: Option<f64>,
     right: Option<f64>,
 ) -> Result<Option<HoldBounds>, String> {
-    let fields = [
-        ("hold_bound_up_mil", up),
-        ("hold_bound_down_mil", down),
-        ("hold_bound_left_mil", left),
-        ("hold_bound_right_mil", right),
+    let flags = [
+        ("--hold-up", up),
+        ("--hold-down", down),
+        ("--hold-left", left),
+        ("--hold-right", right),
     ];
-    let set_count = fields.iter().filter(|(_, v)| v.is_some()).count();
+    let set_count = flags.iter().filter(|(_, v)| v.is_some()).count();
     if set_count == 0 {
         return Ok(None);
     }
     if set_count < 4 {
-        let missing: Vec<&str> = fields
+        let missing: Vec<&str> = flags
             .iter()
             .filter(|(_, v)| v.is_none())
             .map(|(name, _)| *name)
             .collect();
         return Err(format!(
-            "reticle hold bounds are incomplete — missing {} (all four hold_bound_*_mil \
-             fields are required together, or none)",
+            "reticle hold bounds are incomplete — missing {} (all four of --hold-up/\
+             --hold-down/--hold-left/--hold-right are required together, or none)",
             missing.join(", ")
         ));
     }
@@ -5174,6 +5213,30 @@ fn require_hold_bounds(
         left_mil: left.unwrap(),
         right_mil: right.unwrap(),
     }))
+}
+
+/// `profile save`'s carry-forward merge for one of the twelve turret/hold fields (MBA-1348
+/// review fix I1): an explicit `flag` always wins; otherwise `existing` (the value already
+/// on disk, if any) carries forward — UNLESS `clear_turret` (`--clear-turret`) was given,
+/// which wins over carry-forward. Mirrors `carried_reticle`'s three-way
+/// flag/clear/carry-forward treatment, generalized over `Copy` so the same function serves
+/// `f64` (the ten angular fields), `u32` (`clicks_per_revolution`), and `bool` (`zero_stop`)
+/// without hand-rolling the identical match twelve times.
+///
+/// Callers guarantee `flag.is_some() && clear_turret` never both hold for the SAME field by
+/// construction: `profile save` rejects `--clear-turret` combined with any of the twelve
+/// flags before this is ever called (see the mutual-exclusivity check in the `Save` match
+/// arm), so `clear_turret` here always implies every one of `flag`'s twelve call-site
+/// arguments is `None` already. The explicit `if clear_turret` branch below is still needed
+/// despite that: without it, `flag.or(existing)` would incorrectly resurrect `existing`'s
+/// stored value on a clear, since `flag` being `None` looks identical to "the user didn't
+/// mention this field" and "the user cleared it" from this function's point of view alone.
+fn carry_turret_field<T: Copy>(flag: Option<T>, existing: Option<T>, clear_turret: bool) -> Option<T> {
+    if clear_turret {
+        None
+    } else {
+        flag.or(existing)
+    }
 }
 
 impl ProfileData {
@@ -5325,25 +5388,25 @@ impl ProfileData {
         // skipped every one of these checks via the early `Ok(None)` return, silently
         // persisting an incomplete pair no downstream code could ever have used anyway).
         let elevation_travel = require_angular_pair(
-            "elevation_travel_up_mil",
+            "--travel-up",
             self.elevation_travel_up_mil,
-            "elevation_travel_down_mil",
+            "--travel-down",
             self.elevation_travel_down_mil,
         )?
         .map(|(up, down)| TravelLimits { up_mil: up, down_mil: down });
 
         let windage_travel = require_angular_pair(
-            "windage_travel_left_mil",
+            "--windage-travel-left",
             self.windage_travel_left_mil,
-            "windage_travel_right_mil",
+            "--windage-travel-right",
             self.windage_travel_right_mil,
         )?
         .map(|(left, right)| TravelLimits { down_mil: left, up_mil: right });
 
         let turret_state = require_angular_pair(
-            "turret_elevation_dialed_mil",
+            "--turret-elev",
             self.turret_elevation_dialed_mil,
-            "turret_windage_dialed_mil",
+            "--turret-wind",
             self.turret_windage_dialed_mil,
         )?
         .map(|(elevation_mil, windage_mil)| TurretState { elevation_mil, windage_mil });
@@ -5371,9 +5434,9 @@ impl ProfileData {
                 || reticle_hold_bounds.is_some()
             {
                 return Err(
-                    "turret/hold fields are set but elevation_click is not -- a turret \
+                    "turret/hold fields are set but --elevation-click is not -- a turret \
                      model needs a click graduation to be usable at all; set \
-                     --elevation-click (or clear the other fields)"
+                     --elevation-click, or pass --clear-turret to clear the other fields"
                         .to_string(),
                 );
             }
@@ -12357,6 +12420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     hold_right,
                     turret_elev,
                     turret_wind,
+                    clear_turret,
                 } => {
                     let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
                     let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
@@ -12412,8 +12476,134 @@ fn main() -> Result<(), Box<dyn Error>> {
                         (None, false) => existing_profile.as_ref().and_then(|p| p.reticle.clone()),
                     };
 
-                    // MBA-1355: validate click graduations at save time so a saved profile
-                    // can never store a value `resolve_click_values` would later reject.
+                    // MBA-1348 review fix I1: the twelve turret/hold fields are hardware
+                    // spec-sheet facts a shooter doesn't have memorized (clicks-per-rev,
+                    // travel, hold bounds, dialed state) — silently dropping them on every
+                    // unrelated re-save (a chrono update, a new lot's velocity) would be a
+                    // real data-loss footgun, exactly like DSF/reticle/CF/zero-sets above.
+                    // They now follow the SAME carry-forward contract: an explicit flag
+                    // wins, an omitted one carries the existing profile's value forward,
+                    // and `--clear-turret` (mutually exclusive with all twelve flags in the
+                    // same invocation, checked below) clears all twelve at once — a single
+                    // flag, not twelve individual `--clear-*` flags, since removing one
+                    // hardware fact while keeping the rest isn't a realistic workflow.
+                    let any_turret_flag_given = clicks_per_rev.is_some()
+                        || zero_stop.is_some()
+                        || travel_up.is_some()
+                        || travel_down.is_some()
+                        || windage_travel_left.is_some()
+                        || windage_travel_right.is_some()
+                        || hold_up.is_some()
+                        || hold_down.is_some()
+                        || hold_left.is_some()
+                        || hold_right.is_some()
+                        || turret_elev.is_some()
+                        || turret_wind.is_some();
+                    if clear_turret && any_turret_flag_given {
+                        let mut conflicting = Vec::new();
+                        if clicks_per_rev.is_some() {
+                            conflicting.push("--clicks-per-rev");
+                        }
+                        if zero_stop.is_some() {
+                            conflicting.push("--zero-stop");
+                        }
+                        if travel_up.is_some() {
+                            conflicting.push("--travel-up");
+                        }
+                        if travel_down.is_some() {
+                            conflicting.push("--travel-down");
+                        }
+                        if windage_travel_left.is_some() {
+                            conflicting.push("--windage-travel-left");
+                        }
+                        if windage_travel_right.is_some() {
+                            conflicting.push("--windage-travel-right");
+                        }
+                        if hold_up.is_some() {
+                            conflicting.push("--hold-up");
+                        }
+                        if hold_down.is_some() {
+                            conflicting.push("--hold-down");
+                        }
+                        if hold_left.is_some() {
+                            conflicting.push("--hold-left");
+                        }
+                        if hold_right.is_some() {
+                            conflicting.push("--hold-right");
+                        }
+                        if turret_elev.is_some() {
+                            conflicting.push("--turret-elev");
+                        }
+                        if turret_wind.is_some() {
+                            conflicting.push("--turret-wind");
+                        }
+                        return Err(format!(
+                            "--clear-turret and {} are mutually exclusive",
+                            conflicting.join(", ")
+                        )
+                        .into());
+                    }
+                    let existing_optic = existing_profile.as_ref();
+                    let carried_clicks_per_revolution = carry_turret_field(
+                        clicks_per_rev,
+                        existing_optic.and_then(|p| p.clicks_per_revolution),
+                        clear_turret,
+                    );
+                    let carried_zero_stop =
+                        carry_turret_field(zero_stop, existing_optic.and_then(|p| p.zero_stop), clear_turret);
+                    let carried_elevation_travel_up_mil = carry_turret_field(
+                        travel_up,
+                        existing_optic.and_then(|p| p.elevation_travel_up_mil),
+                        clear_turret,
+                    );
+                    let carried_elevation_travel_down_mil = carry_turret_field(
+                        travel_down,
+                        existing_optic.and_then(|p| p.elevation_travel_down_mil),
+                        clear_turret,
+                    );
+                    let carried_windage_travel_left_mil = carry_turret_field(
+                        windage_travel_left,
+                        existing_optic.and_then(|p| p.windage_travel_left_mil),
+                        clear_turret,
+                    );
+                    let carried_windage_travel_right_mil = carry_turret_field(
+                        windage_travel_right,
+                        existing_optic.and_then(|p| p.windage_travel_right_mil),
+                        clear_turret,
+                    );
+                    let carried_turret_elevation_dialed_mil = carry_turret_field(
+                        turret_elev,
+                        existing_optic.and_then(|p| p.turret_elevation_dialed_mil),
+                        clear_turret,
+                    );
+                    let carried_turret_windage_dialed_mil = carry_turret_field(
+                        turret_wind,
+                        existing_optic.and_then(|p| p.turret_windage_dialed_mil),
+                        clear_turret,
+                    );
+                    let carried_hold_bound_up_mil = carry_turret_field(
+                        hold_up,
+                        existing_optic.and_then(|p| p.hold_bound_up_mil),
+                        clear_turret,
+                    );
+                    let carried_hold_bound_down_mil = carry_turret_field(
+                        hold_down,
+                        existing_optic.and_then(|p| p.hold_bound_down_mil),
+                        clear_turret,
+                    );
+                    let carried_hold_bound_left_mil = carry_turret_field(
+                        hold_left,
+                        existing_optic.and_then(|p| p.hold_bound_left_mil),
+                        clear_turret,
+                    );
+                    let carried_hold_bound_right_mil = carry_turret_field(
+                        hold_right,
+                        existing_optic.and_then(|p| p.hold_bound_right_mil),
+                        clear_turret,
+                    );
+
+                    // MBA-1355: validate a NEWLY SUPPLIED click graduation at save time (a
+                    // carried-forward value below was already validated when first saved).
                     if let Some(ref v) = elevation_click {
                         parse_click_value(v)
                             .map_err(|e| format!("--elevation-click '{v}' is invalid: {e}"))?;
@@ -12422,6 +12612,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         parse_click_value(v)
                             .map_err(|e| format!("--windage-click '{v}' is invalid: {e}"))?;
                     }
+                    // MBA-1348 review fix I1: elevation_click/windage_click now ALSO carry
+                    // forward on an unrelated re-save (no --clear flag of their own — see
+                    // their help text) — the twelve fields above depend on a click
+                    // graduation existing at all (optic_profile()'s elevation_click gate),
+                    // so leaving just this one field pair on the old reset-on-omit contract
+                    // would silently break every carried-forward turret profile on its very
+                    // next unrelated re-save.
+                    let elevation_click = elevation_click
+                        .or_else(|| existing_optic.and_then(|p| p.elevation_click.clone()));
+                    let windage_click = windage_click
+                        .or_else(|| existing_optic.and_then(|p| p.windage_click.clone()));
 
                     let profile = ProfileData {
                         name: name.clone(),
@@ -12465,24 +12666,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                         windage_cf: carried_windage_cf,
                         zero_sets: carried_zero_sets,
                         reticle: carried_reticle,
-                        // MBA-1348: like elevation_click/windage_click above, these twelve
-                        // fields are a direct overwrite from this invocation's flags, not
-                        // carried forward from an existing profile -- omitting one of a
-                        // required pair on a later re-save resets it to None (validated
-                        // below), the same contract elevation_click/windage_click already
-                        // have.
-                        clicks_per_revolution: clicks_per_rev,
-                        zero_stop,
-                        elevation_travel_up_mil: travel_up,
-                        elevation_travel_down_mil: travel_down,
-                        windage_travel_left_mil: windage_travel_left,
-                        windage_travel_right_mil: windage_travel_right,
-                        turret_elevation_dialed_mil: turret_elev,
-                        turret_windage_dialed_mil: turret_wind,
-                        hold_bound_up_mil: hold_up,
-                        hold_bound_down_mil: hold_down,
-                        hold_bound_left_mil: hold_left,
-                        hold_bound_right_mil: hold_right,
+                        // MBA-1348 review fix I1: carry-forward, like every other field
+                        // above that this command cannot fully express standalone -- see
+                        // the `any_turret_flag_given`/`carry_turret_field` block above.
+                        clicks_per_revolution: carried_clicks_per_revolution,
+                        zero_stop: carried_zero_stop,
+                        elevation_travel_up_mil: carried_elevation_travel_up_mil,
+                        elevation_travel_down_mil: carried_elevation_travel_down_mil,
+                        windage_travel_left_mil: carried_windage_travel_left_mil,
+                        windage_travel_right_mil: carried_windage_travel_right_mil,
+                        turret_elevation_dialed_mil: carried_turret_elevation_dialed_mil,
+                        turret_windage_dialed_mil: carried_turret_windage_dialed_mil,
+                        hold_bound_up_mil: carried_hold_bound_up_mil,
+                        hold_bound_down_mil: carried_hold_bound_down_mil,
+                        hold_bound_left_mil: carried_hold_bound_left_mil,
+                        hold_bound_right_mil: carried_hold_bound_right_mil,
                     };
 
                     // MBA-1348: assemble + validate the optic profile (turret mechanics +
@@ -21404,7 +21602,7 @@ mod profile_unit_tests {
             ..metric_profile()
         };
         let err = profile.optic_profile().unwrap_err();
-        assert!(err.contains("elevation_click"), "{err}");
+        assert!(err.contains("--elevation-click"), "{err}");
     }
 
     /// The specific scenario the smoke test caught: a complete travel pair AND a
@@ -21421,7 +21619,7 @@ mod profile_unit_tests {
             ..metric_profile()
         };
         let err = profile.optic_profile().unwrap_err();
-        assert!(err.contains("elevation_click"), "{err}");
+        assert!(err.contains("--elevation-click"), "{err}");
     }
 
     /// The save-time guarantee (MBA-1348): a dialed turret state outside its own
@@ -21446,22 +21644,27 @@ mod profile_unit_tests {
 
     /// A travel pair set on only one side is a named-field `Err`, not a silent "0.0 on
     /// the other side" guess (see `require_angular_pair`'s own doc comment for why).
+    /// Names the FLAG the user would type (MBA-1348 review fix I2) -- `--travel-up`, not
+    /// the internal `elevation_travel_up_mil` struct field the flag maps onto -- since
+    /// that mapping drops the "elevation" axis prefix and isn't otherwise mechanical.
     #[test]
-    fn optic_profile_errors_naming_the_field_when_a_travel_pair_is_incomplete() {
+    fn optic_profile_errors_naming_the_flag_when_a_travel_pair_is_incomplete() {
         let profile = ProfileData {
             elevation_click: Some("0.1mil".to_string()),
             elevation_travel_up_mil: Some(10.0),
             ..metric_profile()
         };
         let err = profile.optic_profile().unwrap_err();
-        assert!(err.contains("elevation_travel_up_mil"), "{err}");
-        assert!(err.contains("elevation_travel_down_mil"), "{err}");
+        assert!(err.contains("--travel-up"), "{err}");
+        assert!(err.contains("--travel-down"), "{err}");
+        assert!(!err.contains("elevation_travel_up_mil"), "{err}");
     }
 
-    /// Same all-or-nothing rule for `HoldBounds`' four fields, naming every field still
-    /// missing (see `require_hold_bounds`).
+    /// Same all-or-nothing rule for `HoldBounds`' four fields, naming every FLAG still
+    /// missing (MBA-1348 review fix I2), not the internal struct fields (see
+    /// `require_hold_bounds`).
     #[test]
-    fn optic_profile_errors_naming_missing_fields_when_hold_bounds_are_incomplete() {
+    fn optic_profile_errors_naming_missing_flags_when_hold_bounds_are_incomplete() {
         let profile = ProfileData {
             elevation_click: Some("0.1mil".to_string()),
             hold_bound_up_mil: Some(4.0),
@@ -21469,8 +21672,9 @@ mod profile_unit_tests {
             ..metric_profile()
         };
         let err = profile.optic_profile().unwrap_err();
-        assert!(err.contains("hold_bound_down_mil"), "{err}");
-        assert!(err.contains("hold_bound_right_mil"), "{err}");
+        assert!(err.contains("--hold-down"), "{err}");
+        assert!(err.contains("--hold-right"), "{err}");
+        assert!(!err.contains("hold_bound_down_mil"), "{err}");
     }
 
     /// Another `OpticProfile::validate()` rule reachable through the save-time wiring
