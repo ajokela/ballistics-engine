@@ -1,0 +1,147 @@
+{
+  "compare": {
+    "conditions": {
+      "altitude": 0.0,
+      "humidity": 50.0,
+      "pressure": 29.92,
+      "sight_height": 1.5,
+      "temperature": 59.0,
+      "wind_direction": 90.0,
+      "wind_speed": 10.0,
+      "zero_distance": 100.0
+    },
+    "loads": [
+      {
+        "bc": 0.243,
+        "bc_segments": false,
+        "custom_drag_curve": false,
+        "diameter": 0.308,
+        "drag_model": "G7",
+        "mass": 175.0,
+        "name": "175 SMK",
+        "velocity": 2650.0,
+        "zero_angle_deg": 0.06522011034661776
+      },
+      {
+        "bc": 0.523,
+        "bc_segments": false,
+        "custom_drag_curve": false,
+        "diameter": 0.308,
+        "drag_model": "G7",
+        "mass": 168.0,
+        "name": "168 ELD-M",
+        "velocity": 2700.0,
+        "zero_angle_deg": 0.06268474412670902
+      }
+    ],
+    "rows": [
+      {
+        "loads": [
+          {
+            "delta_drift": 0.0,
+            "delta_drop": 0.0,
+            "delta_energy": 0.0,
+            "delta_velocity": 0.0,
+            "drift": -0.7346959881272611,
+            "drift_adj": -0.20408221892423922,
+            "drop": 0.0034898493594497366,
+            "drop_adj": 0.0009694025998471492,
+            "energy": 2361.2226211664047,
+            "name": "175 SMK",
+            "time": 0.11738199385238458,
+            "velocity": 2465.28061918723
+          },
+          {
+            "delta_drift": 0.4091883086269169,
+            "delta_drop": -0.0038751307321240234,
+            "delta_energy": 184.155527686632,
+            "delta_velocity": 147.11191019173475,
+            "drift": -0.3255076795003442,
+            "drift_adj": -0.09041879986120671,
+            "drop": -0.0003852813726742867,
+            "drop_adj": -0.0001070226035206352,
+            "energy": 2545.3781488530367,
+            "name": "168 ELD-M",
+            "time": 0.11296063825917373,
+            "velocity": 2612.392529378965
+          }
+        ],
+        "range": 100.0
+      },
+      {
+        "loads": [
+          {
+            "delta_drift": 0.0,
+            "delta_drop": 0.0,
+            "delta_energy": 0.0,
+            "delta_velocity": 0.0,
+            "drift": -3.042239514793471,
+            "drift_adj": -0.4225332659435376,
+            "drop": 4.230277284949063,
+            "drop_adj": 0.5875385117984809,
+            "energy": 2033.802122695031,
+            "name": "175 SMK",
+            "time": 0.24370053655437054,
+            "velocity": 2287.980095953069
+          },
+          {
+            "delta_drift": 1.7193104579071896,
+            "delta_drop": -0.6376537897174819,
+            "delta_energy": 346.64352924060177,
+            "delta_velocity": 238.35766010640646,
+            "drift": -1.3229290568862813,
+            "drift_adj": -0.1837401467897613,
+            "drop": 3.5926234952315808,
+            "drop_adj": 0.4989754854488307,
+            "energy": 2380.4456519356327,
+            "name": "168 ELD-M",
+            "time": 0.22973893637794132,
+            "velocity": 2526.3377560594754
+          }
+        ],
+        "range": 200.0
+      },
+      {
+        "loads": [
+          {
+            "delta_drift": 0.0,
+            "delta_drop": 0.0,
+            "delta_energy": 0.0,
+            "delta_velocity": 0.0,
+            "drift": -7.101734550082539,
+            "drift_adj": -0.6575680138965314,
+            "drop": 15.112224865673207,
+            "drop_adj": 1.3992800801549266,
+            "energy": 1743.5998823201753,
+            "name": "175 SMK",
+            "time": 0.3799732416978327,
+            "velocity": 2118.4650788856375
+          },
+          {
+            "delta_drift": 4.076045219579937,
+            "delta_drop": -2.4820368758321223,
+            "delta_energy": 480.3088823485955,
+            "delta_velocity": 323.39492019236377,
+            "drift": -3.0256893305026016,
+            "drift_adj": -0.2801564194909816,
+            "drop": 12.630187989841085,
+            "drop_adj": 1.1694618509112114,
+            "energy": 2223.908764668771,
+            "name": "168 ELD-M",
+            "time": 0.3505248064284449,
+            "velocity": 2441.8599990780012
+          }
+        ],
+        "range": 300.0
+      }
+    ],
+    "units": {
+      "adjustment": "MIL",
+      "distance": "yd",
+      "drop": "in",
+      "energy": "ft-lb",
+      "velocity": "fps",
+      "wind_speed": "mph"
+    }
+  }
+}

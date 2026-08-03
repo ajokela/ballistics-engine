@@ -1,0 +1,14 @@
+Load Comparison
+Zero: 100 yd | Wind: 10 mph @ 90° | Sight: 1.5 in | Alt: 0 ft
+
+  #1 175 SMK: G7 BC 0.243, 175 @ 2650 fps (dia 0.308)
+  #2 168 ELD-M: G7 BC 0.523, 168 @ 2700 fps (dia 0.308)
+
+   Range |          175 SMK           |         168 ELD-M          
+    (yd) |     Drop    Drift      Vel |     Drop    Drift      Vel 
+-------------------------------------------------------------------
+     100 |     0.00    -0.20     2465 |    -0.00    -0.09     2612 
+     200 |     0.59    -0.42     2288 |     0.50    -0.18     2526 
+     300 |     1.40    -0.66     2118 |     1.17    -0.28     2442 
+-------------------------------------------------------------------
+Drop/Drift in MIL (- is down/left), Vel in fps. Use -o json or -o csv for linear drop/drift (in), energy (ft-lb), time of flight, and deltas vs load #1.

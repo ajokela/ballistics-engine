@@ -19,7 +19,9 @@ mod pdf_dope_card;
 mod solve_json_command;
 // MBA-1355: parse_click_value/clicks_for/ClickValue power the CLI's click-graduation
 // flags (--elevation-click-value/--windage-click-value) and profile fields.
-use ballistics_engine::adjustment::{adjustment_factor, clicks_for, parse_click_value, ClickBase, ClickValue};
+use ballistics_engine::adjustment::{
+    adjustment_factor, clicks_for, parse_click_value, ClickBase, ClickValue, Quantized,
+};
 use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
 use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
@@ -6091,6 +6093,20 @@ fn resolve_click_values(
 /// `(true_need + bias) / CF`. `0.0` (no set selected) skips the addition entirely —
 /// bit-exact, byte-identical output (an unconditional `+ 0.0` would flip a `-0.0`
 /// angular value to `+0.0` and change rendered bytes).
+///
+/// The plain scalar every call site prints, plus — on the clicks arm only — the
+/// quantization detail (Plan B Task 2). `value` is unchanged by this split: the clicks
+/// arm's `value` is still the whole-click count as an `f64`, the angular arm's is still
+/// the plain angle. `quantized` carries the sub-click `residual` (`Quantized`, see
+/// `ballistics_engine::adjustment`) so a caller that needs it doesn't have to
+/// re-derive the click math a second time; `None` on the angular arm, where nothing is
+/// quantized.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AdjustmentDisplay {
+    value: f64,
+    quantized: Option<Quantized>,
+}
+
 fn adjustment_display(
     drop_yd: f64,
     range_yd: f64,
@@ -6098,20 +6114,33 @@ fn adjustment_display(
     click: Option<ClickValue>,
     bias_mil: f64,
     cf: f64,
-) -> f64 {
+) -> AdjustmentDisplay {
     match click {
         // Clicks convert from RAW drop (not from the angular value above), so the CF is
         // applied to the input drop — correcting the angle before click quantization.
         // The zero-set bias joins as its drop-equivalent at this range (1 mil =
         // range/1000), keeping the ordering: (true + bias) first, / CF second, then
-        // quantize into whole clicks.
+        // quantize into whole clicks. This is the one boundary where bias, CF, and
+        // quantization compose — the order is load-bearing (see
+        // `zero_set_bias_applies_before_the_cf_division` and
+        // `clicks_arm_order_of_operations_is_load_bearing` below) and must not move.
         Some(c) => {
             let biased_drop_yd = if bias_mil != 0.0 {
                 drop_yd + bias_mil / 1000.0 * range_yd
             } else {
                 drop_yd
             };
-            clicks_for(biased_drop_yd / cf, range_yd, &c) as f64
+            let drop_for_clicks = biased_drop_yd / cf;
+            // Inlined from `clicks_for` (guard, then angle formula) so this boundary can
+            // quantize once and keep the residual, instead of calling `clicks_for` and
+            // throwing the sub-click remainder away.
+            if range_yd < 1.0 {
+                AdjustmentDisplay { value: 0.0, quantized: Some(Quantized { clicks: 0, residual: 0.0 }) }
+            } else {
+                let angle = (drop_for_clicks / range_yd) * adjustment_factor(c.base);
+                let q = ballistics_engine::adjustment::quantize_angle(angle, &c);
+                AdjustmentDisplay { value: q.clicks as f64, quantized: Some(q) }
+            }
         }
         None => {
             let true_need = drop_to_adjustment(drop_yd, range_yd, unit);
@@ -6124,7 +6153,7 @@ fn adjustment_display(
             } else {
                 true_need
             };
-            biased / cf
+            AdjustmentDisplay { value: biased / cf, quantized: None }
         }
     }
 }
@@ -6165,7 +6194,7 @@ fn windage_adjustment_display(
     windage_click: Option<ClickValue>,
     windage_bias_mil: f64,
     windage_cf: f64,
-) -> f64 {
+) -> AdjustmentDisplay {
     let click = if windage_unit == AdjustmentUnit::Clicks {
         windage_click
     } else {
@@ -14002,11 +14031,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         // Drop/Wind columns here (total-correction dials); the Lead
                         // column is a COMPONENT hold (composed on top of the wind dial,
                         // which already carries the bias) so it stays bias-free.
-                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf),
+                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value,
                         // Wind: positive = dial right for wind from right
-                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf),
+                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value,
                         // Lead for a moving target (a dialed quantity — the windage CF divides it, MBA-1358)
-                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf),
+                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf).value,
                     }
                 })
                 .collect();
@@ -17898,7 +17927,8 @@ fn handle_come_ups(
                     elevation_click,
                     zero_set_elevation_bias_mil,
                     elevation_cf,
-                );
+                )
+                .value;
                 let come_up = drop_adj - prev_drop_adj;
 
                 rows.push(ComeUpRow {
@@ -19144,6 +19174,7 @@ fn handle_wind_card(
                             zero_set_windage_bias_mil,
                             windage_cf,
                         )
+                        .value
                     } else {
                         0.0
                     }
@@ -19658,7 +19689,7 @@ fn handle_range_table(
                 };
 
                 let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf);
+                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value;
 
                 let wind_linear = match units {
                     UnitSystem::Imperial => w.wind_drift_m / 0.0254,
@@ -19666,7 +19697,7 @@ fn handle_range_table(
                 };
 
                 let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf);
+                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value;
 
                 rows.push(RangeRow {
                     range: current_range,
@@ -20055,13 +20086,13 @@ fn handle_compare(
             let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
             // MBA-1360: compare has no --zero-set (multiple loads, no single profile to
             // look a set up in — the MBA-1358 flag-only precedent), so its bias is 0.0.
-            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, 0.0, elevation_cf);
+            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, 0.0, elevation_cf).value;
             let wind_linear = match units {
                 UnitSystem::Imperial => w.wind_drift_m / 0.0254,
                 UnitSystem::Metric => w.wind_drift_m * 1000.0,
             };
             let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, 0.0, windage_cf);
+            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, 0.0, windage_cf).value;
             rows.push(LoadRow {
                 drop_linear,
                 drop_adj,
@@ -20953,7 +20984,7 @@ mod profile_unit_tests {
 
         let cf = 0.95;
         let bias = 0.25;
-        let got = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Mil, None, bias, cf);
+        let got = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Mil, None, bias, cf).value;
         assert!(
             ((got - (base + bias) / cf).abs()) < 1e-12,
             "expected (true + bias)/cf, got {got}"
@@ -20962,7 +20993,7 @@ mod profile_unit_tests {
         assert!((got - (base / cf + bias)).abs() > 1e-3);
 
         // MOA arm gets the same ANGULAR correction, rescaled through the shared factors.
-        let moa = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Moa, None, bias, cf);
+        let moa = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Moa, None, bias, cf).value;
         let base_moa = drop_to_adjustment(drop_yd, range_yd, AdjustmentUnit::Moa);
         let expected_moa = (base_moa + bias * 3.438) / cf;
         assert!((moa - expected_moa).abs() < 1e-12, "moa = {moa}");
@@ -20976,13 +21007,106 @@ mod profile_unit_tests {
             Some(click),
             bias,
             cf,
-        );
+        )
+        .value;
         let expected_clicks = (((base + bias) / cf) / 0.1).round();
         assert_eq!(clicks, expected_clicks);
 
         // Zero bias is an exact no-op on every arm.
-        let none = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Mil, None, 0.0, cf);
+        let none = adjustment_display(drop_yd, range_yd, AdjustmentUnit::Mil, None, 0.0, cf).value;
         assert_eq!(none.to_bits(), (base / cf).to_bits());
+    }
+
+    /// Delegation-equivalence pin (Plan B Task 2): the clicks arm of `adjustment_display`
+    /// now INLINES `clicks_for`'s own guard + angle formula (so it can keep the residual)
+    /// instead of calling it — this must not drift from `clicks_for` itself. Checked
+    /// across several inputs, including a sub-1-yard range that exercises the short-range
+    /// guard (0 clicks).
+    #[test]
+    fn adjustment_display_clicks_arm_delegates_to_clicks_for() {
+        let mil = parse_click_value("0.1mil").unwrap();
+        let quarter_moa = parse_click_value("0.25moa").unwrap();
+        // (drop_yd, range_yd, unit, click, bias_mil, cf)
+        let cases = [
+            (0.2, 200.0, AdjustmentUnit::Clicks, mil, 0.0, 1.0),
+            (0.2, 200.0, AdjustmentUnit::Clicks, mil, 0.25, 0.95),
+            (-0.37, 300.0, AdjustmentUnit::Clicks, quarter_moa, 0.0, 1.0),
+            (1.6, 400.0, AdjustmentUnit::Clicks, quarter_moa, -0.5, 1.05),
+            // sub-1-yard range: clicks_for's own guard, independent of bias/cf.
+            (10.0, 0.5, AdjustmentUnit::Clicks, mil, 1.0, 0.5),
+        ];
+        for (drop_yd, range_yd, unit, click, bias_mil, cf) in cases {
+            let got = adjustment_display(drop_yd, range_yd, unit, Some(click), bias_mil, cf).value;
+            let biased_drop_yd = if bias_mil != 0.0 {
+                drop_yd + bias_mil / 1000.0 * range_yd
+            } else {
+                drop_yd
+            };
+            let want = clicks_for(biased_drop_yd / cf, range_yd, &click) as f64;
+            assert_eq!(got, want, "drop_yd={drop_yd} range_yd={range_yd} bias_mil={bias_mil} cf={cf}");
+        }
+    }
+
+    /// Order-sensitivity pin (Plan B Task 2) -- THE load-bearing invariant: bias joins the
+    /// drop-equivalent FIRST, the tracking CF divides SECOND, and quantization to whole
+    /// clicks happens THIRD. Reordering bias/CF changes which click the result rounds to,
+    /// so this input is deliberately chosen to be sensitive to that order (a refactor that
+    /// silently swaps the order will fail this test, not just move a number slightly).
+    ///
+    /// Hand derivation, following the actual drop-space formula (bias joins as a
+    /// drop-equivalent before the CF division, matching the code -- see
+    /// `adjustment_display`'s clicks arm): drop_yd = 0.6, range_yd = 100.0, bias_mil =
+    /// 1.0, cf = 0.5, click = 0.1mil.
+    /// - CORRECT order (bias first, then /CF, then quantize): `biased_drop_yd = drop_yd +
+    ///   bias_mil/1000*range_yd = 0.6 + 0.1 = 0.7`; `drop_for_clicks = biased_drop_yd/cf =
+    ///   0.7/0.5 = 1.4`; `angle = drop_for_clicks/range_yd * 1000 = 1.4/100*1000`, which in
+    ///   f64 is `13.999999999999998` (not exactly 14.0 -- ordinary floating-point
+    ///   representation error from this particular chain of divisions, not a bug) ->
+    ///   `clicks = round(angle / 0.1) = round(139.99999999999997) = 140`.
+    /// - WRONG order (CF divides only the pre-bias angle, bias added unscaled after -- the
+    ///   bug this guards against): `base = drop_yd/range_yd * 1000 = 6.0` mil exactly ->
+    ///   `angle_wrong = base/cf + bias_mil = 6.0/0.5 + 1.0 = 13.0` mil exactly ->
+    ///   `clicks_wrong = round(13.0 / 0.1) = 130`.
+    /// - The two orders disagree by `bias_mil * (1/cf - 1) = 1.0 * 1.0 = 1.0` mil == 10
+    ///   clicks (140 vs 130) -- a full 10-click miss, not a rounding-boundary artifact, so
+    ///   ordinary float noise cannot make the two orders coincide here. The residual is
+    ///   correspondingly NOT exactly 0.0 (it inherits that same ~1.8e-15 deviation from
+    ///   14.0); the reconstruction assertion below checks it bit-exactly rather than
+    ///   asserting a specific value.
+    #[test]
+    fn clicks_arm_order_of_operations_is_load_bearing() {
+        let click = parse_click_value("0.1mil").unwrap();
+        let (drop_yd, range_yd, bias_mil, cf) = (0.6, 100.0, 1.0, 0.5);
+
+        let result = adjustment_display(
+            drop_yd,
+            range_yd,
+            AdjustmentUnit::Clicks,
+            Some(click),
+            bias_mil,
+            cf,
+        );
+
+        assert_eq!(result.value, 140.0, "expected the bias-then-CF order's 140 clicks");
+        let wrong_order_clicks = {
+            let base = (drop_yd / range_yd) * adjustment_factor(ClickBase::Mil);
+            let angle_wrong = base / cf + bias_mil;
+            (angle_wrong / click.size).round()
+        };
+        assert_eq!(wrong_order_clicks, 130.0, "sanity: the wrong order really does diverge");
+        assert_ne!(result.value, wrong_order_clicks);
+
+        // Bit-exact reconstruction: clicks*size + residual == the angle actually
+        // quantized (recomputed independently here, the same way the boundary derives it).
+        let q = result.quantized.expect("clicks arm always returns Some(Quantized)");
+        assert_eq!(q.clicks, 140);
+        let biased_drop_yd = drop_yd + bias_mil / 1000.0 * range_yd;
+        let angle = (biased_drop_yd / cf / range_yd) * adjustment_factor(ClickBase::Mil);
+        assert_eq!(
+            (q.clicks as f64 * click.size + q.residual).to_bits(),
+            angle.to_bits(),
+            "clicks*size + residual must reconstruct the quantized angle bit-exactly"
+        );
     }
 }
 

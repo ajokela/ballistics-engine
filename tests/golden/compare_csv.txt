@@ -1,0 +1,4 @@
+range_yd,175 SMK_drop_in,175 SMK_drop_MIL,175 SMK_drift_in,175 SMK_drift_MIL,175 SMK_velocity_fps,175 SMK_energy_ft-lb,175 SMK_tof_s,168 ELD-M_drop_in,168 ELD-M_drop_MIL,168 ELD-M_drift_in,168 ELD-M_drift_MIL,168 ELD-M_velocity_fps,168 ELD-M_energy_ft-lb,168 ELD-M_tof_s
+100,0.00,0.00,-0.73,-0.20,2465,2361,0.117,-0.00,-0.00,-0.33,-0.09,2612,2545,0.113
+200,4.23,0.59,-3.04,-0.42,2288,2034,0.244,3.59,0.50,-1.32,-0.18,2526,2380,0.230
+300,15.11,1.40,-7.10,-0.66,2118,1744,0.380,12.63,1.17,-3.03,-0.28,2442,2224,0.351
