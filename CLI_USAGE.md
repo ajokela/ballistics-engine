@@ -3098,11 +3098,12 @@ estimates, table/CSV text, and JSON schema remain compatible.
 ### Solution Diff Attribution (`explain`) — MBA-1345
 
 `explain`, `error-budget`, and `tolerance` (below) are a small analysis train built on the same
-shared perturbation kernel, and are the first CLI surfaces whose PRIMARY input is a
-[solve-json v1](docs/SOLVE_JSON_V1.md) request file rather than `-v`/`-b`/`-m`/`-d` flags -- a
-plain JSON document, explicit SI units throughout, that fully describes one firing solution. You
-author one by hand (or generate it from another tool); `ballistics solve-json < request.json`
-will solve one standalone and echo back the resolved values if you want to sanity-check it first.
+shared perturbation kernel. Like `solve-json`, these take a
+[solve-json v1](docs/SOLVE_JSON_V1.md) request file as their primary input rather than
+`-v`/`-b`/`-m`/`-d` flags -- a plain JSON document, explicit SI units throughout, that fully
+describes one firing solution. You author one by hand (or generate it from another tool);
+`ballistics solve-json < request.json` will solve one standalone and echo back the resolved
+values if you want to sanity-check it first.
 
 `explain` answers a question none of this crate's other commands do: not "what does this load
 do," but *why do two solved requests disagree*. It resolves `--a` and `--b` independently and
