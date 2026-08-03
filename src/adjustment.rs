@@ -7,17 +7,16 @@
 //! table; `main.rs` maps its own `AdjustmentUnit` onto `ClickBase`/`adjustment_factor`
 //! locally (see `drop_to_adjustment` in `main.rs`).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Angular base unit for a turret click graduation (MBA-1355). A click graduation is
 /// always expressed in mil, (true) MOA, or SMOA/IPHY — never in whole clicks itself.
 ///
-/// Serialized lowercase (`"mil"` / `"moa"` / `"smoa"`), matching `parse_click_value`'s
-/// suffix vocabulary and this crate's convention for unit-like enums (e.g.
-/// `crate::truing::DropUnit`) — added for `crate::optic::OpticProfile` (MBA-1348), which
-/// embeds a `ClickValue` per turret and needs it to round-trip through JSON.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Does not itself derive `Serialize`/`Deserialize`: `ClickValue` serializes as ONE
+/// suffixed string (`"0.1mil"`, `"0.25moa"`, ...) via its own hand-written impls below,
+/// not as a structural `{size, base}` object, so nothing needs this type's wire form on
+/// its own (MBA-1348).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClickBase {
     Mil,
     Moa,
@@ -39,7 +38,7 @@ pub fn adjustment_factor(base: ClickBase) -> f64 {
 
 /// A turret click graduation, parsed from suffixed CLI/profile syntax
 /// like "0.1mil" / "0.25moa" / "0.125smoa" (MBA-1355).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClickValue {
     pub size: f64,
     pub base: ClickBase,
@@ -71,6 +70,43 @@ pub fn parse_click_value(s: &str) -> Result<ClickValue, String> {
         return Err(format!("click value '{s}' must be a positive, finite graduation"));
     }
     Ok(ClickValue { size, base })
+}
+
+/// Serializes as the crate's one existing suffixed-string representation — `"0.1mil"`,
+/// `"0.25moa"`, `"1smoa"` — the exact shape `parse_click_value` parses and a CLI
+/// `--elevation-click` flag already accepts (MBA-1348). Deliberately NOT the structural
+/// `{"size": 0.1, "base": "mil"}` a plain derive would produce: the string form is stable
+/// against internal field changes and makes a profile file's click entries identical to
+/// the CLI flag syntax a shooter already types. `size` uses `f64`'s default `Display`,
+/// which is Rust's shortest string that round-trips back to the same value (so `1.0`
+/// prints as `"1"`, matching `parse_click_value`'s own accepted syntax).
+impl Serialize for ClickValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let suffix = match self.base {
+            ClickBase::Mil => "mil",
+            ClickBase::Moa => "moa",
+            ClickBase::Smoa => "smoa",
+        };
+        let size = self.size;
+        serializer.serialize_str(&format!("{size}{suffix}"))
+    }
+}
+
+/// Deserializes via `parse_click_value` — the ONLY parser for this syntax, not a second,
+/// divergent implementation of it — so a malformed string is rejected with the identical
+/// message the CLI already gives, and `parse_click_value`'s positive-and-finite rule
+/// applies on every deserialize (MBA-1348).
+impl<'de> Deserialize<'de> for ClickValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        parse_click_value(&raw).map_err(serde::de::Error::custom)
+    }
 }
 
 /// One quantized dial setting: the detent count nearest `angle`, and what remains.
@@ -230,5 +266,47 @@ mod tests {
         assert_eq!(click_size_mil(&moa), 0.25 * 1000.0 / 3438.0);
         let mil = ClickValue { size: 0.1, base: ClickBase::Mil };
         assert_eq!(click_size_mil(&mil), 0.1);
+    }
+
+    // MBA-1348: ClickValue's JSON wire form is the same suffixed string
+    // `parse_click_value` already parses, not a structural `{size, base}` object.
+    #[test]
+    fn click_value_json_is_pinned_to_the_suffixed_string() {
+        let quarter_moa = ClickValue { size: 0.25, base: ClickBase::Moa };
+        assert_eq!(serde_json::to_string(&quarter_moa).unwrap(), "\"0.25moa\"");
+
+        let tenth_mil = ClickValue { size: 0.1, base: ClickBase::Mil };
+        assert_eq!(serde_json::to_string(&tenth_mil).unwrap(), "\"0.1mil\"");
+
+        // A whole-number size prints without a trailing ".0" -- `f64`'s shortest Display.
+        let one_smoa = ClickValue { size: 1.0, base: ClickBase::Smoa };
+        assert_eq!(serde_json::to_string(&one_smoa).unwrap(), "\"1smoa\"");
+    }
+
+    #[test]
+    fn click_value_round_trips_through_json_including_smoa() {
+        let cases = [
+            ClickValue { size: 0.1, base: ClickBase::Mil },
+            ClickValue { size: 0.25, base: ClickBase::Moa },
+            ClickValue { size: 1.0, base: ClickBase::Smoa },
+            ClickValue { size: 0.125, base: ClickBase::Smoa },
+        ];
+        for click in cases {
+            let json = serde_json::to_string(&click).unwrap();
+            let parsed: ClickValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, click, "round trip broke for {json}");
+        }
+    }
+
+    #[test]
+    fn click_value_deserialize_rejects_what_parse_click_value_rejects() {
+        // The Deserialize impl IS parse_click_value -- a non-positive or malformed
+        // string must fail to deserialize exactly as it fails to parse.
+        for bad in ["\"0mil\"", "\"-0.1mil\"", "\"0.25\"", "\"nonsense\""] {
+            assert!(
+                serde_json::from_str::<ClickValue>(bad).is_err(),
+                "{bad} must be rejected"
+            );
+        }
     }
 }

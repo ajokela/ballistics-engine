@@ -65,11 +65,14 @@ use crate::adjustment::ClickValue;
 /// (`clicks_per_revolution`, `elevation_travel`, `windage_travel`, `turret_state`) are in
 /// DIAL-space; `reticle_hold_bounds` is TRUE angular. See the module docs for what that
 /// distinction means and why it matters.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpticProfile {
     /// Elevation turret's click graduation (its engraved size, e.g. 0.1 mil or 1/4 MOA).
+    /// Serializes as `crate::adjustment::ClickValue`'s own suffixed string (`"0.1mil"`),
+    /// not a structural object. `validate` requires a positive size.
     pub elevation_click: ClickValue,
-    /// Windage turret's click graduation.
+    /// Windage turret's click graduation. Same serialized form and `validate` rule as
+    /// `elevation_click`.
     pub windage_click: ClickValue,
     /// Click detents per full turret revolution, for turrets whose cap marks revolutions
     /// at all (many hunting turrets do not, hence `Option`). Must be at least 1 when
@@ -99,7 +102,7 @@ pub struct OpticProfile {
 /// zero: `down_mil` is travel available going down (elevation) or left (windage);
 /// `up_mil` is travel available going up (elevation) or right (windage). `validate`
 /// rejects negative and non-finite values.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TravelLimits {
     pub down_mil: f64,
     pub up_mil: f64,
@@ -111,7 +114,7 @@ pub struct TravelLimits {
 /// side of zero), so `validate` does not reject a negative value on its own — it only
 /// rejects a state whose magnitude on an axis exceeds that axis's declared
 /// `TravelLimits`, when both are present.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurretState {
     pub elevation_mil: f64,
     pub windage_mil: f64,
@@ -128,7 +131,7 @@ pub struct TurretState {
 /// be drawn with marks stopping well short of where the image circle actually vignettes,
 /// or drawn past it. Treating one as a proxy for the other would silently misstate how
 /// far a shooter can actually hold.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HoldBounds {
     pub up_mil: f64,
     pub down_mil: f64,
@@ -145,6 +148,12 @@ pub enum OpticError {
     /// A travel or hold-bound magnitude was negative.
     #[error("{field} must not be negative (got {value})")]
     NegativeLimit { field: &'static str, value: f64 },
+    /// A click graduation's `size` was zero or negative. `ClickValue`'s fields are `pub`,
+    /// so this is reachable by direct construction even though `parse_click_value`
+    /// (`crate::adjustment`) already excludes it on every string-parsed or deserialized
+    /// click — see that function and `ClickValue`'s `Deserialize` impl.
+    #[error("{field} must be a positive click size (got {size})")]
+    NonPositiveClickSize { field: &'static str, size: f64 },
     /// `clicks_per_revolution` was `Some(0)`. Zero clicks is not a revolution.
     #[error("clicks_per_revolution must be at least 1 when present, got 0")]
     ZeroClicksPerRevolution,
@@ -163,17 +172,21 @@ pub enum OpticError {
 }
 
 impl OpticProfile {
-    /// Checks internal consistency: every angular field is finite, every travel/hold-bound
-    /// magnitude is non-negative, `clicks_per_revolution` is a sane count, and — when both
-    /// are present — `turret_state` lies within `elevation_travel` / `windage_travel`.
+    /// Checks internal consistency: every angular field is finite, both click sizes are
+    /// positive, every travel/hold-bound magnitude is non-negative, `clicks_per_revolution`
+    /// is a sane count, and — when both are present — `turret_state` lies within
+    /// `elevation_travel` / `windage_travel`.
     ///
     /// This cannot and does not check that the profile matches any real, physical scope;
     /// it only rejects shapes that are self-contradictory or would corrupt downstream
     /// arithmetic (a zero-length revolution, NaN propagation, a dialed state the turret
-    /// could not physically reach given its own declared travel).
+    /// could not physically reach given its own declared travel, or a zero/negative click
+    /// size that would turn a later `quantize_angle` division into infinity or NaN).
     pub fn validate(&self) -> Result<(), OpticError> {
         require_finite("elevation_click.size", self.elevation_click.size)?;
+        require_positive_click_size("elevation_click.size", self.elevation_click.size)?;
         require_finite("windage_click.size", self.windage_click.size)?;
+        require_positive_click_size("windage_click.size", self.windage_click.size)?;
 
         if self.clicks_per_revolution == Some(0) {
             return Err(OpticError::ZeroClicksPerRevolution);
@@ -234,6 +247,19 @@ fn require_non_negative(field: &'static str, value: f64) -> Result<(), OpticErro
         Ok(())
     } else {
         Err(OpticError::NegativeLimit { field, value })
+    }
+}
+
+/// `size` must be strictly positive (a zero or negative click graduation is meaningless
+/// and would make `quantize_angle`'s `angle / click.size` divide by zero or flip sign).
+/// Callers must check finiteness first, for the same reason as `require_non_negative`:
+/// `NaN > 0.0` is `false`, so this alone would misreport a non-finite size as merely
+/// non-positive.
+fn require_positive_click_size(field: &'static str, size: f64) -> Result<(), OpticError> {
+    if size > 0.0 {
+        Ok(())
+    } else {
+        Err(OpticError::NonPositiveClickSize { field, size })
     }
 }
 
@@ -408,6 +434,42 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_non_positive_click_size() {
+        // `ClickValue`'s fields are `pub`, so a zero or negative size is reachable by
+        // direct construction even though `parse_click_value` already excludes it.
+        for bad_size in [0.0, -0.1] {
+            let mut elevation_bad = baseline_profile();
+            elevation_bad.elevation_click.size = bad_size;
+            assert!(
+                matches!(
+                    elevation_bad.validate(),
+                    Err(OpticError::NonPositiveClickSize { field: "elevation_click.size", size })
+                        if size == bad_size
+                ),
+                "size {bad_size}: {:?}",
+                elevation_bad.validate()
+            );
+
+            let mut windage_bad = baseline_profile();
+            windage_bad.windage_click.size = bad_size;
+            assert!(
+                matches!(
+                    windage_bad.validate(),
+                    Err(OpticError::NonPositiveClickSize { field: "windage_click.size", size })
+                        if size == bad_size
+                ),
+                "size {bad_size}: {:?}",
+                windage_bad.validate()
+            );
+        }
+
+        // Fencepost: a very small but positive size is accepted.
+        let mut tiny = baseline_profile();
+        tiny.elevation_click.size = f64::MIN_POSITIVE;
+        assert_eq!(tiny.validate(), Ok(()));
+    }
+
+    #[test]
     fn validate_rejects_non_finite_fields() {
         type Mutator = fn(&mut OpticProfile);
         let cases: &[(&str, Mutator)] = &[
@@ -543,5 +605,73 @@ mod tests {
         assert_eq!(revolution_annotation(0, 0), None);
         assert_eq!(revolution_annotation(5, 0), None);
         assert_eq!(revolution_annotation(-5, 0), None);
+    }
+
+    // MBA-1348: OpticProfile's JSON wire form -- Task 5 stores this in profiles, so its
+    // shape (including how absent turret data is represented) is pinned here, not left
+    // to whatever serde's defaults happen to produce.
+    #[test]
+    fn optic_profile_round_trips_through_json() {
+        let profile = baseline_profile();
+        let json = serde_json::to_string(&profile).unwrap();
+        let parsed: OpticProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, profile);
+    }
+
+    #[test]
+    fn optic_profile_json_pins_click_fields_to_the_suffixed_string() {
+        let profile = baseline_profile();
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["elevation_click"], serde_json::json!("0.1mil"));
+        assert_eq!(json["windage_click"], serde_json::json!("0.1mil"));
+    }
+
+    #[test]
+    fn optic_profile_json_pins_option_field_presence_and_absence() {
+        // Every optional field is `Some` in the baseline profile: present as its real
+        // value, not omitted.
+        let present = serde_json::to_value(baseline_profile()).unwrap();
+        for field in [
+            "clicks_per_revolution",
+            "elevation_travel",
+            "windage_travel",
+            "turret_state",
+            "reticle_hold_bounds",
+        ] {
+            let value = &present[field];
+            assert!(
+                !value.is_null(),
+                "{field} should be present as a real value in the baseline profile, got {value:?}"
+            );
+        }
+
+        // `None` serializes as an explicit JSON `null` -- there is no
+        // `#[serde(skip_serializing_if = "Option::is_none")]` on this type, so a `None`
+        // field key is still PRESENT in the object, just null-valued, not omitted.
+        let mut profile = baseline_profile();
+        profile.clicks_per_revolution = None;
+        profile.elevation_travel = None;
+        profile.windage_travel = None;
+        profile.turret_state = None;
+        profile.reticle_hold_bounds = None;
+        let absent = serde_json::to_value(&profile).unwrap();
+        for field in [
+            "clicks_per_revolution",
+            "elevation_travel",
+            "windage_travel",
+            "turret_state",
+            "reticle_hold_bounds",
+        ] {
+            assert_eq!(
+                absent.get(field),
+                Some(&serde_json::Value::Null),
+                "{field} should be a present-but-null key, not an omitted one"
+            );
+        }
+
+        // And the None-shaped profile still round-trips.
+        let json = serde_json::to_string(&profile).unwrap();
+        let parsed: OpticProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, profile);
     }
 }
