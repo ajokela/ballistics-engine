@@ -130,6 +130,18 @@ pub enum KernelError {
     /// there are two). `KernelError` had not shipped on any released version when this variant
     /// was added, so there is no compatibility concern in extending it.
     DuplicateAxis(InputAxis),
+    /// The domain supplied to `crate::tolerance::tolerance_envelope` for one axis is missing, or
+    /// does not have the shape a one-variable bisection needs: both bounds finite, the lower
+    /// bound strictly less than the upper, and the axis's own current value strictly between
+    /// them. A domain where the current value sits AT (not strictly inside) one edge would make
+    /// that search direction a zero-width probe -- `bisect_axis` would report `Ok(None)` for it
+    /// (the two identical endpoints trivially agree), and that `None` would be indistinguishable
+    /// from a genuine "stays inside throughout" result even though nothing beyond the current
+    /// value was ever actually searched. 0.33.0 decision-support Task 12 (MBA-1350): never
+    /// constructed by `with_axis`/`evaluate`/`bisect_axis` themselves -- `tolerance_envelope`
+    /// validates its own domain argument up front, before any solve, the same way
+    /// `crate::error_budget::error_budget` validates its `ranges_m`/`sources` arguments.
+    InvalidDomain { axis: InputAxis, reason: &'static str },
 }
 
 impl std::fmt::Display for KernelError {
@@ -153,6 +165,9 @@ impl std::fmt::Display for KernelError {
             ),
             KernelError::DuplicateAxis(a) => {
                 write!(f, "axis {a:?} was declared more than once")
+            }
+            KernelError::InvalidDomain { axis, reason } => {
+                write!(f, "invalid tolerance-envelope domain for axis {axis:?}: {reason}")
             }
         }
     }

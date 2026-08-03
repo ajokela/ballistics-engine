@@ -356,13 +356,26 @@ struct Entry {
 ///
 /// `Some` for the four structural refusals this module's doc names explicitly
 /// (`AxisUnsupportedForRequest`, `AxisAbsent`, `CategoricalAxis`, `StepOutOfDomain`); `None` for
-/// everything else (`Solve`, `Observation`, `TypeMismatch`, `NonFinite`, `DuplicateAxis`), which
-/// the caller must propagate. Exhaustive over every `KernelError` variant with no wildcard arm,
-/// so a future variant fails to compile here until it is explicitly placed in one bucket or the
-/// other -- this is what forced `DuplicateAxis` to be classified here even though
-/// `error_budget`'s own up-front validation constructs and returns it directly, never through
-/// `central_difference` at all.
-fn unavailable_reason(e: &KernelError) -> Option<(UnavailableReasonCodeV1, String)> {
+/// everything else (`Solve`, `Observation`, `TypeMismatch`, `NonFinite`, `DuplicateAxis`,
+/// `InvalidDomain`), which the caller must propagate. Exhaustive over every `KernelError` variant
+/// with no wildcard arm, so a future variant fails to compile here until it is explicitly placed
+/// in one bucket or the other -- this is what forced `DuplicateAxis` to be classified here even
+/// though `error_budget`'s own up-front validation constructs and returns it directly, never
+/// through `central_difference` at all.
+///
+/// `pub(crate)` (0.33.0 decision-support Task 12, MBA-1350): `crate::tolerance::tolerance_envelope`
+/// reuses this SAME classification verbatim (including its exact reason text) for the identical
+/// four `bisect_axis`/`with_axis` refusals, rather than defining a second, independently
+/// maintained copy of the same four-way split -- a future `KernelError` variant now only needs
+/// to be placed in one bucket here, once, for both features to agree on it. Two of the four
+/// reason strings below read as if written for differentiation/uncertainty specifically
+/// (`CategoricalAxis`'s "cannot be assigned a one-sigma uncertainty or differentiated" and
+/// `StepOutOfDomain`'s "central differencing needs to perturb..."); `tolerance_envelope` never
+/// actually reaches `StepOutOfDomain` (`bisect_axis` cannot produce it -- only
+/// `central_difference` can), and accepts the `CategoricalAxis` wording being slightly
+/// off-context (still true and informative) as the cost of sharing one classifier rather than
+/// forking it.
+pub(crate) fn unavailable_reason(e: &KernelError) -> Option<(UnavailableReasonCodeV1, String)> {
     match e {
         KernelError::AxisUnsupportedForRequest { reason, .. } => {
             Some((UnavailableReasonCodeV1::AxisUnsupportedForRequest, reason.to_string()))
@@ -393,7 +406,8 @@ fn unavailable_reason(e: &KernelError) -> Option<(UnavailableReasonCodeV1, Strin
         | KernelError::Observation(_)
         | KernelError::TypeMismatch(_)
         | KernelError::NonFinite(_)
-        | KernelError::DuplicateAxis(_) => None,
+        | KernelError::DuplicateAxis(_)
+        | KernelError::InvalidDomain { .. } => None,
     }
 }
 
@@ -1337,6 +1351,11 @@ mod tests {
             KernelError::TypeMismatch(InputAxis::Mass),
             KernelError::NonFinite(InputAxis::Mass),
             KernelError::DuplicateAxis(InputAxis::Mass),
+            // 0.33.0 decision-support Task 12 (MBA-1350): tolerance_envelope's own
+            // domain-validation variant. Not constructed by central_difference, but this
+            // classifier is exhaustive over the whole KernelError type (see its doc comment),
+            // so it belongs in this list on the same footing as DuplicateAxis above.
+            KernelError::InvalidDomain { axis: InputAxis::WindSpeed, reason: "x" },
         ];
         for e in &genuine {
             assert!(

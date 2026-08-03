@@ -166,6 +166,13 @@ pub mod special;
 // feature gate: must compile for wasm32 (depends only on perturbation/solve_json/
 // truing_uncertainty, all unconditional).
 pub mod error_budget;
+// 0.33.0 decision-support Task 12, MBA-1350: one-variable tolerance envelopes -- how far a
+// single input may drift from its own current value before the impact leaves an explicit
+// target, by monotone bisection outward from the nominal (`perturbation::bisect_axis`, Task 7).
+// Reuses `error_budget::TargetGeometryV1` and its unavailable-axis classification verbatim. No
+// feature gate: must compile for wasm32 (depends only on perturbation/error_budget/solve_json,
+// all unconditional).
+pub mod tolerance;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]
