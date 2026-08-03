@@ -71,10 +71,11 @@ use ballistics_engine::wind_scenarios::{
     format_robust_hold_report, parse_target_spec, parse_wind_scenario_set, solve_robust_hold,
     CorridorLoad, RobustHoldFormat, RobustHoldRequest, TargetSpec,
 };
-// 0.33.0 decision-support Task 14: `explain`/`tolerance` CLI surfaces for MBA-1345/MBA-1350.
-use ballistics_engine::error_budget::TargetGeometryV1;
+// 0.33.0 decision-support Tasks 14-15: `explain`/`tolerance`/`error-budget` CLI surfaces for
+// MBA-1345/MBA-1347/MBA-1350.
+use ballistics_engine::error_budget::{error_budget_with_target, ErrorBudgetReportV1, TargetGeometryV1};
 use ballistics_engine::explain::{explain_difference, DeltaV1, SolutionDiffReportV1};
-use ballistics_engine::perturbation::{axis_meta, AxisKind, InputAxis};
+use ballistics_engine::perturbation::{axis_meta, AxisKind, DifferenceScheme, InputAxis};
 use ballistics_engine::solve_json::{decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorEnvelopeV1};
 use ballistics_engine::tolerance::{tolerance_envelope, LimitingBoundaryV1, ToleranceReportV1};
 // MBA-1361: reticle schema, generators and the hold-point API (shared with WASM/FFI).
@@ -3239,6 +3240,65 @@ enum Commands {
         /// (whose bounds then simply go unused).
         #[arg(long = "domain", value_name = "AXIS=LO:HI", action = clap::ArgAction::Append)]
         domains: Vec<String>,
+
+        /// Output format: table (default) or json
+        #[arg(short, long, default_value = "table")]
+        output: OutputFormat,
+    },
+
+    /// Rank which declared input is worth measuring better, by its own share of impact
+    /// uncertainty (MBA-1347)
+    ///
+    /// Takes a solve-json v1 request file, resolves it, and propagates each declared one-sigma
+    /// input uncertainty (`--sigma AXIS=VALUE`, repeatable) to impact covariance at every
+    /// requested range, through the SAME central-difference kernel `explain`/`tolerance` share.
+    /// Every declared source is preserved individually and ranked by its own share of impact
+    /// variance -- NEVER collapsed into an "other" bucket the way `monte-carlo --wez`'s
+    /// attribution is -- so the report ends with a concrete answer: which single input is worth
+    /// improving here. A source the kernel cannot evaluate for this request (a categorical axis,
+    /// a wind axis absent under segmented wind, one outside its own physical domain, ...) is
+    /// named in `unavailable_sources` with the reason, never silently dropped: a dropped source
+    /// would read as "contributes no uncertainty," a different fact from "could not be measured."
+    ///
+    /// With `--target`, each row additionally reports the probability the impact falls inside
+    /// that target, and each source's hit-probability gain if it alone were measured perfectly
+    /// (its sigma set to zero, every other source unchanged) -- the value-of-information number
+    /// this command exists to answer.
+    ErrorBudget {
+        /// solve-json v1 request file
+        #[arg(long, value_name = "FILE")]
+        request: PathBuf,
+
+        /// Comma-separated ranges to evaluate, in meters. Solve-json requests are already SI, so
+        /// this is NOT affected by --units.
+        #[arg(
+            long,
+            value_name = "R1,R2,...",
+            value_delimiter = ',',
+            num_args = 1..,
+            required = true
+        )]
+        ranges: Vec<f64>,
+
+        /// Declared one-sigma uncertainty for one input, AXIS=VALUE, in that axis's own physical
+        /// unit (e.g. wind-speed=1.5 for 1.5 m/s, muzzle-velocity-mps=5.0 for 5 m/s, cant=0.01
+        /// for 0.01 rad); repeatable, at least one required. An unrecognized axis is rejected
+        /// with the full accepted list; a duplicate axis or a negative/non-finite value is
+        /// rejected by name.
+        #[arg(
+            long = "sigma",
+            value_name = "AXIS=VALUE",
+            action = clap::ArgAction::Append,
+            required = true
+        )]
+        sigmas: Vec<String>,
+
+        /// Optional target geometry for the hit-probability / value-of-information columns:
+        /// rect:WIDTHxHEIGHT or circle:DIAMETER (inches imperial / cm metric, per --units --
+        /// same convention as tolerance --target; converted to meters internally). Omitted:
+        /// sources are still ranked, just without a hit probability.
+        #[arg(long)]
+        target: Option<String>,
 
         /// Output format: table (default) or json
         #[arg(short, long, default_value = "table")]
@@ -12482,6 +12542,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             output,
         } => {
             handle_tolerance(request, range, target, axes, domains, cli.units, output)?;
+        }
+
+        Commands::ErrorBudget {
+            request,
+            ranges,
+            sigmas,
+            target,
+            output,
+        } => {
+            handle_error_budget(request, ranges, sigmas, target, cli.units, output)?;
         }
 
         Commands::Completions { shell } => {
@@ -23535,6 +23605,33 @@ fn parse_domain_arg(s: &str) -> Result<(InputAxis, (f64, f64)), String> {
     Ok((axis, (lo, hi)))
 }
 
+/// Parse one `error-budget --sigma AXIS=VALUE` token into an axis and its declared one-sigma
+/// uncertainty, in the axis's own physical unit.
+///
+/// The value is validated (finite, non-negative) HERE rather than left to
+/// `error_budget_with_target`'s own check: forwarding an invalid sigma to the library would
+/// surface `KernelError::NonFinite`'s generic Display text ("axis {axis:?} produced a non-finite
+/// result"), which describes a DIFFERENT failure (a computed derivative that came out
+/// non-finite) from "the value you typed after '=' is invalid." Naming the flag and the axis
+/// directly here avoids that misleading reuse.
+fn parse_sigma_arg(s: &str) -> Result<(InputAxis, f64), String> {
+    let (axis_part, value_part) = s
+        .split_once('=')
+        .ok_or_else(|| format!("invalid --sigma '{s}': expected AXIS=VALUE (e.g. wind-speed=1.5)"))?;
+    let axis = parse_input_axis(axis_part.trim())?;
+    let value_str = value_part.trim();
+    let value: f64 = value_str
+        .parse()
+        .map_err(|_| format!("invalid --sigma '{s}': value '{value_str}' is not a number"))?;
+    if !(value.is_finite() && value >= 0.0) {
+        return Err(format!(
+            "invalid --sigma for axis '{}': {value_str} must be finite and non-negative",
+            axis_kebab_name(axis)
+        ));
+    }
+    Ok((axis, value))
+}
+
 /// One [`DeltaV1`] as a fixed-width, aligned line -- shared by every group-contribution row,
 /// the total, and the interaction remainder so the four numbers line up down the table.
 fn format_delta(d: &DeltaV1) -> String {
@@ -23808,6 +23905,141 @@ fn handle_tolerance(
     Ok(())
 }
 
+/// Render an [`ErrorBudgetReportV1`] as a human-readable table: one block per range with the
+/// impact spread, the ranked source list (variance share as a percentage; the finite-difference
+/// scheme is named only when it is NOT the ordinary central one; the per-source hit-probability
+/// gain only when the report carries one at all), and the row's own priority statement on its
+/// own line -- then, once (the same list applies to every row), any declared source the kernel
+/// could not evaluate at all, with its reason, so a source that could not be measured never
+/// reads the same as a source that measured zero.
+fn render_error_budget_table(report: &ErrorBudgetReportV1) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "error-budget -- method: {}", report.method);
+
+    for row in &report.rows {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "range {:.3} m", row.range_m);
+        let _ = writeln!(
+            out,
+            "  impact spread: sigma_drop {:.6} m   sigma_windage {:.6} m   covariance {:.6} m^2",
+            row.sigma_drop_m, row.sigma_windage_m, row.covariance_m2
+        );
+        let _ = writeln!(
+            out,
+            "  95% ellipse: semi-major {:.6} m   semi-minor {:.6} m   area {:.6} m^2",
+            row.ellipse_95.semi_major_m, row.ellipse_95.semi_minor_m, row.ellipse_95.area_m2
+        );
+        if let Some(p_hit) = row.p_hit {
+            let _ = writeln!(out, "  p_hit: {:.1}%", p_hit * 100.0);
+        }
+        if !row.sources.is_empty() {
+            let _ = writeln!(out, "  ranked sources (share of impact variance):");
+            for (i, s) in row.sources.iter().enumerate() {
+                let name = axis_kebab_name(s.axis);
+                let scheme_note = if s.scheme == DifferenceScheme::Central {
+                    String::new()
+                } else {
+                    format!("   [{:?}]", s.scheme)
+                };
+                let gain_note = match s.p_hit_gain_if_perfect {
+                    Some(gain) => format!("   gain if perfected: p_hit +{:.3}%", gain * 100.0),
+                    None => String::new(),
+                };
+                let _ = writeln!(
+                    out,
+                    "    {:>2}. {:<28} {:>6.1}%{scheme_note}{gain_note}",
+                    i + 1,
+                    name,
+                    s.variance_share * 100.0
+                );
+            }
+        }
+        let _ = writeln!(out, "  priority: {}", row.priority_statement);
+    }
+
+    if !report.unavailable_sources.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "unavailable sources (could not be evaluated at all):");
+        for u in &report.unavailable_sources {
+            let name = axis_kebab_name(u.axis);
+            let code = format!("{:?}", u.code);
+            let _ = writeln!(out, "  {name} (sigma {:.6}) [{code}] -- {}", u.sigma, u.reason);
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "assumptions:");
+    for a in &report.assumptions {
+        let _ = writeln!(out, "  - {a}");
+    }
+    out
+}
+
+/// `error-budget` dispatch (MBA-1347).
+fn handle_error_budget(
+    request_path: PathBuf,
+    ranges_m: Vec<f64>,
+    sigmas_raw: Vec<String>,
+    target: Option<String>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    match output {
+        OutputFormat::Csv => {
+            return Err("error-budget has no CSV form; use -o table or -o json".into())
+        }
+        OutputFormat::Pdf => {
+            return Err("error-budget has no PDF form; use -o table or -o json".into())
+        }
+        OutputFormat::Table | OutputFormat::Json => {}
+    }
+
+    // Parsed and de-duplicated up front, before the request is even read -- the same ordering
+    // `handle_tolerance` uses for --axis, and for the identical reason: a duplicate declaration
+    // would double-count that axis's variance and corrupt its own leave-one-out counterfactual,
+    // so it is rejected by name rather than silently accepted (and cheaper to reject before
+    // paying for a solve).
+    let mut sources: Vec<(InputAxis, f64)> = Vec::with_capacity(sigmas_raw.len());
+    for raw in &sigmas_raw {
+        let (axis, sigma) = parse_sigma_arg(raw)?;
+        if sources.iter().any(|&(a, _)| a == axis) {
+            return Err(format!(
+                "--sigma for axis '{}' was given more than once",
+                axis_kebab_name(axis)
+            )
+            .into());
+        }
+        sources.push((axis, sigma));
+    }
+
+    let resolved = load_resolved_request(&request_path)?;
+
+    // Mirrors `handle_tolerance`'s ordering: the target spec is parsed after the request is
+    // loaded (it does not depend on it, but this keeps both handlers' stage order identical).
+    let geometry = target
+        .map(|spec| {
+            parse_target_spec(&spec, units).map(|target_spec| match target_spec {
+                TargetSpec::Rect { width_m, height_m } => TargetGeometryV1::Rect { width_m, height_m },
+                TargetSpec::Circle { diameter_m } => {
+                    TargetGeometryV1::Circle { radius_m: diameter_m / 2.0 }
+                }
+            })
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?;
+
+    let report = error_budget_with_target(&resolved, &sources, &ranges_m, geometry)
+        .map_err(|e| e.to_string())?;
+
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render_error_budget_table(&report));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod decision_support_axis_tests {
     use super::*;
@@ -23871,12 +24103,40 @@ mod decision_support_axis_tests {
         assert!(parse_domain_arg("wind-speed=lo:20").is_err(), "non-numeric lower bound");
         assert!(parse_domain_arg("nope=0:20").is_err(), "unknown axis");
     }
+
+    #[test]
+    fn sigma_arg_parses_axis_and_value() {
+        assert_eq!(parse_sigma_arg("wind-speed=1.5"), Ok((InputAxis::WindSpeed, 1.5)));
+        assert_eq!(
+            parse_sigma_arg("muzzle-velocity-mps=5.0"),
+            Ok((InputAxis::MuzzleVelocityMps, 5.0))
+        );
+        // A zero sigma is a legitimate declaration (the source is real but currently trusted
+        // exactly) -- it must parse, not be rejected as if it were missing.
+        assert_eq!(parse_sigma_arg("cant=0"), Ok((InputAxis::Cant, 0.0)));
+    }
+
+    #[test]
+    fn sigma_arg_rejects_malformed_unknown_or_invalid_tokens() {
+        assert!(parse_sigma_arg("wind-speed").is_err(), "missing '='");
+        assert!(parse_sigma_arg("nope=1.5").is_err(), "unknown axis");
+        assert!(parse_sigma_arg("wind-speed=abc").is_err(), "non-numeric value");
+        let negative = parse_sigma_arg("wind-speed=-1.0").unwrap_err();
+        assert!(negative.contains("wind-speed"), "{negative}");
+        let non_finite = parse_sigma_arg("wind-speed=NaN").unwrap_err();
+        assert!(non_finite.contains("wind-speed"), "{non_finite}");
+        let infinite = parse_sigma_arg("wind-speed=inf").unwrap_err();
+        assert!(infinite.contains("wind-speed"), "{infinite}");
+    }
 }
 
 #[cfg(test)]
 mod decision_support_render_tests {
     use super::*;
-    use ballistics_engine::error_budget::UnavailableReasonCodeV1;
+    use ballistics_engine::error_budget::{
+        Ellipse95V1, ErrorBudgetRowV1, SourceContributionV1, UnavailableReasonCodeV1,
+        UnavailableSourceV1,
+    };
     use ballistics_engine::tolerance::{ToleranceAxisV1, UnavailableAxisV1};
 
     /// Delta #3's "nominal outside target" situation cannot be driven through this CLI's own
@@ -24012,5 +24272,146 @@ mod decision_support_render_tests {
         assert!(table.contains("axis target-distance"), "{table}");
         assert!(table.contains("axis cant"), "{table}");
         assert!(table.contains("magnus-enabled ["), "{table}");
+    }
+
+    /// Zero-cost (no solve -- the report is built by hand) pin of `render_error_budget_table`'s
+    /// MUST-render properties from the task-15 brief's corrections: the ranked list shows
+    /// variance share as a percentage and names a scheme only when it is NOT central; the
+    /// p_hit/per-source gain columns appear because this report carries a target; and an
+    /// unavailable source is named with its reason while staying out of the ranked list.
+    #[test]
+    fn error_budget_table_renders_ranked_sources_gain_and_unavailable_sources() {
+        let report = ErrorBudgetReportV1 {
+            schema_version: 1,
+            method: "central_difference_first_order_propagation_gl20_panelled_pm6sigma"
+                .to_string(),
+            assumptions: vec!["Declared sources are treated as independent.".to_string()],
+            unavailable_sources: vec![UnavailableSourceV1 {
+                axis: InputAxis::Altitude,
+                sigma: 50.0,
+                code: UnavailableReasonCodeV1::AxisUnsupportedForRequest,
+                reason: "the original request declared a QNH pressure_reference".to_string(),
+            }],
+            rows: vec![ErrorBudgetRowV1 {
+                range_m: 600.0,
+                sigma_drop_m: 0.2,
+                sigma_windage_m: 0.3,
+                covariance_m2: 0.01,
+                ellipse_95: Ellipse95V1 {
+                    semi_major_m: 0.5,
+                    semi_minor_m: 0.1,
+                    rotation_rad: 0.0,
+                    area_m2: 0.157,
+                },
+                p_hit: Some(0.873),
+                sources: vec![
+                    SourceContributionV1 {
+                        axis: InputAxis::WindSpeed,
+                        sigma: 1.5,
+                        d_drop_d_x: 0.0,
+                        d_windage_d_x: 0.2,
+                        scheme: DifferenceScheme::ForwardOneSided,
+                        variance_share: 0.623,
+                        ellipse_area_reduction_m2: 0.157,
+                        p_hit_gain_if_perfect: Some(0.4416),
+                    },
+                    SourceContributionV1 {
+                        axis: InputAxis::MuzzleVelocityMps,
+                        sigma: 5.0,
+                        d_drop_d_x: 0.001,
+                        d_windage_d_x: 0.0,
+                        scheme: DifferenceScheme::Central,
+                        variance_share: 0.377,
+                        ellipse_area_reduction_m2: 0.157,
+                        p_hit_gain_if_perfect: Some(0.00008),
+                    },
+                ],
+                priority_statement: "WindSpeed dominates at 600 m (62.3% of impact variance)."
+                    .to_string(),
+            }],
+        };
+
+        let table = render_error_budget_table(&report);
+
+        // The ranked list: both sources present, share rendered as a percentage. This test does
+        // not re-sort (that is `error_budget_with_target`'s own job, covered by its library test
+        // suite) -- the renderer must not reorder or drop either one.
+        assert!(table.contains("wind-speed"), "{table}");
+        assert!(table.contains("62.3%"), "{table}");
+        assert!(table.contains("muzzle-velocity-mps"), "{table}");
+        assert!(table.contains("37.7%"), "{table}");
+
+        // The scheme is named ONLY for the non-central source.
+        assert_eq!(table.matches("ForwardOneSided").count(), 1, "{table}");
+        assert!(!table.contains("[Central]"), "{table}");
+
+        // p_hit and the per-source gain-if-perfected column are both present because this
+        // report carries a target -- including wind-speed's large gain and
+        // muzzle-velocity-mps's tiny one, which a coarser percentage format would round to the
+        // same "0.0%" and erase the very distinction this column exists to show (see
+        // `SourceContributionV1::p_hit_gain_if_perfect`'s own doc comment).
+        assert!(table.contains("p_hit: 87.3%"), "{table}");
+        assert_eq!(table.matches("gain if perfected").count(), 2, "{table}");
+        assert!(table.contains("44.160%"), "wind-speed's own large gain: {table}");
+        assert!(table.contains("0.008%"), "muzzle-velocity-mps's own tiny gain: {table}");
+
+        // The unavailable source is named, with its reason, and never inside the ranked list.
+        assert!(table.contains("unavailable sources"), "{table}");
+        assert!(table.contains("altitude"), "{table}");
+        assert!(table.contains("QNH"), "{table}");
+        let ranked_section = table.split("unavailable sources").next().unwrap();
+        assert!(
+            !ranked_section.contains("altitude"),
+            "an unavailable source must not appear in the ranked list: {table}"
+        );
+
+        // The priority statement is rendered on its own line.
+        assert!(table.contains("priority: WindSpeed dominates"), "{table}");
+    }
+
+    /// A report with no target at all (`error_budget`'s own `None` wrapper) must render NEITHER
+    /// `p_hit` NOR any per-source gain -- never a fabricated number standing in for the real
+    /// absence. Complements the JSON-shaped check already made by
+    /// `error_budget_table_shows_p_hit_and_gain_only_with_a_target` in
+    /// `tests/decision_support_cli.rs`.
+    #[test]
+    fn error_budget_table_omits_p_hit_and_gain_without_a_target() {
+        let report = ErrorBudgetReportV1 {
+            schema_version: 1,
+            method: "central_difference_first_order_propagation".to_string(),
+            assumptions: vec!["Declared sources are treated as independent.".to_string()],
+            unavailable_sources: vec![],
+            rows: vec![ErrorBudgetRowV1 {
+                range_m: 600.0,
+                sigma_drop_m: 0.2,
+                sigma_windage_m: 0.3,
+                covariance_m2: 0.01,
+                ellipse_95: Ellipse95V1 {
+                    semi_major_m: 0.5,
+                    semi_minor_m: 0.1,
+                    rotation_rad: 0.0,
+                    area_m2: 0.157,
+                },
+                p_hit: None,
+                sources: vec![SourceContributionV1 {
+                    axis: InputAxis::WindSpeed,
+                    sigma: 1.5,
+                    d_drop_d_x: 0.0,
+                    d_windage_d_x: 0.2,
+                    scheme: DifferenceScheme::Central,
+                    variance_share: 1.0,
+                    ellipse_area_reduction_m2: 0.0,
+                    p_hit_gain_if_perfect: None,
+                }],
+                priority_statement: "WindSpeed dominates at 600 m (100.0% of impact variance)."
+                    .to_string(),
+            }],
+        };
+
+        let table = render_error_budget_table(&report);
+        assert!(!table.contains("p_hit:"), "{table}");
+        assert!(!table.contains("gain if perfected"), "{table}");
+        assert!(table.contains("wind-speed"), "{table}");
+        assert!(table.contains("100.0%"), "{table}");
     }
 }

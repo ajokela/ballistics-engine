@@ -3095,6 +3095,184 @@ This uncertainty surface currently runs in the native CLI and library. With no
 uncertainty flag, `true-velocity` takes the existing path unchanged: point
 estimates, table/CSV text, and JSON schema remain compatible.
 
+### Solution Diff Attribution (`explain`) — MBA-1345
+
+`explain`, `error-budget`, and `tolerance` (below) are a small analysis train built on the same
+shared perturbation kernel, and are the first CLI surfaces whose PRIMARY input is a
+[solve-json v1](docs/SOLVE_JSON_V1.md) request file rather than `-v`/`-b`/`-m`/`-d` flags -- a
+plain JSON document, explicit SI units throughout, that fully describes one firing solution. You
+author one by hand (or generate it from another tool); `ballistics solve-json < request.json`
+will solve one standalone and echo back the resolved values if you want to sanity-check it first.
+
+`explain` answers a question none of this crate's other commands do: not "what does this load
+do," but *why do two solved requests disagree*. It resolves `--a` and `--b` independently and
+attributes the difference in the observed impact, at each requested range, to a symmetric
+counterfactual swap of each of seven input groups -- drag, muzzle velocity, zero/sight geometry,
+atmosphere, wind, shot geometry, effects. Whatever nonlinear interaction between groups the seven
+do not explain is reported once per range as an explicit **interaction remainder**, and is never
+distributed across groups.
+
+```bash
+cat > a.json <<'JSON'
+{"schema_version": 1,
+ "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7", "ballistic_coefficient": 0.243},
+ "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+ "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0},
+ "atmosphere": {}, "wind": {"speed_mps": 3.0, "direction_from_rad": 1.5707963267948966},
+ "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}}
+JSON
+cat > b.json <<'JSON'
+{"schema_version": 1,
+ "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7", "ballistic_coefficient": 0.243},
+ "rifle": {"muzzle_velocity_mps": 870.0, "sight_height_m": 0.05},
+ "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0},
+ "atmosphere": {}, "wind": {"speed_mps": 6.0, "direction_from_rad": 1.5707963267948966},
+ "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}}
+JSON
+ballistics explain --a a.json --b b.json --ranges 600
+```
+
+```
+explain -- method: symmetric_group_counterfactual
+
+range 600.000 m
+  total                  drop -0.375886 m   windage -0.540216 m   time -0.057616 s   velocity  +35.9830 m/s
+  ProjectileDrag         drop +0.000000 m   windage +0.000000 m   time +0.000000 s   velocity   +0.0000 m/s
+  MuzzleVelocity         drop -0.375901 m   windage +0.082054 m   time -0.057619 s   velocity  +35.9817 m/s
+  ZeroSightGeometry      drop +0.000000 m   windage +0.000000 m   time +0.000000 s   velocity   +0.0000 m/s
+  Atmosphere             drop +0.000000 m   windage +0.000000 m   time +0.000000 s   velocity   +0.0000 m/s
+  Wind                   drop +0.000015 m   windage -0.622271 m   time +0.000003 s   velocity   +0.0013 m/s
+  ShotGeometry           drop +0.000000 m   windage +0.000000 m   time +0.000000 s   velocity   +0.0000 m/s
+  Effects                drop +0.000000 m   windage +0.000000 m   time +0.000000 s   velocity   +0.0000 m/s
+  interaction remainder  drop +0.000000 m   windage +0.000000 m   time +0.000000 s   velocity   +0.0000 m/s   (unexplained by any single group)
+```
+
+`total` is the raw observed difference at that range (`b` minus `a`); each group line is that
+group's own symmetric counterfactual contribution -- the mean of swapping just that group's
+inputs in each direction, so the split does not depend on which file is `--a` and which is `--b`.
+Here `b.json` differs from `a.json` in both muzzle velocity (+47 m/s) and wind call (+3 m/s), and
+the table attributes the drop change almost entirely to `MuzzleVelocity` and the windage change to
+a mix of `MuzzleVelocity` (a faster bullet spends less time exposed to the crosswind) and `Wind`
+itself -- with a near-zero interaction remainder, meaning these two particular changes combine
+almost additively at this range. `-o json` carries the identical numbers as a versioned `SolutionDiffReportV1`
+(`schema_version`, `method`, `assumptions`, `skipped_axes`, `rows[].total` /
+`.contributions[]` / `.interaction_remainder`); a table run also lists any `skipped_axes` (an
+input that could not be swapped on one or both requests at all, e.g. a wind axis absent under
+segmented wind) with the group and reason.
+
+**Honest limits**, carried in the report's own `assumptions` field, not only here: group
+contributions are symmetric counterfactuals, so the split never depends on replacement order or
+which file is `--a`/`--b`; nonlinear interaction between groups is reported ONLY as the explicit
+interaction remainder and is never distributed across groups -- for genuinely correlated inputs no
+unique causal attribution exists, and this command does not manufacture one; and an axis that
+could not be swapped for one or both requests is excluded from BOTH directions of its group (see
+`skipped_axes`), with any real effect it would have had folded into the interaction remainder
+rather than silently dropped or partially attributed.
+
+### Per-Input Error Budget (`error-budget`) — MBA-1347
+
+A shooter usually has time to improve exactly one input before a shot: rezero, get a better wind
+call, chronograph another string. `error-budget` takes a solve-json v1 request (like `explain`,
+above) and a set of declared one-sigma input uncertainties (`--sigma AXIS=VALUE`, repeatable,
+kebab-case axis names, e.g. `wind-speed`, `muzzle-velocity-mps`, `cant` -- an unrecognized name is
+rejected with the full accepted list), propagates each one to impact covariance at every
+requested range through the same central-difference kernel `explain`/`tolerance` share, and ranks
+the sources by their own share of impact variance. Every declared source is kept individually and
+ranked -- **never** collapsed into an "other" bucket the way `monte-carlo --wez`'s attribution is
+-- so the report ends with a concrete answer: which one input is worth improving here.
+
+```bash
+ballistics error-budget --request a.json --ranges 600 --units imperial \
+  --target rect:10x15 \
+  --sigma wind-speed=1.5 --sigma muzzle-velocity-mps=10.0
+```
+
+```
+error-budget -- method: central_difference_first_order_propagation_gl20_panelled_pm6sigma
+
+range 600.000 m
+  impact spread: sigma_drop 0.087680 m   sigma_windage 0.325048 m   covariance -0.001101 m^2
+  95% ellipse: semi-major 0.795650 m   semi-minor 0.214436 m   area 0.536007 m^2
+  p_hit: 29.5%
+  ranked sources (share of impact variance):
+     1. wind-speed                     93.1%   gain if perfected: p_hit +67.523%
+     2. muzzle-velocity-mps             6.9%   gain if perfected: p_hit +0.909%
+  priority: WindSpeed dominates at 600 m (93.1% of impact variance). Measuring it better is the highest-value single improvement here.
+```
+
+A 1.5 m/s wind-call sigma and a 10 m/s muzzle-velocity sigma leave this 10x15 in target at only a
+29.5% hit probability, almost entirely (93.1%) because of the wind call -- and the `gain if
+perfected` column turns that into a decision: perfecting the wind call alone would recover 67.5
+points of hit probability, while perfecting muzzle velocity recovers under 1 point. That gain
+column, computed from `p_hit_gain_if_perfect`, appears only when `--target` is supplied (omit it
+to get the ranked sources and impact spread without a hit probability). A source the kernel
+cannot evaluate for this request -- a categorical axis, a wind axis absent under segmented wind,
+one outside its own physical domain -- is named in a separate `unavailable sources` section with
+its reason, and **never** silently dropped from the ranking: a dropped source would read as
+"contributes no uncertainty," a different fact from "could not be measured." `-o json` carries
+the identical numbers as a versioned `ErrorBudgetReportV1`, including each source's finite-
+difference `scheme` (the table names it only when it is not the ordinary central difference) and
+`unavailable_sources[].code`/`.reason`.
+
+**Honest limits**, carried in the report's own `assumptions` field: declared sources are treated
+as independent, with no correlation between them modelled; propagation is first-order
+(local-linear) about the nominal solution, using each axis's own small default differencing step
+regardless of the declared sigma -- a large declared sigma is a linear extrapolation from a slope
+measured over a much smaller window, not exact for large or non-Gaussian input uncertainty; the
+95% ellipse and the hit probability both assume an approximately Gaussian impact distribution; a
+source's derivative may be one-sided rather than central at a physical domain boundary (still air
+for wind speed is the routine case, not an exotic one); and hit probability reflects only the
+declared input uncertainty, never model error, over a target always centred on the nominal
+(zero-mean) impact point.
+
+### Tolerance Envelopes (`tolerance`) — MBA-1350
+
+`tolerance` answers the complementary question to `error-budget`: not "how much uncertainty does
+this input contribute," but "how wrong may this one input be before the shot leaves the target."
+It takes a solve-json v1 request, resolves it, and bisects each requested `--axis` outward --
+toward its own configured `--domain`'s lower bound and, independently, its upper bound -- until
+the impact crosses the target boundary. `--domain AXIS=LO:HI` is required once per `--axis`, in
+that axis's own physical unit (no default domain is ever invented, even for a categorical axis,
+whose bounds then simply go unused).
+
+```bash
+ballistics tolerance --request a.json --range 600 --units imperial --target rect:10x15 \
+  --axis wind-speed --domain wind-speed=0:12 \
+  --axis muzzle-velocity-mps --domain muzzle-velocity-mps=750:900
+```
+
+```
+tolerance -- method: one_variable_deterministic_bisection
+range 600.000 m
+
+axis wind-speed (nominal 3.000000 m/s, target margin 0.1270 m)
+  near (toward the domain's lower bound): bound at 2.413496 m/s -- crosses the Right edge
+  far  (toward the domain's upper bound): bound at 3.586503 m/s -- crosses the Left edge
+
+axis muzzle-velocity-mps (nominal 823.000000 m/s, target margin 0.1270 m)
+  near (toward the domain's lower bound): bound at 802.154006 m/s -- crosses the Bottom edge
+  far  (toward the domain's upper bound): bound at 845.896312 m/s -- crosses the Top edge
+```
+
+On this 10x15 in target, the wind call may drift only to 2.41-3.59 m/s (well inside the
+configured 0-12 m/s search domain) before the shot leaves the target sideways, while muzzle
+velocity has much more room, 802-846 m/s, before it leaves top or bottom. A `--domain` searched to
+its edge with no crossing reports `no bound within the configured domain` (the impact never
+leaves the target there) rather than extrapolating past it; an axis that provably cannot move the
+impact at this fixed range at all (`target-distance`, for example, which only matters when the
+range itself changes) reports `no measurable effect on the impact` instead -- a different fact
+from merely being unbounded, so the two are never rendered with the same text. An axis the kernel
+refuses outright (a categorical toggle, an axis absent under segmented wind, ...) appears in a
+separate `unavailable axes` section instead of a fabricated bound.
+
+**Honest limits**, carried in the report's own `assumptions` field: each bound holds ONE input at
+its limit while every other input stays at its nominal value -- bounds from different axes may
+**not** be assumed to hold simultaneously, since two inputs each at their own individual limit
+will generally miss even though neither alone would; no probability distribution is assumed or
+implied by any bound here, these are deterministic limits of a one-variable search, not confidence
+intervals or a probability of hit; and a bound is reported only when found strictly within the
+axis's own configured search domain, never extrapolated beyond it.
+
 ## Output Formats
 
 ### Units by Output Surface

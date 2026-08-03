@@ -5,6 +5,59 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0] - Unreleased
+
+### Added
+- **Decision-support analysis train**: three CLI subcommands built on a shared perturbation
+  kernel over solve-json v1 requests:
+  - `explain --a A.json --b B.json --ranges R1,R2,...` (MBA-1345) attributes the difference
+    between two resolved firing solutions to a symmetric counterfactual swap of each of seven
+    input groups (drag, muzzle velocity, zero/sight geometry, atmosphere, wind, shot geometry,
+    effects), with any nonlinear interaction between groups reported once per range as an
+    explicit interaction remainder rather than distributed across groups.
+  - `error-budget --request FILE --ranges R1,... --sigma AXIS=VALUE [--target rect:WxH|circle:D]`
+    (MBA-1347) propagates each declared per-input one-sigma uncertainty to impact covariance via
+    central differences, ranks the sources by their own share of impact variance (never
+    collapsed into an "other" bucket), and, with `--target`, reports the hit probability and
+    each source's hit-probability gain if it alone were measured perfectly -- the
+    value-of-information a shooter with time to improve exactly one input needs.
+  - `tolerance --request FILE --range R --target ... --axis AXIS --domain AXIS=LO:HI`
+    (MBA-1350) bisects one input at a time outward from its nominal value until the impact
+    leaves the target, reporting a one-variable, no-probability-attached bound (or an explicit
+    "no measurable effect" / "unbounded in domain" / "unavailable" when a bound does not apply).
+
+  See [CLI_USAGE.md](CLI_USAGE.md#solution-diff-attribution-explain--mba-1345) for all three,
+  worked examples, and each report's own stated limits.
+
+  Underneath the CLI this is a new library layer: a shared input taxonomy of 32 perturbable axes
+  (`ballistics_engine::perturbation`) with typed axis access and a central-difference/bisection
+  kernel that re-solves the real trajectory through the same `solve_v1` path every other
+  consumer of a solve-json v1 request uses; `ballistics_engine::explain`,
+  `ballistics_engine::error_budget`, and `ballistics_engine::tolerance` publish versioned
+  (`schema_version`) JSON reports on top of it. The kernel depends on a resolved solve-json v1
+  request now being round-trippable back into a solvable request
+  (`From<&ResolvedSolveRequestV1> for SolveRequestV1`) -- previously the resolved form was
+  output-only.
+
+### Changed
+- **WEZ (`monte-carlo --wez`) attribution now runs on the shared central-difference kernel**
+  instead of its own one-sided finite differences. Published share values (`wind_call_share`,
+  `mv_sd_share`, `other_share`) move slightly as a result -- about 5e-4 absolute on the
+  project's own characterization fixture -- but bucket names and JSON field names are
+  unchanged.
+- **WEZ attribution now reports `n/a` (`attribution_unavailable: true`) for two configurations
+  that have no solve-json v1 representation at all**: a loaded custom drag table, or a drag
+  model outside solve-json v1's `G1`/`G6`/`G7`/`G8` set (`G2`, `G5`, `GI`, `GS`, `RA4`). `p_hit`
+  is unaffected either way; only the per-source variance-share attribution is unavailable for
+  these two cases.
+- **solve-json v1 requests may now supply `shot.zero_distance_m` and `shot.muzzle_angle_rad`
+  together**; this previously failed as `conflicting_fields`. The explicit angle now wins for
+  elevation, the zero search is skipped, and a `zero_distance_elevation_not_resolved` warning
+  notice is emitted -- `zero_distance_m` is still retained on the resolved request and still
+  affects the windage-convergence bias, `summary.equivalent_horizontal_range_m`, and downrange
+  wind-coverage validation. This is an additive widening of the accepted request shape: no
+  request that was previously valid changes behavior.
+
 ## [0.32.0] - 2026-07-31
 
 ### Added

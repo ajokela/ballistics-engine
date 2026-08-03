@@ -1,9 +1,13 @@
-//! 0.33.0 decision-support Task 14: the `explain` and `tolerance` CLI surfaces over
-//! `explain_difference` (MBA-1345) and `tolerance_envelope` (MBA-1350).
+//! 0.33.0 decision-support Tasks 14-15: the `explain`, `tolerance` and `error-budget` CLI
+//! surfaces over `explain_difference` (MBA-1345), `tolerance_envelope` (MBA-1350) and
+//! `error_budget_with_target` (MBA-1347).
 //!
-//! Fixtures are deliberately small (short `max_range_m`, one or two ranges, one or two axes):
-//! `explain` solves on the order of 70 times per call and `tolerance` bisects once per axis, so
-//! this file's own runtime is dominated by fixture SIZE, not test COUNT.
+//! Fixtures are deliberately small (short `max_range_m`, one or two ranges, one to two sources):
+//! `explain` solves on the order of 70 times per call, `tolerance` bisects once per axis, and
+//! `error-budget` costs one `central_difference` call per DECLARED source (2 real solves for an
+//! ordinary axis, ~35-40 for a `requires_rezero` axis on a request that also carries
+//! `zero_distance_m` -- see `src/error_budget.rs`'s own module doc, "Cost" section, for the
+//! measured numbers), so this file's own runtime is dominated by fixture SIZE, not test COUNT.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,6 +75,25 @@ fn vacuum_request() -> serde_json::Value {
         "shot": {"max_range_m": 500.0, "muzzle_angle_rad": 0.0},
         "atmosphere": {}, "wind": {}, "solver": {}, "effects": {},
         "sampling": {"interval_m": 5.0}
+    })
+}
+
+/// A QNH-referenced atmosphere fixture, copied verbatim (field for field) from
+/// `src/error_budget.rs`'s own already-verified `qnh_resolved` test fixture: `Altitude` is
+/// refused there with `KernelError::AxisUnsupportedForRequest` (a STATIC guard on the resolved
+/// atmosphere's own reference mode -- it costs zero real solves, never even reaching
+/// `TrajectorySolver`), so declaring it alongside a real source is the cheapest possible way to
+/// exercise the "unavailable, not silently dropped" path end to end through this CLI.
+fn qnh_request() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                       "ballistic_coefficient": 0.243},
+        "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+        "shot": {"max_range_m": 900.0},
+        "atmosphere": {"altitude_m": 500.0, "temperature_k": 288.0, "pressure_pa": 101325.0,
+                       "pressure_reference": "qnh"},
+        "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
     })
 }
 
@@ -418,10 +441,154 @@ fn tolerance_table_distinguishes_unbounded_from_unavailable() {
     );
 }
 
-/// CSV and PDF have no form for either subcommand (neither report is tabular in a CSV-friendly
-/// sense, matching `hold-corridor`'s identical rejection).
+// ---- Task 15: error-budget (`error_budget_with_target`, MBA-1347) ----
+
+/// Task-15 brief's own test (Step 1), corrected for the REAL canonical axis spelling:
+/// `muzzle-velocity-mps` (from `InputAxis::MuzzleVelocityMps` via `axis_kebab_name`), not the
+/// brief's stale `muzzle-velocity` -- see the task-14 report's own note flagging this for Task
+/// 15. Extended with the schema_version/method checks the task instructions ask for on every
+/// subcommand, plus (since this call supplies `--target`) the p_hit/gain presence checks.
 #[test]
-fn csv_and_pdf_are_rejected_for_both_subcommands() {
+fn error_budget_ranks_sources_and_states_assumptions() {
+    let dir = tempfile_dir();
+    let a = write_json(&dir, "a.json", &small_request(823.0));
+    let (stdout, stderr, ok) = run(&[
+        "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
+        "--sigma", "muzzle-velocity-mps=5.0", "--sigma", "wind-speed=1.5",
+        "--target", "rect:0.5x0.75", "-o", "json",
+    ]);
+    assert!(ok, "stderr: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(
+        v["method"],
+        "central_difference_first_order_propagation_gl20_panelled_pm6sigma"
+    );
+    let sources = v["rows"][0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2, "both declared sources must be preserved");
+    // Ranked descending by variance share.
+    let first = sources[0]["variance_share"].as_f64().unwrap();
+    let second = sources[1]["variance_share"].as_f64().unwrap();
+    assert!(first >= second);
+    assert!(
+        v["rows"][0]["p_hit"].is_number(),
+        "a target was supplied: p_hit must be reported, not null: {v}"
+    );
+    assert!(
+        sources[0]["p_hit_gain_if_perfect"].is_number(),
+        "a target was supplied: the per-source gain must be reported, not null: {v}"
+    );
+    assert!(v["rows"][0]["priority_statement"].as_str().unwrap().len() > 10);
+    assert!(v["assumptions"].as_array().unwrap().iter()
+        .any(|s| s.as_str().unwrap().contains("independent")));
+}
+
+/// Correction #3 (task-15 brief): the table must show `p_hit` and each source's
+/// hit-probability gain ONLY when a target was supplied -- never a fabricated number when one
+/// was not, and never silently missing when one WAS. A single cheap (`WindSpeed`, not
+/// `requires_rezero`) source is enough to exercise this; ranking multiple sources is already
+/// covered by the test above.
+#[test]
+fn error_budget_table_shows_p_hit_and_gain_only_with_a_target() {
+    let dir = tempfile_dir();
+    let a = write_json(&dir, "a.json", &small_request(823.0));
+    let a_str = a.to_str().unwrap();
+
+    let (with_target, stderr, ok) = run(&[
+        "error-budget", "--request", a_str, "--ranges", "600",
+        "--sigma", "wind-speed=1.5", "--target", "rect:0.5x0.75",
+    ]);
+    assert!(ok, "stderr: {stderr}");
+    assert!(with_target.contains("p_hit:"), "{with_target}");
+    assert!(with_target.contains("gain if perfected"), "{with_target}");
+
+    let (without_target, stderr, ok) = run(&[
+        "error-budget", "--request", a_str, "--ranges", "600", "--sigma", "wind-speed=1.5",
+    ]);
+    assert!(ok, "stderr: {stderr}");
+    assert!(!without_target.contains("p_hit:"), "{without_target}");
+    assert!(!without_target.contains("gain if perfected"), "{without_target}");
+}
+
+/// The unavailable-source path, end to end: `Altitude` is declared alongside a real source
+/// (`MuzzleVelocityMps`) on the QNH fixture. The table must name the unavailable axis with its
+/// reason, and it must NEVER appear in the ranked list -- a silently dropped source would read
+/// as "contributes no uncertainty," the exact wrong answer `error_budget.rs`'s own module doc
+/// says this feature exists to prevent. Checked structurally in the JSON too, not just by
+/// scraping table text.
+#[test]
+fn error_budget_names_an_unavailable_source_and_excludes_it_from_the_ranked_list() {
+    let dir = tempfile_dir();
+    let req = write_json(&dir, "qnh.json", &qnh_request());
+    let req_str = req.to_str().unwrap();
+
+    let (table, stderr, ok) = run(&[
+        "error-budget", "--request", req_str, "--ranges", "300",
+        "--sigma", "altitude=50.0", "--sigma", "muzzle-velocity-mps=5.0",
+    ]);
+    assert!(ok, "stderr: {stderr}");
+    assert!(table.contains("unavailable sources"), "{table}");
+    assert!(table.contains("altitude"), "{table}");
+    assert!(table.contains("QNH"), "the reason should name the mechanism: {table}");
+    let ranked_section = table.split("unavailable sources").next().unwrap();
+    assert!(
+        !ranked_section.contains("altitude"),
+        "an unavailable source must never appear in the ranked list: {table}"
+    );
+    assert!(ranked_section.contains("muzzle-velocity-mps"), "{table}");
+
+    let (stdout, stderr, ok) = run(&[
+        "error-budget", "--request", req_str, "--ranges", "300",
+        "--sigma", "altitude=50.0", "--sigma", "muzzle-velocity-mps=5.0", "-o", "json",
+    ]);
+    assert!(ok, "stderr: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let unavailable = v["unavailable_sources"].as_array().unwrap();
+    assert_eq!(unavailable.len(), 1, "{v}");
+    assert_eq!(unavailable[0]["axis"], "altitude");
+    assert_eq!(unavailable[0]["code"], "axis_unsupported_for_request");
+
+    let sources = v["rows"][0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 1, "only the one evaluable source should be ranked: {v}");
+    assert_eq!(sources[0]["axis"], "muzzle_velocity_mps");
+}
+
+/// A duplicate `--sigma` axis would double-count that axis's variance and corrupt its own
+/// leave-one-out counterfactual (`error_budget_with_target`'s own contract) -- rejected by the
+/// CLI before any solve, naming the axis and the flag, same as `tolerance --axis`/`--domain`.
+#[test]
+fn error_budget_rejects_a_duplicate_sigma_axis() {
+    let dir = tempfile_dir();
+    let a = write_json(&dir, "a.json", &small_request(823.0));
+    let (_, stderr, ok) = run(&[
+        "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
+        "--sigma", "wind-speed=1.5", "--sigma", "wind-speed=2.0",
+    ]);
+    assert!(!ok, "a duplicate --sigma axis must be rejected");
+    assert!(stderr.contains("wind-speed"), "{stderr}");
+    assert!(stderr.contains("more than once"), "{stderr}");
+}
+
+/// A negative sigma is physically meaningless (a one-sigma uncertainty is a magnitude) and is
+/// rejected by name -- not forwarded to `KernelError::NonFinite`'s generic Display text, which
+/// describes an unrelated failure (a computed derivative that came out non-finite). See
+/// `parse_sigma_arg`'s own doc comment in `src/main.rs`.
+#[test]
+fn error_budget_rejects_a_negative_sigma() {
+    let dir = tempfile_dir();
+    let a = write_json(&dir, "a.json", &small_request(823.0));
+    let (_, stderr, ok) = run(&[
+        "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
+        "--sigma", "wind-speed=-1.0",
+    ]);
+    assert!(!ok, "a negative sigma must be rejected");
+    assert!(stderr.contains("wind-speed"), "{stderr}");
+}
+
+/// CSV and PDF have no form for any of the three subcommands (none of the three reports is
+/// tabular in a CSV-friendly sense, matching `hold-corridor`'s identical rejection).
+#[test]
+fn csv_and_pdf_are_rejected_for_all_three_subcommands() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let b = write_json(&dir, "b.json", &small_request(870.0));
@@ -441,11 +608,18 @@ fn csv_and_pdf_are_rejected_for_both_subcommands() {
         ]);
         assert!(!ok, "tolerance -o {format} was accepted");
         assert!(stderr.contains("no "), "{format}: {stderr}");
+
+        let (_, stderr, ok) = run(&[
+            "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
+            "--sigma", "wind-speed=1.5", "-o", format,
+        ]);
+        assert!(!ok, "error-budget -o {format} was accepted");
+        assert!(stderr.contains("no "), "{format}: {stderr}");
     }
 }
 
-/// A missing request file names the path, for both subcommands, matching `hold-corridor`'s own
-/// "could not read" convention.
+/// A missing request file names the path, for all three subcommands, matching
+/// `hold-corridor`'s own "could not read" convention.
 #[test]
 fn a_missing_request_file_names_the_path() {
     let (_, stderr, ok) = run(&[
@@ -457,6 +631,13 @@ fn a_missing_request_file_names_the_path() {
     let (_, stderr, ok) = run(&[
         "tolerance", "--request", "/nonexistent/req.json", "--range", "600",
         "--target", "rect:0.5x0.75", "--axis", "wind-speed", "--domain", "wind-speed=0:20",
+    ]);
+    assert!(!ok);
+    assert!(stderr.contains("/nonexistent/req.json"), "{stderr}");
+
+    let (_, stderr, ok) = run(&[
+        "error-budget", "--request", "/nonexistent/req.json", "--ranges", "600",
+        "--sigma", "wind-speed=1.5",
     ]);
     assert!(!ok);
     assert!(stderr.contains("/nonexistent/req.json"), "{stderr}");
