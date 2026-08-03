@@ -45,18 +45,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mv_sd_share`, `other_share`) move slightly as a result -- about 5e-4 absolute on the
   project's own characterization fixture -- but bucket names and JSON field names are
   unchanged.
-- **WEZ attribution now reports `n/a` (`attribution_unavailable: true`) for two configurations
-  that have no solve-json v1 representation at all**: a loaded custom drag table, or a drag
-  model outside solve-json v1's `G1`/`G6`/`G7`/`G8` set (`G2`, `G5`, `GI`, `GS`, `RA4`). `p_hit`
-  is unaffected either way; only the per-source variance-share attribution is unavailable for
-  these two cases.
+- **WEZ attribution now reports `n/a` (`attribution_unavailable: true`) for three
+  configurations**: a loaded custom drag table or a drag model outside solve-json v1's
+  `G1`/`G6`/`G7`/`G8` set (`G2`, `G5`, `GI`, `GS`, `RA4` -- neither has a solve-json v1
+  representation at all), and now also whenever the shared attribution kernel hits a structural
+  refusal on one of the shot's error sources for that particular range (an input combination the
+  underlying sensitivity solve can't evaluate). `p_hit` is unaffected in all three cases; only
+  the per-source variance-share attribution is unavailable.
 - **solve-json v1 requests may now supply `shot.zero_distance_m` and `shot.muzzle_angle_rad`
   together**; this previously failed as `conflicting_fields`. The explicit angle now wins for
   elevation, the zero search is skipped, and a `zero_distance_elevation_not_resolved` warning
   notice is emitted -- `zero_distance_m` is still retained on the resolved request and still
   affects the windage-convergence bias, `summary.equivalent_horizontal_range_m`, and downrange
-  wind-coverage validation. This is an additive widening of the accepted request shape: no
-  request that was previously valid changes behavior.
+  wind-coverage validation. This is an additive widening of the accepted request shape scoped to
+  these two fields only: no request that was previously valid because it did NOT combine
+  `zero_distance_m` and `muzzle_angle_rad` changes behavior.
+- **`resolved_request` now echoes seven more fields when the request explicitly supplies
+  them**: `sight_offset_lateral_m`, `zero_poi_up_m`, `zero_poi_right_m`, `drops_reference`,
+  `pressure_reference`, `wind_reference`, and `reticle` (from a `reticle hold` request) each gain
+  a resolved counterpart -- needed so a resolved request is a complete, round-trippable
+  description of the solve, which the new decision-support kernel above depends on. Every field
+  skip-serializes when absent, so a request that never supplies any of the seven keeps a
+  byte-identical response; a request that DOES supply one gains a key it did not have before --
+  explicitly supplying a value equal to its own behavioral default (e.g. `wind_reference:
+  "shooter"`, `sight_offset_lateral_m: 0.0`) is now distinguished from never having supplied the
+  field at all, a distinction the response did not previously make.
+
+### Fixed
+- **`$.atmosphere.pressure_reference` was rejected as `unknown_field`** by
+  `decode_solve_request_v1`'s hand-maintained shape validator ever since the field shipped
+  (MBA-1397): its allowlist was never updated to match, even though direct `SolveRequestV1`
+  construction and `resolve_atmosphere` always handled the field correctly. The whole
+  QNH-pressure feature was unreachable through the JSON wire path as a result. Now accepted and
+  performs the QNH-to-station-pressure reduction as documented.
 
 ## [0.32.0] - 2026-07-31
 

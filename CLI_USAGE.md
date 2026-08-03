@@ -3161,6 +3161,10 @@ almost additively at this range. `-o json` carries the identical numbers as a ve
 input that could not be swapped on one or both requests at all, e.g. a wind axis absent under
 segmented wind) with the group and reason.
 
+**Units.** `--ranges` is always meters, solve-json v1's own SI unit, and is never affected by
+`--units` -- `explain` has no `--target`/`--sigma`/`--domain`-style flag for the global `--units`
+flag to apply to, so it is simply inert here.
+
 **Honest limits**, carried in the report's own `assumptions` field, not only here: group
 contributions are symmetric counterfactuals, so the split never depends on replacement order or
 which file is `--a`/`--b`; nonlinear interaction between groups is reported ONLY as the explicit
@@ -3215,6 +3219,11 @@ the identical numbers as a versioned `ErrorBudgetReportV1`, including each sourc
 difference `scheme` (the table names it only when it is not the ordinary central difference) and
 `unavailable_sources[].code`/`.reason`.
 
+**Units.** Two conventions are in play in the example above: `--target` follows `--units`
+(inches under imperial, cm under metric -- matching `tolerance --target` below), while `--ranges`
+and every `--sigma` value are always in solve-json v1's own SI unit (meters, m/s, radians, ...),
+regardless of `--units`.
+
 **Honest limits**, carried in the report's own `assumptions` field: declared sources are treated
 as independent, with no correlation between them modelled; propagation is first-order
 (local-linear) about the nominal solution, using each axis's own small default differencing step
@@ -3265,6 +3274,26 @@ range itself changes) reports `no measurable effect on the impact` instead -- a 
 from merely being unbounded, so the two are never rendered with the same text. An axis the kernel
 refuses outright (a categorical toggle, an axis absent under segmented wind, ...) appears in a
 separate `unavailable axes` section instead of a fabricated bound.
+
+**`target-distance`'s domain must not reach below `--range`.** The `no measurable effect on the
+impact` claim above holds only while `--domain target-distance=LO:HI`'s own `LO` stays at or
+above `--range`: bisecting `target-distance` (`shot.max_range_m`) DOWNWARD past the range you are
+observing at asks the solver for an impact beyond where the trajectory was even computed, which
+fails outright (a genuine, whole-command-aborting error, not a graceful `unavailable axes` entry).
+`target-distance` is also not an answer to "how far off could my rangefinder reading be" in the
+first place -- it changes how far the trajectory is COMPUTED, never the muzzle angle, so it has no
+effect on the impact at a fixed range at all. `zero-distance` is the axis that actually answers
+that question: it re-runs the elevation search for a different assumed zero and observes the
+impact at your true, fixed `--range`, exactly what an inaccurate rangefinder does to a real shot.
+
+**Units.** The same mixed convention as `error-budget` above: `--target` follows `--units`
+(inches under imperial, cm under metric), while `--range` and every `--domain` bound are always
+in solve-json v1's own SI unit (meters, m/s, radians, ...), regardless of `--units`.
+
+`-o json` carries the identical numbers as a versioned `ToleranceReportV1` (`schema_version`,
+`method`, `assumptions`, `range_m`, `axes[]` with each axis's `nominal`, `near_bound`/`far_bound`,
+`near_limiting_boundary`/`far_limiting_boundary`, `unbounded_in_domain`, and the
+`near_has_no_effect`/`far_has_no_effect` flags) and `unavailable_axes[].code`/`.reason`.
 
 **Honest limits**, carried in the report's own `assumptions` field: each bound holds ONE input at
 its limit while every other input stays at its nominal value -- bounds from different axes may

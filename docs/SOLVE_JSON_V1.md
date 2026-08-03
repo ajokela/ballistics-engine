@@ -305,6 +305,12 @@ resolved values are recorded as explicit numbers in a successful response's
   station pressure, not the raw QNH the caller sent. The reduction is recorded as an
   `assumptions` entry with code `qnh_reduced_to_station_pressure`.
 
+The mode itself is separately echoed in `resolved_request.atmosphere.pressure_reference`
+whenever the request supplies one, including an explicit `"absolute"` — which therefore solves
+identically to omission (`"absolute"` is the behavioral default) but is no longer byte-identical
+at the envelope level, since the echo itself then appears where an omitted-field response leaves
+it absent (the same separate-mode-echo convention `wind_reference` below uses).
+
 `pressure_reference` has no effect when `pressure_pa` is omitted: an omitted pressure always
 resolves to the ICAO standard station pressure at `altitude_m`, which is mathematically the same
 result as reducing a QNH of exactly `101325 Pa` (the ICAO sea-level standard).
@@ -412,7 +418,9 @@ The service emits notices in deterministic request-field order. Stable v1 assump
 `qnh_reduced_to_station_pressure` for an explicit `pressure_reference: "qnh"` pressure reduced
 to station pressure (MBA-1397), and `estimated_projectile_length` when the engine needs
 inferred projectile geometry. Stable v1 warning codes are `partial_wind_coverage`,
-`experimental_effect`, and `rk45_time_step_ignored`. Messages are descriptive text rather than
+`experimental_effect`, `rk45_time_step_ignored`, and `zero_distance_elevation_not_resolved` (an
+explicit `muzzle_angle_rad` supplied together with `zero_distance_m`, so the elevation search did
+not run — see `shot.muzzle_angle_rad` above). Messages are descriptive text rather than
 a compatibility surface.
 
 ```json
@@ -473,6 +481,10 @@ Summary fields have fixed evaluation frames:
 A request may carry an optional top-level `reticle` object. When it does — and only then —
 the success envelope gains a top-level `reticle_hold` object. Requests without it, and every
 response that predates the field, serialize byte-identically.
+
+The raw block is also echoed verbatim onto `resolved_request.reticle` when supplied (0.33.0
+decision-support), completing the resolved request as a full description of the solve. Omitting
+`reticle` keeps `resolved_request` byte-identical to requests that predate the field.
 
 ```json
 "reticle": {
