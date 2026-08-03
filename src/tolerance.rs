@@ -18,23 +18,31 @@
 //!
 //! [`bisect_axis`]'s own contract (`crate::perturbation::derive`'s module doc, "Bisection
 //! contract") is explicit that `Ok(None)` means ONLY "the predicate did not change truth value
-//! across this domain" -- nothing more. For this module's predicate (impact stays inside
-//! `target`), that is true in TWO opposite situations that look identical at the type level:
+//! across this domain" -- nothing more. In general, for a two-sided "stays inside a region"
+//! predicate, that single fact is consistent with TWO opposite situations that look identical at
+//! the type level: the region is never exited, or the search never started inside it at all.
 //!
-//! - the shot stays INSIDE the target across the whole searched span (the good case: "no bound
-//!   within the configured domain"), or
-//! - the shot is already OUTSIDE the target at the point the search started from, so it never
-//!   has anywhere to "flip" from (the bad case: the premise this whole analysis rests on --
-//!   that the nominal is centred on the target -- does not actually hold here).
+//! **In this module specifically, the second situation has exactly one door.** `target`
+//! ([`TargetGeometryV1`]) has no offset field at all -- every variant is, by that type's own
+//! doc, ALWAYS defined centred on the nominal impact point. That makes the nominal itself, read
+//! against its own centred target, inside by construction for any target with positive area
+//! (`dy == dz == 0.0` trivially satisfies `dy.abs() <= height_m / 2.0` etc. whenever `height_m`/
+//! `width_m`/`radius_m` is positive). The ONLY way the nominal can fail that check is a
+//! DEGENERATE target -- non-positive width, height, or radius, which contains no point at all,
+//! not even its own centre. A target genuinely offset from the nominal, or a nominal that is
+//! "not really centred" for some other reason, is not an expressible input to this API at all --
+//! `TargetGeometryV1` has no field that could carry it -- so that reading of "outside throughout"
+//! cannot be the live case here, and this doc previously implied otherwise.
 //!
-//! Conflating these is the exact wrong-answer class this ticket exists to prevent: reporting
-//! "stays inside throughout" when the truth is "never inside" would tell a shooter their shot is
-//! robust to input error when in fact it is not even on target to begin with.
-//!
-//! **This module resolves the ambiguity by evaluating the shared anchor point itself**, via the
-//! IDENTICAL `with_axis`/`evaluate` reconstruction [`bisect_axis`] uses for `domain.0` in both
-//! the near and far searches (see [`tolerance_envelope`]'s "Pre-flight" step below), BEFORE
-//! trusting any `Ok(None)` it returns. If that anchor check itself reads as "outside" --
+//! **This module still checks it explicitly rather than assuming it**, via a pre-flight step
+//! that evaluates the shared anchor point itself -- the IDENTICAL `with_axis`/`evaluate`
+//! reconstruction [`bisect_axis`] uses for `domain.0` in both the near and far searches (see
+//! [`tolerance_envelope`]'s "Pre-flight" step below) -- BEFORE trusting any `Ok(None)` it
+//! returns. This closes the only door that DOES exist (a degenerate target, or a reconstruction
+//! bug in `with_axis`/`evaluate` themselves) rather than guarding against a routinely-reachable
+//! "off-centre nominal" scenario the type system cannot currently express; it is still worth
+//! keeping for that narrower reason, and is still what makes the following distinction sound
+//! rather than assumed. If the anchor check reads as "outside" --
 //! [`ToleranceAxisV1::nominal_inside_target`] is `false` -- the search is never even run: see
 //! correctness requirement 1 below. Only once the anchor is CONFIRMED "inside" does an `Ok(None)`
 //! from a search direction unambiguously mean "stays inside throughout that direction," recorded
@@ -108,6 +116,33 @@
 //! plausibly be" bisected past "the range I am currently asking about") -- and propagates
 //! immediately, aborting the whole report rather than mislabelling it as a per-axis refusal. See
 //! `a_genuine_observation_error_propagates_not_recorded_as_unavailable`.
+//!
+//! # `TargetDistance` cannot answer "how wrong may my range estimate be"
+//!
+//! The ticket's own motivating example is a range-estimate question -- "my rangefinder read
+//! 600 m; how far off could that reading be before I miss?" The axis that superficially matches,
+//! `InputAxis::TargetDistance` (`shot.max_range_m`), does NOT answer it. `TargetDistance` is
+//! `requires_rezero: false` (`crate::perturbation::axis_meta`): perturbing it changes only how
+//! far the trajectory is COMPUTED, never the muzzle angle or any sight correction, so it has NO
+//! effect at all on the impact observed at a fixed `range_m` as long as the perturbed
+//! `max_range_m` stays at or above `range_m`. Bisecting it reports either a hard
+//! [`KernelError::Observation`] (once the search dips below `range_m`, see above) or
+//! `unbounded_in_domain: true` with [`ToleranceAxisV1::near_has_no_effect`]/
+//! [`ToleranceAxisV1::far_has_no_effect`] both `true` -- literally correct about this specific
+//! axis, but not an answer to the range-estimate question, and a caller who reads
+//! `unbounded_in_domain: true` alone (without also checking the `_has_no_effect` flags) could
+//! easily mistake "this axis has no effect" for "your range estimate can be off by any amount
+//! and still hit," which is not what it means here.
+//!
+//! The axis that actually answers a range-estimate question is `InputAxis::ZeroDistance`
+//! (`shot.zero_distance_m`, `requires_rezero: true`): perturbing it re-runs the elevation search
+//! for a DIFFERENT assumed zero distance, producing a different effective muzzle angle, and only
+//! THEN observes the impact at the caller's own fixed, unchanged `range_m` -- i.e. "if I had
+//! dialed for a different distance than the true one, how far off would I land at the true
+//! range," which is what a rangefinder error actually does to a shot. See
+//! `target_distance_axis_shows_no_measurable_effect_not_a_generic_unbounded_claim` in this
+//! module's tests, which pins both the `TargetDistance` "no effect" finding and the contrast
+//! against an axis that genuinely does move the impact but merely stays inside a large target.
 //!
 //! # Cost
 //!
@@ -198,6 +233,19 @@ pub struct ToleranceAxisV1 {
     /// would also be `true` when `nominal_inside_target` is `false`, which is the exact
     /// conflation this ticket exists to prevent.
     pub unbounded_in_domain: bool,
+    /// `true` exactly when `near_bound` is `None` AND the impact at the domain's own lower edge
+    /// is indistinguishable (within `1e-9` m on both drop and windage) from the nominal impact:
+    /// this axis has NO MEASURABLE EFFECT on the observed impact in this direction at all, as
+    /// distinct from an axis that DOES move the impact but never far enough to leave `target`.
+    /// See "`TargetDistance` cannot answer..." in the module doc for the motivating example
+    /// (`TargetDistance`'s `requires_rezero: false` means it never affects the impact at a fixed
+    /// `range_m` at all, so `unbounded_in_domain: true` for it means "this axis is provably
+    /// irrelevant here," not "any error in it is safe"). Always `false` when `near_bound` is
+    /// `Some` (a bound exists, so the axis clearly has SOME effect) or `nominal_inside_target` is
+    /// `false` (the direction was never searched).
+    pub near_has_no_effect: bool,
+    /// As `near_has_no_effect`, for the far direction.
+    pub far_has_no_effect: bool,
     /// The smallest linear half-extent of `target` (`min(height_m, width_m) / 2.0` for a
     /// [`TargetGeometryV1::Rect`], `radius_m` for a [`TargetGeometryV1::Circle`]) -- a
     /// convenience summary of how tight the target is, identical across every axis in a report
@@ -277,6 +325,17 @@ fn inside(o: &Observation, nominal: &Observation, target: TargetGeometryV1) -> b
             radius_m > 0.0 && (dy * dy + dz * dz).sqrt() <= radius_m
         }
     }
+}
+
+/// Whether `o`'s (drop, windage) is indistinguishable from `nominal`'s to within `1e-9` m on
+/// each -- see [`ToleranceAxisV1::near_has_no_effect`]/[`ToleranceAxisV1::far_has_no_effect`].
+/// `1e-9` m is far tighter than any genuine physical sensitivity this crate's taxonomy produces
+/// (see `crate::perturbation::taxonomy`'s `min_abs_step` values, none smaller than `1e-7`) and
+/// far looser than floating-point noise from an identical, deterministic re-solve (no
+/// axis/request combination this module reaches involves randomness), so this only fires for an
+/// axis that is truly, not merely negligibly, disconnected from the observed impact.
+fn observation_matches_nominal(o: &Observation, nominal: &Observation) -> bool {
+    (o.drop_m - nominal.drop_m).abs() < 1e-9 && (o.windage_m - nominal.windage_m).abs() < 1e-9
 }
 
 /// Which edge of `target` `o` (already known to be outside, or exactly on the boundary of,
@@ -450,6 +509,8 @@ pub fn tolerance_envelope(
                 near_limiting_boundary: None,
                 far_limiting_boundary: None,
                 unbounded_in_domain: false,
+                near_has_no_effect: false,
+                far_has_no_effect: false,
                 margin_linear_m,
             });
             continue;
@@ -467,19 +528,32 @@ pub fn tolerance_envelope(
         let near = bisect_axis(base, axis, range_m, (nominal_value, lo), &pred, tol)?;
         let far = bisect_axis(base, axis, range_m, (nominal_value, hi), &pred, tol)?;
 
-        let near_limiting_boundary = match near {
+        // Beyond finding a bound (or confirming its absence), each None direction is checked
+        // for whether the axis has ANY measurable effect on the impact at all -- see
+        // `near_has_no_effect`/`far_has_no_effect`'s own doc and the module doc's "TargetDistance
+        // cannot answer..." section for why this distinction matters. Both endpoint observations
+        // (`lo`/`hi`) are recomputed here rather than threaded out of `bisect_axis` (which does
+        // evaluate them internally to decide `Ok(None)`, but does not expose them) -- at most two
+        // extra solves per axis, only in the already-cheaper `None` case.
+        let (near_limiting_boundary, near_has_no_effect) = match near {
             Some(v) => {
                 let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(v))?, &[range_m])?[0];
-                Some(limiting_boundary(&o, &nominal, target))
+                (Some(limiting_boundary(&o, &nominal, target)), false)
             }
-            None => None,
+            None => {
+                let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(lo))?, &[range_m])?[0];
+                (None, observation_matches_nominal(&o, &nominal))
+            }
         };
-        let far_limiting_boundary = match far {
+        let (far_limiting_boundary, far_has_no_effect) = match far {
             Some(v) => {
                 let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(v))?, &[range_m])?[0];
-                Some(limiting_boundary(&o, &nominal, target))
+                (Some(limiting_boundary(&o, &nominal, target)), false)
             }
-            None => None,
+            None => {
+                let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(hi))?, &[range_m])?[0];
+                (None, observation_matches_nominal(&o, &nominal))
+            }
         };
 
         out.push(ToleranceAxisV1 {
@@ -491,6 +565,8 @@ pub fn tolerance_envelope(
             near_limiting_boundary,
             far_limiting_boundary,
             unbounded_in_domain: near.is_none() && far.is_none(),
+            near_has_no_effect,
+            far_has_no_effect,
             margin_linear_m,
         });
     }
@@ -591,6 +667,14 @@ mod tests {
     }
 
     /// A bound that does not exist in the domain is reported as such, not invented.
+    ///
+    /// Review fix: also confirms `near_has_no_effect`/`far_has_no_effect` are BOTH `false` here
+    /// -- WindSpeed genuinely does move the impact over this domain (see the probed sweep in
+    /// `windage_dominant_axis_reports_left_or_right_not_top_or_bottom`'s doc), it just never
+    /// moves it far enough to leave this deliberately huge target. Contrast
+    /// `target_distance_axis_shows_no_measurable_effect_not_a_generic_unbounded_claim`, where the
+    /// SAME `unbounded_in_domain: true` shape comes from an axis that has genuinely zero effect
+    /// -- these two tests together are the discriminating pair for that new field.
     #[test]
     fn an_axis_that_never_exits_is_flagged_not_bounded() {
         let r = resolved();
@@ -600,6 +684,56 @@ mod tests {
             TargetGeometryV1::Rect { width_m: 50.0, height_m: 50.0 }, &domains).unwrap();
         assert!(rep.axes[0].unbounded_in_domain);
         assert!(rep.axes[0].near_bound.is_none() && rep.axes[0].far_bound.is_none());
+        assert!(
+            !rep.axes[0].near_has_no_effect && !rep.axes[0].far_has_no_effect,
+            "WindSpeed does move the impact within this domain -- it just never leaves this \
+             huge target -- so has_no_effect must be false in both directions"
+        );
+    }
+
+    /// Review fix #3: the ticket's own flagship example is a range-estimate question ("how far
+    /// off could my rangefinder reading be"), and the axis that superficially matches --
+    /// `TargetDistance` (`shot.max_range_m`) -- does not answer it: it is `requires_rezero:
+    /// false`, so perturbing it never changes the muzzle angle or any sight correction, and
+    /// therefore never changes the impact observed at a FIXED `range_m` at all (as long as the
+    /// perturbed value stays >= `range_m`). Both directions here report `unbounded_in_domain:
+    /// true`, and this test's whole point is that `near_has_no_effect`/`far_has_no_effect` being
+    /// ALSO `true` is what tells a caller this is "provably irrelevant," not "any range error is
+    /// safe." `ZeroDistance` (`shot.zero_distance_m`, `requires_rezero: true`) is the axis that
+    /// actually re-zeroes for a different assumed distance and DOES move the impact at the true,
+    /// fixed `range_m` -- checked here for contrast, with real, non-`None` bounds.
+    #[test]
+    fn target_distance_axis_shows_no_measurable_effect_not_a_generic_unbounded_claim() {
+        let r = resolved(); // max_range_m = 900.0, zero_distance_m = 600.0
+        let target = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.5 };
+
+        let td_domains = [(InputAxis::TargetDistance, (500.0_f64, 1100.0_f64))];
+        let td = tolerance_envelope(&r, &[InputAxis::TargetDistance], 400.0, target, &td_domains)
+            .unwrap();
+        let a = &td.axes[0];
+        assert!(a.nominal_inside_target);
+        assert!(a.near_bound.is_none() && a.far_bound.is_none());
+        assert!(a.unbounded_in_domain);
+        assert!(
+            a.near_has_no_effect && a.far_has_no_effect,
+            "TargetDistance must show NO measurable effect in either direction, not merely an \
+             unbounded one -- it cannot change the impact observed at a fixed range_m at all"
+        );
+
+        // Contrast: ZeroDistance, over the SAME true observation range, DOES move the impact,
+        // and finds real bounds -- proving `has_no_effect` genuinely discriminates rather than
+        // being true for every `requires_rezero: false`-adjacent axis or every wide domain.
+        let zd_domains = [(InputAxis::ZeroDistance, (400.0_f64, 800.0_f64))];
+        let zd = tolerance_envelope(&r, &[InputAxis::ZeroDistance], 400.0, target, &zd_domains)
+            .unwrap();
+        let b = &zd.axes[0];
+        assert!(b.nominal_inside_target);
+        assert!(
+            b.near_bound.is_some() && b.far_bound.is_some(),
+            "ZeroDistance must produce real bounds: re-zeroing for a different assumed distance \
+             DOES move the impact observed at the true, fixed range_m"
+        );
+        assert!(!b.unbounded_in_domain);
     }
 
     #[test]
@@ -620,22 +754,33 @@ mod tests {
     /// duplicates for a different fixture) to the two the brief's test does not cover: never
     /// extrapolating past the configured domain, and confirming the nominal reads as inside
     /// before any bound is searched for.
+    ///
+    /// Review fix: the fourth check previously asserted only `contains("nominal")`, which
+    /// `assumptions[0]` ("...stays at its **nominal** value...") already satisfies on its own --
+    /// deleting `assumptions[3]` entirely left this test green. Pinned per-index instead, on a
+    /// substring unique to each sentence (`"nominal_inside_target"`, the literal field name,
+    /// appears ONLY in `assumptions[3]`), plus an exact length so a deleted or reordered
+    /// assumption is caught even if its specific substring happened to still appear elsewhere.
     #[test]
     fn assumptions_cover_all_four_correctness_requirements() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
         let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
             TargetGeometryV1::Rect { width_m: 0.2, height_m: 0.3 }, &domains).unwrap();
-        let joined = rep.assumptions.join(" ");
-        assert!(joined.contains("simultaneously"), "one-variable-at-a-time must be stated");
-        assert!(joined.contains("probability"), "no probability must be stated");
+        assert_eq!(rep.assumptions.len(), 4, "exactly four assumption sentences are expected");
         assert!(
-            joined.to_lowercase().contains("domain"),
+            rep.assumptions[0].contains("simultaneously"),
+            "one-variable-at-a-time must be stated"
+        );
+        assert!(rep.assumptions[1].contains("probability"), "no probability must be stated");
+        assert!(
+            rep.assumptions[2].to_lowercase().contains("domain"),
             "never-extrapolate-beyond-domain must be stated"
         );
         assert!(
-            joined.to_lowercase().contains("nominal"),
-            "the nominal-inside precondition must be stated"
+            rep.assumptions[3].contains("nominal_inside_target"),
+            "the nominal-inside precondition must be stated, discriminated from assumptions[0]'s \
+             own unrelated use of the word \"nominal\""
         );
     }
 
@@ -695,6 +840,10 @@ mod tests {
         .unwrap();
         let a = &rep.axes[0];
         assert!(a.nominal_inside_target);
+        // Review minor #5: every other test in this module happens to use range_m = 600.0, so
+        // `range_m` echoing the caller's input was never checked against any OTHER value --
+        // this fixture's own 400.0 closes that gap.
+        assert_eq!(rep.range_m, x);
 
         // far (v > v0): drop DECREASES, crossing where drop(v) = drop0 - half_height.
         let expected_far = x / (2.0 * (drop0 - half_height) / G).sqrt();
@@ -712,6 +861,56 @@ mod tests {
 
         assert_eq!(a.far_limiting_boundary, Some(LimitingBoundaryV1::Top));
         assert_eq!(a.near_limiting_boundary, Some(LimitingBoundaryV1::Bottom));
+    }
+
+    /// Review fix #7 (part 1): pins `bisection_tolerance`'s formula directly, independent of any
+    /// downstream bisection -- catches a hardcoded constant or a different scaling factor.
+    #[test]
+    fn bisection_tolerance_scales_with_domain_width_not_a_flat_constant() {
+        assert_eq!(bisection_tolerance(0.0, 20.0), 20.0 * 1e-6);
+        assert_eq!(bisection_tolerance(700.0, 1100.0), 400.0 * 1e-6);
+        // Floor: a domain so narrow that width * 1e-6 would underflow below what 80 bisection
+        // iterations could usefully resolve is clamped to 1e-9, not left arbitrarily small.
+        assert_eq!(bisection_tolerance(800.0, 800.0 + 1e-5), 1e-9);
+    }
+
+    /// Review fix #7 (part 2): the domain-proportional formula is undefended end-to-end by every
+    /// OTHER test in this module, because every domain they use is wide enough that even a flat
+    /// `1e-4` tolerance would still run several real bisection iterations and land close to the
+    /// true crossing -- the two formulas are indistinguishable from the outside on a wide domain.
+    /// This test uses a domain SO narrow (`5e-5` per direction) that a flat `1e-4` tolerance
+    /// would satisfy `bisect_axis`'s very FIRST check (`(hi - lo).abs() <= tolerance`) with ZERO
+    /// bisection steps, returning the sub-domain's own exact algebraic midpoint verbatim --
+    /// verified by literally making that mutation (`bisection_tolerance` hardcoded to `1e-4`),
+    /// which reproducibly returns `far_bound` exactly equal to `800.000025` (`diff = 0e0`, not
+    /// even one ULP off) -- then reverting. Under the shipped domain-proportional formula
+    /// (`tol = 0.0001 * 1e-6`, floored to `1e-9`), real bisection runs and the result differs
+    /// from that same exact midpoint by `~8.6e-6` -- more than four orders of magnitude past any
+    /// floating-point noise floor, so `> 1e-7` below is a comfortable, non-flaky margin.
+    #[test]
+    fn a_narrow_domain_gets_real_bisection_not_an_immediate_midpoint_return() {
+        let r = vacuum_resolved();
+        let x = 400.0_f64;
+        let half_height = 5e-8_f64;
+        let domains = [(InputAxis::MuzzleVelocityMps, (799.99995_f64, 800.00005_f64))];
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::MuzzleVelocityMps],
+            x,
+            TargetGeometryV1::Rect { width_m: 1.0e6, height_m: 2.0 * half_height },
+            &domains,
+        )
+        .unwrap();
+        let a = &rep.axes[0];
+        let far_midpoint = 0.5 * (800.0_f64 + 800.00005_f64);
+        let far = a.far_bound.expect("a crossing must exist this close to nominal");
+        assert!(
+            (far - far_midpoint).abs() > 1e-7,
+            "far_bound ({far}) must differ meaningfully from the domain's own exact midpoint \
+             ({far_midpoint}) -- an unchanged difference of ~0 would mean bisect_axis returned \
+             the midpoint verbatim without ever refining it, exactly what a flat 1e-4 tolerance \
+             does on a domain this narrow"
+        );
     }
 
     /// Independent oracle #2 (re-solve): a found bound is verified by re-solving at it, and at
@@ -975,7 +1174,11 @@ mod tests {
     }
 
     /// A [`TargetGeometryV1::Circle`] has no distinct edges and must always report `Radial`,
-    /// regardless of which direction (windage- or drop-dominant) the crossing came from.
+    /// regardless of which direction (windage- or drop-dominant) the crossing came from. Also
+    /// pins `target_margin_linear_m`'s `Circle` arm (review minor #6): previously only the
+    /// `Rect` arm was checked numerically (`multiple_axes_are_each_independently_computed_...`),
+    /// so a bug specific to the `Circle` branch (e.g. returning `radius_m` un-halved, or a
+    /// hardcoded `0.0`) could have passed every existing test.
     #[test]
     fn a_circle_target_always_reports_radial() {
         let r = resolved();
@@ -986,6 +1189,51 @@ mod tests {
         assert!(a.far_bound.is_some() && a.near_bound.is_some());
         assert_eq!(a.far_limiting_boundary, Some(LimitingBoundaryV1::Radial));
         assert_eq!(a.near_limiting_boundary, Some(LimitingBoundaryV1::Radial));
+        assert!(
+            (a.margin_linear_m - 0.15).abs() < 1e-9,
+            "Circle's margin_linear_m must be exactly its radius_m, got {}",
+            a.margin_linear_m
+        );
+    }
+
+    /// Review fix #2: every existing fixture that reaches `limiting_boundary` has one deviation
+    /// at (or indistinguishable from) zero -- the windage-dominant fixture has `dy ~ 0`, both
+    /// drop-dominant fixtures use a wind-free vacuum with `dz` exactly `0`. Under any of those,
+    /// swapping the cross-multiplication's `width_m`/`height_m` (`dy.abs() * height_m >=
+    /// dz.abs() * width_m` instead of the correct `dy.abs() * width_m >= dz.abs() * height_m`)
+    /// still passes, because one side of the comparison collapses to (approximately) zero either
+    /// way. This calls `limiting_boundary` directly (it is private, and this test lives in the
+    /// same module) with both deviations simultaneously non-trivial and an aspect-ratio-skewed
+    /// target, so the two formulas disagree: `dy = 0.1` against `height_m = 0.2` (ratio `1.0`)
+    /// and `dz = 0.5` against `width_m = 2.0` (ratio `0.5`) -- correct: `ratio_y > ratio_z` =>
+    /// `Bottom`; swapped: `dy.abs()*height_m = 0.02 < dz.abs()*width_m = 1.0` => `Left`/`Right`
+    /// branch entirely, i.e. a DIFFERENT edge family, not just a different edge.
+    #[test]
+    fn limiting_boundary_uses_the_correct_axis_for_each_deviation_not_swapped() {
+        let nominal = Observation {
+            range_m: 600.0,
+            drop_m: 0.0,
+            windage_m: 0.0,
+            time_s: 1.0,
+            velocity_mps: 500.0,
+        };
+        let o = Observation {
+            range_m: 600.0,
+            drop_m: 0.1,
+            windage_m: 0.5,
+            time_s: 1.0,
+            velocity_mps: 500.0,
+        };
+        let target = TargetGeometryV1::Rect { width_m: 2.0, height_m: 0.2 };
+        assert_eq!(
+            limiting_boundary(&o, &nominal, target),
+            LimitingBoundaryV1::Bottom,
+            "dy/height_m ratio (1.0) exceeds dz/width_m ratio (0.5): must be a drop-family edge"
+        );
+        // Mirror on the drop side (dy < 0) to also confirm Top is reachable from this same
+        // aspect-ratio-skewed target, not just Bottom.
+        let o_top = Observation { drop_m: -0.1, ..o };
+        assert_eq!(limiting_boundary(&o_top, &nominal, target), LimitingBoundaryV1::Top);
     }
 
     /// A categorical axis has no numeric domain to bisect -- must be recorded, not silently
@@ -1109,6 +1357,40 @@ mod tests {
     fn an_inverted_domain_is_rejected() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (20.0_f64, 0.0_f64))];
+        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
+        assert!(matches!(err, KernelError::InvalidDomain { axis: InputAxis::WindSpeed, .. }));
+    }
+
+    /// Review fix (most important finding): `nominal_outside_the_configured_domain_is_rejected`
+    /// puts the nominal (`3.0`) OUTSIDE its domain `(5.0, 20.0)` entirely, and
+    /// `an_inverted_domain_is_rejected` is caught by the EARLIER `lo >= hi` check before the
+    /// nominal-strictness check ever runs -- neither test can tell a strict `>`/`<` comparison
+    /// apart from a relaxed `>=`/`<=` one. Relaxing `tolerance.rs`'s validation to `>=`/`<=`
+    /// leaves ALL other tests in this module green: with `domains = [(WindSpeed, (3.0, 20.0))]`
+    /// and nominal `3.0`, `bisect_axis` would be called with `(nominal_value, lo) = (3.0, 3.0)`
+    /// -- a zero-width probe whose two endpoints trivially agree, so it would report `Ok(None)`
+    /// for a direction that was never actually searched even one step into, and (if the far
+    /// direction also found nothing) `unbounded_in_domain: true` -- "your wind call is robust in
+    /// every direction," fabricated from a search that never moved. This test, and its mirror
+    /// below for the upper edge, place the nominal EXACTLY at one edge and require
+    /// `InvalidDomain` -- these fail under the `>=`/`<=` relaxation described above (verified by
+    /// making that exact edit, confirming exactly these two tests fail with all others still
+    /// green, then reverting to byte-identical -- see the task report).
+    #[test]
+    fn nominal_at_the_lower_domain_edge_is_rejected() {
+        let r = resolved(); // WindSpeed nominal = 3.0
+        let domains = [(InputAxis::WindSpeed, (3.0_f64, 20.0_f64))];
+        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
+        assert!(matches!(err, KernelError::InvalidDomain { axis: InputAxis::WindSpeed, .. }));
+    }
+
+    /// Mirror of the above at the UPPER edge -- see that test's doc for the full rationale.
+    #[test]
+    fn nominal_at_the_upper_domain_edge_is_rejected() {
+        let r = resolved(); // WindSpeed nominal = 3.0
+        let domains = [(InputAxis::WindSpeed, (0.0_f64, 3.0_f64))];
         let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
             TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
         assert!(matches!(err, KernelError::InvalidDomain { axis: InputAxis::WindSpeed, .. }));
