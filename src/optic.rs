@@ -53,11 +53,71 @@
 //! of which marks someone chose to author, grown by a fixed margin, not a property of the
 //! scope's actual usable optical extent. It must never be reused as a stand-in for a real
 //! spec.
+//!
+//! # `plan_corrections` and the CF rule
+//!
+//! [`plan_corrections`] turns a TRUE angular [`AngularCorrection`] into ranked, executable
+//! [`DialPlan`]s: dial the whole correction in whole clicks, hold the whole correction on
+//! the reticle, or split it (dial what the turret can reach, hold the TRUE angular
+//! remainder). Getting the DIAL-space/TRUE-angular distinction above right in every arm is
+//! the entire reason this function exists, so the rule is restated here in full and
+//! followed literally everywhere below:
+//!
+//! - Turret travel, turret state, and click counts all live in DIAL space, as established
+//!   above.
+//! - A tracking correction factor (CF) maps one space to the other. To EXECUTE a TRUE
+//!   angular need of `corr_true` mil on a turret whose CF is `cf`, the DIAL target is
+//!   `corr_dial = corr_true / cf` — the CF DIVIDES going from a true need to a dial target,
+//!   the same direction as `crate::adjustment::zero_banner_dial_values` and
+//!   `crate::truing::scale_report_dial_values`. That target is quantized onto whole clicks
+//!   IN DIAL SPACE, via `quantize_angle(corr_dial, &ClickValue { size:
+//!   click_size_mil(click), base: ClickBase::Mil })` — a SYNTHETIC click value in mil so
+//!   the reconstruction identity (`clicks as f64 * size + residual == corr_dial`) holds in
+//!   mil regardless of whether the real click graduation is mil, MOA, or SMOA. Whatever
+//!   whole click count results, the dial then EXECUTES `clicks as f64 *
+//!   click_size_mil(click) * cf` TRUE angular mil — the CF MULTIPLIES going from dial
+//!   clicks back to true angular, the OPPOSITE direction from how it was applied going in.
+//! - Reticle holds are TRUE angular and are NEVER CF-scaled, anywhere: a hold component is
+//!   computed and bounds-checked entirely in true mil, never quantized onto a click.
+//!
+//! `cf_dial_space_worked_example` (this module's test suite) pins the hand-derived numbers
+//! for a CF of 0.98: a 5.0 true-mil correction on 0.1-mil clicks needs a dial target of
+//! `5.0 / 0.98 = 5.10204...` mil, which quantizes to 51 clicks; those 51 clicks EXECUTE
+//! `51 * 0.1 * 0.98 = 4.998` true mil, leaving a 0.002 true-mil hybrid hold. Swapping the
+//! multiply/divide directions, or holding the DIAL-space remainder (`corr_dial - clicks *
+//! size`) instead of the TRUE one (`corr_true - dial_mil_true`), silently produces a
+//! different, wrong number here — this module exists specifically to make that mistake
+//! impossible to make quietly.
+//!
+//! # Honesty: nothing is silently clamped
+//!
+//! A plan whose dial component cannot reach its target given the optic's declared travel
+//! is still returned — clamped to the travel it actually has — but its `feasible` field is
+//! `false` and the clamp is recorded in `limits_hit` as a [`LimitViolation`]. The same is
+//! true of a hold that exceeds `reticle_hold_bounds` or [`Preferences::max_hold_mil`]. A
+//! plan's `residual_mil` is always computed against what it actually executes, never
+//! against the original request, so a clamped plan's residual honestly reflects the
+//! resulting miss (see `infeasible_is_reported_never_silently_clamped`).
+//!
+//! Declared travel/hold data is trusted exactly as given; its ABSENCE is a different,
+//! weaker claim than a KNOWN, EXCEEDED limit, and gets its own [`LimitKind`]
+//! (`NoTravelData`/`NoHoldBoundData`) rather than being silently treated as "unlimited."
+//! Whether a missing or exceeded limit turns off a strategy's OWN `feasible` flag depends
+//! on what that strategy actually promises: [`Strategy::DialAll`] promises to deliver the
+//! WHOLE correction by dialing alone, so it cannot affirm that promise without knowing
+//! (and fitting inside) its travel. [`Strategy::HoldAll`] and [`Strategy::Hybrid`] promise
+//! (respectively) the whole correction, or the dial shortfall's exact remainder, via the
+//! reticle, so THEY cannot affirm their promise without knowing (and fitting inside) hold
+//! bounds — but a `Hybrid` plan's dial component absorbing less than the full correction
+//! because travel ran out is not a broken promise (the hold is DEFINED to absorb exactly
+//! that shortfall, by construction), so a missing or exceeded TRAVEL limit is recorded on
+//! a `Hybrid` plan purely for disclosure and never by itself makes it infeasible — only
+//! its own hold not fitting does.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::adjustment::ClickValue;
+use crate::adjustment::{click_size_mil, quantize_angle, ClickBase, ClickValue};
 
 /// A shooter's complete turret and reticle geometry (MBA-1348).
 ///
@@ -336,6 +396,603 @@ pub fn revolution_annotation(
     // clicks_from_zero >= 0 and cpr > 0 (checked above), so both quotient and remainder
     // are non-negative; a value that does not fit u32 is not a real turret setting.
     Some((revolutions as u32, clicks_in_revolution as u32))
+}
+
+// ============================================================================================
+// MBA-1348 Task 4: `plan_corrections` -- dial / hold / hybrid execution planning
+// ============================================================================================
+
+/// Schema version for [`DialPlanReportV1`]'s payload shape (MBA-1348).
+pub const DIAL_PLAN_SCHEMA_VERSION_V1: u32 = 1;
+
+/// A TRUE angular correction to deliver on target -- the output of a solve, not yet
+/// realized as any turret or reticle instruction. Positive `elevation_mil` is UP; positive
+/// `windage_mil` is RIGHT. Never CF-scaled -- see the module's "CF rule" doc section.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AngularCorrection {
+    pub elevation_mil: f64,
+    pub windage_mil: f64,
+}
+
+/// Caller preferences steering [`plan_corrections`]'s ranking -- never its underlying
+/// arithmetic, which is identical regardless of these values. See "Ranking is
+/// deterministic" in [`plan_corrections`]'s own doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Preferences {
+    /// When ranking ties on `residual_linear_at_range_m`, prefer holding over dialing.
+    /// `false` (the [`Default`] impl's value) prefers dialing.
+    pub prefer_hold: bool,
+    /// An optional blanket cap on any single hold component's magnitude, TRUE angular mil,
+    /// applied together with (the tighter of it and) `OpticProfile::reticle_hold_bounds`.
+    /// `None` (the default) applies no cap beyond `reticle_hold_bounds` itself.
+    pub max_hold_mil: Option<f64>,
+}
+
+impl Default for Preferences {
+    /// `prefer_hold: false, max_hold_mil: None` -- prefer dial, no extra hold cap.
+    fn default() -> Self {
+        Self { prefer_hold: false, max_hold_mil: None }
+    }
+}
+
+/// Which of a shot's two independent angular axes an [`AxisInstruction`] or
+/// [`LimitViolation`] belongs to (MBA-1348). Unrelated to `crate::reticle_import`'s
+/// private, importer-internal `Axis` of the same name in a different module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Axis {
+    Elevation,
+    Windage,
+}
+
+/// How a [`DialPlan`] proposes to deliver a correction (MBA-1348).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Strategy {
+    /// Dial the whole correction in whole clicks; hold nothing.
+    DialAll,
+    /// Dial nothing; hold the whole correction on the reticle.
+    HoldAll,
+    /// Dial the whole clicks the turret can reach (travel-clamped if necessary); hold the
+    /// TRUE angular remainder on the reticle. Always reconstructs the correction exactly --
+    /// see the module's "CF rule" doc section.
+    Hybrid,
+}
+
+/// Why a [`DialPlan`] component was clamped, or could not be verified feasible (MBA-1348).
+/// Paired with the offending [`Axis`] in a [`LimitViolation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitKind {
+    /// The dial target exceeded the axis's declared `TravelLimits` and was clamped to it.
+    TravelExceeded,
+    /// The hold component exceeded the axis's declared `HoldBounds` and/or
+    /// `Preferences::max_hold_mil`. Holds are never clamped -- see `Strategy::HoldAll`.
+    HoldBoundExceeded,
+    /// A nonzero dial target was needed, but the optic profile declares no `TravelLimits`
+    /// for this axis, so reachability could not be verified. NOT the same claim as
+    /// `TravelExceeded` -- see the module's "Honesty" doc section.
+    NoTravelData,
+    /// A nonzero hold was needed, but neither `HoldBounds` nor `Preferences::max_hold_mil`
+    /// is declared for this axis, so fitting the reticle could not be verified.
+    NoHoldBoundData,
+}
+
+/// One recorded reason a [`DialPlan`] was clamped or could not be verified feasible
+/// (MBA-1348). Always DISCLOSED in `DialPlan::limits_hit`, never silently absorbed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LimitViolation {
+    pub axis: Axis,
+    pub kind: LimitKind,
+    /// The signed value that triggered this record, BEFORE any clamp: DIAL-space mil for
+    /// `TravelExceeded`/`NoTravelData` (comparable to `available_mil`, also dial-space);
+    /// TRUE angular mil for `HoldBoundExceeded`/`NoHoldBoundData`.
+    pub needed_mil: f64,
+    /// The declared limit's magnitude on the exceeded side, when known. `None` for
+    /// `NoTravelData`/`NoHoldBoundData` -- that absence is the entire point of those kinds.
+    pub available_mil: Option<f64>,
+}
+
+/// One axis's executable instruction within a [`DialPlan`] (MBA-1348).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct AxisInstruction {
+    pub axis: Axis,
+    /// `"up"`/`"down"` (elevation) or `"left"`/`"right"` (windage) for the DELTA actually
+    /// dialed (`delta_clicks`'s sign) -- not for the correction's own sign.
+    pub direction: &'static str,
+    /// Clicks to turn from `OpticProfile::turret_state` (or zero, if absent) to
+    /// `target_clicks_from_zero`. Positive is up/right, matching `direction`.
+    pub delta_clicks: i64,
+    /// The DIAL setting this instruction ends at, measured from zero -- NOT from
+    /// `turret_state`. See the `turret_state_shifts_delta_but_not_target` test.
+    pub target_clicks_from_zero: i64,
+    /// `revolution_annotation(target_clicks_from_zero, clicks_per_revolution)`: `None`
+    /// when `clicks_per_revolution` is undeclared, or `target_clicks_from_zero` is
+    /// negative (see that function's own contract).
+    pub end_revolution: Option<(u32, u32)>,
+    /// What the dial EXECUTES in TRUE angular mil: `target_clicks_from_zero as f64 *
+    /// click_size_mil(click) * cf`. Zero for `Strategy::HoldAll`.
+    pub dial_mil_true: f64,
+    /// The TRUE angular reticle hold component, mil (+ = over/right). Zero for
+    /// `Strategy::DialAll`.
+    pub hold_mil: f64,
+    /// `correction − dial_mil_true − hold_mil`: the honest, post-execution miss on this
+    /// axis. Exactly `0.0` for `Strategy::Hybrid` (an identity by construction -- `hold_mil`
+    /// is DEFINED as whatever makes this exact -- not an approximation that merely happens
+    /// to come out small).
+    pub residual_mil: f64,
+}
+
+/// One ranked, executable plan for delivering a two-axis [`AngularCorrection`] (MBA-1348).
+/// `instructions` is always exactly `[elevation, windage]`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DialPlan {
+    pub strategy: Strategy,
+    pub instructions: [AxisInstruction; 2],
+    /// RSS of both axes' `residual_mil`, mil-to-linear at `DialPlanReportV1::range_m` by
+    /// the small-angle approximation (assumption 0). The PRIMARY ranking key -- see
+    /// [`plan_corrections`]'s doc comment.
+    pub residual_linear_at_range_m: f64,
+    /// `false` whenever a [`LimitViolation`] this strategy's OWN promise depends on is
+    /// present in `limits_hit` -- see the module's "Honesty" doc section for what each
+    /// strategy promises, and therefore what gates it.
+    pub feasible: bool,
+    pub limits_hit: Vec<LimitViolation>,
+}
+
+/// [`plan_corrections`]'s versioned report (MBA-1348). Carries `method` and `assumptions`
+/// in the payload itself -- this train's cross-cutting honesty principle (spec §2) -- not
+/// only in prose documentation.
+///
+/// Deliberately `Serialize`-only, not `Deserialize`: `AxisInstruction::direction` is a
+/// `&'static str`, which cannot be deserialized in the general case (there is no way to
+/// hand back a `'static`-lived string from an arbitrary, non-`'static` deserializer input).
+/// Nothing in this train reads a `DialPlanReportV1` back from JSON; Task 6's CLI only ever
+/// writes one out.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DialPlanReportV1 {
+    pub schema_version: u32,
+    pub method: String,
+    pub assumptions: Vec<String>,
+    pub range_m: f64,
+    /// Ranked best-first -- see "Ranking is deterministic" in [`plan_corrections`]'s doc
+    /// comment.
+    pub plans: Vec<DialPlan>,
+}
+
+/// The largest whole-click count reachable within `boundary_mil` of DIAL-space travel
+/// without exceeding it (MBA-1348).
+///
+/// Ordinarily `(boundary_mil / click_mil).floor()`, EXCEPT when that ratio is within a
+/// click-thousandth of a whole number, where it rounds to that whole number instead -- so
+/// floating-point noise in the division (e.g. `0.4 / 0.1` landing a hair under `4.0`)
+/// cannot silently discard a click of real, declared travel. A genuinely fractional
+/// boundary (e.g. 0.45 mil of travel on a 0.1 mil click) still floors: 4, never rounding UP
+/// past a hard mechanical limit to 5.
+fn max_clicks_within(boundary_mil: f64, click_mil: f64) -> i64 {
+    let raw = boundary_mil / click_mil;
+    let nearest = raw.round();
+    if (nearest * click_mil - boundary_mil).abs() <= click_mil * 1e-9 {
+        nearest as i64
+    } else {
+        raw.floor() as i64
+    }
+}
+
+/// Quantizes `corr_true / cf` onto whole DIAL-space clicks (the CF rule's "way in": see the
+/// module doc), clamping to `travel` when declared and the unclamped target would exceed
+/// it, and recording exactly one [`LimitViolation`] when either the clamp happened or a
+/// nonzero target could not be checked because `travel` is `None` (MBA-1348). Returns
+/// `(clamped_target_clicks, corr_dial, violation)` -- `corr_dial` (the pre-quantization
+/// continuous dial-space value) is reused by callers as `LimitViolation::needed_mil`.
+fn quantize_and_clamp(
+    axis: Axis,
+    corr_true: f64,
+    click_mil: f64,
+    cf: f64,
+    travel: Option<&TravelLimits>,
+) -> (i64, f64, Option<LimitViolation>) {
+    let corr_dial = corr_true / cf;
+    let synthetic = ClickValue { size: click_mil, base: ClickBase::Mil };
+    let target = quantize_angle(corr_dial, &synthetic).clicks;
+    let violation = match travel {
+        None if target == 0 => None,
+        None => Some(LimitViolation {
+            axis,
+            kind: LimitKind::NoTravelData,
+            needed_mil: corr_dial,
+            available_mil: None,
+        }),
+        Some(t) => {
+            let max_up = max_clicks_within(t.up_mil, click_mil);
+            let max_down = max_clicks_within(t.down_mil, click_mil);
+            if target > max_up {
+                return (
+                    max_up,
+                    corr_dial,
+                    Some(LimitViolation {
+                        axis,
+                        kind: LimitKind::TravelExceeded,
+                        needed_mil: corr_dial,
+                        available_mil: Some(t.up_mil),
+                    }),
+                );
+            } else if target < -max_down {
+                return (
+                    -max_down,
+                    corr_dial,
+                    Some(LimitViolation {
+                        axis,
+                        kind: LimitKind::TravelExceeded,
+                        needed_mil: corr_dial,
+                        available_mil: Some(t.down_mil),
+                    }),
+                );
+            }
+            None
+        }
+    };
+    (target, corr_dial, violation)
+}
+
+/// Bounds-checks a TRUE angular hold value against this axis's directional `HoldBounds`
+/// magnitude and `Preferences::max_hold_mil` (the tighter of the two, when both are
+/// declared), recording exactly one [`LimitViolation`] when the hold exceeds it, or (for a
+/// nonzero hold) when NEITHER is declared at all (MBA-1348). Holds are never clamped -- see
+/// `Strategy::HoldAll` -- so this never alters `hold_true_mil`, only reports on it.
+fn check_hold_bounds(
+    axis: Axis,
+    hold_true_mil: f64,
+    bound_positive: Option<f64>,
+    bound_negative: Option<f64>,
+    max_hold_mil: Option<f64>,
+) -> Option<LimitViolation> {
+    if hold_true_mil == 0.0 {
+        return None;
+    }
+    let directional_bound = if hold_true_mil > 0.0 { bound_positive } else { bound_negative };
+    let effective_bound = match (directional_bound, max_hold_mil) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    match effective_bound {
+        None => Some(LimitViolation {
+            axis,
+            kind: LimitKind::NoHoldBoundData,
+            needed_mil: hold_true_mil,
+            available_mil: None,
+        }),
+        Some(bound) if hold_true_mil.abs() > bound => Some(LimitViolation {
+            axis,
+            kind: LimitKind::HoldBoundExceeded,
+            needed_mil: hold_true_mil,
+            available_mil: Some(bound),
+        }),
+        Some(_) => None,
+    }
+}
+
+fn end_revolution_for(target_clicks: i64, cpr: Option<u32>) -> Option<(u32, u32)> {
+    cpr.and_then(|c| revolution_annotation(target_clicks, c))
+}
+
+/// `"up"`/`"down"` for elevation, `"left"`/`"right"` for windage, from the sign of
+/// `delta_clicks`. Zero is reported as the positive word (`"up"`/`"right"`) -- an
+/// instruction to turn zero clicks has no natural direction of its own.
+fn direction_str(axis: Axis, delta_clicks: i64) -> &'static str {
+    match (axis, delta_clicks < 0) {
+        (Axis::Elevation, true) => "down",
+        (Axis::Elevation, false) => "up",
+        (Axis::Windage, true) => "left",
+        (Axis::Windage, false) => "right",
+    }
+}
+
+/// Per-axis DIAL-space quantization plus every input a [`Strategy`] needs for that axis,
+/// computed exactly once per axis per [`plan_corrections`] call and shared across all three
+/// strategies (MBA-1348) -- `target_clicks`/`travel_violation` are IDENTICAL for
+/// `Strategy::DialAll` and `Strategy::Hybrid` by construction, never recomputed twice.
+struct AxisComputation {
+    axis: Axis,
+    corr_true: f64,
+    click_mil: f64,
+    cf: f64,
+    /// The whole-click target from zero, after travel-clamping (if travel is declared).
+    target_clicks: i64,
+    travel_violation: Option<LimitViolation>,
+    /// `OpticProfile::turret_state`'s click-quantized position on this axis, or 0.
+    state_clicks: i64,
+    cpr: Option<u32>,
+    /// `HoldBounds`'s magnitude in the positive direction (elevation up / windage right).
+    hold_bound_positive: Option<f64>,
+    /// `HoldBounds`'s magnitude in the negative direction (elevation down / windage left).
+    hold_bound_negative: Option<f64>,
+}
+
+// Private per-axis helper: every parameter is a distinct, independently-varying input this
+// module's own tests exercise in isolation (click graduation, CF, travel, turret state,
+// hold bounds, revolution count) -- collapsing them into a params struct would just move
+// the same nine fields into a second, purely-local type with no independent meaning.
+#[allow(clippy::too_many_arguments)]
+fn compute_axis(
+    axis: Axis,
+    corr_true: f64,
+    click: &ClickValue,
+    cf: f64,
+    travel: Option<&TravelLimits>,
+    state_mil: Option<f64>,
+    hold_bound_positive: Option<f64>,
+    hold_bound_negative: Option<f64>,
+    cpr: Option<u32>,
+) -> AxisComputation {
+    let click_mil = click_size_mil(click);
+    let (target_clicks, _corr_dial, travel_violation) =
+        quantize_and_clamp(axis, corr_true, click_mil, cf, travel);
+    let state_clicks = state_mil.map_or(0, |mil| {
+        quantize_angle(mil, &ClickValue { size: click_mil, base: ClickBase::Mil }).clicks
+    });
+    AxisComputation {
+        axis,
+        corr_true,
+        click_mil,
+        cf,
+        target_clicks,
+        travel_violation,
+        state_clicks,
+        cpr,
+        hold_bound_positive,
+        hold_bound_negative,
+    }
+}
+
+/// Builds one axis's [`AxisInstruction`] for `strategy` from a shared [`AxisComputation`],
+/// plus any [`LimitViolation`]s to fold into the plan's `limits_hit` and whether THIS axis,
+/// under THIS strategy, satisfies the strategy's own feasibility promise (MBA-1348) -- see
+/// the module's "Honesty" doc section for why `Strategy::Hybrid`'s feasibility ignores its
+/// own (purely disclosed) travel violation.
+fn build_axis_instruction(
+    strategy: Strategy,
+    ac: &AxisComputation,
+    prefs: &Preferences,
+) -> (AxisInstruction, Vec<LimitViolation>, bool) {
+    match strategy {
+        Strategy::DialAll => {
+            let clicks = ac.target_clicks;
+            let dial_true = clicks as f64 * ac.click_mil * ac.cf;
+            let residual = ac.corr_true - dial_true;
+            let delta_clicks = clicks - ac.state_clicks;
+            let feasible = ac.travel_violation.is_none();
+            let violations = ac.travel_violation.into_iter().collect();
+            let instr = AxisInstruction {
+                axis: ac.axis,
+                direction: direction_str(ac.axis, delta_clicks),
+                delta_clicks,
+                target_clicks_from_zero: clicks,
+                end_revolution: end_revolution_for(clicks, ac.cpr),
+                dial_mil_true: dial_true,
+                hold_mil: 0.0,
+                residual_mil: residual,
+            };
+            (instr, violations, feasible)
+        }
+        Strategy::HoldAll => {
+            let hold = ac.corr_true;
+            let hold_violation = check_hold_bounds(
+                ac.axis,
+                hold,
+                ac.hold_bound_positive,
+                ac.hold_bound_negative,
+                prefs.max_hold_mil,
+            );
+            let feasible = hold_violation.is_none();
+            let target_clicks = 0_i64;
+            let delta_clicks = target_clicks - ac.state_clicks;
+            let violations = hold_violation.into_iter().collect();
+            let instr = AxisInstruction {
+                axis: ac.axis,
+                direction: direction_str(ac.axis, delta_clicks),
+                delta_clicks,
+                target_clicks_from_zero: target_clicks,
+                end_revolution: end_revolution_for(target_clicks, ac.cpr),
+                dial_mil_true: 0.0,
+                hold_mil: hold,
+                residual_mil: 0.0,
+            };
+            (instr, violations, feasible)
+        }
+        Strategy::Hybrid => {
+            let clicks = ac.target_clicks;
+            let dial_true = clicks as f64 * ac.click_mil * ac.cf;
+            let hold = ac.corr_true - dial_true;
+            let residual = ac.corr_true - dial_true - hold;
+            let hold_violation = check_hold_bounds(
+                ac.axis,
+                hold,
+                ac.hold_bound_positive,
+                ac.hold_bound_negative,
+                prefs.max_hold_mil,
+            );
+            // Hybrid's OWN promise is that dial+hold reconstruct the correction exactly
+            // (always true by construction -- `residual` above), so a travel violation on
+            // its dial component is disclosed but does not gate ITS feasibility; only its
+            // hold not fitting does. See the module's "Honesty" doc section.
+            let feasible = hold_violation.is_none();
+            let delta_clicks = clicks - ac.state_clicks;
+            let mut violations: Vec<LimitViolation> = ac.travel_violation.into_iter().collect();
+            violations.extend(hold_violation);
+            let instr = AxisInstruction {
+                axis: ac.axis,
+                direction: direction_str(ac.axis, delta_clicks),
+                delta_clicks,
+                target_clicks_from_zero: clicks,
+                end_revolution: end_revolution_for(clicks, ac.cpr),
+                dial_mil_true: dial_true,
+                hold_mil: hold,
+                residual_mil: residual,
+            };
+            (instr, violations, feasible)
+        }
+    }
+}
+
+/// mil→linear at `range_m` by the small-angle approximation, RSS'd across both axes:
+/// `sqrt((e/1000*range)^2 + (w/1000*range)^2)` (assumption 0).
+fn residual_linear_at_range(e_res_mil: f64, w_res_mil: f64, range_m: f64) -> f64 {
+    let e = e_res_mil / 1000.0 * range_m;
+    let w = w_res_mil / 1000.0 * range_m;
+    (e * e + w * w).sqrt()
+}
+
+fn build_plan(
+    strategy: Strategy,
+    elevation: &AxisComputation,
+    windage: &AxisComputation,
+    prefs: &Preferences,
+    range_m: f64,
+) -> DialPlan {
+    let (e_instr, e_viol, e_feasible) = build_axis_instruction(strategy, elevation, prefs);
+    let (w_instr, w_viol, w_feasible) = build_axis_instruction(strategy, windage, prefs);
+    let mut limits_hit = e_viol;
+    limits_hit.extend(w_viol);
+    DialPlan {
+        strategy,
+        residual_linear_at_range_m: residual_linear_at_range(
+            e_instr.residual_mil,
+            w_instr.residual_mil,
+            range_m,
+        ),
+        instructions: [e_instr, w_instr],
+        feasible: e_feasible && w_feasible,
+        limits_hit,
+    }
+}
+
+/// Ascending sort key for `prefs.prefer_hold`: `false` (prefer dial) ranks
+/// `DialAll < Hybrid < HoldAll`; `true` reverses that. See
+/// `ranking_is_deterministic_and_preference_respected`.
+fn preference_rank(strategy: Strategy, prefer_hold: bool) -> u8 {
+    let dial_first = match strategy {
+        Strategy::DialAll => 0,
+        Strategy::Hybrid => 1,
+        Strategy::HoldAll => 2,
+    };
+    if prefer_hold { 2 - dial_first } else { dial_first }
+}
+
+/// `Strategy`'s own declaration order (`DialAll, HoldAll, Hybrid`), the final ranking
+/// tiebreak once residual and preference are both exhausted.
+fn declaration_rank(strategy: Strategy) -> u8 {
+    match strategy {
+        Strategy::DialAll => 0,
+        Strategy::HoldAll => 1,
+        Strategy::Hybrid => 2,
+    }
+}
+
+/// Turns a TRUE angular [`AngularCorrection`] into ranked, executable dial/hold/hybrid
+/// plans for a real optic (MBA-1348) -- see the module's "`plan_corrections` and the CF
+/// rule" and "Honesty" doc sections for the conventions this function follows in every arm.
+///
+/// Returns exactly three plans, one per [`Strategy`], in `DialPlanReportV1::plans`, ranked
+/// best-first by ascending [`DialPlan::residual_linear_at_range_m`] (via `f64::total_cmp`,
+/// so ranking never panics regardless of input); ties are broken by `prefs.prefer_hold`
+/// (`false` ranks `DialAll < Hybrid < HoldAll`, `true` reverses that), and any remaining
+/// tie by `Strategy`'s own declaration order (`DialAll, HoldAll, Hybrid`) -- see
+/// `ranking_is_deterministic_and_preference_respected`.
+///
+/// `Err(OpticError)` when `optic.validate()` fails, or when `correction`, `range_m`,
+/// `elevation_cf`, `windage_cf`, or `prefs.max_hold_mil` is not finite, or `range_m` /
+/// `max_hold_mil` is negative. `elevation_cf`/`windage_cf` are otherwise trusted exactly as
+/// given, like `crate::truing::scale_report_dial_values` -- this function does not re-apply
+/// `crate::adjustment::tracking_cf_in_range`'s plausibility band; enforcing that band (if
+/// at all) is a caller/CLI concern, matching that existing precedent.
+pub fn plan_corrections(
+    correction: AngularCorrection,
+    optic: &OpticProfile,
+    range_m: f64,
+    elevation_cf: f64,
+    windage_cf: f64,
+    prefs: &Preferences,
+) -> Result<DialPlanReportV1, OpticError> {
+    optic.validate()?;
+    require_finite("correction.elevation_mil", correction.elevation_mil)?;
+    require_finite("correction.windage_mil", correction.windage_mil)?;
+    require_finite("range_m", range_m)?;
+    require_non_negative("range_m", range_m)?;
+    require_finite("elevation_cf", elevation_cf)?;
+    require_finite("windage_cf", windage_cf)?;
+    if let Some(max_hold) = prefs.max_hold_mil {
+        require_finite("max_hold_mil", max_hold)?;
+        require_non_negative("max_hold_mil", max_hold)?;
+    }
+
+    let (hold_up, hold_down, hold_left, hold_right) = match &optic.reticle_hold_bounds {
+        Some(b) => (Some(b.up_mil), Some(b.down_mil), Some(b.left_mil), Some(b.right_mil)),
+        None => (None, None, None, None),
+    };
+
+    let elevation = compute_axis(
+        Axis::Elevation,
+        correction.elevation_mil,
+        &optic.elevation_click,
+        elevation_cf,
+        optic.elevation_travel.as_ref(),
+        optic.turret_state.as_ref().map(|s| s.elevation_mil),
+        hold_up,
+        hold_down,
+        optic.clicks_per_revolution,
+    );
+    let windage = compute_axis(
+        Axis::Windage,
+        correction.windage_mil,
+        &optic.windage_click,
+        windage_cf,
+        optic.windage_travel.as_ref(),
+        optic.turret_state.as_ref().map(|s| s.windage_mil),
+        hold_right,
+        hold_left,
+        optic.clicks_per_revolution,
+    );
+
+    let mut plans = vec![
+        build_plan(Strategy::DialAll, &elevation, &windage, prefs, range_m),
+        build_plan(Strategy::HoldAll, &elevation, &windage, prefs, range_m),
+        build_plan(Strategy::Hybrid, &elevation, &windage, prefs, range_m),
+    ];
+    plans.sort_by(|a, b| {
+        a.residual_linear_at_range_m
+            .total_cmp(&b.residual_linear_at_range_m)
+            .then_with(|| {
+                preference_rank(a.strategy, prefs.prefer_hold)
+                    .cmp(&preference_rank(b.strategy, prefs.prefer_hold))
+            })
+            .then_with(|| declaration_rank(a.strategy).cmp(&declaration_rank(b.strategy)))
+    });
+
+    Ok(DialPlanReportV1 {
+        schema_version: DIAL_PLAN_SCHEMA_VERSION_V1,
+        method: "dial_space_quantization_v1".to_string(),
+        assumptions: vec![
+            "Linear miss at range uses the small-angle approximation (mil / 1000 * range); \
+             it is not exact at extreme angles."
+                .to_string(),
+            "Elevation and windage are planned independently; no cant-induced coupling \
+             between axes is modeled."
+                .to_string(),
+            "Reticle holds are assumed continuous and unquantized, unlike turret clicks."
+                .to_string(),
+            "Travel limits and turret state are trusted exactly as declared in the optic \
+             profile, not sensed or independently verified."
+                .to_string(),
+            "MOA-graduated clicks convert to milliradians using the locked printed-table \
+             constant 3438, not the exact geometric 3437.7467."
+                .to_string(),
+        ],
+        range_m,
+        plans,
+    })
 }
 
 #[cfg(test)]
@@ -673,5 +1330,545 @@ mod tests {
         let json = serde_json::to_string(&profile).unwrap();
         let parsed: OpticProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, profile);
+    }
+}
+
+// MBA-1348 Task 4: `plan_corrections` and its supporting types. Kept in its own test module,
+// separate from `mod tests` above (Task 3's turret-model tests), matching this crate's
+// existing practice of splitting a large file's tests by concern (e.g.
+// `error_budget::window_helper_tests`).
+#[cfg(test)]
+mod plan_corrections_tests {
+    use super::*;
+    use crate::adjustment::ClickBase;
+
+    /// Same numbers as `tests::baseline_profile` (Task 3) -- 0.1 mil clicks on both
+    /// turrets, 10 clicks/revolution, a zero stop, 0.4 mil of down travel and 28.0 of up,
+    /// +-6 mil of windage travel, dialed to zero on both axes, and hold bounds of 5 up /
+    /// 10 down / 6 left / 6 right -- redefined locally (rather than reused across modules)
+    /// so this module doesn't depend on `tests`' private helper visibility.
+    fn baseline_profile() -> OpticProfile {
+        OpticProfile {
+            elevation_click: ClickValue { size: 0.1, base: ClickBase::Mil },
+            windage_click: ClickValue { size: 0.1, base: ClickBase::Mil },
+            clicks_per_revolution: Some(10),
+            zero_stop: true,
+            elevation_travel: Some(TravelLimits { down_mil: 0.4, up_mil: 28.0 }),
+            windage_travel: Some(TravelLimits { down_mil: 6.0, up_mil: 6.0 }),
+            turret_state: Some(TurretState { elevation_mil: 0.0, windage_mil: 0.0 }),
+            reticle_hold_bounds: Some(HoldBounds {
+                up_mil: 5.0,
+                down_mil: 10.0,
+                left_mil: 6.0,
+                right_mil: 6.0,
+            }),
+        }
+    }
+
+    fn plan_for(strategy: Strategy, report: &DialPlanReportV1) -> DialPlan {
+        report
+            .plans
+            .iter()
+            .find(|p| p.strategy == strategy)
+            .unwrap_or_else(|| panic!("no {strategy:?} plan in report"))
+            .clone()
+    }
+
+    // Spec §7 acceptance criterion: "exact-click dope produces zero residual."
+    //
+    // `elevation_mil` is constructed as `23.0 * 0.1`, NOT the literal `2.3`, so it is
+    // BIT-IDENTICAL to `clicks as f64 * click.size` after quantization -- matching
+    // `crate::adjustment::tests::quantize_exact_multiples_have_residual_exactly_zero`'s own
+    // established pattern for the same reason: `2.3_f64 - 23.0 * 0.1 == -4.440892098500626e-16`,
+    // NOT zero, so the decimal literal and the click-multiple product are numerically equal
+    // but not bit-identical. This is a hand-verified floating-point fact (checked directly
+    // in Python's IEEE-754 binary64 floats, identical semantics to Rust `f64`), not a
+    // stylistic choice -- the brief's own "residual_mil == 0.0 bit-exact" requirement is
+    // only achievable this way.
+    #[test]
+    fn exact_click_dope_has_residual_exactly_zero() {
+        let corr = AngularCorrection { elevation_mil: 23.0 * 0.1, windage_mil: 0.0 };
+        let optic = baseline_profile();
+        let report =
+            plan_corrections(corr, &optic, 600.0, 1.0, 1.0, &Preferences::default()).unwrap();
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        assert_eq!(dial_all.instructions[0].target_clicks_from_zero, 23);
+        assert_eq!(dial_all.instructions[0].residual_mil, 0.0, "must be bit-exact zero");
+        assert_eq!(dial_all.instructions[0].residual_mil.to_bits(), 0.0_f64.to_bits());
+        assert!(dial_all.feasible, "{dial_all:?}");
+        assert!(dial_all.limits_hit.is_empty(), "{dial_all:?}");
+    }
+
+    // Spec §7: "fractional-click dope reports the chosen rounding and remaining
+    // angular/linear error at range."
+    //
+    // Hand-derived (and Python-verified against IEEE-754 binary64 arithmetic): 2.34 / 0.1 =
+    // 23.4, rounds to 23 clicks; residual = 2.34 - 23*0.1 = 0.03999999999999959 (~0.04,
+    // matching `2.34 - 2.3` to within 1e-12 as the brief specifies); linear error at 600 m
+    // = |residual| / 1000 * 600 = 0.023999999999999754 (~0.024, within 1e-9).
+    #[test]
+    fn fractional_click_reports_rounding_and_linear_error() {
+        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let optic = baseline_profile();
+        let report =
+            plan_corrections(corr, &optic, 600.0, 1.0, 1.0, &Preferences::default()).unwrap();
+
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        assert_eq!(dial_all.instructions[0].target_clicks_from_zero, 23);
+        let expected_residual = 2.34 - 2.3;
+        assert!(
+            (dial_all.instructions[0].residual_mil - expected_residual).abs() < 1e-12,
+            "residual {} vs hand-derived {}",
+            dial_all.instructions[0].residual_mil,
+            expected_residual
+        );
+        assert!(
+            (dial_all.residual_linear_at_range_m - 0.024).abs() < 1e-9,
+            "residual_linear_at_range_m = {}",
+            dial_all.residual_linear_at_range_m
+        );
+
+        let hybrid = plan_for(Strategy::Hybrid, &report);
+        assert_eq!(
+            hybrid.instructions[0].residual_mil, 0.0,
+            "Hybrid's residual is an identity by construction, always bit-exact zero"
+        );
+        assert!(
+            (hybrid.instructions[0].hold_mil - 0.04).abs() < 1e-9,
+            "hold_mil = {}",
+            hybrid.instructions[0].hold_mil
+        );
+    }
+
+    // Spec §7: "MIL and MOA produce physically equivalent results."
+    #[test]
+    fn mil_and_moa_optics_are_physically_equivalent() {
+        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let prefs = Preferences::default();
+
+        let mil_optic = baseline_profile();
+        let mil_report = plan_corrections(corr, &mil_optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+
+        let mut moa_optic = baseline_profile();
+        moa_optic.elevation_click = ClickValue { size: 0.25, base: ClickBase::Moa };
+        let moa_report = plan_corrections(corr, &moa_optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+
+        for (label, report, click) in [
+            ("mil", &mil_report, &mil_optic.elevation_click),
+            ("moa", &moa_report, &moa_optic.elevation_click),
+        ] {
+            let hybrid = plan_for(Strategy::Hybrid, report);
+            let e = &hybrid.instructions[0];
+            assert!(
+                (e.dial_mil_true + e.hold_mil - corr.elevation_mil).abs() < 1e-12,
+                "{label}: dial_true {} + hold {} should reconstruct corr {} to 1e-12",
+                e.dial_mil_true,
+                e.hold_mil,
+                corr.elevation_mil
+            );
+            assert_eq!(e.residual_mil, 0.0, "{label}: Hybrid residual must be bit-exact zero");
+
+            let dial_all = plan_for(Strategy::DialAll, report);
+            let click_mil = click_size_mil(click);
+            assert!(
+                dial_all.instructions[0].residual_mil.abs() <= click_mil / 2.0,
+                "{label}: DialAll residual {} must be within half a click ({})",
+                dial_all.instructions[0].residual_mil,
+                click_mil / 2.0
+            );
+        }
+    }
+
+    // The brief's pinned worked example -- hand-derived numbers, verified against Rust's
+    // exact IEEE-754 f64 semantics before writing this test:
+    //   corr_dial  = 5.0 / 0.98               = 5.1020408163265305
+    //   clicks     = round(corr_dial / 0.1)   = 51
+    //   dial_true  = 51 * 0.1 * 0.98          = 4.998
+    //   hybrid hold = 5.0 - 4.998             = 0.0019999999999997797  (~0.002, 1e-12)
+    // If the CF multiply/divide directions were swapped, or Hybrid held the DIAL-space
+    // remainder instead of the TRUE one, these numbers would come out different and wrong
+    // -- see this task's required fault-injection verification.
+    #[test]
+    fn cf_dial_space_worked_example() {
+        let corr = AngularCorrection { elevation_mil: 5.0, windage_mil: 0.0 };
+        let optic = baseline_profile();
+        let report =
+            plan_corrections(corr, &optic, 100.0, 0.98, 1.0, &Preferences::default()).unwrap();
+
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        let e = &dial_all.instructions[0];
+        assert_eq!(e.target_clicks_from_zero, 51, "51 clicks: 5.0/0.98 = 5.10204... -> round");
+        assert!(
+            (e.dial_mil_true - 4.998).abs() < 1e-12,
+            "dial_mil_true = {} (expected 51*0.1*0.98 = 4.998)",
+            e.dial_mil_true
+        );
+
+        let hybrid = plan_for(Strategy::Hybrid, &report);
+        let eh = &hybrid.instructions[0];
+        assert_eq!(eh.target_clicks_from_zero, 51);
+        assert!(
+            (eh.hold_mil - 0.002).abs() < 1e-12,
+            "hybrid hold_mil = {} (expected 5.0 - 4.998 = 0.002)",
+            eh.hold_mil
+        );
+        assert_eq!(eh.residual_mil, 0.0, "Hybrid residual must be bit-exact zero");
+        assert!(hybrid.feasible, "{hybrid:?}");
+    }
+
+    // Spec §7: "revolution and click counts are correct across zero-stop and travel
+    // limits" + the brief's specific cpr-10 / 0.4-down / 28-up worked scenario.
+    #[test]
+    fn revolutions_and_zero_stop() {
+        let optic = baseline_profile(); // cpr 10, up 28.0, down 0.4, click 0.1 mil
+        let prefs = Preferences::default();
+
+        // --- 27 clicks: end_revolution == Some((2, 7)) ---
+        // corr constructed as 27.0 * 0.1 for the same bit-exactness reason as the
+        // exact-click test above.
+        let up_corr = AngularCorrection { elevation_mil: 27.0 * 0.1, windage_mil: 0.0 };
+        let up_report = plan_corrections(up_corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+        let dial_all = plan_for(Strategy::DialAll, &up_report);
+        assert_eq!(dial_all.instructions[0].target_clicks_from_zero, 27);
+        assert_eq!(dial_all.instructions[0].end_revolution, Some((2, 7)));
+        assert!(dial_all.feasible, "{dial_all:?}");
+
+        // --- down 1.0 mil needs -10 clicks; only 0.4 mil (4 clicks) of down travel ---
+        let down_corr = AngularCorrection { elevation_mil: -1.0, windage_mil: 0.0 };
+        let down_report = plan_corrections(down_corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+
+        let dial_all = plan_for(Strategy::DialAll, &down_report);
+        let e = &dial_all.instructions[0];
+        assert_eq!(e.target_clicks_from_zero, -4, "clamped to the 0.4 mil / 0.1 mil = 4 clicks available");
+        assert!(!dial_all.feasible, "DialAll must be infeasible when travel-clamped");
+        assert_eq!(dial_all.limits_hit.len(), 1);
+        assert!(matches!(
+            dial_all.limits_hit[0],
+            LimitViolation {
+                axis: Axis::Elevation,
+                kind: LimitKind::TravelExceeded,
+                needed_mil,
+                available_mil: Some(available_mil),
+            } if (needed_mil - (-1.0)).abs() < 1e-12 && available_mil == 0.4
+        ), "{:?}", dial_all.limits_hit[0]);
+
+        let hybrid = plan_for(Strategy::Hybrid, &down_report);
+        let eh = &hybrid.instructions[0];
+        assert_eq!(eh.target_clicks_from_zero, -4, "Hybrid dials the same clamped -4 clicks");
+        assert!(
+            eh.hold_mil.is_sign_negative() && (eh.hold_mil - (-0.6)).abs() < 1e-9,
+            "Hybrid holds the rest: hold_mil = {} (expected -0.6)",
+            eh.hold_mil
+        );
+        assert_eq!(eh.residual_mil, 0.0, "Hybrid residual must be bit-exact zero even when clamped");
+        // The travel violation is still recorded on Hybrid (disclosure)...
+        assert!(
+            hybrid.limits_hit.iter().any(|v| matches!(v.kind, LimitKind::TravelExceeded)),
+            "{:?}",
+            hybrid.limits_hit
+        );
+        // ...but Hybrid's own feasibility depends ONLY on whether the hold fits bounds
+        // (baseline's down_mil hold bound is 10.0; |-0.6| fits comfortably), NOT on the
+        // travel clamp -- this is the crux of the brief's "feasible iff hold fits bounds".
+        assert!(
+            hybrid.feasible,
+            "Hybrid must remain feasible: the hold (-0.6) fits within the 10.0 mil hold \
+             bound, even though its dial component was travel-clamped: {hybrid:?}"
+        );
+    }
+
+    // Spec §7: "an infeasible request is reported as infeasible rather than silently
+    // clamped" -- the brief's own acceptance test name.
+    #[test]
+    fn infeasible_is_reported_never_silently_clamped() {
+        let optic = baseline_profile(); // down travel 0.4 mil
+        let corr = AngularCorrection { elevation_mil: -1.0, windage_mil: 0.0 };
+        let report =
+            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
+
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        assert!(!dial_all.feasible);
+        let e = &dial_all.instructions[0];
+        // The clamped dial only executes -4 clicks * 0.1 mil * 1.0 cf = -0.4 true mil, NOT
+        // the requested -1.0. The reported residual must equal the REAL shortfall against
+        // what was actually executed, never something smaller that pretends the clamp
+        // didn't happen.
+        let clamped_dial_true = e.target_clicks_from_zero as f64 * 0.1 * 1.0;
+        assert!((clamped_dial_true - (-0.4)).abs() < 1e-12);
+        let honest_residual = corr.elevation_mil - clamped_dial_true;
+        assert!(
+            (e.residual_mil - honest_residual).abs() < 1e-12,
+            "residual_mil {} must equal corr_true - clamped_dial_true = {} exactly, not a \
+             smaller, optimistic number",
+            e.residual_mil,
+            honest_residual
+        );
+        assert!(
+            e.residual_mil.abs() > 0.5,
+            "a silently-optimistic implementation might under-report this; the real miss \
+             is large (-0.6 mil): residual_mil = {}",
+            e.residual_mil
+        );
+
+        // No plan anywhere in the ranked list is feasible: true while ALSO carrying a
+        // recorded violation that its own strategy's feasibility depends on (DialAll's own
+        // travel violation, HoldAll's own hold violation). This is a general property of
+        // the whole report, not just DialAll.
+        for plan in &report.plans {
+            match plan.strategy {
+                Strategy::DialAll | Strategy::HoldAll => {
+                    assert_eq!(
+                        plan.feasible,
+                        plan.limits_hit.is_empty(),
+                        "{:?}: DialAll/HoldAll feasibility must exactly track limits_hit",
+                        plan.strategy
+                    );
+                }
+                Strategy::Hybrid => {} // see revolutions_and_zero_stop: gated on hold only
+            }
+        }
+    }
+
+    // Spec §7 + the brief's own ranking rule: ascending residual_linear_at_range_m, ties
+    // broken by `prefer_hold` (false => DialAll < Hybrid < HoldAll, true => reverse), final
+    // tie by Strategy's declaration order. No float sort_by panic regardless (total_cmp).
+    #[test]
+    fn ranking_is_deterministic_and_preference_respected() {
+        // --- A full 3-way tie: an exact-click correction makes ALL THREE strategies'
+        // residual (and therefore residual_linear_at_range_m) exactly 0.0 -- DialAll lands
+        // on an exact click (no quantization error), and HoldAll/Hybrid are ALWAYS exactly
+        // 0.0 by construction regardless of the correction. This isolates the preference
+        // tiebreak completely: nothing here is decided by the primary residual key.
+        let optic = baseline_profile();
+        let corr = AngularCorrection { elevation_mil: 23.0 * 0.1, windage_mil: 0.0 };
+
+        let prefer_dial = Preferences { prefer_hold: false, max_hold_mil: None };
+        let report_dial =
+            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefer_dial).unwrap();
+        let strategies: Vec<Strategy> = report_dial.plans.iter().map(|p| p.strategy).collect();
+        assert_eq!(
+            strategies,
+            vec![Strategy::DialAll, Strategy::Hybrid, Strategy::HoldAll],
+            "prefer_hold=false must rank DialAll < Hybrid < HoldAll when fully tied"
+        );
+
+        let prefer_hold = Preferences { prefer_hold: true, max_hold_mil: None };
+        let report_hold =
+            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefer_hold).unwrap();
+        let strategies: Vec<Strategy> = report_hold.plans.iter().map(|p| p.strategy).collect();
+        assert_eq!(
+            strategies,
+            vec![Strategy::HoldAll, Strategy::Hybrid, Strategy::DialAll],
+            "prefer_hold=true must reverse the order to HoldAll < Hybrid < DialAll"
+        );
+
+        // --- A NON-tied scenario: DialAll's residual (~0.04) is strictly worse than
+        // HoldAll/Hybrid's (always exactly 0.0), so the PRIMARY ascending-residual key must
+        // place DialAll last regardless of preference -- preference only ever breaks ties,
+        // it never overrides a genuine residual difference.
+        let frac_corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        for prefs in [prefer_dial, prefer_hold] {
+            let report =
+                plan_corrections(frac_corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+            assert_eq!(
+                report.plans.last().unwrap().strategy,
+                Strategy::DialAll,
+                "DialAll's nonzero residual must always rank it last, prefer_hold={}",
+                prefs.prefer_hold
+            );
+            // Ranked ascending by residual_linear_at_range_m, non-decreasing throughout.
+            for pair in report.plans.windows(2) {
+                assert!(
+                    pair[0].residual_linear_at_range_m <= pair[1].residual_linear_at_range_m,
+                    "{:?}",
+                    report.plans
+                );
+            }
+        }
+    }
+
+    // Spec §2 (every report carries method + assumptions) + the Plan-A lesson: a
+    // `contains("word")` check alone is satisfiable by a DIFFERENT sentence, so this pins
+    // length AND a substring unique to each index (verified unique among the five strings
+    // actually emitted, not merely plausible-sounding).
+    #[test]
+    fn report_carries_method_and_all_five_assumptions() {
+        let optic = baseline_profile();
+        let corr = AngularCorrection { elevation_mil: 2.3, windage_mil: 0.0 };
+        let report =
+            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
+
+        assert_eq!(report.schema_version, DIAL_PLAN_SCHEMA_VERSION_V1);
+        assert_eq!(report.method, "dial_space_quantization_v1");
+        assert_eq!(report.assumptions.len(), 5, "{:?}", report.assumptions);
+        assert!(
+            report.assumptions[0].contains("small-angle"),
+            "[0] small-angle mil<->linear conversion: {}",
+            report.assumptions[0]
+        );
+        assert!(
+            report.assumptions[1].contains("cant"),
+            "[1] axes planned independently, no cant coupling: {}",
+            report.assumptions[1]
+        );
+        assert!(
+            report.assumptions[2].contains("unquantized"),
+            "[2] holds assumed continuous and unquantized: {}",
+            report.assumptions[2]
+        );
+        assert!(
+            report.assumptions[3].contains("sensed"),
+            "[3] travel/state trusted as declared, not sensed: {}",
+            report.assumptions[3]
+        );
+        assert!(
+            report.assumptions[4].contains("3438"),
+            "[4] MOA uses the locked 3438 printed-table constant: {}",
+            report.assumptions[4]
+        );
+    }
+
+    // The brief's own acceptance test: turret_state shifts delta_clicks but never
+    // target_clicks_from_zero.
+    #[test]
+    fn turret_state_shifts_delta_but_not_target() {
+        let corr = AngularCorrection { elevation_mil: 23.0 * 0.1, windage_mil: 0.0 };
+        let prefs = Preferences::default();
+
+        let zeroed = baseline_profile(); // turret_state elevation_mil: 0.0
+        let report_zeroed = plan_corrections(corr, &zeroed, 100.0, 1.0, 1.0, &prefs).unwrap();
+        let dial_zeroed = plan_for(Strategy::DialAll, &report_zeroed);
+
+        let mut dialed = baseline_profile();
+        dialed.turret_state = Some(TurretState { elevation_mil: 1.0, windage_mil: 0.0 });
+        let report_dialed = plan_corrections(corr, &dialed, 100.0, 1.0, 1.0, &prefs).unwrap();
+        let dial_dialed = plan_for(Strategy::DialAll, &report_dialed);
+
+        assert_eq!(dial_zeroed.instructions[0].target_clicks_from_zero, 23);
+        assert_eq!(dial_dialed.instructions[0].target_clicks_from_zero, 23,
+            "target_clicks_from_zero must NOT move just because turret_state changed");
+        assert_eq!(dial_zeroed.instructions[0].delta_clicks, 23);
+        assert_eq!(
+            dial_dialed.instructions[0].delta_clicks, 13,
+            "1.0 mil dialed = 10 clicks of state; delta_clicks must drop by exactly 10 (23 -> 13)"
+        );
+    }
+
+    // ---- Beyond the brief: NoTravelData / NoHoldBoundData disclosure ----
+    //
+    // Neither LimitKind is exercised by the brief's nine named tests, but both appear in
+    // the `LimitKind` interface the brief itself specifies, so their behavior is a real
+    // part of this task's surface, not an incidental implementation detail. Absence of
+    // declared data is a WEAKER claim than a known, exceeded limit (see the module's
+    // "Honesty" doc section): it is disclosed in `limits_hit`, and it gates exactly the
+    // strategies whose OWN feasibility promise depends on that data.
+
+    #[test]
+    fn missing_travel_data_is_disclosed_and_gates_dial_all_but_not_hybrid() {
+        let mut optic = baseline_profile();
+        optic.elevation_travel = None; // no travel data at all on this axis
+        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let report =
+            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
+
+        let dial_all = plan_for(Strategy::DialAll, &report);
+        assert!(
+            dial_all.limits_hit.iter().any(|v| matches!(
+                v,
+                LimitViolation { axis: Axis::Elevation, kind: LimitKind::NoTravelData, available_mil: None, .. }
+            )),
+            "{:?}",
+            dial_all.limits_hit
+        );
+        assert!(!dial_all.feasible, "DialAll cannot affirm feasibility without travel data");
+
+        let hybrid = plan_for(Strategy::Hybrid, &report);
+        assert!(
+            hybrid.limits_hit.iter().any(|v| matches!(v.kind, LimitKind::NoTravelData)),
+            "Hybrid still discloses the missing data: {:?}",
+            hybrid.limits_hit
+        );
+        assert!(
+            hybrid.feasible,
+            "Hybrid's feasibility does not depend on travel data at all, only its hold \
+             fitting bounds (it does, here): {hybrid:?}"
+        );
+
+        // A trivial (zero) correction needs no travel data at all, so nothing is disclosed.
+        let zero_corr = AngularCorrection { elevation_mil: 0.0, windage_mil: 0.0 };
+        let zero_report =
+            plan_corrections(zero_corr, &optic, 100.0, 1.0, 1.0, &Preferences::default())
+                .unwrap();
+        let zero_dial_all = plan_for(Strategy::DialAll, &zero_report);
+        assert!(zero_dial_all.limits_hit.is_empty(), "{:?}", zero_dial_all.limits_hit);
+        assert!(zero_dial_all.feasible);
+    }
+
+    #[test]
+    fn missing_hold_bound_data_is_disclosed_and_gates_hold_all_and_hybrid() {
+        let mut optic = baseline_profile();
+        optic.reticle_hold_bounds = None; // no hold bound data at all
+        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let prefs = Preferences::default(); // max_hold_mil also None
+        let report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+
+        let hold_all = plan_for(Strategy::HoldAll, &report);
+        assert!(
+            hold_all.limits_hit.iter().any(|v| matches!(
+                v,
+                LimitViolation { axis: Axis::Elevation, kind: LimitKind::NoHoldBoundData, available_mil: None, .. }
+            )),
+            "{:?}",
+            hold_all.limits_hit
+        );
+        assert!(!hold_all.feasible);
+
+        let hybrid = plan_for(Strategy::Hybrid, &report);
+        assert!(
+            hybrid.limits_hit.iter().any(|v| matches!(v.kind, LimitKind::NoHoldBoundData)),
+            "{:?}",
+            hybrid.limits_hit
+        );
+        assert!(!hybrid.feasible, "Hybrid's hold ALSO cannot be verified here: {hybrid:?}");
+
+        // But `max_hold_mil` alone is enough to make the hold checkable again -- 3.0 is
+        // comfortably above the 2.34 mil hold actually needed, so this must fit, not merely
+        // become checkable-and-still-exceeded.
+        let capped = Preferences { prefer_hold: false, max_hold_mil: Some(3.0) };
+        let capped_report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &capped).unwrap();
+        let capped_hold_all = plan_for(Strategy::HoldAll, &capped_report);
+        assert!(
+            capped_hold_all.limits_hit.is_empty(),
+            "2.34 fits within the 3.0 cap, so nothing should be recorded at all: {:?}",
+            capped_hold_all.limits_hit
+        );
+        assert!(capped_hold_all.feasible, "{:?}", capped_hold_all);
+    }
+
+    #[test]
+    fn max_clicks_within_handles_exact_and_fractional_boundaries() {
+        // Exact multiples: floating-point noise in the division must not discard a click.
+        assert_eq!(max_clicks_within(0.4, 0.1), 4);
+        assert_eq!(max_clicks_within(28.0, 0.1), 280);
+        assert_eq!(max_clicks_within(6.0, 0.1), 60);
+        // A genuinely fractional boundary floors -- never rounds up past a hard limit.
+        assert_eq!(max_clicks_within(0.45, 0.1), 4);
+        assert_eq!(max_clicks_within(0.05, 0.1), 0);
+    }
+
+    #[test]
+    fn preferences_default_prefers_dial_with_no_hold_cap() {
+        let p = Preferences::default();
+        assert!(!p.prefer_hold);
+        assert_eq!(p.max_hold_mil, None);
+    }
+
+    #[test]
+    fn plan_corrections_rejects_an_invalid_profile() {
+        let mut optic = baseline_profile();
+        optic.elevation_click.size = 0.0; // rejected by OpticProfile::validate
+        let corr = AngularCorrection { elevation_mil: 1.0, windage_mil: 0.0 };
+        let result = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default());
+        assert!(matches!(result, Err(OpticError::NonPositiveClickSize { .. })), "{result:?}");
     }
 }
