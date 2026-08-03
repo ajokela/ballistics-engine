@@ -7,9 +7,17 @@
 //! table; `main.rs` maps its own `AdjustmentUnit` onto `ClickBase`/`adjustment_factor`
 //! locally (see `drop_to_adjustment` in `main.rs`).
 
+use serde::{Deserialize, Serialize};
+
 /// Angular base unit for a turret click graduation (MBA-1355). A click graduation is
 /// always expressed in mil, (true) MOA, or SMOA/IPHY — never in whole clicks itself.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Serialized lowercase (`"mil"` / `"moa"` / `"smoa"`), matching `parse_click_value`'s
+/// suffix vocabulary and this crate's convention for unit-like enums (e.g.
+/// `crate::truing::DropUnit`) — added for `crate::optic::OpticProfile` (MBA-1348), which
+/// embeds a `ClickValue` per turret and needs it to round-trip through JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ClickBase {
     Mil,
     Moa,
@@ -31,7 +39,7 @@ pub fn adjustment_factor(base: ClickBase) -> f64 {
 
 /// A turret click graduation, parsed from suffixed CLI/profile syntax
 /// like "0.1mil" / "0.25moa" / "0.125smoa" (MBA-1355).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClickValue {
     pub size: f64,
     pub base: ClickBase,

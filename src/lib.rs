@@ -173,6 +173,12 @@ pub mod error_budget;
 // feature gate: must compile for wasm32 (depends only on perturbation/error_budget/solve_json,
 // all unconditional).
 pub mod tolerance;
+// 0.33.0 decision-support Task 3, MBA-1348: turret + reticle geometry model (click
+// detents/revolutions, zero stop, travel limits, current turret state, reticle hold
+// bounds) that a later dial/hold/hybrid engagement planner will read. Pure data +
+// validation; no feature gate: must compile for wasm32 (depends only on `adjustment`,
+// itself unconditional).
+pub mod optic;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]
