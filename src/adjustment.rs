@@ -65,6 +65,30 @@ pub fn parse_click_value(s: &str) -> Result<ClickValue, String> {
     Ok(ClickValue { size, base })
 }
 
+/// One quantized dial setting: the detent count nearest `angle`, and what remains.
+/// `residual` is in the same angular unit as `angle` (the click's base unit) and is
+/// DEFINED by the exact reconstruction identity
+/// `angle == clicks as f64 * click.size + residual` (bit-for-bit, by construction).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quantized {
+    pub clicks: i64,
+    pub residual: f64,
+}
+
+/// Quantize an angular value (in `click.base` units) onto a click detent.
+/// Rounding is nearest, ties away from zero — identical to `clicks_for`, which delegates here.
+pub fn quantize_angle(angle: f64, click: &ClickValue) -> Quantized {
+    let clicks_f = (angle / click.size).round();
+    Quantized { clicks: clicks_f as i64, residual: angle - clicks_f * click.size }
+}
+
+/// This click's size in milliradians, the crate's true-angular unit. `adjustment_factor`
+/// maps one physical ratio into each display unit, so conversion is a factor ratio —
+/// using the LOCKED printed-table MOA constant (3438; MBA-724), deliberately not 3437.7467.
+pub fn click_size_mil(click: &ClickValue) -> f64 {
+    click.size * adjustment_factor(ClickBase::Mil) / adjustment_factor(click.base)
+}
+
 /// Whole-click adjustment for a drop at a range: the angular value in the graduation's
 /// own base unit divided by the graduation, rounded to the nearest click (ties away from
 /// zero). Sign is preserved. Ranges under 1 yard are defined as zero adjustment, matching
@@ -74,7 +98,7 @@ pub fn clicks_for(drop_yd: f64, range_yd: f64, click: &ClickValue) -> i64 {
         return 0;
     }
     let angle = (drop_yd / range_yd) * adjustment_factor(click.base);
-    (angle / click.size).round() as i64
+    quantize_angle(angle, click).clicks
 }
 
 /// Zero-banner dial values `(MOA, mrad)` for a solved zero angle, corrected by the
@@ -154,5 +178,49 @@ mod tests {
         // 10.5 clicks rounds away from zero
         let drop_yd = 2.625 / 3438.0 * 100.0;
         assert_eq!(clicks_for(drop_yd, 100.0, &quarter_moa), 11);
+    }
+
+    #[test]
+    fn quantize_reconstruction_identity_is_bit_exact() {
+        // residual is DEFINED as angle - clicks*size, so reconstruction is exact by construction.
+        let c = ClickValue { size: 0.25, base: ClickBase::Moa };
+        for angle in [0.0, 0.24, 0.25, 0.26, -std::f64::consts::PI, 7.4499999, 1234.567] {
+            let q = quantize_angle(angle, &c);
+            assert_eq!(q.clicks as f64 * c.size + q.residual, angle, "identity broke at {angle}");
+            assert!(q.residual.abs() <= c.size / 2.0 + f64::EPSILON, "residual beyond half-click");
+        }
+    }
+
+    #[test]
+    fn quantize_exact_multiples_have_residual_exactly_zero() {
+        let c = ClickValue { size: 0.1, base: ClickBase::Mil };
+        let q = quantize_angle(0.1 * 27.0, &c);
+        assert_eq!(q.clicks, 27);
+        assert_eq!(q.residual, 0.0); // bit-exact, not approx
+    }
+
+    #[test]
+    fn quantize_ties_round_away_from_zero_matching_clicks_for() {
+        let c = ClickValue { size: 0.5, base: ClickBase::Mil };
+        assert_eq!(quantize_angle(0.25, &c).clicks, 1);   // f64::round: ties away from zero
+        assert_eq!(quantize_angle(-0.25, &c).clicks, -1);
+    }
+
+    #[test]
+    fn clicks_for_is_unchanged_and_delegates() {
+        // Historical behavior pinned: sub-1yd guard + rounding. Values chosen off any tie.
+        let c = ClickValue { size: 0.25, base: ClickBase::Moa };
+        assert_eq!(clicks_for(10.0, 0.5, &c), 0);                       // range_yd < 1.0 guard
+        let angle = (7.2 / 300.0) * adjustment_factor(ClickBase::Moa);
+        assert_eq!(clicks_for(7.2, 300.0, &c), (angle / 0.25_f64).round() as i64);
+    }
+
+    #[test]
+    fn click_size_mil_converts_via_the_locked_factor_table() {
+        let moa = ClickValue { size: 0.25, base: ClickBase::Moa };
+        // 0.25 MOA in mil via the LOCKED 3438 constant (MBA-724), not 3437.7467.
+        assert_eq!(click_size_mil(&moa), 0.25 * 1000.0 / 3438.0);
+        let mil = ClickValue { size: 0.1, base: ClickBase::Mil };
+        assert_eq!(click_size_mil(&mil), 0.1);
     }
 }
