@@ -83,6 +83,11 @@ use ballistics_engine::hold_curve::{
     build_trajectory_components, run_sampled_trajectory, HoldCurve, HoldCurveLoad,
     MarkToRangeOutcome,
 };
+// 0.33.0 decision-support Task 9: CardRow, the shared display-ready row type behind the
+// come-ups/range-table/wind-card/compare surfaces (replacing four function-local row
+// structs -- ComeUpRow/RangeRow/WindRow/LoadRow -- that each said the same thing a
+// different way).
+use ballistics_engine::card::CardRow;
 use ballistics_engine::wind::{parse_wind_direction_standalone, ParsedWindDirection};
 // MBA-1349: robust hold corridors over named segmented-wind scenarios.
 use ballistics_engine::wind_scenarios::{
@@ -12436,7 +12441,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Assemble the load list: explicit --load specs first, then --profile loads,
             // preserving command-line order within each group. Load #1 is the delta baseline.
-            let mut compare_loads: Vec<CompareLoad> = Vec::new();
+            let mut compare_loads: Vec<CompareLoadSpec> = Vec::new();
             for spec in &loads {
                 compare_loads.push(parse_compare_load_spec(spec, cli.units)?);
             }
@@ -12458,7 +12463,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         })
                     })
                     .transpose()?;
-                compare_loads.push(CompareLoad {
+                compare_loads.push(CompareLoadSpec {
                     name: name.clone(),
                     drag_model: parse_drag_model_arg(&p.drag_model),
                     bc: p.bc,
@@ -18307,16 +18312,7 @@ fn handle_come_ups(
         UnitSystem::Metric => ("m", "m/s", "J"),
     };
 
-    struct ComeUpRow {
-        range: f64,
-        drop_adj: f64,
-        come_up: f64,
-        velocity: f64,
-        energy: f64,
-        time: f64,
-    }
-
-    let mut rows: Vec<ComeUpRow> = Vec::new();
+    let mut rows: Vec<CardRow> = Vec::new();
     let mut current_range = start;
     let mut prev_drop_adj: f64 = 0.0;
 
@@ -18346,13 +18342,18 @@ fn handle_come_ups(
                 .value;
                 let come_up = drop_adj - prev_drop_adj;
 
-                rows.push(ComeUpRow {
+                rows.push(CardRow {
                     range: current_range,
-                    drop_adj,
-                    come_up,
-                    velocity: UnitConverter::velocity_from_metric(sample.velocity_mps, units),
-                    energy: UnitConverter::energy_from_metric(sample.energy_j, units),
-                    time: sample.time_s,
+                    drop_linear: None,
+                    drop_adj: Some(drop_adj),
+                    come_up: Some(come_up),
+                    wind_linear: None,
+                    wind_adj: None,
+                    velocity: Some(UnitConverter::velocity_from_metric(sample.velocity_mps, units)),
+                    energy: Some(UnitConverter::energy_from_metric(sample.energy_j, units)),
+                    time: Some(sample.time_s),
+                    lead_adj: None,
+                    wind_columns: Vec::new(),
                 });
 
                 prev_drop_adj = drop_adj;
@@ -18403,12 +18404,22 @@ fn handle_come_ups(
                 if is_clicks {
                     println!(
                         "{:.0},{:.0},{:.0},{:.0},{:.0},{:.3}",
-                        r.range, r.drop_adj, r.come_up, r.velocity, r.energy, r.time
+                        r.range,
+                        r.drop_adj.unwrap(),
+                        r.come_up.unwrap(),
+                        r.velocity.unwrap(),
+                        r.energy.unwrap(),
+                        r.time.unwrap()
                     );
                 } else {
                     println!(
                         "{:.0},{:.3},{:.3},{:.0},{:.0},{:.3}",
-                        r.range, r.drop_adj, r.come_up, r.velocity, r.energy, r.time
+                        r.range,
+                        r.drop_adj.unwrap(),
+                        r.come_up.unwrap(),
+                        r.velocity.unwrap(),
+                        r.energy.unwrap(),
+                        r.time.unwrap()
                     );
                 }
             }
@@ -18437,22 +18448,7 @@ fn handle_come_ups(
             let is_clicks = matches!(adjustment_unit, AdjustmentUnit::Clicks);
             let drop_field_w = drop_label_w + 6;
             for (i, r) in rows.iter().enumerate() {
-                let drop_str = if is_clicks {
-                    format!("{:>drop_field_w$.0}", r.drop_adj)
-                } else {
-                    format!("{:>drop_field_w$.3}", r.drop_adj)
-                };
-                let come_up_str = if i == 0 {
-                    "    —     ".to_string()
-                } else if is_clicks {
-                    format!("{:>9.0} ", r.come_up)
-                } else {
-                    format!("{:>9.3} ", r.come_up)
-                };
-                println!(
-                    "│{:>9.0} │{} │{}│{:>9.0} │{:>9.0} │{:>9.3} │",
-                    r.range, drop_str, come_up_str, r.velocity, r.energy, r.time
-                );
+                println!("{}", come_up_row_line(r, i, is_clicks, drop_field_w));
             }
             println!("└{ten}┴{drop_dashes}┴{ten}┴{ten}┴{ten}┴{ten}┘");
 
@@ -18486,6 +18482,37 @@ fn come_up_header_line(dist_unit: &str, adj_label: &str, vel_unit: &str) -> Stri
     format!(
         "│Range ({:>2})|Drop ({:>w$})|Come-Up   │ Vel ({:>3})│Energy    │ Time (s) │",
         dist_unit, adj_label, vel_unit, w = w
+    )
+}
+
+/// Come-ups Table data row, extracted (0.33.0 decision-support Task 9) so the
+/// range/drop/come-up/velocity/energy/time column wiring is unit-testable without
+/// spinning up the whole CLI -- see `card_row_sentinel_tests` for the anti-transposition
+/// regression guard this enables. `i == 0` prints the em-dash placeholder in the Come-Up
+/// column (there is no prior row to compute a come-up from).
+fn come_up_row_line(r: &CardRow, i: usize, is_clicks: bool, drop_field_w: usize) -> String {
+    let drop_adj = r.drop_adj.unwrap();
+    let come_up = r.come_up.unwrap();
+    let drop_str = if is_clicks {
+        format!("{:>drop_field_w$.0}", drop_adj)
+    } else {
+        format!("{:>drop_field_w$.3}", drop_adj)
+    };
+    let come_up_str = if i == 0 {
+        "    —     ".to_string()
+    } else if is_clicks {
+        format!("{:>9.0} ", come_up)
+    } else {
+        format!("{:>9.3} ", come_up)
+    };
+    format!(
+        "│{:>9.0} │{} │{}│{:>9.0} │{:>9.0} │{:>9.3} │",
+        r.range,
+        drop_str,
+        come_up_str,
+        r.velocity.unwrap(),
+        r.energy.unwrap(),
+        r.time.unwrap()
     )
 }
 
@@ -19517,12 +19544,9 @@ fn handle_wind_card(
     // trajectory at each wind speed and collect drift. Legacy default is a
     // single 90° (full-value crosswind from the right) angle.
     //
-    // Collect data: rows = ranges, columns = wind speeds
-    struct WindRow {
-        range: f64,
-        drifts: Vec<f64>, // drift in adjustment units per wind speed
-    }
-
+    // Collect data: rows = ranges, columns = wind speeds (CardRow::wind_columns holds the
+    // drift-in-adjustment-units-per-wind-speed vector; every other CardRow field is unused
+    // by this surface and stays None/empty).
     let mut ranges: Vec<f64> = Vec::new();
     let mut current = start;
     while current <= end + 0.1 {
@@ -19601,12 +19625,21 @@ fn handle_wind_card(
             }
         }
 
-        let wind_rows: Vec<WindRow> = ranges
+        let wind_rows: Vec<CardRow> = ranges
             .iter()
             .enumerate()
-            .map(|(i, &range)| WindRow {
+            .map(|(i, &range)| CardRow {
                 range,
-                drifts: all_drifts[i].clone(),
+                drop_linear: None,
+                drop_adj: None,
+                come_up: None,
+                wind_linear: None,
+                wind_adj: None,
+                velocity: None,
+                energy: None,
+                time: None,
+                lead_adj: None,
+                wind_columns: all_drifts[i].clone(),
             })
             .collect();
 
@@ -19618,7 +19651,7 @@ fn handle_wind_card(
                         let mut row = serde_json::json!({ "range": r.range });
                         for (j, &ws) in wind_speeds.iter().enumerate() {
                             row[format!("wind_{}", ws)] =
-                                serde_json::json!(r.drifts.get(j).unwrap_or(&0.0));
+                                serde_json::json!(r.wind_columns.get(j).unwrap_or(&0.0));
                         }
                         row
                     })
@@ -19652,7 +19685,7 @@ fn handle_wind_card(
                 println!("range_{},{}", dist_unit, ws_headers.join(","));
                 for r in &wind_rows {
                     let drift_strs: Vec<String> = r
-                        .drifts
+                        .wind_columns
                         .iter()
                         .map(|d| {
                             let d = if d.abs() < 1e-9 { 0.0 } else { *d };
@@ -19702,7 +19735,7 @@ fn handle_wind_card(
 
                 for r in &wind_rows {
                     let mut row_str = format!("│{:>9.0} ", r.range);
-                    for d in &r.drifts {
+                    for d in &r.wind_columns {
                         let d = if d.abs() < 1e-9 { 0.0 } else { *d };
                         row_str += &format!("│{:>9.1} ", d);
                     }
@@ -20063,18 +20096,7 @@ fn handle_range_table(
         UnitSystem::Metric => ("m", "m/s", "J", "mm", "m/s"),
     };
 
-    struct RangeRow {
-        range: f64,
-        drop_linear: f64,
-        drop_adj: f64,
-        wind_linear: f64,
-        wind_adj: f64,
-        velocity: f64,
-        energy: f64,
-        time: f64,
-    }
-
-    let mut rows: Vec<RangeRow> = Vec::new();
+    let mut rows: Vec<CardRow> = Vec::new();
     let mut current_range = start;
 
     while current_range <= end + 0.1 {
@@ -20114,15 +20136,18 @@ fn handle_range_table(
                 let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
                 let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value;
 
-                rows.push(RangeRow {
+                rows.push(CardRow {
                     range: current_range,
-                    drop_linear,
-                    drop_adj,
-                    wind_linear,
-                    wind_adj,
-                    velocity: UnitConverter::velocity_from_metric(nw.velocity_mps, units),
-                    energy: UnitConverter::energy_from_metric(nw.energy_j, units),
-                    time: nw.time_s,
+                    drop_linear: Some(drop_linear),
+                    drop_adj: Some(drop_adj),
+                    come_up: None,
+                    wind_linear: Some(wind_linear),
+                    wind_adj: Some(wind_adj),
+                    velocity: Some(UnitConverter::velocity_from_metric(nw.velocity_mps, units)),
+                    energy: Some(UnitConverter::energy_from_metric(nw.energy_j, units)),
+                    time: Some(nw.time_s),
+                    lead_adj: None,
+                    wind_columns: Vec::new(),
                 });
             }
         }
@@ -20185,13 +20210,13 @@ fn handle_range_table(
                 println!(
                     "{:.0},{:.1},{:.3},{:.1},{:.2},{:.0},{:.0},{:.2}",
                     r.range,
-                    r.drop_linear,
-                    r.drop_adj,
-                    r.wind_linear,
-                    r.wind_adj,
-                    r.velocity,
-                    r.energy,
-                    r.time
+                    r.drop_linear.unwrap(),
+                    r.drop_adj.unwrap(),
+                    r.wind_linear.unwrap(),
+                    r.wind_adj.unwrap(),
+                    r.velocity.unwrap(),
+                    r.energy.unwrap(),
+                    r.time.unwrap()
                 );
             }
         }
@@ -20213,17 +20238,7 @@ fn handle_range_table(
                 "├───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┤"
             );
             for r in &rows {
-                println!(
-                    "│{:>6.0} │{:>8.1} │{:>8.3} │{:>8.1} │{:>8.2} │{:>8.0} │{:>8.0} │{:>6.2} │",
-                    r.range,
-                    r.drop_linear,
-                    r.drop_adj,
-                    r.wind_linear,
-                    r.wind_adj,
-                    r.velocity,
-                    r.energy,
-                    r.time
-                );
+                println!("{}", range_table_row_line(r));
             }
             println!(
                 "└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘"
@@ -20234,11 +20249,34 @@ fn handle_range_table(
     Ok(())
 }
 
-/// One load in a `compare` run, in DISPLAY units per the session `--units`.
-/// `bc_segments_data`/`custom_drag_table` come only from saved profiles (inline
-/// `--load` specs are scalar-BC by design) and are threaded into BOTH the zero
+/// Range Table data row, extracted (0.33.0 decision-support Task 9) so the range/drop-
+/// linear/drop-adj/wind-linear/wind-adj/velocity/energy/time column wiring is
+/// unit-testable without spinning up the whole CLI -- see `card_row_sentinel_tests` for
+/// the anti-transposition regression guard this enables (a `drop_adj`<->`wind_adj` swap
+/// here must fail that test, since the two columns sit right next to each other).
+fn range_table_row_line(r: &CardRow) -> String {
+    format!(
+        "│{:>6.0} │{:>8.1} │{:>8.3} │{:>8.1} │{:>8.2} │{:>8.0} │{:>8.0} │{:>6.2} │",
+        r.range,
+        r.drop_linear.unwrap(),
+        r.drop_adj.unwrap(),
+        r.wind_linear.unwrap(),
+        r.wind_adj.unwrap(),
+        r.velocity.unwrap(),
+        r.energy.unwrap(),
+        r.time.unwrap()
+    )
+}
+
+/// One load's CLI/profile SPEC in a `compare` run, in DISPLAY units per the session
+/// `--units`. `bc_segments_data`/`custom_drag_table` come only from saved profiles
+/// (inline `--load` specs are scalar-BC by design) and are threaded into BOTH the zero
 /// solve and the sampled runs so the zero uses the same drag physics (MBA-735).
-struct CompareLoad {
+///
+/// Named `CompareLoadSpec` (0.33.0 decision-support Task 9) to free the name
+/// `CompareLoad` for the thin per-load `{ name, rows: Vec<CardRow> }` result type
+/// `handle_compare` builds from it.
+struct CompareLoadSpec {
     name: String,
     drag_model: DragModel,
     bc: f64,
@@ -20251,7 +20289,10 @@ struct CompareLoad {
 
 /// Parse a `--load` spec: `NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]` (MBA-735).
 /// Follows the `--wind-segment` colon convention; all numbers are display units.
-fn parse_compare_load_spec(spec: &str, units: UnitSystem) -> Result<CompareLoad, Box<dyn Error>> {
+fn parse_compare_load_spec(
+    spec: &str,
+    units: UnitSystem,
+) -> Result<CompareLoadSpec, Box<dyn Error>> {
     let parts: Vec<&str> = spec.split(':').collect();
     if parts.len() != 5 && parts.len() != 6 {
         return Err(format!(
@@ -20291,7 +20332,7 @@ fn parse_compare_load_spec(spec: &str, units: UnitSystem) -> Result<CompareLoad,
             UnitSystem::Metric => 7.82,
         }
     };
-    Ok(CompareLoad {
+    Ok(CompareLoadSpec {
         name: name.to_string(),
         drag_model,
         bc,
@@ -20309,7 +20350,7 @@ fn parse_compare_load_spec(spec: &str, units: UnitSystem) -> Result<CompareLoad,
 /// Like range-table, saved-profile bc_segments/drag_curve are not consumed here.
 #[allow(clippy::too_many_arguments)] // mirrors the sibling range-table handler
 fn handle_compare(
-    loads: Vec<CompareLoad>,
+    loads: Vec<CompareLoadSpec>,
     zero_distance: f64,
     start: f64,
     end: f64,
@@ -20361,18 +20402,12 @@ fn handle_compare(
         altitude: altitude_m,
     };
 
-    struct LoadRow {
-        drop_linear: f64,
-        drop_adj: f64,
-        wind_linear: f64,
-        wind_adj: f64,
-        velocity: f64,
-        energy: f64,
-        time: f64,
-    }
-    struct LoadResult {
-        zero_angle_deg: f64,
-        rows: Vec<LoadRow>,
+    // Thin per-load result: the shared `ranges` grid below indexes both `rows` here and
+    // every other load's `rows` identically, so `results[li].rows[ri]` is load `li` at
+    // `ranges[ri]` (used by the delta-vs-baseline JSON and the Table/CSV writers).
+    struct CompareLoad {
+        name: String,
+        rows: Vec<CardRow>,
     }
 
     // The shared range grid (display units)
@@ -20383,7 +20418,11 @@ fn handle_compare(
         r += step;
     }
 
-    let mut results: Vec<LoadResult> = Vec::new();
+    let mut results: Vec<CompareLoad> = Vec::new();
+    // Parallel to `results`/`loads` (one push per loop iteration below): CardRow has no
+    // slot for a per-load scalar like the zero angle, so it stays out-of-band here exactly
+    // as it always has, just no longer bundled into the row-collection struct.
+    let mut zero_angles_deg: Vec<f64> = Vec::new();
     for load in &loads {
         let velocity_m = UnitConverter::velocity_to_metric(load.velocity, units);
         let mass_kg = UnitConverter::mass_to_metric(load.mass, units);
@@ -20468,7 +20507,7 @@ fn handle_compare(
         )
         .map_err(|e| format!("load '{}': {e}", load.name))?;
 
-        let mut rows: Vec<LoadRow> = Vec::new();
+        let mut rows: Vec<CardRow> = Vec::new();
         for &range_display in &ranges {
             let range_m = UnitConverter::distance_to_metric(range_display, units);
             let nw = no_wind_samples.iter().min_by(|a, b| {
@@ -20508,18 +20547,23 @@ fn handle_compare(
             };
             let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
             let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, 0.0, windage_cf).value;
-            rows.push(LoadRow {
-                drop_linear,
-                drop_adj,
-                wind_linear,
-                wind_adj,
-                velocity: UnitConverter::velocity_from_metric(nw.velocity_mps, units),
-                energy: UnitConverter::energy_from_metric(nw.energy_j, units),
-                time: nw.time_s,
+            rows.push(CardRow {
+                range: range_display,
+                drop_linear: Some(drop_linear),
+                drop_adj: Some(drop_adj),
+                come_up: None,
+                wind_linear: Some(wind_linear),
+                wind_adj: Some(wind_adj),
+                velocity: Some(UnitConverter::velocity_from_metric(nw.velocity_mps, units)),
+                energy: Some(UnitConverter::energy_from_metric(nw.energy_j, units)),
+                time: Some(nw.time_s),
+                lead_adj: None,
+                wind_columns: Vec::new(),
             });
         }
-        results.push(LoadResult {
-            zero_angle_deg: zero_angle.to_degrees(),
+        zero_angles_deg.push(zero_angle.to_degrees());
+        results.push(CompareLoad {
+            name: load.name.clone(),
             rows,
         });
     }
@@ -20537,7 +20581,7 @@ fn handle_compare(
         OutputFormat::Json => {
             let mut json = serde_json::json!({
                 "compare": {
-                    "loads": loads.iter().zip(results.iter()).map(|(l, res)| {
+                    "loads": loads.iter().zip(zero_angles_deg.iter()).map(|(l, &zero_angle_deg)| {
                         serde_json::json!({
                             "name": l.name,
                             "drag_model": l.drag_model.to_string(),
@@ -20545,7 +20589,7 @@ fn handle_compare(
                             "mass": l.mass,
                             "velocity": l.velocity,
                             "diameter": l.diameter,
-                            "zero_angle_deg": res.zero_angle_deg,
+                            "zero_angle_deg": zero_angle_deg,
                             "bc_segments": l.bc_segments_data.is_some(),
                             "custom_drag_curve": l.custom_drag_table.is_some(),
                         })
@@ -20573,11 +20617,11 @@ fn handle_compare(
                     "rows": ranges.iter().enumerate().map(|(ri, &range)| {
                         serde_json::json!({
                             "range": range,
-                            "loads": results.iter().enumerate().map(|(li, res)| {
+                            "loads": results.iter().map(|res| {
                                 let row = &res.rows[ri];
                                 let baseline = &results[0].rows[ri];
                                 serde_json::json!({
-                                    "name": loads[li].name,
+                                    "name": res.name,
                                     "drop": row.drop_linear,
                                     "drop_adj": row.drop_adj,
                                     "drift": row.wind_linear,
@@ -20586,10 +20630,10 @@ fn handle_compare(
                                     "energy": row.energy,
                                     "time": row.time,
                                     // deltas vs load #1 (zero for the baseline itself)
-                                    "delta_drop": row.drop_linear - baseline.drop_linear,
-                                    "delta_drift": row.wind_linear - baseline.wind_linear,
-                                    "delta_velocity": row.velocity - baseline.velocity,
-                                    "delta_energy": row.energy - baseline.energy,
+                                    "delta_drop": row.drop_linear.unwrap() - baseline.drop_linear.unwrap(),
+                                    "delta_drift": row.wind_linear.unwrap() - baseline.wind_linear.unwrap(),
+                                    "delta_velocity": row.velocity.unwrap() - baseline.velocity.unwrap(),
+                                    "delta_energy": row.energy.unwrap() - baseline.energy.unwrap(),
                                 })
                             }).collect::<Vec<_>>(),
                         })
@@ -20630,13 +20674,13 @@ fn handle_compare(
                     let row = &res.rows[ri];
                     line.push_str(&format!(
                         ",{:.2},{:.2},{:.2},{:.2},{:.0},{:.0},{:.3}",
-                        row.drop_linear,
-                        row.drop_adj,
-                        row.wind_linear,
-                        row.wind_adj,
-                        row.velocity,
-                        row.energy,
-                        row.time
+                        row.drop_linear.unwrap(),
+                        row.drop_adj.unwrap(),
+                        row.wind_linear.unwrap(),
+                        row.wind_adj.unwrap(),
+                        row.velocity.unwrap(),
+                        row.energy.unwrap(),
+                        row.time.unwrap()
                     ));
                 }
                 println!("{line}");
@@ -20698,7 +20742,7 @@ fn handle_compare(
                     let row = &res.rows[ri];
                     line.push_str(&format!(
                         "| {:>8.2} {:>8.2} {:>8.0} ",
-                        row.drop_adj, row.wind_adj, row.velocity
+                        row.drop_adj.unwrap(), row.wind_adj.unwrap(), row.velocity.unwrap()
                     ));
                 }
                 println!("{line}");
@@ -20724,6 +20768,86 @@ fn handle_compare(
     }
 
     Ok(())
+}
+
+/// 0.33.0 decision-support Task 9: the anti-transposition lesson from this train. Every
+/// `CardRow` field a table renderer reads gets its own DISTINCT sentinel value here, so a
+/// renderer that reads the wrong field -- e.g. a `drop_adj`<->`wind_adj` swap in
+/// `range_table_row_line`, the two adjacent dial columns that make that mistake easy to
+/// make -- prints a different string than the hand-computed `expected`, and this test
+/// fails loudly instead of shipping a plausible-looking but silently-wrong card. Covers
+/// the two riskiest renderers: come-ups (`drop_adj`/`come_up` side by side) and
+/// range-table (four adjacent numeric columns: `drop_linear`/`drop_adj`/`wind_linear`/
+/// `wind_adj`).
+#[cfg(test)]
+mod card_row_sentinel_tests {
+    use super::{come_up_drop_label_width, come_up_row_line, range_table_row_line, CardRow};
+
+    /// Every field distinct so a transposition anywhere changes the rendered string.
+    fn sentinel_row() -> CardRow {
+        CardRow {
+            range: 111.0,
+            drop_linear: Some(222.1),
+            drop_adj: Some(333.2),
+            come_up: Some(444.3),
+            wind_linear: Some(555.4),
+            wind_adj: Some(666.5),
+            velocity: Some(777.6),
+            energy: Some(888.7),
+            time: Some(9.123),
+            lead_adj: Some(101.0),
+            wind_columns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn come_up_row_line_places_each_sentinel_in_its_own_column() {
+        let r = sentinel_row();
+        let drop_field_w = come_up_drop_label_width("MIL") + 6;
+        // i = 1 (not the first row) so the Come-Up column prints its numeric sentinel
+        // instead of the "no prior row" em-dash placeholder.
+        let line = come_up_row_line(&r, 1, false, drop_field_w);
+        let expected = format!(
+            "│{:>9.0} │{:>drop_field_w$.3} │{:>9.3} │{:>9.0} │{:>9.0} │{:>9.3} │",
+            r.range,
+            r.drop_adj.unwrap(),
+            r.come_up.unwrap(),
+            r.velocity.unwrap(),
+            r.energy.unwrap(),
+            r.time.unwrap(),
+        );
+        assert_eq!(line, expected);
+        // Named-column spot checks: each sentinel appears exactly where its field name
+        // says it should, not in a neighbor's slot.
+        assert!(line.contains("333.200"), "drop_adj sentinel missing/misplaced: {line}");
+        assert!(line.contains("444.300"), "come_up sentinel missing/misplaced: {line}");
+        assert!(!line.contains("666.5"), "wind_adj has no come-ups column but its sentinel leaked in: {line}");
+    }
+
+    #[test]
+    fn range_table_row_line_places_each_sentinel_in_its_own_column() {
+        let r = sentinel_row();
+        let line = range_table_row_line(&r);
+        let expected = format!(
+            "│{:>6.0} │{:>8.1} │{:>8.3} │{:>8.1} │{:>8.2} │{:>8.0} │{:>8.0} │{:>6.2} │",
+            r.range,
+            r.drop_linear.unwrap(),
+            r.drop_adj.unwrap(),
+            r.wind_linear.unwrap(),
+            r.wind_adj.unwrap(),
+            r.velocity.unwrap(),
+            r.energy.unwrap(),
+            r.time.unwrap(),
+        );
+        assert_eq!(line, expected);
+        // A drop_adj<->wind_adj swap (the two dial columns sitting either side of
+        // wind_linear) would put "666.50" where "333.200" belongs and vice versa --
+        // pin both independently, not just the whole-line equality above.
+        assert!(line.contains("222.1"), "drop_linear sentinel missing/misplaced: {line}");
+        assert!(line.contains("333.200"), "drop_adj sentinel missing/misplaced: {line}");
+        assert!(line.contains("555.4"), "wind_linear sentinel missing/misplaced: {line}");
+        assert!(line.contains("666.50"), "wind_adj sentinel missing/misplaced: {line}");
+    }
 }
 
 /// MBA-1366: the cross-crate proof that `atmosphere::resolve_atmosphere_for_density_altitude`

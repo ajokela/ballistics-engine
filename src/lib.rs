@@ -186,6 +186,12 @@ pub mod optic;
 // No feature gate: must compile for wasm32 (pure math over already-resolved inputs; no fs, no
 // clap -- CLI argument resolution stays in `main.rs`).
 pub mod hold_curve;
+// 0.33.0 decision-support Task 9: `CardRow`, the shared display-ready row type behind the
+// come-ups/range-table/wind-card/compare CLI surfaces, replacing four function-local row
+// structs that each said the same thing a different way. Pure data; no feature gate: must
+// compile for wasm32 (no fs, no clap, no pdf -- those stay in main.rs). Task 10 rewrites the
+// PDF dope card on `&[CardRow]`; Task 11 grows an adaptive-card engine here.
+pub mod card;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]
