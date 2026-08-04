@@ -65,7 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`-o json`, `AdaptiveCardReportV1` pretty-printed verbatim). A budget tighter than the
     optic's own half-click quantization floor is honestly reported `budget_met: false`, never
     silently relaxed, and every requested `--anchor` always appears in the card regardless of
-    what the measured error says.
+    what the measured error says. **Not a claim of fewer rows than a well-chosen fixed step**:
+    measured against the most generous uniform-step baseline on a smooth trajectory, adaptive
+    placement lost 10, tied 5, and won 5 across five domains and four budgets -- the value here
+    is the measured error bound, the always-present anchors, and no step size to guess, never a
+    shorter card.
 
   See [CLI_USAGE.md](CLI_USAGE.md#constrained-dial--hold-planning-dial-plan--mba-1348) for
   both commands, worked examples (including the `come-ups` -> `dial-plan` pairing), and each
@@ -78,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ballistics_engine::card` (the unified `CardRow` display-row type, see Changed below, plus
   the `adaptive_card` engine), and `ballistics_engine::pdf_dope_card` (the PDF dope card, now
   `CardRow`-based -- also see Changed below for what moved).
+
+  None of the card, optic, or PDF changes in this bullet touch solve-json v1: no field, no
+  accepted request shape, and no resolved-request behavior changed by anything here (see the
+  Changed entries below for what solve-json v1 *did* gain this release).
 
 ### Changed
 - **WEZ (`monte-carlo --wez`) attribution now runs on the shared central-difference kernel**
@@ -134,9 +142,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected -- its rows are still rounded to whole yards before rendering and its PDF output
   is unchanged -- but the relocated function is now reachable from any library consumer
   (language bindings; `adaptive-card -o pdf` above) that enables the `pdf` feature.
-
-Nothing in this train touches solve-json v1: no field, no accepted request shape, and no
-resolved-request behavior changed.
 
 ### Fixed
 - **`$.atmosphere.pressure_reference` was rejected as `unknown_field`** by

@@ -1463,4 +1463,53 @@ mod adaptive_card_tests {
         assert!(first["lead_adj"].is_null());
         assert_eq!(first["wind_columns"], serde_json::json!([]));
     }
+
+    /// Review fix I-4 (review of `4e69435`): the test above pinned only 5 of `CardRow`'s 11
+    /// fields (`range`, `drop_adj`, `come_up`, `lead_adj`, `wind_columns`) -- `drop_linear`,
+    /// `wind_linear`, `wind_adj`, `velocity`, `energy`, `time` were unpinned key names.
+    /// `CardRow` is a *shared* internal type Task 9 itself created by unifying four other
+    /// structs one task ago; a further rename during refactoring is a live possibility, and
+    /// it would silently invalidate a wire published under `ADAPTIVE_CARD_SCHEMA_VERSION_V1`
+    /// (and the 45-line worked JSON example in CLI_USAGE.md) with nothing here noticing.
+    ///
+    /// Every field gets its own pairwise-distinct sentinel (all `Some`, unlike the report-level
+    /// test above which reads a real, physics-derived row) so a field-name<->value
+    /// transposition -- not just a missing key -- fails this, and the row's key COUNT is
+    /// pinned too, so a future field addition/removal is caught even if its name happens to
+    /// collide with an existing sentinel value.
+    #[test]
+    fn card_row_field_names_bind_to_their_sentinel_values_in_json() {
+        let row = CardRow {
+            range: 111.1,
+            drop_linear: Some(222.2),
+            drop_adj: Some(333.3),
+            come_up: Some(444.4),
+            wind_linear: Some(555.5),
+            wind_adj: Some(666.6),
+            velocity: Some(777.7),
+            energy: Some(888.8),
+            time: Some(9.99),
+            lead_adj: Some(101.1),
+            wind_columns: vec![1.0, 2.0, 3.0],
+        };
+        let json = serde_json::to_value(&row).expect("row must serialize");
+
+        assert_eq!(json["range"], 111.1);
+        assert_eq!(json["drop_linear"], 222.2);
+        assert_eq!(json["drop_adj"], 333.3);
+        assert_eq!(json["come_up"], 444.4);
+        assert_eq!(json["wind_linear"], 555.5);
+        assert_eq!(json["wind_adj"], 666.6);
+        assert_eq!(json["velocity"], 777.7);
+        assert_eq!(json["energy"], 888.8);
+        assert_eq!(json["time"], 9.99);
+        assert_eq!(json["lead_adj"], 101.1);
+        assert_eq!(json["wind_columns"], serde_json::json!([1.0, 2.0, 3.0]));
+
+        // No extra keys, and none silently dropped: exactly CardRow's 11 fields.
+        assert_eq!(
+            json.as_object().expect("row must serialize to a JSON object").len(),
+            11
+        );
+    }
 }

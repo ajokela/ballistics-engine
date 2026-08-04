@@ -303,3 +303,67 @@ fn max_rows_caps_and_the_footer_admits_it() {
     assert!(table.contains("budget met: no"), "{table}");
     assert!(table.contains("rows: 2 of 2 max (row cap reached)"), "{table}");
 }
+
+// ---- review fix I-1: a fractional row range must print the SAME value on every format,
+// not get silently rounded to a whole display unit on table/csv while json/pdf keep the
+// exact value. Reproduces the review's own case: `--anchor 412.5` on a 200-500 m metric card.
+
+#[test]
+fn fractional_anchor_range_agrees_across_json_table_and_csv() {
+    let tail = ["--start", "200", "--end", "500", "--anchor", "412.5"];
+
+    let (json_out, stderr, ok) = {
+        let mut t = tail.to_vec();
+        t.extend(["-o", "json"]);
+        run(&t)
+    };
+    assert!(ok, "stderr: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&json_out).expect("json");
+    let ranges: Vec<f64> = v["rows"].as_array().unwrap().iter().map(|r| r["range"].as_f64().unwrap()).collect();
+    assert!(ranges.contains(&412.5), "json must carry the exact anchor: {ranges:?}");
+
+    let (table, stderr, ok) = run(&tail);
+    assert!(ok, "stderr: {stderr}");
+    assert!(
+        table.contains("│ 412.5 │"),
+        "table must print the exact anchor 412.5, not a rounded '412': {table}"
+    );
+    assert!(
+        !table.contains("│   412 │"),
+        "table must not silently round the 412.5 m anchor to a whole metre: {table}"
+    );
+
+    let (csv, stderr, ok) = {
+        let mut t = tail.to_vec();
+        t.extend(["-o", "csv"]);
+        run(&t)
+    };
+    assert!(ok, "stderr: {stderr}");
+    assert!(
+        csv.lines().any(|l| l.starts_with("412.5,")),
+        "csv must print the exact anchor 412.5, not a rounded '412': {csv}"
+    );
+    assert!(
+        !csv.lines().any(|l| l.starts_with("412,")),
+        "csv must not silently round the 412.5 m anchor to a whole metre: {csv}"
+    );
+}
+
+/// The near-integer rule's OTHER branch: a range that lands within floating-point noise of a
+/// whole display unit (both domain ends here) must still print as a bare integer, not grow a
+/// spurious ".0" -- the I-1 fix must not regress the common, previously-correct case.
+#[test]
+fn whole_unit_ranges_still_print_as_bare_integers() {
+    let (table, stderr, ok) = run(&["--start", "200", "--end", "500"]);
+    assert!(ok, "stderr: {stderr}");
+    // A range cell formatted as "200.0" would render "│ 200.0 │" (6-wide, one decimal), not
+    // "│   200 │" (6-wide, bare integer) -- the positive match below is mutually exclusive
+    // with the regression this test guards against, so no separate negative check is needed.
+    assert!(table.contains("│   200 │"), "domain start must print as a bare integer: {table}");
+    assert!(table.contains("│   500 │"), "domain end must print as a bare integer: {table}");
+
+    let (csv, stderr, ok) = run(&["--start", "200", "--end", "500", "-o", "csv"]);
+    assert!(ok, "stderr: {stderr}");
+    assert!(csv.lines().any(|l| l.starts_with("200,")), "{csv}");
+    assert!(csv.lines().any(|l| l.starts_with("500,")), "{csv}");
+}

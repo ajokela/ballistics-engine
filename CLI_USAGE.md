@@ -3525,6 +3525,42 @@ unit suffix (mil/moa/smoa/iphy), converted into whichever `--adjustment` unit is
 the same conversion rule the default (profile-click-derived) budget uses, so an explicit
 budget and the default can never silently disagree about which space they live in.
 
+**Table/CSV Range formatting.** `HoldCurve`'s native grid is spaced every 0.9144 m, so under
+`--units metric` almost every algorithm-chosen interior row -- and any `--anchor` that doesn't
+happen to land on a whole display unit, in either unit system -- is genuinely fractional. The
+Table and CSV Range column render it as a bare integer only when within floating-point noise
+of one, and with exactly one decimal place otherwise (the identical rule the PDF path's
+`format_range` already used) -- **not** rounded to the nearest whole unit, which would silently
+disagree with the exact value `-o json` and `-o pdf` both carry for that same row. For example,
+requesting `--anchor 412.5` on a 200-500 m card:
+
+```bash
+ballistics --units metric adaptive-card -v 800 -b 0.223 -m 10.9 -d 7.82 --drag-model g7 \
+  --sight-height 45 --zero-distance 100 --start 200 --end 500 --anchor 412.5
+```
+```
+
+Adaptive Range Card (zero: 100 m) -- method: greedy_worst_point_insertion_on_holdcurve_grid_v1
+┌───────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬───────┐
+│Range  │Drop     │Drop     │Wind     │Wind     │Vel      │Energy   │ToF    │
+│( m)   │(mm)     │(MIL)    │(mm)     │(MIL)    │(m/s)    │(   J)   │(s)    │
+├───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┤
+│   200 │   137.6 │   0.688 │     0.0 │    0.00 │     670 │    2449 │  0.27 │
+│ 307.2 │   529.8 │   1.724 │     0.0 │    0.00 │     606 │    2003 │  0.44 │
+│ 412.5 │  1214.2 │   2.943 │     0.0 │    0.00 │     546 │    1628 │  0.62 │
+│   500 │  2057.7 │   4.115 │     0.0 │    0.00 │     499 │    1357 │  0.79 │
+└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘
+
+budget met: yes
+rows: 4 of 25 max
+worst error: elevation 0.0274 MIL, windage 0.0000 MIL @ 251.460 m
+verification grid: 0.9144 m step
+```
+
+The requested anchor prints as `412.5`, exactly what `-o json` reports for that row, not `412`
+-- and the algorithm-chosen row at the curve's own native grid point 307.2384 m prints `307.2`,
+the same one-decimal rounding `-o pdf`'s Range column already applied before this fix.
+
 The optic (for click quantization) and its tracking correction factors come only from
 `--profile NAME` here -- unlike `dial-plan`, there is no inline-flag optic path for
 `adaptive-card`, since quantization is optional for a range card: the exact, unrounded angle

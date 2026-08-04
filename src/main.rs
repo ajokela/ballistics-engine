@@ -25962,6 +25962,58 @@ fn adaptive_card_display_row(r: &CardRow, units: UnitSystem) -> CardRow {
     }
 }
 
+/// Formats an adaptive-card row's `range` for table/CSV: a bare integer when within floating-
+/// point noise of one, one decimal place otherwise (review fix I-1, `4e69435`'s review).
+///
+/// `HoldCurve::SAMPLE_INTERVAL_M` is 0.9144 m, so under `--units metric` almost every
+/// algorithm-chosen interior row is genuinely fractional (and a user's own `--anchor` can be
+/// fractional in either unit system) -- `{:.0}` silently rounds it, which made the table and
+/// CSV disagree with `-o json`'s exact value and with `-o pdf` (whose `format_range`,
+/// `src/pdf_dope_card.rs`, already applies this identical rule). This is a **separate copy**
+/// of that same rule, not a shared call: `pdf_dope_card::format_range` is private to a module
+/// gated behind the `pdf` feature, while adaptive-card's table/CSV must render with `pdf`
+/// disabled too. Keep the two in sync by hand if the rounding rule ever changes.
+///
+/// Deliberately NOT applied to `range_table_row_line` (Task 9): that function is golden-
+/// pinned by `tests/card_golden_cli.rs` and `range-table`'s own display units are always
+/// whole, so it is left untouched; adaptive-card gets its own row formatter,
+/// `adaptive_card_row_line`, below.
+fn format_adaptive_card_range(range: f64) -> String {
+    let rounded = range.round();
+    if (range - rounded).abs() < 0.05 {
+        format!("{:.0}", rounded)
+    } else {
+        format!("{:.1}", range)
+    }
+}
+
+/// Adaptive-card's own table row formatter (review fix I-1): byte-identical column layout to
+/// `range_table_row_line` (same widths, same separators, same non-Range formats), but the
+/// Range cell goes through [`format_adaptive_card_range`] instead of `{:>6.0}` -- formatted to
+/// a string first, then right-padded to the same 6-wide field `range_table_row_line` uses, so
+/// an integer range (the common case: both domain ends under imperial units, or any range that
+/// happens to land on a whole display unit) renders byte-for-byte like before. A fractional
+/// range -- ordinary under `--units metric`, or any explicit `--anchor` that doesn't land on a
+/// whole unit -- now prints its one decimal place instead of a silently rounded integer, which
+/// is what makes it agree with `-o json`/`-o pdf` at last.
+///
+/// `range_table_row_line` itself is UNTOUCHED (see its own doc comment): golden-pinning it
+/// means the hard constraint "the 12 goldens must stay byte-identical" is satisfied by
+/// construction, not by proof -- `range-table` never calls this function at all.
+fn adaptive_card_row_line(r: &CardRow) -> String {
+    format!(
+        "│{:>6} │{:>8.1} │{:>8.3} │{:>8.1} │{:>8.2} │{:>8.0} │{:>8.0} │{:>6.2} │",
+        format_adaptive_card_range(r.range),
+        r.drop_linear.unwrap(),
+        r.drop_adj.unwrap(),
+        r.wind_linear.unwrap(),
+        r.wind_adj.unwrap(),
+        r.velocity.unwrap(),
+        r.energy.unwrap(),
+        r.time.unwrap()
+    )
+}
+
 /// Maps a [`CardError`] into a CLI-facing message, naming the flag the user typed wherever
 /// one exists (`--start`/`--end`/`--anchor`/`--elevation-budget`/`--windage-budget`/
 /// `--max-rows`) -- the same "name the flag, not the struct field" convention
@@ -26157,8 +26209,8 @@ fn handle_adaptive_card(
             );
             for r in &display_rows {
                 println!(
-                    "{:.0},{:.1},{:.3},{:.1},{:.2},{:.0},{:.0},{:.2}",
-                    r.range,
+                    "{},{:.1},{:.3},{:.1},{:.2},{:.0},{:.0},{:.2}",
+                    format_adaptive_card_range(r.range),
                     r.drop_linear.unwrap(),
                     r.drop_adj.unwrap(),
                     r.wind_linear.unwrap(),
@@ -26191,7 +26243,7 @@ fn handle_adaptive_card(
                 "├───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┤"
             );
             for r in &display_rows {
-                println!("{}", range_table_row_line(r));
+                println!("{}", adaptive_card_row_line(r));
             }
             println!(
                 "└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘"
@@ -26268,4 +26320,72 @@ fn handle_adaptive_card(
     }
 
     Ok(())
+}
+
+/// Review fix I-1 (review of `4e69435`): `format_adaptive_card_range`/`adaptive_card_row_line`
+/// pin the near-integer-then-one-decimal range rule and prove it does not disturb the seven
+/// other columns.
+#[cfg(test)]
+mod adaptive_card_row_tests {
+    use super::*;
+
+    /// Mirrors `pdf_dope_card::format_range`'s own pinned examples (`src/pdf_dope_card.rs`)
+    /// exactly -- this is a separate copy of that identical rule (see this fn's doc comment
+    /// for why it can't be a shared call), so matching its already-reviewed fixtures keeps
+    /// the two provably in sync rather than merely similar by construction.
+    #[test]
+    fn format_adaptive_card_range_matches_the_pdf_dope_cards_pinned_examples() {
+        assert_eq!(format_adaptive_card_range(400.0), "400");
+        assert_eq!(format_adaptive_card_range(417.3), "417.3");
+        assert_eq!(format_adaptive_card_range(400.02), "400");
+        assert_eq!(format_adaptive_card_range(399.98), "400");
+        assert_eq!(format_adaptive_card_range(100.0 + 1e-9), "100");
+        assert_eq!(format_adaptive_card_range(100.5), "100.5");
+        assert_eq!(format_adaptive_card_range(400.08), "400.1");
+    }
+
+    /// I-1's exact reproduction: a real `--anchor`/interior-row value must print its one
+    /// decimal, not a silently rounded integer that disagrees with `-o json`/`-o pdf`.
+    #[test]
+    fn format_adaptive_card_range_does_not_silently_round_a_real_anchor() {
+        assert_eq!(format_adaptive_card_range(412.5), "412.5");
+        assert_eq!(format_adaptive_card_range(307.2384), "307.2");
+    }
+
+    fn sentinel_row(range: f64) -> CardRow {
+        CardRow {
+            range,
+            drop_linear: Some(222.1),
+            drop_adj: Some(333.2),
+            come_up: None,
+            wind_linear: Some(555.4),
+            wind_adj: Some(666.5),
+            velocity: Some(777.6),
+            energy: Some(888.7),
+            time: Some(9.123),
+            lead_adj: None,
+            wind_columns: Vec::new(),
+        }
+    }
+
+    /// Same anti-transposition technique as
+    /// `card_row_sentinel_tests::range_table_row_line_places_each_sentinel_in_its_own_column`
+    /// (Task 9): `expected` is a literal, independently hand-typed string, not produced by
+    /// calling the function under test. Two cases -- an integer range (the common case,
+    /// previously-correct and must stay so) and a fractional one (the I-1 fix) -- so fixing
+    /// the Range column is proven not to disturb the seven columns it must leave alone.
+    #[test]
+    fn adaptive_card_row_line_places_each_sentinel_in_its_own_column() {
+        let integer_row = sentinel_row(111.0);
+        let line = adaptive_card_row_line(&integer_row);
+        let expected =
+            "│   111 │   222.1 │ 333.200 │   555.4 │  666.50 │     778 │     889 │  9.12 │";
+        assert_eq!(line, expected);
+
+        let fractional_row = sentinel_row(111.4);
+        let line = adaptive_card_row_line(&fractional_row);
+        let expected =
+            "│ 111.4 │   222.1 │ 333.200 │   555.4 │  666.50 │     778 │     889 │  9.12 │";
+        assert_eq!(line, expected);
+    }
 }
