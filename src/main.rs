@@ -14,8 +14,6 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod mcp_command;
-#[cfg(feature = "pdf")]
-mod pdf_dope_card;
 mod solve_json_command;
 // MBA-1355: parse_click_value/clicks_for/ClickValue power the CLI's click-graduation
 // flags (--elevation-click-value/--windage-click-value) and profile fields.
@@ -31,7 +29,9 @@ use ballistics_engine::optic::{
 };
 use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
-use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
+use ballistics_engine::pdf_dope_card::{
+    calculate_density_altitude, DopeCardConfig, FontSizePreset, RangeUnit,
+};
 
 #[cfg(feature = "online")]
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder, TrueVelocityRequest};
@@ -14857,7 +14857,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
             // Convert sampled trajectory to dope card rows
             // Filter from zero range onwards (typically 100 yards)
-            let rows: Vec<DopeCardRow> = sampled
+            let rows: Vec<CardRow> = sampled
                 .iter()
                 .filter(|s| {
                     s.distance_m >= UnitConverter::distance_to_metric(100.0, UnitSystem::Imperial)
@@ -14886,8 +14886,13 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     let elevation_unit = pdf_meta.adjustment_unit;
                     let windage_unit = pdf_meta.windage_unit;
 
-                    DopeCardRow {
-                        range_yd: range_yd.round() as u32,
+                    CardRow {
+                        // Task 10 (0.33.0 decision-support Plan B): range is now the raw
+                        // f64 yard value rather than pre-rounded to u32 --
+                        // generate_dope_card_pdf's own range formatter renders it as the
+                        // legacy bare integer (fractional part < 0.05, which this near-
+                        // exact yard conversion always satisfies).
+                        range: range_yd,
                         // Drop: positive = dial up (bullet below LOS). drop_m is already
                         // positive-below-LOS (sample_trajectory: los_y - y_interp), matching the
                         // come-up / range tables, so do NOT negate it (this column was sign-flipped).
@@ -14898,11 +14903,18 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         // Drop/Wind columns here (total-correction dials); the Lead
                         // column is a COMPONENT hold (composed on top of the wind dial,
                         // which already carries the bias) so it stays bias-free.
-                        drop_adj: adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value,
+                        drop_adj: Some(adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value),
                         // Wind: positive = dial right for wind from right
-                        wind_adj: windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value,
+                        wind_adj: Some(windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value),
                         // Lead for a moving target (a dialed quantity — the windage CF divides it, MBA-1358)
-                        lead_adj: windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf).value,
+                        lead_adj: Some(windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf).value),
+                        drop_linear: None,
+                        come_up: None,
+                        wind_linear: None,
+                        velocity: None,
+                        energy: None,
+                        time: None,
+                        wind_columns: Vec::new(),
                     }
                 })
                 .collect();
@@ -14911,8 +14923,13 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 return Err("No trajectory data available for PDF output. Ensure --sample-trajectory is enabled and range > 100 yards.".into());
             }
 
-            // Generate PDF
-            let pdf_bytes = pdf_dope_card::generate_dope_card_pdf(&pdf_config, &rows)?;
+            // Generate PDF. Dope-card ranges are always yards (see the range_yd
+            // conversion above), regardless of --units.
+            let pdf_bytes = ballistics_engine::pdf_dope_card::generate_dope_card_pdf(
+                &pdf_config,
+                &rows,
+                RangeUnit::Yards,
+            )?;
 
             // Write to file
             std::fs::write(output_path, &pdf_bytes)?;
@@ -14920,8 +14937,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
             eprintln!(
                 "  {} ranges from {} to {} yards",
                 rows.len(),
-                rows.first().map(|r| r.range_yd).unwrap_or(0),
-                rows.last().map(|r| r.range_yd).unwrap_or(0)
+                rows.first().map(|r| r.range.round() as i64).unwrap_or(0),
+                rows.last().map(|r| r.range.round() as i64).unwrap_or(0)
             );
         }
         #[cfg(not(feature = "pdf"))]
@@ -20852,14 +20869,14 @@ mod card_row_sentinel_tests {
 
 /// MBA-1366: the cross-crate proof that `atmosphere::resolve_atmosphere_for_density_altitude`
 /// (library) is the exact algebraic inverse of `pdf_dope_card::calculate_density_altitude`
-/// (this CLI-binary-only module) -- the strongest correctness check available, per the task
-/// brief: a density altitude fed into the inverse function, then that function's OWN output fed
-/// back through the FORWARD function this engine already ships to REPORT density altitude, must
-/// reproduce the original number.
+/// (0.33.0 Task 10: also promoted into the library, gated behind the `pdf` feature) -- the
+/// strongest correctness check available, per the task brief: a density altitude fed into the
+/// inverse function, then that function's OWN output fed back through the FORWARD function
+/// this engine already ships to REPORT density altitude, must reproduce the original number.
 #[cfg(all(test, feature = "pdf"))]
 mod density_altitude_round_trip_tests {
     use ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude;
-    use crate::pdf_dope_card::calculate_density_altitude;
+    use ballistics_engine::pdf_dope_card::calculate_density_altitude;
 
     const FT_TO_M: f64 = 0.3048;
 

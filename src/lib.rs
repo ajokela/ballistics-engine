@@ -192,6 +192,15 @@ pub mod hold_curve;
 // compile for wasm32 (no fs, no clap, no pdf -- those stay in main.rs). Task 10 rewrites the
 // PDF dope card on `&[CardRow]`; Task 11 grows an adaptive-card engine here.
 pub mod card;
+// 0.33.0 decision-support Task 10: the PDF dope card, promoted out of the `ballistics`
+// binary (it was `mod pdf_dope_card;`, private to `main.rs`) so it can consume
+// `card::CardRow` directly instead of its own `DopeCardRow { range_yd: u32, .. }` -- that
+// u32-yards field couldn't express the non-integer ranges Task 11's adaptive card engine
+// produces. Feature-gated (unlike `card`): pulls in `printpdf` (PDF generation) and `dirs`
+// (font-file lookup), neither wasm32-safe nor free -- `pdf` is on by default but the
+// wasm32 build always passes `--no-default-features`.
+#[cfg(feature = "pdf")]
+pub mod pdf_dope_card;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]

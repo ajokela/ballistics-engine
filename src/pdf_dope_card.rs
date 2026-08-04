@@ -1,11 +1,19 @@
 //! PDF Dope Card Generation Module
 //!
 //! Generates printable dope cards in Glenn's proven field-ready format.
-//! Format: Two-column layout with Range (yd) and Drop/Wind/Lead in MIL or MOA
+//! Format: Two-column layout with Range (yd or m) and Drop/Wind/Lead in MIL or MOA
 //! (selected via DopeCardConfig::unit_label; values pre-converted by the caller)
 //! Color coding: Black=Range, Red=Drop, Green=Wind, Blue=Lead
 //! Row striping for improved readability.
+//!
+//! 0.33.0 decision-support Plan B Task 10: moved from a `ballistics`-binary-private module
+//! (`mod pdf_dope_card;` in `main.rs`) into this library behind the `pdf` feature, and
+//! rewritten to consume `&[crate::card::CardRow]` instead of this module's own
+//! `DopeCardRow { range_yd: u32, .. }` -- the u32-yards field couldn't express the
+//! non-integer ranges Task 11's adaptive card engine (`crate::card`) produces. The caller
+//! now states the row range's unit explicitly via `RangeUnit`; see its doc comment.
 
+use crate::card::CardRow;
 use printpdf::*;
 
 // Embed Liberation Sans fonts directly into the binary (SIL Open Font License)
@@ -34,10 +42,10 @@ pub struct DopeCardConfig {
     pub font_scale: f32,
     pub bold_data: bool,
     /// Angular unit label shown in the Drop column sub-header ("MIL", "MOA", "SMOA",
-    /// "IPHY", or "CLICKS"). `DopeCardRow::drop_adj` is already expressed in this unit
+    /// "IPHY", or "CLICKS"). `CardRow::drop_adj` is already expressed in this unit
     /// (MBA-1410: independent from `windage_unit_label` below).
     pub elevation_unit_label: String,
-    /// Angular unit label shown in the Wind/Lead column sub-headers. `DopeCardRow::
+    /// Angular unit label shown in the Wind/Lead column sub-headers. `CardRow::
     /// wind_adj`/`lead_adj` are already expressed in this unit -- may differ from
     /// `elevation_unit_label` (MBA-1410 independent elevation/windage unit selection).
     pub windage_unit_label: String,
@@ -60,6 +68,12 @@ impl FontSizePreset {
         }
     }
 
+    // Promoting this module to `pub` in the library (Task 10) makes this method part of
+    // the crate's exported API for the first time, which is why clippy only starts
+    // flagging it here: it returns `Option<Self>`, not `Result<Self, Self::Err>`, so it
+    // doesn't fit std::str::FromStr's contract, and FontSizePreset's shape is preserved
+    // verbatim rather than reworked to satisfy the lint.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "small" | "s" => Some(Self::Small),
@@ -70,15 +84,22 @@ impl FontSizePreset {
     }
 }
 
-/// A single row in the dope card table
-#[derive(Debug, Clone)]
-pub struct DopeCardRow {
-    pub range_yd: u32,
-    /// Drop/wind/lead adjustments, already expressed in the card's angular unit
-    /// (MIL or MOA — see DopeCardConfig::unit_label).
-    pub drop_adj: f64,
-    pub wind_adj: f64,
-    pub lead_adj: f64,
+/// Which unit `CardRow::range` is expressed in for this card. Selects only the Range
+/// column's sub-header text ("Yd" / "M") -- row values are never converted here, same
+/// "the caller already converted it" convention `CardRow` itself documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeUnit {
+    Yards,
+    Meters,
+}
+
+impl RangeUnit {
+    fn label(&self) -> &'static str {
+        match self {
+            RangeUnit::Yards => "Yd",
+            RangeUnit::Meters => "M",
+        }
+    }
 }
 
 // Page dimensions (Letter size in mm)
@@ -105,7 +126,10 @@ const INHG_TO_HPA: f64 = 33.863_886_666_667;
 
 // The angular conversion (drop_yd/range_yd -> MIL or MOA) and moving-target lead now
 // live in main.rs::drop_to_adjustment, so both card units share one code path; the
-// caller fills DopeCardRow's drop_adj/wind_adj/lead_adj already in the chosen unit.
+// caller fills CardRow's drop_adj/wind_adj/lead_adj (as Some(..)) already in the chosen
+// unit. This renderer treats a None on any of those three as 0.0 -- every current
+// producer of dope-card rows populates all three; None only arises if a future caller
+// hands this function a CardRow built for a different card surface.
 
 /// Calculate density altitude from environmental conditions
 ///
@@ -117,7 +141,9 @@ const INHG_TO_HPA: f64 = 33.863_886_666_667;
 /// PA = 145366.45 * (1 - (P_hPa/1013.25)^0.190284)
 /// <https://www.weather.gov/media/epz/wxcalc/pressureAltitude.pdf>
 ///
-///          DA = PA + 66.7 * (OAT_F - ISA_temp_F)
+/// ```text
+/// DA = PA + 66.7 * (OAT_F - ISA_temp_F)
+/// ```
 pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f: f64) -> f64 {
     // The NWS equation is defined in hPa (equivalently millibars), so convert before
     // applying its matched coefficient, reference pressure, and exponent.
@@ -260,10 +286,15 @@ fn draw_separator_line(ops: &mut Vec<Op>, y: f32) {
     });
 }
 
-/// Generate a dope card PDF matching Glenn's format with row striping
+/// Generate a dope card PDF matching Glenn's format with row striping.
+///
+/// `rows` is display-ready per `CardRow`'s convention (already converted to the card's
+/// chosen angular unit, and to `range_unit`); `range_unit` only selects the Range
+/// column's sub-header text ("Yd" or "M") -- it does not convert `row.range`.
 pub fn generate_dope_card_pdf(
     config: &DopeCardConfig,
-    rows: &[DopeCardRow],
+    rows: &[CardRow],
+    range_unit: RangeUnit,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut doc = PdfDocument::new(&format!("{} Dope Card", config.rifle_name));
 
@@ -310,6 +341,7 @@ pub fn generate_dope_card_pdf(
             &font_bold,
             config,
             page_rows,
+            range_unit,
             page_num + 1,
             total_pages,
             header_size,
@@ -336,7 +368,8 @@ fn render_page(
     font: &FontId,
     font_bold: &FontId,
     config: &DopeCardConfig,
-    rows: &[DopeCardRow],
+    rows: &[CardRow],
+    range_unit: RangeUnit,
     page: usize,
     _total_pages: usize,
     header_size: f32,
@@ -389,6 +422,7 @@ fn render_page(
         y,
         table_size,
         font_scale,
+        range_unit,
         &config.elevation_unit_label,
         &config.windage_unit_label,
     );
@@ -502,6 +536,7 @@ fn draw_table_header(
     y: f32,
     table_size: f32,
     font_scale: f32,
+    range_unit: RangeUnit,
     elevation_unit: &str,
     windage_unit: &str,
 ) {
@@ -515,14 +550,15 @@ fn draw_table_header(
         ("Wind", COLOR_GREEN),
         ("Lead", COLOR_BLUE),
     ];
-    // Range columns are yards; Drop is the elevation unit, Wind/Lead the (possibly
-    // different, MBA-1410) windage unit.
+    // Range columns use the card's range unit (Yd/M); Drop is the elevation unit,
+    // Wind/Lead the (possibly different, MBA-1410) windage unit.
+    let range_label = range_unit.label();
     let sub_headers = [
-        "Yd",
+        range_label,
         elevation_unit,
         windage_unit,
         windage_unit,
-        "Yd",
+        range_label,
         elevation_unit,
         windage_unit,
         windage_unit,
@@ -557,13 +593,30 @@ fn format_adjustment(value: f64, unit_label: &str) -> String {
     }
 }
 
+/// Formats `CardRow::range` for the dope card's Range column. The pre-Task-10
+/// `DopeCardRow` stored range as `u32` yards -- always a bare integer; `CardRow::range`
+/// is `f64`, since Task 11's adaptive card engine can hand this renderer genuinely
+/// fractional ranges. To keep every existing (integer-range) card byte-for-byte
+/// identical, a value within floating-point rounding noise of a whole number (fractional
+/// part < 0.05 -- the yard-conversion call site is never exactly integral) still renders
+/// as that legacy bare integer; anything else renders with one decimal place, e.g.
+/// `417.3` -> "417.3".
+fn format_range(range: f64) -> String {
+    let rounded = range.round();
+    if (range - rounded).abs() < 0.05 {
+        format!("{:.0}", rounded)
+    } else {
+        format!("{:.1}", range)
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // Drawing primitive mirrors the PDF text/layout parameters.
 fn draw_data_row(
     ops: &mut Vec<Op>,
     font: &FontId,
     x: f32,
     y: f32,
-    row: &DopeCardRow,
+    row: &CardRow,
     _is_left: bool,
     table_size: f32,
     font_scale: f32,
@@ -571,10 +624,10 @@ fn draw_data_row(
     windage_unit: &str,
 ) {
     let values = [
-        (row.range_yd.to_string(), COLOR_BLACK),
-        (format_adjustment(row.drop_adj, elevation_unit), COLOR_RED),
-        (format_adjustment(row.wind_adj, windage_unit), COLOR_GREEN),
-        (format_adjustment(row.lead_adj, windage_unit), COLOR_BLUE),
+        (format_range(row.range), COLOR_BLACK),
+        (format_adjustment(row.drop_adj.unwrap_or(0.0), elevation_unit), COLOR_RED),
+        (format_adjustment(row.wind_adj.unwrap_or(0.0), windage_unit), COLOR_GREEN),
+        (format_adjustment(row.lead_adj.unwrap_or(0.0), windage_unit), COLOR_BLUE),
     ];
 
     for (i, (value, color)) in values.iter().enumerate() {
@@ -795,5 +848,106 @@ mod tests {
         let standard_density_altitude =
             calculate_density_altitude(0.0, standard_pressure_inhg, 59.0);
         assert!(standard_density_altitude.abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Task 10 (0.33.0 decision-support Plan B): CardRow-based range formatting + PDF
+    // generation smoke tests.
+    // -----------------------------------------------------------------------------------
+
+    /// Pinned brief examples: a legacy-integer range renders with no decimal point, a
+    /// genuinely fractional one (as Task 11's adaptive engine can now produce) renders
+    /// with exactly one.
+    #[test]
+    fn format_range_pinned_examples() {
+        assert_eq!(format_range(400.0), "400");
+        assert_eq!(format_range(417.3), "417.3");
+    }
+
+    /// The pre-Task-10 call site rounded to `u32` before storing, so its yard conversion
+    /// was never exactly integral (floating-point noise). The new `f64`-range path must
+    /// still collapse that noise to the same bare integer -- this is the `< 0.05`
+    /// tolerance's whole reason to exist.
+    #[test]
+    fn format_range_absorbs_floating_point_noise_around_a_whole_number() {
+        assert_eq!(format_range(400.02), "400");
+        assert_eq!(format_range(399.98), "400");
+        assert_eq!(format_range(100.0 + 1e-9), "100");
+    }
+
+    #[test]
+    fn format_range_renders_one_decimal_outside_the_noise_band() {
+        assert_eq!(format_range(417.3), "417.3");
+        assert_eq!(format_range(100.5), "100.5");
+        assert_eq!(format_range(400.08), "400.1");
+    }
+
+    fn test_config() -> DopeCardConfig {
+        DopeCardConfig {
+            rifle_name: "Test Rifle".to_string(),
+            location: "Test Range".to_string(),
+            density_altitude_ft: 1500.0,
+            pressure_inhg: 29.92,
+            pressure_hpa: 1013.25,
+            temperature_f: 59.0,
+            altitude_ft: 1000.0,
+            wind_speed_mph: 5.0,
+            target_speed_mph: 0.0,
+            solver_mode: "offline".to_string(),
+            powder: "Test Powder".to_string(),
+            bullet: "Test Bullet".to_string(),
+            weight_gr: 175.0,
+            bc: 0.5,
+            drag_model: "g7".to_string(),
+            velocity_fps: 2700.0,
+            font_scale: 1.0,
+            bold_data: false,
+            elevation_unit_label: "MIL".to_string(),
+            windage_unit_label: "MIL".to_string(),
+        }
+    }
+
+    fn test_row(range: f64) -> CardRow {
+        CardRow {
+            range,
+            drop_linear: None,
+            drop_adj: Some(1.0),
+            come_up: None,
+            wind_linear: None,
+            wind_adj: Some(0.5),
+            velocity: None,
+            energy: None,
+            time: None,
+            lead_adj: Some(0.2),
+            wind_columns: Vec::new(),
+        }
+    }
+
+    fn assert_valid_pdf_bytes(bytes: &[u8]) {
+        assert!(!bytes.is_empty(), "PDF output must not be empty");
+        assert_eq!(&bytes[..5], b"%PDF-", "output must start with a PDF header");
+    }
+
+    #[test]
+    fn generate_dope_card_pdf_is_non_empty_for_a_single_row() {
+        let config = test_config();
+        let rows = vec![test_row(100.0)];
+        let bytes = generate_dope_card_pdf(&config, &rows, RangeUnit::Yards)
+            .expect("single-row dope card should generate");
+        assert_valid_pdf_bytes(&bytes);
+    }
+
+    /// 120 rows forces the two-column, ~98-rows-per-page layout past a single page
+    /// (`data_rows_per_page` is well under 120 at the default font scale), exercising the
+    /// pagination path `generate_dope_card_pdf` walks via `total_pages`/`page_rows`.
+    #[test]
+    fn generate_dope_card_pdf_is_non_empty_for_120_rows_pagination() {
+        let config = test_config();
+        let rows: Vec<CardRow> = (0..120)
+            .map(|i| test_row(100.0 + i as f64 * 25.0))
+            .collect();
+        let bytes = generate_dope_card_pdf(&config, &rows, RangeUnit::Meters)
+            .expect("120-row dope card should generate and paginate");
+        assert_valid_pdf_bytes(&bytes);
     }
 }
