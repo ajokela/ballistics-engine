@@ -70,6 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly supplying a value equal to its own behavioral default (e.g. `wind_reference:
   "shooter"`, `sight_offset_lateral_m: 0.0`) is now distinguished from never having supplied the
   field at all, a distinction the response did not previously make.
+- **Five hand-rolled bracket/interpolation searches (hold curves, wind-scenario corridors,
+  reticle holds, the CLI's regular-interval trajectory sampler, and the inclined-shot
+  equivalent-horizontal-range solver) now share one search-and-lerp core.** The regular-interval
+  sampler's interpolated values -- `TrajectoryResult::sampled_points`, and therefore
+  `come-ups`/range-table/wind-card/compare stdout, `wind_scenarios`' inputs, and the
+  Python/Ruby/WASM bindings -- may shift by at most 1 ULP: the shared core divides to get an
+  interpolation fraction and then multiplies, where this one site previously multiplied then
+  divided. Invisible at the display precision every existing fixture pins; the other four sites'
+  arithmetic is unchanged.
 
 ### Fixed
 - **`$.atmosphere.pressure_reference` was rejected as `unknown_field`** by

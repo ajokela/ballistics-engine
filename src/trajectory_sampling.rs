@@ -518,6 +518,15 @@ mod tests {
         // Test boundary conditions
         assert_eq!(interpolate(&x_vals, &y_vals, -1.0), 0.0); // Below range
         assert_eq!(interpolate(&x_vals, &y_vals, 4.0), 30.0); // Above range
+
+        // Exact-key hits (0.33.0 Task 7 review, I2): bracket_param resolves an exact match as
+        // the END of the bracket below it (`t == 1.0`) rather than the old code's short-circuit
+        // (`x <= x_vals[0]`) or its `[k, k+1] @ t == 0` bracket for an interior knot. Pin that
+        // every exact key still recovers its own value bit-for-bit regardless of which bracket
+        // supplies it.
+        assert_eq!(interpolate(&x_vals, &y_vals, 0.0), 0.0); // x == first key
+        assert_eq!(interpolate(&x_vals, &y_vals, 2.0), 20.0); // x == an interior knot
+        assert_eq!(interpolate(&x_vals, &y_vals, 3.0), 30.0); // x == last key
     }
 
     #[test]
