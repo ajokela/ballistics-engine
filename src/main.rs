@@ -25,6 +25,10 @@ use ballistics_engine::adjustment::{
 // MBA-1348: the saved-profile turret/reticle model (Plan B Task 5) -- ProfileData::optic_profile
 // assembles one of these from the profile's twelve turret/hold fields.
 use ballistics_engine::optic::{HoldBounds, OpticProfile, TravelLimits, TurretState};
+// MBA-1348 Plan B Task 6: `dial-plan` -- the `plan_corrections` CLI surface.
+use ballistics_engine::optic::{
+    plan_corrections, AngularCorrection, Axis, DialPlanReportV1, Direction, Preferences, Strategy,
+};
 use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
 use pdf_dope_card::{calculate_density_altitude, DopeCardConfig, DopeCardRow, FontSizePreset};
@@ -3322,6 +3326,124 @@ enum Commands {
     Reticle {
         #[command(subcommand)]
         action: ReticleAction,
+    },
+
+    /// Rank dial/hold/hybrid execution plans for a TRUE angular correction on a real optic
+    /// (MBA-1348 Phase 3)
+    ///
+    /// Takes a correction already computed elsewhere (`come-ups`, a solved trajectory, a
+    /// spotter call) and turns it into three ranked, executable plans via `plan_corrections`:
+    /// dial the whole thing in whole turret clicks, hold the whole thing on the reticle, or
+    /// dial what the turret can reach and hold the TRUE angular remainder. Every plan reports
+    /// its own honest residual (angular, and linear miss at the given range); an infeasible
+    /// plan is still reported in full, never silently dropped or clamped away -- concluding
+    /// "this doesn't fit the optic" is itself a successful analysis, so this command exits 0
+    /// even when every plan is infeasible.
+    ///
+    /// Runs no solve at all -- unlike every calculator subcommand in this file, the correction
+    /// is a direct input, so this is pure, instant arithmetic.
+    DialPlan {
+        /// TRUE angular elevation correction to deliver, suffixed (mil/moa/smoa/iphy);
+        /// positive = UP. At least one of --elevation/--windage is required.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
+        elevation: Option<f64>,
+
+        /// TRUE angular windage correction to deliver, suffixed; positive = RIGHT. See
+        /// --elevation -- at least one of the two is required.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
+        windage: Option<f64>,
+
+        /// Range for the linear-miss-at-range residual (yards imperial / meters metric).
+        #[arg(long)]
+        range: f64,
+
+        /// Saved profile supplying the optic (turret mechanics + reticle hold bounds) and its
+        /// tracking correction factors (elevation_cf/windage_cf, default 1.0). Mutually
+        /// exclusive with the inline optic flags below.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
+        /// Elevation turret's click graduation, e.g. 0.1mil or 0.25moa (inline optic, mutually
+        /// exclusive with --profile). Required, inline, to define an optic at all -- inline
+        /// mode has no tracking-CF flags, so the CF is always 1.0.
+        #[arg(long)]
+        elevation_click: Option<String>,
+
+        /// Windage turret's click graduation (inline optic); falls back to --elevation-click
+        /// when omitted, like `profile save --windage-click`.
+        #[arg(long)]
+        windage_click: Option<String>,
+
+        /// Click detents per full revolution (inline optic); omit when unknown or the turret
+        /// has no revolution markings.
+        #[arg(long)]
+        clicks_per_rev: Option<u32>,
+
+        /// Whether the elevation turret hard-stops at its lowest travel (inline optic);
+        /// purely descriptive, never consulted by the planner itself.
+        #[arg(long)]
+        zero_stop: Option<bool>,
+
+        /// Elevation travel remaining UP from the current zero (inline optic); required
+        /// together with --travel-down.
+        #[arg(long, value_parser = parse_angular_mil)]
+        travel_up: Option<f64>,
+
+        /// Elevation travel remaining DOWN from the current zero (inline optic); required
+        /// together with --travel-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        travel_down: Option<f64>,
+
+        /// Windage travel remaining LEFT from the current zero (inline optic); required
+        /// together with --windage-travel-right.
+        #[arg(long, value_parser = parse_angular_mil)]
+        windage_travel_left: Option<f64>,
+
+        /// Windage travel remaining RIGHT from the current zero (inline optic); required
+        /// together with --windage-travel-left.
+        #[arg(long, value_parser = parse_angular_mil)]
+        windage_travel_right: Option<f64>,
+
+        /// The reticle's usable hold extent ABOVE center (inline optic); required together
+        /// with --hold-down/--hold-left/--hold-right.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_up: Option<f64>,
+
+        /// The reticle's usable hold extent BELOW center (inline optic). See --hold-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_down: Option<f64>,
+
+        /// The reticle's usable hold extent LEFT of center (inline optic). See --hold-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_left: Option<f64>,
+
+        /// The reticle's usable hold extent RIGHT of center (inline optic). See --hold-up.
+        #[arg(long, value_parser = parse_angular_mil)]
+        hold_right: Option<f64>,
+
+        /// The elevation turret's current dialed offset from zero, signed: positive is dialed
+        /// UP (inline optic); required together with --turret-wind.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
+        turret_elev: Option<f64>,
+
+        /// The windage turret's current dialed offset from zero, signed: positive is dialed
+        /// RIGHT (inline optic); required together with --turret-elev.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_angular_mil)]
+        turret_wind: Option<f64>,
+
+        /// When ranking ties, prefer holding over dialing (the planner otherwise prefers
+        /// dialing -- see `plan_corrections`).
+        #[arg(long)]
+        prefer_hold: bool,
+
+        /// Cap any single hold component's magnitude, TRUE angular, suffixed -- applied
+        /// together with (the tighter of it and) the optic's own declared reticle hold bounds.
+        #[arg(long, value_name = "MIL", value_parser = parse_angular_mil)]
+        max_hold: Option<f64>,
+
+        /// Output format: table (default) or json (versioned DialPlanReportV1)
+        #[arg(short, long, default_value = "table")]
+        output: OutputFormat,
     },
 
     /// Generate shell completions
@@ -13263,6 +13385,55 @@ fn main() -> Result<(), Box<dyn Error>> {
             output,
         } => {
             handle_error_budget(request, ranges, sigmas, target, cli.units, output)?;
+        }
+
+        Commands::DialPlan {
+            elevation,
+            windage,
+            range,
+            profile,
+            elevation_click,
+            windage_click,
+            clicks_per_rev,
+            zero_stop,
+            travel_up,
+            travel_down,
+            windage_travel_left,
+            windage_travel_right,
+            hold_up,
+            hold_down,
+            hold_left,
+            hold_right,
+            turret_elev,
+            turret_wind,
+            prefer_hold,
+            max_hold,
+            output,
+        } => {
+            handle_dial_plan(
+                elevation,
+                windage,
+                range,
+                profile,
+                elevation_click,
+                windage_click,
+                clicks_per_rev,
+                zero_stop,
+                travel_up,
+                travel_down,
+                windage_travel_left,
+                windage_travel_right,
+                hold_up,
+                hold_down,
+                hold_left,
+                hold_right,
+                turret_elev,
+                turret_wind,
+                prefer_hold,
+                max_hold,
+                cli.units,
+                output,
+            )?;
         }
 
         Commands::Completions { shell } => {
@@ -25526,4 +25697,262 @@ mod decision_support_render_tests {
         assert!(table.contains("wind-speed"), "{table}");
         assert!(table.contains("100.0%"), "{table}");
     }
+}
+
+// ============================================================================================
+// MBA-1348 Plan B Task 6: `dial-plan` -- the `plan_corrections` CLI surface
+// ============================================================================================
+
+/// `Axis::Elevation`/`Axis::Windage` as the lowercase word this table uses everywhere else
+/// (matches `axis_kebab_name`'s lowercase convention for the unrelated `InputAxis`).
+fn dial_plan_axis_label(axis: Axis) -> &'static str {
+    match axis {
+        Axis::Elevation => "elevation",
+        Axis::Windage => "windage",
+    }
+}
+
+/// `AxisInstruction::direction` as the shouted word a shooter reads off a dial under time
+/// pressure -- deliberately uppercase, unlike `dial_plan_axis_label`, so it reads as an
+/// instruction rather than a label.
+fn dial_plan_direction_word(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Up => "UP",
+        Direction::Down => "DOWN",
+        Direction::Left => "LEFT",
+        Direction::Right => "RIGHT",
+    }
+}
+
+/// `Strategy`'s table label -- the same snake_case spelling `#[serde(rename_all =
+/// "snake_case")]` gives it on the wire, so the table and `-o json` never disagree about a
+/// strategy's name.
+fn dial_plan_strategy_label(strategy: Strategy) -> &'static str {
+    match strategy {
+        Strategy::DialAll => "dial_all",
+        Strategy::HoldAll => "hold_all",
+        Strategy::Hybrid => "hybrid",
+    }
+}
+
+/// Render a [`DialPlanReportV1`] as a human-readable table (MBA-1348 Task 6): one block per
+/// ranked plan (best first -- see `plan_corrections`' own ranking doc) with a strategy header
+/// naming feasibility, one instruction line per axis (direction, delta clicks, a revolution
+/// annotation when the turret declares `clicks_per_revolution`, and the TRUE angular hold), a
+/// residual line (both axes' angular residual plus the RSS linear miss at range), and any
+/// limit violations this plan hit. A violation is disclosed even on a FEASIBLE plan -- a
+/// `Hybrid` plan's own travel clamp is recorded but does not gate ITS feasibility, see
+/// `plan_corrections`' "Honesty" doc section -- and an infeasible plan is rendered exactly
+/// like a feasible one, never hidden: this table (and the command's own exit code) treats a
+/// "this doesn't fit" conclusion as a normal, successful result.
+fn render_dial_plan_table(report: &DialPlanReportV1) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "dial-plan -- method: {}", report.method);
+    let _ = writeln!(out, "range: {:.3} m", report.range_m);
+
+    for (i, plan) in report.plans.iter().enumerate() {
+        let _ = writeln!(out);
+        let feasible_word = if plan.feasible { "FEASIBLE" } else { "INFEASIBLE" };
+        let _ = writeln!(
+            out,
+            "#{} strategy: {} [{feasible_word}]",
+            i + 1,
+            dial_plan_strategy_label(plan.strategy)
+        );
+
+        for instr in &plan.instructions {
+            let axis_label = dial_plan_axis_label(instr.axis);
+            let dir_word = dial_plan_direction_word(instr.direction);
+            let revolution = match instr.end_revolution {
+                Some((revs, clicks_in_rev)) => {
+                    format!(" (end at rev {revs} + {clicks_in_rev} clicks)")
+                }
+                None => String::new(),
+            };
+            let _ = writeln!(
+                out,
+                "  {axis_label}: dial {dir_word} {} clicks{revolution}; hold {:.3} mil",
+                instr.delta_clicks.abs(),
+                instr.hold_mil
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "  residual: elevation {:.3} mil, windage {:.3} mil -> {:.3} m at {:.3} m",
+            plan.instructions[0].residual_mil,
+            plan.instructions[1].residual_mil,
+            plan.residual_linear_at_range_m,
+            report.range_m
+        );
+
+        for v in &plan.limits_hit {
+            let axis_label = dial_plan_axis_label(v.axis);
+            let kind = format!("{:?}", v.kind);
+            let available = match v.available_mil {
+                Some(a) => format!("available {a:.3} mil"),
+                None => "no data declared for this axis".to_string(),
+            };
+            let _ = writeln!(
+                out,
+                "  limit: {axis_label} {kind} -- needed {:.3} mil, {available}",
+                v.needed_mil
+            );
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "assumptions:");
+    for a in &report.assumptions {
+        let _ = writeln!(out, "  - {a}");
+    }
+    out
+}
+
+/// `dial-plan` dispatch (MBA-1348 Task 6): resolves the optic from either `--profile` or the
+/// inline turret/hold flags (mutually exclusive), resolves the TRUE angular correction from
+/// `--elevation`/`--windage` (at least one required), and hands both to `plan_corrections`.
+/// Unlike every calculator subcommand in this file, this runs no solve at all -- the
+/// correction is a direct input -- so this handler is pure, instant arithmetic.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable dial-plan CLI command shape"
+)]
+fn handle_dial_plan(
+    elevation: Option<f64>,
+    windage: Option<f64>,
+    range: f64,
+    profile: Option<String>,
+    elevation_click: Option<String>,
+    windage_click: Option<String>,
+    clicks_per_rev: Option<u32>,
+    zero_stop: Option<bool>,
+    travel_up: Option<f64>,
+    travel_down: Option<f64>,
+    windage_travel_left: Option<f64>,
+    windage_travel_right: Option<f64>,
+    hold_up: Option<f64>,
+    hold_down: Option<f64>,
+    hold_left: Option<f64>,
+    hold_right: Option<f64>,
+    turret_elev: Option<f64>,
+    turret_wind: Option<f64>,
+    prefer_hold: bool,
+    max_hold: Option<f64>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    match output {
+        OutputFormat::Csv => {
+            return Err("dial-plan has no CSV form; use -o table or -o json".into())
+        }
+        OutputFormat::Pdf => {
+            return Err("dial-plan has no PDF form; use -o table or -o json".into())
+        }
+        OutputFormat::Table | OutputFormat::Json => {}
+    }
+
+    if elevation.is_none() && windage.is_none() {
+        return Err("at least one of --elevation or --windage is required".into());
+    }
+
+    let inline_flag_given = elevation_click.is_some()
+        || windage_click.is_some()
+        || clicks_per_rev.is_some()
+        || zero_stop.is_some()
+        || travel_up.is_some()
+        || travel_down.is_some()
+        || windage_travel_left.is_some()
+        || windage_travel_right.is_some()
+        || hold_up.is_some()
+        || hold_down.is_some()
+        || hold_left.is_some()
+        || hold_right.is_some()
+        || turret_elev.is_some()
+        || turret_wind.is_some();
+
+    if profile.is_some() && inline_flag_given {
+        return Err(
+            "--profile cannot be combined with inline optic flags (--elevation-click and the \
+             rest of the turret/hold flags) -- choose one source for the optic"
+                .into(),
+        );
+    }
+
+    let (optic, elevation_cf, windage_cf) = match profile {
+        Some(name) => {
+            let data = load_profile(&name)?;
+            let optic = data
+                .optic_profile()
+                .map_err(|e| format!("profile '{name}': {e}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "profile '{name}' has no optic (turret/click) data saved -- save one \
+                         with `profile save --elevation-click <SIZE><UNIT>`"
+                    )
+                })?;
+            (optic, data.elevation_cf.unwrap_or(1.0), data.windage_cf.unwrap_or(1.0))
+        }
+        None => {
+            let Some(elev_str) = elevation_click.as_deref() else {
+                return Err(
+                    "either --profile <NAME> or --elevation-click <SIZE><UNIT> is required to \
+                     define the optic"
+                        .into(),
+                );
+            };
+            let elevation_click_v = parse_click_value(elev_str)?;
+            let windage_click_v = match windage_click.as_deref() {
+                Some(s) => parse_click_value(s)?,
+                None => elevation_click_v,
+            };
+            let elevation_travel =
+                require_angular_pair("--travel-up", travel_up, "--travel-down", travel_down)?
+                    .map(|(up, down)| TravelLimits { up_mil: up, down_mil: down });
+            let windage_travel = require_angular_pair(
+                "--windage-travel-left",
+                windage_travel_left,
+                "--windage-travel-right",
+                windage_travel_right,
+            )?
+            .map(|(left, right)| TravelLimits { down_mil: left, up_mil: right });
+            let turret_state =
+                require_angular_pair("--turret-elev", turret_elev, "--turret-wind", turret_wind)?
+                    .map(|(elevation_mil, windage_mil)| TurretState {
+                        elevation_mil,
+                        windage_mil,
+                    });
+            let reticle_hold_bounds =
+                require_hold_bounds(hold_up, hold_down, hold_left, hold_right)?;
+            let optic = OpticProfile {
+                elevation_click: elevation_click_v,
+                windage_click: windage_click_v,
+                clicks_per_revolution: clicks_per_rev,
+                zero_stop: zero_stop.unwrap_or(false),
+                elevation_travel,
+                windage_travel,
+                turret_state,
+                reticle_hold_bounds,
+            };
+            (optic, 1.0, 1.0)
+        }
+    };
+
+    let range_m = UnitConverter::distance_to_metric(range, units);
+    let correction = AngularCorrection {
+        elevation_mil: elevation.unwrap_or(0.0),
+        windage_mil: windage.unwrap_or(0.0),
+    };
+    let prefs = Preferences { prefer_hold, max_hold_mil: max_hold };
+
+    let report = plan_corrections(correction, &optic, range_m, elevation_cf, windage_cf, &prefs)
+        .map_err(|e| e.to_string())?;
+
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", render_dial_plan_table(&report));
+    }
+    Ok(())
 }
