@@ -58,11 +58,11 @@ pub struct AdaptiveBudget {
 
 /// Everything one adaptive card needs beyond the solved curve itself.
 ///
-/// `elevation_cf` / `windage_cf` are the scope's tracking correction factors (MBA-1358) and
-/// are expected to already satisfy [`crate::adjustment::tracking_cf_in_range`] -- the CLI and
-/// the WASM terminal both validate against that one locked band before they get here, so
-/// this engine debug-asserts rather than growing a sixth error variant for a value its
-/// callers cannot legally produce. `bias_mil` is the selected zero set's elevation dial
+/// `elevation_cf` / `windage_cf` are the scope's tracking correction factors (MBA-1358).
+/// Both are VALIDATED here against [`crate::adjustment::tracking_cf_in_range`]'s locked
+/// `(0.5, 1.5)` band and rejected with [`CardError::InvalidTrackingCf`] -- this is a public
+/// library API that language bindings call without the CLI's own validation, and an
+/// out-of-band CF fails silently rather than loudly. `bias_mil` is the selected zero set's elevation dial
 /// correction (MBA-1360) in true angular mil; it applies to the ELEVATION axis only, which
 /// is what "zero-set bias as a drop-equivalent" means.
 #[derive(Debug, Clone)]
@@ -133,6 +133,17 @@ pub enum CardError {
     /// The domain runs past the last sampled point of the curve, where there is no ground
     /// truth to verify against.
     DomainOutsideCurve { requested_m: f64, curve_max_m: f64 },
+    /// A tracking correction factor outside [`crate::adjustment::tracking_cf_in_range`]'s
+    /// locked `(0.5, 1.5)` band (MBA-1358).
+    ///
+    /// Checked rather than assumed because the failure is SILENT AND CONFIDENT, not loud: a
+    /// finite but out-of-band CF -- the realistic slip of passing the percentage `95` where
+    /// the ratio `0.95` belongs, or an `INFINITY` -- divides every printed value to ~0, so
+    /// every measured error is ~0 and the engine would hand back a two-row card of near-zero
+    /// dial values reporting `budget_met: true`. That is a wrong answer on the one field
+    /// this whole module exists to make trustworthy, and it is worse than the NaN a zero CF
+    /// produces, which at least reports `budget_met: false`.
+    InvalidTrackingCf { axis: &'static str, value: f64 },
 }
 
 impl fmt::Display for CardError {
@@ -160,6 +171,11 @@ impl fmt::Display for CardError {
             } => write!(
                 f,
                 "range {requested_m} m is past the curve's last sampled point at {curve_max_m} m"
+            ),
+            Self::InvalidTrackingCf { axis, value } => write!(
+                f,
+                "{axis} tracking correction factor {value} must be finite and between 0.5 and 1.5 \
+                 (it is a ratio such as 0.95, not a percentage)"
             ),
         }
     }
@@ -380,7 +396,10 @@ struct LoopTrace {
 /// # Errors
 ///
 /// Returns [`CardError`] for an inverted or non-positive domain, an anchor outside it, a
-/// non-positive budget, a zero row cap, or a domain running past the curve's last sample.
+/// non-positive budget, a zero row cap, a domain running past the curve's last sample, or a
+/// tracking correction factor outside the locked `(0.5, 1.5)` band. Every one of these is
+/// checked before any work is done, on every build profile -- a caller cannot reach the
+/// solver with a request that would produce a confidently wrong card.
 pub fn adaptive_card(
     curve: &HoldCurve,
     req: &AdaptiveRequest,
@@ -408,6 +427,18 @@ fn adaptive_card_traced(
             return Err(CardError::NonPositiveBudget { axis, value });
         }
     }
+    // Enforced, not assumed: an out-of-band CF silently produces a confident, wrong card
+    // (see `CardError::InvalidTrackingCf`), and a `debug_assert` is compiled out of exactly
+    // the builds that ship. `tracking_cf_in_range` is the crate's ONE locked band (MBA-1358),
+    // shared with the CLI and the WASM terminal -- reused here, never restated as a literal.
+    for (axis, value) in [
+        ("elevation", req.elevation_cf),
+        ("windage", req.windage_cf),
+    ] {
+        if !crate::adjustment::tracking_cf_in_range(value) {
+            return Err(CardError::InvalidTrackingCf { axis, value });
+        }
+    }
     if !start_m.is_finite() || !end_m.is_finite() || start_m <= 0.0 || end_m <= start_m {
         return Err(CardError::EmptyOrInvertedDomain { start_m, end_m });
     }
@@ -427,11 +458,6 @@ fn adaptive_card_traced(
             });
         }
     }
-    debug_assert!(
-        crate::adjustment::tracking_cf_in_range(req.elevation_cf)
-            && crate::adjustment::tracking_cf_in_range(req.windage_cf),
-        "tracking correction factors must be pre-validated by the caller (MBA-1358)"
-    );
     debug_assert!(req.bias_mil.is_finite(), "zero-set bias must be finite");
 
     let (elevation_click, windage_click) = match req.click {
@@ -894,9 +920,14 @@ mod adaptive_card_tests {
     /// sharply; on a smooth mid-range trajectory its value is the MEASURED error bound, the
     /// anchors and not having to guess a step -- not a shorter card.
     ///
-    /// Asserted loosely on purpose: this pins the finding without pinning arithmetic that a
-    /// physics change would move. If it ever fails because adaptive won, the insertion rule
-    /// has been improved and this comment is the thing to update.
+    /// Two assertions, bounding the finding from BOTH sides, because a one-sided bound is
+    /// not a pin. The upper bound is a regression backstop (bisection granularity must never
+    /// cost more than a doubling). The directional one is the finding itself: adaptive does
+    /// not meaningfully beat uniform here. Neither pins exact arithmetic a physics change
+    /// would move -- the `+ 1` slack keeps a ULP-level shift at the current 5-vs-5 tie from
+    /// firing spuriously -- but if adaptive ever genuinely wins, the directional assertion
+    /// fails, and that is the signal that this comment, the public `adaptive_card` docs and
+    /// the product guidance built on them have all gone stale.
     #[test]
     fn fixed_step_comparison_is_measured_not_assumed() {
         let curve = test_curve(900.0);
@@ -917,6 +948,13 @@ mod adaptive_card_tests {
             adaptive_rows <= 2 * uniform_rows,
             "adaptive used {adaptive_rows} rows against a {uniform_rows}-row uniform card; \
              bisection granularity should never cost more than a doubling"
+        );
+        assert!(
+            adaptive_rows + 1 >= uniform_rows,
+            "adaptive ({adaptive_rows} rows) now beats uniform ({uniform_rows} rows) at the \
+             brief's own parameters -- the insertion rule has been improved, so the finding in \
+             this test's doc comment, the \"not a shorter card\" disclosure on `adaptive_card`, \
+             and the product guidance built on it are ALL stale and must be revisited"
         );
     }
 
@@ -1300,5 +1338,79 @@ mod adaptive_card_tests {
 
         // Every variant renders as a sentence, so a CLI can print the reason verbatim.
         assert!(CardError::ZeroMaxRows.to_string().contains("at least one row"));
+    }
+
+    /// An out-of-band ELEVATION tracking CF is rejected with the exact variant and payload.
+    ///
+    /// `95.0` is the specific realistic slip this guards: a percentage typed where the ratio
+    /// `0.95` belongs. Unvalidated it does not blow up -- it divides every printed value to
+    /// ~0, so every measured error is ~0 and the card comes back `budget_met: true` while
+    /// being entirely wrong. The assertion below therefore also pins that the request is
+    /// refused rather than answered.
+    #[test]
+    fn out_of_band_elevation_tracking_cf_is_rejected() {
+        let curve = test_curve(900.0);
+        for bad in [95.0, 0.0, 0.5, 1.5, 2.0, f64::INFINITY, f64::NAN] {
+            let mut req = plain_request((200.0, 800.0), 0.1, 50);
+            req.elevation_cf = bad;
+            let err = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil)
+                .expect_err("an out-of-band elevation CF must be refused, not answered");
+            match err {
+                CardError::InvalidTrackingCf { axis, value } => {
+                    assert_eq!(axis, "elevation");
+                    // NaN never equals itself; compare bit patterns so the payload is pinned
+                    // for every case including the non-finite ones.
+                    assert_eq!(value.to_bits(), bad.to_bits(), "payload must echo the input");
+                }
+                other => panic!("expected InvalidTrackingCf for {bad}, got {other:?}"),
+            }
+        }
+        // The band's interior is accepted, so the guard is not simply refusing everything.
+        let mut req = plain_request((200.0, 800.0), 0.1, 50);
+        req.elevation_cf = 0.95;
+        assert!(adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).is_ok());
+    }
+
+    /// Same for the WINDAGE axis -- a per-axis check, because one shared guard covering only
+    /// the elevation field would pass an elevation-only test and still ship the bug.
+    #[test]
+    fn out_of_band_windage_tracking_cf_is_rejected() {
+        let curve = test_curve(900.0);
+        for bad in [95.0, 0.0, 0.5, 1.5, 2.0, f64::INFINITY, f64::NAN] {
+            let mut req = plain_request((200.0, 800.0), 0.1, 50);
+            req.windage_cf = bad;
+            let err = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil)
+                .expect_err("an out-of-band windage CF must be refused, not answered");
+            match err {
+                CardError::InvalidTrackingCf { axis, value } => {
+                    assert_eq!(axis, "windage");
+                    assert_eq!(value.to_bits(), bad.to_bits(), "payload must echo the input");
+                }
+                other => panic!("expected InvalidTrackingCf for {bad}, got {other:?}"),
+            }
+        }
+        let mut req = plain_request((200.0, 800.0), 0.1, 50);
+        req.windage_cf = 1.05;
+        assert!(adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).is_ok());
+
+        // Elevation is reported first when both axes are bad, so the message names one
+        // concrete axis rather than a vague "a tracking factor".
+        let mut req = plain_request((200.0, 800.0), 0.1, 50);
+        req.elevation_cf = 95.0;
+        req.windage_cf = 95.0;
+        assert_eq!(
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).unwrap_err(),
+            CardError::InvalidTrackingCf {
+                axis: "elevation",
+                value: 95.0
+            }
+        );
+        // And it renders as a sentence that names the ratio-vs-percentage trap.
+        let text = CardError::InvalidTrackingCf {
+            axis: "elevation",
+            value: 95.0,
+        }
+        .to_string();
+        assert!(text.contains("elevation") && text.contains("0.5") && text.contains("1.5"), "{text}");
     }
 }
