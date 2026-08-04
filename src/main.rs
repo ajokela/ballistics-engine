@@ -18,7 +18,8 @@ mod solve_json_command;
 // MBA-1355: parse_click_value/clicks_for/ClickValue power the CLI's click-graduation
 // flags (--elevation-click-value/--windage-click-value) and profile fields.
 use ballistics_engine::adjustment::{
-    adjustment_factor, clicks_for, parse_click_value, ClickBase, ClickValue, Quantized,
+    adjustment_factor, click_size_mil, clicks_for, parse_click_value, ClickBase, ClickValue,
+    Quantized,
 };
 // MBA-1348: the saved-profile turret/reticle model (Plan B Task 5) -- ProfileData::optic_profile
 // assembles one of these from the profile's twelve turret/hold fields.
@@ -88,6 +89,12 @@ use ballistics_engine::hold_curve::{
 // structs -- ComeUpRow/RangeRow/WindRow/LoadRow -- that each said the same thing a
 // different way).
 use ballistics_engine::card::CardRow;
+// 0.33.0 decision-support Task 12: `adaptive-card` -- the CLI surface over Task 11's
+// greedy-insertion engine, itself built on CardRow above.
+use ballistics_engine::card::{
+    adaptive_card, AdaptiveBudget, AdaptiveCardReportV1, AdaptiveRequest, CardAdjustmentUnit,
+    CardError,
+};
 use ballistics_engine::wind::{parse_wind_direction_standalone, ParsedWindDirection};
 // MBA-1349: robust hold corridors over named segmented-wind scenarios.
 use ballistics_engine::wind_scenarios::{
@@ -3460,6 +3467,72 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// The smallest range card that provably reconstructs the trajectory within a stated
+    /// error budget (MBA-1351)
+    ///
+    /// Greedy worst-point insertion over the solved trajectory's own sample grid: start from
+    /// both range ends plus any anchors, then keep adding whichever audited point is furthest
+    /// outside the elevation/windage budget until none is, the row cap binds, or the
+    /// remaining error is an irreducible click-quantization floor. A separate dense pass then
+    /// MEASURES the finished card and reports its true worst-case error and the grid it was
+    /// verified against -- see `assumptions` in the output for the exact, honest limits.
+    ///
+    /// This does NOT reliably produce fewer rows than a well-chosen fixed step (measured: on
+    /// a smooth trajectory it does not beat uniform spacing) -- the value here is a MEASURED
+    /// error bound, every requested anchor always present, and no step size to guess.
+    AdaptiveCard {
+        #[command(flatten)]
+        load: InverseSolverLoadArgs,
+
+        /// Zero distance (yards for imperial, meters for metric)
+        #[arg(long)]
+        zero_distance: Option<f64>,
+
+        /// Start of the card's range domain (yards imperial / meters metric)
+        #[arg(long)]
+        start: f64,
+
+        /// End of the card's range domain (yards imperial / meters metric)
+        #[arg(long)]
+        end: f64,
+
+        /// A range that must appear as a row whatever the measured error says (a known dope
+        /// point, a target distance); repeatable.
+        #[arg(long = "anchor", value_name = "RANGE", action = clap::ArgAction::Append)]
+        anchors: Vec<f64>,
+
+        /// Elevation reconstruction-error budget, suffixed (mil/moa/smoa/iphy, e.g. 0.1mil,
+        /// 0.25moa) -- converted into --adjustment's unit. Default: half the profile's
+        /// elevation click when --profile supplies one, else 0.1mil.
+        #[arg(long, value_name = "VALUEUNIT")]
+        elevation_budget: Option<String>,
+
+        /// Windage reconstruction-error budget, suffixed. See --elevation-budget for the
+        /// default rule (the profile's windage click, not elevation).
+        #[arg(long, value_name = "VALUEUNIT")]
+        windage_budget: Option<String>,
+
+        /// Maximum printed rows. The mandatory seed (both range ends plus every anchor) is
+        /// never truncated to honor this -- see the report's own rows_capped field.
+        #[arg(long, default_value = "25")]
+        max_rows: usize,
+
+        /// Printed adjustment unit for the Drop/Wind columns. --profile's click graduation
+        /// (when present) still quantizes rows onto its own native unit; this only selects
+        /// what that quantized (or, with no profile, exact) angle is printed/measured in.
+        #[arg(long, value_enum, default_value = "mil")]
+        adjustment: AdaptiveCardAdjustmentArg,
+
+        /// Output file path (required for -o pdf)
+        #[arg(long, value_name = "FILE")]
+        output_file: Option<PathBuf>,
+
+        /// Output format: table (default), csv, json (versioned AdaptiveCardReportV1), or
+        /// pdf (requires the pdf feature and --output-file; the relocated library dope card)
+        #[arg(short, long, default_value = "table")]
+        output: OutputFormat,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -6824,6 +6897,37 @@ fn adjustment_unit_label(unit: AdjustmentUnit) -> String {
         AdjustmentUnit::Smoa => "SMOA".to_string(),
         AdjustmentUnit::Iphy => "IPHY".to_string(),
         AdjustmentUnit::Clicks => "CLICKS".to_string(),
+    }
+}
+
+/// CLI-facing selector for `adaptive-card`'s printed adjustment unit (MBA-1351): mirrors
+/// `ballistics_engine::card::CardAdjustmentUnit`, restricted to mil/moa. Deliberately its
+/// own thin `ValueEnum` rather than reusing the wider `AdjustmentUnit` above (which also
+/// accepts smoa/iphy/clicks) -- the adaptive-card engine has no SMOA/IPHY/whole-click
+/// concept, only the printed-table Mil/Moa distinction, so a value outside that pair should
+/// be a clap parse error naming the two accepted values, not a runtime error reachable only
+/// after solving a trajectory. Same established pattern as `FocalPlaneArg`/
+/// `RecoilFirearmTypeArg`.
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
+enum AdaptiveCardAdjustmentArg {
+    #[default]
+    Mil,
+    Moa,
+}
+
+impl AdaptiveCardAdjustmentArg {
+    fn to_engine(self) -> CardAdjustmentUnit {
+        match self {
+            Self::Mil => CardAdjustmentUnit::Mil,
+            Self::Moa => CardAdjustmentUnit::Moa,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mil => "MIL",
+            Self::Moa => "MOA",
+        }
     }
 }
 
@@ -13445,6 +13549,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                 turret_wind,
                 prefer_hold,
                 max_hold,
+                cli.units,
+                output,
+            )?;
+        }
+
+        Commands::AdaptiveCard {
+            load,
+            zero_distance,
+            start,
+            end,
+            anchors,
+            elevation_budget,
+            windage_budget,
+            max_rows,
+            adjustment,
+            output_file,
+            output,
+        } => {
+            handle_adaptive_card(
+                load,
+                zero_distance,
+                start,
+                end,
+                anchors,
+                elevation_budget,
+                windage_budget,
+                max_rows,
+                adjustment,
+                output_file,
                 cli.units,
                 output,
             )?;
@@ -25780,5 +25913,359 @@ fn handle_dial_plan(
     } else {
         print!("{}", render_dial_plan_table(&report));
     }
+    Ok(())
+}
+
+// ============================================================================
+// Adaptive Range Card (MBA-1351, 0.33.0 decision-support Plan B Task 12)
+// ============================================================================
+
+/// Default reconstruction-error budget when `--elevation-budget`/`--windage-budget` is
+/// omitted: half the profile's click on that axis -- the honest floor `adaptive_card`'s own
+/// assumptions already document (a tighter budget is reported `budget_met: false`, never
+/// silently relaxed) -- or 0.1 TRUE mil when no optic click is known. Returned in TRUE mil;
+/// the caller scales into the chosen `--adjustment` unit exactly like a supplied
+/// `--elevation-budget`/`--windage-budget` string is (`parse_angular_mil` then the unit
+/// factor), so an explicit budget and this default land in the same space.
+fn adaptive_card_default_budget_mil(click: Option<&ClickValue>) -> f64 {
+    match click {
+        Some(c) => click_size_mil(c) / 2.0,
+        None => 0.1,
+    }
+}
+
+/// Converts one adaptive-card row from the engine's native space (metres for `range`,
+/// METRIC metres for `drop_linear`/`wind_linear`, metric m/s and J for `velocity`/`energy`)
+/// into the run's display units. `drop_adj`/`wind_adj` are already expressed in the chosen
+/// `--adjustment` printed unit by `adaptive_card` itself and must NOT be touched here --
+/// only the fields `CardRow`'s own "display-ready, do not re-convert" convention has not
+/// yet applied to need this. Needed because `range_table_row_line` (Task 9) and the PDF
+/// dope card (Task 10) both expect display-ready values per that same convention, while
+/// `adaptive_card` works entirely on `HoldCurve`'s native metric grid (Task 11).
+fn adaptive_card_display_row(r: &CardRow, units: UnitSystem) -> CardRow {
+    let linear_from_meters = |meters: f64| match units {
+        UnitSystem::Imperial => meters / 0.0254,
+        UnitSystem::Metric => meters * 1000.0,
+    };
+    CardRow {
+        range: UnitConverter::distance_from_metric(r.range, units),
+        drop_linear: r.drop_linear.map(linear_from_meters),
+        drop_adj: r.drop_adj,
+        come_up: r.come_up,
+        wind_linear: r.wind_linear.map(linear_from_meters),
+        wind_adj: r.wind_adj,
+        velocity: r.velocity.map(|v| UnitConverter::velocity_from_metric(v, units)),
+        energy: r.energy.map(|v| UnitConverter::energy_from_metric(v, units)),
+        time: r.time,
+        lead_adj: r.lead_adj,
+        wind_columns: r.wind_columns.clone(),
+    }
+}
+
+/// Maps a [`CardError`] into a CLI-facing message, naming the flag the user typed wherever
+/// one exists (`--start`/`--end`/`--anchor`/`--elevation-budget`/`--windage-budget`/
+/// `--max-rows`) -- the same "name the flag, not the struct field" convention
+/// `require_angular_pair` established (MBA-1348 review fix). `InvalidTrackingCf` has no
+/// adaptive-card flag of its own: this command sources the tracking CF only from
+/// `--profile`, and `load_profile` already validates `elevation_cf`/`windage_cf` into the
+/// identical `(0.5, 1.5)` band on load (MBA-1358), so in practice this arm cannot be
+/// reached through this CLI surface today. It is still mapped -- `CardError` is not
+/// `#[non_exhaustive]`, and a future direct `--elevation-cf`/`--windage-cf` override (or a
+/// hand-edited profile loaded by a path that skips validation) must get a message, not a
+/// panic -- so `CardError`'s own `Display` text is used verbatim for it.
+fn adaptive_card_error_message(err: CardError, units: UnitSystem) -> String {
+    let dist_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let disp = |m: f64| UnitConverter::distance_from_metric(m, units);
+    match err {
+        CardError::EmptyOrInvertedDomain { start_m, end_m } => format!(
+            "--start {:.3} {dist_unit} and --end {:.3} {dist_unit} must describe a forward \
+             interval with a positive start",
+            disp(start_m),
+            disp(end_m)
+        ),
+        CardError::AnchorOutsideDomain { anchor_m, start_m, end_m } => format!(
+            "--anchor {:.3} {dist_unit} lies outside --start {:.3} {dist_unit} / --end \
+             {:.3} {dist_unit}",
+            disp(anchor_m),
+            disp(start_m),
+            disp(end_m)
+        ),
+        CardError::NonPositiveBudget { axis, value } => format!(
+            "--{axis}-budget must be positive and finite (resolved to {value} in the chosen \
+             --adjustment unit)"
+        ),
+        CardError::ZeroMaxRows => "--max-rows must be at least 1".to_string(),
+        CardError::DomainOutsideCurve { requested_m, curve_max_m } => format!(
+            "--end {:.3} {dist_unit} is past the solved trajectory's last reachable point at \
+             {:.3} {dist_unit}",
+            disp(requested_m),
+            disp(curve_max_m)
+        ),
+        CardError::InvalidTrackingCf { .. } => err.to_string(),
+    }
+}
+
+/// The footer block every `adaptive-card` output carries: budget met / rows (of the max) /
+/// worst measured error and where / the verification grid it was measured on. Printed
+/// directly under the table on stdout; written to stderr for csv/pdf so their primary
+/// output channel (the CSV data rows; the PDF file) stays exactly that and nothing else.
+/// `-o json` carries the identical facts as struct fields instead and gets no footer at all
+/// -- see [`AdaptiveCardReportV1`] and the `-o json` arm below.
+fn adaptive_card_footer(
+    report: &AdaptiveCardReportV1,
+    units: UnitSystem,
+    unit_label: &str,
+    max_rows: usize,
+) -> String {
+    use std::fmt::Write as _;
+    let dist_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let mut out = String::new();
+    let _ = writeln!(out);
+    let _ = writeln!(out, "budget met: {}", if report.budget_met { "yes" } else { "no" });
+    let capped = if report.rows_capped { " (row cap reached)" } else { "" };
+    let _ = writeln!(out, "rows: {} of {max_rows} max{capped}", report.rows.len());
+    let _ = writeln!(
+        out,
+        "worst error: elevation {:.4} {unit_label}, windage {:.4} {unit_label} @ {:.3} {dist_unit}",
+        report.worst_elevation_error,
+        report.worst_windage_error,
+        UnitConverter::distance_from_metric(report.worst_error_range_m, units)
+    );
+    let _ = writeln!(
+        out,
+        "verification grid: {:.4} {dist_unit} step",
+        UnitConverter::distance_from_metric(report.verification_grid_step_m, units)
+    );
+    out
+}
+
+/// `adaptive-card` dispatch (MBA-1351 Task 12): resolves the load and (optionally) the
+/// optic from `--profile` via the same `InverseSolverLoadArgs`/`ProfileData::optic_profile`
+/// pattern `dial-plan` uses, solves one `HoldCurve` out past `--end` (mirroring
+/// `mark-to-range`'s own 2% search-headroom convention), then hands the resolved budgets
+/// and optional click graduations to [`adaptive_card`]. Unlike `dial-plan`, a profile with
+/// no optic data is not an error here -- quantization is optional for a range card (the
+/// exact unrounded angle is a perfectly good answer), where `dial-plan`'s entire purpose
+/// requires one.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable adaptive-card CLI command shape"
+)]
+fn handle_adaptive_card(
+    load_args: InverseSolverLoadArgs,
+    zero_distance: Option<f64>,
+    start: f64,
+    end: f64,
+    anchors: Vec<f64>,
+    elevation_budget: Option<String>,
+    windage_budget: Option<String>,
+    max_rows: usize,
+    adjustment: AdaptiveCardAdjustmentArg,
+    output_file: Option<PathBuf>,
+    units: UnitSystem,
+    output: OutputFormat,
+) -> Result<(), Box<dyn Error>> {
+    let (load, profile_data) = load_args.resolve(zero_distance, units)?;
+
+    // Optic is OPTIONAL here (unlike dial-plan): no --profile, or a --profile with no
+    // turret/click data saved, both just mean "print exact, unquantized angles."
+    let optic = match &profile_data {
+        Some(p) => p.optic_profile().map_err(|e| format!("profile '{}': {e}", p.name))?,
+        None => None,
+    };
+    // elevation_cf/windage_cf live on ProfileData independently of the twelve turret/optic
+    // fields, so they resolve the same way regardless of whether `optic` above is Some or
+    // None. load_profile already validates a stored value into the (0.5, 1.5) band
+    // (MBA-1358), so this is never an out-of-band value in practice -- adaptive_card's own
+    // CardError::InvalidTrackingCf check runs anyway, since this is also a public library
+    // entry point other callers reach without the CLI's validation.
+    let elevation_cf = profile_data.as_ref().and_then(|p| p.elevation_cf).unwrap_or(1.0);
+    let windage_cf = profile_data.as_ref().and_then(|p| p.windage_cf).unwrap_or(1.0);
+
+    let unit = adjustment.to_engine();
+    let unit_label = adjustment.label();
+    let unit_factor = unit.from_mil_factor();
+
+    // Budgets parse via the same suffix-mandatory parse_angular_mil rule every other
+    // angular CLI flag in this file uses, then convert (TRUE mil -> the chosen --adjustment
+    // unit) exactly like the default below, so an explicit flag and the default share one
+    // conversion step and cannot silently diverge.
+    let elevation_budget_printed = match elevation_budget.as_deref() {
+        Some(s) => parse_angular_mil(s)? * unit_factor,
+        None => {
+            adaptive_card_default_budget_mil(optic.as_ref().map(|o| &o.elevation_click)) * unit_factor
+        }
+    };
+    let windage_budget_printed = match windage_budget.as_deref() {
+        Some(s) => parse_angular_mil(s)? * unit_factor,
+        None => {
+            adaptive_card_default_budget_mil(optic.as_ref().map(|o| &o.windage_click)) * unit_factor
+        }
+    };
+
+    let start_m = UnitConverter::distance_to_metric(start, units);
+    let end_m = UnitConverter::distance_to_metric(end, units);
+    let anchors_m: Vec<f64> =
+        anchors.iter().map(|&a| UnitConverter::distance_to_metric(a, units)).collect();
+
+    // Search a little past --end so a domain end landing exactly on the curve's last sample
+    // still brackets -- the same 2% headroom `mark-to-range`/`bdc-match` solve with.
+    let max_solve_range_m = if end_m.is_finite() && end_m > 0.0 { end_m * 1.02 } else { end_m };
+    let curve = HoldCurve::solve(&load, max_solve_range_m)?;
+
+    let click = optic.as_ref().map(|o| (&o.elevation_click, &o.windage_click));
+    let req = AdaptiveRequest {
+        domain_m: (start_m, end_m),
+        anchors_m,
+        budget: AdaptiveBudget { elevation: elevation_budget_printed, windage: windage_budget_printed },
+        max_rows,
+        click,
+        elevation_cf,
+        windage_cf,
+        // No --zero-set on this command's interface (MBA-1360 zero sets are out of scope
+        // for Task 12's brief); a card is always relative to the plain, unbiased zero.
+        bias_mil: 0.0,
+    };
+
+    let report =
+        adaptive_card(&curve, &req, unit).map_err(|e| adaptive_card_error_message(e, units))?;
+
+    let (dist_unit, drop_unit, vel_unit, energy_unit) = match units {
+        UnitSystem::Imperial => ("yd", "in", "fps", "ft-lb"),
+        UnitSystem::Metric => ("m", "mm", "m/s", "J"),
+    };
+    let display_rows: Vec<CardRow> =
+        report.rows.iter().map(|r| adaptive_card_display_row(r, units)).collect();
+
+    match output {
+        OutputFormat::Json => {
+            // Verbatim: AdaptiveCardReportV1's own Serialize impl IS the wire format here,
+            // unlike the four Task 9 surfaces' hand-built json! objects -- no footer, since
+            // every fact the footer states is already a field on this struct.
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        OutputFormat::Csv => {
+            let unit_lower = unit_label.to_lowercase();
+            println!(
+                "range_{dist_unit},drop_{drop_unit},drop_{unit_lower},wind_{drop_unit},wind_{unit_lower},velocity_{vel_unit},energy_{energy_unit},tof_s"
+            );
+            for r in &display_rows {
+                println!(
+                    "{:.0},{:.1},{:.3},{:.1},{:.2},{:.0},{:.0},{:.2}",
+                    r.range,
+                    r.drop_linear.unwrap(),
+                    r.drop_adj.unwrap(),
+                    r.wind_linear.unwrap(),
+                    r.wind_adj.unwrap(),
+                    r.velocity.unwrap(),
+                    r.energy.unwrap(),
+                    r.time.unwrap()
+                );
+            }
+            eprint!("{}", adaptive_card_footer(&report, units, unit_label, max_rows));
+        }
+        OutputFormat::Table => {
+            println!();
+            println!(
+                "Adaptive Range Card (zero: {:.0} {dist_unit}) -- method: {}",
+                UnitConverter::distance_from_metric(load.zero_distance_m, units),
+                report.method
+            );
+            println!(
+                "┌───────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬───────┐"
+            );
+            println!(
+                "│Range  │Drop     │Drop     │Wind     │Wind     │Vel      │Energy   │ToF    │"
+            );
+            println!(
+                "│({:>2})   │({:>2})     │({:>3})    │({:>2})     │({:>3})    │({:>3})    │({:>4})   │(s)    │",
+                dist_unit, drop_unit, unit_label, drop_unit, unit_label, vel_unit, energy_unit
+            );
+            println!(
+                "├───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┤"
+            );
+            for r in &display_rows {
+                println!("{}", range_table_row_line(r));
+            }
+            println!(
+                "└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘"
+            );
+            print!("{}", adaptive_card_footer(&report, units, unit_label, max_rows));
+        }
+        #[cfg(feature = "pdf")]
+        OutputFormat::Pdf => {
+            let output_path = output_file.as_ref().ok_or("PDF output requires --output-file")?;
+            let range_unit = match units {
+                UnitSystem::Imperial => RangeUnit::Yards,
+                UnitSystem::Metric => RangeUnit::Meters,
+            };
+            // The dope-card PDF header is always imperial, matching `trajectory -o pdf`'s
+            // own PdfMetadata convention -- HoldCurveLoad is already metric-normalized
+            // regardless of --units, so this converts unconditionally rather than
+            // branching on the run's own unit system.
+            let velocity_fps = UnitConverter::velocity_from_metric(load.velocity_mps, UnitSystem::Imperial);
+            let temperature_f =
+                UnitConverter::temperature_from_metric(load.temperature_c, UnitSystem::Imperial);
+            let pressure_inhg =
+                UnitConverter::pressure_from_metric(load.pressure_hpa, UnitSystem::Imperial);
+            let altitude_ft = UnitConverter::altitude_from_metric(load.altitude_m, UnitSystem::Imperial);
+            let wind_speed_mph =
+                UnitConverter::wind_from_metric(load.wind_speed_mps, UnitSystem::Imperial);
+            let weight_gr = UnitConverter::mass_from_metric(load.mass_kg, UnitSystem::Imperial);
+            let da_ft = calculate_density_altitude(altitude_ft, pressure_inhg, temperature_f);
+
+            let rifle_name = profile_data
+                .as_ref()
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "Adaptive Card".to_string());
+            let bullet = profile_data.as_ref().and_then(|p| p.bullet_name.clone()).unwrap_or_default();
+
+            let pdf_config = DopeCardConfig {
+                rifle_name,
+                location: String::new(),
+                density_altitude_ft: da_ft,
+                pressure_inhg,
+                pressure_hpa: load.pressure_hpa,
+                temperature_f,
+                altitude_ft,
+                wind_speed_mph,
+                target_speed_mph: 0.0,
+                solver_mode: if cfg!(feature = "online") { "online".to_string() } else { "offline".to_string() },
+                powder: String::new(),
+                bullet,
+                weight_gr,
+                bc: load.bc,
+                drag_model: load.drag_model.to_string(),
+                velocity_fps,
+                font_scale: 1.0,
+                bold_data: false,
+                elevation_unit_label: unit_label.to_string(),
+                windage_unit_label: unit_label.to_string(),
+            };
+
+            let pdf_bytes = ballistics_engine::pdf_dope_card::generate_dope_card_pdf(
+                &pdf_config,
+                &display_rows,
+                range_unit,
+            )?;
+            std::fs::write(output_path, &pdf_bytes)?;
+            eprintln!("Adaptive range card PDF written to: {}", output_path.display());
+            eprint!("{}", adaptive_card_footer(&report, units, unit_label, max_rows));
+        }
+        #[cfg(not(feature = "pdf"))]
+        OutputFormat::Pdf => {
+            return Err(
+                "PDF output requires building with the 'pdf' feature (e.g. cargo build --features pdf)"
+                    .into(),
+            );
+        }
+    }
+
     Ok(())
 }

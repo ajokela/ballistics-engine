@@ -38,6 +38,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request now being round-trippable back into a solvable request
   (`From<&ResolvedSolveRequestV1> for SolveRequestV1`) -- previously the resolved form was
   output-only.
+- **Turret/hold decision-support train** (0.33.0 decision-support Plan B): saved profiles can
+  now store a shooter's actual turret mechanics and reticle hold extent, and two new CLI
+  subcommands turn that model plus a computed correction into ranked, executable plans or a
+  compact, error-bounded range card:
+  - **Turret-mechanics profile fields** (MBA-1348): `profile save` gains twelve turret/hold
+    fields -- elevation/windage click graduation, clicks-per-revolution, zero-stop, elevation/
+    windage travel remaining from the current zero, the turret's current dialed state, and the
+    reticle's four-direction usable hold extent -- carried forward unchanged on re-save like
+    every other optional profile field, with `--clear-turret`/`--clear-click` for intentional
+    removal.
+  - **`dial-plan --elevation VAL [--windage VAL] --range R (--profile NAME |
+    --elevation-click ...)`** (MBA-1348) ranks whole-click dial, reticle-hold, and hybrid
+    execution plans for a TRUE angular correction, on top of a new residual-carrying planner
+    core, `ballistics_engine::optic::plan_corrections`: each plan reports its exact dial-space/
+    true-angular split and its linear miss at range, and is never silently clamped -- an
+    optic whose declared travel or hold bounds can't fully execute a plan gets an explicit
+    `feasible: false` with the limiting mechanism named instead.
+  - **`adaptive-card <load/profile args> --start R1 --end R2 [--anchor R]...
+    [--elevation-budget VAL] [--windage-budget VAL] [--max-rows N] [--adjustment mil|moa]
+    [-o table|csv|json|pdf]`** (MBA-1351) builds the smallest range card that PROVABLY
+    reconstructs the trajectory within a stated elevation/windage error budget: greedy
+    worst-point insertion over the solved trajectory's own sample grid, then a separate dense
+    pass MEASURES the finished card's true worst-case error and reports it -- together with
+    the grid it was verified against -- in a footer (table/csv/pdf) or as report fields
+    (`-o json`, `AdaptiveCardReportV1` pretty-printed verbatim). A budget tighter than the
+    optic's own half-click quantization floor is honestly reported `budget_met: false`, never
+    silently relaxed, and every requested `--anchor` always appears in the card regardless of
+    what the measured error says.
+
+  See [CLI_USAGE.md](CLI_USAGE.md#constrained-dial--hold-planning-dial-plan--mba-1348) for
+  both commands, worked examples (including the `come-ups` -> `dial-plan` pairing), and each
+  report's own stated limits.
+
+  Underneath the CLI, four modules are new or newly public in the library:
+  `ballistics_engine::optic` (the turret/hold profile model and `plan_corrections`),
+  `ballistics_engine::hold_curve` (`HoldCurve`, the solved/sampled drop-vs-range curve
+  `adaptive-card` and the existing reticle/BDC inverse solvers now share),
+  `ballistics_engine::card` (the unified `CardRow` display-row type, see Changed below, plus
+  the `adaptive_card` engine), and `ballistics_engine::pdf_dope_card` (the PDF dope card, now
+  `CardRow`-based -- also see Changed below for what moved).
 
 ### Changed
 - **WEZ (`monte-carlo --wez`) attribution now runs on the shared central-difference kernel**
@@ -79,6 +119,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interpolation fraction and then multiplies, where this one site previously multiplied then
   divided. Invisible at the display precision every existing fixture pins; the other four sites'
   arithmetic is unchanged.
+- **`come-ups`/`range-table`/`wind-card`/`compare`'s four output surfaces share one internal
+  row type**, `ballistics_engine::card::CardRow`, replacing four separate function-local
+  structs that each said the same handful of things (range, drop, wind, velocity, energy,
+  time) a different way. Internal only: **the four surfaces' output is byte-identical; only
+  the internal row types were unified** -- pinned by a 12-case golden suite
+  (`tests/card_golden_cli.rs`) covering table/CSV/JSON for all four, so binding maintainers do
+  not need to re-verify any of their wire formats.
+- **The PDF dope card moved from a `ballistics`-binary-private module into the library**,
+  `ballistics_engine::pdf_dope_card` (behind the existing `pdf` feature), and rewritten onto
+  `CardRow` above: `generate_dope_card_pdf` now takes `&[CardRow]` plus an explicit
+  `RangeUnit` (`Yards`/`Meters`) parameter instead of the module's own binary-only
+  `DopeCardRow { range_yd: u32, .. }`. The existing call site (`trajectory -o pdf`) is
+  unaffected -- its rows are still rounded to whole yards before rendering and its PDF output
+  is unchanged -- but the relocated function is now reachable from any library consumer
+  (language bindings; `adaptive-card -o pdf` above) that enables the `pdf` feature.
+
+Nothing in this train touches solve-json v1: no field, no accepted request shape, and no
+resolved-request behavior changed.
 
 ### Fixed
 - **`$.atmosphere.pressure_reference` was rejected as `unknown_field`** by

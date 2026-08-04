@@ -46,6 +46,8 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Solution Diff Attribution** — explain why two resolved solutions differ, attributed by input group with an explicit interaction remainder (`explain`) — see [CLI_USAGE.md](CLI_USAGE.md#solution-diff-attribution-explain--mba-1345)
 - **Per-Input Error Budget** — rank which input is worth measuring better by its share of impact uncertainty, with the hit-probability gain if it were perfected (`error-budget`) — see [CLI_USAGE.md](CLI_USAGE.md#per-input-error-budget-error-budget--mba-1347)
 - **Tolerance Envelopes** — how wrong one input may be before the shot leaves the target (`tolerance`) — see [CLI_USAGE.md](CLI_USAGE.md#tolerance-envelopes-tolerance--mba-1350)
+- **Constrained Dial & Hold Planning** — rank whole-click dial, reticle-hold, and hybrid execution plans for a TRUE angular correction against a real optic's turret mechanics, travel, and hold bounds, with infeasibility naming the limiting mechanism rather than a silent clamp (`dial-plan`) — see [CLI_USAGE.md](CLI_USAGE.md#constrained-dial--hold-planning-dial-plan--mba-1348)
+- **Adaptive Range Cards** — the smallest range card that provably reconstructs the trajectory within a stated elevation/windage error budget, with click rounding from a saved optic and a footer stating the measured worst-case error and the grid it was verified against — a MEASURED error bound and always-present anchors, not a claim of fewer rows than a well-chosen fixed step (`adaptive-card`) — see [CLI_USAGE.md](CLI_USAGE.md#adaptive-range-cards-adaptive-card--mba-1351)
 
 ## Installation
 

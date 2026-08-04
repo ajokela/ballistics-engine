@@ -16,7 +16,15 @@
 /// One card row. Display-ready values in the surface's chosen units (exactly what the
 /// legacy per-surface structs stored), so rendering is unchanged; range is f64 metres-
 /// or-display per the surface's existing convention — DO NOT re-convert anything.
-#[derive(Debug, Clone)]
+///
+/// `Serialize` (0.33.0 decision-support Plan B Task 12) so `adaptive-card -o json` can
+/// pretty-print [`AdaptiveCardReportV1`] verbatim rather than hand-rebuilding a `json!`
+/// object the way the four Task 9 surfaces do -- purely additive: none of those four
+/// surfaces serializes a `CardRow` directly (each still builds its own `json!({..})` from
+/// named fields), so this creates no new wire surface for them. Deliberately NOT
+/// `Deserialize` -- nothing reads a `CardRow` back yet, and adding it speculatively is not
+/// this task's job.
+#[derive(Debug, Clone, Serialize)]
 pub struct CardRow {
     pub range: f64,
     pub drop_linear: Option<f64>,
@@ -42,6 +50,7 @@ pub struct CardRow {
 
 use crate::adjustment::{click_size_mil, quantize_angle, ClickBase, ClickValue};
 use crate::hold_curve::HoldCurve;
+use serde::Serialize;
 use std::fmt;
 
 /// Schema version of [`AdaptiveCardReportV1`]. Bump only for a breaking shape change.
@@ -116,7 +125,7 @@ impl CardAdjustmentUnit {
     }
 }
 
-/// Every way an [`adaptive_card`] request can be rejected. All five are structured: a range
+/// Every way an [`adaptive_card`] request can be rejected. All six are structured: a range
 /// a shooter asked for and did not get back is information, never a silent drop.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CardError {
@@ -188,7 +197,11 @@ impl std::error::Error for CardError {}
 /// The error fields are MEASURED by a dense verification pass over the declared grid after
 /// the rows are final -- they are not the loop's running estimate, and `budget_met` is
 /// recomputed from that pass rather than inherited from the insertion loop.
-#[derive(Debug, Clone)]
+///
+/// `Serialize` (Task 12): `adaptive-card -o json` prints this struct pretty-printed
+/// verbatim, field names unchanged -- unlike the four Task 9 surfaces, there is no legacy
+/// hand-built `json!` shape to preserve here, so a plain derive IS the wire format.
+#[derive(Debug, Clone, Serialize)]
 pub struct AdaptiveCardReportV1 {
     pub schema_version: u32,
     /// Stable identifier for how these rows were chosen.
@@ -1412,5 +1425,42 @@ mod adaptive_card_tests {
         }
         .to_string();
         assert!(text.contains("elevation") && text.contains("0.5") && text.contains("1.5"), "{text}");
+    }
+
+    /// Task 12: `adaptive-card -o json` prints this report pretty-printed VERBATIM (no
+    /// hand-rebuilt `json!` object, unlike the four Task 9 surfaces), so the derived
+    /// `Serialize` impl IS the wire contract. Pins the field names a CLI/binding consumer
+    /// would rely on, and that a row's `None` fields serialize as `null` (never dropped),
+    /// matching `CardRow`'s existing "every surface populates only the fields it has"
+    /// convention -- a `skip_serializing_if` would silently make an adaptive row's JSON
+    /// shape depend on which fields happened to be absent.
+    #[test]
+    fn report_serializes_verbatim_with_stable_field_names() {
+        let curve = test_curve(900.0);
+        let req = plain_request((200.0, 400.0), 0.2, 50);
+        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+
+        let json = serde_json::to_value(&report).expect("report must serialize");
+        assert_eq!(json["schema_version"], ADAPTIVE_CARD_SCHEMA_VERSION_V1);
+        assert_eq!(json["method"], "greedy_worst_point_insertion_on_holdcurve_grid_v1");
+        assert_eq!(json["assumptions"].as_array().expect("assumptions array").len(), 5);
+        assert_eq!(json["budget_met"], report.budget_met);
+        assert_eq!(json["rows_capped"], report.rows_capped);
+        assert!(json.get("worst_elevation_error").is_some());
+        assert!(json.get("worst_windage_error").is_some());
+        assert!(json.get("worst_error_range_m").is_some());
+        assert!(json.get("verification_grid_step_m").is_some());
+
+        let rows = json["rows"].as_array().expect("rows array");
+        assert_eq!(rows.len(), report.rows.len());
+        let first = &rows[0];
+        assert!(first["range"].is_number());
+        assert!(first["drop_adj"].is_number(), "a populated Some(..) field must serialize as a number");
+        // Fields every adaptive row leaves `None` serialize as explicit JSON null, not as an
+        // absent key -- a consumer can tell "never populated by this engine" from "absent
+        // because of a version skew" only if the key is always present.
+        assert!(first["come_up"].is_null());
+        assert!(first["lead_adj"].is_null());
+        assert_eq!(first["wind_columns"], serde_json::json!([]));
     }
 }

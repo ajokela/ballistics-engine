@@ -3303,6 +3303,243 @@ implied by any bound here, these are deterministic limits of a one-variable sear
 intervals or a probability of hit; and a bound is reported only when found strictly within the
 axis's own configured search domain, never extrapolated beyond it.
 
+### Constrained Dial & Hold Planning (`dial-plan`) — MBA-1348
+
+Turns an already-known TRUE angular correction into ranked, EXECUTABLE plans against a real
+optic: whole clicks with a direction and (when the turret declares `clicks_per_revolution`) a
+revolution count, a reticle hold in continuous TRUE angular mil, or a hybrid split (dial what
+the turret can reach, hold the true angular remainder). All three strategies -- `dial_all`,
+`hold_all`, `hybrid` -- are always evaluated and ranked feasible-first. An optic that cannot
+fully execute a strategy is never silently clamped: the plan is still returned, `feasible:
+false`, with the limiting mechanism named (`TravelExceeded`, `HoldBoundExceeded`,
+`NoTravelData`, `NoHoldBoundData`, ...) -- an infeasibility analysis is a normal, successful
+run (exit 0), never an error.
+
+The optic comes from `--profile NAME` (its saved turret mechanics, hold bounds, and
+`elevation_cf`/`windage_cf`) or from inline flags mirroring `profile save`'s own set
+(`--elevation-click`, `--travel-up`/`--travel-down`, `--windage-travel-left`/
+`--windage-travel-right`, `--hold-up`/`--hold-down`/`--hold-left`/`--hold-right`,
+`--turret-elev`/`--turret-wind`, `--clicks-per-rev`, `--zero-stop`) -- the two sources are
+mutually exclusive.
+
+**The come-ups → dial-plan pairing.** `come-ups` computes a correction from a load and a
+zero; `dial-plan` turns an already-known correction into an executable plan. Run them in
+sequence:
+
+```bash
+ballistics come-ups -v 2700 -b 0.475 -m 175 -d 0.308 --drag-model g7 \
+  --zero-distance 100 --start 100 --end 600 --step 100
+```
+```
+
+Come-Up Table (zero: 100 yd, MIL)
+┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+│Range (yd)|Drop (MIL)|Come-Up   │ Vel (fps)│Energy    │ Time (s) │
+├──────────┼──────────┼──────────┼──────────┼──────────┼──────────┤
+│      100 │    0.000 │    —     │     2604 │     2634 │    0.113 │
+│      200 │    0.434 │    0.434 │     2509 │     2446 │    0.231 │
+│      300 │    1.090 │    0.656 │     2417 │     2269 │    0.352 │
+│      400 │    1.832 │    0.742 │     2326 │     2102 │    0.479 │
+│      500 │    2.634 │    0.802 │     2237 │     1945 │    0.610 │
+│      600 │    3.490 │    0.856 │     2151 │     1797 │    0.747 │
+└──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
+```
+
+At 600 yards the "Drop (MIL)" column is the total elevation correction from zero, 3.490 mil --
+feed that straight into `dial-plan`:
+
+```bash
+ballistics dial-plan --elevation 3.49mil --range 600 \
+  --elevation-click 0.1mil --travel-up 30mil --travel-down 5mil
+```
+```
+dial-plan -- method: dial_space_quantization_v1
+range: 548.640 m
+
+#1 strategy: dial_all [FEASIBLE]
+  elevation: dial UP 35 clicks; hold 0.000 mil
+  windage: dial RIGHT 0 clicks; hold 0.000 mil
+  residual: elevation -0.010 mil, windage 0.000 mil -> 0.005 m at 548.640 m
+
+#2 strategy: hybrid [INFEASIBLE]
+  elevation: dial UP 35 clicks; hold -0.010 mil
+  windage: dial RIGHT 0 clicks; hold 0.000 mil
+  residual: elevation 0.000 mil, windage 0.000 mil -> 0.000 m at 548.640 m
+  limit: elevation NoHoldBoundData -- needed -0.010 mil, no data declared for this axis
+
+#3 strategy: hold_all [INFEASIBLE]
+  elevation: dial UP 0 clicks; hold 3.490 mil
+  windage: dial RIGHT 0 clicks; hold 0.000 mil
+  residual: elevation 0.000 mil, windage 0.000 mil -> 0.000 m at 548.640 m
+  limit: elevation NoHoldBoundData -- needed 3.490 mil, no data declared for this axis
+
+assumptions:
+  - Linear miss at range uses the small-angle approximation (mil / 1000 * range); it is not exact at extreme angles.
+  - Elevation and windage are planned independently; no cant-induced coupling between axes is modeled.
+  - Reticle holds are assumed continuous and unquantized, unlike turret clicks.
+  - Travel limits and turret state are trusted exactly as declared in the optic profile, not sensed or independently verified.
+  - MOA-graduated clicks convert to milliradians using the locked printed-table constant 3438, not the exact geometric 3437.7467.
+```
+
+`dial_all` wins: 35 clicks up on a 0.1 mil turret with 30 mil of declared up-travel leaves only
+a -0.010 mil residual (5 mm of linear miss at 600 yards) -- negligible, and feasible outright.
+`hybrid`/`hold_all` are marked infeasible here only because this optic declared no
+`--hold-up`/`--hold-down`/`--hold-left`/`--hold-right`; add all four (a real reticle's usable
+extent) to make those two strategies evaluable as well.
+
+**Units.** `--range` follows `--units` (yards imperial / meters metric) like every other
+calculator command, but the report's own `range_m` field -- and everything the table above
+prints -- is always meters, regardless of `--units`: the example requested 600 yards and the
+report says `range: 548.640 m`. `--elevation`/`--windage` (and every inline optic travel/hold/
+turret-state flag) are TRUE angular with a mandatory unit suffix (mil/moa/smoa/iphy); `+` means
+up/right on both axes.
+
+`-o csv`/`-o pdf` are rejected by name (`dial-plan has no CSV/PDF form; use -o table or -o
+json`); `-o json` is `DialPlanReportV1` pretty-printed verbatim (`schema_version`, `method`,
+`assumptions`, `range_m`, `plans[]`).
+
+**Honest limits**, carried in the report's own `assumptions` field (quoted above verbatim): the
+linear-miss figure is a small-angle approximation, not exact at extreme angles; elevation and
+windage are planned independently with no cant-induced coupling modeled; reticle holds are
+continuous and unquantized, unlike turret clicks; declared travel/turret state is trusted
+exactly as given, never sensed or independently verified; and MOA-graduated clicks convert on
+this crate's locked printed-table constant (3438), not the exact geometric 3437.7467.
+
+### Adaptive Range Cards (`adaptive-card`) — MBA-1351
+
+The smallest range card that PROVABLY reconstructs the trajectory within a stated elevation/
+windage error budget: greedy worst-point insertion over the solved trajectory's own sample
+grid, starting from both range ends plus any `--anchor`s and adding whichever audited point is
+furthest outside budget until none is (or the row cap binds, or the remaining error is an
+irreducible click-quantization floor). A SEPARATE dense pass then MEASURES the finished card
+and reports its true worst-case error and the grid it was verified against.
+
+**What this buys you, and what it does not.** Measured against the most generous possible
+fixed-step card, adaptive placement does **not** reliably produce fewer rows than a
+well-chosen uniform step on a smooth trajectory -- the engine's own
+`fixed_step_comparison_is_measured_not_assumed` test (`src/card.rs`) found adaptive placement
+lost 10, tied 5, and won 5 across five domains and four budgets. What it buys instead: a
+MEASURED worst-case error bound (not an assumed one), every range you asked for as an
+`--anchor` always present in the card, and no step size to guess.
+
+```bash
+ballistics adaptive-card -v 2700 -b 0.475 -m 175 -d 0.308 --drag-model g7 \
+  --zero-distance 100 --start 300 --end 700
+```
+```
+
+Adaptive Range Card (zero: 100 yd) -- method: greedy_worst_point_insertion_on_holdcurve_grid_v1
+┌───────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬───────┐
+│Range  │Drop     │Drop     │Wind     │Wind     │Vel      │Energy   │ToF    │
+│(yd)   │(in)     │(MIL)    │(in)     │(MIL)    │(fps)    │(ft-lb)   │(s)    │
+├───────┼─────────┼─────────┼─────────┼─────────┼─────────┼─────────┼───────┤
+│   300 │    11.8 │   1.090 │     0.0 │    0.00 │    2417 │    2269 │  0.35 │
+│   494 │    46.0 │   2.584 │     0.0 │    0.00 │    2243 │    1954 │  0.60 │
+│   700 │   110.9 │   4.400 │     0.0 │    0.00 │    2066 │    1659 │  0.89 │
+└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘
+
+budget met: yes
+rows: 3 of 25 max
+worst error: elevation 0.0286 MIL, windage 0.0000 MIL @ 395.000 yd
+verification grid: 1.0000 yd step
+```
+
+With no `--elevation-budget`/`--windage-budget` given (as here), the default is half the
+profile's own click size -- the honest floor documented below -- when `--profile` supplies
+one, or 0.1 true mil otherwise. Three rows reconstruct 300-700 yards within that 0.1 mil
+default: interpolating linearly between any two adjacent rows above is never more than 0.0286
+mil off the real trajectory, worst case, at 395 yards -- and that worst point, and the grid it
+was measured against, are stated rather than assumed. (The `(ft-lb)` header cell overflowing
+its column by one character is a pre-existing cosmetic quirk shared with `range-table`'s
+identical imperial header, not something new here.)
+
+Table/CSV/PDF (`-o table|csv|pdf`) all carry the same footer block shown above (`budget met` /
+`rows` / `worst error @ range` / `verification grid`) -- `-o csv`/`-o pdf` write it to STDERR
+so their own data channel (the CSV rows; the PDF file) stays exactly that and nothing else.
+`-o json` carries no separate footer, because every fact in it is already a field on the
+report:
+
+```bash
+ballistics adaptive-card -v 2700 -b 0.475 -m 175 -d 0.308 --drag-model g7 \
+  --zero-distance 100 --start 300 --end 400 \
+  --elevation-budget 0.05mil --windage-budget 0.05mil -o json
+```
+```
+{
+  "schema_version": 1,
+  "method": "greedy_worst_point_insertion_on_holdcurve_grid_v1",
+  "assumptions": [
+    "Verification is limited to the hold curve's declared sample grid (verification_grid_step_m) together with the card's own rows; no claim is made about ranges between those audited points.",
+    "The reader of this card interpolates linearly between adjacent rows.",
+    "Errors are measured in printed-value space -- the same zero-set bias, tracking-correction division and click quantization the printed rows carry -- so a constant zero-set bias cancels out of the interpolation error and the tracking correction factor is already inside the numbers being compared.",
+    "Rows quantized to an optic's clicks carry an irreducible error of up to half a click at the rows themselves, which no number of added rows can remove.",
+    "A budget tighter than that half-click floor is reported as budget_met: false; the requested tolerance is never silently relaxed."
+  ],
+  "rows": [
+    {
+      "range": 274.32,
+      "drop_linear": 0.29906997487840825,
+      "drop_adj": 1.0902230055351714,
+      "come_up": null,
+      "wind_linear": 0.0,
+      "wind_adj": 0.0,
+      "velocity": 736.5692110050417,
+      "energy": 3076.1171845457698,
+      "time": 0.35235712510991274,
+      "lead_adj": null,
+      "wind_columns": []
+    },
+    {
+      "range": 365.76,
+      "drop_linear": 0.670060323809346,
+      "drop_adj": 1.8319672020159286,
+      "come_up": null,
+      "wind_linear": 0.0,
+      "wind_adj": 0.0,
+      "velocity": 708.9565577781669,
+      "energy": 2849.8040653051507,
+      "time": 0.4788992677109733,
+      "lead_adj": null,
+      "wind_columns": []
+    }
+  ],
+  "budget_met": true,
+  "rows_capped": false,
+  "worst_elevation_error": 0.008452678351470011,
+  "worst_windage_error": 0.0,
+  "worst_error_range_m": 318.2112,
+  "verification_grid_step_m": 0.9144
+}
+```
+
+**Units.** `--start`/`--end`/`--anchor` follow `--units` for input (yards imperial / meters
+metric), exactly like `range-table`, and the Table/CSV/PDF Range column is likewise in
+`--units`. `-o json`, however, is `AdaptiveCardReportV1` pretty-printed **verbatim**:
+`range`/`drop_linear`/`wind_linear`/`worst_error_range_m`/`verification_grid_step_m` stay in
+the engine's own native METRES regardless of `--units` -- notice the example above requested
+`--start 300` (yards) and the JSON's first row range reads `274.32` (= 300 x 0.9144, not
+re-converted for display). `drop_adj`/`wind_adj` are the one exception either way: they are
+already expressed in the `--adjustment` unit (`mil` or `moa`) in every output format, and are
+never re-converted. `--elevation-budget`/`--windage-budget` are TRUE angular with a mandatory
+unit suffix (mil/moa/smoa/iphy), converted into whichever `--adjustment` unit is selected --
+the same conversion rule the default (profile-click-derived) budget uses, so an explicit
+budget and the default can never silently disagree about which space they live in.
+
+The optic (for click quantization) and its tracking correction factors come only from
+`--profile NAME` here -- unlike `dial-plan`, there is no inline-flag optic path for
+`adaptive-card`, since quantization is optional for a range card: the exact, unrounded angle
+is a perfectly good answer with no optic declared at all.
+
+**Honest limits**, carried in the report's own `assumptions` field (quoted above verbatim):
+verification is limited to the hold curve's declared sample grid together with the card's own
+rows -- no claim is made about ranges between those audited points; the reader of the card is
+assumed to interpolate linearly between adjacent rows; errors are measured in printed-value
+space (the same zero-set bias, tracking-correction division, and click quantization the
+printed rows themselves carry); rows quantized to an optic's clicks carry an irreducible error
+of up to half a click at the rows themselves, which no number of added rows can remove; and a
+budget tighter than that half-click floor is reported `budget_met: false` -- the requested
+tolerance is never silently relaxed.
+
 ## Output Formats
 
 ### Units by Output Surface
