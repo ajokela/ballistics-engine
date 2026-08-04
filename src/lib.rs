@@ -179,6 +179,13 @@ pub mod tolerance;
 // validation; no feature gate: must compile for wasm32 (depends only on `adjustment`,
 // itself unconditional).
 pub mod optic;
+// 0.33.0 decision-support Task 8: `HoldCurve`, the drop-vs-range interpolation core shared
+// by `mark-to-range`, `bdc-match`, `optimal-zero` and `reticle hold --range`, promoted out of
+// the CLI binary (together with the sampled-trajectory helpers it solves through) so the
+// range-card work its own doc comment already nominates can reuse it as a library dependency.
+// No feature gate: must compile for wasm32 (pure math over already-resolved inputs; no fs, no
+// clap -- CLI argument resolution stays in `main.rs`).
+pub mod hold_curve;
 
 // Online mode: HTTP client for Flask API (feature-gated)
 #[cfg(feature = "online")]
