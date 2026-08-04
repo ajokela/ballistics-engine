@@ -1,4 +1,5 @@
 use crate::cli_api::BallisticsError;
+use crate::trajectory_observation::{bracket_param, Bracket};
 use nalgebra::Vector3;
 use std::collections::HashSet;
 use std::fmt;
@@ -238,38 +239,14 @@ fn interpolate(x_vals: &[f64], y_vals: &[f64], x: f64) -> f64 {
         return 0.0;
     }
 
-    if x <= x_vals[0] {
-        return y_vals[0];
+    match bracket_param(x_vals.len(), |i| x_vals[i], x) {
+        // A single-point series clamps to its only value regardless of `x` -- there is no
+        // second point to bracket against, so `Degenerate` (len == 1, empty was already
+        // handled above) reads the same as clamping below it.
+        Bracket::Below | Bracket::Degenerate => y_vals[0],
+        Bracket::Above => y_vals[y_vals.len() - 1],
+        Bracket::Inside { lo, t } => y_vals[lo] + (y_vals[lo + 1] - y_vals[lo]) * t,
     }
-
-    if x >= x_vals[x_vals.len() - 1] {
-        return y_vals[y_vals.len() - 1];
-    }
-
-    // Binary search for the correct interval
-    let mut left = 0;
-    let mut right = x_vals.len() - 1;
-
-    while right - left > 1 {
-        let mid = (left + right) / 2;
-        if x_vals[mid] <= x {
-            left = mid;
-        } else {
-            right = mid;
-        }
-    }
-
-    // Linear interpolation
-    let x1 = x_vals[left];
-    let x2 = x_vals[right];
-    let y1 = y_vals[left];
-    let y2 = y_vals[right];
-
-    if (x2 - x1).abs() < f64::EPSILON {
-        return y1;
-    }
-
-    y1 + (y2 - y1) * (x - x1) / (x2 - x1)
 }
 
 /// Add trajectory flags using vectorized detection algorithms

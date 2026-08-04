@@ -3,6 +3,12 @@
 //! The legacy [`crate::TrajectoryResult::position_at_range`] API intentionally clamps queries
 //! beyond the computed trajectory.  The APIs in this module are for protocol and laboratory
 //! consumers that need explicit range errors, finite values, and an exact terminal sample.
+//!
+//! This module also owns [`bracket_param`], the shared bracket-and-lerp search behind every
+//! interpolation site in the crate: hold curves, wind-scenario corridors, reticle holds,
+//! trajectory sampling, and the CLI's equivalent-horizontal-range solver. Each call site keeps
+//! its own out-of-range policy (`None`, clamp-to-end, or a structured error) and its own field
+//! interpolation; this centralizes only the search and the degenerate-interval rule.
 
 use crate::cli_api::{TrajectoryPoint, TrajectoryResult};
 use crate::trajectory_sampling::MAX_TRAJECTORY_SAMPLES;
@@ -457,6 +463,76 @@ fn projected_observation_count(
     }
 }
 
+/// Bracket `x` in a monotonically non-decreasing key sequence of `len` elements, addressed
+/// through `key_at(index)` rather than a concrete slice so every interpolation site can share
+/// one search over its own sample type -- a hold curve's samples, a raw `f64` array, or
+/// trajectory points.
+///
+/// Out-of-range POLICY is the caller's: the five call sites this centralizes deliberately
+/// differ (`None` vs. clamp-to-end vs. a structured error) and those differences are preserved
+/// AT the call sites, not here.
+///
+/// Declared `pub` rather than `pub(crate)`: the CLI binary (`src/main.rs`) is a separate crate
+/// that links this library and is one of the five call sites (`HoldCurve::at_range`), so a
+/// crate-private item would not be visible where it is needed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bracket {
+    /// `x` is within `[key_at(0), key_at(len - 1)]`. The bracket is `(lo, lo + 1)` and `t` is
+    /// the interpolation fraction in `[0, 1]`: `t == 0.0` reuses `key_at(lo)` exactly and
+    /// `t == 1.0` reuses `key_at(lo + 1)` exactly.
+    Inside { lo: usize, t: f64 },
+    /// `x` is below `key_at(0)`.
+    Below,
+    /// `x` is above `key_at(len - 1)`.
+    Above,
+    /// Fewer than two keys -- no interval exists to bracket.
+    Degenerate,
+}
+
+/// Find where `x` falls among `len` keys read through `key_at`. See [`Bracket`] for what each
+/// arm means and who is responsible for handling it.
+///
+/// The degenerate-interval rule: when the bracketed interval's width (`key_at(lo + 1) -
+/// key_at(lo)`) is non-finite or not strictly positive -- equal adjacent keys, or a locally
+/// non-monotonic or non-finite pair -- `t` is `0.0` and the lower point is reused rather than
+/// dividing by a zero or non-finite span.
+pub fn bracket_param(len: usize, key_at: impl Fn(usize) -> f64, x: f64) -> Bracket {
+    if len < 2 {
+        return Bracket::Degenerate;
+    }
+    let first = key_at(0);
+    let last = key_at(len - 1);
+    if x < first {
+        return Bracket::Below;
+    }
+    if x > last {
+        return Bracket::Above;
+    }
+
+    // `partition_point` over a virtual `len`-element sequence: the smallest index whose key is
+    // not less than `x`. Bounded to `len - 1` because `x <= last` was just established, so
+    // `key_at(len - 1)` always satisfies "not less than x" and the search cannot run off the end.
+    let mut lo_bound = 0usize;
+    let mut hi_bound = len;
+    while lo_bound < hi_bound {
+        let mid = lo_bound + (hi_bound - lo_bound) / 2;
+        if key_at(mid) < x {
+            lo_bound = mid + 1;
+        } else {
+            hi_bound = mid;
+        }
+    }
+    let index = lo_bound.min(len - 1);
+    let lo = index.saturating_sub(1);
+    let dx = key_at(lo + 1) - key_at(lo);
+    let t = if dx.is_finite() && dx > 0.0 {
+        (x - key_at(lo)) / dx
+    } else {
+        0.0
+    };
+    Bracket::Inside { lo, t }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,5 +907,73 @@ mod tests {
                 Err(TrajectoryObservationError::NonMonotonicTrajectory { .. })
             ));
         }
+    }
+
+    // -- bracket_param -------------------------------------------------------------------
+
+    #[test]
+    fn bracket_param_is_degenerate_below_two_keys() {
+        // `key_at` must not even be called when len < 2 -- there is no interval to bracket.
+        let unreachable = |_: usize| -> f64 { panic!("key_at must not be called when len < 2") };
+        assert_eq!(bracket_param(0, unreachable, 5.0), Bracket::Degenerate);
+        assert_eq!(bracket_param(1, unreachable, 5.0), Bracket::Degenerate);
+        assert_eq!(bracket_param(1, unreachable, 0.0), Bracket::Degenerate);
+    }
+
+    #[test]
+    fn bracket_param_is_below_or_above_the_key_span() {
+        let keys = [10.0, 20.0, 30.0];
+        assert_eq!(bracket_param(3, |i| keys[i], 9.999), Bracket::Below);
+        assert_eq!(bracket_param(3, |i| keys[i], 30.001), Bracket::Above);
+        // The span endpoints themselves are Inside, not Below/Above -- see the
+        // exact-endpoint-hits test below.
+    }
+
+    #[test]
+    fn bracket_param_pins_exact_endpoint_hits() {
+        let keys = [0.0, 10.0, 20.0, 30.0];
+        assert_eq!(
+            bracket_param(4, |i| keys[i], 0.0),
+            Bracket::Inside { lo: 0, t: 0.0 }
+        );
+        assert_eq!(
+            bracket_param(4, |i| keys[i], 30.0),
+            Bracket::Inside { lo: 2, t: 1.0 } // lo == len - 2
+        );
+    }
+
+    #[test]
+    fn bracket_param_interpolates_an_interior_point() {
+        let keys = [0.0, 10.0, 20.0, 30.0];
+        assert_eq!(
+            bracket_param(4, |i| keys[i], 15.0),
+            Bracket::Inside { lo: 1, t: 0.5 }
+        );
+    }
+
+    #[test]
+    fn bracket_param_degenerate_dx_reuses_the_lower_point() {
+        // A non-finite key at the bracket forces t = 0.0 even though `x` is not itself equal
+        // to the lower key -- this isolates the degenerate-dx rule from the exact-endpoint case.
+        let nan_keys = [0.0, f64::NAN, 20.0];
+        assert_eq!(
+            bracket_param(3, |i| nan_keys[i], 10.0),
+            Bracket::Inside { lo: 0, t: 0.0 }
+        );
+        let inf_keys = [0.0, f64::INFINITY];
+        assert_eq!(
+            bracket_param(2, |i| inf_keys[i], 50.0),
+            Bracket::Inside { lo: 0, t: 0.0 }
+        );
+
+        // Equal adjacent keys (dx == 0.0 exactly): without the guard, t would be 0.0 / 0.0 ==
+        // NaN. A duplicate run can only be entered at its first occurrence -- the search always
+        // returns the leftmost index whose key is >= x, so this case necessarily coincides with
+        // x == first (unlike the two cases above, where x is strictly inside the span).
+        let equal_keys = [5.0, 5.0, 10.0];
+        assert_eq!(
+            bracket_param(3, |i| equal_keys[i], 5.0),
+            Bracket::Inside { lo: 0, t: 0.0 }
+        );
     }
 }

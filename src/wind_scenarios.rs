@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli_api::{AtmosphericConditions, BallisticInputs, TrajectorySolver, UnitSystem};
 use crate::drag_model::DragModel;
+use crate::trajectory_observation::{bracket_param, Bracket};
 use crate::wind::{validate_wind_segments, WindSegment};
 use crate::WindConditions;
 
@@ -822,29 +823,16 @@ fn interpolate_hold_mil(
     if !range_m.is_finite() || range_m <= 0.0 {
         return None;
     }
-    let first = samples.first()?;
-    let last = samples.last()?;
-    if range_m < first.distance_m || range_m > last.distance_m {
+    let Bracket::Inside { lo, t } =
+        bracket_param(samples.len(), |i| samples[i].distance_m, range_m)
+    else {
         return None;
-    }
-    let index = samples
-        .partition_point(|s| s.distance_m < range_m)
-        .min(samples.len() - 1);
-    let (lo, hi) = if index == 0 {
-        (&samples[0], &samples[0])
-    } else {
-        (&samples[index - 1], &samples[index])
     };
-    let width = hi.distance_m - lo.distance_m;
-    let t = if width.abs() < f64::EPSILON {
-        0.0
-    } else {
-        (range_m - lo.distance_m) / width
-    };
+    let hi = lo + 1;
     let lerp = |a: f64, b: f64| a + (b - a) * t;
     Some((
-        lerp(lo.drop_m, hi.drop_m) / range_m * 1000.0,
-        lerp(lo.wind_drift_m, hi.wind_drift_m) / range_m * 1000.0,
+        lerp(samples[lo].drop_m, samples[hi].drop_m) / range_m * 1000.0,
+        lerp(samples[lo].wind_drift_m, samples[hi].wind_drift_m) / range_m * 1000.0,
     ))
 }
 

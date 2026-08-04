@@ -9,7 +9,7 @@ use crate::trajectory_sampling::{
     projected_sample_count, sample_trajectory, TrajectoryData, TrajectoryOutputs,
     TrajectorySample,
 };
-use crate::trajectory_observation::TrajectoryTermination;
+use crate::trajectory_observation::{bracket_param, Bracket, TrajectoryTermination};
 use crate::wind_shear::WindShearModel;
 use crate::DragModel;
 use nalgebra::{Vector3, Vector6};
@@ -1469,25 +1469,21 @@ impl TrajectorySolver {
         // In the shot frame the LOS is the x-axis, so drop below the LOS is
         // `los_height - y` for the inclined and flat solves alike.
         fn path_y_at(points: &[TrajectoryPoint], distance_m: f64) -> Option<f64> {
-            let mut previous: Option<(f64, f64)> = None;
-            for point in points {
-                if point.position.x >= distance_m {
-                    return Some(match previous {
-                        None => point.position.y,
-                        Some((prev_x, prev_y)) => {
-                            let span = point.position.x - prev_x;
-                            if span <= 0.0 {
-                                point.position.y
-                            } else {
-                                let fraction = (distance_m - prev_x) / span;
-                                prev_y + fraction * (point.position.y - prev_y)
-                            }
-                        }
-                    });
+            match bracket_param(points.len(), |i| points[i].position.x, distance_m) {
+                // Below the first point: clamp to it (mirrors zero_trial_height_at's
+                // interpolation, which the doc comment above promises). Fewer than two points
+                // is not a case a real solved trajectory reaches; treat it like Above (no
+                // extrapolation) rather than guessing.
+                Bracket::Below => Some(points[0].position.y),
+                Bracket::Above | Bracket::Degenerate => None,
+                Bracket::Inside { lo, t } => {
+                    let hi = lo + 1;
+                    Some(
+                        points[lo].position.y
+                            + t * (points[hi].position.y - points[lo].position.y),
+                    )
                 }
-                previous = Some((point.position.x, point.position.y));
             }
-            None
         }
 
         // Inclined solution's angular correction at the target (radians, small-angle:

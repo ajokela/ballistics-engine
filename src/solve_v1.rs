@@ -15,8 +15,8 @@ use crate::solve_json::{
     WindReferenceV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
 use crate::trajectory_observation::{
-    TrajectoryObservation, TrajectoryObservationError, TrajectoryObservationFlag,
-    TrajectoryTermination,
+    bracket_param, Bracket, TrajectoryObservation, TrajectoryObservationError,
+    TrajectoryObservationFlag, TrajectoryTermination,
 };
 use crate::wind::WindSegment;
 use crate::{
@@ -1374,38 +1374,31 @@ fn resolve_reticle_hold(
             "reticle.range_m must be finite and greater than zero",
         ));
     }
-    let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
-        return Err(internal_error(
-            "trajectory sampling produced no points to read a reticle hold from",
-        ));
-    };
-    if range_m < first.distance_m || range_m > last.distance_m {
-        return Err(invalid_value(
-            path,
-            format!(
-                "reticle.range_m {range_m} is outside the sampled trajectory ({} to {} m)",
-                first.distance_m, last.distance_m
-            ),
-        ));
-    }
 
-    let index = samples
-        .partition_point(|s| s.distance_m < range_m)
-        .min(samples.len() - 1);
-    let (lo, hi) = if index == 0 {
-        (&samples[0], &samples[0])
-    } else {
-        (&samples[index - 1], &samples[index])
+    let (lo, t) = match bracket_param(samples.len(), |i| samples[i].distance_m, range_m) {
+        Bracket::Inside { lo, t } => (lo, t),
+        Bracket::Degenerate => {
+            return Err(internal_error(
+                "trajectory sampling produced no points to read a reticle hold from",
+            ));
+        }
+        Bracket::Below | Bracket::Above => {
+            // `Degenerate` (len < 2) was already handled above, so at least two samples exist.
+            let first = &samples[0];
+            let last = &samples[samples.len() - 1];
+            return Err(invalid_value(
+                path,
+                format!(
+                    "reticle.range_m {range_m} is outside the sampled trajectory ({} to {} m)",
+                    first.distance_m, last.distance_m
+                ),
+            ));
+        }
     };
-    let span = hi.distance_m - lo.distance_m;
-    let t = if span.abs() < f64::EPSILON {
-        0.0
-    } else {
-        (range_m - lo.distance_m) / span
-    };
+    let hi = lo + 1;
     let lerp = |a: f64, b: f64| a + (b - a) * t;
-    let drop_mil = lerp(lo.drop_m, hi.drop_m) / range_m * 1000.0;
-    let wind_mil = lerp(lo.windage_m, hi.windage_m) / range_m * 1000.0;
+    let drop_mil = lerp(samples[lo].drop_m, samples[hi].drop_m) / range_m * 1000.0;
+    let wind_mil = lerp(samples[lo].windage_m, samples[hi].windage_m) / range_m * 1000.0;
 
     let hold = hold_point_in_reticle(
         drop_mil,

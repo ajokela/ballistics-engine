@@ -74,6 +74,9 @@ use ballistics_engine::{
     trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs,
     BcReferenceStandard, DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
 };
+// 0.33.0 decision-support Task 7: the shared bracket-and-lerp core -- HoldCurve::at_range is
+// one of its five call sites.
+use ballistics_engine::trajectory_observation::{bracket_param, Bracket};
 use ballistics_engine::wind::{parse_wind_direction_standalone, ParsedWindDirection};
 // MBA-1349: robust hold corridors over named segmented-wind scenarios.
 use ballistics_engine::wind_scenarios::{
@@ -18069,37 +18072,24 @@ impl HoldCurve {
         if !range_m.is_finite() || range_m <= 0.0 {
             return None;
         }
-        let first = self.samples.first()?;
-        let last = self.samples.last()?;
-        if range_m < first.distance_m || range_m > last.distance_m {
+        let samples = &self.samples;
+        let Bracket::Inside { lo, t } =
+            bracket_param(samples.len(), |i| samples[i].distance_m, range_m)
+        else {
             return None;
-        }
-        let index = self
-            .samples
-            .partition_point(|s| s.distance_m < range_m)
-            .min(self.samples.len() - 1);
-        let (lo, hi) = if index == 0 {
-            (&self.samples[0], &self.samples[0])
-        } else {
-            (&self.samples[index - 1], &self.samples[index])
         };
-        let span = hi.distance_m - lo.distance_m;
-        let t = if span.abs() < f64::EPSILON {
-            0.0
-        } else {
-            (range_m - lo.distance_m) / span
-        };
+        let hi = lo + 1;
         let lerp = |a: f64, b: f64| a + (b - a) * t;
-        let drop_m = lerp(lo.drop_m, hi.drop_m);
-        let drift_m = lerp(lo.wind_drift_m, hi.wind_drift_m);
+        let drop_m = lerp(samples[lo].drop_m, samples[hi].drop_m);
+        let drift_m = lerp(samples[lo].wind_drift_m, samples[hi].wind_drift_m);
         Some(HoldPoint {
             range_m,
             // Milliradian small-angle definition: 1 mil subtends 1/1000 of the range.
             drop_mil: drop_m / range_m * 1000.0,
             wind_mil: drift_m / range_m * 1000.0,
-            velocity_mps: lerp(lo.velocity_mps, hi.velocity_mps),
-            energy_j: lerp(lo.energy_j, hi.energy_j),
-            time_s: lerp(lo.time_s, hi.time_s),
+            velocity_mps: lerp(samples[lo].velocity_mps, samples[hi].velocity_mps),
+            energy_j: lerp(samples[lo].energy_j, samples[hi].energy_j),
+            time_s: lerp(samples[lo].time_s, samples[hi].time_s),
         })
     }
 
