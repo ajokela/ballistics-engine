@@ -127,9 +127,10 @@ const INHG_TO_HPA: f64 = 33.863_886_666_667;
 // The angular conversion (drop_yd/range_yd -> MIL or MOA) and moving-target lead now
 // live in main.rs::drop_to_adjustment, so both card units share one code path; the
 // caller fills CardRow's drop_adj/wind_adj/lead_adj (as Some(..)) already in the chosen
-// unit. This renderer treats a None on any of those three as 0.0 -- every current
-// producer of dope-card rows populates all three; None only arises if a future caller
-// hands this function a CardRow built for a different card surface.
+// unit. Fix-round I-1: a None on any of those three renders as an em-dash (see
+// `format_adjustment_cell`), never a fake 0.0 -- Task 11's adaptive engine, the stated
+// reason this module takes CardRow at all, emits `lead_adj: None` on every row it
+// produces, and a plausible-looking dialed zero would be dangerously wrong there.
 
 /// Calculate density altitude from environmental conditions
 ///
@@ -593,14 +594,32 @@ fn format_adjustment(value: f64, unit_label: &str) -> String {
     }
 }
 
+/// Fix-round I-1: renders an `Option<f64>` dope-card cell honestly. `Some(v)` delegates to
+/// `format_adjustment` exactly as before; `None` renders as an em-dash rather than a
+/// plausible-looking (but fake) `0.0`. `DopeCardRow` made drop/wind/lead mandatory, so
+/// this distinction didn't exist before Task 10 promoted the card onto `CardRow`, whose
+/// equivalent fields are `Option`. It matters because Task 11's adaptive card engine --
+/// the reason this module accepts `CardRow` at all -- always emits `lead_adj: None`; an
+/// `unwrap_or(0.0)` would print a full Lead column of confident-looking zeroes for a card
+/// that carries no lead data whatsoever.
+fn format_adjustment_cell(value: Option<f64>, unit_label: &str) -> String {
+    match value {
+        Some(v) => format_adjustment(v, unit_label),
+        None => "—".to_string(),
+    }
+}
+
 /// Formats `CardRow::range` for the dope card's Range column. The pre-Task-10
-/// `DopeCardRow` stored range as `u32` yards -- always a bare integer; `CardRow::range`
-/// is `f64`, since Task 11's adaptive card engine can hand this renderer genuinely
-/// fractional ranges. To keep every existing (integer-range) card byte-for-byte
-/// identical, a value within floating-point rounding noise of a whole number (fractional
-/// part < 0.05 -- the yard-conversion call site is never exactly integral) still renders
-/// as that legacy bare integer; anything else renders with one decimal place, e.g.
-/// `417.3` -> "417.3".
+/// `DopeCardRow` stored range as `u32` yards -- always a bare integer. `CardRow::range`
+/// is `f64`: the `trajectory -o pdf` call site now explicitly rounds to whole yards
+/// before building each row (`main.rs::dope_card_row_from_sample`, fix-round C-1 --
+/// sampled ranges are exact multiples of a metre-denominated sample interval, so their
+/// yard conversion is genuinely fractional and would NOT fall into the noise band below
+/// on its own), so its rows always land in the integer branch here; a future caller with
+/// genuinely fractional ranges (Task 11/12's adaptive cards) renders with one decimal
+/// instead, e.g. `417.3` -> "417.3". The `< 0.05` band exists only to absorb ordinary
+/// floating-point rounding noise around an already-whole number, not to "round" a
+/// meaningfully fractional value down to the nearest integer.
 fn format_range(range: f64) -> String {
     let rounded = range.round();
     if (range - rounded).abs() < 0.05 {
@@ -625,9 +644,9 @@ fn draw_data_row(
 ) {
     let values = [
         (format_range(row.range), COLOR_BLACK),
-        (format_adjustment(row.drop_adj.unwrap_or(0.0), elevation_unit), COLOR_RED),
-        (format_adjustment(row.wind_adj.unwrap_or(0.0), windage_unit), COLOR_GREEN),
-        (format_adjustment(row.lead_adj.unwrap_or(0.0), windage_unit), COLOR_BLUE),
+        (format_adjustment_cell(row.drop_adj, elevation_unit), COLOR_RED),
+        (format_adjustment_cell(row.wind_adj, windage_unit), COLOR_GREEN),
+        (format_adjustment_cell(row.lead_adj, windage_unit), COLOR_BLUE),
     ];
 
     for (i, (value, color)) in values.iter().enumerate() {
@@ -835,6 +854,18 @@ mod tests {
         assert_eq!(format_adjustment(2.34, "IPHY"), "2.3");
     }
 
+    /// Fix-round I-1: a missing column must render as an honest em-dash, never a
+    /// plausible-looking fake `0.0` -- pinned for both a decimal unit and a clicks unit,
+    /// since a naive fix might special-case `None` only inside one branch of
+    /// `format_adjustment`'s clicks/non-clicks split.
+    #[test]
+    fn format_adjustment_cell_renders_none_as_an_em_dash_not_a_fake_zero() {
+        assert_eq!(format_adjustment_cell(Some(2.34), "MIL"), "2.3");
+        assert_eq!(format_adjustment_cell(Some(5.0), "CLICKS"), "5");
+        assert_eq!(format_adjustment_cell(None, "MIL"), "—");
+        assert_eq!(format_adjustment_cell(None, "CLICKS"), "—");
+    }
+
     #[test]
     fn density_altitude_uses_published_nws_pressure_altitude_equation() {
         // 20.670988150011322 inHg is exactly 700 hPa under the standard conversion.
@@ -948,6 +979,22 @@ mod tests {
             .collect();
         let bytes = generate_dope_card_pdf(&config, &rows, RangeUnit::Meters)
             .expect("120-row dope card should generate and paginate");
+        assert_valid_pdf_bytes(&bytes);
+    }
+
+    /// Fix-round I-1: Task 11's adaptive card engine -- the reason this module accepts
+    /// `CardRow` at all -- always emits `lead_adj: None`. The full renderer must still
+    /// produce a valid PDF for that row shape (via `format_adjustment_cell`'s em-dash,
+    /// not `unwrap_or(0.0)`'s fake zero); this exercises `draw_data_row` end to end,
+    /// while `format_adjustment_cell_renders_none_as_an_em_dash_not_a_fake_zero` above
+    /// pins the exact string.
+    #[test]
+    fn generate_dope_card_pdf_succeeds_when_lead_adj_is_none() {
+        let config = test_config();
+        let mut row = test_row(100.0);
+        row.lead_adj = None;
+        let bytes = generate_dope_card_pdf(&config, &[row], RangeUnit::Yards)
+            .expect("a row missing lead_adj must still render, not error");
         assert_valid_pdf_bytes(&bytes);
     }
 }

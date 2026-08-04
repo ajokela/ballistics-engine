@@ -13484,6 +13484,87 @@ struct PdfMetadata {
     windage_unit: AdjustmentUnit,
 }
 
+/// Builds one dope-card `CardRow` from a sampled trajectory point -- the only row source
+/// on the `trajectory -o pdf` call site. Extracted out of that call site's `.map()`
+/// closure (Task 10 fix-round, C-1) so the legacy-integer-range guarantee is
+/// unit-testable directly, without spinning up the CLI or parsing PDF bytes.
+#[cfg(feature = "pdf")]
+#[allow(clippy::too_many_arguments)]
+fn dope_card_row_from_sample(
+    s: &trajectory_sampling::TrajectorySample,
+    pdf_meta: &PdfMetadata,
+    elevation_click: Option<ClickValue>,
+    windage_click: Option<ClickValue>,
+    zero_set_elevation_bias_mil: f64,
+    zero_set_windage_bias_mil: f64,
+    elevation_cf: f64,
+    windage_cf: f64,
+) -> CardRow {
+    // Convert distance to yards for range
+    let range_yd = UnitConverter::distance_from_metric(s.distance_m, UnitSystem::Imperial);
+    // Convert drop to yards (s.drop_m is already in meters, positive = below line of sight)
+    let drop_yd = s.drop_m / 0.9144; // meters to yards
+                                     // Convert drift to yards
+    let drift_yd = s.wind_drift_m / 0.9144;
+    // Lead: how far the target moves during the bullet's flight, as an
+    // angular hold. Movement (yd) = speed (yd/s) * time; 1760/3600 = mph->yd/s.
+    // Shared moving-target math (MBA-1287): mph → m/s, perpendicular
+    // (90°) crossing — lead_m = speed·TOF exactly, as before; the yd
+    // conversion chain differs from the old 1760/3600 factor by ≤1 ulp.
+    let lead_m = ballistics_engine::lead_from_tof(
+        pdf_meta.target_speed_mph * 0.44704,
+        90.0,
+        s.time_s,
+        s.distance_m,
+    )
+    .lead_m;
+    let lead_yd = lead_m / 0.9144;
+    let elevation_unit = pdf_meta.adjustment_unit;
+    let windage_unit = pdf_meta.windage_unit;
+
+    CardRow {
+        // Fix-round C-1: sampled distances are exact multiples of --sample-interval IN
+        // METRES (default 10.0 m; trajectory_sampling's distances are `i as f64 *
+        // step_size`), so their yard conversion is genuinely ~0.3-0.4 yd off an integer
+        // (100 m -> 109.36 yd) -- nowhere near format_range's noise band, NOT
+        // "near-exact yards" as this comment wrongly claimed before the fix-round.
+        // Round here, matching the legacy `DopeCardRow { range_yd: u32, .. }` cast
+        // exactly, so the ONE shipped dope-card path keeps its byte-identical integer
+        // Range column. `generate_dope_card_pdf`'s own `format_range` still renders a
+        // genuinely fractional range with one decimal -- that support exists for a
+        // future caller with non-integer ranges (Task 11/12's adaptive cards), not
+        // this one.
+        range: range_yd.round(),
+        // Drop: positive = dial up (bullet below LOS). drop_m is already
+        // positive-below-LOS (sample_trajectory: los_y - y_interp), matching the
+        // come-up / range tables, so do NOT negate it (this column was sign-flipped).
+        // Rendered in MIL/MOA/SMOA/IPHY (MBA-724) or whole clicks (MBA-1355) per
+        // its own axis unit (MBA-1410): drop uses the elevation unit/graduation,
+        // wind/lead the (possibly different) windage one.
+        // MBA-1360: the selected zero set's dial corrections join the
+        // Drop/Wind columns here (total-correction dials); the Lead
+        // column is a COMPONENT hold (composed on top of the wind dial,
+        // which already carries the bias) so it stays bias-free.
+        //
+        // NOTE: these three still divide/bias on the RAW (unrounded) `range_yd`, exactly
+        // as before the fix-round -- only the CardRow's own displayed `range` field
+        // above is rounded. The adjustment math has always used the true sample
+        // distance, never the display value.
+        drop_adj: Some(adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value),
+        // Wind: positive = dial right for wind from right
+        wind_adj: Some(windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value),
+        // Lead for a moving target (a dialed quantity — the windage CF divides it, MBA-1358)
+        lead_adj: Some(windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf).value),
+        drop_linear: None,
+        come_up: None,
+        wind_linear: None,
+        velocity: None,
+        energy: None,
+        time: None,
+        wind_columns: Vec::new(),
+    }
+}
+
 // ============================================================================
 // BC5D Segment Generation Helper (MBA-744)
 // ============================================================================
@@ -14863,59 +14944,16 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     s.distance_m >= UnitConverter::distance_to_metric(100.0, UnitSystem::Imperial)
                 })
                 .map(|s| {
-                    // Convert distance to yards for range
-                    let range_yd =
-                        UnitConverter::distance_from_metric(s.distance_m, UnitSystem::Imperial);
-                    // Convert drop to yards (s.drop_m is already in meters, positive = below line of sight)
-                    let drop_yd = s.drop_m / 0.9144; // meters to yards
-                                                     // Convert drift to yards
-                    let drift_yd = s.wind_drift_m / 0.9144;
-                    // Lead: how far the target moves during the bullet's flight, as an
-                    // angular hold. Movement (yd) = speed (yd/s) * time; 1760/3600 = mph->yd/s.
-                    // Shared moving-target math (MBA-1287): mph → m/s, perpendicular
-                    // (90°) crossing — lead_m = speed·TOF exactly, as before; the yd
-                    // conversion chain differs from the old 1760/3600 factor by ≤1 ulp.
-                    let lead_m = ballistics_engine::lead_from_tof(
-                        pdf_meta.target_speed_mph * 0.44704,
-                        90.0,
-                        s.time_s,
-                        s.distance_m,
+                    dope_card_row_from_sample(
+                        s,
+                        pdf_meta,
+                        elevation_click,
+                        windage_click,
+                        zero_set_elevation_bias_mil,
+                        zero_set_windage_bias_mil,
+                        elevation_cf,
+                        windage_cf,
                     )
-                    .lead_m;
-                    let lead_yd = lead_m / 0.9144;
-                    let elevation_unit = pdf_meta.adjustment_unit;
-                    let windage_unit = pdf_meta.windage_unit;
-
-                    CardRow {
-                        // Task 10 (0.33.0 decision-support Plan B): range is now the raw
-                        // f64 yard value rather than pre-rounded to u32 --
-                        // generate_dope_card_pdf's own range formatter renders it as the
-                        // legacy bare integer (fractional part < 0.05, which this near-
-                        // exact yard conversion always satisfies).
-                        range: range_yd,
-                        // Drop: positive = dial up (bullet below LOS). drop_m is already
-                        // positive-below-LOS (sample_trajectory: los_y - y_interp), matching the
-                        // come-up / range tables, so do NOT negate it (this column was sign-flipped).
-                        // Rendered in MIL/MOA/SMOA/IPHY (MBA-724) or whole clicks (MBA-1355) per
-                        // its own axis unit (MBA-1410): drop uses the elevation unit/graduation,
-                        // wind/lead the (possibly different) windage one.
-                        // MBA-1360: the selected zero set's dial corrections join the
-                        // Drop/Wind columns here (total-correction dials); the Lead
-                        // column is a COMPONENT hold (composed on top of the wind dial,
-                        // which already carries the bias) so it stays bias-free.
-                        drop_adj: Some(adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value),
-                        // Wind: positive = dial right for wind from right
-                        wind_adj: Some(windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value),
-                        // Lead for a moving target (a dialed quantity — the windage CF divides it, MBA-1358)
-                        lead_adj: Some(windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf).value),
-                        drop_linear: None,
-                        come_up: None,
-                        wind_linear: None,
-                        velocity: None,
-                        energy: None,
-                        time: None,
-                        wind_columns: Vec::new(),
-                    }
                 })
                 .collect();
 
@@ -20864,6 +20902,91 @@ mod card_row_sentinel_tests {
         assert!(line.contains("333.200"), "drop_adj sentinel missing/misplaced: {line}");
         assert!(line.contains("555.4"), "wind_linear sentinel missing/misplaced: {line}");
         assert!(line.contains("666.50"), "wind_adj sentinel missing/misplaced: {line}");
+    }
+}
+
+/// Task 10 fix-round, C-1: the review proved by hand that sampled distances are exact
+/// multiples of `--sample-interval` IN METRES (default 10.0 m), so their yard conversion
+/// is genuinely ~0.3-0.4 yd off an integer -- not "near-exact yards" as the pre-fix code
+/// comment claimed. `dope_card_row_from_sample` must round `range` back to whole yards
+/// itself so the one shipped dope-card path stays byte-identical to the pre-Task-10
+/// `DopeCardRow { range_yd: u32, .. }` cards. Pins both the review's own worked table and
+/// the general "integer-valued" property, without spinning up the CLI or parsing PDF bytes.
+#[cfg(all(test, feature = "pdf"))]
+mod dope_card_row_tests {
+    use super::{dope_card_row_from_sample, trajectory_sampling, AdjustmentUnit, PdfMetadata};
+
+    fn sample_at(distance_m: f64) -> trajectory_sampling::TrajectorySample {
+        trajectory_sampling::TrajectorySample {
+            distance_m,
+            drop_m: 0.5,
+            wind_drift_m: 0.1,
+            velocity_mps: 0.0,
+            energy_j: 0.0,
+            time_s: 0.3,
+            flags: Vec::new(),
+        }
+    }
+
+    fn pdf_meta_fixture() -> PdfMetadata {
+        PdfMetadata {
+            rifle_name: "Test".to_string(),
+            location_name: "Test".to_string(),
+            powder: "Test".to_string(),
+            bullet_name: "Test".to_string(),
+            target_speed_mph: 0.0,
+            output_file: None,
+            velocity_fps: 2700.0,
+            temperature_f: 59.0,
+            pressure_inhg: 29.92,
+            altitude_ft: 0.0,
+            wind_speed_mph: 0.0,
+            weight_gr: 175.0,
+            font_scale: 1.0,
+            bold_data: false,
+            adjustment_unit: AdjustmentUnit::Mil,
+            windage_unit: AdjustmentUnit::Mil,
+        }
+    }
+
+    #[test]
+    fn trajectory_built_rows_carry_integer_valued_ranges() {
+        let pdf_meta = pdf_meta_fixture();
+        // (sample distance_m, legacy DopeCardRow{range_yd: u32} equivalent) -- the exact
+        // table the review derived by hand from `val / 0.9144`.
+        let expected = [
+            (100.0, 109.0),
+            (110.0, 120.0),
+            (120.0, 131.0),
+            (130.0, 142.0),
+            (730.0, 798.0),
+        ];
+        for (distance_m, expected_range_yd) in expected {
+            let row = dope_card_row_from_sample(
+                &sample_at(distance_m),
+                &pdf_meta,
+                None,
+                None,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            );
+            assert_eq!(
+                row.range, expected_range_yd,
+                "distance_m={distance_m}: expected legacy-rounded range {expected_range_yd}, got {}",
+                row.range
+            );
+            // The reviewer's own phrasing of the required property: range is
+            // integer-valued (round-tripping through .round() is a no-op), regardless of
+            // which specific integer it is.
+            assert_eq!(
+                (row.range - row.range.round()).abs(),
+                0.0,
+                "distance_m={distance_m}: range must be integer-valued, got {}",
+                row.range
+            );
+        }
     }
 }
 
