@@ -5,7 +5,8 @@
 //! `tests/reticle_cli.rs`'s `profile_attachment_round_trips_and_carries_forward` is the
 //! precedent this mirrors: an explicit flag always wins; an omitted one carries the
 //! existing profile's stored value forward; `--clear-turret` clears all twelve turret/hold
-//! fields at once (but never the click graduation, which has no `--clear` of its own).
+//! fields at once; `--clear-click` (review fix round 2) clears both click fields at once —
+//! the removal path carry-forward itself needs, since omission no longer means "remove".
 //!
 //! This carry-forward logic lives in the `profile save` CLI handler itself (`main.rs`'s
 //! `ProfileAction::Save` match arm), not in any unit-testable pure function — `optic_profile`
@@ -240,4 +241,111 @@ fn clear_turret_conflicts_with_any_turret_flag() {
     assert!(err.contains("--clear-turret"), "{err}");
     assert!(err.contains("--hold-up"), "{err}");
     assert!(err.contains("--zero-stop"), "{err}");
+}
+
+/// MBA-1348 review fix round 2: `--clear-click` is the removal path click carry-forward
+/// needs (before this diff, an omitted `--elevation-click` was an accidental,
+/// footgun-shaped way to remove it; carry-forward correctly closed that footgun but left
+/// no replacement until this flag). Baseline case: a profile with ONLY the click set (no
+/// turret fields to require it) clears cleanly and still saves/loads.
+#[test]
+fn clear_click_removes_both_clicks_when_nothing_else_needs_them() {
+    let home = tempfile_dir("e");
+    save(&home, "rifle", "2700", &["--elevation-click", "0.1mil", "--windage-click", "0.2mil"]);
+    let baseline = stored(&home, "rifle");
+    assert_eq!(baseline["elevation_click"], "0.1mil");
+    assert_eq!(baseline["windage_click"], "0.2mil");
+
+    save(&home, "rifle", "2700", &["--clear-click"]);
+    let after = stored(&home, "rifle");
+    assert!(after.get("elevation_click").is_none(), "{after}");
+    assert!(after.get("windage_click").is_none(), "{after}");
+
+    let output = Command::new(BIN)
+        .env("HOME", &home)
+        .args(["profile", "show", "rifle"])
+        .output()
+        .expect("run profile show");
+    assert!(
+        output.status.success(),
+        "profile show failed after --clear-click: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `--clear-click` combined with `--elevation-click`/`--windage-click` in the same
+/// invocation is a usage error naming both flags -- the same treatment `--clear-turret`
+/// gets against its own twelve flags.
+#[test]
+fn clear_click_conflicts_with_click_flags() {
+    let home = tempfile_dir("f");
+    save(&home, "rifle", "2700", &["--elevation-click", "0.1mil"]);
+
+    let err = save_expect_failure(&home, "rifle", &["--clear-click", "--elevation-click", "0.2mil"]);
+    assert!(err.contains("--clear-click"), "{err}");
+    assert!(err.contains("--elevation-click"), "{err}");
+
+    // Both click flags named at once, not just the first found.
+    let err = save_expect_failure(
+        &home,
+        "rifle",
+        &["--clear-click", "--elevation-click", "0.2mil", "--windage-click", "0.3mil"],
+    );
+    assert!(err.contains("--clear-click"), "{err}");
+    assert!(err.contains("--elevation-click"), "{err}");
+    assert!(err.contains("--windage-click"), "{err}");
+}
+
+/// The subtle validation interaction (MBA-1348 review fix round 2): clearing the click
+/// while the eleven turret fields are still set (carried forward from the baseline save)
+/// is CORRECT to reject -- a turret model is meaningless without a click graduation, the
+/// same `optic_profile()` gate `--travel-up`-without-`--elevation-click` already hits --
+/// but the error must point the user at the actual resolution (name `--clear-turret` and
+/// `--elevation-click`, not just say something is wrong).
+#[test]
+fn clear_click_alone_fails_validation_while_turret_fields_remain() {
+    let home = tempfile_dir("g");
+    save(&home, "rifle", "2700", &baseline_turret_flags());
+
+    let err = save_expect_failure(&home, "rifle", &["--clear-click"]);
+    assert!(err.contains("--elevation-click"), "{err}");
+    assert!(err.contains("--clear-turret"), "{err}");
+
+    // And the save was REJECTED, not partially applied -- the profile on disk is
+    // untouched (still has its click and all twelve fields from the baseline save).
+    let after = stored(&home, "rifle");
+    assert_eq!(after["elevation_click"], "0.1mil");
+    for key in TWELVE_KEYS {
+        assert!(after.get(key).is_some(), "field {key} should be untouched: {after}");
+    }
+}
+
+/// `--clear-click --clear-turret` together clears everything optic-related at once and
+/// saves cleanly -- the two flags are independent (neither excludes the other) and
+/// composing them is exactly how a shooter would express "I don't have this scope
+/// anymore, wipe the whole turret/click model".
+#[test]
+fn clear_click_and_clear_turret_together_clears_everything() {
+    let home = tempfile_dir("h");
+    save(&home, "rifle", "2700", &baseline_turret_flags());
+
+    save(&home, "rifle", "2700", &["--clear-click", "--clear-turret"]);
+    let after = stored(&home, "rifle");
+
+    assert!(after.get("elevation_click").is_none(), "{after}");
+    assert!(after.get("windage_click").is_none(), "{after}");
+    for key in TWELVE_KEYS {
+        assert!(after.get(key).is_none(), "field {key} should be absent: {after}");
+    }
+
+    let output = Command::new(BIN)
+        .env("HOME", &home)
+        .args(["profile", "show", "rifle"])
+        .output()
+        .expect("run profile show");
+    assert!(
+        output.status.success(),
+        "profile show failed after --clear-click --clear-turret: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

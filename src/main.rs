@@ -3814,7 +3814,7 @@ enum ProfileAction {
         /// review fix) — the twelve turret/hold fields below depend on a click
         /// graduation existing at all, so leaving just this one field on the old
         /// reset-on-omit contract would silently break every carried-forward turret
-        /// profile on its very next unrelated re-save.
+        /// profile on its very next unrelated re-save. Remove it with --clear-click.
         #[arg(long)]
         elevation_click: Option<String>,
 
@@ -3825,6 +3825,19 @@ enum ProfileAction {
         /// `--elevation-click` above.
         #[arg(long)]
         windage_click: Option<String>,
+
+        /// Remove the stored click graduation (MBA-1348 review fix round 2) — clears
+        /// BOTH `--elevation-click` and `--windage-click` at once; there is no per-axis
+        /// clear, since windage already falls back to elevation and clearing one
+        /// without the other has no clean meaning. Mutually exclusive with
+        /// `--elevation-click`/`--windage-click` in the same invocation. If the
+        /// profile's other eleven turret/hold fields are still set (carried forward or
+        /// freshly given), clearing the click alone still fails save-time validation —
+        /// a turret model needs a click graduation to be usable at all — naming
+        /// `--elevation-click` as the fix; combine with `--clear-turret` to clear
+        /// everything at once instead.
+        #[arg(long)]
+        clear_click: bool,
 
         /// Remove this profile's DSF (drop-scale-factor) table, if any (MBA-1357). Without
         /// this flag, re-saving an existing profile carries its DSF table forward
@@ -3923,7 +3936,8 @@ enum ProfileAction {
         /// Mutually exclusive with any of the twelve flags above in the same invocation
         /// (ambiguous intent: clear or set is not a decision this command guesses at).
         /// Does NOT clear `--elevation-click`/`--windage-click`, which are a separate
-        /// field pair with their own carry-forward contract.
+        /// field pair with their own carry-forward contract and their own
+        /// `--clear-click` flag; combine both to clear everything optic-related.
         #[arg(long)]
         clear_turret: bool,
     },
@@ -5435,8 +5449,9 @@ impl ProfileData {
             {
                 return Err(
                     "turret/hold fields are set but --elevation-click is not -- a turret \
-                     model needs a click graduation to be usable at all; set \
-                     --elevation-click, or pass --clear-turret to clear the other fields"
+                     model needs a click graduation to be usable at all; supply \
+                     --elevation-click, or also pass --clear-turret to clear the other \
+                     fields (e.g. after --clear-click removed the click alone)"
                         .to_string(),
                 );
             }
@@ -12405,6 +12420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     bullet_length,
                     elevation_click,
                     windage_click,
+                    clear_click,
                     clear_dsf,
                     reticle_json,
                     clear_reticle,
@@ -12543,6 +12559,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         )
                         .into());
                     }
+                    // MBA-1348 review fix round 2: --clear-click is the removal path the
+                    // click-carry-forward change above needs (see the elevation_click/
+                    // windage_click merge below) -- symmetric with --clear-turret's
+                    // conflict check, one flag clearing both clicks at once (there is no
+                    // per-axis clear; windage already falls back to elevation).
+                    if clear_click && (elevation_click.is_some() || windage_click.is_some()) {
+                        let mut conflicting = Vec::new();
+                        if elevation_click.is_some() {
+                            conflicting.push("--elevation-click");
+                        }
+                        if windage_click.is_some() {
+                            conflicting.push("--windage-click");
+                        }
+                        return Err(format!(
+                            "--clear-click and {} are mutually exclusive",
+                            conflicting.join(", ")
+                        )
+                        .into());
+                    }
                     let existing_optic = existing_profile.as_ref();
                     let carried_clicks_per_revolution = carry_turret_field(
                         clicks_per_rev,
@@ -12612,17 +12647,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                         parse_click_value(v)
                             .map_err(|e| format!("--windage-click '{v}' is invalid: {e}"))?;
                     }
-                    // MBA-1348 review fix I1: elevation_click/windage_click now ALSO carry
-                    // forward on an unrelated re-save (no --clear flag of their own — see
-                    // their help text) — the twelve fields above depend on a click
+                    // MBA-1348 review fix I1 (round 2: now with --clear-click):
+                    // elevation_click/windage_click carry forward on an unrelated re-save,
+                    // like the twelve turret fields above -- they depend on a click
                     // graduation existing at all (optic_profile()'s elevation_click gate),
                     // so leaving just this one field pair on the old reset-on-omit contract
                     // would silently break every carried-forward turret profile on its very
-                    // next unrelated re-save.
-                    let elevation_click = elevation_click
-                        .or_else(|| existing_optic.and_then(|p| p.elevation_click.clone()));
-                    let windage_click = windage_click
-                        .or_else(|| existing_optic.and_then(|p| p.windage_click.clone()));
+                    // next unrelated re-save. --clear-click (checked above for conflicts
+                    // with --elevation-click/--windage-click) is the removal path that
+                    // carry-forward itself needs, since an omitted flag no longer means
+                    // "remove" the way it used to.
+                    let elevation_click = if clear_click {
+                        None
+                    } else {
+                        elevation_click.or_else(|| existing_optic.and_then(|p| p.elevation_click.clone()))
+                    };
+                    let windage_click = if clear_click {
+                        None
+                    } else {
+                        windage_click.or_else(|| existing_optic.and_then(|p| p.windage_click.clone()))
+                    };
 
                     let profile = ProfileData {
                         name: name.clone(),
