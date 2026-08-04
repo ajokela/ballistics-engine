@@ -3504,13 +3504,13 @@ enum Commands {
         /// Elevation reconstruction-error budget, suffixed (mil/moa/smoa/iphy, e.g. 0.1mil,
         /// 0.25moa) -- converted into --adjustment's unit. Default: half the profile's
         /// elevation click when --profile supplies one, else 0.1mil.
-        #[arg(long, value_name = "VALUEUNIT")]
-        elevation_budget: Option<String>,
+        #[arg(long, value_name = "VALUEUNIT", value_parser = parse_angular_mil)]
+        elevation_budget: Option<f64>,
 
         /// Windage reconstruction-error budget, suffixed. See --elevation-budget for the
         /// default rule (the profile's windage click, not elevation).
-        #[arg(long, value_name = "VALUEUNIT")]
-        windage_budget: Option<String>,
+        #[arg(long, value_name = "VALUEUNIT", value_parser = parse_angular_mil)]
+        windage_budget: Option<f64>,
 
         /// Maximum printed rows. The mandatory seed (both range ends plus every anchor) is
         /// never truncated to honor this -- see the report's own rows_capped field.
@@ -26115,8 +26115,8 @@ fn handle_adaptive_card(
     start: f64,
     end: f64,
     anchors: Vec<f64>,
-    elevation_budget: Option<String>,
-    windage_budget: Option<String>,
+    elevation_budget: Option<f64>,
+    windage_budget: Option<f64>,
     max_rows: usize,
     adjustment: AdaptiveCardAdjustmentArg,
     output_file: Option<PathBuf>,
@@ -26145,17 +26145,20 @@ fn handle_adaptive_card(
     let unit_factor = unit.from_mil_factor();
 
     // Budgets parse via the same suffix-mandatory parse_angular_mil rule every other
-    // angular CLI flag in this file uses, then convert (TRUE mil -> the chosen --adjustment
-    // unit) exactly like the default below, so an explicit flag and the default share one
-    // conversion step and cannot silently diverge.
-    let elevation_budget_printed = match elevation_budget.as_deref() {
-        Some(s) => parse_angular_mil(s)? * unit_factor,
+    // angular CLI flag in this file uses -- as a clap value_parser on the field itself (see
+    // the AdaptiveCard variant above), exactly like dial-plan's angular flags, so a missing
+    // suffix is a clap usage error naming this flag ("invalid value '...' for
+    // '--elevation-budget <VALUEUNIT>'") rather than an unnamed one. What's left here is
+    // only the TRUE-mil -> --adjustment-unit conversion, applied identically to an explicit
+    // value and the profile-derived default so the two paths cannot silently diverge.
+    let elevation_budget_printed = match elevation_budget {
+        Some(v) => v * unit_factor,
         None => {
             adaptive_card_default_budget_mil(optic.as_ref().map(|o| &o.elevation_click)) * unit_factor
         }
     };
-    let windage_budget_printed = match windage_budget.as_deref() {
-        Some(s) => parse_angular_mil(s)? * unit_factor,
+    let windage_budget_printed = match windage_budget {
+        Some(v) => v * unit_factor,
         None => {
             adaptive_card_default_budget_mil(optic.as_ref().map(|o| &o.windage_click)) * unit_factor
         }

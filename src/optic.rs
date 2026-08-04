@@ -1787,8 +1787,10 @@ mod plan_corrections_tests {
 
     // Spec §2 (every report carries method + assumptions) + the Plan-A lesson: a
     // `contains("word")` check alone is satisfiable by a DIFFERENT sentence, so this pins
-    // length AND a substring unique to each index (verified unique among the five strings
-    // actually emitted, not merely plausible-sounding).
+    // length AND full-string equality at every index (mirrors card.rs's own
+    // `report_carries_method_and_all_five_assumptions`) -- a consumer that quotes
+    // `assumptions[2]` must keep getting the unquantized-holds sentence, not whatever a
+    // later edit shuffled into that slot.
     #[test]
     fn report_carries_method_and_all_five_assumptions() {
         let optic = baseline_profile();
@@ -1799,30 +1801,25 @@ mod plan_corrections_tests {
         assert_eq!(report.schema_version, DIAL_PLAN_SCHEMA_VERSION_V1);
         assert_eq!(report.method, "dial_space_quantization_v1");
         assert_eq!(report.assumptions.len(), 5, "{:?}", report.assumptions);
-        assert!(
-            report.assumptions[0].contains("small-angle"),
-            "[0] small-angle mil<->linear conversion: {}",
-            report.assumptions[0]
+        assert_eq!(
+            report.assumptions[0],
+            "Linear miss at range uses the small-angle approximation (mil / 1000 * range); it is not exact at extreme angles."
         );
-        assert!(
-            report.assumptions[1].contains("cant"),
-            "[1] axes planned independently, no cant coupling: {}",
-            report.assumptions[1]
+        assert_eq!(
+            report.assumptions[1],
+            "Elevation and windage are planned independently; no cant-induced coupling between axes is modeled."
         );
-        assert!(
-            report.assumptions[2].contains("unquantized"),
-            "[2] holds assumed continuous and unquantized: {}",
-            report.assumptions[2]
+        assert_eq!(
+            report.assumptions[2],
+            "Reticle holds are assumed continuous and unquantized, unlike turret clicks."
         );
-        assert!(
-            report.assumptions[3].contains("sensed"),
-            "[3] travel/state trusted as declared, not sensed: {}",
-            report.assumptions[3]
+        assert_eq!(
+            report.assumptions[3],
+            "Travel limits and turret state are trusted exactly as declared in the optic profile, not sensed or independently verified."
         );
-        assert!(
-            report.assumptions[4].contains("3438"),
-            "[4] MOA uses the locked 3438 printed-table constant: {}",
-            report.assumptions[4]
+        assert_eq!(
+            report.assumptions[4],
+            "MOA-graduated clicks convert to milliradians using the locked printed-table constant 3438, not the exact geometric 3437.7467."
         );
     }
 

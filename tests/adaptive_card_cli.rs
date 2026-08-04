@@ -187,6 +187,27 @@ fn anchor_outside_domain_is_a_usage_error_naming_the_flag() {
     assert!(stderr.contains("--end"), "{stderr}");
 }
 
+// ---- --elevation-budget/--windage-budget without a unit suffix -> a clap usage error
+// naming the flag, the same as every other angular flag on dial-plan/profile save (final
+// branch review N-3: these two used to fall back to a bare "needs a unit suffix" message
+// with nothing saying which flag) ----
+
+#[test]
+fn elevation_budget_without_a_unit_suffix_is_a_usage_error_naming_the_flag() {
+    let (_stdout, stderr, ok) =
+        run(&["--start", "200", "--end", "500", "--elevation-budget", "0.1"]);
+    assert!(!ok, "a budget with no unit suffix must be a usage error");
+    assert!(stderr.contains("--elevation-budget"), "{stderr}");
+}
+
+#[test]
+fn windage_budget_without_a_unit_suffix_is_a_usage_error_naming_the_flag() {
+    let (_stdout, stderr, ok) =
+        run(&["--start", "200", "--end", "500", "--windage-budget", "0.1"]);
+    assert!(!ok, "a budget with no unit suffix must be a usage error");
+    assert!(stderr.contains("--windage-budget"), "{stderr}");
+}
+
 // ---- (e) -o pdf writes a non-empty file ----
 
 #[cfg(feature = "pdf")]

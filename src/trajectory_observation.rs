@@ -4,7 +4,7 @@
 //! beyond the computed trajectory.  The APIs in this module are for protocol and laboratory
 //! consumers that need explicit range errors, finite values, and an exact terminal sample.
 //!
-//! This module also owns [`bracket_param`], the shared bracket-and-lerp search behind every
+//! This module also owns `bracket_param`, the shared bracket-and-lerp search behind every
 //! interpolation site in the crate: hold curves, wind-scenario corridors, reticle holds,
 //! trajectory sampling, and the CLI's equivalent-horizontal-range solver. Each call site keeps
 //! its own out-of-range policy (`None`, clamp-to-end, or a structured error) and its own field
@@ -472,11 +472,14 @@ fn projected_observation_count(
 /// differ (`None` vs. clamp-to-end vs. a structured error) and those differences are preserved
 /// AT the call sites, not here.
 ///
-/// Declared `pub` rather than `pub(crate)`: the CLI binary (`src/main.rs`) is a separate crate
-/// that links this library and is one of the five call sites (`HoldCurve::at_range`), so a
-/// crate-private item would not be visible where it is needed.
+/// `pub(crate)`, not `pub`: every call site this centralizes is itself in-crate --
+/// `wind_scenarios`, `solve_v1`, `trajectory_sampling`, `cli_api`, and `hold_curve`. The CLI
+/// binary (`src/main.rs`) used to be a direct sixth call site; that call moved into
+/// `HoldCurve::at_range` in the library, so `src/main.rs` now reaches this only through that
+/// public method and has zero remaining references to `Bracket` or `bracket_param`. Nothing
+/// outside this crate needs either item, so both stay crate-private.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Bracket {
+pub(crate) enum Bracket {
     /// `x` is within `[key_at(0), key_at(len - 1)]`. The bracket is `(lo, lo + 1)` and `t` is
     /// the interpolation fraction in `[0, 1]`: `t == 0.0` reuses `key_at(lo)` exactly and
     /// `t == 1.0` reuses `key_at(lo + 1)` exactly.
@@ -496,7 +499,7 @@ pub enum Bracket {
 /// key_at(lo)`) is non-finite or not strictly positive -- equal adjacent keys, or a locally
 /// non-monotonic or non-finite pair -- `t` is `0.0` and the lower point is reused rather than
 /// dividing by a zero or non-finite span.
-pub fn bracket_param(len: usize, key_at: impl Fn(usize) -> f64, x: f64) -> Bracket {
+pub(crate) fn bracket_param(len: usize, key_at: impl Fn(usize) -> f64, x: f64) -> Bracket {
     if len < 2 {
         return Bracket::Degenerate;
     }
