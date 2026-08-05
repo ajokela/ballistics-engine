@@ -144,6 +144,10 @@ pub mod form_factor;
 // MBA-153: Make monte_carlo public for ballistics_rust wrapping
 pub mod bc_estimation;
 pub mod cluster_bc;
+// MBA-1352 Task 2: Monte Carlo hit-statistics foundation -- Welford streaming moments and
+// fixed-n Wilson score intervals. The anytime-valid confidence sequence (Task 3) extends this
+// module. No feature gate: must compile for wasm32; pure std math, no randomness.
+pub mod mc_stats;
 pub mod monte_carlo;
 pub mod stability;
 pub mod stability_advanced;
