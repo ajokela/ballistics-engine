@@ -86,6 +86,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   None of the card, optic, or PDF changes in this bullet touch solve-json v1: no field, no
   accepted request shape, and no resolved-request behavior changed by anything here (see the
   Changed entries below for what solve-json v1 *did* gain this release).
+- **Confidence-controlled Monte Carlo** (0.33.0 decision-support Plan C, MBA-1352): every
+  `monte-carlo` hit-probability estimate now states its sample count, method, confidence level,
+  and interval, on both the existing run and a new opt-in mode:
+  - The existing fixed-`n` `monte-carlo --target-distance` run gains an additive Wilson
+    interval alongside the unchanged point estimate: a `Hit probability NN% CI: [lo, hi]
+    (Wilson, n=N)` line under the existing `Hit Probability:` line, and an additive
+    `hit_probability_ci` key (`method`, `confidence_percent`, `low`, `high`, `samples`) next to
+    the unchanged `hit_probability` on `-o json`/`-o full`.
+  - **`monte-carlo --adaptive [--confidence 90|95|99] [--target-ci-half-width P]
+    [--min-samples N] [--max-samples N] [--mc-batch-size N] [--seed S]`** samples in batches
+    until an anytime-valid confidence sequence's half-width reaches `--target-ci-half-width`
+    (or `--max-samples` is exhausted) instead of a fixed `--num-sims` guess, and reports the
+    point estimate, its interval, method, confidence level, stop reason, and three sample
+    cardinalities (`attempts` drawn, `samples` that produced an outcome, `arrivals` that
+    reached the target plane) as a versioned report, `AdaptiveMcReportV1` (`-o json`/`-o full`
+    verbatim, `json` accepted as an alias for `full`), or a plain-text summary block (table
+    output). Ignores `--num-sims` and `--wind-direction-std`; incompatible with `--wez`, which
+    stays fixed-count. New `--seed` flag (reused by the fixed-count path above too) makes any
+    run reproducible.
+
+  See [CLI_USAGE.md](CLI_USAGE.md#confidence-controlled-sampling---adaptive--mba-1352) for the
+  full flag table, captured examples, and the reported assumptions (sampling error only, never
+  model error; anytime-valid stopping is specifically what makes stopping early on the
+  confidence sequence legitimate, unlike repeated peeks at a fixed-`n` Wilson interval).
+
+  Underneath the CLI this is a new public library layer: `ballistics_engine::mc_stats`
+  (`Welford` streaming moments, `ConfidenceLevel`, `wilson_interval`, and the anytime-valid
+  `BernoulliConfidenceSequence`) and `ballistics_engine::special::{ln_gamma, ln_beta}` (the
+  log-gamma/log-beta functions the confidence sequence's mixture martingale is built on), plus
+  `run_monte_carlo_adaptive_seeded`, `AdaptiveMcReportV1`, `McConvergence`, and `McStopReason`
+  re-exported at the crate root.
 
 ### Changed
 - **WEZ (`monte-carlo --wez`) attribution now runs on the shared central-difference kernel**
@@ -142,6 +173,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected -- its rows are still rounded to whole yards before rendering and its PDF output
   is unchanged -- but the relocated function is now reachable from any library consumer
   (language bindings; `adaptive-card -o pdf` above) that enables the `pdf` feature.
+- `pdf` is a default feature, so the relocated PDF dope card now compiles into the library for
+  default-feature consumers (Python/Ruby/FFI builds), adding printpdf and ~825 KB of embedded
+  fonts to those artifacts; `--no-default-features` builds are unaffected.
+- **Fixed-count `monte-carlo` output gains an additive confidence-interval line**: all numeric
+  estimates for a given seed are unchanged (see Added above for the new line/key itself).
 
 ### Fixed
 - **`$.atmosphere.pressure_reference` was rejected as `unknown_field`** by

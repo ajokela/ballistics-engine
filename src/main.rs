@@ -42,6 +42,10 @@ use ballistics_engine::bc_table_5d::Bc5dTableManager;
 use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN, GRAINS_PER_GRAM, FPS_TO_MPS};
 use ballistics_engine::cli_api::UnitSystem;
+// MBA-1352: confidence levels for monte-carlo's Wilson/adaptive CLI surface. ConfidenceLevel
+// itself derives no clap trait -- mc_stats.rs is deliberately clap-free so it keeps compiling
+// unconditionally for wasm32 -- so the CLI-only 90/95/99 mapping lives here (parse_confidence_level).
+use ballistics_engine::mc_stats::ConfidenceLevel;
 use ballistics_engine::truing::{
     calculate_true_velocity_local, correct_chrono_velocity_fps, dsf_window_start,
     fallback_bullet_length_m, mv_calibration_window, parse_truing_observation,
@@ -72,8 +76,9 @@ use ballistics_engine::atmosphere::{
     resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
 };
 use ballistics_engine::{
-    trajectory_sampling, AtmosphericConditions, BCSegmentData, BallisticInputs,
-    BcReferenceStandard, DragModel, MonteCarloParams, TrajectorySolver, WindConditions,
+    run_monte_carlo_adaptive_seeded, trajectory_sampling, AdaptiveMcReportV1, AtmosphericConditions,
+    BCSegmentData, BallisticInputs, BcReferenceStandard, DragModel, McConvergence, McStopReason,
+    MonteCarloParams, TrajectorySolver, WindConditions,
 };
 // 0.33.0 decision-support Task 8: HoldCurve (mark-to-range/bdc-match/optimal-zero/reticle
 // hold --range) and the sampled-trajectory helpers it solves through, promoted into the
@@ -394,6 +399,41 @@ impl clap::builder::TypedValueParser for F64RangeParser {
         }
         Ok(inner)
     }
+}
+
+/// `--confidence`'s three permitted levels, parsed directly into
+/// [`ConfidenceLevel`] (MBA-1352). That type
+/// derives no clap trait of its own -- `mc_stats.rs` is deliberately clap-free so it keeps
+/// compiling for `wasm32-unknown-unknown` unconditionally -- so this CLI-only mapping stands
+/// in for a `ValueEnum` derive. A plain `fn(&str) -> Result<T, String>` used as a
+/// `value_parser` gets its owning `--flag` name attached to the error automatically by clap
+/// (see `parse_angular_mil` below for the same convention), so the message only needs to
+/// state the value and the allowed choices, matching the dial-plan budget-flags precedent from
+/// the Plan B final review (a bad value must name the flag, not just the value).
+fn parse_confidence_level(s: &str) -> Result<ConfidenceLevel, String> {
+    match s {
+        "90" => Ok(ConfidenceLevel::P90),
+        "95" => Ok(ConfidenceLevel::P95),
+        "99" => Ok(ConfidenceLevel::P99),
+        _ => Err(format!("confidence level '{s}' must be one of: 90, 95, 99")),
+    }
+}
+
+/// `--target-ci-half-width` must be finite and greater than zero -- the same rule
+/// [`McConvergence::validate`] enforces on the field it feeds, checked here at parse time so a
+/// bad value is a clap usage error naming `--target-ci-half-width` (MBA-1352) rather than the
+/// library's struct-qualified `"McConvergence.target_half_width"` message reaching the user
+/// unrewritten.
+fn parse_positive_half_width(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|_| format!("half-width '{s}' is not a valid number"))?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!(
+            "half-width '{s}' must be a finite value greater than zero (probability units, e.g. 0.02 = +-2 percentage points)"
+        ));
+    }
+    Ok(v)
 }
 
 #[derive(Parser)]
@@ -1312,6 +1352,67 @@ enum Commands {
         /// WEZ sweep step (yards for imperial, meters for metric).
         #[arg(long, default_value = "100.0", requires = "wez")]
         wez_step: f64,
+
+        /// Confidence-controlled sampling (MBA-1352): run in batches until the hit-probability
+        /// confidence interval's half-width reaches --target-ci-half-width (or --max-samples is
+        /// hit) instead of a fixed --num-sims. Reports sample count, method, confidence level,
+        /// and interval alongside the estimate -- see CLI_USAGE.md's "Confidence-Controlled
+        /// Sampling" section. Ignores --num-sims (--min-samples is the floor instead) and
+        /// --wind-direction-std (the adaptive driver disperses no wind direction, matching
+        /// run_monte_carlo_with_wind); incompatible with --wez, which stays fixed-count.
+        #[arg(long, conflicts_with = "wez")]
+        adaptive: bool,
+
+        /// Confidence level of the reported hit-probability interval: 90, 95, or 99. Applies
+        /// both to the fixed-count Wilson companion line/JSON key shown alongside the estimate
+        /// and, under --adaptive, to the confidence sequence's stopping rule and interval.
+        #[arg(long, default_value = "95", value_parser = parse_confidence_level)]
+        confidence: ConfidenceLevel,
+
+        /// --adaptive: stop once the confidence interval's half-width is at or below this many
+        /// probability units (e.g. 0.02 = the hit probability is known to within about +-2
+        /// percentage points).
+        #[arg(
+            long,
+            default_value = "0.02",
+            requires = "adaptive",
+            allow_hyphen_values = true,
+            value_parser = parse_positive_half_width
+        )]
+        target_ci_half_width: f64,
+
+        /// --adaptive: never stop before this many trials, even if the interval is already
+        /// tight (guards against an early run of all-hits or all-misses looking falsely
+        /// precise). Matches --num-sims's legacy default of 1000.
+        #[arg(long, default_value = "1000", requires = "adaptive")]
+        min_samples: u64,
+
+        /// --adaptive: never run more than this many trials, even if the interval is still
+        /// wide. Bounds the wall time of an unreachable --target-ci-half-width; hitting it is
+        /// an honest, successful run (exit 0), not an error.
+        #[arg(
+            long,
+            default_value = "100000",
+            requires = "adaptive",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        max_samples: u64,
+
+        /// --adaptive: how many trials to run between convergence checks. Smaller batches can
+        /// stop sooner; larger batches check less often.
+        #[arg(
+            long,
+            default_value = "500",
+            requires = "adaptive",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        mc_batch_size: u64,
+
+        /// Seed the Monte Carlo RNG for reproducible output (both the default fixed-count path
+        /// and --adaptive). Without it, each run draws fresh randomness and is not reproducible
+        /// run to run.
+        #[arg(long)]
+        seed: Option<u64>,
 
         /// Output format
         #[arg(short = 'o', long, default_value = "summary")]
@@ -4296,6 +4397,13 @@ impl RecoilFirearmTypeArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MonteCarloOutput {
     Summary,
+    /// MBA-1352: `json` is accepted as an alias so `monte-carlo --adaptive -o json` matches
+    /// the `-o json` spelling every sibling decision-support subcommand uses; the value is
+    /// still `Full` underneath (`--adaptive`'s JSON is `AdaptiveMcReportV1` verbatim, the
+    /// fixed-count path's is the existing `MonteCarloResult` plus the new additive
+    /// `hit_probability_ci` key -- see the dispatch match on `output` in each of
+    /// `run_monte_carlo`/`run_monte_carlo_adaptive`).
+    #[value(alias = "json")]
     Full,
     Statistics,
 }
@@ -5105,6 +5213,24 @@ struct TrajectoryConfig {
     solved_zero_angle_deg: Option<f64>,
 }
 
+/// [`HitProbabilityCi::method`]'s only value on the fixed-count path: the classic fixed-`n`
+/// Wilson score interval (MBA-1352), as opposed to `--adaptive`'s anytime-valid confidence
+/// sequence (`AdaptiveMcReportV1::method`, a different string entirely -- the two must never
+/// be confused, since only one of them is still valid after optional stopping).
+const MC_FIXED_COUNT_CI_METHOD: &str = "wilson_fixed_n";
+
+/// Additive companion to [`MonteCarloResult::hit_probability`]: the same point estimate's
+/// fixed-`n` Wilson interval (MBA-1352), plus the method name, confidence level, and `n`
+/// needed to interpret it without cross-referencing anything else in the payload.
+#[derive(Debug, Serialize, Deserialize)]
+struct HitProbabilityCi {
+    method: String,
+    confidence_percent: u32,
+    low: f64,
+    high: f64,
+    samples: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct MonteCarloResult {
     mean_range: f64,
@@ -5116,6 +5242,11 @@ struct MonteCarloResult {
     cep: Option<f64>,
     target_shortfall_fraction: f64,
     hit_probability: Option<f64>,
+    /// `Some` exactly when `hit_probability` is (i.e. only when `--target-distance` was given);
+    /// additive -- absent from no `MonteCarloResult` that existed before MBA-1352, and always
+    /// present (possibly JSON `null`, matching `hit_probability`'s own null-not-absent
+    /// convention) after it.
+    hit_probability_ci: Option<HitProbabilityCi>,
 }
 
 // Unit conversion functions
@@ -9941,6 +10072,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             wez_start,
             wez_end,
             wez_step,
+            adaptive,
+            confidence,
+            target_ci_half_width,
+            min_samples,
+            max_samples,
+            mc_batch_size,
+            seed,
             output,
         } => {
             let bullet_mass = mass;
@@ -10043,6 +10181,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                     output,
                     cli.units,
                 )?;
+            } else if adaptive {
+                // MBA-1352: confidence-controlled sampling. --wez is rejected above (clap
+                // conflicts_with = "wez"), so this and the WEZ branch above are mutually
+                // exclusive by construction.
+                run_monte_carlo_adaptive(
+                    velocity_metric,
+                    angle,
+                    bc,
+                    bc_reference,
+                    mass_metric,
+                    diameter_metric,
+                    velocity_std_metric,
+                    angle_std,
+                    bc_std,
+                    wind_std_metric,
+                    wind_speed_metric,
+                    wind_direction_relative_deg,
+                    wind_vertical_metric,
+                    target_distance_metric,
+                    target_radius_metric,
+                    custom_drag_table,
+                    cd_scale,
+                    cant,
+                    sight_offset_lateral_m,
+                    AdaptiveMcCliControls {
+                        confidence,
+                        target_half_width: target_ci_half_width,
+                        min_samples,
+                        max_samples,
+                        batch_size: mc_batch_size,
+                        seed,
+                    },
+                    output,
+                )?;
             } else {
                 run_monte_carlo(
                     velocity_metric,
@@ -10066,6 +10238,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     cd_scale,
                     cant,
                     sight_offset_lateral_m,
+                    seed,
+                    confidence,
                     output,
                 )?;
             }
@@ -15566,6 +15740,13 @@ fn run_monte_carlo(
     // MBA-1396: lateral sight-mount offset, METERS (positive = sight right of bore).
     // monte-carlo solves no zero, so only the physical initial displacement applies.
     sight_offset_lateral_m: f64,
+    // MBA-1352: an explicit --seed makes this run reproducible (branches to the `_seeded`
+    // entry point below); `None` preserves the exact prior unseeded call, so a run without
+    // --seed is byte-for-byte the same code path as before this flag existed.
+    seed: Option<u64>,
+    // MBA-1352: confidence level for the additive Wilson companion below. Default (95) is
+    // ConfidenceLevel::P95, matching `run_monte_carlo_adaptive_seeded`'s own default level.
+    confidence: ConfidenceLevel,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
     // Create base inputs. MBA-967: use the same bore-height/ground convention as the
@@ -15614,13 +15795,25 @@ fn run_monte_carlo(
         azimuth_std_dev: angle_std.to_radians() * 0.5, // Use half of elevation std for horizontal spread
     };
 
-    // Run Monte Carlo simulation
-    let results = ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev(
-        base_inputs,
-        base_wind,
-        mc_params,
-        wind_direction_std.to_radians(),
-    )?;
+    // Run Monte Carlo simulation. MBA-1352: an explicit --seed routes through the `_seeded`
+    // entry point for reproducible output; omitting it is the exact call this file made before
+    // --seed existed (same function, same argument order), so the no-seed default path is
+    // untouched byte-for-byte.
+    let results = match seed {
+        Some(seed) => ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            base_inputs,
+            base_wind,
+            mc_params,
+            wind_direction_std.to_radians(),
+            seed,
+        )?,
+        None => ballistics_engine::run_monte_carlo_with_wind_and_direction_std_dev(
+            base_inputs,
+            base_wind,
+            mc_params,
+            wind_direction_std.to_radians(),
+        )?,
+    };
 
     // Calculate statistics
     let mean_range = results.ranges.iter().sum::<f64>() / results.ranges.len() as f64;
@@ -15654,6 +15847,13 @@ fn run_monte_carlo(
     // FFI. The old range-precision notion (ground-impact range within 1 m of the target) reported
     // 0% for any target short of the impact range.
     let hit_probability = target_distance.map(|_target| results.hit_probability(target_radius));
+    // MBA-1352: additive Wilson companion to the point estimate above -- `Some` under the exact
+    // same condition as `hit_probability` (only when --target-distance was given), and its
+    // `p_hat` is byte-identical to `hit_probability`'s since `hit_probability_wilson` calls the
+    // very same `MonteCarloResults::hit_probability` internally (see cli_api.rs). Existing
+    // numeric estimates above are computed and printed exactly as before this addition.
+    let hit_probability_ci = target_distance
+        .map(|_target| results.hit_probability_wilson(target_radius, confidence));
 
     match output {
         MonteCarloOutput::Summary => {
@@ -15678,6 +15878,15 @@ fn run_monte_carlo(
                 println!("║ Hit Probability:   {:>8.1} %          ║", prob * 100.0);
             }
             println!("╚════════════════════════════════════════╝");
+            // MBA-1352: additive line, printed after the box (not padded into its fixed-width
+            // frame -- [lo, hi] has no fixed width, unlike every field the box itself prints).
+            // Probability units throughout, matching --target-ci-half-width's own units rule.
+            if let Some((_, (lo, hi), n)) = hit_probability_ci {
+                println!(
+                    "Hit probability {}% CI: [{lo:.3}, {hi:.3}] (Wilson, n={n})",
+                    confidence.as_percent()
+                );
+            }
         }
 
         MonteCarloOutput::Full => {
@@ -15689,6 +15898,13 @@ fn run_monte_carlo(
                 cep,
                 target_shortfall_fraction,
                 hit_probability,
+                hit_probability_ci: hit_probability_ci.map(|(_, (lo, hi), n)| HitProbabilityCi {
+                    method: MC_FIXED_COUNT_CI_METHOD.to_string(),
+                    confidence_percent: confidence.as_percent(),
+                    low: lo,
+                    high: hi,
+                    samples: n,
+                }),
             };
             println!("{}", serde_json::to_string_pretty(&mc_result)?);
         }
@@ -15724,6 +15940,178 @@ fn run_monte_carlo(
     }
 
     Ok(())
+}
+
+/// CLI-resolved `--adaptive` controls (MBA-1352), bundled into one argument so
+/// [`run_monte_carlo_adaptive`]'s signature does not grow a further trailing scalar parameter
+/// for every knob [`McConvergence`] exposes.
+struct AdaptiveMcCliControls {
+    confidence: ConfidenceLevel,
+    target_half_width: f64,
+    min_samples: u64,
+    max_samples: u64,
+    batch_size: u64,
+    seed: Option<u64>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror run_monte_carlo's stable CLI command shape; the six \
+              --adaptive-only knobs are bundled into AdaptiveMcCliControls rather than adding \
+              six more trailing scalars"
+)]
+fn run_monte_carlo_adaptive(
+    velocity: f64,
+    angle: f64,
+    bc: f64,
+    bc_reference_standard: BcReferenceStandard,
+    mass: f64,
+    diameter: f64,
+    velocity_std: f64,
+    angle_std: f64,
+    bc_std: f64,
+    wind_std: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    wind_vertical: f64,
+    target_distance: Option<f64>,
+    target_radius: f64,
+    custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    cd_scale: f64,
+    cant: f64,
+    // MBA-1396: lateral sight-mount offset, METERS (positive = sight right of bore).
+    sight_offset_lateral_m: f64,
+    controls: AdaptiveMcCliControls,
+    output: MonteCarloOutput,
+) -> Result<(), Box<dyn Error>> {
+    // Same bore-height/ground convention as run_monte_carlo (MBA-967): a realistic ground
+    // impact instead of the integrator's range cap.
+    let bore_height_metric = 1.5_f64;
+    let base_inputs = BallisticInputs {
+        muzzle_velocity: velocity,
+        muzzle_angle: angle.to_radians(),
+        bc_value: bc,
+        bc_reference_standard,
+        bullet_mass: mass,
+        bullet_diameter: diameter,
+        muzzle_height: bore_height_metric,
+        ground_threshold: 0.0,
+        custom_drag_table,
+        cd_scale,
+        cant_angle: cant.to_radians(),
+        sight_offset_lateral_m,
+        ..Default::default()
+    };
+
+    let base_wind = WindConditions {
+        speed: wind_speed,
+        direction: wind_direction.to_radians(),
+        vertical_speed: wind_vertical,
+    };
+
+    // `num_simulations: 0` makes "ignored by the adaptive driver" visible in the value itself
+    // rather than only in a comment: --min-samples is the floor instead (see
+    // `run_monte_carlo_adaptive_seeded`'s own doc comment on the library side). There is no
+    // --wind-direction-std field here at all -- MonteCarloParams carries no direction-sigma
+    // field, and the adaptive driver always passes 0.0 (matching `run_monte_carlo_with_wind`),
+    // so that CLI flag has no effect under --adaptive; this is documented on the flag itself
+    // rather than silently threaded through to nowhere.
+    let mc_params = MonteCarloParams {
+        num_simulations: 0,
+        velocity_std_dev: velocity_std,
+        angle_std_dev: angle_std.to_radians(),
+        bc_std_dev: bc_std,
+        wind_speed_std_dev: wind_std,
+        target_distance,
+        base_wind_speed: wind_speed,
+        base_wind_direction: wind_direction.to_radians(),
+        azimuth_std_dev: angle_std.to_radians() * 0.5,
+    };
+
+    let convergence = McConvergence {
+        level: controls.confidence,
+        target_half_width: controls.target_half_width,
+        min_samples: controls.min_samples,
+        max_samples: controls.max_samples,
+        batch_size: controls.batch_size,
+    };
+
+    // No --seed: draw one fresh random seed for this run -- the same "unseeded means
+    // nondeterministic run to run" contract the fixed-count path keeps.
+    // `run_monte_carlo_adaptive_seeded` has no unseeded entry point of its own to delegate to,
+    // since every caller (this one included) must supply *some* concrete seed.
+    // `RngExt`, not `Rng`: rand 0.10 moved the `random::<T>()` extension method off `Rng` onto
+    // `RngExt` (see `mc_stats.rs`'s own tests for the same divergence).
+    use rand::RngExt as _;
+    let seed = controls.seed.unwrap_or_else(|| rand::rng().random::<u64>());
+
+    let report = run_monte_carlo_adaptive_seeded(
+        &base_inputs,
+        &base_wind,
+        &mc_params,
+        &convergence,
+        target_radius,
+        seed,
+    )
+    .map_err(|e| format!("--adaptive: {e}"))?;
+
+    match output {
+        MonteCarloOutput::Summary => print_adaptive_mc_summary(&report),
+        MonteCarloOutput::Full => println!("{}", serde_json::to_string_pretty(&report)?),
+        MonteCarloOutput::Statistics => {
+            // The adaptive driver retains no per-trial ranges/velocities (that O(1)-memory
+            // property is the whole point, see `AdaptiveMcReportV1`'s own doc comment), so
+            // there is nothing to tabulate the way the fixed-count path's CSV rows do. An
+            // honest usage error naming the flag beats either silently falling back to another
+            // format or fabricating a single-row CSV out of the summary statistics.
+            return Err("--output statistics is not supported with --adaptive (the adaptive \
+                driver retains no per-trial data to tabulate); use --output summary or \
+                --output full/json instead"
+                .into());
+        }
+    }
+
+    Ok(())
+}
+
+/// The `--adaptive` table-output summary block (MBA-1352): p_hit, its interval, the three
+/// sample cardinalities, why the run stopped, the method/level, the hit geometry, and the six
+/// Welford statistics -- everything [`AdaptiveMcReportV1`] carries except `schema_version` and
+/// the `assumptions` sentences (see `-o json`/`-o full` for those verbatim). `stop_reason` is
+/// spelled out with the identical snake_case token the JSON wire form serializes
+/// ([`McStopReason`]'s `#[serde(rename_all = "snake_case")]`), so the two output formats read
+/// as one report told twice, not two reports that happen to agree.
+fn print_adaptive_mc_summary(report: &AdaptiveMcReportV1) {
+    let stop_reason = match report.stop_reason {
+        McStopReason::TargetHalfWidthMet => "target_half_width_met",
+        McStopReason::MaxSamplesReached => "max_samples_reached",
+    };
+    println!("Adaptive Monte Carlo (confidence-controlled sampling, MBA-1352)");
+    println!("  method:            {}", report.method);
+    println!("  confidence level:  {}%", report.confidence_percent);
+    println!(
+        "  hit probability:   {:.4}  ({}% CI: [{:.4}, {:.4}])",
+        report.hit_probability, report.confidence_percent, report.ci_low, report.ci_high
+    );
+    println!(
+        "  samples:           {}  (attempts: {}, arrivals: {})",
+        report.samples, report.attempts, report.arrivals
+    );
+    println!("  stop reason:       {stop_reason}");
+    println!("  hit radius:        {:.4} m", report.hit_radius_m);
+    println!("  target distance:   {:.4} m", report.target_distance_m);
+    println!(
+        "  impact velocity:   mean {:.3} m/s, std {:.3} m/s",
+        report.mean_impact_velocity_mps, report.std_impact_velocity_mps
+    );
+    println!(
+        "  drop at target:    mean {:.4} m, std {:.4} m",
+        report.mean_drop_at_target_m, report.std_drop_at_target_m
+    );
+    println!(
+        "  drift at target:   mean {:.4} m, std {:.4} m",
+        report.mean_wind_drift_at_target_m, report.std_wind_drift_at_target_m
+    );
 }
 
 #[allow(

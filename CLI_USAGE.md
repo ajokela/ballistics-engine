@@ -2004,6 +2004,179 @@ Statistical analysis with parameter variations:
   --target-distance 600 # For hit probability
 ```
 
+### Confidence-Controlled Sampling (`--adaptive`) — MBA-1352
+
+Every `monte-carlo --target-distance` run reports a hit probability, but a bare point estimate
+does not say how much sampling backs it -- a 20% estimate from 30 trials and a 20% estimate
+from 30,000 trials look identical unless the report also states an interval. This section
+covers two ways to get one: an **additive interval on the existing fixed-`n` run**, and an
+**opt-in `--adaptive` mode** that keeps sampling until the interval is as tight as you asked
+for.
+
+**Flags:**
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--confidence <90\|95\|99>` | `95` | Confidence level of the reported interval. Applies to the fixed-count Wilson line/JSON key below AND to `--adaptive`'s stopping rule and interval. Any other value is a usage error naming `--confidence` and listing the three choices. |
+| `--adaptive` | off | Switch from a fixed `--num-sims` to confidence-controlled sampling (below). Incompatible with `--wez`, which stays fixed-count. |
+| `--target-ci-half-width <p>` | `0.02` | `--adaptive` only. Stop once the interval's half-width is at or below this many **probability units** (`0.02` = the hit probability is known to within about ±2 percentage points). Must be finite and greater than zero. Requires `--adaptive`. |
+| `--min-samples <n>` | `1000` | `--adaptive` only. Never stop before this many trials, even if the interval already looks tight. Matches `--num-sims`'s own legacy default. Requires `--adaptive`. |
+| `--max-samples <n>` | `100000` | `--adaptive` only. Never run more than this many trials. Hitting it is an honest, successful run (exit `0`), not an error. Requires `--adaptive`. |
+| `--mc-batch-size <n>` | `500` | `--adaptive` only. How many trials to run between convergence checks. Requires `--adaptive`. |
+| `--seed <u64>` | none (fresh randomness each run) | Seeds the Monte Carlo RNG for reproducible output, on **both** the default fixed-count path and `--adaptive`. |
+
+`--adaptive` ignores `--num-sims` (`--min-samples` is the floor instead -- the two modes have
+different stopping semantics) and `--wind-direction-std` (the adaptive driver disperses no wind
+direction, matching `run_monte_carlo_with_wind`); both are silently unused rather than errors,
+since they still apply to every *other* `monte-carlo` mode on the same command line.
+
+**Fixed-count mode gains one line.** No existing number or field changes shape -- `--seed` is
+new too, added only so this example reproduces exactly if you run it yourself; the run behaves
+identically to an unseeded one, just with fixed randomness -- but the hit-probability line now
+has a companion:
+
+```bash
+./ballistics monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 1000 \
+  --velocity-std 10 --angle-std 0.5 --bc-std 0.01 --wind-std 2 \
+  --target-distance 600 --seed 42
+```
+```
+╔════════════════════════════════════════╗
+║      MONTE CARLO RESULTS               ║
+║      1000 simulations                   ║
+╠════════════════════════════════════════╣
+║ Mean Range:          480.36 m          ║
+║ Std Dev Range:       311.66 m          ║
+║ Mean Impact Vel:     564.32 m/s        ║
+║ Std Dev Velocity:    141.30 m/s        ║
+║ CEP (arrivals):        3.73 m          ║
+║ Target Shortfall:      61.9 %          ║
+║ Hit Probability:        0.2 %          ║
+╚════════════════════════════════════════╝
+Hit probability 95% CI: [0.001, 0.007] (Wilson, n=1000)
+```
+
+This is the textbook point precisely because the estimate is small: "0.2%" alone reads as
+precise, but the 95% Wilson interval says the true probability could plausibly be anywhere from
+about 0.05% to 0.73% at only 1000 trials -- a better-than-13x range the bare percentage hides.
+`-o json`/`-o full` (same command, `-o json` added) gain the identical fact as an additive key,
+`hit_probability_ci`, alongside the unchanged existing keys:
+
+```json
+{
+  "mean_range": 480.35763209156374,
+  "std_range": 311.65807211958315,
+  "mean_impact_velocity": 564.3227501383241,
+  "std_impact_velocity": 141.29683010644374,
+  "cep": 3.7330017194509684,
+  "target_shortfall_fraction": 0.619,
+  "hit_probability": 0.002,
+  "hit_probability_ci": {
+    "method": "wilson_fixed_n",
+    "confidence_percent": 95,
+    "low": 0.000548643588120728,
+    "high": 0.007262807863492177,
+    "samples": 1000
+  }
+}
+```
+
+`hit_probability_ci` is `null` (present, not absent, matching every other optional field this
+command's JSON already carries) whenever `hit_probability` itself is -- i.e. whenever
+`--target-distance` was not given.
+
+**`--adaptive` decides its own sample size.** Instead of guessing `--num-sims`, tell it how
+precise you need the answer and it samples in batches (`--mc-batch-size`) until the interval
+reaches `--target-ci-half-width` or `--max-samples` is exhausted:
+
+```bash
+./ballistics monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 \
+  --velocity-std 5 --angle-std 0.1 --bc-std 0.005 --wind-std 1.5 --target-distance 400 \
+  --adaptive --confidence 90 --target-ci-half-width 0.03 \
+  --min-samples 200 --max-samples 20000 --seed 42
+```
+```
+Adaptive Monte Carlo (confidence-controlled sampling, MBA-1352)
+  method:            anytime_beta_binomial_mixture_cs_v1
+  confidence level:  90%
+  hit probability:   0.1912  (90% CI: [0.1645, 0.2200])
+  samples:           2500  (attempts: 2500, arrivals: 1725)
+  stop reason:       target_half_width_met
+  hit radius:        0.3000 m
+  target distance:   365.7600 m
+  impact velocity:   mean 560.851 m/s, std 31.466 m/s
+  drop at target:    mean 0.3291 m, std 0.4407 m
+  drift at target:   mean -0.0043 m, std 0.3236 m
+```
+
+It ran 2500 of the 20,000 permitted trials -- exactly what the requested 90% / ±0.03 precision
+needed on this load, no more -- and stopped for a data-dependent reason
+(`target_half_width_met`), not because a fixed count ran out. `samples`, `attempts`, and
+`arrivals` are three different counts, in that order: `attempts` is every trial drawn,
+`samples` (`= attempts` here) is every trial that produced an outcome and is the `n` behind the
+hit probability and its interval, and `arrivals` (`1725`, well under `samples`) is only the
+trials that reached the target plane -- the population behind the six velocity/drop/drift
+statistics below `stop reason`. `--output full` -- `json` is accepted as an alias for the same
+value, so `-o json` works too -- prints the identical report as its versioned wire form,
+`AdaptiveMcReportV1`, verbatim:
+
+```json
+{
+  "schema_version": 1,
+  "method": "anytime_beta_binomial_mixture_cs_v1",
+  "assumptions": [
+    "Sampling uncertainty only: intervals cover Monte Carlo sampling error, not model error in the trajectory solver or its inputs.",
+    "Anytime-valid stopping: the beta-binomial mixture confidence sequence keeps its coverage guarantee despite stopping the moment the target half-width is met.",
+    "Input dispersions are the independent normal distributions declared in MonteCarloParams; correlations between inputs are not modeled.",
+    "Continuous statistics are streaming Welford moments over trials that reached the target plane, reported with sample (n-1) standard deviations; hit probability's denominator includes all trials."
+  ],
+  "confidence_percent": 90,
+  "hit_probability": 0.1912,
+  "ci_low": 0.16448890323739063,
+  "ci_high": 0.2199595698086259,
+  "samples": 2500,
+  "attempts": 2500,
+  "arrivals": 1725,
+  "stop_reason": "target_half_width_met",
+  "hit_radius_m": 0.3,
+  "target_distance_m": 365.76,
+  "mean_impact_velocity_mps": 560.8513010242867,
+  "std_impact_velocity_mps": 31.46555841729584,
+  "mean_drop_at_target_m": 0.3290765670086509,
+  "std_drop_at_target_m": 0.44069648856048765,
+  "mean_wind_drift_at_target_m": -0.004288891866863569,
+  "std_wind_drift_at_target_m": 0.32356953067182526
+}
+```
+
+`-o statistics` (the CSV format) is not available under `--adaptive`: the adaptive driver keeps
+no per-trial ranges or velocities to tabulate (that constant-memory property, unbounded trial
+count at the cost of the CSV/full trial history, is the point of it), so this is a named usage
+error rather than a silently-empty or fabricated CSV.
+
+**Honest limits, stated in the payload itself.** Every `AdaptiveMcReportV1` carries its own
+`assumptions` array so a consumer rendering just the numbers still has the caveats attached.
+The first two, verbatim:
+
+> Sampling uncertainty only: intervals cover Monte Carlo sampling error, not model error in the
+> trajectory solver or its inputs.
+>
+> Anytime-valid stopping: the beta-binomial mixture confidence sequence keeps its coverage
+> guarantee despite stopping the moment the target half-width is met.
+
+The first is the same caveat every interval in this file carries: it bounds sampling noise, not
+whether the underlying physics model or its inputs are themselves correct. The second is
+specific to `--adaptive` -- it is *not* safe to run the fixed-count Wilson interval above
+repeatedly and stop the instant it "looks" tight; that inflates the true error rate with every
+peek. `--adaptive` is safe to stop early because it uses a different interval (an anytime-valid
+confidence sequence) built for exactly that use, at the cost of a strictly wider interval than
+Wilson would report at the same `n` -- paying that width is what buys the early stop.
+
+**Units rule.** `--target-ci-half-width`, and every low/high/`ci_low`/`ci_high` bound this
+section's flags and JSON keys report, are in **probability units** (`0`-`1`), the same space
+`hit_probability` itself is in -- never a percentage, even though the fixed-count box above
+prints `hit_probability` itself as a percentage for the existing `Hit Probability:` line.
+
 ### WEZ (Weapon Employment Zone) Sweep
 
 > Also available in the WASM terminal (ballistics.sh): `monte-carlo --wez` with the
