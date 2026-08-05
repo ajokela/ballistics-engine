@@ -4457,6 +4457,30 @@ pub struct AdaptiveMcReportV1 {
     pub ci_high: f64,
     /// Trials actually folded into the statistics (`n`).
     pub samples: u64,
+    /// Trials *drawn*, including any the solver could not complete.
+    ///
+    /// `attempts - samples` is the drop count. It is normally zero, and equals `samples`
+    /// whenever it is -- but without this field a run with a 40% solver-failure rate is
+    /// indistinguishable in the payload from a clean one at the same `samples`, which is the
+    /// one thing `samples` alone cannot tell you. `attempts` is also what
+    /// [`McConvergence::max_samples`] caps, so `attempts == max_samples` is the signature of a
+    /// [`McStopReason::MaxSamplesReached`] stop.
+    pub attempts: u64,
+    /// Trials that reached the target plane -- the population behind the three at-target
+    /// statistics below, and the `n` in their `n-1` standard deviations.
+    ///
+    /// This is the magnitude behind the asymmetry `assumptions[3]` discloses qualitatively:
+    /// `mean_drop_at_target_m`, `mean_wind_drift_at_target_m` and `mean_impact_velocity_mps`
+    /// describe these `arrivals` trials, while `hit_probability` is over all `samples` (a
+    /// trial that fell short is a definite miss, so it is in that denominator but has no
+    /// measured position to contribute). With `arrivals` well below `samples`, the at-target
+    /// statistics describe only part of the run and this field is what says so.
+    ///
+    /// The fixed-count path exposes the same information as
+    /// [`MonteCarloResults::target_arrival_count`] and
+    /// [`MonteCarloResults::target_shortfall_fraction`]; `samples - arrivals` is the shortfall
+    /// count and `1 - arrivals / samples` the shortfall fraction.
+    pub arrivals: u64,
     /// Why the run stopped. Serializes as `"target_half_width_met"` / `"max_samples_reached"`.
     pub stop_reason: McStopReason,
     /// Hit-zone radius the probability was computed against.
@@ -4530,13 +4554,23 @@ pub struct AdaptiveMcReportV1 {
 /// half-width is at or below `target_half_width`; stop with
 /// [`McStopReason::MaxSamplesReached`] once `max_samples` trials have been attempted.
 ///
-/// `samples` counts trials that produced an outcome. A trial whose solve fails is dropped
-/// rather than counted as a miss -- the legacy loop's behaviour, preserved so the two paths
-/// cannot disagree about what a solver failure means -- but it still consumes one of the
-/// `max_samples` attempts. With no dropped trials the two are equal, which is the normal case;
-/// when they differ, `samples` can finish below `min_samples`, and the honest report of that
-/// is `MaxSamplesReached` with the smaller `n` and the correspondingly wider interval. A run
-/// in which *every* trial was dropped is an error, not a report.
+/// The report carries three cardinalities, and they are three different numbers:
+///
+/// * `attempts` -- trials drawn. This is what `max_samples` caps.
+/// * `samples` -- trials that produced an outcome, i.e. the `n` behind `hit_probability` and
+///   the confidence interval.
+/// * `arrivals` -- trials that reached the target plane, i.e. the `n` behind the three
+///   at-target statistics.
+///
+/// `attempts >= samples >= arrivals` always. A trial whose solve fails is dropped rather than
+/// counted as a miss -- the legacy loop's behaviour, preserved so the two paths cannot
+/// disagree about what a solver failure means -- but it still consumes an attempt, so it
+/// shows up as `attempts > samples`. With no dropped trials the two are equal, which is the
+/// normal case; when they differ, `samples` can finish below `min_samples`, and the honest
+/// report of that is `MaxSamplesReached` with the smaller `n` and the correspondingly wider
+/// interval. A trial that solved but fell short of the target plane is a definite miss: it is
+/// a sample (in `hit_probability`'s denominator) but not an arrival, so it shows up as
+/// `samples > arrivals`. A run in which *every* trial was dropped is an error, not a report.
 ///
 /// # Errors
 ///
@@ -4623,6 +4657,11 @@ pub fn run_monte_carlo_adaptive_seeded(
         ci_low,
         ci_high,
         samples,
+        attempts,
+        // All three at-target accumulators are fed under one guard, in one block, so their
+        // counts are equal by construction; reading the population off one of them binds this
+        // field to the actual Welford `n` rather than to a parallel counter that could drift.
+        arrivals: drop_at_target.count(),
         stop_reason,
         hit_radius_m,
         target_distance_m: sampler.target_distance,
@@ -5724,6 +5763,21 @@ mod monte_carlo_seeded_tests {
         }
     }
 
+    /// Params whose target plane sits *inside* the ground-impact scatter, so some trials
+    /// arrive at it and some fall short.
+    ///
+    /// The pin fixture records ground impact between 1907 m and 1936 m for this projectile, so
+    /// a 1920 m plane splits the run. That split is the point: with `loose_params()` every
+    /// trial arrives, which makes `arrivals`, `samples` and `attempts` numerically identical
+    /// and therefore useless for catching a report that populates one of them from another.
+    fn mixed_arrival_params() -> MonteCarloParams {
+        MonteCarloParams {
+            num_simulations: 1,
+            target_distance: Some(1920.0),
+            ..MonteCarloParams::default()
+        }
+    }
+
     /// THE bit-for-bit compatibility contract for the legacy seeded Monte Carlo path
     /// (Plan C spec 9.5).
     ///
@@ -5955,6 +6009,95 @@ mod monte_carlo_seeded_tests {
         assert_eq!(r.samples, 3_000);
     }
 
+    /// The adaptive middle: a stop that is decided by the DATA, not by either bound.
+    ///
+    /// Every other stopping test lands on a boundary -- the easy case and the determinism case
+    /// both stop at exactly `min_samples`, and the impossible case runs to `max_samples`. None
+    /// of them would notice if the half-width check were, say, only consulted on the first
+    /// batch. Here `min_samples` is 0 and `max_samples` is far away, so the sample count is
+    /// whatever the confidence sequence decides it is, and the assertions pin that it landed
+    /// strictly inside both bounds after more than one batch.
+    #[test]
+    fn adaptive_stops_between_the_floor_and_the_ceiling() {
+        let (inputs, wind) = seeded_test_fixture();
+        let conv = McConvergence {
+            level: ConfidenceLevel::P95,
+            target_half_width: 0.03,
+            min_samples: 0,
+            max_samples: 10_000,
+            batch_size: 100,
+        };
+        let r = run_monte_carlo_adaptive_seeded(
+            &inputs,
+            &wind,
+            &loose_params(),
+            &conv,
+            DEFAULT_HIT_RADIUS_M,
+            0x1352_5A1D,
+        )
+        .unwrap();
+
+        assert_eq!(r.stop_reason, McStopReason::TargetHalfWidthMet);
+        assert!(r.samples > 0);
+        assert!(
+            r.samples.is_multiple_of(conv.batch_size),
+            "samples {} is not a whole number of batches",
+            r.samples
+        );
+        assert!(
+            r.samples > conv.min_samples,
+            "stopped on the floor, not on the data"
+        );
+        assert!(
+            r.samples < conv.max_samples,
+            "ran to the ceiling, so nothing adaptive was exercised"
+        );
+        assert!(
+            r.samples > conv.batch_size,
+            "stopped on the very first look ({} samples); the multi-batch path is untested",
+            r.samples
+        );
+        assert!((r.ci_high - r.ci_low) / 2.0 <= 0.03 + 1e-12);
+        assert!(r.ci_low <= r.hit_probability && r.hit_probability <= r.ci_high);
+        assert_eq!(r.attempts, r.samples, "no trial should have been dropped");
+    }
+
+    /// The final batch is truncated so `max_samples` is a hard ceiling, not a threshold the
+    /// last batch overshoots.
+    ///
+    /// `750 = 500 + 250`, so the second batch must run short. With a `max_samples` that is a
+    /// whole multiple of `batch_size` -- as in every other test here -- the
+    /// `batch_size.min(max_samples - attempts)` clamp never actually clamps, and a driver that
+    /// ignored it entirely would pass. This one would report 1000.
+    #[test]
+    fn adaptive_runs_a_truncated_final_batch_up_to_max_samples() {
+        let (inputs, wind) = seeded_test_fixture();
+        let conv = McConvergence {
+            level: ConfidenceLevel::P95,
+            target_half_width: 1e-6,
+            min_samples: 0,
+            max_samples: 750,
+            batch_size: 500,
+        };
+        let r = run_monte_carlo_adaptive_seeded(
+            &inputs,
+            &wind,
+            &loose_params(),
+            &conv,
+            DEFAULT_HIT_RADIUS_M,
+            0x1352_7B10,
+        )
+        .unwrap();
+
+        assert_eq!(r.stop_reason, McStopReason::MaxSamplesReached);
+        assert_eq!(
+            r.samples, 750,
+            "the 250-trial final batch did not run, or was not truncated"
+        );
+        assert_eq!(r.attempts, 750);
+        assert!(!r.samples.is_multiple_of(conv.batch_size));
+    }
+
     #[test]
     fn adaptive_is_deterministic_for_a_seed() {
         let (inputs, wind) = seeded_test_fixture();
@@ -5997,7 +6140,9 @@ mod monte_carlo_seeded_tests {
     #[test]
     fn adaptive_report_carries_schema_method_and_all_four_assumptions() {
         let (inputs, wind) = seeded_test_fixture();
-        // Nothing here depends on the statistics, so keep it to one batch.
+        // Nothing here depends on the statistics converging, so keep it to one batch. The
+        // fixture is the mixed-arrival one so the three cardinalities come out DISTINCT --
+        // see the assertions below.
         let conv = McConvergence {
             min_samples: 0,
             max_samples: 50,
@@ -6008,7 +6153,7 @@ mod monte_carlo_seeded_tests {
         let r = run_monte_carlo_adaptive_seeded(
             &inputs,
             &wind,
-            &loose_params(),
+            &mixed_arrival_params(),
             &conv,
             DEFAULT_HIT_RADIUS_M,
             0x1352_D0C5,
@@ -6019,6 +6164,26 @@ mod monte_carlo_seeded_tests {
         assert_eq!(r.schema_version, 1);
         assert_eq!(r.method, "anytime_beta_binomial_mixture_cs_v1");
         assert_eq!(r.confidence_percent, 90);
+
+        // The three cardinalities, pinned against each other rather than each against 50.
+        // `attempts` and `samples` are both 50 here (nothing was dropped), but `arrivals` is
+        // strictly smaller because the 1920 m plane sits inside the ground-impact scatter --
+        // so a report that populated `arrivals` from `samples` (or vice versa) fails here,
+        // which it could not if all three were the same number.
+        assert_eq!(r.attempts, 50, "one full batch was drawn");
+        assert_eq!(r.samples, 50, "no trial was dropped by the solver");
+        assert!(
+            r.arrivals > 0 && r.arrivals < r.samples,
+            "fixture must split the run: arrivals {} of samples {}",
+            r.arrivals,
+            r.samples
+        );
+        // ...and the at-target statistics really are the `arrivals` population: two or more
+        // arrivals is what makes a Bessel-corrected standard deviation defined at all.
+        assert!(r.arrivals >= 2, "arrivals {} too few for a sample sd", r.arrivals);
+        assert!(r.std_drop_at_target_m > 0.0 && r.std_impact_velocity_mps > 0.0);
+        // The ordering invariant the doc comments promise.
+        assert!(r.attempts >= r.samples && r.samples >= r.arrivals);
 
         // Length AND per-index full-string equality against literals restated here character
         // for character. Deliberately NOT compared against MC_ADAPTIVE_ASSUMPTIONS_V1: that
