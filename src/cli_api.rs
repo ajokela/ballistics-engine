@@ -1,5 +1,8 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::cluster_bc::ClusterBCDegradation;
+use crate::mc_stats::{
+    wilson_interval, BernoulliConfidenceSequence, ConfidenceLevel, Welford,
+};
 use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
 use crate::precession_nutation::{
     calculate_combined_angular_motion, projectile_moments_of_inertia, AngularState,
@@ -3856,11 +3859,63 @@ impl MonteCarloResults {
         let hits = self
             .impact_positions
             .iter()
-            .filter(|position| {
-                Self::position_reached_target(position) && position.norm() < hit_radius_m
-            })
+            .filter(|position| Self::position_is_hit(position, hit_radius_m))
             .count();
         hits as f64 / self.impact_positions.len() as f64
+    }
+
+    /// Whether one encoded impact position is a hit inside `hit_radius_m` of the point of aim.
+    ///
+    /// The single source of truth for the hit predicate itself, as
+    /// [`hit_probability`](Self::hit_probability) is for the ratio. Both that method and the
+    /// adaptive driver ([`run_monte_carlo_adaptive_seeded`]) call this, so "hit" means the
+    /// same thing whether it was counted over a retained result vector or streamed one trial
+    /// at a time and then discarded.
+    ///
+    /// A sample that never reached the target plane is a definite miss, never a hit: the
+    /// shortfall marker's norm is enormous, but the marker is excluded explicitly rather than
+    /// left to depend on that.
+    pub fn position_is_hit(position: &Vector3<f64>, hit_radius_m: f64) -> bool {
+        Self::position_reached_target(position) && position.norm() < hit_radius_m
+    }
+
+    /// Fixed-`n` Wilson companion to [`hit_probability`](Self::hit_probability): the same point
+    /// estimate, plus a confidence interval for it and the `n` behind it.
+    ///
+    /// Returns `(p_hat, (ci_low, ci_high), n)`. This is a *composition* of two existing
+    /// functions, not a second derivation of either: `p_hat` is
+    /// [`hit_probability`](Self::hit_probability) called directly, and the bounds are
+    /// [`wilson_interval`] over the hit count and `impact_positions.len()`. The denominator is
+    /// therefore identical -- samples that fell short of the target plane are counted as
+    /// misses in `n`, exactly as `hit_probability` counts them -- and the two can never drift
+    /// apart under maintenance.
+    ///
+    /// # When this is the wrong interval
+    ///
+    /// A fixed-`n` interval is only valid if `n` was fixed *before* the data was seen. Use
+    /// this for a run of a pre-declared `num_simulations`. If the sample count was instead
+    /// chosen by watching the results -- stopping once the interval looked tight enough --
+    /// this interval has no coverage guarantee at all; use [`run_monte_carlo_adaptive_seeded`],
+    /// whose interval is anytime-valid, for that.
+    ///
+    /// With no samples the result is `(0.0, (0.0, 1.0), 0)`: the `0.0` that `hit_probability`
+    /// reports, alongside the total-ignorance interval `wilson_interval` reports at `n == 0`.
+    pub fn hit_probability_wilson(
+        &self,
+        hit_radius_m: f64,
+        level: ConfidenceLevel,
+    ) -> (f64, (f64, f64), u64) {
+        let trials = self.impact_positions.len() as u64;
+        let hits = self
+            .impact_positions
+            .iter()
+            .filter(|position| Self::position_is_hit(position, hit_radius_m))
+            .count() as u64;
+        (
+            self.hit_probability(hit_radius_m),
+            wilson_interval(hits, trials, level),
+            trials,
+        )
     }
 
     /// Fraction of simulations whose impact at the target plane lands within the axis-aligned
@@ -3958,6 +4013,190 @@ impl MonteCarloWindSampler {
     }
 }
 
+/// One Monte Carlo trial's recorded outcome: the three quantities the legacy result vectors
+/// hold, for one sample.
+#[derive(Debug, Clone, Copy)]
+struct TrialOutcome {
+    /// Ground-impact range (m), recorded for every sample regardless of the target plane
+    /// (MBA-967).
+    range: f64,
+    /// Ground-impact velocity (m/s), likewise recorded for every sample.
+    impact_velocity: f64,
+    /// Deviation from the baseline point of aim at the target plane, or
+    /// `(0, TARGET_NOT_REACHED_SENTINEL_M, 0)` when this sample fell short of it.
+    impact_position: Vector3<f64>,
+}
+
+/// The per-trial context of a Monte Carlo run: the baseline solve, the resolved target plane
+/// and the five input distributions, all built once and reused by every trial.
+///
+/// Extracted verbatim from the body of
+/// [`run_monte_carlo_with_wind_and_direction_std_dev_using_rng`] so the adaptive driver
+/// ([`run_monte_carlo_adaptive_seeded`]) runs the *identical* trial rather than a second copy
+/// of it that could drift out of agreement.
+///
+/// # The draw order is a compatibility contract
+///
+/// [`Self::sample_one_trial`] consumes exactly six draws from the caller's RNG, in this order:
+/// muzzle-velocity delta, muzzle angle, ballistic coefficient, azimuth, wind speed, wind
+/// direction. Changing the count or the order shifts every subsequent sample of an
+/// already-seeded run, so `monte_carlo_seeded_tests::legacy_seeded_estimates_are_pinned_bit_for_bit`
+/// pins a committed seed's output bit-for-bit as the check on it.
+///
+/// The distributions are also *constructed* in the order the original inline code constructed
+/// them. That is not cosmetic: construction is where an invalid standard deviation is
+/// rejected, so the order decides which malformed parameter a caller is told about first.
+struct MonteCarloTrialSampler {
+    base_inputs: BallisticInputs,
+    atmosphere: AtmosphericConditions,
+    solver_max_range: f64,
+    /// Resolved target plane: `params.target_distance` when the caller gave one, else the
+    /// baseline solve's own max range.
+    target_distance: f64,
+    /// Baseline (undispersed) position at `target_distance`. Every trial's impact position is
+    /// a deviation from this point.
+    baseline_at_target: Vector3<f64>,
+    velocity_delta_dist: rand_distr::Normal<f64>,
+    angle_dist: rand_distr::Normal<f64>,
+    bc_dist: rand_distr::Normal<f64>,
+    wind_sampler: MonteCarloWindSampler,
+    azimuth_dist: rand_distr::Normal<f64>,
+}
+
+impl MonteCarloTrialSampler {
+    /// Solves the baseline trajectory and builds the input distributions.
+    ///
+    /// Consumes no randomness -- every RNG draw happens in [`Self::sample_one_trial`].
+    fn new(
+        base_inputs: BallisticInputs,
+        base_wind: &WindConditions,
+        params: &MonteCarloParams,
+        wind_direction_std_dev: f64,
+    ) -> Result<Self, BallisticsError> {
+        use rand_distr::Normal;
+
+        let atmosphere = AtmosphericConditions {
+            temperature: base_inputs.temperature,
+            pressure: base_inputs.pressure,
+            humidity: base_inputs.humidity_percent(),
+            altitude: base_inputs.altitude,
+        };
+        let target_hint = params
+            .target_distance
+            .unwrap_or(base_inputs.target_distance);
+        let solver_max_range = target_hint.max(1000.0) * 2.0;
+
+        // First, calculate baseline trajectory with no variations
+        let mut baseline_solver =
+            TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), atmosphere.clone());
+        baseline_solver.set_max_range(solver_max_range);
+        let baseline_result = baseline_solver.solve()?;
+
+        // Determine target distance: use explicit target or baseline max range
+        let target_distance = params.target_distance.unwrap_or(baseline_result.max_range);
+
+        // Get baseline position at target distance (interpolated)
+        let baseline_at_target = baseline_result
+            .position_at_range(target_distance)
+            .ok_or("Could not interpolate baseline at target distance")?;
+
+        // Create normal distributions for variations
+        // Sample muzzle velocity as a DELTA and apply it after TrajectorySolver::new resolves the
+        // powder-temperature model. Sampling an absolute value here let a powder curve overwrite
+        // every draw in the constructor, collapsing the requested dispersion to zero (MBA-1176).
+        let velocity_delta_dist = Normal::new(0.0, params.velocity_std_dev)
+            .map_err(|e| format!("Invalid velocity distribution: {}", e))?;
+        let angle_dist = Normal::new(base_inputs.muzzle_angle, params.angle_std_dev)
+            .map_err(|e| format!("Invalid angle distribution: {}", e))?;
+        let bc_dist = Normal::new(base_inputs.bc_value, params.bc_std_dev)
+            .map_err(|e| format!("Invalid BC distribution: {}", e))?;
+        // Direction uncertainty is an independent angular quantity in radians. Do not derive it from
+        // wind-speed uncertainty: meters/second cannot supply an angular standard deviation.
+        let wind_sampler = MonteCarloWindSampler::new(
+            base_wind,
+            params.wind_speed_std_dev,
+            wind_direction_std_dev,
+        )?;
+        let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
+            .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
+
+        Ok(Self {
+            base_inputs,
+            atmosphere,
+            solver_max_range,
+            target_distance,
+            baseline_at_target,
+            velocity_delta_dist,
+            angle_dist,
+            bc_dist,
+            wind_sampler,
+            azimuth_dist,
+        })
+    }
+
+    /// Draws one trial: six RNG draws, one trajectory solve, one recorded outcome.
+    ///
+    /// `None` means the trial produced nothing to record -- either the solve failed, or it
+    /// succeeded but the target plane could not be interpolated despite being within range (a
+    /// defensive branch). Both were a bare `continue` in the original loop, i.e. the trial was
+    /// dropped rather than counted as a miss, and callers must preserve that.
+    ///
+    /// All six draws happen *before* the solve, so a dropped trial still consumes exactly six
+    /// draws and the RNG stream stays aligned with a run in which it succeeded.
+    fn sample_one_trial<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> Option<TrialOutcome> {
+        use rand_distr::Distribution;
+
+        // Create varied inputs
+        let mut inputs = self.base_inputs.clone();
+        let muzzle_velocity_delta = self.velocity_delta_dist.sample(&mut *rng);
+        inputs.muzzle_angle = self.angle_dist.sample(&mut *rng);
+        inputs.bc_value = self.bc_dist.sample(&mut *rng).max(0.01);
+        inputs.azimuth_angle = self.azimuth_dist.sample(&mut *rng); // Add horizontal variation
+
+        // Create varied wind (now based on base wind conditions)
+        let wind = self.wind_sampler.sample(&mut *rng);
+
+        // Run trajectory. The sampled velocity delta is applied to the SOLVER's inputs, after
+        // TrajectorySolver::new has resolved any powder-temperature model -- see the MBA-1176
+        // note on `velocity_delta_dist` above.
+        let mut solver = TrajectorySolver::new(inputs, wind, self.atmosphere.clone());
+        solver.inputs.muzzle_velocity =
+            (solver.inputs.muzzle_velocity + muzzle_velocity_delta).max(0.0);
+        solver.set_max_range(self.solver_max_range);
+        // Skip failed simulations
+        let result = solver.solve().ok()?;
+
+        // MBA-967: do NOT skip samples that fall short of the target. range/velocity are
+        // recorded at GROUND IMPACT for EVERY sample, so "Mean Range" is the ground-impact
+        // distribution — independent of target_distance and consistent with `trajectory`.
+        // All three result vectors still grow together per sample, so the equal-length FFI
+        // ABI (exposed under one count) is preserved.
+        let impact_position = if result.max_range < self.target_distance {
+            // This sample never reached the target plane -> definite miss. Keep the
+            // encoded miss finite but far outside any practical target radius.
+            Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0)
+        } else {
+            // defensive: drop the whole sample (keeps the result vectors aligned)
+            let pos_at_target = result.position_at_range(self.target_distance)?;
+            // Deviation from baseline at the SAME target distance (McCoy): X = downrange
+            // (0 here), Y = vertical (elevation), Z = lateral (windage). Muzzle-angle
+            // sampling already models vertical pointing dispersion, so do not add a
+            // second independent vertical pointing draw here.
+            Vector3::new(
+                0.0,
+                pos_at_target.y - self.baseline_at_target.y,
+                pos_at_target.z - self.baseline_at_target.z,
+            )
+        };
+
+        Some(TrialOutcome {
+            range: result.max_range,
+            impact_velocity: result.impact_velocity,
+            impact_position,
+        })
+    }
+}
+
 // Run Monte Carlo simulation (backwards compatibility)
 pub fn run_monte_carlo(
     base_inputs: BallisticInputs,
@@ -4048,108 +4287,25 @@ fn run_monte_carlo_with_wind_and_direction_std_dev_using_rng<R: rand::Rng + ?Siz
     wind_direction_std_dev: f64,
     rng: &mut R,
 ) -> Result<MonteCarloResults, BallisticsError> {
-    use rand_distr::{Distribution, Normal};
-
     let mut ranges = Vec::new();
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
 
-    let atmosphere = AtmosphericConditions {
-        temperature: base_inputs.temperature,
-        pressure: base_inputs.pressure,
-        humidity: base_inputs.humidity_percent(),
-        altitude: base_inputs.altitude,
-    };
-    let target_hint = params
-        .target_distance
-        .unwrap_or(base_inputs.target_distance);
-    let solver_max_range = target_hint.max(1000.0) * 2.0;
-
-    // First, calculate baseline trajectory with no variations
-    let mut baseline_solver =
-        TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), atmosphere.clone());
-    baseline_solver.set_max_range(solver_max_range);
-    let baseline_result = baseline_solver.solve()?;
-
-    // Determine target distance: use explicit target or baseline max range
-    let target_distance = params.target_distance.unwrap_or(baseline_result.max_range);
-
-    // Get baseline position at target distance (interpolated)
-    let baseline_at_target = baseline_result
-        .position_at_range(target_distance)
-        .ok_or("Could not interpolate baseline at target distance")?;
-
-    // Create normal distributions for variations
-    // Sample muzzle velocity as a DELTA and apply it after TrajectorySolver::new resolves the
-    // powder-temperature model. Sampling an absolute value here let a powder curve overwrite
-    // every draw in the constructor, collapsing the requested dispersion to zero (MBA-1176).
-    let velocity_delta_dist = Normal::new(0.0, params.velocity_std_dev)
-        .map_err(|e| format!("Invalid velocity distribution: {}", e))?;
-    let angle_dist = Normal::new(base_inputs.muzzle_angle, params.angle_std_dev)
-        .map_err(|e| format!("Invalid angle distribution: {}", e))?;
-    let bc_dist = Normal::new(base_inputs.bc_value, params.bc_std_dev)
-        .map_err(|e| format!("Invalid BC distribution: {}", e))?;
-    // Direction uncertainty is an independent angular quantity in radians. Do not derive it from
-    // wind-speed uncertainty: meters/second cannot supply an angular standard deviation.
-    let wind_sampler = MonteCarloWindSampler::new(
+    let sampler = MonteCarloTrialSampler::new(
+        base_inputs,
         &base_wind,
-        params.wind_speed_std_dev,
+        &params,
         wind_direction_std_dev,
     )?;
-    let azimuth_dist = Normal::new(base_inputs.azimuth_angle, params.azimuth_std_dev)
-        .map_err(|e| format!("Invalid azimuth distribution: {}", e))?;
 
     for _ in 0..params.num_simulations {
-        // Create varied inputs
-        let mut inputs = base_inputs.clone();
-        let muzzle_velocity_delta = velocity_delta_dist.sample(&mut *rng);
-        inputs.muzzle_angle = angle_dist.sample(&mut *rng);
-        inputs.bc_value = bc_dist.sample(&mut *rng).max(0.01);
-        inputs.azimuth_angle = azimuth_dist.sample(&mut *rng); // Add horizontal variation
-
-        // Create varied wind (now based on base wind conditions)
-        let wind = wind_sampler.sample(&mut *rng);
-
-        // Run trajectory
-        let mut solver = TrajectorySolver::new(inputs, wind, atmosphere.clone());
-        solver.inputs.muzzle_velocity =
-            (solver.inputs.muzzle_velocity + muzzle_velocity_delta).max(0.0);
-        solver.set_max_range(solver_max_range);
-        match solver.solve() {
-            Ok(result) => {
-                // MBA-967: do NOT skip samples that fall short of the target. range/velocity are
-                // recorded at GROUND IMPACT for EVERY sample, so "Mean Range" is the ground-impact
-                // distribution — independent of target_distance and consistent with `trajectory`.
-                // All three result vectors still grow together per sample, so the equal-length FFI
-                // ABI (exposed under one count) is preserved.
-                let deviation = if result.max_range < target_distance {
-                    // This sample never reached the target plane -> definite miss. Keep the
-                    // encoded miss finite but far outside any practical target radius.
-                    Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0)
-                } else {
-                    let pos_at_target = match result.position_at_range(target_distance) {
-                        Some(p) => p,
-                        None => continue, // defensive: skip the whole sample (keeps vectors aligned)
-                    };
-                    // Deviation from baseline at the SAME target distance (McCoy): X = downrange
-                    // (0 here), Y = vertical (elevation), Z = lateral (windage). Muzzle-angle
-                    // sampling already models vertical pointing dispersion, so do not add a
-                    // second independent vertical pointing draw here.
-                    Vector3::new(
-                        0.0,
-                        pos_at_target.y - baseline_at_target.y,
-                        pos_at_target.z - baseline_at_target.z,
-                    )
-                };
-
-                ranges.push(result.max_range);
-                impact_velocities.push(result.impact_velocity);
-                impact_positions.push(deviation);
-            }
-            Err(_) => {
-                // Skip failed simulations
-                continue;
-            }
+        // A dropped trial pushes nothing at all, exactly as the original `continue` arms did,
+        // so all three vectors stay equal-length (the FFI exposes them under one count) --
+        // they are simply shorter than `num_simulations`.
+        if let Some(outcome) = sampler.sample_one_trial(rng) {
+            ranges.push(outcome.range);
+            impact_velocities.push(outcome.impact_velocity);
+            impact_positions.push(outcome.impact_position);
         }
     }
 
@@ -4161,6 +4317,321 @@ fn run_monte_carlo_with_wind_and_direction_std_dev_using_rng<R: rand::Rng + ?Siz
         ranges,
         impact_velocities,
         impact_positions,
+    })
+}
+
+/// Schema version of [`AdaptiveMcReportV1`]'s JSON wire form.
+pub const MC_ADAPTIVE_SCHEMA_VERSION_V1: u32 = 1;
+
+/// The value [`AdaptiveMcReportV1::method`] always carries: Robbins' beta-binomial mixture
+/// confidence sequence, revision 1.
+///
+/// Named so a consumer can branch on the estimator rather than on the schema version -- the
+/// schema can gain fields without the statistics changing, and the statistics could be
+/// replaced without the field set changing.
+pub const MC_ADAPTIVE_METHOD_V1: &str = "anytime_beta_binomial_mixture_cs_v1";
+
+/// The four disclosures every [`AdaptiveMcReportV1`] carries, in order.
+///
+/// These are stated in the payload itself rather than only in this crate's documentation,
+/// because the payload is what travels: a consumer that renders a hit probability and an
+/// interval has everything it needs to over-claim, and these four sentences are what stop it.
+/// In order they disclose (0) that the interval covers sampling error only, not model error;
+/// (1) that stopping early is legitimate here specifically because the sequence is
+/// anytime-valid; (2) that the input dispersions are independent normals with no modeled
+/// correlation; and (3) how the continuous statistics were accumulated and which denominator
+/// the hit probability uses.
+///
+/// Pinned per-index, full-string, by
+/// `monte_carlo_seeded_tests::adaptive_report_carries_schema_method_and_all_four_assumptions`.
+pub const MC_ADAPTIVE_ASSUMPTIONS_V1: [&str; 4] = [
+    "Sampling uncertainty only: intervals cover Monte Carlo sampling error, not model error in the trajectory solver or its inputs.",
+    "Anytime-valid stopping: the beta-binomial mixture confidence sequence keeps its coverage guarantee despite stopping the moment the target half-width is met.",
+    "Input dispersions are the independent normal distributions declared in MonteCarloParams; correlations between inputs are not modeled.",
+    "Continuous statistics are streaming Welford moments over trials that reached the target plane, reported with sample (n-1) standard deviations; hit probability's denominator includes all trials.",
+];
+
+/// How precise the hit probability has to get, and how much sampling may be spent getting
+/// there.
+///
+/// [`Default`] reproduces the legacy fixed-count run's sample size as the *floor*
+/// (`min_samples: 1_000`, which is [`MonteCarloParams::default`]'s `num_simulations`) and then
+/// keeps going, in batches, until the interval is tight enough or the ceiling is hit.
+#[derive(Debug, Clone)]
+pub struct McConvergence {
+    /// Confidence level of the reported interval.
+    pub level: ConfidenceLevel,
+    /// Stop once the confidence sequence's half-width is at or below this, in probability
+    /// units. `0.02` means "the hit probability is known to about +-2 percentage points".
+    pub target_half_width: f64,
+    /// Never stop before this many trials, even if the interval is already tight. Guards
+    /// against an early run of all-hits or all-misses producing a narrow interval off a
+    /// handful of trials.
+    pub min_samples: u64,
+    /// Never run more than this many trials, even if the interval is still wide. This is what
+    /// bounds the wall time of an unreachable `target_half_width`.
+    pub max_samples: u64,
+    /// How many trials to run between convergence checks. Larger batches check less often (a
+    /// `bounds()` call is two 200-step bisections); smaller batches can stop sooner.
+    pub batch_size: u64,
+}
+
+impl Default for McConvergence {
+    fn default() -> Self {
+        Self {
+            level: ConfidenceLevel::P95,
+            target_half_width: 0.02,
+            min_samples: 1_000,
+            max_samples: 100_000,
+            batch_size: 500,
+        }
+    }
+}
+
+impl McConvergence {
+    /// Rejects a configuration that cannot produce a meaningful run, naming the offending
+    /// field.
+    ///
+    /// Checked once up front rather than defended against inside the loop: a zero
+    /// `batch_size` would spin forever making no progress, and a non-positive or `NaN`
+    /// `target_half_width` can never be met, so both would surface as a hang or a silent
+    /// max-samples cap instead of an error the caller can read. `NaN` is caught by the
+    /// `is_finite` test -- `NaN <= 0.0` is `false`, so a bare comparison would let it through.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.target_half_width.is_finite() || self.target_half_width <= 0.0 {
+            return Err(format!(
+                "McConvergence.target_half_width must be a finite value greater than zero (got {})",
+                self.target_half_width
+            ));
+        }
+        if self.batch_size == 0 {
+            return Err("McConvergence.batch_size must be greater than zero".to_string());
+        }
+        if self.max_samples == 0 {
+            return Err("McConvergence.max_samples must be greater than zero".to_string());
+        }
+        if self.max_samples < self.min_samples {
+            return Err(format!(
+                "McConvergence.max_samples ({}) must be at least McConvergence.min_samples ({})",
+                self.max_samples, self.min_samples
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Why an adaptive run stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McStopReason {
+    /// The confidence sequence reached [`McConvergence::target_half_width`]. The reported
+    /// precision is the requested precision.
+    TargetHalfWidthMet,
+    /// [`McConvergence::max_samples`] was exhausted first. The interval is whatever that many
+    /// trials bought -- read `ci_low`/`ci_high`, not just `hit_probability`.
+    MaxSamplesReached,
+}
+
+/// The result of a confidence-controlled Monte Carlo run.
+///
+/// Produced by [`run_monte_carlo_adaptive_seeded`]. Unlike [`MonteCarloResults`] this retains
+/// no per-trial data at all: the continuous quantities arrive as streaming [`Welford`] moments
+/// and the hit/miss counts as a running confidence sequence, so a 100,000-trial run costs the
+/// same memory as a 1,000-trial one.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdaptiveMcReportV1 {
+    /// Always [`MC_ADAPTIVE_SCHEMA_VERSION_V1`].
+    pub schema_version: u32,
+    /// Always [`MC_ADAPTIVE_METHOD_V1`].
+    pub method: String,
+    /// Always the four sentences of [`MC_ADAPTIVE_ASSUMPTIONS_V1`], in order.
+    pub assumptions: Vec<String>,
+    /// Confidence level of `ci_low`/`ci_high`, as a whole-number percentage.
+    pub confidence_percent: u32,
+    /// Point estimate `S / n`: hits over all trials, including trials that never reached the
+    /// target plane.
+    pub hit_probability: f64,
+    /// Lower bound of the anytime-valid interval.
+    pub ci_low: f64,
+    /// Upper bound of the anytime-valid interval.
+    pub ci_high: f64,
+    /// Trials actually folded into the statistics (`n`).
+    pub samples: u64,
+    /// Why the run stopped. Serializes as `"target_half_width_met"` / `"max_samples_reached"`.
+    pub stop_reason: McStopReason,
+    /// Hit-zone radius the probability was computed against.
+    pub hit_radius_m: f64,
+    /// Resolved target plane: `params.target_distance` if given, else the baseline's max range.
+    pub target_distance_m: f64,
+    /// Mean ground-impact velocity over trials that reached the target plane.
+    ///
+    /// The velocity is the one the legacy path records: speed at *ground impact*, not at the
+    /// target plane (MBA-967). Only the conditioning is on reaching the plane.
+    pub mean_impact_velocity_mps: f64,
+    /// Sample (`n-1`) standard deviation of the above. `0.0` for fewer than two such trials.
+    pub std_impact_velocity_mps: f64,
+    /// Mean *vertical deviation from the baseline point of aim* at the target plane, in
+    /// meters, positive high.
+    ///
+    /// Named "drop" for continuity with the rest of the API, but it is a deviation from the
+    /// undispersed baseline, not a drop from the bore line: with symmetric input dispersions
+    /// its expectation is near zero and the informative number is
+    /// [`std_drop_at_target_m`](Self::std_drop_at_target_m).
+    pub mean_drop_at_target_m: f64,
+    /// Sample (`n-1`) standard deviation of the vertical deviation -- the run's vertical
+    /// dispersion at the target.
+    pub std_drop_at_target_m: f64,
+    /// Mean lateral deviation from the baseline point of aim at the target plane, in meters.
+    /// The same "deviation, not absolute" caveat as `mean_drop_at_target_m` applies.
+    pub mean_wind_drift_at_target_m: f64,
+    /// Sample (`n-1`) standard deviation of the lateral deviation -- the run's horizontal
+    /// dispersion at the target.
+    pub std_wind_drift_at_target_m: f64,
+}
+
+/// Runs a Monte Carlo hit-probability estimate that decides its own sample size, from an
+/// explicit seed.
+///
+/// # What this buys over the fixed-count path
+///
+/// [`run_monte_carlo_with_wind_and_direction_std_dev_seeded`] runs exactly
+/// `params.num_simulations` trials and reports a point estimate; whether that count was enough
+/// is left to the caller to guess. This instead runs until the answer is as precise as the
+/// caller asked for, and reports the achieved precision either way. **`params.num_simulations`
+/// is ignored here** -- the sample count comes from `convergence`, and
+/// [`McConvergence::min_samples`] defaults to the same `1_000` so the floor matches the legacy
+/// default.
+///
+/// # Why the interval is anytime-valid
+///
+/// Stopping when the interval looks tight enough is optional stopping, and a fixed-`n`
+/// interval (Wilson, Wald, anything) checked repeatedly that way has no coverage guarantee:
+/// the error rate grows with the number of peeks. [`BernoulliConfidenceSequence`] is instead
+/// valid at every `n` simultaneously, so a data-dependent stopping rule is legitimate. The
+/// price is a strictly wider interval at any given `n` than the fixed-`n`
+/// [`MonteCarloResults::hit_probability_wilson`] would report on the same counts. Paying it is
+/// the point.
+///
+/// # The trial is the same trial
+///
+/// Each trial is `MonteCarloTrialSampler::sample_one_trial` (crate-internal), the same body
+/// and the same six-draw sequence the legacy loop runs, and the hit test is
+/// [`MonteCarloResults::position_is_hit`], the same predicate
+/// [`MonteCarloResults::hit_probability`] counts with. A trial that never reached the target
+/// plane is a definite miss and stays in the denominator, exactly as it does there. Wind
+/// direction is not dispersed: [`MonteCarloParams`] has no direction-sigma field, so this
+/// passes `0.0`, matching [`run_monte_carlo_with_wind`].
+///
+/// # Sample accounting
+///
+/// Trials are run in batches of [`McConvergence::batch_size`] (the last batch truncated so the
+/// ceiling is never overshot), and the stopping rule is evaluated after each batch: stop with
+/// [`McStopReason::TargetHalfWidthMet`] once at least `min_samples` trials are in *and* the
+/// half-width is at or below `target_half_width`; stop with
+/// [`McStopReason::MaxSamplesReached`] once `max_samples` trials have been attempted.
+///
+/// `samples` counts trials that produced an outcome. A trial whose solve fails is dropped
+/// rather than counted as a miss -- the legacy loop's behaviour, preserved so the two paths
+/// cannot disagree about what a solver failure means -- but it still consumes one of the
+/// `max_samples` attempts. With no dropped trials the two are equal, which is the normal case;
+/// when they differ, `samples` can finish below `min_samples`, and the honest report of that
+/// is `MaxSamplesReached` with the smaller `n` and the correspondingly wider interval. A run
+/// in which *every* trial was dropped is an error, not a report.
+///
+/// # Errors
+///
+/// Returns `Err` if `convergence` is not usable ([`McConvergence::validate`], which names the
+/// offending field), if the baseline solve or an input distribution is invalid, or if no trial
+/// at all produced an outcome.
+pub fn run_monte_carlo_adaptive_seeded(
+    base_inputs: &BallisticInputs,
+    base_wind: &WindConditions,
+    params: &MonteCarloParams,
+    convergence: &McConvergence,
+    hit_radius_m: f64,
+    seed: u64,
+) -> Result<AdaptiveMcReportV1, String> {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    convergence.validate()?;
+
+    // `wind_direction_std_dev = 0.0`: MonteCarloParams carries no direction sigma, so this
+    // matches `run_monte_carlo_with_wind`'s treatment rather than inventing one.
+    let sampler = MonteCarloTrialSampler::new(base_inputs.clone(), base_wind, params, 0.0)
+        .map_err(|e| e.to_string())?;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut hits_cs = BernoulliConfidenceSequence::new(convergence.level);
+    let mut impact_velocity = Welford::new();
+    let mut drop_at_target = Welford::new();
+    let mut drift_at_target = Welford::new();
+
+    let mut attempts: u64 = 0;
+    let mut stop_reason = McStopReason::MaxSamplesReached;
+
+    while attempts < convergence.max_samples {
+        // Truncate the final batch so `max_samples` is a ceiling on attempts, not a threshold
+        // the last batch may overshoot.
+        let batch = convergence.batch_size.min(convergence.max_samples - attempts);
+        let mut batch_hits: u64 = 0;
+        let mut batch_trials: u64 = 0;
+
+        for _ in 0..batch {
+            attempts += 1;
+            let Some(outcome) = sampler.sample_one_trial(&mut rng) else {
+                continue; // dropped trial: not a miss, not a sample (see the legacy loop)
+            };
+            batch_trials += 1;
+            if MonteCarloResults::position_is_hit(&outcome.impact_position, hit_radius_m) {
+                batch_hits += 1;
+            }
+            // Continuous statistics are conditioned on arrival: a shortfall marker is a
+            // placeholder, not a measured position, and folding it in would drag the moments
+            // toward TARGET_NOT_REACHED_SENTINEL_M. It still counts as a miss above.
+            if MonteCarloResults::position_reached_target(&outcome.impact_position) {
+                impact_velocity.push(outcome.impact_velocity);
+                drop_at_target.push(outcome.impact_position.y);
+                drift_at_target.push(outcome.impact_position.z);
+            }
+        }
+
+        hits_cs.update_batch(batch_hits, batch_trials);
+
+        if hits_cs.trials() >= convergence.min_samples
+            && hits_cs.half_width() <= convergence.target_half_width
+        {
+            stop_reason = McStopReason::TargetHalfWidthMet;
+            break;
+        }
+    }
+
+    let samples = hits_cs.trials();
+    if samples == 0 {
+        return Err("No successful simulations".to_string());
+    }
+    let (ci_low, ci_high) = hits_cs.bounds();
+
+    Ok(AdaptiveMcReportV1 {
+        schema_version: MC_ADAPTIVE_SCHEMA_VERSION_V1,
+        method: MC_ADAPTIVE_METHOD_V1.to_string(),
+        assumptions: MC_ADAPTIVE_ASSUMPTIONS_V1
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        confidence_percent: convergence.level.as_percent(),
+        hit_probability: hits_cs.successes() as f64 / samples as f64,
+        ci_low,
+        ci_high,
+        samples,
+        stop_reason,
+        hit_radius_m,
+        target_distance_m: sampler.target_distance,
+        mean_impact_velocity_mps: impact_velocity.mean(),
+        std_impact_velocity_mps: impact_velocity.sample_std(),
+        mean_drop_at_target_m: drop_at_target.mean(),
+        std_drop_at_target_m: drop_at_target.sample_std(),
+        mean_wind_drift_at_target_m: drift_at_target.mean(),
+        std_wind_drift_at_target_m: drift_at_target.sample_std(),
     })
 }
 
@@ -5230,6 +5701,29 @@ mod monte_carlo_seeded_tests {
         )
     }
 
+    /// Dispersions for the adaptive-driver tests: a 300 m shot with small pointing and wind
+    /// error, so almost every trial lands inside `DEFAULT_HIT_RADIUS_M` of the baseline.
+    ///
+    /// Tuned for *test wall time*, deliberately. A confidence sequence's half-width scales
+    /// with `sqrt(p(1-p) * log(n) / n)`, so a hit probability near `1` reaches the default
+    /// `0.02` target inside `min_samples` (1000 trials) while a `p` near `0.5` would need
+    /// roughly 4-5x as many -- and every trial is a full trajectory solve, run unoptimised
+    /// under `cargo test`. It stays a little short of a degenerate `p == 1`: a handful of
+    /// misses in 1000 keeps the hit *counting* under test rather than trivially saturated.
+    fn loose_params() -> MonteCarloParams {
+        MonteCarloParams {
+            num_simulations: 1, // deliberately absurd: the adaptive driver must ignore it
+            velocity_std_dev: 3.0,
+            angle_std_dev: 3.5e-4,
+            bc_std_dev: 0.01,
+            wind_speed_std_dev: 1.0,
+            target_distance: Some(300.0),
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 3.5e-4,
+        }
+    }
+
     /// THE bit-for-bit compatibility contract for the legacy seeded Monte Carlo path
     /// (Plan C spec 9.5).
     ///
@@ -5384,6 +5878,296 @@ mod monte_carlo_seeded_tests {
         .expect("seeded run b");
 
         assert_ne!(a.impact_velocities, b.impact_velocities);
+    }
+
+    #[test]
+    fn adaptive_stops_at_target_half_width_on_an_easy_case() {
+        let (inputs, wind) = seeded_test_fixture();
+        let conv = McConvergence {
+            target_half_width: 0.05,
+            ..Default::default()
+        };
+        let r = run_monte_carlo_adaptive_seeded(
+            &inputs,
+            &wind,
+            &loose_params(),
+            &conv,
+            DEFAULT_HIT_RADIUS_M,
+            0x1352_ADA9,
+        )
+        .unwrap();
+
+        assert_eq!(r.stop_reason, McStopReason::TargetHalfWidthMet);
+        assert!(
+            (r.ci_high - r.ci_low) / 2.0 <= 0.05 + 1e-12,
+            "half-width {} exceeds the requested 0.05",
+            (r.ci_high - r.ci_low) / 2.0
+        );
+        assert!(r.samples >= conv.min_samples, "stopped below min_samples");
+        assert!(r.samples < conv.max_samples, "did not actually stop early");
+        assert!(r.samples.is_multiple_of(conv.batch_size) || r.samples == conv.min_samples);
+        assert!(r.ci_low <= r.hit_probability && r.hit_probability <= r.ci_high);
+
+        // The report must describe the run it actually did, not the params it ignored.
+        assert_eq!(r.hit_radius_m, DEFAULT_HIT_RADIUS_M);
+        assert_eq!(r.target_distance_m, 300.0);
+        assert_eq!(r.confidence_percent, 95);
+        // `num_simulations` is 1 in `loose_params`; if it were honoured we would see 1 sample.
+        assert!(
+            r.samples > 1,
+            "params.num_simulations must be ignored by the adaptive driver"
+        );
+        // The streaming moments ran over trials that reached the plane: a 300 m shot at
+        // 800 m/s is still supersonic, and the dispersions are nonzero, so both must be too.
+        assert!(
+            r.mean_impact_velocity_mps > 0.0,
+            "no impact velocity accumulated"
+        );
+        assert!(
+            r.std_drop_at_target_m > 0.0 && r.std_wind_drift_at_target_m > 0.0,
+            "dispersion collapsed: drop sd {} drift sd {}",
+            r.std_drop_at_target_m,
+            r.std_wind_drift_at_target_m
+        );
+    }
+
+    #[test]
+    fn adaptive_caps_at_max_samples_on_an_impossible_target() {
+        let (inputs, wind) = seeded_test_fixture();
+        let conv = McConvergence {
+            target_half_width: 1e-6,
+            max_samples: 3_000,
+            batch_size: 500,
+            min_samples: 1_000,
+            level: ConfidenceLevel::P95,
+        };
+        let r = run_monte_carlo_adaptive_seeded(
+            &inputs,
+            &wind,
+            &loose_params(),
+            &conv,
+            DEFAULT_HIT_RADIUS_M,
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(r.stop_reason, McStopReason::MaxSamplesReached);
+        assert_eq!(r.samples, 3_000);
+    }
+
+    #[test]
+    fn adaptive_is_deterministic_for_a_seed() {
+        let (inputs, wind) = seeded_test_fixture();
+        let conv = McConvergence::default();
+        let a = run_monte_carlo_adaptive_seeded(
+            &inputs,
+            &wind,
+            &loose_params(),
+            &conv,
+            DEFAULT_HIT_RADIUS_M,
+            99,
+        )
+        .unwrap();
+        let b = run_monte_carlo_adaptive_seeded(
+            &inputs,
+            &wind,
+            &loose_params(),
+            &conv,
+            DEFAULT_HIT_RADIUS_M,
+            99,
+        )
+        .unwrap();
+
+        assert_eq!(a.hit_probability.to_bits(), b.hit_probability.to_bits());
+        assert_eq!(a.samples, b.samples);
+        assert_eq!(a.ci_low.to_bits(), b.ci_low.to_bits());
+        assert_eq!(a.ci_high.to_bits(), b.ci_high.to_bits());
+        // The streaming moments have to be reproducible too, not just the hit counts: they
+        // are the part that would drift if the trial body consumed draws inconsistently.
+        assert_eq!(
+            a.mean_impact_velocity_mps.to_bits(),
+            b.mean_impact_velocity_mps.to_bits()
+        );
+        assert_eq!(
+            a.std_drop_at_target_m.to_bits(),
+            b.std_drop_at_target_m.to_bits()
+        );
+    }
+
+    #[test]
+    fn adaptive_report_carries_schema_method_and_all_four_assumptions() {
+        let (inputs, wind) = seeded_test_fixture();
+        // Nothing here depends on the statistics, so keep it to one batch.
+        let conv = McConvergence {
+            min_samples: 0,
+            max_samples: 50,
+            batch_size: 50,
+            target_half_width: 1.0,
+            level: ConfidenceLevel::P90,
+        };
+        let r = run_monte_carlo_adaptive_seeded(
+            &inputs,
+            &wind,
+            &loose_params(),
+            &conv,
+            DEFAULT_HIT_RADIUS_M,
+            0x1352_D0C5,
+        )
+        .unwrap();
+
+        assert_eq!(r.schema_version, MC_ADAPTIVE_SCHEMA_VERSION_V1);
+        assert_eq!(r.schema_version, 1);
+        assert_eq!(r.method, "anytime_beta_binomial_mixture_cs_v1");
+        assert_eq!(r.confidence_percent, 90);
+
+        // Length AND per-index full-string equality against literals restated here character
+        // for character. Deliberately NOT compared against MC_ADAPTIVE_ASSUMPTIONS_V1: that
+        // would be circular, passing for any edit to the constant. `contains()` is likewise
+        // not a pin -- a substring probe survives a sentence being reworded, truncated, or
+        // having its meaning inverted around the matched word.
+        assert_eq!(r.assumptions.len(), 4, "exactly four assumptions expected");
+        assert_eq!(
+            r.assumptions[0],
+            "Sampling uncertainty only: intervals cover Monte Carlo sampling error, not model error in the trajectory solver or its inputs."
+        );
+        assert_eq!(
+            r.assumptions[1],
+            "Anytime-valid stopping: the beta-binomial mixture confidence sequence keeps its coverage guarantee despite stopping the moment the target half-width is met."
+        );
+        assert_eq!(
+            r.assumptions[2],
+            "Input dispersions are the independent normal distributions declared in MonteCarloParams; correlations between inputs are not modeled."
+        );
+        assert_eq!(
+            r.assumptions[3],
+            "Continuous statistics are streaming Welford moments over trials that reached the target plane, reported with sample (n-1) standard deviations; hit probability's denominator includes all trials."
+        );
+
+        // The stop reason is a snake_case string on the wire, not a variant name or an index.
+        assert_eq!(
+            serde_json::to_string(&McStopReason::TargetHalfWidthMet).unwrap(),
+            "\"target_half_width_met\""
+        );
+        assert_eq!(
+            serde_json::to_string(&McStopReason::MaxSamplesReached).unwrap(),
+            "\"max_samples_reached\""
+        );
+    }
+
+    #[test]
+    fn adaptive_rejects_nonsense_convergence() {
+        let (inputs, wind) = seeded_test_fixture();
+        let run = |conv: McConvergence| {
+            run_monte_carlo_adaptive_seeded(
+                &inputs,
+                &wind,
+                &loose_params(),
+                &conv,
+                DEFAULT_HIT_RADIUS_M,
+                1,
+            )
+            .unwrap_err()
+        };
+
+        for bad_width in [0.0, -0.01, f64::NAN] {
+            let err = run(McConvergence {
+                target_half_width: bad_width,
+                ..Default::default()
+            });
+            assert!(
+                err.contains("target_half_width"),
+                "error must name the field, got: {err}"
+            );
+        }
+
+        let err = run(McConvergence {
+            batch_size: 0,
+            ..Default::default()
+        });
+        assert!(err.contains("batch_size"), "got: {err}");
+
+        let err = run(McConvergence {
+            min_samples: 5_000,
+            max_samples: 1_000,
+            ..Default::default()
+        });
+        assert!(err.contains("max_samples"), "got: {err}");
+        assert!(err.contains("min_samples"), "got: {err}");
+
+        let err = run(McConvergence {
+            max_samples: 0,
+            min_samples: 0,
+            ..Default::default()
+        });
+        assert!(err.contains("max_samples"), "got: {err}");
+
+        // Validation happens before any trajectory work: a rejected config costs no solves.
+        let err = McConvergence {
+            batch_size: 0,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("batch_size"));
+    }
+
+    #[test]
+    fn wilson_companion_matches_hit_probability_and_wilson_interval() {
+        let (inputs, wind) = seeded_test_fixture();
+        let params = MonteCarloParams {
+            num_simulations: 128,
+            target_distance: Some(500.0),
+            ..MonteCarloParams::default()
+        };
+        let results = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            inputs,
+            wind,
+            params,
+            0.01,
+            0x1352_C0DE,
+        )
+        .expect("seeded legacy run");
+
+        for level in [
+            ConfidenceLevel::P90,
+            ConfidenceLevel::P95,
+            ConfidenceLevel::P99,
+        ] {
+            let (p_hat, (lo, hi), n) =
+                results.hit_probability_wilson(DEFAULT_HIT_RADIUS_M, level);
+
+            // The companion is a composition, not a re-derivation: p_hat must be the very
+            // number `hit_probability` returns, bit for bit.
+            assert_eq!(
+                p_hat.to_bits(),
+                results.hit_probability(DEFAULT_HIT_RADIUS_M).to_bits()
+            );
+            assert_eq!(n, results.impact_positions.len() as u64);
+
+            // ...and the bounds must be `wilson_interval` over the same counts. The hit count
+            // is recomputed here from the shared predicate rather than taken from the
+            // companion, so a wrong denominator (e.g. excluding target shortfalls) fails.
+            let hits = results
+                .impact_positions
+                .iter()
+                .filter(|p| MonteCarloResults::position_is_hit(p, DEFAULT_HIT_RADIUS_M))
+                .count() as u64;
+            let (want_lo, want_hi) = wilson_interval(hits, n, level);
+            assert_eq!(lo.to_bits(), want_lo.to_bits());
+            assert_eq!(hi.to_bits(), want_hi.to_bits());
+            assert!(lo <= p_hat && p_hat <= hi, "interval excludes p_hat");
+        }
+
+        // Empty results: hit_probability's 0.0 alongside wilson_interval's n == 0 ignorance.
+        let empty = MonteCarloResults {
+            ranges: Vec::new(),
+            impact_velocities: Vec::new(),
+            impact_positions: Vec::new(),
+        };
+        assert_eq!(
+            empty.hit_probability_wilson(DEFAULT_HIT_RADIUS_M, ConfidenceLevel::P95),
+            (0.0, (0.0, 1.0), 0)
+        );
     }
 }
 
