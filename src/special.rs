@@ -7,12 +7,15 @@
 //! constants elsewhere -- so `erf`/`erfc`/`normal_cdf` are implemented and tested here
 //! instead of pulling in a crate like `libm` or `statrs`.
 //!
-//! `ln_gamma` is deliberately NOT implemented here: it belongs to a different plan
-//! (Plan C, MBA-1352) and nothing in this plan needs it.
+//! `ln_gamma` and `ln_beta` were added for Plan C (MBA-1352): the beta-binomial
+//! mixture confidence sequence needs the log gamma and log beta functions, and the
+//! same dependency-light posture applies -- implemented and tested here rather than
+//! pulled in from `libm` or `statrs`.
 //!
 //! There is exactly one approximation to validate, [`erfc`]; [`erf`] and
 //! [`normal_cdf`] are thin wrappers over it, computed directly rather than as `1.0 -
-//! erf(...)` so evaluating deep in a tail never cancels away the answer.
+//! erf(...)` so evaluating deep in a tail never cancels away the answer. [`ln_gamma`]
+//! is its own approximation (Lanczos, `g = 7`); [`ln_beta`] is a thin wrapper over it.
 
 /// Error function: `erf(x) = 2/sqrt(pi) * integral_0^x exp(-t^2) dt`.
 ///
@@ -79,6 +82,49 @@ pub fn erfc(x: f64) -> f64 {
 /// is `0.0`.
 pub fn normal_cdf(z: f64) -> f64 {
     0.5 * erfc(-z / std::f64::consts::SQRT_2)
+}
+
+/// Natural log of the gamma function on the positive reals.
+///
+/// Lanczos approximation (g = 7, 9 coefficients). Absolute error is far below
+/// the 1e-12 the tests pin across the tested range; callers here (the
+/// beta-binomial mixture confidence sequence) only need ~1e-10.
+/// Returns NaN for `x <= 0` and non-finite inputs -- this crate's special
+/// functions are total functions with NaN as the out-of-domain signal, not
+/// panics (matches `erf`'s posture).
+pub fn ln_gamma(x: f64) -> f64 {
+    if !x.is_finite() || x <= 0.0 {
+        return f64::NAN;
+    }
+    const G: f64 = 7.0;
+    const COEF: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        // Reflection: ln Gamma(x) = ln(pi / sin(pi*x)) - ln Gamma(1 - x)
+        let pi = std::f64::consts::PI;
+        return (pi / (pi * x).sin()).ln() - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut acc = COEF[0];
+    for (i, c) in COEF.iter().enumerate().skip(1) {
+        acc += c / (x + i as f64);
+    }
+    let t = x + G + 0.5;
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + acc.ln()
+}
+
+/// ln B(a, b) = ln Gamma(a) + ln Gamma(b) - ln Gamma(a + b), same domain rule per argument.
+pub fn ln_beta(a: f64, b: f64) -> f64 {
+    ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)
 }
 
 #[cfg(test)]
@@ -252,5 +298,54 @@ mod tests {
         assert_eq!(normal_cdf(f64::INFINITY), 1.0);
         assert_eq!(normal_cdf(f64::NEG_INFINITY), 0.0);
         assert!(normal_cdf(f64::NAN).is_nan());
+    }
+
+    // Reference values: DLMF 5.4 / Abramowitz & Stegun 6.1; ln Γ(0.5) = ln √π.
+    #[test]
+    fn ln_gamma_matches_published_reference_values() {
+        let cases = [
+            (0.5_f64, 0.572_364_942_924_700_1_f64), // ln sqrt(pi)
+            (1.0, 0.0),
+            (1.5, -0.120_782_237_635_245_22),
+            (2.0, 0.0),
+            (3.0, std::f64::consts::LN_2),          // ln 2! = ln 2
+            (10.0, 12.801_827_480_081_469),         // ln 9!
+            (100.0, 359.134_205_369_575_4),         // ln 99!
+            (0.1, 2.252_712_651_734_206),           // reflection-region case
+        ];
+        for (x, expected) in cases {
+            let got = ln_gamma(x);
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "ln_gamma({x}) = {got}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn ln_gamma_rejects_nonpositive_and_nonfinite() {
+        assert!(ln_gamma(0.0).is_nan());
+        assert!(ln_gamma(-1.0).is_nan());
+        assert!(ln_gamma(f64::NAN).is_nan());
+        assert!(ln_gamma(f64::INFINITY).is_nan());
+    }
+
+    #[test]
+    fn ln_gamma_satisfies_the_recurrence_identity() {
+        // ln Γ(x+1) = ln Γ(x) + ln x — a property pin independent of the table above.
+        for x in [0.3_f64, 0.7, 1.2, 4.5, 25.0, 170.0] {
+            let lhs = ln_gamma(x + 1.0);
+            let rhs = ln_gamma(x) + x.ln();
+            assert!((lhs - rhs).abs() < 1e-10, "recurrence failed at x={x}: {lhs} vs {rhs}");
+        }
+    }
+
+    #[test]
+    fn ln_beta_is_the_gamma_combination_and_is_symmetric() {
+        // B(1,1) = 1 → ln = 0; B(2,3) = 1/12 → ln = -ln 12.
+        assert!((ln_beta(1.0, 1.0) - 0.0).abs() < 1e-14);
+        assert!((ln_beta(2.0, 3.0) - (-(12.0_f64).ln())).abs() < 1e-12);
+        assert!((ln_beta(7.3, 0.4) - ln_beta(0.4, 7.3)).abs() < 1e-13);
+        assert!(ln_beta(0.0, 1.0).is_nan());
     }
 }
