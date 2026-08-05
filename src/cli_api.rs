@@ -5212,6 +5212,107 @@ mod monte_carlo_result_tests {
 mod monte_carlo_seeded_tests {
     use super::*;
 
+    /// Shared fixture for the seeded Monte Carlo tests: the crate defaults at an explicit
+    /// 800 m/s muzzle velocity in still air.
+    ///
+    /// The brief for this task assumed the module already had such a helper; it did not (every
+    /// test above restated the same two literals inline), so it is introduced here and the
+    /// adaptive-driver tests below share it. The existing tests keep their own inline fixtures
+    /// deliberately: rewriting them to call this helper would change nothing about what they
+    /// assert but would put unrelated churn in the same commit as a bit-for-bit pin.
+    fn seeded_test_fixture() -> (BallisticInputs, WindConditions) {
+        (
+            BallisticInputs {
+                muzzle_velocity: 800.0,
+                ..BallisticInputs::default()
+            },
+            WindConditions::default(),
+        )
+    }
+
+    /// THE bit-for-bit compatibility contract for the legacy seeded Monte Carlo path
+    /// (Plan C spec 9.5).
+    ///
+    /// Every literal below was captured by running this exact fixture against the tree at
+    /// commit 5a421bf ("fix(decision-support): close the last three Plan B branch-review
+    /// gaps"), i.e. the last commit before any Plan C change touched `src/cli_api.rs`, and
+    /// printed with `{:?}` (shortest round-tripping form, so the pasted literal reproduces the
+    /// captured `f64` to the bit).
+    ///
+    /// It exists to be run BEFORE and AFTER the per-trial body is extracted into
+    /// [`MonteCarloTrialSampler::sample_one_trial`]. The extraction is only legitimate if the
+    /// sequence and count of RNG draws per trial is unchanged, and that is not something the
+    /// type system can check: a reordered or added draw shifts every subsequent sample and
+    /// shows up here as a mismatch. If this test fails after a refactor of the trial loop, the
+    /// refactor is wrong -- do not re-capture the literals.
+    #[test]
+    fn legacy_seeded_estimates_are_pinned_bit_for_bit() {
+        let (inputs, wind) = seeded_test_fixture();
+        let params = MonteCarloParams {
+            num_simulations: 200,
+            target_distance: Some(500.0),
+            ..MonteCarloParams::default()
+        };
+
+        let results = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            inputs,
+            wind,
+            params,
+            0.01,
+            0x1352_5EED,
+        )
+        .expect("seeded legacy run");
+
+        // Every trial is recorded: no solve failed and no target-plane interpolation was
+        // skipped, so the three vectors are all 200 long. This is asserted, not assumed --
+        // an extraction that started dropping trials would otherwise shorten the vectors
+        // while the first three entries below still matched.
+        assert_eq!(results.ranges.len(), 200, "ranges length");
+        assert_eq!(results.impact_velocities.len(), 200, "impact_velocities length");
+        assert_eq!(results.impact_positions.len(), 200, "impact_positions length");
+
+        // 28 hits in 200 trials.
+        assert_eq!(
+            results.hit_probability(DEFAULT_HIT_RADIUS_M).to_bits(),
+            0.14_f64.to_bits(),
+            "hit_probability = {:?}",
+            results.hit_probability(DEFAULT_HIT_RADIUS_M)
+        );
+
+        let expected_ranges: [f64; 3] =
+            [1907.972891143359, 1936.408435469319, 1912.8150447617645];
+        let expected_velocities: [f64; 3] =
+            [238.6187151542299, 239.91923651600106, 243.14112455427164];
+        let expected_positions: [(f64, f64, f64); 3] = [
+            (0.0, -0.0643556039548101, 0.7344970252014579),
+            (0.0, 0.5769422971539162, 0.27227201756386726),
+            (0.0, -0.7440425792472842, 0.1541804446282822),
+        ];
+
+        for (i, expected) in expected_ranges.iter().enumerate() {
+            assert_eq!(
+                results.ranges[i].to_bits(),
+                expected.to_bits(),
+                "ranges[{i}] = {:?}, pinned {expected:?}",
+                results.ranges[i]
+            );
+        }
+        for (i, expected) in expected_velocities.iter().enumerate() {
+            assert_eq!(
+                results.impact_velocities[i].to_bits(),
+                expected.to_bits(),
+                "impact_velocities[{i}] = {:?}, pinned {expected:?}",
+                results.impact_velocities[i]
+            );
+        }
+        for (i, (x, y, z)) in expected_positions.iter().enumerate() {
+            let actual = results.impact_positions[i];
+            assert_eq!(actual.x.to_bits(), x.to_bits(), "impact_positions[{i}].x = {:?}", actual.x);
+            assert_eq!(actual.y.to_bits(), y.to_bits(), "impact_positions[{i}].y = {:?}", actual.y);
+            assert_eq!(actual.z.to_bits(), z.to_bits(), "impact_positions[{i}].z = {:?}", actual.z);
+        }
+    }
+
     #[test]
     fn seeded_runs_are_deterministic_and_match_the_using_rng_path() {
         let inputs = BallisticInputs {
