@@ -4,13 +4,18 @@
 //! time, so an adaptive Monte Carlo driver never needs to retain the full trial history just
 //! to report a standard deviation. [`wilson_interval`] is the classic fixed-`n` confidence
 //! interval for a Bernoulli hit/miss proportion, evaluated at one of three pinned confidence
-//! levels ([`ConfidenceLevel`]). The anytime-valid beta-binomial-mixture confidence sequence
-//! that lets an adaptive driver peek at partial results without inflating its error rate lives
-//! in this same module too (Task 3 of Plan C, MBA-1352) -- it is added separately.
+//! levels ([`ConfidenceLevel`]). [`BernoulliConfidenceSequence`] is the anytime-valid
+//! beta-binomial-mixture counterpart to [`wilson_interval`]: it lets an adaptive driver peek at
+//! partial results after every trial, and stop on a data-dependent rule, without inflating its
+//! error rate (Task 3 of Plan C, MBA-1352).
 //!
-//! No randomness lives here: this module consumes trial outcomes a caller already produced
-//! (the existing Monte Carlo trial loop in `src/cli_api.rs`) and is pure `std` math only --
-//! no `rand`, no `fs`, no `clap` -- so it compiles for `wasm32-unknown-unknown` unconditionally.
+//! No randomness lives in the production path: this module consumes trial outcomes a caller
+//! already produced (the existing Monte Carlo trial loop in `src/cli_api.rs`) and is pure `std`
+//! math only -- no `rand`, no `fs`, no `clap` -- so it compiles for `wasm32-unknown-unknown`
+//! unconditionally. (One `#[cfg(test)]` test, the empirical coverage check, does draw from a
+//! seeded `rand` generator; nothing outside `#[cfg(test)]` does.)
+
+use crate::special::ln_beta;
 
 /// Online (streaming) mean and variance via Welford's algorithm.
 ///
@@ -166,6 +171,267 @@ pub fn wilson_interval(successes: u64, trials: u64, level: ConfidenceLevel) -> (
     ((center - spread).max(0.0), (center + spread).min(1.0))
 }
 
+/// Bracket floor for the endpoint search: roots are hunted on `(EPS, p_hat]` and
+/// `[p_hat, 1 - EPS)` rather than on the open unit interval, because `ln M_n` diverges at both
+/// ends and a bracket endpoint has to be a finite number. `1e-15` is ~9 ULP away from `0.0` on
+/// the low side and ~9 ULP from `1.0` on the high side, so the excluded slivers are narrower
+/// than any proportion this crate could report meaningfully; a root inside a sliver is reported
+/// as the saturated `0.0` / `1.0`, which widens the interval and therefore cannot break
+/// coverage.
+const BRACKET_EPS: f64 = 1e-15;
+
+/// Bisection steps taken per endpoint by [`BernoulliConfidenceSequence::bounds`]. Fixed, not
+/// tolerance-driven -- see that method's docs for why.
+const BISECTION_ITERS: u32 = 200;
+
+/// `ln M_n(p)`, the log mixture martingale, given the precomputed prior term
+/// `ln_b = ln B(S+1, n-S+1)` (constant across an endpoint search, so it is hoisted out).
+///
+/// The two guards apply the `0 * ln(0) == 0` convention, which makes this a total function at
+/// `p == 0` and `p == 1` (where `S == 0` / `S == n` respectively kill the divergent term) rather
+/// than a `0.0 * -INFINITY == NaN`. The bisection itself never evaluates outside
+/// `[BRACKET_EPS, 1 - BRACKET_EPS]`, so the guards are a correctness margin, not a hot path.
+///
+/// `(1.0 - p).ln()` is used rather than `(-p).ln_1p()`: for `p >= 0.5` the subtraction is exact
+/// (Sterbenz), and for `p < 0.5` the operand is at least `0.5`, so its half-ULP rounding is a
+/// relative `1e-16` that contributes an absolute `~1e-16` to a logarithm -- far below the
+/// `ln_beta` error budget quantified in [`BernoulliConfidenceSequence::bounds`].
+fn ln_mixture(ln_b: f64, successes: f64, failures: f64, p: f64) -> f64 {
+    let mut ln_m = ln_b;
+    if successes > 0.0 {
+        ln_m -= successes * p.ln();
+    }
+    if failures > 0.0 {
+        ln_m -= failures * (1.0 - p).ln();
+    }
+    ln_m
+}
+
+/// Bisects for the endpoint where `ln M_n(p) == threshold`, on a bracket whose `outside` end is
+/// known to exceed the threshold and whose `inside` end is known not to.
+///
+/// Direction-agnostic on purpose: the lower endpoint passes `outside = BRACKET_EPS,
+/// inside = p_hat` and the upper passes `outside = 1 - BRACKET_EPS, inside = p_hat`, so both
+/// endpoints run the identical loop and cannot drift apart under maintenance. Midpoints stay
+/// strictly inside the initial bracket, so `p` never reaches `0.0` or `1.0`.
+fn bisect_endpoint(
+    ln_b: f64,
+    successes: f64,
+    failures: f64,
+    threshold: f64,
+    mut outside: f64,
+    mut inside: f64,
+) -> f64 {
+    for _ in 0..BISECTION_ITERS {
+        let mid = 0.5 * (outside + inside);
+        if ln_mixture(ln_b, successes, failures, mid) > threshold {
+            outside = mid;
+        } else {
+            inside = mid;
+        }
+    }
+    0.5 * (outside + inside)
+}
+
+/// Anytime-valid confidence sequence for a Bernoulli proportion: Robbins' beta-binomial mixture
+/// with a uniform `Beta(1, 1)` prior.
+///
+/// # Why not just re-run [`wilson_interval`]
+///
+/// A fixed-`n` interval is only valid if `n` was fixed *before* the data. An adaptive driver
+/// that watches the interval after every trial and stops when it looks tight enough is doing
+/// optional stopping, and a fixed-`n` interval checked that way has no coverage guarantee at
+/// all: the error rate grows with the number of peeks. A confidence sequence is instead a whole
+/// family of intervals, one per `n`, that are *simultaneously* valid:
+///
+/// ```text
+/// P( there exists n >= 1 with p_true outside CS_n )  <=  alpha
+/// ```
+///
+/// so the caller may look as often as it likes, stop on any rule it likes -- including a
+/// data-dependent one -- and the interval it stops on still covers at the advertised rate. The
+/// price is width: at every `n` this interval is strictly wider than the Wilson interval on the
+/// same counts (pinned by this module's tests). Paying it is the point.
+///
+/// # The mixture martingale
+///
+/// Robbins (1970), "Statistical methods related to the law of the iterated logarithm"; the
+/// modern treatment is Howard, Ramdas, McAuliffe & Sekhon (2021), "Time-uniform, nonasymptotic,
+/// nonparametric confidence sequences". Against a candidate value `p`, with `S` successes in
+/// `n` trials, mix the likelihood ratio over a uniform `Beta(1, 1)` prior on the alternative:
+///
+/// ```text
+/// M_n(p) = integral_0^1 q^S (1-q)^(n-S) dq / [ p^S (1-p)^(n-S) ]
+///        = B(S+1, n-S+1) / [ p^S (1-p)^(n-S) ]
+/// ```
+///
+/// The prior's own normaliser `1 / B(1, 1)` is `1` (`ln B(1,1) == 0`), so it drops out. In logs,
+/// via [`crate::special::ln_beta`]:
+///
+/// ```text
+/// ln M_n(p) = ln B(S+1, n-S+1) - S*ln(p) - (n-S)*ln(1-p)
+/// ```
+///
+/// When `p` is the true success probability, `M_n` is a nonnegative martingale with `M_0 = 1`,
+/// so Ville's inequality bounds it uniformly over all time: `P(exists n : M_n >= 1/alpha) <=
+/// alpha`. Inverting that test -- keeping every `p` the data has not yet ruled out -- gives the
+/// confidence set
+///
+/// ```text
+/// CS_n = { p in (0, 1) : ln M_n(p) <= ln(1/alpha) }
+/// ```
+///
+/// whose miss probability, over the whole infinite sequence at once, is at most `alpha`.
+///
+/// # Asymptotics
+///
+/// Substituting Stirling into `ln B(S+1, n-S+1) = -ln[(n+1) * C(n, S)]` gives
+/// `ln M_n(p) ~ n*KL(p_hat || p) - ln(n+1) + 0.5*ln(2*pi*n*p_hat*(1-p_hat))`, so the half-width
+/// shrinks like `sqrt((ln(1/alpha) + 0.5*ln n) * p_hat*(1-p_hat) * 2 / n)` -- the familiar
+/// `sqrt(log(n)/n)` rate of a confidence sequence, a `sqrt(log n)` factor wider than the
+/// `sqrt(1/n)` of a fixed-`n` interval. That extra factor *is* the optional-stopping licence.
+#[derive(Debug, Clone)]
+pub struct BernoulliConfidenceSequence {
+    successes: u64,
+    trials: u64,
+    alpha: f64,
+}
+
+impl BernoulliConfidenceSequence {
+    /// A fresh sequence with no observations, at the given confidence level.
+    pub fn new(level: ConfidenceLevel) -> Self {
+        Self {
+            successes: 0,
+            trials: 0,
+            alpha: level.alpha(),
+        }
+    }
+
+    /// Folds in one more trial.
+    pub fn update(&mut self, hit: bool) {
+        self.trials = self.trials.saturating_add(1);
+        if hit {
+            self.successes = self.successes.saturating_add(1);
+        }
+    }
+
+    /// Folds in `trials` more trials of which `hits` succeeded.
+    ///
+    /// `hits` above `trials` saturates at `trials` rather than panicking or asserting, matching
+    /// [`wilson_interval`]'s posture for the same malformed input so the two functions cannot
+    /// disagree about what a bad count means. That choice is load-bearing here rather than
+    /// merely tidy: `S > n` would make the second argument of `ln B(S+1, n-S+1)` non-positive,
+    /// [`crate::special::ln_gamma`] returns `NaN` out of domain, and `NaN > threshold` is
+    /// `false` -- so `bisect_endpoint` would take its `else` arm 200 times running and return
+    /// a perfectly plausible-looking number pinned to the bracket end instead of signalling
+    /// anything. Saturating at the input removes that silent-wrong-answer path entirely. A
+    /// `debug_assert!` was considered and rejected for the reason recorded on `wilson_interval`:
+    /// it would panic under plain `cargo test`, leaving the documented behaviour unpinnable by
+    /// an ordinary test.
+    ///
+    /// Both counters saturate at `u64::MAX` too, which preserves the `successes <= trials`
+    /// invariant (`min(S+h, MAX) <= min(n+t, MAX)` whenever `S <= n` and `h <= t`).
+    pub fn update_batch(&mut self, hits: u64, trials: u64) {
+        self.trials = self.trials.saturating_add(trials);
+        self.successes = self.successes.saturating_add(hits.min(trials));
+    }
+
+    /// Successes observed so far.
+    pub fn successes(&self) -> u64 {
+        self.successes
+    }
+
+    /// Trials observed so far.
+    pub fn trials(&self) -> u64 {
+        self.trials
+    }
+
+    /// The current interval: every `p` not yet ruled out at level `alpha`.
+    ///
+    /// `(0.0, 1.0)` when no trials have been folded in -- total ignorance, the same answer
+    /// [`wilson_interval`] gives at `n == 0`, and not an error.
+    ///
+    /// # How the endpoints are found
+    ///
+    /// `d^2/dp^2 ln M_n(p) = S/p^2 + (n-S)/(1-p)^2 > 0`, so `ln M_n` is strictly convex on
+    /// `(0, 1)` with its unique minimum at the MLE `p_hat = S/n`. The confidence set is
+    /// therefore a genuine interval, bounded by the two solutions of
+    /// `ln M_n(p) = ln(1/alpha)`, one on each side of `p_hat`.
+    ///
+    /// `p_hat` is always strictly inside the set, so both brackets are always valid: the
+    /// minimum value is `ln M_n(p_hat) = -ln[(n+1) * C(n,S) * p_hat^S * (1-p_hat)^(n-S)]`, and
+    /// the method-of-types bound (Cover & Thomas, *Elements of Information Theory*, Thm 11.1.4:
+    /// a type's probability under its own maximum-likelihood distribution is at least
+    /// `1/(n+1)^(|alphabet|-1)`, here `1/(n+1)`) makes that bracketed product at least `1`,
+    /// hence `ln M_n(p_hat) <= 0 < ln(1/alpha)` for every `n >= 1` and every level.
+    ///
+    /// Each endpoint is then bisected with exactly `BISECTION_ITERS` (200) steps -- a fixed count,
+    /// not a tolerance test. Every step halves the bracket, so after 200 the bracket is
+    /// `2^-200 ~ 6e-61` of a starting width below `1.0`: the loop has been sitting on two
+    /// adjacent doubles since roughly step 55, and the remaining steps are no-ops that keep
+    /// `bounds()` a pure function of `(S, n, alpha)` with no data-dependent trip count. Since
+    /// the search resolves `p` to the last bit, accuracy is set by `ln M_n` itself, i.e. by
+    /// [`crate::special::ln_beta`]: its measured `~7e-16` relative error at `n = 1e6` is an
+    /// absolute `~5e-10` on an `ln B` of magnitude `~7e5`, and dividing by the slope of
+    /// `ln M_n` at the endpoint (`~9e3` there) puts the endpoint error near `1e-13` -- ten
+    /// orders of magnitude below the `~2e-3` half-width at that `n`.
+    ///
+    /// # Saturation
+    ///
+    /// The lower root can never sit above `p_hat`, so `p_hat <= BRACKET_EPS` (which includes
+    /// `S == 0`, where `p_hat` is exactly `0`) means the root is below anything the bracket can
+    /// resolve: the bound is reported as exactly `0.0`. The upper side mirrors it at
+    /// `p_hat >= 1 - BRACKET_EPS` (including `S == n`, reported as exactly `1.0`). Independently
+    /// of that, at very small `n` the threshold can exceed `ln M_n` even at the bracket end --
+    /// with `n = 1` and 95% confidence, no `p` above `0.025` is excluded on the low side -- and
+    /// then too the bound saturates rather than reporting a root that does not exist. Both
+    /// saturations widen the interval, so neither can cost coverage.
+    pub fn bounds(&self) -> (f64, f64) {
+        if self.trials == 0 {
+            return (0.0, 1.0);
+        }
+        let n = self.trials as f64;
+        // The invariant is maintained by both update paths; re-imposed here so a future
+        // constructor cannot leak an S > n state into ln_gamma's NaN domain.
+        let successes = self.successes.min(self.trials) as f64;
+        let failures = n - successes;
+        let p_hat = successes / n;
+        let threshold = -self.alpha.ln(); // ln(1/alpha)
+        let ln_b = ln_beta(successes + 1.0, failures + 1.0);
+
+        let lower = if p_hat <= BRACKET_EPS
+            || ln_mixture(ln_b, successes, failures, BRACKET_EPS) <= threshold
+        {
+            0.0
+        } else {
+            bisect_endpoint(ln_b, successes, failures, threshold, BRACKET_EPS, p_hat)
+        };
+
+        let upper = if p_hat >= 1.0 - BRACKET_EPS
+            || ln_mixture(ln_b, successes, failures, 1.0 - BRACKET_EPS) <= threshold
+        {
+            1.0
+        } else {
+            bisect_endpoint(
+                ln_b,
+                successes,
+                failures,
+                threshold,
+                1.0 - BRACKET_EPS,
+                p_hat,
+            )
+        };
+
+        (lower, upper)
+    }
+
+    /// Half the width of the current interval; `0.5` before any trials.
+    pub fn half_width(&self) -> f64 {
+        let (lo, hi) = self.bounds();
+        (hi - lo) / 2.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +560,184 @@ mod tests {
             assert_eq!(wilson_interval(37, 20, level), wilson_interval(20, 20, level));
             assert_eq!(wilson_interval(u64::MAX, 20, level), wilson_interval(20, 20, level));
         }
+    }
+
+    #[test]
+    fn cs_starts_ignorant_and_shrinks_monotonically_in_n() {
+        let mut cs = BernoulliConfidenceSequence::new(ConfidenceLevel::P95);
+        assert_eq!(cs.bounds(), (0.0, 1.0));
+        let mut prev = 1.0_f64;
+        // Alternate hits/misses so p̂ stays near 0.5 while n grows.
+        for i in 0..2000 {
+            cs.update(i % 2 == 0);
+            if i % 100 == 99 {
+                let hw = cs.half_width();
+                assert!(hw <= prev + 1e-12, "half-width grew at n={}: {hw} > {prev}", i + 1);
+                prev = hw;
+            }
+        }
+        let (lo, hi) = cs.bounds();
+        assert!(lo > 0.0 && hi < 1.0 && lo < 0.5 && 0.5 < hi);
+    }
+
+    #[test]
+    fn cs_edges_saturate_exactly() {
+        let mut cs = BernoulliConfidenceSequence::new(ConfidenceLevel::P95);
+        cs.update_batch(0, 50);
+        let (lo, hi) = cs.bounds();
+        assert_eq!(lo, 0.0);
+        assert!(hi < 0.25 && hi > 0.0);
+        let mut cs2 = BernoulliConfidenceSequence::new(ConfidenceLevel::P95);
+        cs2.update_batch(50, 50);
+        let (lo2, hi2) = cs2.bounds();
+        assert_eq!(hi2, 1.0);
+        assert!(lo2 > 0.75 && lo2 < 1.0);
+    }
+
+    #[test]
+    fn cs_is_wider_than_wilson_at_the_same_n() {
+        // The honesty property that motivates anytime-validity: the price of
+        // optional stopping is a wider interval than the fixed-n Wilson at every n.
+        for &(k, n) in &[(10_u64, 40_u64), (81, 263), (500, 1000)] {
+            let mut cs = BernoulliConfidenceSequence::new(ConfidenceLevel::P95);
+            cs.update_batch(k, n);
+            let (clo, chi) = cs.bounds();
+            let (wlo, whi) = wilson_interval(k, n, ConfidenceLevel::P95);
+            assert!(chi - clo > whi - wlo, "CS not wider than Wilson at k={k}, n={n}");
+        }
+    }
+
+    #[test]
+    fn cs_bounds_are_deterministic_and_batch_order_invariant() {
+        let mut a = BernoulliConfidenceSequence::new(ConfidenceLevel::P99);
+        let mut b = BernoulliConfidenceSequence::new(ConfidenceLevel::P99);
+        a.update_batch(30, 100);
+        for i in 0..100 { b.update(i < 30); }
+        assert_eq!(a.bounds(), b.bounds()); // state is (S, n) only — exact equality
+    }
+
+    /// The structural preconditions `bounds()` relies on, swept rather than argued: the
+    /// endpoints bracket the MLE (so the two bisections really did straddle the root, and
+    /// `ln M_n(p_hat) <= 0 < ln(1/alpha)` really does hold at every `(S, n)` — the
+    /// method-of-types claim in the `bounds()` docs), the interval stays inside `[0, 1]`,
+    /// and lowering alpha only ever widens it. A sign error or a swapped bracket in the
+    /// endpoint search fails this even where the brief's fixtures happen to look sane.
+    #[test]
+    fn cs_brackets_the_mle_and_nests_by_confidence_level() {
+        for n in 1_u64..=60 {
+            for s in 0..=n {
+                let p_hat = s as f64 / n as f64;
+                let mut widths = Vec::new();
+                for level in [ConfidenceLevel::P90, ConfidenceLevel::P95, ConfidenceLevel::P99] {
+                    let mut cs = BernoulliConfidenceSequence::new(level);
+                    cs.update_batch(s, n);
+                    let (lo, hi) = cs.bounds();
+                    assert!(lo.is_finite() && hi.is_finite(), "non-finite bound at s={s} n={n}");
+                    assert!((0.0..=1.0).contains(&lo), "lo={lo} out of [0,1] at s={s} n={n}");
+                    assert!((0.0..=1.0).contains(&hi), "hi={hi} out of [0,1] at s={s} n={n}");
+                    assert!(lo <= p_hat, "lo={lo} above p_hat={p_hat} at s={s} n={n} {level:?}");
+                    assert!(hi >= p_hat, "hi={hi} below p_hat={p_hat} at s={s} n={n} {level:?}");
+                    assert!((hi - lo - 2.0 * cs.half_width()).abs() < 1e-15);
+                    widths.push(hi - lo);
+                }
+                assert!(widths[0] <= widths[1], "P90 wider than P95 at s={s} n={n}");
+                assert!(widths[1] <= widths[2], "P95 wider than P99 at s={s} n={n}");
+            }
+        }
+        // Malformed counts saturate instead of reaching ln_gamma's NaN domain, matching
+        // `wilson_interval`'s posture (see `update_batch`'s docs).
+        let mut bad = BernoulliConfidenceSequence::new(ConfidenceLevel::P95);
+        bad.update_batch(u64::MAX, 20);
+        assert_eq!(bad.successes(), 20);
+        assert_eq!(bad.trials(), 20);
+        let (lo, hi) = bad.bounds();
+        assert!(lo > 0.0 && !lo.is_nan(), "lo={lo}");
+        assert_eq!(hi, 1.0);
+    }
+
+    /// Exact binomial CDF `P(X <= k)` for `X ~ Bin(n, p)`, used to set the coverage floor
+    /// below. Forward pmf recursion — `pmf(0) = (1-p)^n`, `pmf(i) = pmf(i-1) * ((n-i+1)/i) *
+    /// (p/(1-p))` — so no factorial ever has to be represented, and no special function from
+    /// this crate is involved (the floor stays an independent oracle).
+    fn binomial_cdf(k: usize, n: usize, p: f64) -> f64 {
+        let ratio = p / (1.0 - p);
+        let mut term = (1.0 - p).powi(n as i32);
+        let mut total = term;
+        for i in 1..=k.min(n) {
+            term *= ratio * (n - i + 1) as f64 / i as f64;
+            total += term;
+        }
+        total.min(1.0)
+    }
+
+    /// Empirical coverage under OPTIONAL STOPPING — the spec's acceptance test,
+    /// following the exact-binomial-tail methodology of tests/truing_uncertainty.rs
+    /// (fixed committed seed; a floor that nominal coverage essentially never
+    /// violates but material undercoverage reliably does; an anti-width guard so
+    /// trivially-wide intervals cannot pass).
+    #[test]
+    fn cs_coverage_survives_optional_stopping() {
+        // `RngExt`, not the brief's `Rng`: this crate pins rand 0.10, which moved the
+        // `random::<T>()` extension method off `Rng` onto `RngExt`.
+        use rand::{rngs::StdRng, RngExt, SeedableRng};
+        const TRIALS: usize = 200;
+        const P_TRUE: f64 = 0.30;
+        let mut rng = StdRng::seed_from_u64(0x1352_C0FF_EE00_0001);
+        let mut covered = 0_usize;
+        let mut final_half_widths = 0.0_f64;
+        for _ in 0..TRIALS {
+            let mut cs = BernoulliConfidenceSequence::new(ConfidenceLevel::P95);
+            // Optional stopping: stop the moment the half-width crosses 0.08,
+            // or at 5000 draws. This is exactly the usage pattern that breaks
+            // a repeated-Wilson check.
+            for _ in 0..5000 {
+                cs.update(rng.random::<f64>() < P_TRUE);
+                if cs.trials() >= 50 && cs.half_width() <= 0.08 { break; }
+            }
+            let (lo, hi) = cs.bounds();
+            if lo <= P_TRUE && P_TRUE <= hi { covered += 1; }
+            final_half_widths += cs.half_width();
+        }
+        let mean_hw = final_half_widths / TRIALS as f64;
+        eprintln!("MBA-1352 CS coverage: {covered}/{TRIALS}, mean final half-width {mean_hw:.5}");
+
+        // Floor by exact binomial tail at the *advertised* level, p = 0.95 — the worst case a
+        // correct anytime-valid construction has to survive (its true coverage is >= 0.95, and
+        // measurably higher than that here, so this is conservative twice over). Recomputed by
+        // `binomial_cdf` above rather than quoted:
+        //   P(X <= 179 | n = 200, p = 0.95) = 1.1599e-3   <- this floor's false-failure rate
+        // the same order as truing_uncertainty.rs's ">= 33 of 40" precedent (7.115e-4).
+        //
+        // NOTE, deliberate divergence from the plan: the plan sketched "P(covered <= 183) ~
+        // 8.4e-4" and a floor of 184. The exact tail at 183 is 2.3799e-2 — 28x the quoted
+        // figure, i.e. a 1-in-42 false-failure rate at nominal, well outside the cited
+        // precedent. 8.4e-4 actually lands between k=178 (4.8111e-4) and k=179 (1.1599e-3), so
+        // it is the tail belonging to a floor of 179-180, not 184. The computed value governs.
+        //
+        // What this floor does and does not catch, measured by mutating `bounds()` at this
+        // seed rather than assumed: dropping the `ln B(S+1, n-S+1)` prior term collapses
+        // coverage to 26/200 and fails loudly. But substituting a repeated Wilson interval
+        // scores 185/200 and swapping alpha for the confidence in the threshold scores
+        // 192/200 — both pass, at this floor *and* at the plan's 184. That is a property of
+        // the stopping rule, not of the floor: stopping at a fixed half-width of 0.08 fixes
+        // the final interval width, so every construction is judged at whatever `n` it needs
+        // to reach that width, which equalizes coverage. Those two failure modes are pinned
+        // structurally instead, by `cs_is_wider_than_wilson_at_the_same_n` and
+        // `cs_brackets_the_mle_and_nests_by_confidence_level` (both of which do fail on both
+        // mutants). Read this test as "the sequence does not undercover under optional
+        // stopping", not as the sole guard on the construction.
+        const COVERAGE_FLOOR: usize = 180;
+        let false_failure_rate = binomial_cdf(COVERAGE_FLOOR - 1, TRIALS, 0.95);
+        assert!(
+            (false_failure_rate - 1.1599e-3).abs() < 1e-6,
+            "exact tail P(X <= {}) = {false_failure_rate:.6e}, expected ~1.1599e-3",
+            COVERAGE_FLOOR - 1
+        );
+        assert!(
+            covered >= COVERAGE_FLOOR,
+            "coverage {covered}/{TRIALS} below the exact-tail floor {COVERAGE_FLOOR}"
+        );
+        // Anti-width guard: mean final half-width must show real convergence.
+        assert!(mean_hw < 0.12, "mean final half-width {mean_hw} — intervals not converging");
     }
 }
