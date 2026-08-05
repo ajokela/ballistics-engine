@@ -1363,11 +1363,13 @@ enum Commands {
         #[arg(long, conflicts_with = "wez")]
         adaptive: bool,
 
-        /// Confidence level of the reported hit-probability interval: 90, 95, or 99. Applies
-        /// both to the fixed-count Wilson companion line/JSON key shown alongside the estimate
-        /// and, under --adaptive, to the confidence sequence's stopping rule and interval.
-        #[arg(long, default_value = "95", value_parser = parse_confidence_level)]
-        confidence: ConfidenceLevel,
+        /// Confidence level of the reported hit-probability interval: 90, 95, or 99 (default
+        /// 95). Applies both to the fixed-count Wilson companion line/JSON key shown alongside
+        /// the estimate and, under --adaptive, to the confidence sequence's stopping rule and
+        /// interval. Has NO effect with --wez (the sweep reports no interval at all): passing
+        /// it there prints a one-line stderr note and does not change the exit status.
+        #[arg(long, value_parser = parse_confidence_level)]
+        confidence: Option<ConfidenceLevel>,
 
         /// --adaptive: stop once the confidence interval's half-width is at or below this many
         /// probability units (e.g. 0.02 = the hit probability is known to within about +-2
@@ -1383,20 +1385,19 @@ enum Commands {
 
         /// --adaptive: never stop before this many trials, even if the interval is already
         /// tight (guards against an early run of all-hits or all-misses looking falsely
-        /// precise). Matches --num-sims's legacy default of 1000.
-        #[arg(long, default_value = "1000", requires = "adaptive")]
-        min_samples: u64,
+        /// precise). Default 1000, matching --num-sims's own legacy default.
+        #[arg(long, requires = "adaptive")]
+        min_samples: Option<u64>,
 
         /// --adaptive: never run more than this many trials, even if the interval is still
         /// wide. Bounds the wall time of an unreachable --target-ci-half-width; hitting it is
-        /// an honest, successful run (exit 0), not an error.
+        /// an honest, successful run (exit 0), not an error. Default 100000.
         #[arg(
             long,
-            default_value = "100000",
             requires = "adaptive",
             value_parser = clap::value_parser!(u64).range(1..)
         )]
-        max_samples: u64,
+        max_samples: Option<u64>,
 
         /// --adaptive: how many trials to run between convergence checks. Smaller batches can
         /// stop sooner; larger batches check less often.
@@ -1410,11 +1411,13 @@ enum Commands {
 
         /// Seed the Monte Carlo RNG for reproducible output (both the default fixed-count path
         /// and --adaptive). Without it, each run draws fresh randomness and is not reproducible
-        /// run to run.
+        /// run to run. Has NO effect with --wez (the sweep seeds itself internally): passing it
+        /// there prints a one-line stderr note and does not change the exit status.
         #[arg(long)]
         seed: Option<u64>,
 
-        /// Output format
+        /// Output format: summary (default), full/json, or statistics (not available with
+        /// --adaptive).
         #[arg(short = 'o', long, default_value = "summary")]
         output: MonteCarloOutput,
     },
@@ -4397,13 +4400,14 @@ impl RecoilFirearmTypeArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MonteCarloOutput {
     Summary,
-    /// MBA-1352: `json` is accepted as an alias so `monte-carlo --adaptive -o json` matches
-    /// the `-o json` spelling every sibling decision-support subcommand uses; the value is
-    /// still `Full` underneath (`--adaptive`'s JSON is `AdaptiveMcReportV1` verbatim, the
-    /// fixed-count path's is the existing `MonteCarloResult` plus the new additive
-    /// `hit_probability_ci` key -- see the dispatch match on `output` in each of
-    /// `run_monte_carlo`/`run_monte_carlo_adaptive`).
-    #[value(alias = "json")]
+    /// Full JSON report (also accepted as `full`).
+    // MBA-1352: `json` is now the primary/listed spelling (so it shows in `--help`'s
+    // possible-values, matching the `-o json` convention every sibling decision-support
+    // subcommand uses); `full` survives as a hidden alias so existing scripts keep working.
+    // Fixed-count -> `MonteCarloResult` (now with the additive `hit_probability_ci` key);
+    // `--adaptive` -> `AdaptiveMcReportV1` verbatim. See the dispatch match on `output` in
+    // each of `run_monte_carlo`/`run_monte_carlo_adaptive`.
+    #[value(name = "json", alias = "full")]
     Full,
     Statistics,
 }
@@ -10134,6 +10138,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             if wez {
                 // MBA-1317: WEZ (Weapon Employment Zone) sweep mode.
+                // MBA-1352 review I2: --confidence/--seed are genuine no-ops here (the sweep's
+                // per-row p_hit carries no interval at all, and `run_monte_carlo_wez` seeds
+                // itself internally) -- disclosed rather than silent, since an unseeded WEZ run
+                // is itself reproducible run-to-run (compute_wez has no per-call randomness of
+                // its own to seed), which would otherwise make --seed look honored when tested
+                // the obvious way. Additive stderr only; the run still succeeds unchanged.
+                if confidence.is_some() {
+                    eprintln!(
+                        "note: --confidence has no effect with --wez (the sweep reports a bare hit probability, no confidence interval)"
+                    );
+                }
+                if seed.is_some() {
+                    eprintln!(
+                        "note: --seed has no effect with --wez (the sweep seeds itself internally with a fixed per-range-step seed, not --seed)"
+                    );
+                }
                 let target_size_spec = target_size
                     .as_deref()
                     .ok_or("--target-size is required with --wez (e.g. --target-size 18x30)")?;
@@ -10239,7 +10259,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     cant,
                     sight_offset_lateral_m,
                     seed,
-                    confidence,
+                    confidence.unwrap_or(ConfidenceLevel::P95),
                     output,
                 )?;
             }
@@ -15945,14 +15965,29 @@ fn run_monte_carlo(
 /// CLI-resolved `--adaptive` controls (MBA-1352), bundled into one argument so
 /// [`run_monte_carlo_adaptive`]'s signature does not grow a further trailing scalar parameter
 /// for every knob [`McConvergence`] exposes.
+///
+/// `confidence`/`min_samples`/`max_samples` stay `Option` all the way to
+/// [`run_monte_carlo_adaptive`] (rather than being defaulted at the clap layer) so that
+/// function can tell a value the user typed from one it didn't -- needed both to name
+/// `--max-samples`/`--min-samples` (not the library's `McConvergence` field names) in the
+/// cross-field validation error, and to say which side of it is an untouched default
+/// (review I3).
 struct AdaptiveMcCliControls {
-    confidence: ConfidenceLevel,
+    confidence: Option<ConfidenceLevel>,
     target_half_width: f64,
-    min_samples: u64,
-    max_samples: u64,
+    min_samples: Option<u64>,
+    max_samples: Option<u64>,
     batch_size: u64,
     seed: Option<u64>,
 }
+
+/// [`McConvergence::min_samples`]'s default, mirrored here (rather than a clap
+/// `default_value`) so [`run_monte_carlo_adaptive`] can state, in its own words, when an
+/// out-of-order `--min-samples`/`--max-samples` pair involves a value the user never typed
+/// (review I3).
+const DEFAULT_MC_MIN_SAMPLES: u64 = 1_000;
+/// [`McConvergence::max_samples`]'s default; see [`DEFAULT_MC_MIN_SAMPLES`].
+const DEFAULT_MC_MAX_SAMPLES: u64 = 100_000;
 
 #[allow(
     clippy::too_many_arguments,
@@ -16028,11 +16063,37 @@ fn run_monte_carlo_adaptive(
         azimuth_std_dev: angle_std.to_radians() * 0.5,
     };
 
+    let min_samples = controls.min_samples.unwrap_or(DEFAULT_MC_MIN_SAMPLES);
+    let max_samples = controls.max_samples.unwrap_or(DEFAULT_MC_MAX_SAMPLES);
+
+    // MBA-1352 review I3: pre-validated here, at the CLI boundary, so an out-of-order pair is a
+    // clap-adjacent usage error naming `--max-samples`/`--min-samples` -- not
+    // `McConvergence::validate`'s field-qualified "McConvergence.max_samples ... must be at
+    // least McConvergence.min_samples ...", which names a library struct the CLI user has never
+    // heard of. `McConvergence::validate` itself is untouched and still gives that message to
+    // direct library callers; this short-circuits the CLI from ever reaching it for this one
+    // case. Each side of the message also states when its value is an untouched default rather
+    // than something the user typed, since `--min-samples 200000` alone quotes
+    // `DEFAULT_MC_MAX_SAMPLES` in the comparison without that qualifier being confusing about
+    // where the number came from.
+    if max_samples < min_samples {
+        let describe = |flag: &str, value: Option<u64>, default: u64| match value {
+            Some(v) => format!("{flag} ({v})"),
+            None => format!("{flag} (default {default})"),
+        };
+        return Err(format!(
+            "{} must be at least {}",
+            describe("--max-samples", controls.max_samples, DEFAULT_MC_MAX_SAMPLES),
+            describe("--min-samples", controls.min_samples, DEFAULT_MC_MIN_SAMPLES),
+        )
+        .into());
+    }
+
     let convergence = McConvergence {
-        level: controls.confidence,
+        level: controls.confidence.unwrap_or(ConfidenceLevel::P95),
         target_half_width: controls.target_half_width,
-        min_samples: controls.min_samples,
-        max_samples: controls.max_samples,
+        min_samples,
+        max_samples,
         batch_size: controls.batch_size,
     };
 

@@ -87,8 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted request shape, and no resolved-request behavior changed by anything here (see the
   Changed entries below for what solve-json v1 *did* gain this release).
 - **Confidence-controlled Monte Carlo** (0.33.0 decision-support Plan C, MBA-1352): every
-  `monte-carlo` hit-probability estimate now states its sample count, method, confidence level,
-  and interval, on both the existing run and a new opt-in mode:
+  *sampled* `monte-carlo` hit-probability estimate -- the fixed-count run and the new opt-in
+  `--adaptive` mode, not the separate `--wez` sweep -- now states its sample count, method,
+  confidence level, and interval:
   - The existing fixed-`n` `monte-carlo --target-distance` run gains an additive Wilson
     interval alongside the unchanged point estimate: a `Hit probability NN% CI: [lo, hi]
     (Wilson, n=N)` line under the existing `Hit Probability:` line, and an additive
@@ -102,9 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cardinalities (`attempts` drawn, `samples` that produced an outcome, `arrivals` that
     reached the target plane) as a versioned report, `AdaptiveMcReportV1` (`-o json`/`-o full`
     verbatim, `json` accepted as an alias for `full`), or a plain-text summary block (table
-    output). Ignores `--num-sims` and `--wind-direction-std`; incompatible with `--wez`, which
-    stays fixed-count. New `--seed` flag (reused by the fixed-count path above too) makes any
-    run reproducible.
+    output). Ignores `--num-sims` and `--wind-direction-std`; incompatible with `--wez`
+    (`--adaptive --wez` is a usage error), which is a different report entirely and states no
+    interval of its own, per spec. New `--seed` flag (reused by the fixed-count path above too)
+    makes any run reproducible. `--confidence`/`--seed` are no-ops under `--wez` (its per-range
+    `p_hit` carries no interval and it seeds itself internally) -- each prints a one-line stderr
+    note there instead of doing nothing silently, and the sweep still runs and exits
+    unchanged.
 
   See [CLI_USAGE.md](CLI_USAGE.md#confidence-controlled-sampling---adaptive--mba-1352) for the
   full flag table, captured examples, and the reported assumptions (sampling error only, never

@@ -2017,18 +2017,31 @@ for.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--confidence <90\|95\|99>` | `95` | Confidence level of the reported interval. Applies to the fixed-count Wilson line/JSON key below AND to `--adaptive`'s stopping rule and interval. Any other value is a usage error naming `--confidence` and listing the three choices. |
-| `--adaptive` | off | Switch from a fixed `--num-sims` to confidence-controlled sampling (below). Incompatible with `--wez`, which stays fixed-count. |
+| `--confidence <90\|95\|99>` | `95` | Confidence level of the reported interval. Applies to the fixed-count Wilson line/JSON key below and to `--adaptive`'s stopping rule and interval -- **not** to `--wez`'s per-range sweep, which reports no interval of any kind (see the note below the table). Any other value is a usage error naming `--confidence` and listing the three choices. |
+| `--adaptive` | off | Switch from a fixed `--num-sims` to confidence-controlled sampling (below). `conflicts_with` `--wez`: the two are mutually exclusive flags on the same command line, and `--wez` is a different report out of this section's scope entirely (see the note below the table), not a second "fixed-count" mode that also gets a Wilson interval. |
 | `--target-ci-half-width <p>` | `0.02` | `--adaptive` only. Stop once the interval's half-width is at or below this many **probability units** (`0.02` = the hit probability is known to within about ±2 percentage points). Must be finite and greater than zero. Requires `--adaptive`. |
 | `--min-samples <n>` | `1000` | `--adaptive` only. Never stop before this many trials, even if the interval already looks tight. Matches `--num-sims`'s own legacy default. Requires `--adaptive`. |
 | `--max-samples <n>` | `100000` | `--adaptive` only. Never run more than this many trials. Hitting it is an honest, successful run (exit `0`), not an error. Requires `--adaptive`. |
 | `--mc-batch-size <n>` | `500` | `--adaptive` only. How many trials to run between convergence checks. Requires `--adaptive`. |
-| `--seed <u64>` | none (fresh randomness each run) | Seeds the Monte Carlo RNG for reproducible output, on **both** the default fixed-count path and `--adaptive`. |
+| `--seed <u64>` | none (fresh randomness each run) | Seeds the Monte Carlo RNG for reproducible output, on **both** the default fixed-count path and `--adaptive` -- but **not** `--wez`, which seeds itself internally (see the note below the table). |
 
 `--adaptive` ignores `--num-sims` (`--min-samples` is the floor instead -- the two modes have
 different stopping semantics) and `--wind-direction-std` (the adaptive driver disperses no wind
 direction, matching `run_monte_carlo_with_wind`); both are silently unused rather than errors,
 since they still apply to every *other* `monte-carlo` mode on the same command line.
+
+**`--wez` is a different report entirely, and this section does not apply to it.** Its per-range
+`p_hit` (see the [WEZ section](#wez-weapon-employment-zone-sweep) below) is a bare point
+estimate with no sample count, method, confidence level, or interval attached -- sampling
+statistics are deliberately out of scope for that sweep. `--confidence` and `--seed` therefore
+have no effect on `--wez` output: passing either alongside `--wez` prints a one-line disclosure
+to stderr, and the sweep still runs and exits successfully -- the note is a disclosure, not an
+error:
+
+```
+note: --confidence has no effect with --wez (the sweep reports a bare hit probability, no confidence interval)
+note: --seed has no effect with --wez (the sweep seeds itself internally with a fixed per-range-step seed, not --seed)
+```
 
 **Fixed-count mode gains one line.** No existing number or field changes shape -- `--seed` is
 new too, added only so this example reproduces exactly if you run it yourself; the run behaves

@@ -389,3 +389,110 @@ fn adaptive_o_json_and_o_full_are_the_same_report() {
 
     assert_eq!(json_out, full_out, "-o json must be an alias for -o full, not a distinct shape");
 }
+
+// ---- review fix round (task-5-review.md), I1: `json` must be discoverable in --help's own
+// possible-values list, and the variant's doc comment must read as user-facing help, not a
+// maintainer note naming private functions/structs. ----
+
+#[test]
+fn output_help_lists_json_and_carries_no_maintainer_prose() {
+    let output = Command::new(bin())
+        .args(["monte-carlo", "--help"])
+        .output()
+        .expect("run ballistics --help");
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+
+    assert!(help.contains("- json:"), "json must be a listed possible value: {help}");
+    // `full` still works (checked functionally by adaptive_o_json_and_o_full_are_the_same_report
+    // above) but is a backward-compatible alias now, not the primary/listed spelling.
+    assert!(!help.contains("- full:"), "{help}");
+
+    // Scope the maintainer-note-leak check to just the `-o, --output` flag's own block: several
+    // OTHER flags on this subcommand (e.g. --adaptive) legitimately cite MBA-1352 in their own
+    // user-facing help, so checking the whole page would false-positive on those.
+    let output_block_start = help.find("-o, --output").expect("--output flag block");
+    let output_block = &help[output_block_start..];
+    let output_block_end = output_block.find("-h, --help").unwrap_or(output_block.len());
+    let output_block = &output_block[..output_block_end];
+
+    // The old doc comment named these private items and a ticket ID as CLI help text, right on
+    // the `full`/`json` value's own line; none of that is user-facing information and must not
+    // reappear in this flag's help.
+    for leaked in [
+        "run_monte_carlo_adaptive",
+        "sample_one_trial",
+        "MonteCarloTrialSampler",
+        "dispatch match",
+        "MBA-1352",
+    ] {
+        assert!(!output_block.contains(leaked), "maintainer-note leak {leaked:?}: {output_block}");
+    }
+}
+
+// ---- review fix round, I2: --confidence/--seed are no-ops under --wez (spec 14 scopes WEZ out
+// of sampling statistics); both must say so on stderr rather than silently doing nothing, and
+// the run must still succeed. Fast fixture: a single wez step, tiny -n. ----
+
+#[test]
+fn wez_with_confidence_or_seed_notes_the_no_op_and_still_succeeds() {
+    let wez_tail = [
+        "-n", "5", "--wez", "--target-size", "30x30",
+        "--wez-start", "100", "--wez-end", "100", "--wez-step", "100",
+    ];
+
+    let mut with_both = wez_tail.to_vec();
+    with_both.extend(["--confidence", "90", "--seed", "7"]);
+    let (stdout, stderr, ok) = run(&with_both);
+    assert!(ok, "a disclosed no-op must still succeed; stderr: {stderr}");
+    assert!(
+        stderr.contains("--confidence") && stderr.contains("--wez") && stderr.contains("no effect"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("--seed") && stderr.contains("no effect"),
+        "{stderr}"
+    );
+    assert!(stdout.contains("WEZ sweep:"), "the sweep itself must still run: {stdout}");
+
+    // Neither flag given: no note at all.
+    let (_stdout, stderr, ok) = run(&wez_tail);
+    assert!(ok, "stderr: {stderr}");
+    assert!(!stderr.contains("no effect"), "{stderr}");
+}
+
+// ---- review fix round, I3: the max_samples < min_samples cross-check must name the CLI flags
+// (--max-samples/--min-samples), never the library's McConvergence field names, and must say
+// when one side of the comparison is an untouched default rather than something the user typed.
+
+#[test]
+fn cross_field_sample_bounds_error_names_the_flags_and_states_defaults() {
+    // Both explicit: plain flag-named values, no struct name anywhere.
+    let (_stdout, stderr, ok) = run(&["--adaptive", "--min-samples", "100", "--max-samples", "50"]);
+    assert!(!ok, "50 < 100 must be rejected");
+    assert!(stderr.contains("--max-samples (50)"), "{stderr}");
+    assert!(stderr.contains("--min-samples (100)"), "{stderr}");
+    assert!(!stderr.contains("McConvergence"), "the library struct name must not leak: {stderr}");
+
+    // Only --min-samples given: the untouched --max-samples default must say so.
+    let (_stdout, stderr, ok) = run(&["--adaptive", "--min-samples", "200000"]);
+    assert!(!ok);
+    assert!(stderr.contains("--max-samples (default 100000)"), "{stderr}");
+    assert!(stderr.contains("--min-samples (200000)"), "{stderr}");
+
+    // Only --max-samples given: the untouched --min-samples default must say so.
+    let (_stdout, stderr, ok) = run(&["--adaptive", "--max-samples", "500"]);
+    assert!(!ok);
+    assert!(stderr.contains("--max-samples (500)"), "{stderr}");
+    assert!(stderr.contains("--min-samples (default 1000)"), "{stderr}");
+
+    // One side left at its default (here --max-samples's 100000, well above a tiny explicit
+    // --min-samples) must NOT error -- a sanity check that resolving a default doesn't itself
+    // trip the new pre-check. `--min-samples 20`/loose half-width keeps this fast (~20 trials)
+    // rather than running out the full 1000-sample default floor this fix must not require.
+    let (_stdout, stderr, ok) = run(&[
+        "--target-distance", "300", "--adaptive", "--seed", "1",
+        "--min-samples", "20", "--mc-batch-size", "20", "--target-ci-half-width", "0.9",
+    ]);
+    assert!(ok, "one defaulted side must remain valid; stderr: {stderr}");
+}
