@@ -378,14 +378,27 @@ impl BernoulliConfidenceSequence {
     ///
     /// # Saturation
     ///
-    /// The lower root can never sit above `p_hat`, so `p_hat <= BRACKET_EPS` (which includes
-    /// `S == 0`, where `p_hat` is exactly `0`) means the root is below anything the bracket can
-    /// resolve: the bound is reported as exactly `0.0`. The upper side mirrors it at
-    /// `p_hat >= 1 - BRACKET_EPS` (including `S == n`, reported as exactly `1.0`). Independently
-    /// of that, at very small `n` the threshold can exceed `ln M_n` even at the bracket end --
-    /// with `n = 1` and 95% confidence, no `p` above `0.025` is excluded on the low side -- and
-    /// then too the bound saturates rather than reporting a root that does not exist. Both
-    /// saturations widen the interval, so neither can cost coverage.
+    /// Each side saturates for either of two independent reasons.
+    ///
+    /// **Rule 1, the `p_hat` rule.** The lower root can never sit above `p_hat`, so
+    /// `p_hat <= BRACKET_EPS` (which includes `S == 0`, where `p_hat` is exactly `0`) means the
+    /// root is below anything the bracket can resolve: the bound is reported as exactly `0.0`.
+    /// The upper side mirrors it at `p_hat >= 1 - BRACKET_EPS` (including `S == n`, reported as
+    /// exactly `1.0`). This rule is what handles every small-`n` case, on both sides.
+    ///
+    /// **Rule 2, the endpoint-value guard.** Independently, `ln M_n` evaluated *at* the bracket
+    /// end can already sit at or below the threshold, meaning no root exists inside the bracket
+    /// at all; the bound then saturates rather than bisecting for something that is not there.
+    /// Despite the "tiny `n`" intuition this guard is **not** load-bearing at small `n` -- at
+    /// `S = 1, n = 1` and 95% confidence, `ln M_n(eps) = 33.85` against a threshold of `2.996`,
+    /// 30 nats away from firing, and the low bound there is a genuine root at `0.025`. Every
+    /// small-`n` case that does satisfy this guard is already caught by rule 1. It first becomes
+    /// non-redundant in the opposite regime -- large `n` with an extreme `p_hat`, where the true
+    /// root falls below `BRACKET_EPS` while `p_hat` itself does not. Measured first firings:
+    /// `S = 1` at `n ~ 1e7` (giving `(0.0, 2.22e-6)`), and `S = 2` at `n ~ 1e10`. Do not read it
+    /// as dead code because a small-`n` probe never reaches it.
+    ///
+    /// Both saturations widen the interval, so neither can cost coverage.
     pub fn bounds(&self) -> (f64, f64) {
         if self.trials == 0 {
             return (0.0, 1.0);
@@ -722,10 +735,21 @@ mod tests {
         // the stopping rule, not of the floor: stopping at a fixed half-width of 0.08 fixes
         // the final interval width, so every construction is judged at whatever `n` it needs
         // to reach that width, which equalizes coverage. Those two failure modes are pinned
-        // structurally instead, by `cs_is_wider_than_wilson_at_the_same_n` and
-        // `cs_brackets_the_mle_and_nests_by_confidence_level` (both of which do fail on both
-        // mutants). Read this test as "the sequence does not undercover under optional
-        // stopping", not as the sole guard on the construction.
+        // elsewhere, and each has exactly ONE robust detector — they are not redundantly
+        // covered, so neither leg is safe to prune:
+        //   * repeated Wilson  -> `cs_is_wider_than_wilson_at_the_same_n`, definitionally: the
+        //     two widths become bit-identical, so its strict `>` cannot hold. (The nesting
+        //     sweep does also fail on this mutant today, but only through a 1-ULP artifact of
+        //     Wilson's k=n upper bound landing on 0.9999999999999999 — an accident, not a
+        //     property. Do not rely on it.)
+        //   * alpha/confidence swap -> `cs_brackets_the_mle_and_nests_by_confidence_level`,
+        //     structurally: the threshold ordering inverts, so P90 comes out wider than P95 in
+        //     all 1890 swept cells. The width test catches this one at only 1 of its 3
+        //     fixtures — (10, 40), by 1.2% — because at (81, 263) and (500, 1000) the
+        //     alpha-swapped interval is still 1.19x and 1.31x wider than Wilson. Dropping the
+        //     (10, 40) fixture would silently remove that leg.
+        // Read this test as "the sequence does not undercover under optional stopping", not as
+        // the sole guard on the construction.
         const COVERAGE_FLOOR: usize = 180;
         let false_failure_rate = binomial_cdf(COVERAGE_FLOOR - 1, TRIALS, 0.95);
         assert!(
