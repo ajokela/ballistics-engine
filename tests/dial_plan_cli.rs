@@ -142,7 +142,7 @@ fn infeasible_travel_still_exits_zero_and_names_the_violation() {
     let (table, stderr, ok) = run(&base);
     assert!(ok, "an infeasibility analysis must still exit 0: stderr={stderr}");
     assert!(table.contains("INFEASIBLE"), "{table}");
-    assert!(table.contains("TravelExceeded"), "the violation must be named: {table}");
+    assert!(table.contains("travel_exceeded"), "the violation must be named: {table}");
 
     let mut json_args = base.to_vec();
     json_args.extend(["-o", "json"]);

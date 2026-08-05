@@ -10,7 +10,8 @@
 //! error rate (Task 3 of Plan C, MBA-1352).
 //!
 //! No randomness lives in the production path: this module consumes trial outcomes a caller
-//! already produced (the existing Monte Carlo trial loop in `src/cli_api.rs`) and is pure `std`
+//! already produced (`MonteCarloTrialSampler::sample_one_trial` in `src/cli_api.rs`, the one
+//! trial body both the legacy fixed-count loop and the adaptive driver run) and is pure `std`
 //! math only -- no `rand`, no `fs`, no `clap` -- so it compiles for `wasm32-unknown-unknown`
 //! unconditionally. (One `#[cfg(test)]` test, the empirical coverage check, does draw from a
 //! seeded `rand` generator; nothing outside `#[cfg(test)]` does.)

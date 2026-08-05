@@ -26,7 +26,8 @@ use ballistics_engine::adjustment::{
 use ballistics_engine::optic::{HoldBounds, OpticProfile, TravelLimits, TurretState};
 // MBA-1348 Plan B Task 6: `dial-plan` -- the `plan_corrections` CLI surface.
 use ballistics_engine::optic::{
-    plan_corrections, AngularCorrection, Axis, DialPlanReportV1, Direction, Preferences, Strategy,
+    plan_corrections, AngularCorrection, Axis, DialPlanReportV1, Direction, LimitKind,
+    Preferences, Strategy,
 };
 use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
@@ -82,8 +83,9 @@ use ballistics_engine::{
 };
 // 0.33.0 decision-support Task 8: HoldCurve (mark-to-range/bdc-match/optimal-zero/reticle
 // hold --range) and the sampled-trajectory helpers it solves through, promoted into the
-// library (their own bracket-and-lerp core, Task 7's shared `bracket_param`/`Bracket`, moved
-// with `HoldCurve::at_range` and is no longer referenced directly here). CLI argument
+// library. Their shared bracket-and-lerp core, Task 7's `bracket_param`/`Bracket`, is
+// crate-private (`pub(crate)`, MBA-1348 review N-2) and reached from here only through
+// `HoldCurve::at_range` -- this file has no direct reference to either symbol. CLI argument
 // resolution (InverseSolverLoadArgs::resolve) stays here and constructs HoldCurveLoad.
 use ballistics_engine::hold_curve::{
     build_trajectory_components, run_sampled_trajectory, HoldCurve, HoldCurveLoad,
@@ -3571,7 +3573,7 @@ enum Commands {
         output: OutputFormat,
     },
 
-    /// The smallest range card that provably reconstructs the trajectory within a stated
+    /// A range card that provably reconstructs the trajectory within a stated
     /// error budget (MBA-1351)
     ///
     /// Greedy worst-point insertion over the solved trajectory's own sample grid: start from
@@ -15902,8 +15904,13 @@ fn run_monte_carlo(
             // frame -- [lo, hi] has no fixed width, unlike every field the box itself prints).
             // Probability units throughout, matching --target-ci-half-width's own units rule.
             if let Some((_, (lo, hi), n)) = hit_probability_ci {
+                // 4 decimal places, matching the adaptive block's precision (T5-2 review fix):
+                // at 3 dp a small-p, large-n interval can round both bounds to the same
+                // "[0.000, 0.000]", understating a real (if tiny) width rather than misstating
+                // it -- the interval is still narrower than 0.001 whenever that happens, so the
+                // reader's conclusion stays correct, but the extra digit keeps it informative.
                 println!(
-                    "Hit probability {}% CI: [{lo:.3}, {hi:.3}] (Wilson, n={n})",
+                    "Hit probability {}% CI: [{lo:.4}, {hi:.4}] (Wilson, n={n})",
                     confidence.as_percent()
                 );
             }
@@ -19129,18 +19136,21 @@ fn come_up_header_line(dist_unit: &str, adj_label: &str, vel_unit: &str) -> Stri
 /// column (there is no prior row to compute a come-up from).
 fn come_up_row_line(r: &CardRow, i: usize, is_clicks: bool, drop_field_w: usize) -> String {
     let drop_adj = r.drop_adj.unwrap();
-    let come_up = r.come_up.unwrap();
     let drop_str = if is_clicks {
         format!("{:>drop_field_w$.0}", drop_adj)
     } else {
         format!("{:>drop_field_w$.3}", drop_adj)
     };
+    // `come_up` is only unwrapped in the branches that actually read it: the i == 0 row has
+    // no prior row to compute a come-up from and never touches the value, so a `None` there
+    // (unlike every other row, which `adaptive_card`/the come-ups loop always populates) must
+    // not panic on a value this branch is about to discard anyway.
     let come_up_str = if i == 0 {
         "    —     ".to_string()
     } else if is_clicks {
-        format!("{:>9.0} ", come_up)
+        format!("{:>9.0} ", r.come_up.unwrap())
     } else {
-        format!("{:>9.3} ", come_up)
+        format!("{:>9.3} ", r.come_up.unwrap())
     };
     format!(
         "│{:>9.0} │{} │{}│{:>9.0} │{:>9.0} │{:>9.3} │",
@@ -21454,11 +21464,35 @@ mod card_row_sentinel_tests {
             r.time.unwrap(),
         );
         assert_eq!(line, expected);
-        // Named-column spot checks: each sentinel appears exactly where its field name
-        // says it should, not in a neighbor's slot.
+        // A drop_adj<->come_up swap (the two per-row numeric columns) would put "444.300"
+        // where "333.200" belongs and vice versa -- pin both independently, not just the
+        // whole-line equality above (which a future edit could narrow without noticing a
+        // value went missing).
         assert!(line.contains("333.200"), "drop_adj sentinel missing/misplaced: {line}");
         assert!(line.contains("444.300"), "come_up sentinel missing/misplaced: {line}");
         assert!(!line.contains("666.5"), "wind_adj has no come-ups column but its sentinel leaked in: {line}");
+    }
+
+    /// The come-ups CLICKS table/CSV numbers are pinned by nothing else: the golden suite
+    /// (`tests/card_golden_cli.rs`) is MIL-only, and the CLI's clicks-mode integration tests
+    /// only assert stderr, never the rendered numbers. One more sentinel case closes that gap.
+    #[test]
+    fn come_up_row_line_places_each_sentinel_in_its_own_column_when_clicks() {
+        let r = sentinel_row();
+        let drop_field_w = come_up_drop_label_width("CLICKS") + 6;
+        let line = come_up_row_line(&r, 1, true, drop_field_w);
+        let expected = format!(
+            "│{:>9.0} │{:>drop_field_w$.0} │{:>9.0} │{:>9.0} │{:>9.0} │{:>9.3} │",
+            r.range,
+            r.drop_adj.unwrap(),
+            r.come_up.unwrap(),
+            r.velocity.unwrap(),
+            r.energy.unwrap(),
+            r.time.unwrap(),
+        );
+        assert_eq!(line, expected);
+        assert!(line.contains("333"), "drop_adj sentinel missing/misplaced: {line}");
+        assert!(line.contains("444"), "come_up sentinel missing/misplaced: {line}");
     }
 
     #[test]
@@ -26143,6 +26177,18 @@ fn dial_plan_strategy_label(strategy: Strategy) -> &'static str {
     }
 }
 
+/// `LimitKind`'s table label -- the same snake_case spelling `#[serde(rename_all =
+/// "snake_case")]` gives it on the wire, so the table and `-o json` never disagree about a
+/// limit kind's name (same reasoning, and same fix, as `dial_plan_strategy_label`).
+fn dial_plan_limit_kind_label(kind: LimitKind) -> &'static str {
+    match kind {
+        LimitKind::TravelExceeded => "travel_exceeded",
+        LimitKind::HoldBoundExceeded => "hold_bound_exceeded",
+        LimitKind::NoTravelData => "no_travel_data",
+        LimitKind::NoHoldBoundData => "no_hold_bound_data",
+    }
+}
+
 /// Render a [`DialPlanReportV1`] as a human-readable table (MBA-1348 Task 6): one block per
 /// ranked plan (best first -- see `plan_corrections`' own ranking doc) with a strategy header
 /// naming feasibility, one instruction line per axis (direction, delta clicks, a revolution
@@ -26157,7 +26203,7 @@ fn render_dial_plan_table(report: &DialPlanReportV1) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = writeln!(out, "dial-plan -- method: {}", report.method);
-    let _ = writeln!(out, "range: {:.3} m", report.range_m);
+    let _ = writeln!(out, "range {:.3} m", report.range_m);
 
     for (i, plan) in report.plans.iter().enumerate() {
         let _ = writeln!(out);
@@ -26197,7 +26243,7 @@ fn render_dial_plan_table(report: &DialPlanReportV1) -> String {
 
         for v in &plan.limits_hit {
             let axis_label = dial_plan_axis_label(v.axis);
-            let kind = format!("{:?}", v.kind);
+            let kind = dial_plan_limit_kind_label(v.kind);
             let available = match v.available_mil {
                 Some(a) => format!("available {a:.3} mil"),
                 None => "no data declared for this axis".to_string(),
@@ -26373,9 +26419,10 @@ fn handle_dial_plan(
 /// omitted: half the profile's click on that axis -- the honest floor `adaptive_card`'s own
 /// assumptions already document (a tighter budget is reported `budget_met: false`, never
 /// silently relaxed) -- or 0.1 TRUE mil when no optic click is known. Returned in TRUE mil;
-/// the caller scales into the chosen `--adjustment` unit exactly like a supplied
-/// `--elevation-budget`/`--windage-budget` string is (`parse_angular_mil` then the unit
-/// factor), so an explicit budget and this default land in the same space.
+/// the caller scales into the chosen `--adjustment` unit exactly like an explicit
+/// `--elevation-budget`/`--windage-budget` value is (parsed by the same `parse_angular_mil`
+/// `value_parser`, then the unit factor), so an explicit budget and this default land in the
+/// same space.
 fn adaptive_card_default_budget_mil(click: Option<&ClickValue>) -> f64 {
     match click {
         Some(c) => click_size_mil(c) / 2.0,
@@ -26558,6 +26605,13 @@ fn adaptive_card_footer(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the stable adaptive-card CLI command shape"
 )]
+#[cfg_attr(
+    not(feature = "pdf"),
+    allow(
+        unused_variables,
+        reason = "output_file is read only by the pdf-gated OutputFormat::Pdf arm below"
+    )
+)]
 fn handle_adaptive_card(
     load_args: InverseSolverLoadArgs,
     zero_distance: Option<f64>,
@@ -26621,7 +26675,16 @@ fn handle_adaptive_card(
     // Search a little past --end so a domain end landing exactly on the curve's last sample
     // still brackets -- the same 2% headroom `mark-to-range`/`bdc-match` solve with.
     let max_solve_range_m = if end_m.is_finite() && end_m > 0.0 { end_m * 1.02 } else { end_m };
-    let curve = HoldCurve::solve(&load, max_solve_range_m)?;
+    // Named explicitly rather than let `?` surface HoldCurve::solve's own message bare: that
+    // message says nothing about which CLI flag supplied the bad value (e.g. `--end inf`),
+    // the same "name the flag" gap N-3 fixed for the budget flags.
+    let curve = HoldCurve::solve(&load, max_solve_range_m).map_err(|e| -> Box<dyn Error> {
+        let dist_unit = match units {
+            UnitSystem::Imperial => "yd",
+            UnitSystem::Metric => "m",
+        };
+        format!("--end {end:.3} {dist_unit}: {e}").into()
+    })?;
 
     let click = optic.as_ref().map(|o| (&o.elevation_click, &o.windage_click));
     let req = AdaptiveRequest {

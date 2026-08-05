@@ -36,6 +36,7 @@ pub use cli_api::{
 };
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;
+pub use mc_stats::{wilson_interval, ConfidenceLevel};
 pub use moving_target::{
     calculate_lead, lead_from_tof, mover_ring, LeadComponents, LeadError, LeadSolution,
 };

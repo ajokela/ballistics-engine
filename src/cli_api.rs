@@ -4463,8 +4463,10 @@ pub struct AdaptiveMcReportV1 {
     /// whenever it is -- but without this field a run with a 40% solver-failure rate is
     /// indistinguishable in the payload from a clean one at the same `samples`, which is the
     /// one thing `samples` alone cannot tell you. `attempts` is also what
-    /// [`McConvergence::max_samples`] caps, so `attempts == max_samples` is the signature of a
-    /// [`McStopReason::MaxSamplesReached`] stop.
+    /// [`McConvergence::max_samples`] caps, so [`McStopReason::MaxSamplesReached`] always has
+    /// `attempts == max_samples` -- but the reverse does not hold: a
+    /// [`McStopReason::TargetHalfWidthMet`] stop on the very last batch can reach the same
+    /// equality, so `attempts == max_samples` alone does not identify the stop reason.
     pub attempts: u64,
     /// Trials that reached the target plane -- the population behind the three at-target
     /// statistics below, and the `n` in their `n-1` standard deviations.
@@ -4571,6 +4573,16 @@ pub struct AdaptiveMcReportV1 {
 /// interval. A trial that solved but fell short of the target plane is a definite miss: it is
 /// a sample (in `hit_probability`'s denominator) but not an arrival, so it shows up as
 /// `samples > arrivals`. A run in which *every* trial was dropped is an error, not a report.
+///
+/// # `hit_radius_m` is not validated
+///
+/// Every [`McConvergence`] field is `Err`-checked up front, but `hit_radius_m` itself is not:
+/// a `NaN` or negative radius makes [`MonteCarloResults::position_is_hit`] false for every
+/// trial, yielding `p = 0.0` with a tight interval and (usually) a
+/// [`McStopReason::TargetHalfWidthMet`] stop rather than an error. This is deliberate, not an
+/// oversight -- it matches [`MonteCarloResults::hit_probability`]'s equally lenient legacy
+/// posture on the same input, so this path cannot diverge from the fixed-count one over how a
+/// bad radius is treated.
 ///
 /// # Errors
 ///

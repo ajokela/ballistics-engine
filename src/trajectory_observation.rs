@@ -474,10 +474,16 @@ fn projected_observation_count(
 ///
 /// `pub(crate)`, not `pub`: every call site this centralizes is itself in-crate --
 /// `wind_scenarios`, `solve_v1`, `trajectory_sampling`, `cli_api`, and `hold_curve`. The CLI
-/// binary (`src/main.rs`) used to be a direct sixth call site; that call moved into
+/// binary (`src/main.rs`) used to be a direct fifth call site; that call moved into
 /// `HoldCurve::at_range` in the library, so `src/main.rs` now reaches this only through that
 /// public method and has zero remaining references to `Bracket` or `bracket_param`. Nothing
 /// outside this crate needs either item, so both stay crate-private.
+///
+/// `x = NaN` is accepted, not rejected: it compares `false` against every key, so both the
+/// `Below`/`Above` bounds checks and the partition-point search fall through to index `0`,
+/// and NaN then propagates through the interpolation-fraction division -- the result is
+/// `Inside { lo: 0, t: NaN }`, never `Below`/`Above`/`Degenerate`. Callers that must reject
+/// non-finite input validate before calling; this function does not.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Bracket {
     /// `x` is within `[key_at(0), key_at(len - 1)]`. The bracket is `(lo, lo + 1)` and `t` is
@@ -978,5 +984,21 @@ mod tests {
             bracket_param(3, |i| equal_keys[i], 5.0),
             Bracket::Inside { lo: 0, t: 0.0 }
         );
+    }
+
+    /// Documented on `bracket_param` itself: a NaN `x` is not rejected, it falls through to
+    /// `Inside { lo: 0, t: NaN }`. `Bracket` derives `PartialEq`, but `assert_eq!` against a
+    /// NaN-carrying value would always fail (`NaN != NaN`), so this pins it with an explicit
+    /// `is_nan()` check instead.
+    #[test]
+    fn bracket_param_of_nan_x_returns_inside_lo_zero_with_nan_t() {
+        let keys = [0.0, 10.0, 20.0];
+        match bracket_param(3, |i| keys[i], f64::NAN) {
+            Bracket::Inside { lo, t } => {
+                assert_eq!(lo, 0);
+                assert!(t.is_nan(), "expected t to be NaN, got {t}");
+            }
+            other => panic!("expected Inside {{ lo: 0, t: NaN }}, got {other:?}"),
+        }
     }
 }

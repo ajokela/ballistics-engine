@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `feasible: false` with the limiting mechanism named instead.
   - **`adaptive-card <load/profile args> --start R1 --end R2 [--anchor R]...
     [--elevation-budget VAL] [--windage-budget VAL] [--max-rows N] [--adjustment mil|moa]
-    [-o table|csv|json|pdf]`** (MBA-1351) builds the smallest range card that PROVABLY
+    [-o table|csv|json|pdf]`** (MBA-1351) builds a range card that PROVABLY
     reconstructs the trajectory within a stated elevation/windage error budget: greedy
     worst-point insertion over the solved trajectory's own sample grid, then a separate dense
     pass MEASURES the finished card's true worst-case error and reports it -- together with
@@ -102,7 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     point estimate, its interval, method, confidence level, stop reason, and three sample
     cardinalities (`attempts` drawn, `samples` that produced an outcome, `arrivals` that
     reached the target plane) as a versioned report, `AdaptiveMcReportV1` (`-o json`/`-o full`
-    verbatim, `json` accepted as an alias for `full`), or a plain-text summary block (table
+    verbatim, `full` accepted as an alias for `json`), or a plain-text summary block (table
     output). Ignores `--num-sims` and `--wind-direction-std`; incompatible with `--wez`
     (`--adaptive --wez` is a usage error), which is a different report entirely and states no
     interval of its own, per spec. New `--seed` flag (reused by the fixed-count path above too)
@@ -120,8 +120,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Welford` streaming moments, `ConfidenceLevel`, `wilson_interval`, and the anytime-valid
   `BernoulliConfidenceSequence`) and `ballistics_engine::special::{ln_gamma, ln_beta}` (the
   log-gamma/log-beta functions the confidence sequence's mixture martingale is built on), plus
-  `run_monte_carlo_adaptive_seeded`, `AdaptiveMcReportV1`, `McConvergence`, and `McStopReason`
-  re-exported at the crate root.
+  `run_monte_carlo_adaptive_seeded`, `AdaptiveMcReportV1`, `McConvergence`, `McStopReason`,
+  `ConfidenceLevel`, `wilson_interval`, `MC_ADAPTIVE_SCHEMA_VERSION_V1`,
+  `MC_ADAPTIVE_METHOD_V1`, and `MC_ADAPTIVE_ASSUMPTIONS_V1` re-exported at the crate root, and
+  two new methods on the existing `MonteCarloResults`: `hit_probability_wilson` and
+  `position_is_hit`.
 
 ### Changed
 - **WEZ (`monte-carlo --wez`) attribution now runs on the shared central-difference kernel**
@@ -159,17 +162,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   equivalent-horizontal-range solver) now share one search-and-lerp core.** The regular-interval
   sampler's interpolated values -- `TrajectoryResult::sampled_points`, and therefore
   `come-ups`/range-table/wind-card/compare stdout, `wind_scenarios`' inputs, and the
-  Python/Ruby/WASM bindings -- may shift by at most 1 ULP: the shared core divides to get an
-  interpolation fraction and then multiplies, where this one site previously multiplied then
-  divided. Invisible at the display precision every existing fixture pins; the other four sites'
-  arithmetic is unchanged.
+  Python/Ruby/WASM bindings -- may shift by about 1 ULP, and up to 2 ULP in a pathological
+  worst case (the re-association can move the delta term by roughly a ULP on each side): the
+  shared core divides to get an interpolation fraction and then multiplies, where this one site
+  previously multiplied then divided. Invisible at the display precision every existing fixture
+  pins; the other four sites' arithmetic is unchanged.
 - **`come-ups`/`range-table`/`wind-card`/`compare`'s four output surfaces share one internal
   row type**, `ballistics_engine::card::CardRow`, replacing four separate function-local
   structs that each said the same handful of things (range, drop, wind, velocity, energy,
   time) a different way. Internal only: **the four surfaces' output is byte-identical; only
   the internal row types were unified** -- pinned by a 12-case golden suite
   (`tests/card_golden_cli.rs`) covering table/CSV/JSON for all four, so binding maintainers do
-  not need to re-verify any of their wire formats.
+  not need to re-verify any of their wire formats -- separately from the ULP-scale sampler
+  shift noted above, which is invisible at these four surfaces' pinned display precision.
 - **The PDF dope card moved from a `ballistics`-binary-private module into the library**,
   `ballistics_engine::pdf_dope_card` (behind the existing `pdf` feature), and rewritten onto
   `CardRow` above: `generate_dope_card_pdf` now takes `&[CardRow]` plus an explicit
@@ -181,8 +186,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pdf` is a default feature, so the relocated PDF dope card now compiles into the library for
   default-feature consumers (Python/Ruby/FFI builds), adding printpdf and ~825 KB of embedded
   fonts to those artifacts; `--no-default-features` builds are unaffected.
-- **Fixed-count `monte-carlo` output gains an additive confidence-interval line**: all numeric
-  estimates for a given seed are unchanged (see Added above for the new line/key itself).
+- **Fixed-count `monte-carlo` output gains an additive confidence-interval line**: the unseeded
+  path is byte-identical to before, and the new `--seed` option's numeric estimates are pinned
+  bit-for-bit reproducible for a given seed (see Added above for the new line/key itself). Note
+  the two Monte Carlo paths' `std_*` fields are different estimators over different
+  populations, not merely different numbers: the legacy fixed-count box/JSON `std_range`/
+  `std_impact_velocity` are population standard deviations (divide by `n`) over all trials,
+  while `AdaptiveMcReportV1`'s `std_*` fields are sample standard deviations (divide by `n-1`,
+  `assumptions[3]`) over arrivals only.
 
 ### Fixed
 - **`$.atmosphere.pressure_reference` was rejected as `unknown_field`** by

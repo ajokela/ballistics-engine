@@ -297,6 +297,9 @@ pub fn generate_dope_card_pdf(
     rows: &[CardRow],
     range_unit: RangeUnit,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if rows.is_empty() {
+        return Err("generate_dope_card_pdf: rows must not be empty".into());
+    }
     let mut doc = PdfDocument::new(&format!("{} Dope Card", config.rifle_name));
 
     // Load and register fonts
@@ -904,6 +907,12 @@ mod tests {
         assert_eq!(format_range(400.02), "400");
         assert_eq!(format_range(399.98), "400");
         assert_eq!(format_range(100.0 + 1e-9), "100");
+        // The band rule now exists in two copies (this function and
+        // `format_adaptive_card_range` in `main.rs`), so these fixtures are the sync
+        // mechanism between them -- more coverage right at and near the +-0.05 edge.
+        assert_eq!(format_range(400.04), "400");
+        assert_eq!(format_range(399.96), "400");
+        assert_eq!(format_range(0.0), "0");
     }
 
     #[test]
@@ -911,6 +920,10 @@ mod tests {
         assert_eq!(format_range(417.3), "417.3");
         assert_eq!(format_range(100.5), "100.5");
         assert_eq!(format_range(400.08), "400.1");
+        // 400.05 is exactly the band's edge in decimal, but not in binary: the nearest f64 to
+        // 400.05 is a hair above it, so `(range - rounded).abs() < 0.05` is false and this
+        // renders with one decimal rather than collapsing to "400".
+        assert_eq!(format_range(400.05), "400.1");
     }
 
     fn test_config() -> DopeCardConfig {
@@ -996,5 +1009,25 @@ mod tests {
         let bytes = generate_dope_card_pdf(&config, &[row], RangeUnit::Yards)
             .expect("a row missing lead_adj must still render, not error");
         assert_valid_pdf_bytes(&bytes);
+    }
+
+    /// A zero-page PDF is not a useful answer from a public library API: both in-tree callers
+    /// (`trajectory -o pdf`, `adaptive-card -o pdf`) already guard against empty rows
+    /// themselves, but a binding calling this function directly should get a named error, not
+    /// a silently-empty document.
+    #[test]
+    fn generate_dope_card_pdf_rejects_empty_rows() {
+        let config = test_config();
+        let err = generate_dope_card_pdf(&config, &[], RangeUnit::Yards)
+            .expect_err("an empty row set must not silently produce a PDF");
+        assert!(err.to_string().contains("rows"), "{err}");
+    }
+
+    /// `RangeUnit::label()` untested was Task 10 review Minor #3: a swapped `Yd`/`M` would
+    /// ship silently on `adaptive-card -o pdf`'s Range column sub-header.
+    #[test]
+    fn range_unit_label_matches_its_variant() {
+        assert_eq!(RangeUnit::Yards.label(), "Yd");
+        assert_eq!(RangeUnit::Meters.label(), "M");
     }
 }

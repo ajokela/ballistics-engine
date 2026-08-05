@@ -12,10 +12,10 @@
 //! same dependency-light posture applies -- implemented and tested here rather than
 //! pulled in from `libm` or `statrs`.
 //!
-//! There is exactly one approximation to validate, [`erfc`]; [`erf`] and
-//! [`normal_cdf`] are thin wrappers over it, computed directly rather than as `1.0 -
-//! erf(...)` so evaluating deep in a tail never cancels away the answer. [`ln_gamma`]
-//! is its own approximation (Lanczos, `g = 7`); [`ln_beta`] is a thin wrapper over it.
+//! There are two independent approximations to validate: [`erfc`], of which [`erf`] and
+//! [`normal_cdf`] are thin wrappers computed directly rather than as `1.0 -
+//! erf(...)` so evaluating deep in a tail never cancels away the answer; and
+//! [`ln_gamma`] (Lanczos, `g = 7`), of which [`ln_beta`] is in turn a thin wrapper.
 
 /// Error function: `erf(x) = 2/sqrt(pi) * integral_0^x exp(-t^2) dt`.
 ///
@@ -86,12 +86,15 @@ pub fn normal_cdf(z: f64) -> f64 {
 
 /// Natural log of the gamma function on the positive reals.
 ///
-/// Lanczos approximation (g = 7, 9 coefficients). Absolute error is far below
-/// the 1e-12 the tests pin across the tested range; callers here (the
-/// beta-binomial mixture confidence sequence) only need ~1e-10.
-/// Returns NaN for `x <= 0` and non-finite inputs -- this crate's special
-/// functions are total functions with NaN as the out-of-domain signal, not
-/// panics (matches `erf`'s posture).
+/// Lanczos approximation (g = 7, 9 coefficients). The honest error claim is relative, not
+/// absolute -- `ln_gamma`'s output ranges over many orders of magnitude, so a fixed absolute
+/// bound is not meaningful at the extremes: measured relative error is <= 2.2e-15 (about 1
+/// ULP) across the tested range, comfortably inside both the 1e-12 absolute bound the tests
+/// pin there and the ~1e-10 the beta-binomial mixture confidence sequence actually needs.
+/// Returns NaN for `x <= 0` and non-finite inputs -- this crate's special functions are total
+/// functions with NaN as the out-of-domain signal rather than panicking, though unlike
+/// [`erf`] (which returns a defined limit, `+-1.0`, at `+-infinity`), `ln_gamma` has no finite
+/// limit there and returns NaN for every non-finite input, not just NaN itself.
 pub fn ln_gamma(x: f64) -> f64 {
     if !x.is_finite() || x <= 0.0 {
         return f64::NAN;

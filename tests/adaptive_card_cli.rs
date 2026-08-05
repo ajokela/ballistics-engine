@@ -308,6 +308,13 @@ fn default_budget_matches_half_the_profiles_click_exactly() {
         default_v["worst_elevation_error"].as_f64().unwrap(),
         explicit_v["worst_elevation_error"].as_f64().unwrap()
     );
+    // The elevation assertion above cannot discriminate the WINDAGE default on its own -- bind
+    // that axis too, so a swapped or mis-derived windage default (e.g. reusing elevation's
+    // click instead of windage's) fails this test instead of shipping silently.
+    assert_eq!(
+        default_v["worst_windage_error"].as_f64().unwrap(),
+        explicit_v["worst_windage_error"].as_f64().unwrap()
+    );
 
     let _ = std::fs::remove_dir_all(&home);
 }

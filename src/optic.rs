@@ -266,7 +266,11 @@ pub enum OpticError {
     /// is deliberately NOT re-enforced here, matching this crate's existing precedent
     /// (`crate::truing::scale_report_dial_values` also takes a bare, unchecked `dial_cf`)
     /// of treating that band as an advisory, caller/CLI-level concern, not a hard
-    /// library-level bound.
+    /// library-level bound -- unlike `card::AdaptiveRequest`'s hard enforcement of the same
+    /// band (see its own doc comment): the planner does not enforce it here because
+    /// `plan_corrections`'s residual stays honest under a wild CF, while the card engine
+    /// does enforce it because a large finite CF there would otherwise produce a confident
+    /// `budget_met: true` on a card that does not actually meet its stated error budget.
     #[error("{field} must be a positive, finite tracking factor (got {value})")]
     NonPositiveTrackingFactor { field: &'static str, value: f64 },
 }

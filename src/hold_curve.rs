@@ -347,6 +347,17 @@ impl HoldCurve {
         self.samples.last().map_or(0.0, |s| s.distance_m)
     }
 
+    /// This curve's own sample ranges, in order, meters.
+    ///
+    /// Exact multiples of [`Self::SAMPLE_INTERVAL_M`] (`i as f64 * SAMPLE_INTERVAL_M` for
+    /// `i = 0..N`), the same arithmetic sequence a caller would otherwise have to reproduce by
+    /// hand to reason about where this curve was actually verified -- an additive accessor so
+    /// no consumer needs read access to the private `samples` field just to answer "which
+    /// ranges did this curve solve at."
+    pub fn sample_ranges_m(&self) -> Vec<f64> {
+        self.samples.iter().map(|s| s.distance_m).collect()
+    }
+
     /// Linearly interpolate the angular hold at `range_m`.
     ///
     /// `None` when the range is outside the sampled span or non-positive (an angular drop
@@ -547,8 +558,9 @@ mod tests {
 
         // A probe range read off the oracle's own grid rather than a hand-picked constant --
         // it only needs to land exactly on a sample node so `at_range`'s bracket search
-        // resolves with t == 0.0 and its own linear interpolation is not itself a source of
-        // disagreement with the oracle.
+        // resolves with t == 1.0 (the exact-endpoint-hit convention Task 7 disclosed: an exact
+        // key hit lands on the upper endpoint of its bracket, not the lower one) and its own
+        // linear interpolation is not itself a source of disagreement with the oracle.
         let probe = &oracle_samples[oracle_samples.len() / 2];
         let probe_range_m = probe.distance_m;
         assert!(probe_range_m > 0.0 && probe_range_m.is_finite());
@@ -576,5 +588,27 @@ mod tests {
 
         let beyond = hold_curve.max_sampled_range_m() + 10_000.0;
         assert_eq!(hold_curve.at_range(beyond), None);
+    }
+
+    /// `sample_ranges_m` must reproduce the exact arithmetic sequence `HoldCurve::solve` built
+    /// internally: index 0 at the muzzle (`0.0`), every later index an exact multiple of
+    /// `SAMPLE_INTERVAL_M`, and the last entry equal to `max_sampled_range_m()`.
+    #[test]
+    fn sample_ranges_m_is_the_exact_multiples_of_the_sample_interval() {
+        let load = oracle_test_load();
+        let hold_curve = HoldCurve::solve(&load, 1500.0).expect("hold curve should solve");
+
+        let ranges = hold_curve.sample_ranges_m();
+        assert!(!ranges.is_empty());
+        assert_eq!(ranges[0], 0.0);
+        assert_eq!(*ranges.last().unwrap(), hold_curve.max_sampled_range_m());
+        for (i, &r) in ranges.iter().enumerate() {
+            let expected = i as f64 * HoldCurve::SAMPLE_INTERVAL_M;
+            assert!(
+                (r - expected).abs() < 1e-9,
+                "index {i}: got {r}, expected {expected} ({} * SAMPLE_INTERVAL_M)",
+                i
+            );
+        }
     }
 }

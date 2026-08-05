@@ -71,7 +71,12 @@ pub struct AdaptiveBudget {
 /// Both are VALIDATED here against [`crate::adjustment::tracking_cf_in_range`]'s locked
 /// `(0.5, 1.5)` band and rejected with [`CardError::InvalidTrackingCf`] -- this is a public
 /// library API that language bindings call without the CLI's own validation, and an
-/// out-of-band CF fails silently rather than loudly. `bias_mil` is the selected zero set's elevation dial
+/// out-of-band CF fails silently rather than loudly. Enforced as a hard bound here, unlike
+/// [`crate::optic::OpticError::NonPositiveTrackingFactor`]'s advisory-only band (see its own
+/// doc comment): the card engine enforces it because a large finite CF here would otherwise
+/// produce a confident `budget_met: true` on a card that does not actually meet its stated
+/// error budget, while the planner does not, because its residual stays honest under a wild
+/// CF. `bias_mil` is the selected zero set's elevation dial
 /// correction (MBA-1360) in true angular mil; it applies to the ELEVATION axis only, which
 /// is what "zero-set bias as a drop-equivalent" means.
 #[derive(Debug, Clone)]
@@ -281,12 +286,6 @@ impl PrintedAxis {
             Some(c) => quantize_angle(exact, c).clicks as f64 * c.size,
             None => exact,
         }
-    }
-
-    /// Half the detent spacing: the error a quantized row carries AT ITS OWN RANGE, which no
-    /// number of extra rows can reduce.
-    fn half_click_floor(&self) -> f64 {
-        self.click.map_or(0.0, |c| c.size / 2.0)
     }
 }
 
@@ -611,12 +610,16 @@ fn adaptive_card_traced(
     let budget_met =
         worst_elevation_error <= req.budget.elevation && worst_windage_error <= req.budget.windage;
 
-    // The floor is a property of the axis, not of any one row: assert it here so the
-    // invariant `assumptions[3]` states is checked on every debug build.
-    debug_assert!(
-        elevation.half_click_floor() >= 0.0 && windage.half_click_floor() >= 0.0,
-        "a click graduation is positive by construction"
-    );
+    // (T11 review fix: this used to carry a `debug_assert!(half_click_floor() >= 0.0, ...)`,
+    // where `half_click_floor` was `PrintedAxis::half_click_floor(&self) -> f64`, `self.click
+    // .map_or(0.0, |c| c.size / 2.0)`. That was checking a property already guaranteed by
+    // construction wherever a `ClickValue` reaches this code path -- both CLI parsing and
+    // profile loading reject a non-positive click size before it gets this far -- not the
+    // `assumptions[3]` floor invariant the comment claimed to be checking. Removed (along with
+    // the now-unused `half_click_floor` method) rather than replaced with an assertion this
+    // function cannot actually verify: whether a given run's worst-case error DOES reach the
+    // floor depends on where the mandatory rows happen to fall in the click phase, not on
+    // anything checkable here.)
 
     let card_rows = rows
         .iter()
@@ -1185,7 +1188,11 @@ mod adaptive_card_tests {
             let p = curve.at_range(range_m).expect("probe on the curve");
             p.drop_mil / 1000.0 * range_m
         };
-        let node = 800.0 * step; // a claimed node, out where the curve bends hardest
+        // A claimed node, out where the curve bends hardest -- drawn from `native_grid_m`
+        // itself (not independently reconstructed as `800.0 * step`) so a phase bug in the
+        // function under test would surface in this kink probe too, not only in the separate
+        // ascending/step-spaced check below.
+        let node = native_grid_m(step, max_m)[799];
         let delta = step / 4.0;
 
         let bend_at = |centre: f64| {

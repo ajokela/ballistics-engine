@@ -2066,7 +2066,7 @@ has a companion:
 ║ Target Shortfall:      61.9 %          ║
 ║ Hit Probability:        0.2 %          ║
 ╚════════════════════════════════════════╝
-Hit probability 95% CI: [0.001, 0.007] (Wilson, n=1000)
+Hit probability 95% CI: [0.0005, 0.0073] (Wilson, n=1000)
 ```
 
 This is the textbook point precisely because the estimate is small: "0.2%" alone reads as
@@ -2129,8 +2129,8 @@ needed on this load, no more -- and stopped for a data-dependent reason
 `samples` (`= attempts` here) is every trial that produced an outcome and is the `n` behind the
 hit probability and its interval, and `arrivals` (`1725`, well under `samples`) is only the
 trials that reached the target plane -- the population behind the six velocity/drop/drift
-statistics below `stop reason`. `--output full` -- `json` is accepted as an alias for the same
-value, so `-o json` works too -- prints the identical report as its versioned wire form,
+statistics below `stop reason`. `--output json` -- `full` is accepted as an alias for the same
+value, so `-o full` works too -- prints the identical report as its versioned wire form,
 `AdaptiveMcReportV1`, verbatim:
 
 ```json
@@ -2184,6 +2184,12 @@ repeatedly and stop the instant it "looks" tight; that inflates the true error r
 peek. `--adaptive` is safe to stop early because it uses a different interval (an anytime-valid
 confidence sequence) built for exactly that use, at the cost of a strictly wider interval than
 Wilson would report at the same `n` -- paying that width is what buys the early stop.
+
+**`--adaptive` always reports a hit probability, unlike the fixed-count path.** Omitting
+`--target-distance` on the base command prints no `hit_probability` at all (it stays `null` on
+`-o json`). `--adaptive` has no such silent mode: if `--target-distance` is not given, it falls
+back to the baseline's own computed max range as the target plane (`target_distance_m` in the
+report names exactly which range was used) rather than reporting nothing.
 
 **Units rule.** `--target-ci-half-width`, and every low/high/`ci_low`/`ci_high` bound this
 section's flags and JSON keys report, are in **probability units** (`0`-`1`), the same space
@@ -3497,8 +3503,8 @@ revolution count, a reticle hold in continuous TRUE angular mil, or a hybrid spl
 the turret can reach, hold the true angular remainder). All three strategies -- `dial_all`,
 `hold_all`, `hybrid` -- are always evaluated and ranked feasible-first. An optic that cannot
 fully execute a strategy is never silently clamped: the plan is still returned, `feasible:
-false`, with the limiting mechanism named (`TravelExceeded`, `HoldBoundExceeded`,
-`NoTravelData`, `NoHoldBoundData`, ...) -- an infeasibility analysis is a normal, successful
+false`, with the limiting mechanism named (`travel_exceeded`, `hold_bound_exceeded`,
+`no_travel_data`, `no_hold_bound_data`, ...) -- an infeasibility analysis is a normal, successful
 run (exit 0), never an error.
 
 The optic comes from `--profile NAME` (its saved turret mechanics, hold bounds, and
@@ -3540,7 +3546,7 @@ ballistics dial-plan --elevation 3.49mil --range 600 \
 ```
 ```
 dial-plan -- method: dial_space_quantization_v1
-range: 548.640 m
+range 548.640 m
 
 #1 strategy: dial_all [FEASIBLE]
   elevation: dial UP 35 clicks; hold 0.000 mil
@@ -3551,13 +3557,13 @@ range: 548.640 m
   elevation: dial UP 35 clicks; hold -0.010 mil
   windage: dial RIGHT 0 clicks; hold 0.000 mil
   residual: elevation 0.000 mil, windage 0.000 mil -> 0.000 m at 548.640 m
-  limit: elevation NoHoldBoundData -- needed -0.010 mil, no data declared for this axis
+  limit: elevation no_hold_bound_data -- needed -0.010 mil, no data declared for this axis
 
 #3 strategy: hold_all [INFEASIBLE]
   elevation: dial UP 0 clicks; hold 3.490 mil
   windage: dial RIGHT 0 clicks; hold 0.000 mil
   residual: elevation 0.000 mil, windage 0.000 mil -> 0.000 m at 548.640 m
-  limit: elevation NoHoldBoundData -- needed 3.490 mil, no data declared for this axis
+  limit: elevation no_hold_bound_data -- needed 3.490 mil, no data declared for this axis
 
 assumptions:
   - Linear miss at range uses the small-angle approximation (mil / 1000 * range); it is not exact at extreme angles.
@@ -3576,13 +3582,13 @@ extent) to make those two strategies evaluable as well.
 **Units.** `--range` follows `--units` (yards imperial / meters metric) like every other
 calculator command, but the report's own `range_m` field -- and everything the table above
 prints -- is always meters, regardless of `--units`: the example requested 600 yards and the
-report says `range: 548.640 m`. `--elevation`/`--windage` (and every inline optic travel/hold/
+report says `range 548.640 m`. `--elevation`/`--windage` (and every inline optic travel/hold/
 turret-state flag) are TRUE angular with a mandatory unit suffix (mil/moa/smoa/iphy); `+` means
 up/right on both axes.
 
-`-o csv`/`-o pdf` are rejected by name (`dial-plan has no CSV/PDF form; use -o table or -o
-json`); `-o json` is `DialPlanReportV1` pretty-printed verbatim (`schema_version`, `method`,
-`assumptions`, `range_m`, `plans[]`).
+`-o csv`/`-o pdf` are each rejected by name (`dial-plan has no CSV form; use -o table or -o
+json` / `dial-plan has no PDF form; use -o table or -o json`); `-o json` is `DialPlanReportV1`
+pretty-printed verbatim (`schema_version`, `method`, `assumptions`, `range_m`, `plans[]`).
 
 **Honest limits**, carried in the report's own `assumptions` field (quoted above verbatim): the
 linear-miss figure is a small-angle approximation, not exact at extreme angles; elevation and
@@ -3593,7 +3599,7 @@ this crate's locked printed-table constant (3438), not the exact geometric 3437.
 
 ### Adaptive Range Cards (`adaptive-card`) — MBA-1351
 
-The smallest range card that PROVABLY reconstructs the trajectory within a stated elevation/
+A range card that PROVABLY reconstructs the trajectory within a stated elevation/
 windage error budget: greedy worst-point insertion over the solved trajectory's own sample
 grid, starting from both range ends plus any `--anchor`s and adding whichever audited point is
 furthest outside budget until none is (or the row cap binds, or the remaining error is an
