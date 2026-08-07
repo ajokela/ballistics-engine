@@ -5,6 +5,18 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **WEZ variance attribution supports every built-in reference drag model** (MBA-1442):
+  solve-json v1 and MCP now accept and advertise the full `G1`/`G2`/`G5`/`G6`/`G7`/`G8`/
+  `GI`/`GS`/`RA4` set, restoring the `monte-carlo --wez` dominant-source and variance-share
+  columns for the five models that previously reported `n/a`. Attribution remains unavailable
+  for custom drag decks, ranges the nominal trajectory cannot reach, and structural sensitivity
+  refusals; `p_hit` remains available in those cases. The JSON contract change is additive, but
+  Rust consumers with an exhaustive match over the public `DragModelV1` enum must add arms for
+  the five new variants.
+
 ## [0.33.0] - 2026-08-05
 
 ### Added

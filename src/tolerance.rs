@@ -606,12 +606,11 @@ mod tests {
     use crate::error_budget::TargetGeometryV1;
     use crate::perturbation::InputAxis;
 
-    // The brief's own fixture literal uses a lowercase "g7"; the decoder requires exact-case
-    // "G1"/"G6"/"G7"/"G8" (confirmed against every other fixture in this crate's
-    // perturbation/error_budget test suites, which all use uppercase, and against
-    // `docs/SOLVE_JSON_V1.md`) and rejects lowercase with `InvalidValue` -- fixed to uppercase
-    // here rather than reproducing a decode failure the brief did not anticipate (the same fix
-    // Task 7's report records making to its own brief-supplied fixtures).
+    // The brief's own fixture literal uses a lowercase "g7"; the decoder requires the
+    // exact-case built-in spellings ("G1"/"G2"/"G5"/"G6"/"G7"/"G8"/"GI"/"GS"/"RA4"),
+    // confirmed against the perturbation/error_budget fixtures and `docs/SOLVE_JSON_V1.md`.
+    // Keep this fixture uppercase rather than reproducing the brief's unintended
+    // `InvalidValue` decode failure.
     fn resolved() -> crate::solve_json::ResolvedSolveRequestV1 {
         let json = serde_json::json!({
             "schema_version": 1,

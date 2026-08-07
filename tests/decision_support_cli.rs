@@ -45,11 +45,11 @@ fn run(args: &[&str]) -> (String, String, bool) {
     )
 }
 
-/// A small solve-json v1 request. NOTE: the decoder requires exact-case `"G1"`/`"G6"`/`"G7"`/
-/// `"G8"` drag models -- the task-14 brief's own literal used lowercase `"g7"`, which
-/// `decode_solve_request_v1` rejects with `InvalidValue` (the same brief-fixture mistake Tasks
-/// 7 and 12 already hit and fixed; see their reports and `src/tolerance.rs`'s own test module
-/// doc comment).
+/// A small solve-json v1 request. NOTE: the decoder requires the exact-case built-in spellings
+/// (`"G1"`/`"G2"`/`"G5"`/`"G6"`/`"G7"`/`"G8"`/`"GI"`/`"GS"`/`"RA4"`) -- the task-14 brief's
+/// own literal used lowercase `"g7"`, which `decode_solve_request_v1` rejects with
+/// `InvalidValue` (the same brief-fixture mistake Tasks 7 and 12 already hit and fixed; see
+/// their reports and `src/tolerance.rs`'s own test module doc comment).
 fn small_request(mv: f64) -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,

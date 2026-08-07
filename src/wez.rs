@@ -207,20 +207,22 @@ fn wez_solve_target_plane(
         .expect("WEZ attribution solve: non-empty trajectory always has a last point"))
 }
 
-/// Map the engine's own `DragModel` to solve-json v1's `DragModelV1`, when possible.
+/// Map every built-in engine `DragModel` to its solve-json v1 counterpart.
 ///
-/// `None` when `model` has no v1 counterpart: v1 only has `G1`/`G6`/`G7`/`G8`
-/// ([`crate::solve_json::DragModelV1`]), while the engine's own enum also has `G2`, `G5`, `GI`,
-/// `GS`, and `RA4`. An exhaustive match with no wildcard arm, so a future engine `DragModel`
-/// variant fails to compile here until it is explicitly placed on one side or the other, rather
-/// than silently falling through to `None`.
-fn wez_kernel_drag_model(model: DragModel) -> Option<DragModelV1> {
+/// The exhaustive match deliberately has no wildcard arm: a future engine model must gain an
+/// explicit solve-json representation before WEZ attribution can compile, rather than silently
+/// differentiating under the wrong drag physics.
+fn wez_kernel_drag_model(model: DragModel) -> DragModelV1 {
     match model {
-        DragModel::G1 => Some(DragModelV1::G1),
-        DragModel::G6 => Some(DragModelV1::G6),
-        DragModel::G7 => Some(DragModelV1::G7),
-        DragModel::G8 => Some(DragModelV1::G8),
-        DragModel::G2 | DragModel::G5 | DragModel::GI | DragModel::GS | DragModel::RA4 => None,
+        DragModel::G1 => DragModelV1::G1,
+        DragModel::G2 => DragModelV1::G2,
+        DragModel::G5 => DragModelV1::G5,
+        DragModel::G6 => DragModelV1::G6,
+        DragModel::G7 => DragModelV1::G7,
+        DragModel::G8 => DragModelV1::G8,
+        DragModel::GI => DragModelV1::GI,
+        DragModel::GS => DragModelV1::GS,
+        DragModel::RA4 => DragModelV1::RA4,
     }
 }
 
@@ -242,15 +244,11 @@ fn wez_kernel_drag_model(model: DragModel) -> Option<DragModelV1> {
 /// perturbed solves to see the identical trajectory truncation the row's own baseline solve
 /// used.
 ///
-/// Returns `None` when this configuration cannot be represented on the solve-json v1 wire
-/// contract at all: a loaded custom drag table (`base_inputs.custom_drag_table`, which replaces
-/// G-model+BC drag entirely -- v1 has no field for a custom deck at all), or an engine
-/// `DragModel` v1 has no variant for ([`wez_kernel_drag_model`]). Differentiating under the
-/// wrong drag physics would silently misattribute variance rather than fail loudly, so this is
-/// treated by the caller the same as a kernel structural refusal
-/// (`WezRow::attribution_unavailable`), not answered with a plausible wrong number. Both are
-/// real, CLI/WASM-reachable configurations (`monte-carlo --wez --drag-table ...` /
-/// the WASM terminal's `--drag-model g2`/`gi`/`gs`/`g5`/`ra4` on `--wez`), not hypothetical.
+/// Returns `None` only for a loaded custom drag table (`base_inputs.custom_drag_table`), which
+/// replaces G-model+BC drag entirely and has no solve-json v1 field. Differentiating under a
+/// built-in fallback model would silently misattribute variance, so custom-deck attribution
+/// remains explicitly unavailable. Every built-in [`DragModel`] is represented exactly by
+/// [`wez_kernel_drag_model`].
 fn wez_resolved_request(
     base_inputs: &BallisticInputs,
     base_wind: &WindConditions,
@@ -259,7 +257,7 @@ fn wez_resolved_request(
     if base_inputs.custom_drag_table.is_some() {
         return None;
     }
-    let drag_model = wez_kernel_drag_model(base_inputs.bc_type)?;
+    let drag_model = wez_kernel_drag_model(base_inputs.bc_type);
 
     Some(ResolvedSolveRequestV1 {
         schema_version: SchemaVersionV1,
@@ -558,13 +556,12 @@ pub struct WezRow {
     /// attribution (0.33.0 decision-support D2) hit a structural kernel refusal on one of its
     /// seven sources (`crate::perturbation::KernelError::AxisUnsupportedForRequest`/
     /// `AxisAbsent`/`CategoricalAxis`/`StepOutOfDomain`); or (3) this configuration cannot be
-    /// represented on the shared kernel's solve-json v1 wire contract at all -- a loaded custom
-    /// drag table, or an engine drag model solve-json v1 has no variant for (`G2`/`G5`/`GI`/
-    /// `GS`/`RA4`; see `wez_resolved_request`). Reason (3) is the one most likely to surprise a
-    /// caller: every row of a `--drag-table` or unsupported-`--drag-model` sweep reads `n/a`
-    /// here, which is NOT a claim that the bullet fails to reach that range. `p_hit` is
-    /// unaffected in every case -- it comes from the fully-dispersed Monte Carlo run directly,
-    /// never from the kernel.
+    /// represented on the shared kernel's solve-json v1 wire contract at all -- currently only
+    /// a loaded custom drag table (see `wez_resolved_request`). Reason (3) is the one most likely
+    /// to surprise a caller: every row of a `--drag-table` sweep reads `n/a` here, which is NOT a
+    /// claim that the bullet fails to reach that range. All nine built-in reference drag models
+    /// retain attribution. `p_hit` is unaffected in every case -- it comes from the
+    /// fully-dispersed Monte Carlo run directly, never from the kernel.
     pub attribution_unavailable: bool,
 }
 
@@ -796,9 +793,8 @@ pub fn compute_wez(
                     // attribute, but p_hit is unaffected.
                     None => (WezVarianceShares::default(), true),
                 },
-                // This configuration cannot be represented on the solve-json v1 wire contract
-                // at all (a custom drag table, or a DragModel v1 has no variant for) -- see
-                // wez_resolved_request's doc.
+                // A custom drag table cannot be represented on the solve-json v1 wire contract
+                // at all -- see wez_resolved_request's doc. Every built-in model is represented.
                 None => (WezVarianceShares::default(), true),
             }
         } else {
@@ -863,6 +859,23 @@ mod wez_tests {
             pressure: inputs.pressure,
             humidity: inputs.humidity_percent(),
             altitude: inputs.altitude,
+        }
+    }
+
+    #[test]
+    fn every_engine_drag_model_maps_to_its_exact_wire_variant() {
+        for (engine, wire) in [
+            (DragModel::G1, DragModelV1::G1),
+            (DragModel::G2, DragModelV1::G2),
+            (DragModel::G5, DragModelV1::G5),
+            (DragModel::G6, DragModelV1::G6),
+            (DragModel::G7, DragModelV1::G7),
+            (DragModel::G8, DragModelV1::G8),
+            (DragModel::GI, DragModelV1::GI),
+            (DragModel::GS, DragModelV1::GS),
+            (DragModel::RA4, DragModelV1::RA4),
+        ] {
+            assert_eq!(wez_kernel_drag_model(engine), wire);
         }
     }
 
@@ -1216,56 +1229,63 @@ mod wez_tests {
     /// class of bug.
     #[test]
     fn resolved_request_matches_wez_solve_target_plane_baseline() {
-        let mut inputs = test_base_inputs();
-        inputs.cant_angle = 5.0_f64.to_radians();
-        inputs.sight_offset_lateral_m = 0.02;
-        inputs.azimuth_angle = 0.001;
         let wind = WindConditions::default();
-        let atmosphere = test_atmosphere(&inputs);
         let range_m: f64 = 300.0;
         let solver_max_range = range_m.max(1000.0) * 2.0;
 
-        let baseline = wez_solve_target_plane(
-            inputs.clone(),
-            wind.clone(),
-            atmosphere.clone(),
-            solver_max_range,
-            range_m,
-        )
-        .expect("valid test baseline solve");
+        for (name, model) in [
+            ("G1", DragModel::G1),
+            ("G2", DragModel::G2),
+            ("G5", DragModel::G5),
+            ("G6", DragModel::G6),
+            ("G7", DragModel::G7),
+            ("G8", DragModel::G8),
+            ("GI", DragModel::GI),
+            ("GS", DragModel::GS),
+            ("RA4", DragModel::RA4),
+        ] {
+            let mut inputs = test_base_inputs();
+            inputs.bc_type = model;
+            inputs.cant_angle = 5.0_f64.to_radians();
+            inputs.sight_offset_lateral_m = 0.02;
+            inputs.azimuth_angle = 0.001;
+            let atmosphere = test_atmosphere(&inputs);
 
-        let resolved = wez_resolved_request(&inputs, &wind, solver_max_range)
-            .expect("test_base_inputs's default G1 drag model is always kernel-representable");
-        let req: crate::solve_json::SolveRequestV1 = (&resolved).into();
-        let obs = crate::perturbation::evaluate(&req, &[range_m]).expect("kernel evaluate");
-        assert_eq!(obs.len(), 1);
+            let baseline = wez_solve_target_plane(
+                inputs.clone(),
+                wind.clone(),
+                atmosphere,
+                solver_max_range,
+                range_m,
+            )
+            .expect("valid test baseline solve");
 
-        let line_of_sight_height_m = inputs.muzzle_height + inputs.sight_height;
-        let expected_drop_m = line_of_sight_height_m - baseline.y;
-        assert!(
-            (obs[0].drop_m - expected_drop_m).abs() < 1e-6,
-            "kernel drop_m {} disagrees with wez_solve_target_plane-derived {} -- \
-             wez_resolved_request likely mismaps a field",
-            obs[0].drop_m,
-            expected_drop_m
-        );
-        assert!(
-            (obs[0].windage_m - baseline.z).abs() < 1e-6,
-            "kernel windage_m {} disagrees with wez_solve_target_plane baseline.z {} -- \
-             wez_resolved_request likely mismaps a field",
-            obs[0].windage_m,
-            baseline.z
-        );
+            let resolved = wez_resolved_request(&inputs, &wind, solver_max_range)
+                .expect("every built-in drag model is kernel-representable");
+            let req: crate::solve_json::SolveRequestV1 = (&resolved).into();
+            let obs = crate::perturbation::evaluate(&req, &[range_m]).expect("kernel evaluate");
+            assert_eq!(obs.len(), 1);
+
+            let line_of_sight_height_m = inputs.muzzle_height + inputs.sight_height;
+            let expected_drop_m = line_of_sight_height_m - baseline.y;
+            assert!(
+                (obs[0].drop_m - expected_drop_m).abs() < 1e-6,
+                "{name}: kernel drop_m {} disagrees with wez_solve_target_plane-derived {} -- \
+                 wez_resolved_request likely mismaps a field",
+                obs[0].drop_m,
+                expected_drop_m
+            );
+            assert!(
+                (obs[0].windage_m - baseline.z).abs() < 1e-6,
+                "{name}: kernel windage_m {} disagrees with wez_solve_target_plane baseline.z \
+                 {} -- wez_resolved_request likely mismaps a field",
+                obs[0].windage_m,
+                baseline.z
+            );
+        }
     }
 
-    /// `DragModel::G2`/`G5`/`GI`/`GS`/`RA4` have no solve-json v1 counterpart (v1 only has
-    /// `G1`/`G6`/`G7`/`G8`) -- differentiating under the wrong drag physics would silently
-    /// misattribute variance, so this is treated the same as a kernel structural refusal.
-    /// Reachable via the WASM terminal's `--drag-model` on `--wez` (the native CLI has no such
-    /// flag and always sweeps G1). `p_hit` still comes from the real Monte Carlo run, so it
-    /// must be unaffected by attribution being unavailable.
-    #[test]
-    fn attribution_unavailable_when_drag_model_has_no_kernel_representation() {
+    fn assert_builtin_drag_model_attribution_available(model: DragModel) {
         let result = compute_wez(
             823.0,
             0.0,
@@ -1286,7 +1306,7 @@ mod wez_tests {
             300.0,
             300.0,
             100.0,
-            DragModel::G2,
+            model,
             None,
             1.0,
             0.0,
@@ -1295,10 +1315,53 @@ mod wez_tests {
         .expect("compute_wez");
         let row = result.rows.first().expect("one row");
         assert!(
-            row.attribution_unavailable,
-            "G2 has no solve-json v1 drag-model counterpart; attribution cannot run"
+            !row.attribution_unavailable,
+            "{model} has a solve-json v1 counterpart; attribution must run"
         );
         assert!(row.p_hit.is_finite(), "p_hit comes from the real Monte Carlo run, unaffected");
+        for (name, share) in [
+            ("wind_call", row.wind_call_share),
+            ("mv_sd", row.mv_sd_share),
+            ("other", row.other_share),
+        ] {
+            assert!(share.is_finite(), "{model} {name} share must be finite");
+            assert!(
+                (0.0..=1.0).contains(&share),
+                "{model} {name} share must be within [0, 1], got {share}"
+            );
+        }
+        let sum = row.wind_call_share + row.mv_sd_share + row.other_share;
+        assert!(
+            (sum - 1.0).abs() < 1e-9,
+            "{model} attribution shares must sum to one, got {sum}"
+        );
+    }
+
+    /// MBA-1442: every built-in model now has an exact solve-json v1 representation, so the
+    /// shared perturbation kernel can attribute WEZ variance without changing drag physics.
+    #[test]
+    fn g2_attribution_is_available() {
+        assert_builtin_drag_model_attribution_available(DragModel::G2);
+    }
+
+    #[test]
+    fn g5_attribution_is_available() {
+        assert_builtin_drag_model_attribution_available(DragModel::G5);
+    }
+
+    #[test]
+    fn gi_attribution_is_available() {
+        assert_builtin_drag_model_attribution_available(DragModel::GI);
+    }
+
+    #[test]
+    fn gs_attribution_is_available() {
+        assert_builtin_drag_model_attribution_available(DragModel::GS);
+    }
+
+    #[test]
+    fn ra4_attribution_is_available() {
+        assert_builtin_drag_model_attribution_available(DragModel::RA4);
     }
 
     /// A loaded custom drag table replaces G-model+BC drag entirely, and solve-json v1 has no

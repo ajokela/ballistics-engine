@@ -106,8 +106,14 @@ fn direct_inputs(method: SolverMethodV1) -> BallisticInputs {
 }
 
 fn direct_solver(method: SolverMethodV1) -> TrajectorySolver {
+    direct_solver_for_model(method, DragModel::G7)
+}
+
+fn direct_solver_for_model(method: SolverMethodV1, drag_model: DragModel) -> TrajectorySolver {
+    let mut inputs = direct_inputs(method);
+    inputs.bc_type = drag_model;
     let mut solver = TrajectorySolver::new(
-        direct_inputs(method),
+        inputs,
         WindConditions {
             speed: 4.0,
             direction: std::f64::consts::FRAC_PI_2,
@@ -123,6 +129,42 @@ fn direct_solver(method: SolverMethodV1) -> TrajectorySolver {
     solver.set_max_range(200.0);
     solver.set_time_step(0.001);
     solver
+}
+
+#[test]
+fn every_added_drag_model_matches_its_direct_engine_path() {
+    for (wire_name, engine_model) in [
+        ("G2", DragModel::G2),
+        ("G5", DragModel::G5),
+        ("GI", DragModel::GI),
+        ("GS", DragModel::GS),
+        ("RA4", DragModel::RA4),
+    ] {
+        let mut value = request_value("rk45");
+        value["projectile"]["drag_model"] = json!(wire_name);
+
+        let success = solve_v1(decode(&value)).expect("service solve");
+        assert_eq!(
+            serde_json::to_value(success.resolved_request.projectile.drag_model).unwrap(),
+            json!(wire_name),
+            "resolved request must preserve {wire_name}"
+        );
+
+        let direct = direct_solver_for_model(SolverMethodV1::Rk45, engine_model)
+            .solve()
+            .expect("direct solve");
+        let observations = direct
+            .sample_observations(25.0, 10_000)
+            .expect("direct observations");
+        assert_eq!(success.samples.len(), observations.len(), "{wire_name}");
+        for (actual, expected) in success.samples.iter().zip(observations) {
+            assert_relative_eq!(actual.distance_m, expected.distance_m, epsilon = 1e-12);
+            assert_relative_eq!(actual.time_s, expected.time_s, epsilon = 1e-12);
+            assert_relative_eq!(actual.speed_mps, expected.speed_mps, epsilon = 1e-10);
+            assert_relative_eq!(actual.drop_m, expected.drop_m, epsilon = 1e-12);
+            assert_relative_eq!(actual.windage_m, expected.windage_m, epsilon = 1e-12);
+        }
+    }
 }
 
 #[test]

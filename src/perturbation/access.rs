@@ -4,10 +4,10 @@
 //! (`request_roundtrip.rs`) and then overwrites exactly one field, so every other input is
 //! carried across unchanged.
 //!
-//! Two axes are enum-valued rather than scalar or boolean (`DragModel`: G1/G6/G7/G8;
-//! `TwistDirection`: left/right), so [`AxisValue`] carries a dedicated variant for each
-//! instead of round-tripping through a string -- a string round-trip would turn a typo into a
-//! runtime [`KernelError::TypeMismatch`] instead of a compile error.
+//! Two axes are enum-valued rather than scalar or boolean (`DragModel`:
+//! G1/G2/G5/G6/G7/G8/GI/GS/RA4; `TwistDirection`: left/right), so [`AxisValue`] carries a
+//! dedicated variant for each instead of round-tripping through a string -- a string round-trip
+//! would turn a typo into a runtime [`KernelError::TypeMismatch`] instead of a compile error.
 //!
 //! `with_axis` also refuses two axis/request combinations that would otherwise silently build
 //! a physically WRONG counterfactual, because [the reverse conversion](crate::solve_json)
@@ -481,8 +481,8 @@ mod tests {
         assert_eq!(changed.effects.coriolis, Some(true));
     }
 
-    /// DragModel is a four-way enum (G1/G6/G7/G8), not a bool or float: AxisValue needs a
-    /// dedicated variant to carry it losslessly (see the module doc).
+    /// DragModel is a nine-way enum (G1/G2/G5/G6/G7/G8/GI/GS/RA4), not a bool or float:
+    /// AxisValue needs a dedicated variant to carry it losslessly (see the module doc).
     #[test]
     fn drag_model_axis_reads_and_writes_the_enum_value() {
         let r = resolved();

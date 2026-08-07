@@ -35,7 +35,7 @@
 //! Concretely: anything [`ballistics_engine::solve_json::decode_solve_request_v1`] rejects is
 //! `-32602`; anything [`ballistics_engine::solve_v1()`] rejects after that is `isError: true`.
 
-use ballistics_engine::solve_json::decode_solve_request_v1;
+use ballistics_engine::solve_json::{decode_solve_request_v1, DRAG_MODEL_WIRE_NAMES_V1};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -443,7 +443,7 @@ fn solve_input_schema() -> Value {
                     "mass_kg": {"type": "number"},
                     "diameter_m": {"type": "number"},
                     "length_m": {"type": "number"},
-                    "drag_model": {"type": "string", "enum": ["G1", "G6", "G7", "G8"]},
+                    "drag_model": {"type": "string", "enum": DRAG_MODEL_WIRE_NAMES_V1},
                     "ballistic_coefficient": {"type": "number"}
                 }
             },
@@ -656,7 +656,7 @@ fn call_engine_info_tool() -> Value {
 
     let info = json!({
         "engine_version": env!("CARGO_PKG_VERSION"),
-        "drag_models": ["G1", "G6", "G7", "G8"],
+        "drag_models": DRAG_MODEL_WIRE_NAMES_V1,
         "features": features
     });
     let text = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
@@ -881,6 +881,11 @@ mod tests {
         for tool in tools {
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
+        assert_eq!(
+            tools[0]["inputSchema"]["properties"]["projectile"]["properties"]["drag_model"]
+                ["enum"],
+            json!(DRAG_MODEL_WIRE_NAMES_V1)
+        );
     }
 
     #[test]
@@ -902,7 +907,7 @@ mod tests {
             .expect("text content");
         let info: Value = serde_json::from_str(text).expect("engine_info text is JSON");
         assert_eq!(info["engine_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(info["drag_models"], json!(["G1", "G6", "G7", "G8"]));
+        assert_eq!(info["drag_models"], json!(DRAG_MODEL_WIRE_NAMES_V1));
         assert!(info["features"].is_array());
     }
 

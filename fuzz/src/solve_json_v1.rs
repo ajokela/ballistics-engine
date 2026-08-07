@@ -17,11 +17,16 @@ pub const MAX_FUZZ_RANGE_M: f64 = 250.0;
 pub const MAX_FUZZ_WIND_SEGMENTS: usize = 8;
 
 fn drag_model(u: &mut Unstructured<'_>) -> Result<DragModelV1> {
-    Ok(match u.int_in_range(0u8..=3)? {
+    Ok(match u.int_in_range(0u8..=8)? {
         0 => DragModelV1::G1,
-        1 => DragModelV1::G6,
-        2 => DragModelV1::G7,
-        _ => DragModelV1::G8,
+        1 => DragModelV1::G2,
+        2 => DragModelV1::G5,
+        3 => DragModelV1::G6,
+        4 => DragModelV1::G7,
+        5 => DragModelV1::G8,
+        6 => DragModelV1::GI,
+        7 => DragModelV1::GS,
+        _ => DragModelV1::RA4,
     })
 }
 

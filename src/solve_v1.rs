@@ -1318,9 +1318,14 @@ fn termination_to_wire(termination: TrajectoryTermination) -> TerminationReasonV
 fn drag_model_to_engine(model: DragModelV1) -> DragModel {
     match model {
         DragModelV1::G1 => DragModel::G1,
+        DragModelV1::G2 => DragModel::G2,
+        DragModelV1::G5 => DragModel::G5,
         DragModelV1::G6 => DragModel::G6,
         DragModelV1::G7 => DragModel::G7,
         DragModelV1::G8 => DragModel::G8,
+        DragModelV1::GI => DragModel::GI,
+        DragModelV1::GS => DragModel::GS,
+        DragModelV1::RA4 => DragModel::RA4,
     }
 }
 
@@ -1856,9 +1861,14 @@ mod tests {
     #[test]
     fn enum_mappers_cover_every_engine_metadata_variant() {
         assert_eq!(drag_model_to_engine(DragModelV1::G1), DragModel::G1);
+        assert_eq!(drag_model_to_engine(DragModelV1::G2), DragModel::G2);
+        assert_eq!(drag_model_to_engine(DragModelV1::G5), DragModel::G5);
         assert_eq!(drag_model_to_engine(DragModelV1::G6), DragModel::G6);
         assert_eq!(drag_model_to_engine(DragModelV1::G7), DragModel::G7);
         assert_eq!(drag_model_to_engine(DragModelV1::G8), DragModel::G8);
+        assert_eq!(drag_model_to_engine(DragModelV1::GI), DragModel::GI);
+        assert_eq!(drag_model_to_engine(DragModelV1::GS), DragModel::GS);
+        assert_eq!(drag_model_to_engine(DragModelV1::RA4), DragModel::RA4);
 
         for (engine, wire) in [
             (

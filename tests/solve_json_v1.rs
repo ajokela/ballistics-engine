@@ -1,11 +1,11 @@
 use ballistics_engine::solve_json::{
-    decode_solve_request_v1, ResolvedAtmosphereV1, ResolvedConstantWindV1, ResolvedEffectsV1,
-    ResolvedProjectileV1, ResolvedRifleV1, ResolvedSamplingV1, ResolvedShotV1,
+    decode_solve_request_v1, DragModelV1, ResolvedAtmosphereV1, ResolvedConstantWindV1,
+    ResolvedEffectsV1, ResolvedProjectileV1, ResolvedRifleV1, ResolvedSamplingV1, ResolvedShotV1,
     ResolvedSolveRequestV1, ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, SampleFlagV1,
     SchemaVersionV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveErrorLocationErrorV1,
     SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SuccessStatusV1,
-    TerminationReasonV1, TrajectorySampleV1, MAX_SOLVE_JSON_SAMPLES_V1,
-    SOLVE_JSON_SCHEMA_VERSION_V1,
+    TerminationReasonV1, TrajectorySampleV1, DRAG_MODEL_WIRE_NAMES_V1,
+    MAX_SOLVE_JSON_SAMPLES_V1, SOLVE_JSON_SCHEMA_VERSION_V1,
 };
 use serde_json::{json, Value};
 
@@ -668,6 +668,7 @@ fn explicit_null_is_not_treated_as_field_omission() {
 fn invalid_enum_values_have_stable_paths() {
     for (section, field, invalid, expected_path) in [
         ("projectile", "drag_model", "G9", "$.projectile.drag_model"),
+        ("projectile", "drag_model", "g2", "$.projectile.drag_model"),
         (
             "rifle",
             "twist_direction",
@@ -749,14 +750,37 @@ fn schema_version_invariant_always_serializes_as_integer_one() {
 }
 
 #[test]
-fn drag_models_without_distinct_tables_are_rejected() {
-    for model in ["G2", "G5", "GI", "GS"] {
-        let mut value = request_value();
-        value["projectile"]["drag_model"] = json!(model);
+fn all_reference_drag_models_decode_and_round_trip_exact_wire_names() {
+    let cases = [
+        ("G1", DragModelV1::G1),
+        ("G2", DragModelV1::G2),
+        ("G5", DragModelV1::G5),
+        ("G6", DragModelV1::G6),
+        ("G7", DragModelV1::G7),
+        ("G8", DragModelV1::G8),
+        ("GI", DragModelV1::GI),
+        ("GS", DragModelV1::GS),
+        ("RA4", DragModelV1::RA4),
+    ];
+    assert_eq!(
+        cases.map(|(wire_name, _)| wire_name),
+        DRAG_MODEL_WIRE_NAMES_V1
+    );
 
-        let error = decode(&value).expect_err("fallback-only drag model must fail");
-        assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
-        assert_eq!(error.error.path(), Some("$.projectile.drag_model"));
+    for (wire_name, expected) in cases {
+        let mut value = request_value();
+        value["projectile"]["drag_model"] = json!(wire_name);
+
+        let request = decode(&value).expect("every built-in reference model must decode");
+        assert_eq!(request.projectile.drag_model, expected);
+
+        let encoded = serde_json::to_value(&request).expect("serialize request");
+        assert_eq!(encoded["projectile"]["drag_model"], json!(wire_name));
+
+        let direct: DragModelV1 =
+            serde_json::from_value(json!(wire_name)).expect("direct enum decode");
+        assert_eq!(direct, expected);
+        assert_eq!(serde_json::to_value(direct).unwrap(), json!(wire_name));
     }
 }
 

@@ -5,6 +5,7 @@
 //! by the sibling `solve-json` transport tests in `tests/solve_json_cli.rs`) and drive a full
 //! session over its stdin/stdout, rather than calling the server loop as a library function.
 
+use ballistics_engine::solve_json::DRAG_MODEL_WIRE_NAMES_V1;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -19,7 +20,7 @@ fn solve_request_arguments() -> Value {
             "mass_kg": 0.01134,
             "diameter_m": 0.00782,
             "length_m": 0.031,
-            "drag_model": "G7",
+            "drag_model": "RA4",
             "ballistic_coefficient": 0.243
         },
         "rifle": {
@@ -219,6 +220,10 @@ fn full_session_initialize_list_call_and_clean_eof() {
             "solve inputSchema.required is missing {field:?}"
         );
     }
+    assert_eq!(
+        solve_schema["properties"]["projectile"]["properties"]["drag_model"]["enum"],
+        json!(DRAG_MODEL_WIRE_NAMES_V1)
+    );
 
     // 4. tools/call "solve" with a valid solve-json v1 request: a real trajectory comes back.
     session.send(&json!({
@@ -237,6 +242,10 @@ fn full_session_initialize_list_call_and_clean_eof() {
         serde_json::from_str(content_text).expect("solve tool text content must be JSON");
     assert_eq!(solve_payload["schema_version"], 1);
     assert_eq!(solve_payload["status"], "ok");
+    assert_eq!(
+        solve_payload["resolved_request"]["projectile"]["drag_model"],
+        "RA4"
+    );
     assert!(solve_payload["summary"]["actual_range_m"]
         .as_f64()
         .is_some_and(|range| range > 0.0));
@@ -260,7 +269,7 @@ fn full_session_initialize_list_call_and_clean_eof() {
     let engine_info: Value =
         serde_json::from_str(engine_info_text).expect("engine_info text content must be JSON");
     assert_eq!(engine_info["engine_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(engine_info["drag_models"], json!(["G1", "G6", "G7", "G8"]));
+    assert_eq!(engine_info["drag_models"], json!(DRAG_MODEL_WIRE_NAMES_V1));
 
     // 6. tools/call "solve" with structurally invalid arguments: rejected as Invalid params
     // (-32602), per this server's documented split between malformed-arguments protocol errors

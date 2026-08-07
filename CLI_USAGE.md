@@ -2258,11 +2258,10 @@ does not distinguish between:
   for that particular range — an input combination the underlying sensitivity solve can't
   evaluate.
 - **The drag configuration has no representation in the kernel's wire format at all** — a
-  loaded `--drag-table`, or a `--drag-model` of `G2`, `G5`, `GI`, `GS`, or `RA4` (only `G1`,
-  `G6`, `G7`, and `G8` are supported). This is the case most likely to catch you off guard:
-  every row of a `--drag-table` sweep, or a sweep using one of those unsupported drag models,
-  reads `n/a` on every range — including ranges the bullet clears easily. It is NOT a claim
-  that your bullet fails to reach the target.
+  loaded custom drag deck (`--drag-table`). Every row of such a sweep reads `n/a`, including
+  ranges the bullet clears easily; this is NOT a claim that the bullet fails to reach the
+  target. All nine built-in models (`G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, `RA4`)
+  are representable and retain attribution.
 
 `P(hit)` is unaffected in all three cases — it always comes from the fully-dispersed Monte Carlo
 run directly, never from the attribution kernel (and will simply read 0% under the first case,
@@ -3019,7 +3018,8 @@ out-of-range value, a resource limit, a genuine solve failure) is reported as a 
 [`src/mcp_command.rs`](src/mcp_command.rs) for the full rationale behind this split.
 
 **`engine_info`** — no arguments. Returns this crate's version, the drag models solve-json v1
-accepts (`G1`, `G6`, `G7`, `G8`), and the crate feature flags this binary was compiled with.
+accepts (`G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, `RA4`), and the crate feature flags
+this binary was compiled with.
 
 Only these two tools are exposed in this pass; other CLI subcommands (Monte Carlo, BC
 estimation, true velocity, profile import, and so on) are not wrapped as MCP tools yet.

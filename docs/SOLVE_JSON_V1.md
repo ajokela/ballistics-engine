@@ -56,7 +56,7 @@ and a consumer must not silently reinterpret a v1 field. Removing a field, chang
 sign, renaming an enum value, or changing a field's meaning requires a new schema version — these
 are the invariants v1 guarantees and they hold absolutely.
 
-v1 does, however, grow by ADDITION under two strict rules, so that a feature need not force a
+v1 does, however, grow by ADDITION under three strict rules, so that a feature need not force a
 whole new schema:
 
 1. A new REQUEST field must be optional and default to the exact pre-existing behavior when
@@ -66,6 +66,10 @@ whole new schema:
 2. A new RESPONSE field must be omitted whenever its feature is inactive, so a response that does
    not exercise the feature is byte-identical to one produced before the field existed
    (`reticle_hold` appears only when the request carries a `reticle` block).
+3. An existing REQUEST enum may gain a new accepted value when it names newly supported behavior.
+   The new value is opt-in and may be echoed in the resolved response; requests using older values
+   keep identical behavior and output. Producers that must work with older engines must not send
+   the new value (`G2`, `G5`, `GI`, `GS`, and `RA4` drag models were added this way in MBA-1442).
 
 Consumers must therefore tolerate response fields they do not recognize (ignore, do not reject) if
 they want to parse across engine versions; a consumer that pins a response DTO with
@@ -189,12 +193,12 @@ A representative request is:
 | `mass_kg` | yes | Projectile mass. |
 | `diameter_m` | yes | Projectile diameter. |
 | `length_m` | no | Projectile length; required by effects that need geometry. |
-| `drag_model` | yes | One of `G1`, `G6`, `G7`, or `G8`. |
+| `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. |
 | `ballistic_coefficient` | yes | BC for the selected reference drag model. |
 
-Only reference drag models backed by distinct tables in the engine are part of v1. The engine's
-legacy `G2`, `G5`, `GI`, and `GS` enum values currently fall back to the G1 table, so v1 rejects
-them rather than silently claiming a distinct model.
+All nine built-in reference drag models are backed by distinct tables and are accepted by v1.
+The enum spellings are exact and case-sensitive. Custom drag files and tables remain outside
+this wire format; see [Deliberate v1 exclusions](#deliberate-v1-exclusions).
 
 ### `rifle`
 

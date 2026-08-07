@@ -15,6 +15,13 @@ use std::{fmt, num::NonZeroUsize};
 /// The only solve-json schema version understood by this module.
 pub const SOLVE_JSON_SCHEMA_VERSION_V1: u32 = 1;
 
+/// Exact, case-sensitive wire names accepted for solve-json v1 reference drag models.
+///
+/// Kept as the single metadata source for protocol validation and the MCP schema/engine-info
+/// mirrors so those public surfaces cannot drift apart when the engine gains a model.
+pub const DRAG_MODEL_WIRE_NAMES_V1: [&str; 9] =
+    ["G1", "G2", "G5", "G6", "G7", "G8", "GI", "GS", "RA4"];
+
 /// Maximum number of trajectory observations in one solve-json v1 success response.
 ///
 /// Service implementations must reject a response above this limit with
@@ -207,6 +214,16 @@ pub enum DragModelV1 {
     G7,
     #[serde(rename = "G8")]
     G8,
+    #[serde(rename = "G2")]
+    G2,
+    #[serde(rename = "G5")]
+    G5,
+    #[serde(rename = "GI")]
+    GI,
+    #[serde(rename = "GS")]
+    GS,
+    #[serde(rename = "RA4")]
+    RA4,
 }
 
 /// Rifle and sight geometry.
@@ -1337,7 +1354,7 @@ fn validate_projectile(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     validate_string_enum(
         required_value(object, "drag_model", path)?,
         "$.projectile.drag_model",
-        &["G1", "G6", "G7", "G8"],
+        &DRAG_MODEL_WIRE_NAMES_V1,
     )
 }
 
