@@ -53,6 +53,9 @@ pub use trajectory_sampling::MAX_TRAJECTORY_SAMPLES;
 
 // Module declarations
 pub mod cli_api;
+// MBA-1375: deterministic reference-family BC conversion and banded least-squares family
+// recommendation, shared by native and WASM front ends. Pure table math; no filesystem I/O.
+pub mod bc_conversion;
 pub mod moving_target;
 mod drag_model;
 // The C ABI. Gated behind the default-on `ffi` feature so a binary that links two versions of

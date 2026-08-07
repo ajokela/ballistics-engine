@@ -24,6 +24,190 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn bc_convert_help_discloses_both_modes_and_phase_one_models() {
+        let wasm = WasmBallistics::new();
+        let help = wasm.run_command("help").unwrap();
+        let index = help
+            .split("Global Options:")
+            .next()
+            .expect("help has a command index");
+        assert!(
+            index.contains("\n  bc-convert "),
+            "bc-convert is missing from the command index: {index}"
+        );
+        for expected in [
+            "BC Convert Command:",
+            "--source-model <MODEL>",
+            "--target-model <MODEL>",
+            "--bc <BC>",
+            "--mach <MACH>",
+            "--velocity <VEL>",
+            "--bc-segment <VMIN:VMAX:BC>",
+            "--speed-of-sound <VEL>",
+            "g1|g7",
+            "table/json/csv",
+        ] {
+            assert!(help.contains(expected), "help missing {expected:?}: {help}");
+        }
+        let command_help = wasm.run_command("bc-convert --help").unwrap();
+        assert!(command_help.contains("BC Convert Command:"));
+        assert!(command_help.contains("--source-model <MODEL>"));
+    }
+
+    #[wasm_bindgen_test]
+    fn bc_convert_scalar_json_is_the_shared_formatter_verbatim() {
+        let actual = WasmBallistics::new()
+            .run_command(
+                "bc-convert --source-model g1 --target-model g7 --bc 0.475 \
+                 --velocity 2700 -o JSON",
+            )
+            .unwrap();
+        let result = crate::bc_conversion::convert_bc_at_velocity(
+            0.475,
+            crate::DragModel::G1,
+            crate::DragModel::G7,
+            2700.0,
+            crate::constants::SPEED_OF_SOUND_MPS / crate::constants::FPS_TO_MPS,
+        )
+        .unwrap();
+        let expected = crate::bc_conversion::format_bc_conversion_report(
+            &crate::bc_conversion::BcConversionReportV1::Scalar { result },
+            crate::bc_conversion::BcConversionFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        let _: serde_json::Value =
+            serde_json::from_str(&actual).expect("bc-convert JSON must be a pure document");
+    }
+
+    #[wasm_bindgen_test]
+    fn bc_convert_metric_velocity_and_speed_of_sound_reach_the_canonical_fps_core() {
+        let actual = WasmBallistics::new()
+            .run_command(
+                "--units metric bc-convert --source-model g7 --target-model g1 --bc 0.260 \
+                 --velocity 800 --speed-of-sound 343 -o json",
+            )
+            .unwrap();
+        let result = crate::bc_conversion::convert_bc_at_velocity(
+            0.260,
+            crate::DragModel::G7,
+            crate::DragModel::G1,
+            800.0 * 3.280_839_895,
+            343.0 * 3.280_839_895,
+        )
+        .unwrap();
+        let expected = crate::bc_conversion::format_bc_conversion_report(
+            &crate::bc_conversion::BcConversionReportV1::Scalar { result },
+            crate::bc_conversion::BcConversionFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[wasm_bindgen_test]
+    fn bc_convert_banded_json_includes_the_shared_g1_g7_recommendation() {
+        let actual = WasmBallistics::new()
+            .run_command(
+                "bc-convert --source-model g1 --target-model g7 \
+                 --bc-segment 2400:3200:0.505 --bc-segment 1800:2400:0.480 \
+                 --bc-segment 1200:1800:0.430 -o json",
+            )
+            .unwrap();
+        let segments = vec![
+            crate::BCSegmentData {
+                velocity_min: 2400.0,
+                velocity_max: 3200.0,
+                bc_value: 0.505,
+            },
+            crate::BCSegmentData {
+                velocity_min: 1800.0,
+                velocity_max: 2400.0,
+                bc_value: 0.480,
+            },
+            crate::BCSegmentData {
+                velocity_min: 1200.0,
+                velocity_max: 1800.0,
+                bc_value: 0.430,
+            },
+        ];
+        let result = crate::bc_conversion::analyze_bc_segments(
+            &segments,
+            crate::DragModel::G1,
+            crate::DragModel::G7,
+            &[crate::DragModel::G1, crate::DragModel::G7],
+            crate::constants::SPEED_OF_SOUND_MPS / crate::constants::FPS_TO_MPS,
+        )
+        .unwrap();
+        let expected = crate::bc_conversion::format_bc_conversion_report(
+            &crate::bc_conversion::BcConversionReportV1::Banded { result },
+            crate::bc_conversion::BcConversionFormat::Json,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert!(
+            actual.contains("\"recommendation\""),
+            "banded JSON omitted the family recommendation: {actual}"
+        );
+        let _: serde_json::Value =
+            serde_json::from_str(&actual).expect("banded bc-convert JSON must be pure JSON");
+    }
+
+    #[wasm_bindgen_test]
+    fn bc_convert_rejects_invalid_modes_models_and_values() {
+        let wasm = WasmBallistics::new();
+        for (command, expected) in [
+            (
+                "bc-convert --source-model g2 --target-model g7 --bc 0.5 --mach 2",
+                "expected g1 or g7",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 --bc 0.5",
+                "exactly one of --mach or --velocity",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 --bc 0.5 --mach 2 \
+                 --velocity 2200",
+                "exactly one of --mach or --velocity",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 --bc 0.5 --mach 2 \
+                 --bc-segment 1800:2600:0.5",
+                "--bc cannot be used with --bc-segment",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 \
+                 --bc-segment 1800:2600:0.5 --velocity 2200",
+                "--bc-segment cannot be used with --mach or --velocity",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 --bc 0.5 --mach 2 \
+                 --speed-of-sound 1116.437",
+                "--speed-of-sound cannot be used with --mach",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 --bc 0.4 --bc 0.5 --mach 2",
+                "--bc cannot be used multiple times",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 \
+                 --bc-segment 2600:1800:0.5",
+                "VMIN must be finite and less than VMAX",
+            ),
+            (
+                "bc-convert --source-model g1 --target-model g7 --bc 0.5 --mach 2 -o pdf",
+                "has no PDF form",
+            ),
+        ] {
+            let error = wasm.run_command(command).unwrap_err();
+            let message = error.as_string().unwrap_or_default();
+            assert!(
+                message.contains(expected),
+                "`{command}`: expected {expected:?}, got {message:?}"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
     fn test_basic_trajectory_command() {
         let wasm = WasmBallistics::new();
         let result = wasm

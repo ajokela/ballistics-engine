@@ -1040,6 +1040,7 @@ impl WasmBallistics {
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
             "true-velocity" => self.handle_true_velocity_command(&args[1..], units),
             "true-wind" => self.handle_true_wind_command(&args[1..], units),
+            "bc-convert" => self.handle_bc_convert_command(&args[1..], units),
             "estimate-bc" => self.handle_estimate_bc_command(&args[1..], units),
             "lead" => self.handle_lead_command(&args[1..], units),
             "powder" => self.handle_powder_command(&args[1..], units),
@@ -6174,6 +6175,249 @@ impl WasmBallistics {
         output
     }
 
+    /// MBA-1375's phase-one G1/G7 BC-family converter for the browser terminal.
+    ///
+    /// This method owns only argv parsing and display-unit conversion. The calculation,
+    /// banded-family recommendation, JSON schema, and every output byte come from the shared
+    /// `bc_conversion` module, exactly as on the native command surface.
+    fn handle_bc_convert_command(
+        &self,
+        args: &[&str],
+        units: UnitSystem,
+    ) -> Result<String, JsValue> {
+        use crate::bc_conversion::{
+            analyze_bc_segments, convert_bc_at_mach, convert_bc_at_velocity,
+            format_bc_conversion_report, BcConversionFormat, BcConversionReportV1,
+        };
+
+        if args.iter().any(|arg| matches!(*arg, "-h" | "--help")) {
+            return Ok(self.show_help());
+        }
+
+        let duplicate =
+            |flag: &str| JsValue::from_str(&format!("{flag} cannot be used multiple times"));
+        let parse_bounded = |value: &str, flag: &str, min: f64, max: f64| -> Result<f64, JsValue> {
+            let parsed = parse_f64_arg(value, flag)?;
+            if !parsed.is_finite() || parsed < min || parsed > max {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid value '{value}' for {flag}: must be in range {min}..={max}"
+                )));
+            }
+            Ok(parsed)
+        };
+        let parse_model = |value: &str, flag: &str| -> Result<DragModel, JsValue> {
+            match value.to_ascii_lowercase().as_str() {
+                "g1" => Ok(DragModel::G1),
+                "g7" => Ok(DragModel::G7),
+                _ => Err(JsValue::from_str(&format!(
+                    "Invalid value '{value}' for {flag} (expected g1 or g7; phase one exposes only these models)"
+                ))),
+            }
+        };
+
+        let mut source_model = None;
+        let mut target_model = None;
+        let mut bc = None;
+        let mut mach = None;
+        let mut velocity = None;
+        let mut segment_values: Vec<&str> = Vec::new();
+        let mut speed_of_sound = None;
+        let mut output = BcConversionFormat::Table;
+        let mut output_seen = false;
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--source-model" => {
+                    if source_model.is_some() {
+                        return Err(duplicate("--source-model"));
+                    }
+                    source_model = Some(parse_model(require_value(args, i)?, "--source-model")?);
+                    i += 1;
+                }
+                "--target-model" => {
+                    if target_model.is_some() {
+                        return Err(duplicate("--target-model"));
+                    }
+                    target_model = Some(parse_model(require_value(args, i)?, "--target-model")?);
+                    i += 1;
+                }
+                "-b" | "--bc" => {
+                    if bc.is_some() {
+                        return Err(duplicate("--bc"));
+                    }
+                    bc = Some(parse_bounded(require_value(args, i)?, "--bc", 0.001, 2.0)?);
+                    i += 1;
+                }
+                "--mach" => {
+                    if mach.is_some() {
+                        return Err(duplicate("--mach"));
+                    }
+                    mach = Some(parse_bounded(require_value(args, i)?, "--mach", 0.0, 5.0)?);
+                    i += 1;
+                }
+                "--velocity" => {
+                    if velocity.is_some() {
+                        return Err(duplicate("--velocity"));
+                    }
+                    velocity = Some(parse_bounded(
+                        require_value(args, i)?,
+                        "--velocity",
+                        0.001,
+                        6000.0,
+                    )?);
+                    i += 1;
+                }
+                "--bc-segment" => {
+                    segment_values.push(require_value(args, i)?);
+                    i += 1;
+                }
+                "--speed-of-sound" => {
+                    if speed_of_sound.is_some() {
+                        return Err(duplicate("--speed-of-sound"));
+                    }
+                    speed_of_sound = Some(parse_bounded(
+                        require_value(args, i)?,
+                        "--speed-of-sound",
+                        0.001,
+                        6000.0,
+                    )?);
+                    i += 1;
+                }
+                "-o" | "--output" => {
+                    if output_seen {
+                        return Err(duplicate("--output"));
+                    }
+                    output_seen = true;
+                    output = match require_value(args, i)?.to_ascii_lowercase().as_str() {
+                        "table" => BcConversionFormat::Table,
+                        "json" => BcConversionFormat::Json,
+                        "csv" => BcConversionFormat::Csv,
+                        "pdf" => {
+                            return Err(JsValue::from_str(
+                                "bc-convert has no PDF form; use -o table, -o csv, or -o json",
+                            ));
+                        }
+                        other => {
+                            return Err(JsValue::from_str(&format!(
+                                "Invalid output format '{other}' for bc-convert (expected table, json, or csv)"
+                            )));
+                        }
+                    };
+                    i += 1;
+                }
+                other => {
+                    return Err(JsValue::from_str(&format!(
+                        "unexpected bc-convert argument '{other}'"
+                    )));
+                }
+            }
+            i += 1;
+        }
+
+        let source_model = source_model
+            .ok_or_else(|| JsValue::from_str("--source-model is required for bc-convert"))?;
+        let target_model = target_model
+            .ok_or_else(|| JsValue::from_str("--target-model is required for bc-convert"))?;
+        let velocity_to_fps = match units {
+            UnitSystem::Imperial => 1.0,
+            UnitSystem::Metric => 3.280_839_895,
+        };
+        let speed_of_sound_fps = speed_of_sound.map_or_else(
+            || crate::constants::SPEED_OF_SOUND_MPS / crate::constants::FPS_TO_MPS,
+            |value| value * velocity_to_fps,
+        );
+
+        let report = match (bc, segment_values.is_empty()) {
+            (Some(_), false) => {
+                return Err(JsValue::from_str("--bc cannot be used with --bc-segment"));
+            }
+            (None, true) => {
+                return Err(JsValue::from_str(
+                    "bc-convert requires exactly one of --bc or --bc-segment",
+                ));
+            }
+            (Some(source_bc), true) => {
+                if speed_of_sound.is_some() && mach.is_some() {
+                    return Err(JsValue::from_str(
+                        "--speed-of-sound cannot be used with --mach",
+                    ));
+                }
+                let result = match (mach, velocity) {
+                    (Some(mach), None) => {
+                        convert_bc_at_mach(source_bc, source_model, target_model, mach)
+                    }
+                    (None, Some(velocity)) => convert_bc_at_velocity(
+                        source_bc,
+                        source_model,
+                        target_model,
+                        velocity * velocity_to_fps,
+                        speed_of_sound_fps,
+                    ),
+                    _ => {
+                        return Err(JsValue::from_str(
+                            "scalar conversion requires exactly one of --mach or --velocity",
+                        ));
+                    }
+                }
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                BcConversionReportV1::Scalar { result }
+            }
+            (None, false) => {
+                if mach.is_some() || velocity.is_some() {
+                    return Err(JsValue::from_str(
+                        "--bc-segment cannot be used with --mach or --velocity",
+                    ));
+                }
+
+                let mut segments = Vec::with_capacity(segment_values.len());
+                for value in segment_values {
+                    let fields: Vec<&str> = value.split(':').collect();
+                    if fields.len() != 3 {
+                        return Err(JsValue::from_str(&format!(
+                            "--bc-segment expects VMIN:VMAX:BC (e.g. 1500:1800:0.243), got '{value}'"
+                        )));
+                    }
+                    let vmin = parse_f64_arg(fields[0].trim(), "--bc-segment VMIN")?;
+                    let vmax = parse_f64_arg(fields[1].trim(), "--bc-segment VMAX")?;
+                    let segment_bc = parse_f64_arg(fields[2].trim(), "--bc-segment BC")?;
+                    if !vmin.is_finite()
+                        || !vmax.is_finite()
+                        || vmin.partial_cmp(&vmax) != Some(std::cmp::Ordering::Less)
+                    {
+                        return Err(JsValue::from_str(&format!(
+                            "--bc-segment VMIN must be finite and less than VMAX in '{value}'"
+                        )));
+                    }
+                    if !segment_bc.is_finite() || segment_bc <= 0.0 {
+                        return Err(JsValue::from_str(&format!(
+                            "--bc-segment BC must be finite and greater than zero in '{value}'"
+                        )));
+                    }
+                    segments.push(crate::BCSegmentData {
+                        velocity_min: vmin * velocity_to_fps,
+                        velocity_max: vmax * velocity_to_fps,
+                        bc_value: segment_bc,
+                    });
+                }
+
+                let candidates = [DragModel::G1, DragModel::G7];
+                let result = analyze_bc_segments(
+                    &segments,
+                    source_model,
+                    target_model,
+                    &candidates,
+                    speed_of_sound_fps,
+                )
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+                BcConversionReportV1::Banded { result }
+            }
+        };
+
+        format_bc_conversion_report(&report, output)
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
     /// `drag-curve` in the browser terminal (MBA-1426 item 2, requested alongside MBA-1427 by
     /// the same external consumer — the reference curve his effective Cd curve is plotted
     /// against).
@@ -7634,6 +7878,7 @@ Commands:
   monte-carlo    Run Monte Carlo simulation
   true-velocity  Calculate effective muzzle velocity from observed drop
   true-wind      Back-solve effective crosswind from an observed horizontal miss
+  bc-convert     Convert published BC values between G1 and G7
   estimate-bc    Estimate BC from trajectory data
   lead           Calculate moving-target lead (hold)
   powder         Resolve powder-temperature velocity shift (no trajectory)
@@ -8009,6 +8254,27 @@ True Wind Command:
                                  is local on both surfaces)
     -o, --output <FORMAT>        Output format (table/json/csv) [default: table]
 
+BC Convert Command:
+  ballistics bc-convert --source-model <g1|g7> --target-model <g1|g7> [OPTIONS]
+
+  Converts a published BC between the G1 and G7 reference drag families. Scalar
+  mode converts one --bc at one --mach or --velocity. Banded mode converts every
+  repeated --bc-segment and recommends the better-fitting single-BC family.
+
+  Options:
+    --source-model <MODEL>      Drag family used by the supplied BC value(s) [required]
+    --target-model <MODEL>      Drag family to convert into [required]
+    -b, --bc <BC>               Scalar BC; conflicts with --bc-segment
+    --mach <MACH>               Scalar conversion Mach; conflicts with --velocity,
+                                --speed-of-sound, and --bc-segment
+    --velocity <VEL>            Scalar conversion velocity (fps/m/s); conflicts with
+                                --mach and --bc-segment
+    --bc-segment <VMIN:VMAX:BC> Velocity-banded BC (repeatable; fps/m/s per --units).
+                                Conflicts with --bc, --mach, and --velocity
+    --speed-of-sound <VEL>      Speed of sound in the current velocity units; valid with
+                                --velocity or banded mode [default: 1116.437 fps / 340.29 m/s]
+    -o, --output <FORMAT>       Output format (table/json/csv) [default: table]
+
 Estimate BC Command:
   ballistics estimate-bc [OPTIONS]
 
@@ -8145,6 +8411,9 @@ Examples:
   ballistics trajectory --auto-zero 200 --enable-spin-drift
   ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9
   ballistics zero --target-distance 300
+  ballistics bc-convert --source-model g1 --target-model g7 -b 0.475 --velocity 2700
+  ballistics bc-convert --source-model g1 --target-model g7 \
+    --bc-segment 2500:3000:0.475 --bc-segment 1500:2500:0.465 -o json
   ballistics estimate-bc -v 2700 -m 168 -d 0.308 --data "100,2.1;200,9.4;300,22.8"
   ballistics estimate-bc -v 2650 -m 77 -d 0.224 --data "300,29;500,89.9" \
     --velocity-data "300,1980;500,1560" --drag-model both
@@ -8677,5 +8946,3 @@ impl Calculator {
         }
     }
 }
-
-

@@ -2319,6 +2319,65 @@ per range step.
 base command — a WEZ sweep is `--num-sims` trajectories times the number of sweep steps, plus a
 handful of cheap deterministic solves per step for attribution.
 
+### BC Drag-Family Conversion (`bc-convert`)
+
+Convert a ballistic coefficient published against one reference drag curve into the value that
+produces the same instantaneous retardation against the other phase-one curve. This is a table
+lookup plus the McCoy/Litz form-factor identity — no learned model or bullet-name heuristic:
+
+```text
+BC_target = BC_source × Cd_target(Mach) / Cd_source(Mach)
+```
+
+Scalar mode takes one BC and exactly one position on the drag curves:
+
+```bash
+# Convert a G1 BC at 2600 fps to its G7 value at that velocity.
+ballistics bc-convert --source-model g1 --target-model g7 \
+  --bc 0.505 --velocity 2600
+
+# The same operation when Mach is already known.
+ballistics bc-convert --source-model g1 --target-model g7 \
+  --bc 0.505 --mach 2.33 -o json
+
+# Metric velocity and speed of sound use the global unit system together.
+ballistics --units metric bc-convert --source-model g7 --target-model g1 \
+  --bc 0.260 --velocity 800 --speed-of-sound 343
+```
+
+`--mach` and `--velocity` are mutually exclusive. A velocity is divided by
+`--speed-of-sound` in the same units; when the latter is omitted, the ICAO standard value is
+used (1116.437 fps imperial / 340.29 m/s metric). Passing Mach bypasses the speed-of-sound
+conversion entirely. The command rejects a Mach outside either live table's measured domain
+instead of silently holding an endpoint.
+
+Banded mode reuses the same `VMIN:VMAX:BC` shape as trajectory's manual BC schedule. Supply at
+least one segment in place of `--bc`; scalar `--mach`/`--velocity` flags are not accepted because
+the intervals themselves define the velocity domains to convert:
+
+```bash
+ballistics bc-convert --source-model g1 --target-model g7 \
+  --bc-segment 2400:3200:0.505 \
+  --bc-segment 1800:2400:0.480 \
+  --bc-segment 1200:1800:0.430 \
+  -o table
+```
+
+The converted ladder preserves every input interval. Within each interval, the target BC is the
+width-integrated least-squares constant that best preserves relative retardation across the whole
+band — not a conversion sampled only at its midpoint. The report also fits one constant G1 BC and
+one constant G7 BC across all supplied bands, scores their dimensionless width-normalized RMS
+relative-retardation residuals, and identifies the lower-residual family. That recommendation
+means only “which of these two standard curves represents this BC ladder more consistently”; it
+does not identify bullet shape or replace a measured custom Cd(Mach) deck.
+
+Phase one intentionally accepts only `g1` and `g7` for `--source-model` and `--target-model`.
+Outputs are `-o table|csv|json`; there is no PDF form. The browser terminal accepts the same
+command and flags. Inputs follow `--units`, while report velocities and band bounds use the
+canonical, explicitly named `velocity_fps` / `*_fps` fields and columns so saved JSON/CSV has one
+unit contract across native and browser callers. Conversion preserves the BC's
+reference-atmosphere convention: it does not also convert ICAO vs. Army Standard Metro values.
+
 ### BC Estimation
 
 Estimate ballistic coefficient from observed data. Supports both the **G1 and G7** drag

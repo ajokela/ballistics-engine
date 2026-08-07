@@ -1637,6 +1637,69 @@ enum Commands {
         output: OutputFormat,
     },
 
+    /// Convert a published ballistic coefficient between the G1 and G7 drag families
+    ///
+    /// Scalar mode converts --bc at exactly one stated --mach or --velocity. Banded mode
+    /// converts each repeated --bc-segment and also reports the best single-BC G1/G7 fit.
+    /// Banded velocities, --velocity, and --speed-of-sound follow the global --units setting.
+    BcConvert {
+        /// Drag family the supplied BC value(s) use
+        #[arg(long, value_enum, ignore_case = true)]
+        source_model: BcConvertModelArg,
+
+        /// Drag family to convert the BC value(s) into
+        #[arg(long, value_enum, ignore_case = true)]
+        target_model: BcConvertModelArg,
+
+        /// Scalar ballistic coefficient; conflicts with --bc-segment
+        #[arg(
+            short = 'b',
+            long,
+            value_parser = f64_range(0.001, 2.0),
+            conflicts_with = "bc_segment",
+            required_unless_present = "bc_segment"
+        )]
+        bc: Option<f64>,
+
+        /// Mach number at which to convert a scalar BC; conflicts with --velocity
+        #[arg(
+            long,
+            value_parser = f64_range(0.0, 5.0),
+            conflicts_with_all = ["velocity", "bc_segment", "speed_of_sound"]
+        )]
+        mach: Option<f64>,
+
+        /// Velocity at which to convert a scalar BC (fps imperial, m/s metric)
+        #[arg(
+            long,
+            value_parser = f64_range(0.001, 6000.0),
+            conflicts_with_all = ["mach", "bc_segment"]
+        )]
+        velocity: Option<f64>,
+
+        /// Velocity-banded BC as VMIN:VMAX:BC; repeat for array conversion and family fitting
+        #[arg(
+            long = "bc-segment",
+            value_name = "VMIN:VMAX:BC",
+            action = clap::ArgAction::Append,
+            conflicts_with_all = ["bc", "mach", "velocity"],
+            required_unless_present = "bc"
+        )]
+        bc_segment: Vec<String>,
+
+        /// Speed of sound in the current velocity units [default: ICAO standard, 1116.437 fps / 340.29 m/s]
+        #[arg(
+            long,
+            value_parser = f64_range(0.001, 6000.0),
+            conflicts_with = "mach"
+        )]
+        speed_of_sound: Option<f64>,
+
+        /// Output format: table (default), csv, or json
+        #[arg(short = 'o', long, default_value = "table", ignore_case = true)]
+        output: BcConversionOutputFormat,
+    },
+
     /// Generate BC segments for velocity-dependent BC
     GenerateBCSegments {
         /// Base ballistic coefficient
@@ -4368,6 +4431,33 @@ enum OutputFormat {
     Csv,
     Table,
     Pdf,
+}
+
+/// MBA-1375 phase-one drag families. This intentionally does not reuse the full public
+/// [`DragModel`] `ValueEnum`: accepting a model whose conversion contract has not shipped yet
+/// would turn a future-looking CLI spelling into plausible but unsupported output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BcConvertModelArg {
+    G1,
+    G7,
+}
+
+/// Output forms that actually exist for `bc-convert`. Keeping this separate from the broad
+/// [`OutputFormat`] prevents clap from advertising PDF and then rejecting it at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BcConversionOutputFormat {
+    Json,
+    Csv,
+    Table,
+}
+
+impl From<BcConvertModelArg> for DragModel {
+    fn from(value: BcConvertModelArg) -> Self {
+        match value {
+            BcConvertModelArg::G1 => DragModel::G1,
+            BcConvertModelArg::G7 => DragModel::G7,
+        }
+    }
 }
 
 /// CLI-facing mirror of `ballistics_engine::recoil::FirearmType`, selecting SAAMI's
@@ -10579,6 +10669,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                 sight_height_m,
                 cli.units,
                 output,
+            )?;
+        }
+
+        Commands::BcConvert {
+            source_model,
+            target_model,
+            bc,
+            mach,
+            velocity,
+            bc_segment,
+            speed_of_sound,
+            output,
+        } => {
+            run_bc_convert(
+                source_model,
+                target_model,
+                bc,
+                mach,
+                velocity,
+                &bc_segment,
+                speed_of_sound,
+                output,
+                cli.units,
             )?;
         }
 
@@ -25173,6 +25286,93 @@ fn run_drag_curve(
         ballistics_engine::drag::format_reference_drag_curve(&drag_model, format)
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_bc_convert(
+    source_model: BcConvertModelArg,
+    target_model: BcConvertModelArg,
+    bc: Option<f64>,
+    mach: Option<f64>,
+    velocity: Option<f64>,
+    bc_segment: &[String],
+    speed_of_sound: Option<f64>,
+    output: BcConversionOutputFormat,
+    units: UnitSystem,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ballistics_engine::bc_conversion::{
+        analyze_bc_segments, convert_bc_at_mach, convert_bc_at_velocity,
+        format_bc_conversion_report, BcConversionFormat, BcConversionReportV1,
+    };
+
+    let format = match output {
+        BcConversionOutputFormat::Table => BcConversionFormat::Table,
+        BcConversionOutputFormat::Csv => BcConversionFormat::Csv,
+        BcConversionOutputFormat::Json => BcConversionFormat::Json,
+    };
+    let source: DragModel = source_model.into();
+    let target: DragModel = target_model.into();
+
+    let report = if let Some(source_bc) = bc {
+        let result = match (mach, velocity) {
+            (Some(mach), None) => convert_bc_at_mach(source_bc, source, target, mach)
+                .map_err(|error| error.to_string())?,
+            (None, Some(velocity)) => convert_bc_at_velocity(
+                source_bc,
+                source,
+                target,
+                bc_convert_velocity_to_fps(velocity, units),
+                bc_convert_speed_of_sound_fps(speed_of_sound, units),
+            )
+            .map_err(|error| error.to_string())?,
+            _ => {
+                return Err(
+                    "scalar conversion requires exactly one of --mach or --velocity".into(),
+                );
+            }
+        };
+        BcConversionReportV1::Scalar { result }
+    } else {
+        let segments: Vec<BCSegmentData> = bc_segment
+            .iter()
+            .map(|segment| parse_bc_segment(segment, units))
+            .collect::<Result<_, _>>()?;
+        let result = analyze_bc_segments(
+            &segments,
+            source,
+            target,
+            &[DragModel::G1, DragModel::G7],
+            bc_convert_speed_of_sound_fps(speed_of_sound, units),
+        )
+        .map_err(|error| error.to_string())?;
+        BcConversionReportV1::Banded { result }
+    };
+
+    print!(
+        "{}",
+        format_bc_conversion_report(&report, format).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+/// `BCSegmentData` and the MBA-1375 conversion core use canonical ft/s. Keep this conversion in
+/// one place so scalar velocity, every band boundary, and an explicit speed of sound cannot
+/// accidentally use different approximations under `--units metric`.
+fn bc_convert_velocity_to_fps(value: f64, units: UnitSystem) -> f64 {
+    match units {
+        UnitSystem::Imperial => value,
+        UnitSystem::Metric => value * 3.280_839_895,
+    }
+}
+
+fn bc_convert_speed_of_sound_fps(value: Option<f64>, units: UnitSystem) -> f64 {
+    value.map_or_else(
+        || {
+            ballistics_engine::constants::SPEED_OF_SOUND_MPS
+                / ballistics_engine::constants::FPS_TO_MPS
+        },
+        |value| bc_convert_velocity_to_fps(value, units),
+    )
 }
 
 /// Apply a subcommand's `--pressure-type` to its `--pressure` (MBA-1416).

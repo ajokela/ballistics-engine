@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **G1/G7 ballistic-coefficient drag-family conversion** (MBA-1375): the new `bc-convert`
+  command converts a published scalar BC at an explicit Mach or velocity using the live
+  reference curves (`BC_target = BC_source × Cd_target / Cd_source`). Repeated
+  `--bc-segment VMIN:VMAX:BC` inputs convert an existing velocity-banded ladder and report
+  fixed one-BC G1 and G7 least-squares fits plus the better-fitting family. Native and browser
+  terminal surfaces share the same deterministic library calculation and table/CSV/JSON
+  rendering; phase one intentionally accepts only G1 and G7.
+
 ### Fixed
 - **WEZ variance attribution supports every built-in reference drag model** (MBA-1442):
   solve-json v1 and MCP now accept and advertise the full `G1`/`G2`/`G5`/`G6`/`G7`/`G8`/
