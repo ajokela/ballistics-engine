@@ -2,7 +2,10 @@
 # Extract one version's CHANGELOG section as release-notes markdown (stdout).
 set -euo pipefail
 V="${1:?usage: extract-notes.sh VERSION}"
-cd "$(git rev-parse --show-toplevel)"
+# Resolve the repo from this script's own location, not the caller's cwd:
+# assemble.sh invokes us after cd-ing into the artifact directory, which is not
+# a git repository (bit the 0.33.1 release).
+cd "$(git -C "$(cd "$(dirname "$0")" && pwd)" rev-parse --show-toplevel)"
 python3 - "$V" <<'PY'
 import re, sys
 v = sys.argv[1]
