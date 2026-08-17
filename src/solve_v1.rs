@@ -464,6 +464,7 @@ pub(crate) fn prepare_request(
         powder_temp_curve: None,
         powder_curve_temp_c: None,
         tipoff_yaw: 0.0,
+        cd_delta2: 7.5,
         tipoff_decay_distance: 50.0,
         use_bc_segments: false,
         bc_segments: None,

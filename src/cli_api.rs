@@ -245,6 +245,12 @@ pub struct BallisticInputs {
     pub powder_curve_temp_c: Option<f64>,
     pub tipoff_yaw: f64,            // radians
     pub tipoff_decay_distance: f64, // meters
+    /// Quadratic yaw-drag coefficient CD_delta2 (per rad^2, actual-Cd space) applied
+    /// additively to the tip-off yaw: CD = CD0 + CD_delta2 * delta^2 (McCoy, Modern
+    /// Exterior Ballistics). Literature values for spitzer rifle bullets run ~4-20
+    /// per rad^2 (7.62 M80 ~= 9.6); the default 7.5 is a documented mid-range
+    /// constant. Only active when `tipoff_yaw` is nonzero (MBA-1227).
+    pub cd_delta2: f64,
     /// Enables velocity-keyed `bc_segments_data`. Explicit Mach-keyed `bc_segments` retain their
     /// legacy behavior and remain active when this flag is false.
     pub use_bc_segments: bool,
@@ -540,6 +546,7 @@ impl Default for BallisticInputs {
             powder_curve_temp_c: None,
             tipoff_yaw: 0.0,
             tipoff_decay_distance: 50.0,
+            cd_delta2: 7.5,
             use_bc_segments: false,
             bc_segments: None,
             bc_segments_data: None,

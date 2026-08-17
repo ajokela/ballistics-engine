@@ -1,0 +1,55 @@
+# Measured free-flight drag coefficients from Doppler radar.
+#
+# Source: Elya Courtney, Collin Morris, Michael Courtney, "Accurate Measurements
+# of Free Flight Drag Coefficients with Amateur Doppler Radar", BTG Research,
+# 2016. arXiv:1608.06500. Values are the "Track" column (least-squares slope of
+# the raw velocity-vs-distance data), which the authors found gave smaller
+# uncertainties than the instrument's own Report output in 11/17 and 8/12 cases.
+#
+# sem_pct is the standard error of the mean over n shots, as published. It is the
+# measurement's own uncertainty and is the yardstick any model disagreement has
+# to beat before it means anything.
+#
+# velocity_fps is the NEAR velocity. Rows whose source velocity was published as
+# a Mach band carry mach_direct=1 and velocity_fps computed at a=1116.45 ft/s;
+# the paper notes such bands name the top of the band and extend M0.05 lower.
+#
+# bullet,diameter_in,mass_gr,velocity_fps,cd,sem_pct,n,mach_direct,table
+Sp_FP,0.308,150,1385,0.494,0.3,3,0,T1
+DGHP,0.308,130,1506,0.784,0.7,3,0,T1
+FBBT,0.308,155.5,1387,0.362,0.8,6,0,T1
+Sp_FB,0.308,200,1172,0.368,0.9,21,0,T1
+NP,0.308,220,1306,0.429,0.6,5,0,T1
+NP,0.308,220,1206,0.397,1.6,5,0,T1
+NET,0.308,150,1257,0.496,0.9,5,0,T1
+AMAX,0.308,155,2878,0.283,1.5,4,0,T1
+AMAX,0.308,155,2544,0.316,1.8,10,0,T1
+TMK,0.308,175,2712,0.263,3.2,11,0,T1
+ELD,0.308,208,2888,0.242,1.1,12,0,T1
+ELD,0.308,208,1353,0.356,0.9,5,0,T1
+HSP,0.308,110,1758,0.456,0.5,12,0,T1
+VMAX,0.308,110,1745,0.433,0.4,12,0,T1
+NBT,0.308,125,1677,0.435,0.3,6,0,T1
+TTSXBT,0.308,168,2709,0.313,1.1,14,0,T1
+SST,0.308,125,2893,0.309,0.7,10,0,T1
+TTSXBT,0.224,55,2815,0.456,3.4,5,0,T2
+VMAX,0.224,53,2804,0.313,1.5,3,0,T2
+BFB,0.224,62,3075,0.358,2.0,1,0,T2
+BFB,0.224,62,2645,0.393,1.0,5,0,T2
+BFB,0.224,62,2479,0.410,1.2,2,0,T2
+BFB,0.224,62,2371,0.388,1.2,4,0,T2
+BFB,0.224,62,2223,0.422,1.0,3,0,T2
+BFB,0.224,62,2074,0.419,0.3,6,0,T2
+BFB,0.224,62,1877,0.446,1.8,4,0,T2
+BFB,0.224,62,1724,0.457,0.9,9,0,T2
+VMAX,0.224,55,3243,0.302,0.6,16,0,T2
+SMK,0.224,80,2823,0.282,0.7,8,0,T2
+SMK_pt,0.224,80,2859,0.244,2.4,8,0,T2
+XTP,0.355,115,1252,0.616,0.3,28,0,T3
+XTP,0.355,115,1228.1,0.609,0.7,20,1,T3
+XTP,0.355,115,1172.3,0.605,0.5,20,1,T3
+XTP,0.355,115,1116.5,0.475,0.7,20,1,T3
+FMJ,0.355,115,1176,0.604,1.4,11,0,T3
+WWB,0.355,147,969,0.256,1.4,10,0,T3
+bb,0.177,5.44,368,0.451,0.9,10,0,T4
+bb,0.177,5.44,547,0.480,1.4,10,0,T4

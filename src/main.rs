@@ -7961,6 +7961,7 @@ fn solve_profile_for_dsf(
         powder_temp_curve: None,
         powder_curve_temp_c: None,
         tipoff_yaw: 0.0,
+        cd_delta2: 7.5,
         tipoff_decay_distance: 50.0,
 
         use_bc_segments,
@@ -9964,6 +9965,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     powder_temp_curve: powder_temp_curve_si.clone(),
                                     powder_curve_temp_c,
                                     tipoff_yaw: 0.0,
+        cd_delta2: 7.5,
                                     tipoff_decay_distance: 50.0,
                                     use_bc_segments: effective_use_bc_segments,
                                     bc_segments: None,
@@ -14365,6 +14367,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         powder_temp_curve: powder_temp_curve.clone(),
         powder_curve_temp_c,
         tipoff_yaw: 0.0,
+        cd_delta2: 7.5,
         tipoff_decay_distance: 50.0,
         // The schedule was resolved once before auto-zero and is shared by every local path.
         use_bc_segments,

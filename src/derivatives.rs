@@ -325,7 +325,13 @@ pub fn compute_derivatives(
         } else {
             inputs.tipoff_yaw // No decay if distance is zero
         };
-        let yaw_multiplier = 1.0 + yaw_rad.powi(2);
+        // MBA-1227: quadratic yaw drag is ADDITIVE per McCoy: CD = CD0 + CD_delta2*delta^2.
+        // The previous multiplicative form Cd*(1 + delta^2) implied CD_delta2 == CD0
+        // (~0.3 per rad^2), an order of magnitude below literature (~4-20 per rad^2 for
+        // spitzer rifle bullets). The additive term is expressed in retardation space
+        // (actual-Cd over sectional density), which is denominator-correct for BOTH the
+        // G-model path (drag_factor/BC == Cd_actual/SD) and the custom-table path
+        // (drag_factor/SD). Computed after the (drag_factor, retard_denom) resolution below.
 
         // Calculate density scaling
         let density_scale = air_density / STANDARD_AIR_DENSITY;
@@ -391,8 +397,22 @@ pub fn compute_derivatives(
 
         // Calculate drag acceleration
         let standard_factor = drag_factor * CD_TO_RETARD;
-        let a_drag_ft_s2 =
-            (v_rel_fps.powi(2) * standard_factor * yaw_multiplier * density_scale) / retard_denom;
+        let mut a_drag_ft_s2 =
+            (v_rel_fps.powi(2) * standard_factor * density_scale) / retard_denom;
+        // MBA-1227 additive yaw-drag term (see comment above). Skipped entirely when
+        // tip-off yaw is zero (the default), leaving baseline trajectories bit-identical.
+        // When sectional density is unavailable (degenerate SI-less inputs) the term is
+        // dropped rather than mis-scaled through an unrelated denominator.
+        if yaw_rad != 0.0 {
+            if let Some(sd) = inputs.sectional_density_lb_in2() {
+                if sd > 0.0 {
+                    a_drag_ft_s2 += v_rel_fps.powi(2)
+                        * CD_TO_RETARD
+                        * density_scale
+                        * (inputs.cd_delta2 * yaw_rad.powi(2) / sd);
+                }
+            }
+        }
         let a_drag_m_s2 = a_drag_ft_s2 * FPS_TO_MPS;
 
         // Apply drag in opposite direction of relative velocity
@@ -686,7 +706,7 @@ mod tests {
         baseline_inputs.tipoff_yaw = 0.0;
         baseline_inputs.tipoff_decay_distance = 50.0;
         let mut yawed_inputs = baseline_inputs.clone();
-        yawed_inputs.tipoff_yaw = 0.1;
+        yawed_inputs.tipoff_yaw = 0.1; // radians, per the field docs
 
         let drag_x = |inputs: &BallisticInputs, downrange_m: f64| {
             compute_derivatives(
@@ -702,18 +722,36 @@ mod tests {
             )[3]
         };
 
-        for (downrange_m, expected_ratio) in
-            [(0.0_f64, 1.01), (50.0 * std::f64::consts::LN_2, 1.0025)]
+        // MBA-1227: yaw drag is ADDITIVE per McCoy (CD = CD0 + CD_delta2 * delta^2), so the
+        // extra retardation has a closed form we can assert exactly:
+        //   extra_mps2 = v_fps^2 * CD_TO_RETARD * density_scale * CD_delta2 * delta_eff^2 / SD
+        // with delta_eff = tipoff_yaw * exp(-x / decay). At x = decay*ln(2) the effective yaw
+        // halves, so the extra drag falls to a quarter — which also proves the documented
+        // RADIAN interpretation and the decay wiring in one pass.
+        let sd = baseline_inputs
+            .sectional_density_lb_in2()
+            .expect("test inputs carry mass/diameter");
+        let v_fps = 300.0 * MPS_TO_FPS; // same (rounded) constant the kernel uses
+        let density_scale = 1.225 / STANDARD_AIR_DENSITY;
+
+        for (downrange_m, decay_scale) in [(0.0_f64, 1.0_f64), (50.0 * std::f64::consts::LN_2, 0.5)]
         {
+            let delta_eff = 0.1 * decay_scale;
+            let expected_extra_mps2 = v_fps.powi(2)
+                * CD_TO_RETARD
+                * density_scale
+                * (yawed_inputs.cd_delta2 * delta_eff.powi(2) / sd)
+                * FPS_TO_MPS;
+
             let baseline_drag = drag_x(&baseline_inputs, downrange_m);
             let yawed_drag = drag_x(&yawed_inputs, downrange_m);
-            let actual_ratio = yawed_drag / baseline_drag;
-
             assert!(baseline_drag < 0.0, "baseline must be downrange drag");
+            let measured_extra = baseline_drag - yawed_drag; // yawed is MORE negative
+
             assert!(
-                (actual_ratio - expected_ratio).abs() < 1e-12,
-                "tip-off yaw at x={downrange_m} m used the wrong angular unit or decay: \
-                 ratio={actual_ratio}, expected={expected_ratio}"
+                (measured_extra - expected_extra_mps2).abs() <= 1e-9 * expected_extra_mps2,
+                "additive yaw drag at x={downrange_m} m: measured extra {measured_extra:.9} \
+                 != expected {expected_extra_mps2:.9}"
             );
         }
     }

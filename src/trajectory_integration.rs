@@ -310,6 +310,7 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         pressure: params.atmos_params.2,
         humidity: params.atmos_params.3,
         tipoff_yaw: 0.0,
+        cd_delta2: 7.5,
         target_distance: 1000.0, // default
         muzzle_angle: 0.0,
         wind_speed: if !params.wind_segments.is_empty() {

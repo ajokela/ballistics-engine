@@ -5,6 +5,20 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.1] - 2026-08-17
+
+### Fixed
+- Tip-off yaw drag is now additive per McCoy — `CD = CD0 + CD_delta2 * delta^2` — replacing
+  the multiplicative `Cd * (1 + delta^2)` form whose implicit quadratic yaw-drag coefficient
+  equaled `CD0` itself (~0.3 per rad^2), an order of magnitude below literature values
+  (~4-20 per rad^2 for spitzer rifle bullets; 7.62 M80 = 9.6). New `cd_delta2` input
+  (default 7.5 per rad^2, documented mid-range constant) controls the coefficient; the term
+  is denominator-correct on both the G-model and custom-drag-table paths and is exactly
+  inert when `tipoff_yaw` is zero, leaving all baseline trajectories bit-identical.
+  Tip-off yaw remains modeled only in the RK4/RK45 generic integrator kernel
+  (`derivatives::compute_derivatives`); the `TrajectorySolver` Euler/RK4 paths do not
+  consume it (pre-existing scope). (MBA-1227)
+
 ## [Unreleased]
 
 ### Added
