@@ -19,6 +19,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `adjustment_display`, `windage_adjustment_display`, `adjustment_unit_label`) moved from
   the CLI into the library's `adjustment` module so every surface — CLI, WASM terminal,
   bridge — shares one conversion/bias/CF/quantization boundary. CLI behavior unchanged.
+- **Bridge profile commands** `profile.validate`, `profile.normalize`, and (behind the
+  `profile-import` feature, and listed in `meta.capabilities` only when compiled in)
+  `profile.import_a7p`. `validate` runs exactly the cheap invariants the CLI applies when
+  loading/saving a profile (units string, tracking-CF band, turret/optic assembly +
+  click-value parse) and returns `{valid, warnings, normalized}`; `normalize` returns the
+  document re-serialized by this engine — the supported way for an app to round-trip a
+  stored blob through a newer engine; `import_a7p` takes `{a7p_base64, zero_click?,
+  strict?}` (decoded payload capped at 1 MiB, strict RFC 4648 decoding) and returns the
+  mapped `ProfileData` plus the full import report (`warnings`/`mapped`/`unmapped`/
+  `unknown_fields`) — the same mapping, warnings, and `--zero-click`/`--strict` semantics
+  as the CLI's `profile import`, byte-for-byte (asserted by `tests/profile_bridge.rs`).
+- `ProfileData` (with `ProfileZeroSet`/`ProfileBcSegment`/`ProfileDragPoint`, the
+  turret-pair validators, and `optic_profile` assembly) moved verbatim from the CLI binary
+  into the new library module `ballistics_engine::profile`, and the `.a7p` →
+  `ProfileData` mapping (`map_a7p_to_profile` + `ImportReport`) into
+  `ballistics_engine::profile_import`, so the CLI and the bridge share one definition.
+  The serde wire shape of `~/.ballistics/profiles/*.json` is unchanged — same field
+  names, defaults, null-vs-absent key behavior, and unknown-key tolerance, locked in by a
+  round-trip fixture test in `src/profile.rs`. File persistence and profile unit
+  conversion stay in the CLI; the new module is fs-free and compiles for wasm32.
 
 ## [0.33.2] - 2026-08-18
 

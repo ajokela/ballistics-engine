@@ -51,14 +51,22 @@ const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Commands available in this build, in dispatch order.
 /// `meta.capabilities` reports exactly this list so apps can feature-detect.
 fn command_names() -> Vec<&'static str> {
-    vec![
+    #[allow(unused_mut)] // mut is only exercised by the profile-import push below
+    let mut names = vec![
         "meta.capabilities",
         "meta.version",
         "solve",
         "card.come_ups",
         "card.range_table",
         "card.wind",
-    ]
+        "profile.validate",
+        "profile.normalize",
+    ];
+    // Listed ONLY when compiled in (mirroring compiled_features) so apps feature-detect
+    // the command list instead of probing for unknown_command.
+    #[cfg(feature = "profile-import")]
+    names.push("profile.import_a7p");
+    names
 }
 
 fn compiled_features() -> Vec<&'static str> {
@@ -197,6 +205,10 @@ fn dispatch(request_json: &str) -> String {
             run_card(&request.request, "card.range_table", crate::card_service::range_table_v1)
         }
         "card.wind" => run_card(&request.request, "card.wind", crate::card_service::wind_card_v1),
+        "profile.validate" => run_profile_validate(&request.request),
+        "profile.normalize" => run_profile_normalize(&request.request),
+        #[cfg(feature = "profile-import")]
+        "profile.import_a7p" => run_profile_import_a7p(&request.request),
         other => error(
             BridgeErrorCode::UnknownCommand,
             format!(
@@ -299,6 +311,264 @@ fn command_error<E: Serialize>(message: &str, typed: &E) -> String {
     error(BridgeErrorCode::CommandFailed, message, details)
 }
 
+/// Shared decode for the two profile document commands: the inner request IS a
+/// [`crate::profile::ProfileData`] JSON document (the exact schema of
+/// `~/.ballistics/profiles/*.json` — same field names, same defaults, unknown keys
+/// tolerated, exactly as the CLI loads it).
+fn decode_profile_document(
+    inner: &Value,
+    command: &'static str,
+) -> Result<crate::profile::ProfileData, String> {
+    if inner.is_null() {
+        return Err(error(
+            BridgeErrorCode::InvalidRequest,
+            format!("'{command}' requires a request payload (a ProfileData JSON document)"),
+            None,
+        ));
+    }
+    serde_json::from_value(inner.clone()).map_err(|err| {
+        error(
+            BridgeErrorCode::InvalidRequest,
+            format!("{command} request is not a ProfileData document: {err}"),
+            None,
+        )
+    })
+}
+
+/// `profile.validate`: parse a ProfileData document and run the cheap invariants the CLI
+/// applies when loading/saving a profile (units string, MBA-1358 tracking-CF band,
+/// MBA-1348 turret/optic assembly + validation including click-value parse) — see
+/// [`crate::profile::ProfileData::validation_warnings`]. No new physics checks. Result:
+/// `{ "valid": bool, "warnings": [..], "normalized": <the profile re-serialized by this
+/// engine> }` — `valid` is simply `warnings.is_empty()`.
+fn run_profile_validate(inner: &Value) -> String {
+    let profile = match decode_profile_document(inner, "profile.validate") {
+        Ok(profile) => profile,
+        Err(envelope) => return envelope,
+    };
+    let warnings = profile.validation_warnings();
+    match serde_json::to_value(&profile) {
+        Ok(normalized) => success(
+            "profile.validate",
+            json!({
+                "valid": warnings.is_empty(),
+                "warnings": warnings,
+                "normalized": normalized,
+            }),
+        ),
+        Err(err) => error(
+            BridgeErrorCode::InternalError,
+            format!("failed to serialize normalized profile: {err}"),
+            None,
+        ),
+    }
+}
+
+/// `profile.normalize`: parse a ProfileData document and hand it back re-serialized by
+/// THIS engine — the supported way for an app to round-trip a stored blob through a newer
+/// engine version (unknown keys are tolerated on input and dropped on output; defaults
+/// fill in; `skip_serializing_if` keys stay absent — the same round-trip a CLI
+/// load-then-save performs). Result: `{ "profile": <re-serialized ProfileData> }`.
+fn run_profile_normalize(inner: &Value) -> String {
+    let profile = match decode_profile_document(inner, "profile.normalize") {
+        Ok(profile) => profile,
+        Err(envelope) => return envelope,
+    };
+    match serde_json::to_value(&profile) {
+        Ok(normalized) => success("profile.normalize", json!({ "profile": normalized })),
+        Err(err) => error(
+            BridgeErrorCode::InternalError,
+            format!("failed to serialize normalized profile: {err}"),
+            None,
+        ),
+    }
+}
+
+/// Hard cap on the DECODED `.a7p` payload accepted by `profile.import_a7p`. Real files
+/// are a few KiB; this exists purely as a resource bound (the request envelope's own
+/// [`MAX_REQUEST_BYTES`] already caps the base64 text).
+#[cfg(feature = "profile-import")]
+pub const MAX_A7P_DECODED_BYTES: usize = 1024 * 1024;
+
+/// `profile.import_a7p` request payload. `zero_click` mirrors the CLI's `--zero-click`
+/// (the source device's click graduation, e.g. `"0.1mil"`), enabling the same optional
+/// zero_x/zero_y click-count conversion; omitted keeps the CLI's default behavior (the
+/// counts are reported as unmapped). `strict` mirrors `--strict`: reject the file on an
+/// MD5 envelope mismatch instead of importing with a warning.
+#[cfg(feature = "profile-import")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileImportA7pRequest {
+    a7p_base64: String,
+    #[serde(default)]
+    zero_click: Option<String>,
+    #[serde(default)]
+    strict: bool,
+}
+
+/// `profile.import_a7p`: run the cleanroom `.a7p` parser + the SAME
+/// [`crate::profile_import::map_a7p_to_profile`] mapping the CLI's `profile import` uses,
+/// on a base64-supplied file. Result: `{ "profile": <ProfileData>, "warnings": [..],
+/// "mapped": [[source, raw, converted, destination], ..], "unmapped": [[field, why], ..],
+/// "unknown_fields": [{context, number}, ..] }` — the full import report, nothing
+/// silently dropped (`unmapped` includes the unknown-field entries too, exactly as the
+/// CLI prints them; `unknown_fields` additionally lists the parser-level unknowns in
+/// structured form). The profile name is derived from the file (sanitized); renaming is
+/// the caller's business — there is no name override here.
+#[cfg(feature = "profile-import")]
+fn run_profile_import_a7p(inner: &Value) -> String {
+    use crate::profile_import::{map_a7p_to_profile, parse_a7p, EnvelopeStatus};
+
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'profile.import_a7p' requires a request payload ({\"a7p_base64\": ...})",
+            None,
+        );
+    }
+    let request: ProfileImportA7pRequest = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("profile.import_a7p request rejected: {err}"),
+                None,
+            )
+        }
+    };
+
+    let zero_click = match request.zero_click.as_deref() {
+        Some(raw) => match crate::adjustment::parse_click_value(raw) {
+            Ok(click) => Some(click),
+            Err(err) => {
+                return error(
+                    BridgeErrorCode::InvalidRequest,
+                    format!("profile.import_a7p zero_click: {err}"),
+                    None,
+                )
+            }
+        },
+        None => None,
+    };
+
+    let bytes = match decode_base64(&request.a7p_base64) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("profile.import_a7p a7p_base64: {err}"),
+                None,
+            )
+        }
+    };
+    if bytes.len() > MAX_A7P_DECODED_BYTES {
+        return error(
+            BridgeErrorCode::ResourceLimit,
+            format!(
+                "decoded .a7p payload is {} bytes; the limit is {MAX_A7P_DECODED_BYTES}",
+                bytes.len()
+            ),
+            None,
+        );
+    }
+
+    let doc = match parse_a7p(&bytes) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::CommandFailed,
+                format!("not a usable .a7p file: {err}"),
+                None,
+            )
+        }
+    };
+    // Same refusal (and message) as the CLI's --strict; without it the mismatch becomes
+    // a warning in the report, also exactly as the CLI behaves.
+    if request.strict {
+        if let EnvelopeStatus::Mismatch { expected, actual } = &doc.envelope {
+            return error(
+                BridgeErrorCode::CommandFailed,
+                format!(
+                    "checksum mismatch (file says {expected}, payload hashes to {actual}) — refusing under strict"
+                ),
+                None,
+            );
+        }
+    }
+
+    let outcome = match map_a7p_to_profile(&doc, None, zero_click) {
+        Ok(outcome) => outcome,
+        Err(err) => return error(BridgeErrorCode::CommandFailed, err, None),
+    };
+    let unknown_fields: Vec<Value> = doc
+        .unknown_fields
+        .iter()
+        .map(|u| json!({ "context": u.context, "number": u.number }))
+        .collect();
+    match serde_json::to_value(&outcome.profile) {
+        Ok(profile) => success(
+            "profile.import_a7p",
+            json!({
+                "profile": profile,
+                "warnings": outcome.report.warnings,
+                "mapped": outcome.report.mapped,
+                "unmapped": outcome.report.unmapped,
+                "unknown_fields": unknown_fields,
+            }),
+        ),
+        Err(err) => error(
+            BridgeErrorCode::InternalError,
+            format!("failed to serialize imported profile: {err}"),
+            None,
+        ),
+    }
+}
+
+/// Minimal strict RFC 4648 standard-alphabet base64 decoder for `profile.import_a7p`.
+///
+/// Hand-rolled rather than a new dependency, deliberately: the crate already carries its
+/// own cleanroom MD5 (`profile_import::md5`) and statistical constants for the same
+/// thirteen-platform reasons, `Cargo.toml` has no direct base64 dependency today, and the
+/// input here is a few KiB. Strict: rejects any character outside `A-Za-z0-9+/`, `=`
+/// anywhere but as final padding, and lengths of form 4n+1.
+#[cfg(feature = "profile-import")]
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    fn sextet(c: u8) -> Result<u32, String> {
+        match c {
+            b'A'..=b'Z' => Ok(u32::from(c - b'A')),
+            b'a'..=b'z' => Ok(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Ok(u32::from(c - b'0') + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(format!("invalid base64 character {:?}", char::from(c))),
+        }
+    }
+    let bytes = input.as_bytes();
+    let data = match bytes {
+        [rest @ .., b'=', b'='] => rest,
+        [rest @ .., b'='] => rest,
+        _ => bytes,
+    };
+    if data.contains(&b'=') {
+        return Err("'=' is only valid as trailing padding".to_string());
+    }
+    if data.len() % 4 == 1 {
+        return Err("base64 text has an impossible length (4n+1 data characters)".to_string());
+    }
+    let mut out = Vec::with_capacity(data.len() / 4 * 3 + 2);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &c in data {
+        acc = (acc << 6) | sextet(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +634,56 @@ mod tests {
     fn solve_without_payload_is_invalid_request() {
         let out = call(json!({"api_version": 1, "command": "solve"}));
         assert_eq!(out["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn profile_commands_without_payload_are_invalid_requests() {
+        for command in ["profile.validate", "profile.normalize"] {
+            let out = call(json!({"api_version": 1, "command": command}));
+            assert_eq!(out["error"]["code"], "invalid_request", "{command}: {out}");
+            assert!(
+                out["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ProfileData"),
+                "{command}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn capabilities_lists_profile_commands_and_gates_import_on_the_feature() {
+        let out = call(json!({"api_version": 1, "command": "meta.capabilities"}));
+        let commands: Vec<String> =
+            serde_json::from_value(out["result"]["commands"].clone()).unwrap();
+        assert!(commands.contains(&"profile.validate".to_string()));
+        assert!(commands.contains(&"profile.normalize".to_string()));
+        assert_eq!(
+            commands.contains(&"profile.import_a7p".to_string()),
+            cfg!(feature = "profile-import"),
+            "profile.import_a7p must be listed exactly when compiled in"
+        );
+    }
+
+    #[cfg(feature = "profile-import")]
+    #[test]
+    fn base64_decoder_round_trips_and_rejects_garbage() {
+        // RFC 4648 test vectors.
+        for (text, bytes) in [
+            ("", &b""[..]),
+            ("Zg==", b"f"),
+            ("Zm8=", b"fo"),
+            ("Zm9v", b"foo"),
+            ("Zm9vYg==", b"foob"),
+            ("Zm9vYmE=", b"fooba"),
+            ("Zm9vYmFy", b"foobar"),
+        ] {
+            assert_eq!(decode_base64(text).unwrap(), bytes, "{text}");
+        }
+        assert!(decode_base64("Zm9v\n").is_err(), "whitespace is rejected");
+        assert!(decode_base64("Zg=X").is_err(), "inner padding is rejected");
+        assert!(decode_base64("Z").is_err(), "4n+1 length is rejected");
+        assert!(decode_base64("Zm9v!").is_err(), "non-alphabet byte is rejected");
     }
 
     #[test]

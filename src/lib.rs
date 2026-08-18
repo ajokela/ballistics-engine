@@ -232,6 +232,12 @@ pub mod bc_table;
 // 5D BC correction tables (caliber-specific, ML-derived)
 pub mod bc_table_5d;
 
+// Saved-profile data model (ProfileData & friends), moved from main.rs so the bridge's
+// profile.validate/profile.normalize/profile.import_a7p commands and the CLI share one
+// serde wire shape. No feature gate: must compile for wasm32; fs-free (profile
+// persistence and unit conversion of loaded profiles stay in main.rs).
+pub mod profile;
+
 // Import of third-party ballistic profile files (.a7p), feature-gated
 #[cfg(feature = "profile-import")]
 pub mod profile_import;
