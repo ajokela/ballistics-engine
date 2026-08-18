@@ -30,7 +30,23 @@ MIPS). This is non-negotiable: stale binaries have shipped-adjacent twice.
 
 ## Channels, in order
 
-1. `cargo publish --locked` (idempotence guard: skip if the sparse index already has it).
+1. `prepublish-check.sh` FIRST, then `cargo publish --locked` (idempotence guard: skip
+   if the sparse index already has it).
+
+   The check refuses a non-pristine working tree, a HEAD that is not at a tag, a
+   tag/Cargo.toml version disagreement, and any drift between the real packaged file
+   set and `packaged-files.txt`. It exists because 0.33.1 shipped seven Applied
+   Ballistics geometry files that were sitting UNTRACKED in the working directory:
+   cargo refused the publish exactly as designed, and the refusal was overridden with
+   `--allow-dirty`. **Never pass `--allow-dirty` to a publish.** If the tree is dirty,
+   the fix is to commit, remove, or ignore the files — not to override the guard.
+
+   When the shipped file set changes on purpose, regenerate the manifest in the same
+   commit as the change:
+
+   ```bash
+   cargo package --list --locked | sort > scripts/release/packaged-files.txt
+   ```
 2. Binaries -> `assemble.sh` (refuses on <13 binaries or any checksum mismatch;
    GH release + gs://ballistics-releases/X.Y.Z/).
 3. `deploy-wasm.sh` (4 copies + both firebase sites + badge sed + live byte-verify).
