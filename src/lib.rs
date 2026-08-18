@@ -235,6 +235,10 @@ pub mod bc_table_5d;
 #[cfg(feature = "profile-import")]
 pub mod profile_import;
 
+// Versioned JSON command bridge for embedded (mobile/FFI) consumers
+#[cfg(feature = "bridge")]
+pub mod bridge;
+
 // Internal type alias for compatibility
 pub(crate) type InternalBallisticInputs = BallisticInputs;
 
