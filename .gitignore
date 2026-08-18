@@ -126,3 +126,10 @@ MIPS_BUILD_NOTES.md
 /pkg-web/
 /pkg-nodejs/
 release-artifacts/
+
+# Second defense layer behind .githooks/pre-commit: AB-derived / private-repo
+# material must never even stage here. (The hook is the real guard; this keeps
+# git add -A from picking strays up at all.)
+*ab_geometry*
+*removal-request*
+*.drg

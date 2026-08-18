@@ -1,0 +1,14 @@
+# Paths that must never enter this PUBLIC repository. One extended-regex per
+# line, matched case-insensitively against every staged path by
+# .githooks/pre-commit. Material matching these belongs in the PRIVATE
+# ballistics application repo. Deliberate exceptions: SENSITIVE_OK=1 git commit ...
+ab_geometry
+applied[_-]?ballistics
+removal[- ]request
+hornady
+bullet_images
+bullet_data_
+cdm_
+drag[_-]surface
+lapua_radar
+\.drg$

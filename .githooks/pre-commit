@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Public-repo sensitivity guard. Twice, material derived from Applied
+# Ballistics' proprietary data has been swept into commits of this PUBLIC repo
+# by broad staging (git add -A). This hook makes that class of accident refuse
+# to commit instead of shipping.
+#
+# Rules:
+#   1. No staged PATH may match a pattern in .sensitive-patterns.
+#   2. No NEWLY ADDED file's content may name Applied Ballistics (existing
+#      tracked files legitimately cite AB's published research; new files that
+#      genuinely need to are the rare, eyes-open case).
+# Deliberate override for reviewed exceptions: SENSITIVE_OK=1 git commit ...
+set -euo pipefail
+[ "${SENSITIVE_OK:-0}" = "1" ] && exit 0
+TOP="$(git rev-parse --show-toplevel)"
+PATTERNS="$TOP/.sensitive-patterns"
+[ -f "$PATTERNS" ] || exit 0
+
+viol=0
+while IFS= read -r path; do
+    while IFS= read -r pat; do
+        case "$pat" in ''|'#'*) continue ;; esac
+        if printf '%s\n' "$path" | grep -qiE "$pat"; then
+            echo "pre-commit GUARD: staged path '$path' matches sensitive pattern '$pat'" >&2
+            viol=1
+        fi
+    done < "$PATTERNS"
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+while IFS= read -r path; do
+    # The guard's own files legitimately name the sensitive party; skip them.
+    case "$path" in .githooks/*|.sensitive-patterns) continue ;; esac
+    if git show ":$path" 2>/dev/null | head -c 200000 | grep -qiE 'applied[ _-]?ballistics'; then
+        echo "pre-commit GUARD: newly added '$path' names Applied Ballistics" >&2
+        viol=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=A)
+
+if [ "$viol" = 1 ]; then
+    echo "pre-commit GUARD: refusing this commit. This is the PUBLIC engine repo;" >&2
+    echo "the flagged material belongs in the private application repo. If this is" >&2
+    echo "a reviewed, deliberate exception: SENSITIVE_OK=1 git commit ..." >&2
+    exit 1
+fi
