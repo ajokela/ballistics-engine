@@ -55,15 +55,15 @@ fn command_names() -> Vec<&'static str> {
 }
 
 fn compiled_features() -> Vec<&'static str> {
-    #[allow(unused_mut)]
-    let mut features = Vec::new();
-    #[cfg(feature = "pdf")]
-    features.push("pdf");
-    #[cfg(feature = "profile-import")]
-    features.push("profile-import");
-    #[cfg(feature = "online")]
-    features.push("online");
-    features
+    [
+        ("pdf", cfg!(feature = "pdf")),
+        ("profile-import", cfg!(feature = "profile-import")),
+        ("online", cfg!(feature = "online")),
+    ]
+    .iter()
+    .filter(|(_, enabled)| *enabled)
+    .map(|(name, _)| *name)
+    .collect()
 }
 
 #[derive(Debug, Deserialize)]
