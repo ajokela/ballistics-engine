@@ -2,7 +2,7 @@
 //!
 //! One entry point, [`bridge_call`], accepts a JSON envelope and returns a JSON
 //! envelope. Request semantics live in the transport-free library services
-//! (starting with [`crate::solve_v1`]); this module contains only the envelope
+//! (starting with [`crate::solve_v1()`]); this module contains only the envelope
 //! contract, command dispatch, and panic containment. The C ABI wrapper lives in
 //! [`crate::bridge::ffi`] (feature `ffi`).
 //!
