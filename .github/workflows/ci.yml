@@ -54,11 +54,25 @@ jobs:
             base="$PUSH_BEFORE_SHA"
           fi
 
-          if [[ -n "$base" ]] && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+          # Two distinct force-push failure modes, not one.
+          #
+          # The first (handled since the 0.30.0 train) is the base commit being GONE:
+          # `git diff --check A...B` dies with "Invalid symmetric difference expression".
+          #
+          # The second is the base still being FETCHABLE but no longer an ancestor, which is
+          # what an amend-and-retag produces. A...B is a symmetric difference, so it diffs
+          # from the MERGE-BASE rather than from A. On 2026-08-18 that reached back 318 files
+          # and reported 28 trailing-whitespace hits in vendored fonts/ and
+          # BallisticsEngine.xcframework/ binaries, none of which the push touched -- it was a
+          # one-line rustdoc fix. `git diff --check A B` over the same pair reports nothing.
+          #
+          # So require the base to be an ancestor before trusting the three-dot form.
+          if [[ -n "$base" ]] && git cat-file -e "${base}^{commit}" 2>/dev/null \
+             && git merge-base --is-ancestor "$base" "$HEAD_SHA" 2>/dev/null; then
             git diff --check "${base}...${HEAD_SHA}"
           else
-            echo "Base commit ${base:-<none>} is not present in this checkout (force-push or a" \
-                 "first push); falling back to HEAD^..HEAD."
+            echo "Base commit ${base:-<none>} is missing or not an ancestor of ${HEAD_SHA}" \
+                 "(force-push, retag, or first push); falling back to HEAD^..HEAD."
             git diff --check HEAD^ HEAD
           fi
 
