@@ -95,6 +95,12 @@ impl From<&ResolvedSolveRequestV1> for SolveRequestV1 {
                 interval_m: Some(r.sampling.interval_m),
             },
             reticle: r.reticle.clone(),
+            // Carried straight across: segments are always regenerated from the PUBLISHED
+            // ballistic_coefficient (see `apply_bc5d_correction`), so re-applying the
+            // table on a re-solve reproduces — never compounds — the correction. Dropping
+            // it instead would misattribute the correction's whole effect to whatever a
+            // perturbation caller happened to be perturbing.
+            corrections: r.corrections.clone(),
         }
     }
 }

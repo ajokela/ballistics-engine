@@ -66,6 +66,10 @@ pub const WARNING_RK45_TIME_STEP_IGNORED: &str = "rk45_time_step_ignored";
 /// and is not otherwise inert -- see the warning message for what it still affects.
 pub const WARNING_ZERO_DISTANCE_ELEVATION_NOT_RESOLVED: &str =
     "zero_distance_elevation_not_resolved";
+/// Stable warning code emitted when a `corrections.bc5d_table_path` request names a drag
+/// model outside the table's G1/G7 planes and the lookup is typed as G1 (the same coercion
+/// the CLI's `--bc-table-dir` path performs, surfaced instead of silent).
+pub const WARNING_BC5D_DRAG_MODEL_COERCED: &str = "bc5d_drag_model_coerced";
 
 #[derive(Debug)]
 pub(crate) struct PreparedSolveV1 {
@@ -354,6 +358,10 @@ pub(crate) fn prepare_request(
         // defaulting, no unit conversion. The reticle hold itself is computed later in
         // solve_v1 straight from `request.reticle`, unaffected by this echo.
         reticle: request.reticle.clone(),
+        // Pure pass-through echo, same contract as `reticle` above: segments are always
+        // regenerated from the PUBLISHED ballistic_coefficient, so re-solving a resolved
+        // request re-applies the same correction rather than compounding it.
+        corrections: request.corrections.clone(),
     };
 
     let temperature_c = checked_conversion(
@@ -404,7 +412,7 @@ pub(crate) fn prepare_request(
         ResolvedWindV1::Segmented(_) => (0.0, 0.0),
     };
 
-    let inputs = BallisticInputs {
+    let mut inputs = BallisticInputs {
         bc_value: resolved_request.projectile.ballistic_coefficient,
         bc_type: drag_model_to_engine(resolved_request.projectile.drag_model),
         // solve-json v1 (docs/SOLVE_JSON_V1.md) has no BC-reference-standard field yet;
@@ -499,6 +507,8 @@ pub(crate) fn prepare_request(
         bc_type_str: None,
     };
 
+    apply_bc5d_correction(request, &resolved_request, &mut inputs, &mut warnings)?;
+
     let atmosphere = AtmosphericConditions {
         temperature: temperature_c,
         pressure: pressure_hpa,
@@ -515,6 +525,99 @@ pub(crate) fn prepare_request(
         wind_segments,
         atmosphere,
     })
+}
+
+/// Apply an optional BC5D offline correction (`$.corrections.bc5d_table_path`) to the
+/// prepared engine inputs, mirroring the CLI's `--bc-table-dir` semantics exactly:
+/// CRC-verified load, the same velocity-keyed segment ladder
+/// ([`crate::bc_table_5d::Bc5dTable::generate_segments`], grains + fps axes), the
+/// table's muzzle correction folded into the scalar `bc_value` as the interior-gap
+/// fallback, and a G1 coercion warning for drag models outside the table's G1/G7
+/// planes. Because `prepare_request` feeds both [`solve_v1`]'s zero search and the
+/// trajectory (and the perturbation kernel), the zero is always solved with the SAME
+/// schedule the flight uses — the 0.22.11 auto-zero lesson.
+///
+/// On wasm32 there is no filesystem: supplying the field is a structured
+/// `invalid_value` error, never a silent no-op (WASM callers load table BYTES via
+/// `loadBc5dTable` instead).
+fn apply_bc5d_correction(
+    request: &SolveRequestV1,
+    resolved_request: &ResolvedSolveRequestV1,
+    inputs: &mut BallisticInputs,
+    warnings: &mut Vec<SolveNoticeV1>,
+) -> Result<(), SolveErrorEnvelopeV1> {
+    let Some(table_path) = request
+        .corrections
+        .as_ref()
+        .and_then(|corrections| corrections.bc5d_table_path.as_deref())
+    else {
+        return Ok(());
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (table_path, resolved_request, inputs, warnings);
+        Err(invalid_value(
+            "$.corrections.bc5d_table_path",
+            "bc5d_table_path is not supported on this build (no filesystem access); \
+             load table bytes through the WASM loadBc5dTable API instead",
+        ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crate::bc_table_5d::{path_cache, Bc5dError};
+
+        let table =
+            path_cache::load_verified(std::path::Path::new(table_path)).map_err(|error| {
+                let code = match error {
+                    Bc5dError::IoError(_) => SolveErrorCodeV1::IoError,
+                    _ => SolveErrorCodeV1::InvalidValue,
+                };
+                SolveErrorEnvelopeV1::new(
+                    SolveErrorV1::new(code, format!("bc5d_table_path: {error}"))
+                        .at_path("$.corrections.bc5d_table_path"),
+                )
+            })?;
+
+        // The v2 BC5D tables carry only G1/G7 planes; every other reference model is
+        // typed as G1, with the same warning surface as the CLI/WASM aux paths.
+        let drag_type = match resolved_request.projectile.drag_model {
+            DragModelV1::G7 => "G7",
+            DragModelV1::G1 => "G1",
+            other => {
+                warnings.push(SolveNoticeV1 {
+                    code: WARNING_BC5D_DRAG_MODEL_COERCED.to_owned(),
+                    message: format!(
+                        "BC5D correction tables support G1/G7 only; treating drag model \
+                         {other:?} as G1 for the table lookup"
+                    ),
+                    path: Some("$.corrections.bc5d_table_path".to_owned()),
+                });
+                "G1"
+            }
+        };
+
+        // Table axes are grains and fps; the prepared inputs already carry both
+        // conversions (the same checked ones the summary diagnostics use).
+        let base_bc = resolved_request.projectile.ballistic_coefficient;
+        let weight_grains = inputs.weight_grains;
+        let muzzle_fps = resolved_request.rifle.muzzle_velocity_mps / 0.3048;
+
+        if let Some(segments) =
+            table.generate_segments(base_bc, drag_type, weight_grains, Some(muzzle_fps))
+        {
+            // CLI parity (main.rs `--bc-table-dir`): the scalar BC becomes the
+            // muzzle-corrected fallback for interior coverage gaps.
+            inputs.bc_value =
+                table.get_effective_bc(weight_grains, base_bc, muzzle_fps, muzzle_fps, drag_type);
+            inputs.use_bc_segments = true;
+            inputs.bc_segments_data = Some(segments);
+        }
+        // A neutral table (no meaningful correction for this load) leaves the
+        // published constant BC in place, exactly like the CLI.
+        Ok(())
+    }
 }
 
 fn resolve_projectile(
@@ -1598,6 +1701,7 @@ mod tests {
             effects: EffectsV1::default(),
             sampling: SamplingV1::default(),
             reticle: None,
+            corrections: None,
         }
     }
 

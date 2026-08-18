@@ -22,7 +22,7 @@ use crate::adjustment::{
     AdjustmentUnit, ClickValue,
 };
 use crate::hold_curve::run_sampled_trajectory;
-use crate::{AtmosphericConditions, BallisticInputs, DragModel, WindConditions};
+use crate::{AtmosphericConditions, BallisticInputs, BCSegmentData, DragModel, WindConditions};
 
 /// Schema version of the card request/response contract.
 pub const CARD_SCHEMA_VERSION_V1: u32 = 1;
@@ -122,6 +122,36 @@ pub struct CardRequestV1 {
     /// the right), matching the CLI.
     #[serde(default)]
     pub wind_angles_deg: Vec<f64>,
+
+    /// Explicit velocity-banded BC schedule, mirroring the CLI's repeatable
+    /// `--bc-segment VMIN:VMAX:BC`. Velocities are in the request's `units` velocity
+    /// unit (fps imperial / m/s metric), exactly like the CLI flag. When supplied it
+    /// wins over `bc5d_table_path`, and — CLI parity — the scalar
+    /// `ballistic_coefficient` remains the interior-gap fallback unchanged. The
+    /// schedule feeds BOTH the zero solve and every sampled trajectory.
+    #[serde(default)]
+    pub bc_segments: Option<Vec<CardBcSegmentV1>>,
+    /// Filesystem path to a caliber-specific BC5D correction table
+    /// (`bc5d_<caliber>.bin`, the exact format the CLI's `--bc-table-dir`
+    /// consumes). The table is CRC-verified, a velocity-keyed BC schedule is
+    /// generated for this load (same ladder as the CLI), and the scalar BC gets the
+    /// table's muzzle correction as the interior-gap fallback. Ignored when
+    /// `bc_segments` is supplied. Not available on wasm32 builds (no filesystem);
+    /// there it is rejected with an invalid-request error.
+    #[serde(default)]
+    pub bc5d_table_path: Option<String>,
+}
+
+/// One velocity band of an explicit velocity-keyed BC schedule
+/// (`CardRequestV1::bc_segments`). `velocity_min`/`velocity_max` are in the
+/// request's `units` velocity unit and must satisfy `velocity_min < velocity_max`;
+/// `bc` is the BC (for the request's `drag_model`) that applies inside the band.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardBcSegmentV1 {
+    pub velocity_min: f64,
+    pub velocity_max: f64,
+    pub bc: f64,
 }
 
 fn default_sight_height() -> f64 {
@@ -290,6 +320,13 @@ struct Resolved {
     windage_click: Option<ClickValue>,
     windage_unit: AdjustmentUnit,
     drag_model: DragModel,
+    /// Scalar BC actually fed to the zero solve and every sampled run. Equals the
+    /// request's `ballistic_coefficient` unless a BC5D table applied its muzzle
+    /// correction (CLI parity: the scalar is the schedule's interior-gap fallback).
+    bc_for_solve: f64,
+    /// Velocity-keyed BC schedule (velocities in fps, the unit the solver compares
+    /// against), from explicit `bc_segments` or generated from `bc5d_table_path`.
+    bc_segments_fps: Option<Vec<BCSegmentData>>,
 }
 
 fn resolve(req: &CardRequestV1) -> Result<Resolved, CardServiceError> {
@@ -360,7 +397,11 @@ fn resolve(req: &CardRequestV1) -> Result<Resolved, CardServiceError> {
         ));
     }
 
+    let (bc_for_solve, bc_segments_fps) = resolve_bc_schedule(req, imperial)?;
+
     Ok(Resolved {
+        bc_for_solve,
+        bc_segments_fps,
         velocity_m: u.velocity_to_metric(req.muzzle_velocity),
         mass_kg: u.mass_to_kg(req.mass),
         diameter_m: u.small_len_to_metric(req.diameter),
@@ -381,9 +422,99 @@ fn resolve(req: &CardRequestV1) -> Result<Resolved, CardServiceError> {
     })
 }
 
+/// Resolve the velocity-keyed BC schedule for a card request, mirroring the CLI's
+/// precedence exactly: explicit `bc_segments` win outright (and leave the scalar BC
+/// untouched, like `--bc-segment` restoring the pre-table BC); otherwise a
+/// `bc5d_table_path` generates the same segment ladder `--bc-table-dir` does and
+/// applies the table's muzzle correction to the scalar fallback BC.
+///
+/// Returns `(scalar BC for the solve, optional fps-keyed schedule)`.
+fn resolve_bc_schedule(
+    req: &CardRequestV1,
+    imperial: bool,
+) -> Result<(f64, Option<Vec<BCSegmentData>>), CardServiceError> {
+    if let Some(segments) = req.bc_segments.as_ref().filter(|s| !s.is_empty()) {
+        // Display velocity -> fps: the exact factor the CLI's parse_bc_segment uses.
+        let to_fps = if imperial { 1.0 } else { 3.280_839_895 };
+        let mut converted = Vec::with_capacity(segments.len());
+        for (index, segment) in segments.iter().enumerate() {
+            if !segment.velocity_min.is_finite()
+                || !segment.velocity_max.is_finite()
+                || !segment.bc.is_finite()
+            {
+                return Err(CardServiceError::InvalidRequest(format!(
+                    "bc_segments[{index}]: velocity_min, velocity_max, and bc must be finite"
+                )));
+            }
+            if segment.velocity_min >= segment.velocity_max {
+                return Err(CardServiceError::InvalidRequest(format!(
+                    "bc_segments[{index}]: velocity_min must be < velocity_max"
+                )));
+            }
+            if segment.bc <= 0.0 {
+                return Err(CardServiceError::InvalidRequest(format!(
+                    "bc_segments[{index}]: bc must be > 0"
+                )));
+            }
+            converted.push(BCSegmentData {
+                velocity_min: segment.velocity_min * to_fps,
+                velocity_max: segment.velocity_max * to_fps,
+                bc_value: segment.bc,
+            });
+        }
+        return Ok((req.ballistic_coefficient, Some(converted)));
+    }
+
+    let Some(path) = req.bc5d_table_path.as_deref() else {
+        return Ok((req.ballistic_coefficient, None));
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        Err(CardServiceError::InvalidRequest(
+            "bc5d_table_path is not supported on this target (no filesystem); supply \
+             bc_segments instead"
+                .into(),
+        ))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let table = crate::bc_table_5d::path_cache::load_verified(std::path::Path::new(path))
+            .map_err(|e| {
+                CardServiceError::InvalidRequest(format!("bc5d_table_path: {e}"))
+            })?;
+
+        // The BC5D axes are grains + fps; convert from the request's units the same
+        // way the CLI does. The v2 tables carry only G1/G7 planes — anything else is
+        // typed as G1, matching the CLI/WASM coercion.
+        let weight_grains = if imperial { req.mass } else { req.mass * 15.4324 };
+        let muzzle_fps = if imperial {
+            req.muzzle_velocity
+        } else {
+            req.muzzle_velocity * 3.280_839_895
+        };
+        let drag_type = if req.drag_model == DragModelV1::G7 { "G7" } else { "G1" };
+        let base_bc = req.ballistic_coefficient;
+
+        match table.generate_segments(base_bc, drag_type, weight_grains, Some(muzzle_fps)) {
+            Some(segments) => {
+                // CLI parity: the scalar BC becomes the muzzle-corrected fallback for
+                // interior coverage gaps (main.rs: trued_bc = base * muzzle_correction).
+                let fallback_bc =
+                    table.get_effective_bc(weight_grains, base_bc, muzzle_fps, muzzle_fps, drag_type);
+                Ok((fallback_bc, Some(segments)))
+            }
+            // A neutral table (every sampled cell ~= 1.0) carries no correction:
+            // keep the published scalar BC, exactly like the CLI.
+            None => Ok((base_bc, None)),
+        }
+    }
+}
+
 fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError> {
     let zero_inputs = BallisticInputs {
-        bc_value: req.ballistic_coefficient,
+        bc_value: r.bc_for_solve,
         bc_type: r.drag_model,
         bullet_mass: r.mass_kg,
         muzzle_velocity: r.velocity_m,
@@ -394,6 +525,11 @@ fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError
         zero_poi_vertical_m: r.zero_poi_vertical_m,
         zero_poi_horizontal_m: r.zero_poi_horizontal_m,
         sight_offset_lateral_m: r.sight_offset_lateral_m,
+        // The zero MUST be solved with the same velocity-keyed BC schedule the
+        // sampled flights use (the 0.22.11 auto-zero lesson: a schedule that changes
+        // early-flight drag would otherwise mis-zero every row).
+        use_bc_segments: r.bc_segments_fps.is_some(),
+        bc_segments_data: r.bc_segments_fps.clone(),
         ..Default::default()
     };
     let atmosphere = AtmosphericConditions {
@@ -422,7 +558,7 @@ fn sampled(
 ) -> Result<Vec<crate::trajectory_sampling::TrajectorySample>, CardServiceError> {
     run_sampled_trajectory(
         r.velocity_m,
-        req.ballistic_coefficient,
+        r.bc_for_solve,
         r.mass_kg,
         r.diameter_m,
         r.drag_model,
@@ -436,7 +572,9 @@ fn sampled(
         r.end_m * 1.1,
         r.sample_m,
         zero_angle,
-        None,
+        // The same schedule as the zero solve above, on every card surface
+        // (come-ups, range table, wind card) consistently.
+        r.bc_segments_fps.clone(),
         None,
         None,
         r.zero_poi_vertical_m,

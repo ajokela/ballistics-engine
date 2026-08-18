@@ -552,6 +552,16 @@ fn solve_input_schema() -> Value {
                     "magnification": {"type": "number"},
                     "description": {"type": "object"}
                 }
+            },
+            // Optional offline-corrections block, mirroring solve-json's CorrectionsV1.
+            // Without this the top-level additionalProperties:false above would reject a
+            // `corrections` block that the solve-json path accepts.
+            "corrections": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "bc5d_table_path": {"type": "string"}
+                }
             }
         }
     })

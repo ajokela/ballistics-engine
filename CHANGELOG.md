@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **BC5D offline correction on the mobile bridge.** Solve-json v1 gains an optional,
+  additive `corrections` block with `bc5d_table_path`: a local path to a caliber-specific
+  BC5D correction table (`bc5d_<caliber>.bin`, the exact dual-CRC format the CLI's
+  `--bc-table-dir` consumes; mobile apps download tables themselves — the mobile engine
+  build has no `online` feature by design). The service CRC-verifies the table, generates
+  the same velocity-keyed BC segment ladder as the CLI, folds the muzzle correction into
+  the scalar fallback BC, and applies the schedule to BOTH the zero solve and the flight
+  (the 0.22.11 auto-zero rule). The block is echoed on `resolved_request` and carried by
+  the resolved→request round-trip; segments always regenerate from the published BC, so
+  re-solving never compounds the correction. Non-G1/G7 drag models are typed as G1 with a
+  new stable `bc5d_drag_model_coerced` warning; on wasm32 the field is a structured
+  `invalid_value` (no filesystem), never a silent no-op. Documented in
+  `docs/SOLVE_JSON_V1.md`.
+- **Card requests learn velocity-keyed BC.** `CardRequestV1` (bridge `card.come_ups`,
+  `card.range_table`, `card.wind`) gains optional `bc_segments`
+  (`[{velocity_min, velocity_max, bc}]`, velocities in the request's units system like the
+  CLI's `--bc-segment`) and `bc5d_table_path` (same semantics as solve's corrections
+  block). Explicit `bc_segments` win over the table, exactly like the CLI's precedence;
+  the resolved schedule feeds the zero solve and every sampled run on all three card
+  surfaces consistently.
+- **Bridge command `bc5d.info`**: `{"path": ...}` → header metadata (`valid`, `crc_ok`,
+  format version, caliber, generator API version, timestamp, per-axis bin counts, cell
+  count, weight/velocity coverage) for a downloaded table, using the exact same
+  load-with-verification path the solve/card fields use; corrupt or missing files are a
+  clean `command_failed` envelope. Listed in `meta.capabilities` only on builds with
+  filesystem access (not wasm32).
+- Process-wide BC5D table cache (`bc_table_5d::path_cache`, non-wasm32): tables loaded by
+  path are parsed and CRC-verified once, cached behind an `RwLock` keyed by
+  (canonical path, file size, mtime) with a small bounded capacity, so repeated card/solve
+  calls do not re-parse multi-MB tables; replacing a downloaded file invalidates naturally.
 - **Bridge card commands** `card.come_ups`, `card.range_table`, and `card.wind`, backed by
   the new transport-free `card_service` module (`CardRequestV1`/`CardResponseV1`). These
   replicate the CLI card commands row-for-row — same zero solve, sampled trajectory,

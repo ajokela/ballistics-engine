@@ -66,6 +66,10 @@ fn command_names() -> Vec<&'static str> {
     // the command list instead of probing for unknown_command.
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
+    // Filesystem-backed (BC5D tables are loaded from caller-supplied paths), so absent on
+    // wasm32 — the same "list only what this build can run" rule as profile.import_a7p.
+    #[cfg(not(target_arch = "wasm32"))]
+    names.push("bc5d.info");
     names
 }
 
@@ -209,6 +213,8 @@ fn dispatch(request_json: &str) -> String {
         "profile.normalize" => run_profile_normalize(&request.request),
         #[cfg(feature = "profile-import")]
         "profile.import_a7p" => run_profile_import_a7p(&request.request),
+        #[cfg(not(target_arch = "wasm32"))]
+        "bc5d.info" => run_bc5d_info(&request.request),
         other => error(
             BridgeErrorCode::UnknownCommand,
             format!(
@@ -382,6 +388,86 @@ fn run_profile_normalize(inner: &Value) -> String {
             None,
         ),
     }
+}
+
+/// `bc5d.info` request payload: the filesystem path of a downloaded BC5D table.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bc5dInfoRequest {
+    path: String,
+}
+
+/// `bc5d.info`: open, parse, and CRC-verify a BC5D correction table at a caller-supplied
+/// path — the exact same load-with-verification (`bc_table_5d::path_cache::load_verified`)
+/// the `solve`/card `bc5d_table_path` fields use, so "info says valid" and "the solve will
+/// accept it" cannot drift apart. Lets an app validate a table right after downloading it.
+///
+/// Result on success: `{ "valid": true, "crc_ok": true, ... }` with the identifying
+/// metadata the header carries (format version, caliber, generator API version,
+/// generation timestamp, per-axis bin counts, total cells, weight/velocity coverage).
+/// A missing, unreadable, corrupt, or non-BC5D file is a `command_failed` envelope with
+/// a human-readable message (`invalid_request` when the payload itself is malformed).
+#[cfg(not(target_arch = "wasm32"))]
+fn run_bc5d_info(inner: &Value) -> String {
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'bc5d.info' requires a request payload ({\"path\": ...})",
+            None,
+        );
+    }
+    let request: Bc5dInfoRequest = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("bc5d.info request rejected: {err}"),
+                None,
+            )
+        }
+    };
+
+    let table = match crate::bc_table_5d::path_cache::load_verified(std::path::Path::new(
+        &request.path,
+    )) {
+        Ok(table) => table,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::CommandFailed,
+                format!("bc5d.info: not a usable BC5D table: {err}"),
+                None,
+            )
+        }
+    };
+
+    let (weight, bc, muzzle_vel, current_vel, drag_types) = table.bin_counts();
+    let (weight_lo, weight_hi) = table.weight_range();
+    let (vel_lo, vel_hi) = table.velocity_range();
+    success(
+        "bc5d.info",
+        json!({
+            // Reaching here means the magic, format version, dimensions, AND the stored
+            // CRC32 all checked out — crc_ok is not a separate weaker probe.
+            "valid": true,
+            "crc_ok": true,
+            "format_version": table.version(),
+            "caliber": table.caliber(),
+            "api_version": table.api_version(),
+            "generated_timestamp": table.timestamp(),
+            // Axis order matches the on-disk layout: [drag_type][weight][bc][mv][cv].
+            "bins": {
+                "weight": weight,
+                "bc": bc,
+                "muzzle_velocity": muzzle_vel,
+                "current_velocity": current_vel,
+                "drag_types": drag_types,
+            },
+            "total_cells": table.total_cells(),
+            "weight_range_grains": [weight_lo, weight_hi],
+            "velocity_range_fps": [vel_lo, vel_hi],
+        }),
+    )
 }
 
 /// Hard cap on the DECODED `.a7p` payload accepted by `profile.import_a7p`. Real files
@@ -662,6 +748,32 @@ mod tests {
             commands.contains(&"profile.import_a7p".to_string()),
             cfg!(feature = "profile-import"),
             "profile.import_a7p must be listed exactly when compiled in"
+        );
+        assert_eq!(
+            commands.contains(&"bc5d.info".to_string()),
+            cfg!(not(target_arch = "wasm32")),
+            "bc5d.info must be listed exactly when the build has filesystem access"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bc5d_info_without_payload_or_with_missing_file_fails_cleanly() {
+        let out = call(json!({"api_version": 1, "command": "bc5d.info"}));
+        assert_eq!(out["error"]["code"], "invalid_request", "{out}");
+
+        let out = call(json!({
+            "api_version": 1,
+            "command": "bc5d.info",
+            "request": {"path": "/nonexistent/bc5d_308.bin"}
+        }));
+        assert_eq!(out["error"]["code"], "command_failed", "{out}");
+        assert!(
+            out["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not a usable BC5D table"),
+            "{out}"
         );
     }
 

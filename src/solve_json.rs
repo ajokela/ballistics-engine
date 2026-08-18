@@ -138,6 +138,41 @@ pub struct SolveRequestV1 {
         deserialize_with = "deserialize_present"
     )]
     pub reticle: Option<ReticleRequestV1>,
+    /// Optional offline correction sources applied before the solve. Absent (the
+    /// historical shape) is byte-identical to every request from before the block
+    /// existed; present it is echoed at [`ResolvedSolveRequestV1::corrections`] so a
+    /// resolved request remains a complete description of the solve (the perturbation
+    /// kernel re-solves from it).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub corrections: Option<CorrectionsV1>,
+}
+
+/// Offline correction sources for a solve (additive-optional).
+///
+/// `bc5d_table_path` names a caliber-specific BC5D correction table on the LOCAL
+/// filesystem (`bc5d_<caliber>.bin`, the exact dual-CRC binary format the CLI's
+/// `--bc-table-dir` consumes; mobile apps download tables themselves and hand the
+/// engine a path). The service CRC-verifies the file, generates the same
+/// velocity-keyed BC segment ladder the CLI does for this load, applies the table's
+/// muzzle correction to the scalar BC as the interior-gap fallback, and solves BOTH
+/// the zero search and the trajectory with that schedule. A table that carries no
+/// correction for the load (every sampled cell ~= 1.0) leaves the request's constant
+/// BC in place. On builds without filesystem access (wasm32) supplying the field is
+/// a structured `invalid_value` error, never a silent no-op.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorrectionsV1 {
+    /// Path to a BC5D `.bin` correction table on the local filesystem.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub bc5d_table_path: Option<String>,
 }
 
 /// Ask for a reticle hold point alongside the trajectory (MBA-1361).
@@ -608,6 +643,13 @@ pub struct ResolvedSolveRequestV1 {
     /// full description of the solve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reticle: Option<ReticleRequestV1>,
+    /// Echo of the offline-corrections block, when one was supplied. Present only when
+    /// the raw request supplied it, so a resolved request re-solve (perturbation,
+    /// round-trip) re-applies the same table rather than silently dropping the
+    /// correction. Re-applying is idempotent: segments are always generated from the
+    /// request's PUBLISHED `ballistic_coefficient`, never from an already-corrected one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrections: Option<CorrectionsV1>,
 }
 
 /// Resolved projectile inputs.
@@ -1252,6 +1294,8 @@ fn validate_request_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "sampling",
             // MBA-1361: optional, additive. Omitting it is the historical shape.
             "reticle",
+            // Offline corrections (BC5D table path): optional, additive.
+            "corrections",
         ],
         &[
             "schema_version",
@@ -1276,6 +1320,29 @@ fn validate_request_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     validate_sampling(required_value(root, "sampling", "$")?)?;
     if let Some(reticle) = root.get("reticle") {
         validate_reticle(reticle)?;
+    }
+    if let Some(corrections) = root.get("corrections") {
+        validate_corrections(corrections)?;
+    }
+    Ok(())
+}
+
+/// Shape-validate an optional `corrections` block: a strict envelope whose only
+/// member today is `bc5d_table_path`, a string. The path's existence, format, and
+/// CRC are solve-time concerns (an `invalid_value`/`io_error` from the service),
+/// not protocol-shape ones — same split the reticle description uses.
+fn validate_corrections(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
+    let path = "$.corrections";
+    let object = require_object(value, path)?;
+    validate_members(object, path, &["bc5d_table_path"], &[])?;
+    if let Some(table_path) = object.get("bc5d_table_path") {
+        if !table_path.is_string() {
+            return Err(protocol_error(
+                SolveErrorCodeV1::InvalidValue,
+                "expected a string",
+                "$.corrections.bc5d_table_path",
+            ));
+        }
     }
     Ok(())
 }
