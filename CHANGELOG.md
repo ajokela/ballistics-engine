@@ -5,6 +5,21 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Bridge card commands** `card.come_ups`, `card.range_table`, and `card.wind`, backed by
+  the new transport-free `card_service` module (`CardRequestV1`/`CardResponseV1`). These
+  replicate the CLI card commands row-for-row — same zero solve, sampled trajectory,
+  nearest-sample selection, and adjustment/bias/CF/click ordering — and the
+  `card_bridge_golden` test suite executes the actual CLI binary against the bridge to
+  prove it. Requests are denominated in the declared `units` system (imperial/metric),
+  mirroring the CLI flags they wrap.
+- The adjustment display layer (`AdjustmentUnit`, `drop_to_adjustment`,
+  `adjustment_display`, `windage_adjustment_display`, `adjustment_unit_label`) moved from
+  the CLI into the library's `adjustment` module so every surface — CLI, WASM terminal,
+  bridge — shares one conversion/bias/CF/quantization boundary. CLI behavior unchanged.
+
 ## [0.33.2] - 2026-08-18
 
 ### Added

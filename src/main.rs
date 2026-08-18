@@ -18,8 +18,9 @@ mod solve_json_command;
 // MBA-1355: parse_click_value/clicks_for/ClickValue power the CLI's click-graduation
 // flags (--elevation-click-value/--windage-click-value) and profile fields.
 use ballistics_engine::adjustment::{
-    adjustment_factor, click_size_mil, clicks_for, parse_click_value, ClickBase, ClickValue,
-    Quantized,
+    adjustment_display, adjustment_factor, adjustment_unit_label, click_size_mil, clicks_for,
+    drop_to_adjustment, parse_click_value, windage_adjustment_display, AdjustmentUnit, ClickBase,
+    ClickValue,
 };
 // MBA-1348: the saved-profile turret/reticle model (Plan B Task 5) -- ProfileData::optic_profile
 // assembles one of these from the profile's twelve turret/hold fields.
@@ -4539,22 +4540,6 @@ impl WindShearModelArg {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq)]
-enum AdjustmentUnit {
-    /// Milliradians (1 MIL = 3.6 inches at 100 yards)
-    #[default]
-    Mil,
-    /// Minutes of Angle, true MOA (1 MOA = 1.047 inches at 100 yards)
-    Moa,
-    /// Shooter's MOA (exactly 1 inch per 100 yards)
-    Smoa,
-    /// Inches per hundred yards (numerically identical to SMOA)
-    Iphy,
-    /// Whole turret clicks; requires an elevation click graduation
-    /// (--elevation-click-value or the profile's elevation_click)
-    Clicks,
-}
-
 /// CLI-facing mirror of `ballistics_engine::wind::WindReference` (MBA-1368), same
 /// thin-`ValueEnum`-wrapper pattern as `DropsReferenceArg` below.
 #[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
@@ -6903,31 +6888,6 @@ fn render_import_report(report: &ImportReport) -> String {
     out
 }
 
-/// Convert drop to adjustment unit (MIL, MOA, or SMOA/IPHY). `unit` maps onto the shared
-/// `ballistics_engine::adjustment` module's `ClickBase`/`adjustment_factor` (MBA-1355) so
-/// the CLI and the WASM terminal share one conversion table.
-///
-/// `AdjustmentUnit::Clicks` has no fixed factor of its own — clicks depend on a graduation
-/// (`ClickValue`) supplied separately — so callers MUST resolve clicks via `clicks_for()`
-/// before ever reaching this function with `unit == Clicks`. That arm exists only as a
-/// release-safe fallback (falls back to MIL) guarded by a `debug_assert!`.
-fn drop_to_adjustment(drop_yd: f64, range_yd: f64, unit: AdjustmentUnit) -> f64 {
-    if range_yd < 1.0 {
-        return 0.0;
-    }
-    let factor = match unit {
-        AdjustmentUnit::Mil => adjustment_factor(ClickBase::Mil),
-        AdjustmentUnit::Moa => adjustment_factor(ClickBase::Moa),
-        AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => adjustment_factor(ClickBase::Smoa),
-        AdjustmentUnit::Clicks => {
-            // Callers resolve clicks via clicks_for() BEFORE display; reaching this
-            // arm is a scoping bug. Fall back to MIL so release builds stay sane.
-            debug_assert!(false, "Clicks must be resolved via clicks_for()");
-            adjustment_factor(ClickBase::Mil)
-        }
-    };
-    (drop_yd / range_yd) * factor
-}
 
 /// SMOA/IPHY-per-MIL ratio (3600/1000 = 3.6, exact) for sites that already hold a
 /// mil-based value (e.g. `moving_target::LeadSolution::lead_mil`) and need to rescale it
@@ -6976,155 +6936,6 @@ fn resolve_click_values(
     };
 
     Ok(Some((elevation, windage)))
-}
-
-/// Elevation/windage adjustment display value for one axis (MBA-1355): whole clicks
-/// (rounded via `clicks_for`) when a click graduation has been resolved for this axis
-/// (`--adjustment-unit clicks`), else the pre-existing `drop_to_adjustment` angular value. Shared by
-/// the come-ups table and the trajectory PDF dope-card rows so both format Clicks
-/// identically.
-/// `cf` is the axis's scope tracking correction factor (MBA-1358): dial-unit outputs
-/// (angular values AND click counts, which quantize AFTER the correction) are DIVIDED
-/// by it exactly once, here at the shared conversion boundary, so every dial surface
-/// that routes through this function (come-ups/wind-card/range-table/compare tables,
-/// the PDF dope-card rows) inherits the correction identically.
-///
-/// Direction (the physics): the stored CF is the published tall-target ratio
-/// `actual measured travel / dialed travel` (0.95 = the scope under-tracks by 5%). To
-/// obtain a true angular need `N` on a scope whose dialed unit delivers `CF` true
-/// units, the number set on the dial must be `N / CF` — an under-tracking scope needs
-/// MORE dial, so outputs divide. `1.0` (no correction) is bit-exact — byte-identical
-/// output.
-///
-/// `bias_mil` is the selected zero set's per-load dial correction (MBA-1360), a
-/// constant ANGULAR mil value ADDED to the TRUE angular need BEFORE the CF division:
-/// the bias is a property of the load/zero relationship (true angular units), the CF a
-/// property of the scope's turret (dial units), so the corrected dial is
-/// `(true_need + bias) / CF`. `0.0` (no set selected) skips the addition entirely —
-/// bit-exact, byte-identical output (an unconditional `+ 0.0` would flip a `-0.0`
-/// angular value to `+0.0` and change rendered bytes).
-///
-/// The plain scalar every call site prints, plus — on the clicks arm only — the
-/// quantization detail (Plan B Task 2). `value` is unchanged by this split: the clicks
-/// arm's `value` is still the whole-click count as an `f64`, the angular arm's is still
-/// the plain angle. `quantized` carries the sub-click `residual` (`Quantized`, see
-/// `ballistics_engine::adjustment`) so a caller that needs it doesn't have to
-/// re-derive the click math a second time; `None` on the angular arm, where nothing is
-/// quantized.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct AdjustmentDisplay {
-    value: f64,
-    quantized: Option<Quantized>,
-}
-
-fn adjustment_display(
-    drop_yd: f64,
-    range_yd: f64,
-    unit: AdjustmentUnit,
-    click: Option<ClickValue>,
-    bias_mil: f64,
-    cf: f64,
-) -> AdjustmentDisplay {
-    match click {
-        // Clicks convert from RAW drop (not from the angular value above), so the CF is
-        // applied to the input drop — correcting the angle before click quantization.
-        // The zero-set bias joins as its drop-equivalent at this range (1 mil =
-        // range/1000), keeping the ordering: (true + bias) first, / CF second, then
-        // quantize into whole clicks. This is the one boundary where bias, CF, and
-        // quantization compose — the order is load-bearing (see
-        // `zero_set_bias_applies_before_the_cf_division` and
-        // `clicks_arm_order_of_operations_is_load_bearing` below) and must not move.
-        Some(c) => {
-            let biased_drop_yd = if bias_mil != 0.0 {
-                drop_yd + bias_mil / 1000.0 * range_yd
-            } else {
-                drop_yd
-            };
-            let drop_for_clicks = biased_drop_yd / cf;
-            // Inlined from `clicks_for` (guard, then angle formula) so this boundary can
-            // quantize once and keep the residual, instead of calling `clicks_for` and
-            // throwing the sub-click remainder away.
-            if range_yd < 1.0 {
-                AdjustmentDisplay { value: 0.0, quantized: Some(Quantized { clicks: 0, residual: 0.0 }) }
-            } else {
-                let angle = (drop_for_clicks / range_yd) * adjustment_factor(c.base);
-                let q = ballistics_engine::adjustment::quantize_angle(angle, &c);
-                AdjustmentDisplay { value: q.clicks as f64, quantized: Some(q) }
-            }
-        }
-        None => {
-            let true_need = drop_to_adjustment(drop_yd, range_yd, unit);
-            let biased = if bias_mil != 0.0 {
-                // Rescale the mil bias into the display unit via the shared factor
-                // table (MIL -> unit), so MOA/SMOA/IPHY columns get the same angular
-                // correction the MIL column does.
-                true_need
-                    + bias_mil * unit_factor_for_bias(unit) / adjustment_factor(ClickBase::Mil)
-            } else {
-                true_need
-            };
-            AdjustmentDisplay { value: biased / cf, quantized: None }
-        }
-    }
-}
-
-/// The `adjustment_factor` a non-clicks [`AdjustmentUnit`] renders in, for rescaling a
-/// MIL-denominated zero-set bias into the active display unit (MBA-1360). `Clicks`
-/// never reaches this (the clicks arm above works on raw drop); the MIL fallback
-/// mirrors `drop_to_adjustment`'s own release-safe arm.
-fn unit_factor_for_bias(unit: AdjustmentUnit) -> f64 {
-    match unit {
-        AdjustmentUnit::Mil => adjustment_factor(ClickBase::Mil),
-        AdjustmentUnit::Moa => adjustment_factor(ClickBase::Moa),
-        AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => adjustment_factor(ClickBase::Smoa),
-        AdjustmentUnit::Clicks => {
-            debug_assert!(false, "Clicks bias is applied on raw drop, not here");
-            adjustment_factor(ClickBase::Mil)
-        }
-    }
-}
-
-/// Windage-axis adjustment display (Tier 2 review C1 fix): `windage_click` is resolved
-/// whenever the ELEVATION axis is `clicks` (`resolve_click_values`'s precondition — see
-/// `resolve_windage_unit`'s doc comment), but an explicit `--windage-unit` may
-/// independently set the windage axis to a plain angle. Only pass the click graduation
-/// through to `adjustment_display` when the windage axis itself is `Clicks`; otherwise
-/// this collapses to the angular path. The PDF dope card had this guard inline exactly
-/// once; range-table and compare are the two seams that missed it. All three windage
-/// columns (Wind here, plus PDF's wind_adj/lead_adj) now go through this one function so
-/// the guard cannot be dropped a fourth time.
-/// `windage_cf` is the windage-axis tracking CF (MBA-1358), applied once via the shared
-/// `adjustment_display` boundary below; `windage_bias_mil` is the selected zero set's
-/// windage dial correction (MBA-1360), added to the true angular need before that
-/// division — see `adjustment_display`.
-fn windage_adjustment_display(
-    drift_yd: f64,
-    range_yd: f64,
-    windage_unit: AdjustmentUnit,
-    windage_click: Option<ClickValue>,
-    windage_bias_mil: f64,
-    windage_cf: f64,
-) -> AdjustmentDisplay {
-    let click = if windage_unit == AdjustmentUnit::Clicks {
-        windage_click
-    } else {
-        None
-    };
-    adjustment_display(drift_yd, range_yd, windage_unit, click, windage_bias_mil, windage_cf)
-}
-
-/// Display label for an `AdjustmentUnit` header/column name (MBA-1355, generalized in
-/// MBA-1410): every command that prints one shares this, so the "MIL"/"MOA"/"SMOA"/"IPHY"/
-/// "CLICKS" spelling cannot drift between wind-card/lead/range-table/compare/the PDF dope
-/// card.
-fn adjustment_unit_label(unit: AdjustmentUnit) -> String {
-    match unit {
-        AdjustmentUnit::Mil => "MIL".to_string(),
-        AdjustmentUnit::Moa => "MOA".to_string(),
-        AdjustmentUnit::Smoa => "SMOA".to_string(),
-        AdjustmentUnit::Iphy => "IPHY".to_string(),
-        AdjustmentUnit::Clicks => "CLICKS".to_string(),
-    }
 }
 
 /// CLI-facing selector for `adaptive-card`'s printed adjustment unit (MBA-1351): mirrors

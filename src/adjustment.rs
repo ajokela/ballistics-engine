@@ -310,3 +310,175 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Adjustment display layer (moved from main.rs for the bridge card service).
+//
+// Everything below was previously private to the CLI. The bridge's card
+// commands need the exact same unit conversion, zero-set bias, tracking-CF,
+// and click-quantization ordering the CLI prints, so the shared boundary now
+// lives here and `main.rs` re-imports it. The module doc's historical note
+// about avoiding a circular dependency on main.rs's AdjustmentUnit no longer
+// applies: the enum itself moved here, and the CLI derives its clap face via
+// cfg_attr.
+// ---------------------------------------------------------------------------
+
+/// Printed adjustment unit for dial columns (MIL/MOA/SMOA/IPHY or whole clicks).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+pub enum AdjustmentUnit {
+    /// Milliradians (1 MIL = 3.6 inches at 100 yards)
+    #[default]
+    Mil,
+    /// Minutes of Angle, true MOA (1 MOA = 1.047 inches at 100 yards)
+    Moa,
+    /// Shooter's MOA (exactly 1 inch per 100 yards)
+    Smoa,
+    /// Inches per hundred yards (numerically identical to SMOA)
+    Iphy,
+    /// Whole turret clicks; requires an elevation click graduation
+    /// (--elevation-click-value or the profile's elevation_click)
+    Clicks,
+}
+
+/// Convert drop to adjustment unit (MIL, MOA, or SMOA/IPHY). `unit` maps onto
+/// `ClickBase`/`adjustment_factor` (MBA-1355) so the CLI, the WASM terminal, and the
+/// bridge card service share one conversion table.
+///
+/// `AdjustmentUnit::Clicks` has no fixed factor of its own — clicks depend on a graduation
+/// (`ClickValue`) supplied separately — so callers MUST resolve clicks via `clicks_for()`
+/// before ever reaching this function with `unit == Clicks`. That arm exists only as a
+/// release-safe fallback (falls back to MIL) guarded by a `debug_assert!`.
+pub fn drop_to_adjustment(drop_yd: f64, range_yd: f64, unit: AdjustmentUnit) -> f64 {
+    if range_yd < 1.0 {
+        return 0.0;
+    }
+    let factor = match unit {
+        AdjustmentUnit::Mil => adjustment_factor(ClickBase::Mil),
+        AdjustmentUnit::Moa => adjustment_factor(ClickBase::Moa),
+        AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => adjustment_factor(ClickBase::Smoa),
+        AdjustmentUnit::Clicks => {
+            // Callers resolve clicks via clicks_for() BEFORE display; reaching this
+            // arm is a scoping bug. Fall back to MIL so release builds stay sane.
+            debug_assert!(false, "Clicks must be resolved via clicks_for()");
+            adjustment_factor(ClickBase::Mil)
+        }
+    };
+    (drop_yd / range_yd) * factor
+}
+
+/// The `adjustment_factor` a non-clicks [`AdjustmentUnit`] renders in, for rescaling a
+/// MIL-denominated zero-set bias into the active display unit (MBA-1360). `Clicks`
+/// never reaches this (the clicks arm below works on raw drop); the MIL fallback
+/// mirrors `drop_to_adjustment`'s own release-safe arm.
+pub fn unit_factor_for_bias(unit: AdjustmentUnit) -> f64 {
+    match unit {
+        AdjustmentUnit::Mil => adjustment_factor(ClickBase::Mil),
+        AdjustmentUnit::Moa => adjustment_factor(ClickBase::Moa),
+        AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => adjustment_factor(ClickBase::Smoa),
+        AdjustmentUnit::Clicks => {
+            debug_assert!(false, "Clicks bias is applied on raw drop, not here");
+            adjustment_factor(ClickBase::Mil)
+        }
+    }
+}
+
+/// An adjustment value plus the click-quantization detail (Plan B Task 2). `value` is
+/// the whole-click count as an `f64` on the clicks arm, the plain angle otherwise.
+/// `quantized` carries the sub-click `residual` so a caller that needs it doesn't have
+/// to re-derive the click math a second time; `None` on the angular arm, where nothing
+/// is quantized.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdjustmentDisplay {
+    pub value: f64,
+    pub quantized: Option<Quantized>,
+}
+
+/// The one boundary where zero-set bias, tracking CF, and click quantization compose —
+/// the order is load-bearing (see main.rs's `zero_set_bias_applies_before_the_cf_division`
+/// and `clicks_arm_order_of_operations_is_load_bearing` tests) and must not move.
+pub fn adjustment_display(
+    drop_yd: f64,
+    range_yd: f64,
+    unit: AdjustmentUnit,
+    click: Option<ClickValue>,
+    bias_mil: f64,
+    cf: f64,
+) -> AdjustmentDisplay {
+    match click {
+        // Clicks convert from RAW drop (not from the angular value), so the CF is
+        // applied to the input drop — correcting the angle before click quantization.
+        // The zero-set bias joins as its drop-equivalent at this range (1 mil =
+        // range/1000), keeping the ordering: (true + bias) first, / CF second, then
+        // quantize into whole clicks.
+        Some(c) => {
+            let biased_drop_yd = if bias_mil != 0.0 {
+                drop_yd + bias_mil / 1000.0 * range_yd
+            } else {
+                drop_yd
+            };
+            let drop_for_clicks = biased_drop_yd / cf;
+            // Inlined from `clicks_for` (guard, then angle formula) so this boundary can
+            // quantize once and keep the residual, instead of calling `clicks_for` and
+            // throwing the sub-click remainder away.
+            if range_yd < 1.0 {
+                AdjustmentDisplay {
+                    value: 0.0,
+                    quantized: Some(Quantized { clicks: 0, residual: 0.0 }),
+                }
+            } else {
+                let angle = (drop_for_clicks / range_yd) * adjustment_factor(c.base);
+                let q = quantize_angle(angle, &c);
+                AdjustmentDisplay { value: q.clicks as f64, quantized: Some(q) }
+            }
+        }
+        None => {
+            let true_need = drop_to_adjustment(drop_yd, range_yd, unit);
+            let biased = if bias_mil != 0.0 {
+                // Rescale the mil bias into the display unit via the shared factor
+                // table (MIL -> unit), so MOA/SMOA/IPHY columns get the same angular
+                // correction the MIL column does.
+                true_need
+                    + bias_mil * unit_factor_for_bias(unit) / adjustment_factor(ClickBase::Mil)
+            } else {
+                true_need
+            };
+            AdjustmentDisplay { value: biased / cf, quantized: None }
+        }
+    }
+}
+
+/// Windage-axis adjustment display (Tier 2 review C1 fix): only pass the click
+/// graduation through to `adjustment_display` when the windage axis itself is `Clicks`;
+/// otherwise this collapses to the angular path. All windage columns (range-table,
+/// wind-card, compare, the PDF dope card's wind_adj/lead_adj, and the bridge card
+/// service) go through this one function so the guard cannot be dropped again.
+pub fn windage_adjustment_display(
+    drift_yd: f64,
+    range_yd: f64,
+    windage_unit: AdjustmentUnit,
+    windage_click: Option<ClickValue>,
+    windage_bias_mil: f64,
+    windage_cf: f64,
+) -> AdjustmentDisplay {
+    let click = if windage_unit == AdjustmentUnit::Clicks {
+        windage_click
+    } else {
+        None
+    };
+    adjustment_display(drift_yd, range_yd, windage_unit, click, windage_bias_mil, windage_cf)
+}
+
+/// Display label for an [`AdjustmentUnit`] header/column name (MBA-1355/MBA-1410):
+/// every surface that prints one shares this, so the "MIL"/"MOA"/"SMOA"/"IPHY"/"CLICKS"
+/// spelling cannot drift between commands.
+pub fn adjustment_unit_label(unit: AdjustmentUnit) -> String {
+    match unit {
+        AdjustmentUnit::Mil => "MIL".to_string(),
+        AdjustmentUnit::Moa => "MOA".to_string(),
+        AdjustmentUnit::Smoa => "SMOA".to_string(),
+        AdjustmentUnit::Iphy => "IPHY".to_string(),
+        AdjustmentUnit::Clicks => "CLICKS".to_string(),
+    }
+}

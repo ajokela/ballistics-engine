@@ -51,7 +51,14 @@ const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Commands available in this build, in dispatch order.
 /// `meta.capabilities` reports exactly this list so apps can feature-detect.
 fn command_names() -> Vec<&'static str> {
-    vec!["meta.capabilities", "meta.version", "solve"]
+    vec![
+        "meta.capabilities",
+        "meta.version",
+        "solve",
+        "card.come_ups",
+        "card.range_table",
+        "card.wind",
+    ]
 }
 
 fn compiled_features() -> Vec<&'static str> {
@@ -185,6 +192,11 @@ fn dispatch(request_json: &str) -> String {
             json!({ "engine_version": ENGINE_VERSION }),
         ),
         "solve" => run_solve(&request.request),
+        "card.come_ups" => run_card(&request.request, "card.come_ups", crate::card_service::come_ups_v1),
+        "card.range_table" => {
+            run_card(&request.request, "card.range_table", crate::card_service::range_table_v1)
+        }
+        "card.wind" => run_card(&request.request, "card.wind", crate::card_service::wind_card_v1),
         other => error(
             BridgeErrorCode::UnknownCommand,
             format!(
@@ -234,6 +246,50 @@ fn run_solve(inner: &Value) -> String {
             ),
         },
         Err(envelope) => command_error("solve failed", &envelope),
+    }
+}
+
+/// Shared runner for the three card commands: decode the typed request (rejecting
+/// unknown fields), run the transport-free service, serialize the typed response.
+fn run_card(
+    inner: &Value,
+    command: &'static str,
+    service: fn(
+        &crate::card_service::CardRequestV1,
+    ) -> Result<crate::card_service::CardResponseV1, crate::card_service::CardServiceError>,
+) -> String {
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            format!("'{command}' requires a request payload (card v1 document)"),
+            None,
+        );
+    }
+    let request: crate::card_service::CardRequestV1 =
+        match serde_json::from_value(inner.clone()) {
+            Ok(request) => request,
+            Err(err) => {
+                return error(
+                    BridgeErrorCode::InvalidRequest,
+                    format!("{command} request rejected: {err}"),
+                    None,
+                )
+            }
+        };
+    match service(&request) {
+        Ok(response) => match serde_json::to_value(&response) {
+            Ok(result) => success(command, result),
+            Err(err) => error(
+                BridgeErrorCode::InternalError,
+                format!("failed to serialize {command} result: {err}"),
+                None,
+            ),
+        },
+        Err(err) => error(
+            BridgeErrorCode::CommandFailed,
+            format!("{command} failed: {err}"),
+            None,
+        ),
     }
 }
 
