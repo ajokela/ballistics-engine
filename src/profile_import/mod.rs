@@ -6,6 +6,7 @@
 //! vendored (the a7p project is LGPL-3.0, this crate is MIT OR Apache-2.0).
 
 mod a7p;
+mod map;
 mod md5;
 mod wire;
 
@@ -13,3 +14,4 @@ pub use a7p::{
     parse_a7p, wrap_payload, A7pBcType, A7pDocument, A7pError, A7pProfile, EnvelopeStatus,
     UnknownField,
 };
+pub use map::{map_a7p_to_profile, sanitize_profile_name, A7pImportOutcome, ImportReport};
