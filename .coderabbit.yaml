@@ -1,0 +1,8 @@
+# CodeRabbit is disabled for this repository.
+reviews:
+  auto_review:
+    enabled: false
+  high_level_summary: false
+  poem: false
+chat:
+  auto_reply: false
