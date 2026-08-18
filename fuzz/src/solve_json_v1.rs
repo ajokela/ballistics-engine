@@ -255,6 +255,10 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
         // A dedicated reticle-description generator is a separate harness; the reticle
         // module carries its own unit + overflow-regression tests. Fuzzed as absent here.
         reticle: None,
+        // BC5D corrections point at filesystem tables; fuzzing filesystem paths belongs
+        // to a dedicated harness, and the differential target's 0.21.5 reference engine
+        // has no corrections concept. Fuzzed as absent.
+        corrections: None,
     })
 }
 

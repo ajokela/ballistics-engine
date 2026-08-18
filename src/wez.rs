@@ -327,6 +327,10 @@ fn wez_resolved_request(
         // trajectory directly, never the regular sampling grid); any positive value is inert.
         sampling: ResolvedSamplingV1 { interval_m: 10.0 },
         reticle: None,
+        // WEZ rows are rebuilt from BallisticInputs, which carry no table path — the same
+        // pre-existing "no velocity-keyed schedule in the WEZ kernel" limitation as
+        // use_bc_segments itself (scalar bc_value only).
+        corrections: None,
     })
 }
 

@@ -138,6 +138,7 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
             interval_m: request.sampling.interval_m.unwrap_or(10.0),
         },
         reticle: request.reticle.clone(),
+        corrections: request.corrections.clone(),
     }
 }
 

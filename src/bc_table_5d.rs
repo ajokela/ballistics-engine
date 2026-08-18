@@ -495,6 +495,20 @@ impl Bc5dTable {
         self.data.len()
     }
 
+    /// Bin counts per axis: `(weight, bc, muzzle_vel, current_vel, drag_types)`.
+    ///
+    /// The structured counterpart of [`Self::dimensions_str`], for callers that
+    /// report table metadata over a wire (e.g. the bridge's `bc5d.info`).
+    pub fn bin_counts(&self) -> (usize, usize, usize, usize, usize) {
+        (
+            self.weight_bins.len(),
+            self.bc_bins.len(),
+            self.muzzle_vel_bins.len(),
+            self.current_vel_bins.len(),
+            self.num_drag_types,
+        )
+    }
+
     /// Get table dimensions as a string
     pub fn dimensions_str(&self) -> String {
         format!(
@@ -724,6 +738,81 @@ const fn make_crc32_table() -> [u32; 256] {
         i += 1;
     }
     table
+}
+
+/// Process-wide cache of BC5D tables loaded from explicit filesystem paths.
+///
+/// The bridge/solve-json surfaces accept a caller-supplied table PATH (mobile apps
+/// download the `.bin` themselves and hand the engine a file path), and a parsed
+/// table is several MB — re-reading and re-CRC-ing it on every card or solve call
+/// would dominate the request. Entries are keyed by `(canonical path, file size,
+/// mtime)` so replacing a downloaded table under the same name is picked up on the
+/// next call, and the cache is bounded (oldest entry evicted at capacity).
+///
+/// Filesystem-only by construction, so the whole module is compiled out on
+/// `wasm32` (where WASM callers pass table BYTES via `loadBc5dTable` instead).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod path_cache {
+    use super::{Bc5dError, Bc5dTable};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, OnceLock, RwLock};
+    use std::time::SystemTime;
+
+    /// Small on purpose: a mobile app realistically has one or two calibers live.
+    const CACHE_CAPACITY: usize = 4;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CacheKey {
+        canonical_path: PathBuf,
+        file_size: u64,
+        modified: Option<SystemTime>,
+    }
+
+    type CacheEntries = Vec<(CacheKey, Arc<Bc5dTable>)>;
+
+    fn cache() -> &'static RwLock<CacheEntries> {
+        static CACHE: OnceLock<RwLock<CacheEntries>> = OnceLock::new();
+        CACHE.get_or_init(|| RwLock::new(Vec::new()))
+    }
+
+    /// Load a BC5D table from `path`, verifying the header (magic, version,
+    /// dimensions) and the stored CRC32 exactly as [`Bc5dTable::load`] does, with
+    /// the parsed result cached process-wide.
+    ///
+    /// A cache hit requires the canonical path, file size, AND mtime to match, so
+    /// an in-place re-download invalidates naturally. Corrupt, truncated, or
+    /// missing files are never cached.
+    pub fn load_verified(path: &Path) -> Result<Arc<Bc5dTable>, Bc5dError> {
+        let canonical_path = std::fs::canonicalize(path)?;
+        let metadata = std::fs::metadata(&canonical_path)?;
+        let key = CacheKey {
+            canonical_path,
+            file_size: metadata.len(),
+            modified: metadata.modified().ok(),
+        };
+
+        if let Ok(entries) = cache().read() {
+            if let Some((_, table)) = entries.iter().find(|(k, _)| *k == key) {
+                return Ok(Arc::clone(table));
+            }
+        }
+
+        let bytes = std::fs::read(&key.canonical_path)?;
+        let table = Arc::new(Bc5dTable::from_bytes(&bytes)?);
+
+        if let Ok(mut entries) = cache().write() {
+            // Re-check under the write lock: another thread may have inserted the
+            // same key between our read miss and here.
+            if let Some((_, existing)) = entries.iter().find(|(k, _)| *k == key) {
+                return Ok(Arc::clone(existing));
+            }
+            if entries.len() >= CACHE_CAPACITY {
+                entries.remove(0);
+            }
+            entries.push((key, Arc::clone(&table)));
+        }
+        Ok(table)
+    }
 }
 
 #[cfg(test)]
@@ -992,5 +1081,67 @@ mod tests {
         let data = b"123456789";
         let crc = crc32_ieee(data);
         assert_eq!(crc, 0xCBF43926);
+    }
+
+    #[test]
+    fn test_bin_counts_matches_dimensions() {
+        let table = create_test_table();
+        assert_eq!(table.bin_counts(), (3, 3, 2, 3, 2));
+    }
+
+    /// The path cache must hand back the SAME parsed table for repeated loads of an
+    /// unchanged file, reject corruption instead of caching it, and pick up an
+    /// in-place replacement (size change breaks the key).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn path_cache_reuses_parsed_tables_and_detects_replacement() {
+        let dir = std::env::temp_dir().join(format!(
+            "bc5d-path-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bc5d_308.bin");
+
+        let table = create_test_table();
+        let bytes = serialize_test_table(&table);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let first = path_cache::load_verified(&path).expect("valid table loads");
+        let second = path_cache::load_verified(&path).expect("cached table loads");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "an unchanged file must be served from the cache"
+        );
+
+        // Replace the file with a differently sized (still valid) table: the key
+        // changes, so the next load parses the new content.
+        let mut replacement = create_test_table();
+        replacement.weight_bins.push(250.0);
+        let extra_cells = replacement.num_drag_types
+            * replacement.bc_bins.len()
+            * replacement.muzzle_vel_bins.len()
+            * replacement.current_vel_bins.len();
+        replacement
+            .data
+            .resize(replacement.data.len() + extra_cells, 0.9f32);
+        std::fs::write(&path, serialize_test_table(&replacement)).unwrap();
+        let third = path_cache::load_verified(&path).expect("replacement loads");
+        assert!(!std::sync::Arc::ptr_eq(&first, &third));
+        assert_eq!(third.bin_counts().0, 4, "replacement content must be parsed");
+
+        // Corruption is a clean error, not a cached table.
+        let mut corrupt = serialize_test_table(&table);
+        *corrupt.last_mut().unwrap() ^= 0xFF;
+        std::fs::write(&path, corrupt).unwrap();
+        assert!(matches!(
+            path_cache::load_verified(&path),
+            Err(Bc5dError::ChecksumMismatch { .. })
+        ));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
