@@ -5,6 +5,34 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.2] - 2026-08-18
+
+### Added
+- **JSON command bridge** for embedded (mobile/FFI) consumers: one C entry-point set
+  (`ballistics_bridge_call` / `_call_n` / `_free`) dispatching a versioned JSON envelope
+  to transport-free library services — commands `meta.capabilities`, `meta.version`, and
+  `solve` (delegating verbatim to the solve-json v1 service; the test suite asserts
+  byte-identical output through both paths). All failures are in-band error envelopes:
+  the calls never return NULL and never panic across the ABI. New default-on feature
+  `bridge`; shipped header `include/ballistics_bridge.h`; mobile artifact builds via
+  `scripts/build-mobile-ios.sh` / `scripts/build-mobile-android.sh`
+  (`--no-default-features --features bridge,ffi,pdf,profile-import`, 16 KiB
+  `max-page-size` on Android).
+
+### Fixed
+- serde_json now uses the `float_roundtrip` feature crate-wide: the default float parser
+  can be one ULP off re-reading its own shortest output, which any JSON hop (bridge,
+  solve-json round-trips) would silently inflict on solver inputs.
+- Release tooling: `build-mips.sh` no longer trips over old per-version checkouts on the
+  cross-build host; `extract-notes.sh` resolves the repo from its own location instead of
+  the caller's working directory.
+
+### Removed
+- The Applied Ballistics geometry datasets and associated scripts that were inadvertently
+  swept into the 0.33.1 release (and its crates.io package, which is yanked). This
+  material is not part of the engine and has been withdrawn; `data/validation/` again
+  contains only golden-physics case files.
+
 ## [0.33.1] - 2026-08-17
 
 ### Fixed

@@ -4,7 +4,7 @@ exclude = ["ballistics-engine-rb", "ballistics-engine-py"]
 
 [package]
 name = "ballistics-engine"
-version = "0.33.1"
+version = "0.33.2"
 edition = "2021"
 authors = ["Alex Jokela <email@tinycomputers.io>"]
 description = "High-performance ballistics trajectory engine with professional physics"
@@ -49,7 +49,9 @@ exclude = [
     "MIPS_BUILD_NOTES.md",
     "test_drift.rs",
     "test_user_drift.html",
-    "*.html"
+    "*.html",
+    "data/ab_geometry/",
+    "scripts/*ab_geometry*",
 ]
 
 [features]
