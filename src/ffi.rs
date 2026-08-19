@@ -121,11 +121,42 @@ pub struct FFITrajectorySample {
     pub spin_rate_rps: c_double,  // revolutions per second
 }
 
+/// One integrated trajectory point, in the launch frame.
+///
+/// **Axis convention — read this before indexing the positions.** All three are ABSOLUTE
+/// positions in METERS, measured from the muzzle (the bore exit is the origin):
+///
+/// | field | axis | sign |
+/// |-------|------|------|
+/// | `position_x` | DOWNRANGE, toward the target | increases with range; bracket on this to find a given distance |
+/// | `position_y` | VERTICAL height | `+` up, `-` down (below the muzzle) |
+/// | `position_z` | LATERAL windage | `+` right as seen by the shooter, `-` left |
+///
+/// Two traps this ordering sets for consumers:
+///
+/// - It is **not** the "Z is downrange, X is lateral" convention. Engine 0.13.x used that
+///   opposite convention, and consumers and API layers written against those releases may
+///   still document it, so code ported from one must swap X and Z. Nothing fails loudly if you
+///   do not — all three fields stay valid `double`s, so a mix-up silently plots range as
+///   windage instead of erroring. Take the convention from this struct, not from a downstream
+///   document.
+/// - `position_y` is a height, not a drop. It is positive UP and relative to the muzzle,
+///   whereas [`FFITrajectorySample::drop_meters`] is positive DOWN and relative to the line
+///   of sight. The two disagree in both origin and sign; they are not interchangeable.
+///
+/// Enforced in this file's tests: `zero_then_fly_with_same_deck_is_consistent` brackets the
+/// zero distance on `position_x`, and `ffi_cant_angle_deflects_laterally` asserts `position_z`
+/// grows rightward under cant.
 #[repr(C)]
 pub struct FFITrajectoryPoint {
     pub time: c_double,
+    /// Downrange distance from the muzzle, meters. See the [struct docs](FFITrajectoryPoint).
     pub position_x: c_double,
+    /// Height above the muzzle, meters, positive up (NOT a drop). See the
+    /// [struct docs](FFITrajectoryPoint).
     pub position_y: c_double,
+    /// Lateral offset from the bore line, meters, positive right. See the
+    /// [struct docs](FFITrajectoryPoint).
     pub position_z: c_double,
     pub velocity_magnitude: c_double,
     pub kinetic_energy: c_double,
@@ -164,15 +195,56 @@ pub struct FFIMonteCarloParams {
     pub azimuth_std_dev: c_double,     // Horizontal aiming variation in radians
 }
 
-// Monte Carlo simulation results
+/// Monte Carlo simulation results, one entry per simulated shot.
+///
+/// Every array holds `num_results` `double`s and all of them are indexed by the same sample
+/// number.
+///
+/// **The `impact_positions_*` arrays are DEVIATIONS, not positions.** Each triple is the
+/// sample's offset from the baseline point of aim, measured in the target plane (the plane at
+/// the requested target distance), in METERS — see [`crate::MonteCarloResults::impact_positions`].
+/// A triple of zeros means "exactly on the point of aim", not "at the muzzle".
+///
+/// Axes follow [`FFITrajectoryPoint`]:
+///
+/// | field | axis | use for dispersion? |
+/// |-------|------|---------------------|
+/// | `impact_positions_z` | HORIZONTAL / windage deviation, `+` right | YES — this is the horizontal dispersion axis |
+/// | `impact_positions_y` | VERTICAL deviation, `+` up | YES — this is the vertical dispersion axis |
+/// | `impact_positions_x` | downrange, and the target plane sits at a FIXED downrange | NO — never a dispersion axis |
+///
+/// Consumers ported from engine 0.13.x (`X` lateral, `Z` downrange) commonly read
+/// `impact_positions_x` as the horizontal spread. Under this convention that reads the
+/// downrange component instead, which is not scatter, and it fails silently.
+///
+/// # Filter the shortfall sentinel before computing any statistic
+///
+/// A sample that never reached the target plane has no deviation to report, so it is encoded as
+/// `(0, TARGET_NOT_REACHED_SENTINEL_M, 0)` — the Y component is
+/// [`crate::TARGET_NOT_REACHED_SENTINEL_M`] (`-1.0e9` meters) — which keeps these arrays the same
+/// length as `ranges` and `impact_velocities`. The engine does NOT drop those entries for you.
+/// A sample is a finite arrival exactly when
+/// [`crate::MonteCarloResults::position_reached_target`] accepts it: every component finite AND
+/// the Y component not equal to the sentinel.
+///
+/// Feeding an unfiltered array into a mean or standard deviation drags the result toward
+/// `-1e9` and produces a plainly absurd group size. Exclude sentinel samples from dispersion
+/// statistics, but keep them in the denominator for hit probability — they are definite misses,
+/// which is how `hit_probability` already counts them.
 #[repr(C)]
 pub struct FFIMonteCarloResults {
     pub ranges: *mut c_double,
     pub impact_velocities: *mut c_double,
+    /// Downrange component of the target-plane deviation, meters. NOT a dispersion axis; see
+    /// the [struct docs](FFIMonteCarloResults).
     pub impact_positions_x: *mut c_double,
-    /// `-1.0e9` marks a sample that did not reach the target plane; exclude it from dispersion
-    /// statistics but retain it as a miss for probability calculations.
+    /// VERTICAL deviation from the point of aim, meters, positive up — and the field carrying
+    /// the shortfall marker: [`crate::TARGET_NOT_REACHED_SENTINEL_M`] (`-1.0e9`) marks a sample
+    /// that did not reach the target plane. Exclude those from dispersion statistics but retain
+    /// them as misses for probability calculations. See the [struct docs](FFIMonteCarloResults).
     pub impact_positions_y: *mut c_double,
+    /// HORIZONTAL / windage deviation from the point of aim, meters, positive right. This is
+    /// the horizontal dispersion axis; see the [struct docs](FFIMonteCarloResults).
     pub impact_positions_z: *mut c_double,
     pub num_results: c_int,
     pub mean_range: c_double,
