@@ -102,6 +102,11 @@ impl RangeUnit {
     }
 }
 
+/// The `font_scale` band [`generate_dope_card_pdf`] honours; anything outside it is
+/// clamped into it (see [`dope_card_rows_per_page`], which clamps identically so a page
+/// count and the document it describes cannot disagree).
+pub const FONT_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
+
 // Page dimensions (Letter size in mm)
 const PAGE_WIDTH: f32 = 215.9;
 const PAGE_HEIGHT: f32 = 279.4;
@@ -287,6 +292,35 @@ fn draw_separator_line(ops: &mut Vec<Op>, y: f32) {
     });
 }
 
+/// Data rows the two-column table fits on one page at `font_scale`.
+///
+/// Split out of [`generate_dope_card_pdf`] (which now calls it, so there is exactly one
+/// copy of this arithmetic) for callers that must report a page count without holding the
+/// document: the bridge's `card.pdf` returns `page_count` in its response, and a second,
+/// independent copy of the layout maths there could silently drift from the pagination the
+/// generator actually performed.
+///
+/// `font_scale` is clamped to [`FONT_SCALE_RANGE`] exactly as the generator clamps it.
+pub fn dope_card_rows_per_page(font_scale: f32) -> usize {
+    let row_height = ROW_HEIGHT * font_scale.clamp(*FONT_SCALE_RANGE.start(), *FONT_SCALE_RANGE.end());
+    // Leave space for header/footer + separators
+    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 36.0;
+    // The clamp above bounds row_height to 2.25..=13.5 mm against a ~223 mm usable
+    // height, so this is 16..=52 in practice; `.max(1)` only guarantees the caller's
+    // `div_ceil` below can never divide by zero if those page constants are ever edited.
+    let visual_rows_per_page = ((usable_height / row_height) as usize).clamp(1, 52);
+    // Each visual row shows 2 data points (left + right columns)
+    visual_rows_per_page * 2
+}
+
+/// Pages [`generate_dope_card_pdf`] emits for `row_count` rows at `font_scale`.
+///
+/// `0` rows is `0` pages — that call errors rather than producing an empty document, so a
+/// zero here is a caller's row set to reject, not a document to describe.
+pub fn dope_card_page_count(row_count: usize, font_scale: f32) -> usize {
+    row_count.div_ceil(dope_card_rows_per_page(font_scale))
+}
+
 /// Generate a dope card PDF matching Glenn's format with row striping.
 ///
 /// `rows` is display-ready per `CardRow`'s convention (already converted to the card's
@@ -317,18 +351,19 @@ pub fn generate_dope_card_pdf(
 
     // Only scale the data table — header/footer stay at base size
     // so they don't overflow or consume disproportionate page space
-    let font_scale = config.font_scale.clamp(0.5, 3.0);
+    let font_scale = config
+        .font_scale
+        .clamp(*FONT_SCALE_RANGE.start(), *FONT_SCALE_RANGE.end());
     let header_size = HEADER_FONT_SIZE; // UNSCALED
     let table_size = TABLE_FONT_SIZE * font_scale; // SCALED
     let footer_size = FOOTER_FONT_SIZE; // UNSCALED
     let row_height = ROW_HEIGHT * font_scale; // SCALED
 
-    // Calculate visual rows per page (accounting for header and footer)
-    // Each visual row shows 2 data points (left + right columns)
-    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 36.0; // Leave space for header/footer + separators
-    let visual_rows_per_page = ((usable_height / row_height) as usize).min(52);
-    let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
-    let total_pages = rows.len().div_ceil(data_rows_per_page);
+    // Pagination lives in `dope_card_rows_per_page`/`dope_card_page_count` so a caller
+    // that must report the page count (the bridge's `card.pdf`) reads the same numbers
+    // this loop paginates by, instead of reimplementing them.
+    let data_rows_per_page = dope_card_rows_per_page(config.font_scale);
+    let total_pages = dope_card_page_count(rows.len(), config.font_scale);
 
     let mut pages = Vec::with_capacity(total_pages);
 
@@ -1021,6 +1056,62 @@ mod tests {
         let err = generate_dope_card_pdf(&config, &[], RangeUnit::Yards)
             .expect_err("an empty row set must not silently produce a PDF");
         assert!(err.to_string().contains("rows"), "{err}");
+    }
+
+    /// The pagination `generate_dope_card_pdf` uses is now a public function (the bridge's
+    /// `card.pdf` reports a page count from it), so pin its numbers: they are part of that
+    /// response contract, and a silent change here would silently mislabel every PDF the
+    /// bridge returns.
+    #[test]
+    fn dope_card_rows_per_page_pins_the_preset_scales() {
+        // 279.4 - 20 - 36 = 223.4 mm usable / (4.5 * scale) mm per visual row, floored,
+        // capped at 52 visual rows, doubled for the two-column layout.
+        // The 52-visual-row cap bites below ~0.955 scale (223.4 / 4.5 / 52), so Small and
+        // every scale under it are cap-limited rather than height-limited — which is why
+        // Small and the 0.5 floor agree.
+        assert_eq!(dope_card_rows_per_page(FontSizePreset::Small.scale()), 104);
+        assert_eq!(dope_card_rows_per_page(FontSizePreset::Medium.scale()), 98);
+        assert_eq!(dope_card_rows_per_page(FontSizePreset::Large.scale()), 70);
+        assert_eq!(dope_card_rows_per_page(0.5), 104);
+        // Out-of-band scales are clamped, exactly as the generator clamps them.
+        assert_eq!(dope_card_rows_per_page(0.01), dope_card_rows_per_page(0.5));
+        assert_eq!(dope_card_rows_per_page(99.0), dope_card_rows_per_page(3.0));
+    }
+
+    #[test]
+    fn dope_card_page_count_rounds_up_and_reports_zero_for_no_rows() {
+        let per_page = dope_card_rows_per_page(1.0);
+        assert_eq!(dope_card_page_count(0, 1.0), 0);
+        assert_eq!(dope_card_page_count(1, 1.0), 1);
+        assert_eq!(dope_card_page_count(per_page, 1.0), 1);
+        assert_eq!(dope_card_page_count(per_page + 1, 1.0), 2);
+        assert_eq!(dope_card_page_count(per_page * 3, 1.0), 3);
+    }
+
+    /// The generator must paginate by the same function it reports: a PDF built from
+    /// `per_page + 1` rows has to carry a second page's worth of ops, which shows up as a
+    /// materially larger document than the single-page case.
+    #[test]
+    fn generated_pdf_grows_when_page_count_grows() {
+        let config = test_config();
+        let per_page = dope_card_rows_per_page(config.font_scale);
+        let rows: Vec<CardRow> = (0..per_page).map(|i| test_row(100.0 + i as f64)).collect();
+        let one_page = generate_dope_card_pdf(&config, &rows, RangeUnit::Yards).unwrap();
+        assert_eq!(dope_card_page_count(rows.len(), config.font_scale), 1);
+
+        let mut rows_plus_one = rows.clone();
+        rows_plus_one.push(test_row(100.0 + per_page as f64));
+        let two_pages = generate_dope_card_pdf(&config, &rows_plus_one, RangeUnit::Yards).unwrap();
+        assert_eq!(
+            dope_card_page_count(rows_plus_one.len(), config.font_scale),
+            2
+        );
+        assert!(
+            two_pages.len() > one_page.len(),
+            "a second page must add bytes: {} vs {}",
+            one_page.len(),
+            two_pages.len()
+        );
     }
 
     /// `RangeUnit::label()` untested was Task 10 review Minor #3: a swapped `Yd`/`M` would

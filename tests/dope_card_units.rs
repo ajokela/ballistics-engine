@@ -1,8 +1,15 @@
 //! Integration smoke tests for `--adjustment-unit` on the PDF dope card (MBA-724).
-//! The card was MIL-only; it now renders MIL or MOA. PDF text is compressed so we
-//! can't grep the unit label here — the MIL/MOA conversion itself is unit-tested in
-//! main.rs (adjustment_unit_tests). These tests confirm both units produce a valid,
-//! non-trivial PDF via the CLI (the flag is accepted and the dope-card path runs).
+//! The card was MIL-only; it now renders MIL or MOA. These tests confirm both units
+//! produce a valid, non-trivial PDF via the CLI (the flag is accepted and the dope-card
+//! path runs); the MIL/MOA conversion itself is unit-tested in main.rs
+//! (adjustment_unit_tests).
+//!
+//! No label is grepped out of the PDF here. This file used to say that was because "PDF
+//! text is compressed", which is not so — printpdf writes uncompressed content streams
+//! whose text is hex-encoded glyph ids of the embedded font subset, so a plain byte grep
+//! finds nothing but the text IS recoverable. `tests/card_pdf_bridge.rs` does exactly that
+//! (pdftotext, with a self-calibrating glyph scan as the fallback) for the bridge's
+//! `card.pdf`; these older smoke tests were simply never rewritten to read the card back.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

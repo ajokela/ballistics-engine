@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Bridge command `card.pdf`**: the engine's printable field dope card, returned as
+  `{pdf_base64, byte_length, page_count}` (`byte_length` describes the decoded document,
+  not the base64 text). The request is the SAME `CardRequestV1` the on-screen card commands
+  take, plus an optional presentation-only `pdf` block (`title`, `location`, `powder`,
+  `bullet`, `target_speed` for the Lead column, `font_scale` **or** `font_preset`,
+  `bold_data`) — so an app stores one request per saved card and replays it against
+  `card.range_table` for the screen and `card.pdf` for the printout. The printed
+  Range/Drop/Wind figures come from the same computation `card.range_table` returns, not a
+  second one, and `tests/card_pdf_bridge.rs` reads them back out of the PDF to prove it
+  (including a golden cross-check against the CLI's own `trajectory -o pdf` card for the
+  same load). The Range column follows the request's own distance unit (yards/metres),
+  unlike `trajectory -o pdf`, whose card is always yards; the header/footer block is
+  imperial on all three surfaces. Documents over 4 MiB are refused with `resource_limit`
+  rather than returned. Gated on the `pdf` feature and listed in `meta.capabilities` only
+  when compiled in (a pdf-less build reports it as an unknown command) — but the `pdf`
+  request block itself is accepted in every build, so a stored request still drives the
+  on-screen card on an engine that cannot print it.
+- `pdf_dope_card::dope_card_rows_per_page` / `dope_card_page_count` expose the dope card's
+  pagination, and `generate_dope_card_pdf` now paginates by them, so a caller reporting a
+  page count reads the generator's own arithmetic instead of a copy that could drift.
 - **BC5D offline correction on the mobile bridge.** Solve-json v1 gains an optional,
   additive `corrections` block with `bc5d_table_path`: a local path to a caliber-specific
   BC5D correction table (`bc5d_<caliber>.bin`, the exact dual-CRC format the CLI's

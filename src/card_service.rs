@@ -140,6 +140,75 @@ pub struct CardRequestV1 {
     /// there it is rejected with an invalid-request error.
     #[serde(default)]
     pub bc5d_table_path: Option<String>,
+
+    /// Presentation-only options for the printable PDF dope card (`card.pdf`). Nothing in
+    /// here touches the ballistics: the numbers in the PDF are the rows
+    /// [`range_table_v1`] returns, computed by the same call.
+    ///
+    /// It lives on the shared request — rather than in a `card.pdf`-only wrapper type — so
+    /// an app stores ONE `CardRequestV1` per saved card and replays that exact document
+    /// against either surface: `card.range_table` for the screen, `card.pdf` for the
+    /// printout. The on-screen commands ignore this block.
+    ///
+    /// Deliberately NOT `#[cfg(feature = "pdf")]`, even though everything that consumes it
+    /// is: `CardRequestV1` denies unknown fields, so gating the field would make a
+    /// pdf-less build REJECT a stored request that carries it, breaking exactly the
+    /// round-trip the field exists to support. A pdf-less build parses it and never reads
+    /// it; only the `card.pdf` command itself disappears.
+    #[serde(default)]
+    pub pdf: Option<PdfCardOptionsV1>,
+}
+
+/// Presentation knobs for the PDF dope card: the header/footer labels the printed card
+/// carries and the table's font size. The ballistics axes it prints (elevation unit,
+/// windage unit, click graduations, tracking CFs, zero-set biases) are NOT here — they are
+/// already fields on [`CardRequestV1`], shared with the on-screen card, precisely so the
+/// two cannot disagree about what a row means.
+///
+/// Every field is optional and defaults to the CLI dope card's own default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdfCardOptionsV1 {
+    /// Leading text of header line 1 — the CLI's rifle/profile name. Default
+    /// `"Dope Card"`. Long headers are truncated to fit the page.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Header `Loc:` label. Default empty.
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Footer `Powder:` label. Default empty.
+    #[serde(default)]
+    pub powder: Option<String>,
+    /// Footer `Bullet:` label. Default empty.
+    #[serde(default)]
+    pub bullet: Option<String>,
+    /// Crossing-target speed for the Lead column, in the request's `units` speed unit
+    /// (mph imperial / m/s metric) — the same convention as the CLI's `--target-speed`
+    /// (MBA-1325). The lead is `speed * time-of-flight` for a full-value 90° crossing,
+    /// held on the windage axis, exactly as `trajectory -o pdf` computes it.
+    ///
+    /// Absent means "this card carries no lead data": the Lead column renders as em-dashes
+    /// rather than a column of confident-looking zeroes. An explicit `0.0` is a different
+    /// statement — a stationary target, whose lead genuinely is zero — and prints zeroes,
+    /// matching the CLI's `--target-speed 0` default.
+    #[serde(default)]
+    pub target_speed: Option<f64>,
+    /// Data-table font scale. Must be finite and within
+    /// [`crate::pdf_dope_card::FONT_SCALE_RANGE`] (0.5..=3.0); out-of-band values are
+    /// rejected rather than silently clamped, so what a stored request asks for is what it
+    /// gets. Mutually exclusive with `font_preset`. Default 1.0.
+    #[serde(default)]
+    pub font_scale: Option<f64>,
+    /// Named font scale: `"small"` (0.8), `"medium"` (1.0), `"large"` (1.4) — the CLI's
+    /// `--font-preset` vocabulary, single-letter aliases included. An unrecognized preset
+    /// is an error here (the CLI warns and falls back to medium; a stored request should
+    /// not silently render at a size it did not ask for). Mutually exclusive with
+    /// `font_scale`.
+    #[serde(default)]
+    pub font_preset: Option<String>,
+    /// Render the data rows in bold. Default false.
+    #[serde(default)]
+    pub bold_data: bool,
 }
 
 /// One velocity band of an explicit velocity-keyed BC schedule
@@ -258,6 +327,11 @@ pub enum CardServiceError {
     ZeroSolve(String),
     #[error("trajectory failed: {0}")]
     Trajectory(String),
+    /// PDF rendering itself failed (font load/parse, or an empty row set). Gated with the
+    /// only code path that can produce it, so a build without `pdf` sees an unchanged enum.
+    #[cfg(feature = "pdf")]
+    #[error("pdf generation failed: {0}")]
+    Pdf(String),
 }
 
 // --- Unit conversions: byte-identical constants to the CLI's UnitConverter ---
@@ -682,6 +756,29 @@ pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceErr
 /// Mirrors the CLI's `range-table` command row-for-row (two solves: with wind for
 /// drift, without wind for the pure elevation axis).
 pub fn range_table_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceError> {
+    // Discards the PDF-only extras; see `range_table_rows`.
+    range_table_rows(req, None).map(|(card, _lead, _bc)| card)
+}
+
+/// The one range-table computation, shared by the on-screen `card.range_table` and the
+/// printable `card.pdf`.
+///
+/// Returns `(the card, the Lead column, the scalar BC the solve ran with)`:
+///
+/// * The card is exactly what `card.range_table` serializes — `range_table_v1` is a
+///   discarding wrapper, so the PDF's Range/Drop/Wind figures ARE the on-screen figures.
+///   They are taken from here rather than recomputed because recomputing them is the one
+///   way the printed card could ever disagree with the rows the shooter already read.
+/// * The Lead column parallels `card.rows` one-to-one. `lead_target_speed` is in the
+///   request's `units` speed unit; `None` (no lead requested) yields all `None`, which the
+///   PDF renders as em-dashes rather than fake zeroes.
+/// * The BC is `Resolved::bc_for_solve` — the published BC unless a BC5D table applied its
+///   muzzle correction — which the PDF footer prints. The footer must state the BC the
+///   numbers above it came from, not the one the request nominated.
+fn range_table_rows(
+    req: &CardRequestV1,
+    lead_target_speed: Option<f64>,
+) -> Result<(CardResponseV1, Vec<Option<f64>>, f64), CardServiceError> {
     let r = resolve(req)?;
     let zero_angle = solve_zero(req, &r)?;
     let wind_samples = sampled(
@@ -692,8 +789,10 @@ pub fn range_table_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardService
         zero_angle,
     )?;
     let no_wind_samples = sampled(req, &r, 0.0, 0.0, zero_angle)?;
+    let lead_speed_mps = lead_target_speed.map(|speed| r.u.wind_to_metric(speed));
 
     let mut rows = Vec::new();
+    let mut lead_adj = Vec::new();
     let mut current_range = req.start;
     while current_range <= req.end + 0.1 {
         let range_m = r.u.distance_to_metric(current_range);
@@ -720,6 +819,27 @@ pub fn range_table_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardService
                     req.windage_cf,
                 )
                 .value;
+                // Lead is the windage-axis hold for a full-value 90° crossing target:
+                // `speed * time-of-flight` (MBA-1287's shared moving-target math), on the
+                // no-wind sample whose time this row already reports. It is a COMPONENT
+                // hold composed on top of the wind dial, which already carries the
+                // zero-set bias, so it stays bias-free (bias 0.0) while still being
+                // divided by the windage tracking CF — the same treatment
+                // `main.rs::dope_card_row_from_sample` gives the CLI's Lead column.
+                lead_adj.push(lead_speed_mps.map(|speed_mps| {
+                    let lead_display = r.u.distance_from_metric(
+                        crate::lead_from_tof(speed_mps, 90.0, nw.time_s, nw.distance_m).lead_m,
+                    );
+                    windage_adjustment_display(
+                        lead_display,
+                        range_display,
+                        r.windage_unit,
+                        r.windage_click,
+                        0.0,
+                        req.windage_cf,
+                    )
+                    .value
+                }));
                 rows.push(CardRowV1 {
                     range: current_range,
                     drop_linear: Some(r.u.drop_linear_from_metric(nw.drop_m)),
@@ -737,16 +857,21 @@ pub fn range_table_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardService
         current_range += req.step;
     }
 
-    Ok(CardResponseV1 {
-        schema_version: CARD_SCHEMA_VERSION_V1,
-        kind: "range_table",
-        zero_distance: req.zero_distance,
-        units: units_block(req, r.windage_unit),
-        wind_speeds: Vec::new(),
-        wind_angles_deg: Vec::new(),
-        rows,
-        extra_angle_rows: Vec::new(),
-    })
+    debug_assert_eq!(rows.len(), lead_adj.len(), "Lead column must parallel rows");
+    Ok((
+        CardResponseV1 {
+            schema_version: CARD_SCHEMA_VERSION_V1,
+            kind: "range_table",
+            zero_distance: req.zero_distance,
+            units: units_block(req, r.windage_unit),
+            wind_speeds: Vec::new(),
+            wind_angles_deg: Vec::new(),
+            rows,
+            extra_angle_rows: Vec::new(),
+        },
+        lead_adj,
+        r.bc_for_solve,
+    ))
 }
 
 /// Wind card: drift matrix, ranges x wind speeds, per wind-FROM angle.
@@ -829,5 +954,180 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
         wind_angles_deg: angles,
         rows: first,
         extra_angle_rows: per_angle_rows,
+    })
+}
+
+// ---------------------------------------------------------------------------------------
+// Printable PDF dope card (`card.pdf`), feature `pdf`.
+//
+// A thin presentation layer over `range_table_rows`: the ballistics happen exactly once,
+// in the same call `card.range_table` makes, and this module only turns those rows into
+// the CLI's field-ready two-column PDF. Nothing here recomputes a trajectory, an
+// adjustment, or a unit conversion that the on-screen card already performed.
+// ---------------------------------------------------------------------------------------
+
+/// A rendered PDF dope card: the document plus the facts a transport needs to describe it
+/// without re-parsing the bytes.
+#[cfg(feature = "pdf")]
+#[derive(Debug, Clone)]
+pub struct PdfCardV1 {
+    pub pdf_bytes: Vec<u8>,
+    /// Pages in `pdf_bytes`, from [`crate::pdf_dope_card::dope_card_page_count`] — the
+    /// same function the generator paginated by, not a second estimate of it.
+    pub page_count: usize,
+    /// Rows printed, identical to the on-screen `card.range_table` row count.
+    pub row_count: usize,
+}
+
+/// Resolve the effective table font scale from the mutually exclusive `font_scale` /
+/// `font_preset` options.
+#[cfg(feature = "pdf")]
+fn resolve_font_scale(opts: &PdfCardOptionsV1) -> Result<f32, CardServiceError> {
+    use crate::pdf_dope_card::{FontSizePreset, FONT_SCALE_RANGE};
+
+    match (opts.font_scale, opts.font_preset.as_deref()) {
+        (Some(_), Some(_)) => Err(CardServiceError::InvalidRequest(
+            "pdf.font_scale and pdf.font_preset are mutually exclusive; supply one".into(),
+        )),
+        (Some(scale), None) => {
+            let scale = scale as f32;
+            if !scale.is_finite() || !FONT_SCALE_RANGE.contains(&scale) {
+                return Err(CardServiceError::InvalidRequest(format!(
+                    "pdf.font_scale must be finite and within {}..={}, got {}",
+                    FONT_SCALE_RANGE.start(),
+                    FONT_SCALE_RANGE.end(),
+                    opts.font_scale.unwrap_or(f64::NAN)
+                )));
+            }
+            Ok(scale)
+        }
+        (None, Some(preset)) => FontSizePreset::from_str(preset).map(|p| p.scale()).ok_or_else(|| {
+            CardServiceError::InvalidRequest(format!(
+                "pdf.font_preset '{preset}' is not one of small, medium, large"
+            ))
+        }),
+        (None, None) => Ok(1.0),
+    }
+}
+
+/// Render the printable PDF dope card for a card request.
+///
+/// The rows are `range_table_rows`'s — i.e. literally the rows [`range_table_v1`] would
+/// return for this same request — mapped onto the CLI's Range/Drop/Wind/Lead dope card,
+/// plus the Lead column that `CardRequestV1::pdf`'s `target_speed` asks for. The Range
+/// column is denominated in the request's own distance unit (yards imperial / metres
+/// metric), unlike `trajectory -o pdf`, whose dope card is always yards.
+///
+/// The header/footer block is always imperial, matching both CLI PDF call sites: a metric
+/// request's velocity/temperature/pressure/altitude/wind/weight are converted for display
+/// only. The `Solver:` label reports this build (`online` with the `online` feature,
+/// otherwise `offline`) and the timestamp is generation time, so neither is caller-settable
+/// — and neither is a number a shooter dials.
+#[cfg(feature = "pdf")]
+pub fn pdf_card_v1(req: &CardRequestV1) -> Result<PdfCardV1, CardServiceError> {
+    use crate::card::CardRow;
+    use crate::pdf_dope_card::{
+        calculate_density_altitude, dope_card_page_count, generate_dope_card_pdf, DopeCardConfig,
+        RangeUnit,
+    };
+
+    let opts = req.pdf.clone().unwrap_or_default();
+    // Validate presentation options BEFORE spending a zero solve and two trajectories on a
+    // request that cannot be rendered anyway.
+    let font_scale = resolve_font_scale(&opts)?;
+    // A non-finite crossing speed would print "inf"/"NaN" in every Lead cell rather than
+    // failing. (A NEGATIVE speed is accepted, matching the CLI: it reads as the mover
+    // crossing the other way and simply flips the sign of the hold.)
+    if opts.target_speed.is_some_and(|speed| !speed.is_finite()) {
+        return Err(CardServiceError::InvalidRequest(
+            "pdf.target_speed must be finite".into(),
+        ));
+    }
+
+    let (card, lead_adj, bc_for_solve) = range_table_rows(req, opts.target_speed)?;
+    if card.rows.is_empty() {
+        // `generate_dope_card_pdf` refuses an empty row set, and rightly: an empty dope
+        // card is not a document. Name the cause the caller can act on instead.
+        return Err(CardServiceError::InvalidRequest(format!(
+            "no card rows in {}..={} — the trajectory does not reach this range domain, or \
+             step is coarser than the samples",
+            req.start, req.end
+        )));
+    }
+
+    let imperial = req.units == CardUnits::Imperial;
+    // The atmosphere defaults `resolve()` applies, restated for the header so the printed
+    // conditions are the ones the solve used rather than blanks.
+    let temperature = req.temperature.unwrap_or(if imperial { 59.0 } else { 15.0 });
+    let pressure = req.pressure.unwrap_or(if imperial { 29.92 } else { 1013.25 });
+    // inHg <-> hPa via the CLI dope card's own factor (main.rs uses 33.8639 on both PDF
+    // call sites), NOT pdf_dope_card::INHG_TO_HPA — matching the shipped header exactly.
+    let pressure_inhg = if imperial { pressure } else { pressure / 33.8639 };
+    let pressure_hpa = if imperial { pressure * 33.8639 } else { pressure };
+    let temperature_f = if imperial { temperature } else { temperature * 9.0 / 5.0 + 32.0 };
+    // NOTE: `CardRequestV1::altitude` is fed to the solve unconverted (see `solve_zero` /
+    // `sampled`), i.e. it is METRES in both unit systems — the one field in this request
+    // that does not follow the module's units convention. The header reports the altitude
+    // the solve actually used, so it converts from metres regardless of `units`.
+    let altitude_ft = req.altitude / 0.3048;
+    let rows: Vec<CardRow> = card
+        .rows
+        .iter()
+        .zip(&lead_adj)
+        .map(|(row, lead)| CardRow {
+            range: row.range,
+            drop_linear: row.drop_linear,
+            drop_adj: row.drop_adj,
+            come_up: row.come_up,
+            wind_linear: row.wind_linear,
+            wind_adj: row.wind_adj,
+            velocity: row.velocity,
+            energy: row.energy,
+            time: row.time,
+            lead_adj: *lead,
+            wind_columns: row.wind_columns.clone(),
+        })
+        .collect();
+
+    let config = DopeCardConfig {
+        rifle_name: opts.title.clone().unwrap_or_else(|| "Dope Card".to_string()),
+        location: opts.location.clone().unwrap_or_default(),
+        density_altitude_ft: calculate_density_altitude(altitude_ft, pressure_inhg, temperature_f),
+        pressure_inhg,
+        pressure_hpa,
+        temperature_f,
+        altitude_ft,
+        wind_speed_mph: if imperial { req.wind_speed } else { req.wind_speed / 0.44704 },
+        // Absent target speed prints 0 here (there is no lead to state) while the Lead
+        // column itself stays em-dashed; an explicit 0.0 prints the same 0 and zeroes.
+        target_speed_mph: match opts.target_speed {
+            Some(speed) if imperial => speed,
+            Some(speed) => speed / 0.44704,
+            None => 0.0,
+        },
+        solver_mode: if cfg!(feature = "online") { "online".to_string() } else { "offline".to_string() },
+        powder: opts.powder.clone().unwrap_or_default(),
+        bullet: opts.bullet.clone().unwrap_or_default(),
+        weight_gr: if imperial { req.mass } else { req.mass * 15.4324 },
+        bc: bc_for_solve,
+        drag_model: DragModel::from(req.drag_model).to_string(),
+        velocity_fps: if imperial { req.muzzle_velocity } else { req.muzzle_velocity / 0.3048 },
+        font_scale,
+        bold_data: opts.bold_data,
+        // The card's own axes, straight off the shared request: Drop in the elevation
+        // unit, Wind AND Lead in the (possibly different, MBA-1410) windage unit. These are
+        // the labels `card.range_table`'s `units` block reports for the same request.
+        elevation_unit_label: card.units.elevation_adjustment.clone(),
+        windage_unit_label: card.units.windage_adjustment.clone(),
+    };
+
+    let range_unit = if imperial { RangeUnit::Yards } else { RangeUnit::Meters };
+    let pdf_bytes = generate_dope_card_pdf(&config, &rows, range_unit)
+        .map_err(|e| CardServiceError::Pdf(e.to_string()))?;
+
+    Ok(PdfCardV1 {
+        page_count: dope_card_page_count(rows.len(), font_scale),
+        row_count: rows.len(),
+        pdf_bytes,
     })
 }
