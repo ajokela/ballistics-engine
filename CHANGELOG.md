@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Bridge command `card.pdf`**: the engine's printable field dope card, returned as
-  `{pdf_base64, byte_length, page_count, row_count, kind, source}` (`byte_length` describes
+  `{pdf_base64, byte_length, page_count, row_count, kind, source,
+  unprintable_title_chars}` (`byte_length` describes
   the decoded document, not the base64 text). The request is the SAME `CardRequestV1` the
   on-screen card commands take, plus an optional presentation-only `pdf` block (`title`,
   `location`, `powder`, `bullet`, `target_speed` for the Lead column, `font_scale` **or**
@@ -32,6 +33,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   block). The footer's `BC:` is the stored card's own `bc_for_solve`; `source` in the
   response is `stored_rows` so a caller can verify it got a reprint. Omitting the key (or
   sending `null`) keeps the previous solve-then-print behaviour unchanged.
+  The stored response, its `units` block and its rows are read back through mirrors that
+  IGNORE fields this build has not heard of — deliberately not `deny_unknown_fields`, unlike
+  `CardRequestV1`, where the caller really is the author. What arrives there is the engine's
+  own output round-tripped through an app's storage, so strictness bought no validation and
+  cost a hard cross-version break: the first field ever added to `CardResponseV1` would have
+  made every card saved by the platform that had already bumped its engine pin unexportable
+  on the platform that had not, with a serde message listing internal struct fields. The
+  stored-side "this is not a range table" guard also now refuses `wind_angles_deg`, which
+  the request-side guard already refused.
+- **`card.pdf` reports a title its font cannot draw**, in `unprintable_title_chars` (the
+  distinct characters, in order of first use; empty when the whole title printed). The card
+  is drawn in Liberation Sans, which covers Latin, Latin-1, Cyrillic, Greek and the usual
+  punctuation and nothing else — and printpdf emits NOTHING for an unmapped codepoint, so a
+  card titled `射撃カード 308` printed a header reading `308`, an Arabic or Thai title
+  printed a blank header, and an emoji left a gap, all with `ok: true` and a normal byte
+  length. Every caller-supplied header/footer string now prints
+  `pdf_dope_card::UNPRINTABLE_SUBSTITUTE` (`?`) where such a character stood, so the gap is
+  visible, and `pdf_dope_card::unprintable_chars` is public so a caller can ask before or
+  after printing. Not an error: the document and every row are unaffected.
 - **Provenance on the paper.** The dope card footer now prints `Engine:<version>` and, for a
   reprint, `Table:<version>` beside the timestamp (`DopeCardConfig::engine_version` /
   `table_version`; the CLI's cards state the build too). An empty string prints nothing
