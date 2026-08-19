@@ -50,7 +50,7 @@ use ballistics_engine::pdf_dope_card::{
 #[cfg(feature = "online")]
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder, TrueVelocityRequest};
 use ballistics_engine::bc_table::BcCorrectionTable;
-use ballistics_engine::bc_table_5d::Bc5dTableManager;
+use ballistics_engine::bc_table_5d::{Bc5dError, Bc5dTableManager};
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
 use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN, GRAINS_PER_GRAM, FPS_TO_MPS};
@@ -7874,6 +7874,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let bc_table_5d_correction: Option<f64> = if bc_table_correction.is_none() {
                 if let Some(table_dir) = &effective_bc_table_dir {
                     let mut manager = Bc5dTableManager::new(table_dir);
+                    // Identity guard before any lookup: refuse a table whose header
+                    // caliber is not this shot's caliber (see the helper's docs).
+                    reject_bc5d_caliber_mismatch(&mut manager, caliber_in)?;
 
                     let mass_grains = match cli.units {
                         UnitSystem::Imperial => final_mass,
@@ -9692,6 +9695,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let bc_segments: Option<Vec<BCSegmentData>> =
                 if let Some(table_dir) = &effective_bc_table_dir {
                     let mut manager = Bc5dTableManager::new(table_dir);
+                    // Identity guard before any lookup: refuse a table whose header
+                    // caliber is not this shot's caliber (see the helper's docs).
+                    reject_bc5d_caliber_mismatch(&mut manager, caliber_in)?;
                     generate_bc5d_segments(
                         &mut manager,
                         caliber_in,
@@ -12774,6 +12780,33 @@ fn dope_card_row_from_sample(
 // ============================================================================
 // BC5D Segment Generation Helper (MBA-744)
 // ============================================================================
+
+/// Refuse a `--bc-table-dir` whose table for this caliber is not actually a table for
+/// this caliber.
+///
+/// `Bc5dTableManager::get_table` selects `bc5d_<key>.bin` by NAME but verifies the
+/// header caliber, returning [`Bc5dError::CaliberMismatch`] when the file's CONTENT
+/// belongs to another caliber (a rotated manifest, a hand-copied `.bin`, a generator
+/// bug). That is fatal on purpose: a wrong-caliber table still produces a full,
+/// plausible-looking ladder and silently biases every row, so it is worse than no table
+/// at all — see `Bc5dTable::ensure_caliber_matches`. Without this pre-check the mismatch
+/// would surface as `generate_bc5d_segments` quietly returning no segments, i.e. exactly
+/// the silent uncorrected solve we must not produce.
+///
+/// Every OTHER load failure keeps the historical lenient behavior (no table for this
+/// caliber, unreadable file -> continue without the correction); only a caliber
+/// mismatch, which means the operator handed us the wrong data, stops the run.
+fn reject_bc5d_caliber_mismatch(
+    manager: &mut Bc5dTableManager,
+    caliber_in: f64,
+) -> Result<(), String> {
+    match manager.get_table(caliber_in) {
+        Err(error @ Bc5dError::CaliberMismatch { .. }) => {
+            Err(format!("--bc-table-dir: {error}"))
+        }
+        _ => Ok(()),
+    }
+}
 
 /// Generate velocity-dependent BC segments from a Bc5dTableManager.
 #[allow(

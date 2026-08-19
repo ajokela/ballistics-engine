@@ -70,6 +70,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round-trip fixture test in `src/profile.rs`. File persistence and profile unit
   conversion stay in the CLI; the new module is fs-free and compiles for wasm32.
 
+### Fixed
+- **A BC5D table is now refused for a caliber it was not built for.** Nothing bound a
+  table's CONTENT to the shot it corrected: the CRC only proves the bytes are intact, the
+  CLI picks the file by NAME (`bc5d_<key>.bin`), and the bridge/solve-json/WASM surfaces
+  take a caller-supplied path or raw bytes. Because every lookup clamps to the edge bins,
+  a foreign table never failed — it returned a full, plausible-looking ladder that
+  silently biased every row (the published `bc5d_224.bin` on a 175 gr G1 0.505 .308 at
+  2600 fps gives segment BCs 0.4710..0.5114 where the .308 table gives 0.4989..0.5072,
+  ~6.7 % off in the low bands; a .308 table on a .243 shot measures -17.9 % on effective
+  BC). Every surface that has a shot in hand — bridge cards, bridge `solve`, `solve-json`,
+  the CLI's `--bc-table-dir`, and the WASM `loadBc5dTable` path — now compares the table's
+  header caliber against the bullet diameter and refuses a mismatch with an error naming
+  both values ("table is for 0.224, shot is 0.308"), rather than correcting with foreign
+  data or quietly downgrading to an uncorrected solve the caller cannot distinguish from a
+  corrected one. Matching rule: equality of the 3-digit BC5D caliber key
+  (`round(caliber * 1000)`) — the same key that selects `bc5d_<key>.bin`, so the CLI and
+  every path/bytes consumer agree by construction; in practice a half-thousandth bucket
+  (a `308` table accepts `[0.3075, 0.3085)`), which also absorbs the `f32` header's
+  representation error. A MATCHING table is bit-identical to before (asserted against
+  pre-change golden ladders and card/solve rows). The published tables all carry the right
+  header caliber today, so this closes a latent identity gap (a rotated manifest, a
+  hand-copied `.bin`, a future generator bug) rather than a live mis-serve.
+  `bc5d.info` additionally reports `caliber_key`, the exact integer the guard compares, so
+  an app can pre-check a downloaded table and show its own message. Library API:
+  `Bc5dError` gains a `CaliberMismatch` variant, `Bc5dTable` gains `caliber_key()` and
+  `ensure_caliber_matches()`, `bc_table_5d::caliber_to_key` is now public, and
+  `path_cache::load_verified_for_caliber` is the guarded loader every shot-bearing
+  path consumer uses (plain `load_verified` remains for `bc5d.info`, which describes a
+  file rather than judging a shot).
+
 ## [0.33.2] - 2026-08-18
 
 ### Added

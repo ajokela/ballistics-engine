@@ -99,6 +99,10 @@ pub enum Bc5dError {
     InvalidDimensions,
     TableNotFound(f64),
     NoTableDirectory,
+    /// The table's own header caliber is not the caliber of the shot it was handed to.
+    /// See [`Bc5dTable::ensure_caliber_matches`] for why this is refused rather than
+    /// applied or silently ignored. Both calibers are in inches.
+    CaliberMismatch { table_caliber: f64, shot_caliber: f64 },
 }
 
 impl std::fmt::Display for Bc5dError {
@@ -113,6 +117,18 @@ impl std::fmt::Display for Bc5dError {
             Bc5dError::InvalidDimensions => write!(f, "Invalid table dimensions"),
             Bc5dError::TableNotFound(cal) => write!(f, "No BC5D table found for caliber {:.3}", cal),
             Bc5dError::NoTableDirectory => write!(f, "No BC table directory configured"),
+            Bc5dError::CaliberMismatch {
+                table_caliber,
+                shot_caliber,
+            } => write!(
+                f,
+                "BC5D table caliber does not match the shot: table is for {:.3}, shot is {:.3} \
+                 (BC5D tables are keyed to the nearest 0.001 in: {} vs {})",
+                table_caliber,
+                shot_caliber,
+                caliber_to_key(*table_caliber),
+                caliber_to_key(*shot_caliber),
+            ),
         }
     }
 }
@@ -475,6 +491,58 @@ impl Bc5dTable {
         self.caliber
     }
 
+    /// The table's own caliber as a BC5D key ([`caliber_to_key`]) — exactly the value
+    /// [`Self::ensure_caliber_matches`] compares against, and the value `bc5d.info`
+    /// reports as `caliber_key` so an app can pre-check a downloaded table itself.
+    pub fn caliber_key(&self) -> i32 {
+        caliber_to_key(self.caliber as f64)
+    }
+
+    /// Refuse this table for a shot of a different caliber.
+    ///
+    /// `shot_caliber_in` is the shot's bullet diameter in INCHES.
+    ///
+    /// # Why this is an error and not a warning or a silent skip
+    ///
+    /// Nothing in the lookup path fails on a foreign table: [`Self::lookup`] clamps
+    /// out-of-range values to the edge bins, so a table for another caliber still
+    /// returns a plausible-looking correction for every cell and
+    /// [`Self::generate_segments`] still emits a full ladder. Measured: the published
+    /// `bc5d_224.bin` handed a 175 gr / G1 0.505 / 2600 fps .308 shot yields a
+    /// 25-segment ladder whose segment BCs are 0.4710..0.5114 where the .308 table
+    /// gives 0.4989..0.5072 — ~6.7 % off in the low bands, with no diagnostic
+    /// anywhere; a .308 table on a .243 shot measures -17.9 % effective BC. A
+    /// wrong-caliber table is therefore WORSE than no table at all: no table leaves
+    /// the published BC intact, while a wrong one silently biases every row. So the
+    /// caller is refused outright — never corrected with foreign data, and never
+    /// quietly downgraded to an uncorrected solve either, because a caller that asked
+    /// for a table and got an unannotated uncorrected answer cannot tell.
+    ///
+    /// # Matching rule
+    ///
+    /// Equality of the 3-digit BC5D caliber key ([`caliber_to_key`]) — the same key
+    /// `find_table_file` uses to choose `bc5d_<key>.bin` for `--bc-table-dir`. The
+    /// guard therefore accepts exactly the diameters for which the CLI would have
+    /// selected this table's own filename: precedent decides the rule, so the CLI and
+    /// the path/bytes consumers (bridge cards, bridge solve, solve-json, WASM) cannot
+    /// disagree about what "this table is for my shot" means.
+    ///
+    /// In practice that is a half-thousandth tolerance — a `308` table accepts
+    /// `[0.3075, 0.3085)` — expressed as a bucket rather than a centered epsilon.
+    /// Bucketing matters: the header caliber is an `f32`, so `0.308` arrives as
+    /// 0.30799998, and rounding to the nearest thousandth absorbs that representation
+    /// error, whereas a centered `|a - b| <= 0.0005` comparison would have to carry a
+    /// separate fudge for it.
+    pub fn ensure_caliber_matches(&self, shot_caliber_in: f64) -> Result<(), Bc5dError> {
+        if self.caliber_key() == caliber_to_key(shot_caliber_in) {
+            return Ok(());
+        }
+        Err(Bc5dError::CaliberMismatch {
+            table_caliber: self.caliber as f64,
+            shot_caliber: shot_caliber_in,
+        })
+    }
+
     /// Get table version
     pub fn version(&self) -> u32 {
         self.version
@@ -552,6 +620,12 @@ impl Bc5dTableManager {
     /// Get or load the table for a caliber
     ///
     /// Tables are cached after first load.
+    ///
+    /// The file is selected by NAME (`bc5d_<key>.bin`) but verified by CONTENT: a file
+    /// whose header caliber is not `caliber` is rejected with
+    /// [`Bc5dError::CaliberMismatch`] and never cached, so a rotated manifest, a
+    /// hand-copied `.bin`, or a future generator bug cannot silently bias every lookup
+    /// (see [`Bc5dTable::ensure_caliber_matches`]).
     pub fn get_table(&mut self, caliber: f64) -> Result<&Bc5dTable, Bc5dError> {
         let caliber_key = caliber_to_key(caliber);
 
@@ -564,6 +638,7 @@ impl Bc5dTableManager {
         let table_dir = self.table_dir.as_ref().ok_or(Bc5dError::NoTableDirectory)?;
         let table_path = find_table_file(table_dir, caliber)?;
         let table = Bc5dTable::load(&table_path)?;
+        table.ensure_caliber_matches(caliber)?;
         self.tables.insert(caliber_key, table);
         Ok(self.tables.get(&caliber_key).unwrap())
     }
@@ -633,8 +708,17 @@ impl Bc5dTableManager {
     }
 }
 
-/// Convert caliber to integer key (multiply by 1000)
-fn caliber_to_key(caliber: f64) -> i32 {
+/// The canonical BC5D caliber key: a caliber in inches rounded to the nearest
+/// thousandth, as an integer (0.308 -> 308, 0.224 -> 224).
+///
+/// This is the ONE key BC5D identity is expressed in. `find_table_file` builds
+/// `bc5d_<key>.bin` from it (so it decides which file `--bc-table-dir` picks),
+/// [`Bc5dTableManager`] caches by it, and [`Bc5dTable::ensure_caliber_matches`]
+/// compares by it — one rule, so the CLI's file selection and every path/bytes
+/// consumer's identity check cannot drift apart.
+pub fn caliber_to_key(caliber: f64) -> i32 {
+    // A non-finite caliber saturates to 0 here (Rust's float->int cast), which is not
+    // any real table's key, so it falls out as a mismatch rather than matching anything.
     (caliber * 1000.0).round() as i32
 }
 
@@ -811,6 +895,25 @@ pub mod path_cache {
             }
             entries.push((key, Arc::clone(&table)));
         }
+        Ok(table)
+    }
+
+    /// [`load_verified`] plus the caliber-identity guard: the loaded table must be for
+    /// the caliber of the shot that is about to use it, per
+    /// [`Bc5dTable::ensure_caliber_matches`] (`shot_caliber_in` in INCHES).
+    ///
+    /// This is the entry point every consumer that HAS a shot must use — bridge cards,
+    /// bridge `solve`, and `solve-json` all take a caller-supplied table path, and a
+    /// path says nothing about content. Only surfaces with no shot in hand (e.g. the
+    /// bridge's `bc5d.info`, which just describes a file) call [`load_verified`]
+    /// directly. Keeping the guard inside the loader is deliberate: adding a fourth
+    /// path-based consumer cannot forget it.
+    pub fn load_verified_for_caliber(
+        path: &Path,
+        shot_caliber_in: f64,
+    ) -> Result<Arc<Bc5dTable>, Bc5dError> {
+        let table = load_verified(path)?;
+        table.ensure_caliber_matches(shot_caliber_in)?;
         Ok(table)
     }
 }
@@ -1065,6 +1168,118 @@ mod tests {
         assert_eq!(caliber_to_key(0.308), 308);
         assert_eq!(caliber_to_key(0.224), 224);
         assert_eq!(caliber_to_key(0.338), 338);
+    }
+
+    /// The matching rule's boundaries, pinned. A `308` table is the bucket of diameters
+    /// that round to 0.308 at the thousandth — precisely the diameters for which
+    /// `find_table_file` would have chosen this table's own `bc5d_308.bin`.
+    #[test]
+    fn ensure_caliber_matches_accepts_the_rounding_bucket_and_refuses_outside_it() {
+        let table = create_test_table(); // header caliber 0.308 (as f32)
+
+        // The f32 header (0.30799998) must not cost us the exact match.
+        assert_eq!(table.caliber_key(), 308);
+        assert!(table.ensure_caliber_matches(0.308).is_ok());
+
+        // Inclusive at the bottom edge: 0.3075 * 1000 is exactly 307.5, which rounds
+        // half-away-from-zero to 308.
+        assert!(table.ensure_caliber_matches(0.3075).is_ok());
+        assert!(table.ensure_caliber_matches(0.3084).is_ok());
+
+        // Exclusive at the top edge: 0.3085 * 1000 is exactly 308.5 -> key 309.
+        assert!(matches!(
+            table.ensure_caliber_matches(0.3085),
+            Err(Bc5dError::CaliberMismatch { .. })
+        ));
+        assert!(matches!(
+            table.ensure_caliber_matches(0.3074),
+            Err(Bc5dError::CaliberMismatch { .. })
+        ));
+
+        // The real-world failure mode: a whole different caliber, named in the message.
+        let err = table
+            .ensure_caliber_matches(0.224)
+            .expect_err("a .224 shot must not be served a .308 table");
+        let message = err.to_string();
+        assert!(
+            message.contains("table is for 0.308, shot is 0.224"),
+            "the error must name both calibers: {message}"
+        );
+
+        // A garbage diameter cannot accidentally match a real table either.
+        assert!(table.ensure_caliber_matches(f64::NAN).is_err());
+        assert!(table.ensure_caliber_matches(0.0).is_err());
+    }
+
+    /// A file named `bc5d_308.bin` whose CONTENT is a .224 table must be refused by the
+    /// CLI's manager, and must not be cached (so a retry cannot resurrect it).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn manager_refuses_a_file_whose_header_caliber_is_foreign() {
+        let dir = std::env::temp_dir().join(format!(
+            "bc5d-mislabeled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut foreign = create_test_table();
+        foreign.caliber = 0.224;
+        foreign.data.fill(0.9);
+        std::fs::write(dir.join("bc5d_308.bin"), serialize_test_table(&foreign)).unwrap();
+
+        let mut manager = Bc5dTableManager::new(&dir);
+        let err = manager
+            .get_table(0.308)
+            .expect_err("a mislabeled table must be refused, not applied");
+        assert!(matches!(err, Bc5dError::CaliberMismatch { .. }), "{err}");
+        // Not cached: the second attempt fails the same way rather than succeeding.
+        assert!(matches!(
+            manager.get_table(0.308),
+            Err(Bc5dError::CaliberMismatch { .. })
+        ));
+        // And no correction leaks out through the convenience wrappers.
+        assert!(manager
+            .lookup(0.308, 168.0, 0.4, 2500.0, 2000.0, "G1")
+            .is_err());
+
+        // The same bytes ARE usable for the caliber they actually describe.
+        std::fs::write(dir.join("bc5d_224.bin"), serialize_test_table(&foreign)).unwrap();
+        assert!(manager.get_table(0.224).is_ok());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `load_verified_for_caliber` is the guarded loader every shot-bearing consumer
+    /// uses: same bytes, accepted for their own caliber and refused for another.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn path_cache_guarded_loader_refuses_a_foreign_caliber() {
+        let dir = std::env::temp_dir().join(format!(
+            "bc5d-guarded-load-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bc5d_308.bin");
+        std::fs::write(&path, serialize_test_table(&create_test_table())).unwrap();
+
+        assert!(path_cache::load_verified_for_caliber(&path, 0.308).is_ok());
+        let err = path_cache::load_verified_for_caliber(&path, 0.243)
+            .expect_err("a .243 shot must be refused a .308 table");
+        assert!(matches!(err, Bc5dError::CaliberMismatch { .. }), "{err}");
+        assert!(
+            err.to_string().contains("table is for 0.308, shot is 0.243"),
+            "{err}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
