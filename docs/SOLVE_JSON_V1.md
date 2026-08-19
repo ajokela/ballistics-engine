@@ -426,6 +426,15 @@ correction for the load (every sampled cell ≈ 1.0) leaves the request's consta
 The BC5D tables carry G1 and G7 planes only; a request naming any other reference drag model is
 solved with the lookup typed as G1 and receives a `bc5d_drag_model_coerced` warning.
 
+The table must be for the shot's caliber. Its header declares one, and the service compares that
+against `projectile.diameter_m` by the same 3-digit key that names the file — `round(caliber ×
+1000)`, so a `308` table covers `[0.3075, 0.3085)` in — and refuses a mismatch as an
+`invalid_value` naming both values (`table is for 0.224, shot is 0.308`). This is a refusal, not a
+downgrade: a wrong-caliber table never fails a lookup (values clamp to its edge bins), so applying
+one would silently bias every row, and answering with an unannotated uncorrected solve would be
+indistinguishable from a corrected one. Use the bridge's `bc5d.info` (`caliber_key`) to pre-check a
+downloaded table.
+
 A missing or unreadable file is an `io_error`; a file that is not a valid BC5D table (bad magic,
 unsupported version, impossible dimensions, or a CRC mismatch) is an `invalid_value`, both at
 `$.corrections.bc5d_table_path`. On engine builds without filesystem access (wasm32), supplying

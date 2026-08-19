@@ -3102,6 +3102,11 @@ Impact Velocity: 2510 fps\n";
     /// helper — duplicated here rather than shared since that one lives inside a `mod tests`
     /// this file cannot reach.
     fn synthetic_bc5d_bytes(correction: f32) -> Vec<u8> {
+        synthetic_bc5d_bytes_for_caliber(correction, 0.308)
+    }
+
+    /// Same fixture with a chosen HEADER caliber, for the caliber-identity guard test.
+    fn synthetic_bc5d_bytes_for_caliber(correction: f32, caliber: f32) -> Vec<u8> {
         let weight_bins = [168.0f32];
         let bc_bins = [0.4f32];
         let muzzle_vel_bins = [2500.0f32];
@@ -3111,7 +3116,7 @@ Impact Velocity: 2510 fps\n";
         let mut out = Vec::new();
         out.extend_from_slice(b"BC5D");
         out.extend_from_slice(&2u32.to_le_bytes()); // version
-        out.extend_from_slice(&0.308f32.to_le_bytes()); // caliber
+        out.extend_from_slice(&caliber.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes()); // flags
         out.extend_from_slice(&0u32.to_le_bytes()); // padding
         out.extend_from_slice(&(weight_bins.len() as u32).to_le_bytes());
@@ -3148,6 +3153,36 @@ Impact Velocity: 2510 fps\n";
             out.extend_from_slice(&v.to_le_bytes());
         }
         out
+    }
+
+    /// `loadBc5dTable` takes raw BYTES, so nothing before the solve ties the loaded table
+    /// to the shot: a `.224` table applied to a `.308` bullet still clamped to its edge
+    /// bins and silently biased every row. It must be refused, naming both calibers — and
+    /// the same bytes must still be accepted for the caliber they actually describe.
+    #[wasm_bindgen_test]
+    fn bc5d_table_for_another_caliber_is_refused() {
+        let wasm = WasmBallistics::new();
+        wasm.load_bc5d_table(&synthetic_bc5d_bytes_for_caliber(0.9, 0.224))
+            .unwrap();
+        let error = wasm
+            .run_command(
+                "trajectory -v 2500 -b 0.4 -m 168 -d 0.308 --drag-model g1 --use-bc-segments \
+                 --max-range 300",
+            )
+            .expect_err("a .224 table must not correct a .308 shot");
+        let message = error.as_string().unwrap_or_default();
+        assert!(
+            message.contains("table is for 0.224, shot is 0.308"),
+            "{message}"
+        );
+
+        // The same table is fine for a .224 shot.
+        assert!(wasm
+            .run_command(
+                "trajectory -v 2500 -b 0.4 -m 55 -d 0.224 --drag-model g1 --use-bc-segments \
+                 --max-range 300",
+            )
+            .is_ok());
     }
 
     /// 0.28.1 sweep: the BC5D G1/G7-coercion warning (MBA-1386, bcdd213) was only carried

@@ -568,17 +568,27 @@ fn apply_bc5d_correction(
     {
         use crate::bc_table_5d::{path_cache, Bc5dError};
 
-        let table =
-            path_cache::load_verified(std::path::Path::new(table_path)).map_err(|error| {
-                let code = match error {
-                    Bc5dError::IoError(_) => SolveErrorCodeV1::IoError,
-                    _ => SolveErrorCodeV1::InvalidValue,
-                };
-                SolveErrorEnvelopeV1::new(
-                    SolveErrorV1::new(code, format!("bc5d_table_path: {error}"))
-                        .at_path("$.corrections.bc5d_table_path"),
-                )
-            })?;
+        // Identity, not just integrity: the table's header caliber must be this shot's
+        // caliber. A wrong-caliber table is worse than no table, because every lookup
+        // still succeeds (edge-bin clamping) and silently biases every row — so it is
+        // refused as an invalid_value at the field that named it, never applied and
+        // never downgraded to a silent uncorrected solve. See
+        // `Bc5dTable::ensure_caliber_matches`.
+        let shot_caliber_in = resolved_request.projectile.diameter_m / 0.0254;
+        let table = path_cache::load_verified_for_caliber(
+            std::path::Path::new(table_path),
+            shot_caliber_in,
+        )
+        .map_err(|error| {
+            let code = match error {
+                Bc5dError::IoError(_) => SolveErrorCodeV1::IoError,
+                _ => SolveErrorCodeV1::InvalidValue,
+            };
+            SolveErrorEnvelopeV1::new(
+                SolveErrorV1::new(code, format!("bc5d_table_path: {error}"))
+                    .at_path("$.corrections.bc5d_table_path"),
+            )
+        })?;
 
         // The v2 BC5D tables carry only G1/G7 planes; every other reference model is
         // typed as G1, with the same warning surface as the CLI/WASM aux paths.

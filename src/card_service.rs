@@ -480,10 +480,17 @@ fn resolve_bc_schedule(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let table = crate::bc_table_5d::path_cache::load_verified(std::path::Path::new(path))
-            .map_err(|e| {
-                CardServiceError::InvalidRequest(format!("bc5d_table_path: {e}"))
-            })?;
+        // The table's CONTENT must be for this shot's caliber, not merely CRC-valid: a
+        // wrong-caliber table silently biases every row of the card (see
+        // Bc5dTable::ensure_caliber_matches), so a mismatch is refused here rather than
+        // applied — and rather than quietly falling back to an uncorrected card, which
+        // the caller could not distinguish from a corrected one.
+        let diameter_in = if imperial { req.diameter } else { req.diameter / 25.4 };
+        let table = crate::bc_table_5d::path_cache::load_verified_for_caliber(
+            std::path::Path::new(path),
+            diameter_in,
+        )
+        .map_err(|e| CardServiceError::InvalidRequest(format!("bc5d_table_path: {e}")))?;
 
         // The BC5D axes are grains + fps; convert from the request's units the same
         // way the CLI does. The v2 tables carry only G1/G7 planes — anything else is

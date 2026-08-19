@@ -457,6 +457,14 @@ Tables are automatically downloaded from the server and cached locally:
 
 **Available Calibers:** .224, .243, .264, .277, .284, .308, .338
 
+**Caliber identity:** the file is chosen by name (`bc5d_<caliber×1000>.bin`, so `-d 0.308` looks
+for `bc5d_308.bin`) but verified by content — its header declares a caliber, and a file whose
+header does not match `-d` is a hard error naming both values (`table is for 0.224, shot is
+0.308`), not a skipped correction. A wrong-caliber table never fails a lookup (values clamp to its
+edge bins), so it would silently bias every row: worse than having no table at all. A diameter
+matches when it rounds to the table's own 3-digit key, i.e. `bc5d_308.bin` serves
+`-d 0.3075`..`0.3084`.
+
 **Cache Locations:**
 - macOS: `~/Library/Caches/ballistics-engine/bc5d/`
 - Linux: `~/.cache/ballistics-engine/bc5d/`

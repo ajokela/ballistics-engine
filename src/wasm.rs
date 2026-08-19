@@ -1999,6 +1999,14 @@ impl WasmBallistics {
             // BC5D offline correction: synthesize velocity-dependent BC segments
             // from a loaded table. The table's native units are grains + fps.
             if let Some(table) = self.bc5d_table.borrow().as_ref() {
+                // The loaded table must be for THIS bullet's caliber. loadBc5dTable takes
+                // raw bytes, so nothing before this point ties the table's content to the
+                // shot; a foreign table would still return a full plausible ladder and
+                // silently bias every row (see Bc5dTable::ensure_caliber_matches), so a
+                // mismatch is a hard error rather than a quietly uncorrected solve.
+                table
+                    .ensure_caliber_matches(inputs.bullet_diameter / 0.0254)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
                 let (weight_grains, muzzle_fps) = match units {
                     UnitSystem::Imperial => (mass, velocity),
                     UnitSystem::Metric => (mass * GRAINS_PER_GRAM, velocity * 3.280839895),

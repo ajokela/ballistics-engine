@@ -408,6 +408,15 @@ struct Bc5dInfoRequest {
 /// generation timestamp, per-axis bin counts, total cells, weight/velocity coverage).
 /// A missing, unreadable, corrupt, or non-BC5D file is a `command_failed` envelope with
 /// a human-readable message (`invalid_request` when the payload itself is malformed).
+///
+/// `caliber` is the raw header value (an `f32`, so a .308 table reports 0.30799998) and
+/// `caliber_key` is that same value as the 3-digit BC5D key — EXACTLY the integer the
+/// solve/card caliber guard compares (`Bc5dTable::ensure_caliber_matches`). An app can
+/// therefore pre-check a downloaded table itself with
+/// `round(bullet_diameter_inches * 1000) == caliber_key` and show its own friendly
+/// message instead of provoking the `command_failed`. This command deliberately does NOT
+/// take a caliber: it describes a file, and only the surfaces that have a shot in hand
+/// enforce the match.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_bc5d_info(inner: &Value) -> String {
     if inner.is_null() {
@@ -453,6 +462,8 @@ fn run_bc5d_info(inner: &Value) -> String {
             "crc_ok": true,
             "format_version": table.version(),
             "caliber": table.caliber(),
+            // The integer the caliber guard actually compares (see the doc comment).
+            "caliber_key": table.caliber_key(),
             "api_version": table.api_version(),
             "generated_timestamp": table.timestamp(),
             // Axis order matches the on-disk layout: [drag_type][weight][bc][mv][cv].
