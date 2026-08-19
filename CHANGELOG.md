@@ -9,22 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Bridge command `card.pdf`**: the engine's printable field dope card, returned as
-  `{pdf_base64, byte_length, page_count}` (`byte_length` describes the decoded document,
-  not the base64 text). The request is the SAME `CardRequestV1` the on-screen card commands
-  take, plus an optional presentation-only `pdf` block (`title`, `location`, `powder`,
-  `bullet`, `target_speed` for the Lead column, `font_scale` **or** `font_preset`,
-  `bold_data`) — so an app stores one request per saved card and replays it against
-  `card.range_table` for the screen and `card.pdf` for the printout. The printed
-  Range/Drop/Wind figures come from the same computation `card.range_table` returns, not a
-  second one, and `tests/card_pdf_bridge.rs` reads them back out of the PDF to prove it
-  (including a golden cross-check against the CLI's own `trajectory -o pdf` card for the
-  same load). The Range column follows the request's own distance unit (yards/metres),
-  unlike `trajectory -o pdf`, whose card is always yards; the header/footer block is
-  imperial on all three surfaces. Documents over 4 MiB are refused with `resource_limit`
-  rather than returned. Gated on the `pdf` feature and listed in `meta.capabilities` only
-  when compiled in (a pdf-less build reports it as an unknown command) — but the `pdf`
-  request block itself is accepted in every build, so a stored request still drives the
-  on-screen card on an engine that cannot print it.
+  `{pdf_base64, byte_length, page_count, row_count, kind, source}` (`byte_length` describes
+  the decoded document, not the base64 text). The request is the SAME `CardRequestV1` the
+  on-screen card commands take, plus an optional presentation-only `pdf` block (`title`,
+  `location`, `powder`, `bullet`, `target_speed` for the Lead column, `font_scale` **or**
+  `font_preset`, `bold_data`) — so an app stores one request per saved card and replays it
+  against `card.range_table` for the screen and `card.pdf` for the printout. The Range column
+  follows the request's own distance unit (yards/metres), unlike `trajectory -o pdf`, whose
+  card is always yards; the header/footer block is imperial on all three surfaces. Gated on
+  the `pdf` feature and listed in `meta.capabilities` only when compiled in (a pdf-less build
+  reports it as an unknown command) — but the `pdf` request block itself is accepted in every
+  build, so a stored request still drives the on-screen card on an engine that cannot print
+  it.
+- **`card.pdf` can PRINT STORED ROWS instead of solving**, via one `card.pdf`-only request
+  key: `stored_card: {card: <a stored card.range_table result, verbatim>, engine_version,
+  bc5d_table_version}`. With it, nothing is solved, no trajectory runs, and
+  `bc5d_table_path` is never opened — so a saved card reprints identically after an engine
+  bump, after the correction table at that path is overwritten in place by a table-set
+  refresh, and even after that file is deleted (pinned by
+  `stored_rows_print_without_a_solve_or_a_correction_table`, which exports successfully
+  against a table path that does not exist and shows the same request failing without the
+  block). The footer's `BC:` is the stored card's own `bc_for_solve`; `source` in the
+  response is `stored_rows` so a caller can verify it got a reprint. Omitting the key (or
+  sending `null`) keeps the previous solve-then-print behaviour unchanged.
+- **Provenance on the paper.** The dope card footer now prints `Engine:<version>` and, for a
+  reprint, `Table:<version>` beside the timestamp (`DopeCardConfig::engine_version` /
+  `table_version`; the CLI's cards state the build too). An empty string prints nothing
+  rather than a placeholder, so a card that used no correction table says nothing about one.
+  A reprint states the versions the rows came from, which is what makes a printed card and a
+  screen reconcilable afterwards.
+- **`card.range_table` / `card.come_ups` / `card.wind` responses gain `bc_for_solve`**: the
+  scalar BC the rows were actually computed with (the published BC unless a BC5D table
+  applied its muzzle correction). Additive; it is what a saved card stores so a reprint can
+  state the BC its numbers used.
 - `pdf_dope_card::dope_card_rows_per_page` / `dope_card_page_count` expose the dope card's
   pagination, and `generate_dope_card_pdf` now paginates by them, so a caller reporting a
   page count reads the generator's own arithmetic instead of a copy that could drift.
@@ -89,6 +106,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names, defaults, null-vs-absent key behavior, and unknown-key tolerance, locked in by a
   round-trip fixture test in `src/profile.rs`. File persistence and profile unit
   conversion stay in the CLI; the new module is fs-free and compiles for wasm32.
+
+### Changed
+- **`card.pdf` states which card it prints, and refuses one it would misrepresent.** The
+  response carries `kind: "range_table"`, and a request carrying a wind card's
+  `wind_speeds`/`wind_angles_deg`, or a `stored_card` whose `kind` is not `range_table`, is
+  now refused. Previously a stored `card.wind` request exported `ok=true` with a Wind column
+  of `0.0` on every row while the screen showed drift to −0.42 MIL. A stored card whose
+  `units` labels disagree with the request's own axes is refused for the same reason: the two
+  are not the same card.
+- **A card too big to print is refused from its row and page count**, before any document is
+  built (`card_service::MAX_PDF_ROWS` = 5000, `MAX_PDF_PAGES` = 60 → `resource_limit`); the
+  4 MiB byte cap remains the backstop for a card made huge by its labels. The refusal text
+  now states what is true of the card — how many rows, how many pages — instead of advising
+  "coarsen step, shorten the range domain", controls a saved card's snapshot does not have.
+- The dope card's one-decimal-place rule for MIL/MOA/SMOA/IPHY cells is now documented as the
+  contract for every surface that shows these rows (a turret's resolution is 0.1; two
+  decimals on screen against one on paper put `2.45` against `2.4`, half a click apart), with
+  the rounding vectors pinned — near-ties included, since rounding a double's shortest
+  decimal spelling disagrees with rounding its binary value at values like `7.35`.
 
 ### Fixed
 - **A BC5D table is now refused for a caliber it was not built for.** Nothing bound a

@@ -14174,6 +14174,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 // unit, Wind/Lead in the (possibly different) windage unit.
                 elevation_unit_label: adjustment_unit_label(pdf_meta.adjustment_unit),
                 windage_unit_label: adjustment_unit_label(pdf_meta.windage_unit),
+                // Provenance in the footer: which build printed these numbers. No
+                // correction-table version is knowable here, so none is claimed.
+                engine_version: env!("CARGO_PKG_VERSION").to_string(),
+                table_version: String::new(),
             };
 
             // Convert sampled trajectory to dope card rows
@@ -25813,6 +25817,8 @@ fn handle_adaptive_card(
                 bold_data: false,
                 elevation_unit_label: unit_label.to_string(),
                 windage_unit_label: unit_label.to_string(),
+                engine_version: env!("CARGO_PKG_VERSION").to_string(),
+                table_version: String::new(),
             };
 
             let pdf_bytes = ballistics_engine::pdf_dope_card::generate_dope_card_pdf(

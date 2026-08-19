@@ -319,48 +319,83 @@ fn run_card(
 ///
 /// Every dope card carries a ~815 KiB floor: the two Liberation Sans faces
 /// `pdf_dope_card` embeds. Rows are cheap on top of that (~0.5 KiB each — a 300-row,
-/// 4-page card is ~950 KiB), so this cap leaves room for roughly 7,000 rows / 70 pages and
-/// only trips on a request that asked for something absurd: a hair-fine `step` over a long
-/// domain, or a header/footer label of hundreds of KiB (the `pdf` block's strings are drawn
-/// verbatim on every page). In those cases a typed refusal the caller can act on beats
+/// 4-page card is ~950 KiB).
+///
+/// This is the BACKSTOP, not the first line: the row set is refused on its own row and page
+/// count before any document exists (`card_service::MAX_PDF_ROWS` / `MAX_PDF_PAGES`), because
+/// measuring bytes means having already built and paginated them. What survives that check
+/// and still lands here is a card made huge by its LABELS — the `pdf` block's strings are
+/// drawn verbatim on every page — and for those a typed refusal the caller can act on beats
 /// pushing a multi-megabyte base64 string through an embedded FFI hop.
 #[cfg(feature = "pdf")]
 pub const MAX_PDF_BYTES: usize = 4 * 1024 * 1024;
 
 /// The over-cap envelope for a generated PDF, or `None` when it fits. Split out so the
 /// boundary itself is unit-testable at exactly [`MAX_PDF_BYTES`] and one byte past it.
+///
+/// The message states what is true of the document — its size, and how many rows and pages
+/// it holds. It deliberately does NOT advise "coarsen the step" or "shorten the range
+/// domain": for a saved card those are immutable (there is no editor for a snapshot's
+/// domain), so naming them told the one user who ever sees this message to do something
+/// impossible.
 #[cfg(feature = "pdf")]
-fn pdf_over_cap_error(byte_length: usize) -> Option<String> {
+fn pdf_over_cap_error(byte_length: usize, row_count: usize, page_count: usize) -> Option<String> {
     (byte_length > MAX_PDF_BYTES).then(|| {
         error(
             BridgeErrorCode::ResourceLimit,
             format!(
                 "generated dope card is {byte_length} bytes; the limit is {MAX_PDF_BYTES} \
-                 (coarsen step, shorten the range domain, or shorten the pdf labels)"
+                 ({row_count} rows, {page_count} pages)"
             ),
             None,
         )
     })
 }
 
+/// The one `card.pdf`-only key on the request: the rows to print, instead of solving. Not a
+/// field on [`crate::card_service::CardRequestV1`], because it is not part of a saved card —
+/// it is the card's stored RESPONSE, attached at export time — and a stored request must stay
+/// replayable against `card.range_table` unchanged. Removed from the payload before the card
+/// request is decoded, so `deny_unknown_fields` still governs everything else (a
+/// `stored_cards` typo is an honest `invalid_request`).
+#[cfg(feature = "pdf")]
+const STORED_CARD_KEY: &str = "stored_card";
+
 /// `card.pdf`: the printable dope card, as base64. The request is the SAME
 /// [`crate::card_service::CardRequestV1`] the on-screen card commands take — an app stores
 /// one request per saved card and replays it here — with the optional presentation-only
-/// `pdf` block for the header/footer labels, font size, and the Lead column's target speed.
+/// `pdf` block for the header/footer labels, font size, and the Lead column's target speed,
+/// plus one `card.pdf`-only key:
 ///
-/// The printed Range/Drop/Wind figures are the rows `card.range_table` returns for that
-/// same request, from the same computation (see `card_service::range_table_rows`), so a
-/// reprint cannot disagree with the card the shooter already read.
+/// * `stored_card` (optional): `{ "card": <a stored card.range_table result, verbatim>,
+///   "engine_version": "0.34.1", "bc5d_table_version": "2.5.0" }`. Supply it and this
+///   command PRINTS THOSE ROWS: no zero solve, no trajectory, and `bc5d_table_path` is never
+///   opened, so a saved card reprints identically after an engine bump, after the correction
+///   table at that path is overwritten in place, and even after it is deleted. The footer's
+///   `BC:` is the stored card's own `bc_for_solve`, and its `Engine:`/`Table:` are the two
+///   provenance strings, so paper and screen can be reconciled afterwards.
+/// * Omit it (or send `null`, which means the same thing) and the rows are solved here, from
+///   the same `card_service::range_table_rows` call `card.range_table` makes — the
+///   pre-existing behaviour, unchanged.
 ///
-/// Result: `{ "pdf_base64": ..., "byte_length": <raw PDF bytes>, "page_count": ... }`.
-/// `byte_length` describes the DECODED document, not the base64 text. Documents over
-/// [`MAX_PDF_BYTES`] are refused with `resource_limit` instead of returned.
+/// This surface prints a range-table card and says so. A request carrying a wind card's
+/// `wind_speeds`/`wind_angles_deg`, or a `stored_card` of another kind, is REFUSED: an `ok`
+/// response whose defining field was silently ignored is worse than no response.
 ///
-/// Errors follow the sibling card commands exactly: a malformed payload is
+/// Result: `{ "pdf_base64": ..., "byte_length": <raw PDF bytes>, "page_count": ...,
+/// "row_count": ..., "kind": "range_table", "source": "solve" | "stored_rows" }`.
+/// `byte_length` describes the DECODED document, not the base64 text; `source` lets a caller
+/// verify it got a reprint rather than a re-solve. A card too big to print is refused with
+/// `resource_limit` — on its row/page count first (`card_service::MAX_PDF_ROWS` /
+/// `MAX_PDF_PAGES`), and on [`MAX_PDF_BYTES`] as the backstop.
+///
+/// Other errors follow the sibling card commands exactly: a malformed payload is
 /// `invalid_request`, anything the service rejects (including an out-of-band
 /// `pdf.font_scale`) is `command_failed` with the service's own message.
 #[cfg(feature = "pdf")]
 fn run_card_pdf(inner: &Value) -> String {
+    use crate::card_service::CardServiceError;
+
     if inner.is_null() {
         return error(
             BridgeErrorCode::InvalidRequest,
@@ -368,7 +403,12 @@ fn run_card_pdf(inner: &Value) -> String {
             None,
         );
     }
-    let request: crate::card_service::CardRequestV1 = match serde_json::from_value(inner.clone()) {
+    let mut payload = inner.clone();
+    let stored_value = payload
+        .as_object_mut()
+        .and_then(|object| object.remove(STORED_CARD_KEY))
+        .filter(|value| !value.is_null());
+    let request: crate::card_service::CardRequestV1 = match serde_json::from_value(payload) {
         Ok(request) => request,
         Err(err) => {
             return error(
@@ -378,8 +418,31 @@ fn run_card_pdf(inner: &Value) -> String {
             )
         }
     };
-    let card = match crate::card_service::pdf_card_v1(&request) {
+    let stored: Option<crate::card_service::StoredCardV1> = match stored_value {
+        Some(value) => match serde_json::from_value(value) {
+            Ok(stored) => Some(stored),
+            Err(err) => {
+                return error(
+                    BridgeErrorCode::InvalidRequest,
+                    format!("card.pdf {STORED_CARD_KEY} rejected: {err}"),
+                    None,
+                )
+            }
+        },
+        None => None,
+    };
+
+    let card = match crate::card_service::pdf_card_v1(&request, stored.as_ref()) {
         Ok(card) => card,
+        // A card too large to print is a resource refusal, not a command failure: same code
+        // the byte cap below reports, so a caller has one condition to handle.
+        Err(err @ CardServiceError::TooLarge(_)) => {
+            return error(
+                BridgeErrorCode::ResourceLimit,
+                format!("card.pdf refused: {err}"),
+                None,
+            )
+        }
         Err(err) => {
             return error(
                 BridgeErrorCode::CommandFailed,
@@ -389,7 +452,7 @@ fn run_card_pdf(inner: &Value) -> String {
         }
     };
     let byte_length = card.pdf_bytes.len();
-    if let Some(envelope) = pdf_over_cap_error(byte_length) {
+    if let Some(envelope) = pdf_over_cap_error(byte_length, card.row_count, card.page_count) {
         return envelope;
     }
     success(
@@ -398,6 +461,9 @@ fn run_card_pdf(inner: &Value) -> String {
             "pdf_base64": encode_base64(&card.pdf_bytes),
             "byte_length": byte_length,
             "page_count": card.page_count,
+            "row_count": card.row_count,
+            "kind": crate::card_service::PDF_CARD_KIND,
+            "source": card.source.as_str(),
         }),
     )
 }
@@ -1007,20 +1073,24 @@ mod tests {
     #[cfg(feature = "pdf")]
     #[test]
     fn pdf_output_cap_refuses_only_over_the_limit() {
-        assert!(pdf_over_cap_error(0).is_none());
+        assert!(pdf_over_cap_error(0, 0, 0).is_none());
         assert!(
-            pdf_over_cap_error(MAX_PDF_BYTES).is_none(),
+            pdf_over_cap_error(MAX_PDF_BYTES, 6, 1).is_none(),
             "a document exactly at the cap fits"
         );
         let envelope: Value =
-            serde_json::from_str(&pdf_over_cap_error(MAX_PDF_BYTES + 1).expect("over cap"))
+            serde_json::from_str(&pdf_over_cap_error(MAX_PDF_BYTES + 1, 6, 1).expect("over cap"))
                 .unwrap();
         assert_eq!(envelope["ok"], false);
         assert_eq!(envelope["error"]["code"], "resource_limit");
-        assert!(
-            envelope["error"]["message"].as_str().unwrap().contains("dope card"),
-            "{envelope}"
-        );
+        let message = envelope["error"]["message"].as_str().unwrap();
+        assert!(message.contains("dope card"), "{envelope}");
+        // What is true of the document, not advice about controls a saved card lacks.
+        assert!(message.contains("6 rows"), "{envelope}");
+        assert!(message.contains("1 pages"), "{envelope}");
+        for absent in ["coarsen", "shorten"] {
+            assert!(!message.contains(absent), "{envelope}");
+        }
     }
 
     #[cfg(feature = "pdf")]

@@ -1,12 +1,17 @@
 //! `card.pdf`: the printable PDF dope card through the JSON bridge.
 //!
 //! The load-bearing property is not "a PDF came back" — it is that **the printed numbers
-//! are the numbers the shooter already read on screen**. An app stores one
-//! `CardRequestV1` per saved card and replays it against `card.range_table` for the display
-//! and `card.pdf` for the printout; if those two ever disagree, the card is lying to
-//! somebody. So the tests here generate both from the SAME request and read the figures
-//! back out of the PDF, and then cross-check the whole thing against the CLI's own dope
-//! card for the same load.
+//! are the numbers the shooter already read on screen**. An app stores one `CardRequestV1`
+//! per saved card, plus the `card.range_table` response it displayed; at export time it
+//! hands both back, and `card.pdf` prints THOSE rows (`stored_card`) rather than solving
+//! again. Re-solving is what let a reprint drift: the rows are a function of the engine build
+//! and of the correction-table file at the stored path, and both move under a saved card.
+//!
+//! So the tests here work from a stored response and read the figures back out of the PDF —
+//! including with the correction table the request names deliberately absent, which a
+//! re-solve cannot survive and a reprint must not notice. The solve path is still exercised
+//! (it is what a CLI-shaped caller gets) and cross-checked against the CLI's own dope card
+//! for the same load.
 //!
 //! ## Reading text back out of a dope card
 //!
@@ -271,6 +276,92 @@ mod pdf_present {
         format!("{value:.1}")
     }
 
+    // -- the stored card an app replays for print (E1) -----------------------------------
+
+    /// The `card.range_table` response an app has stored for a saved card, exactly as the
+    /// engine emitted it — this is the document `stored_card.card` takes, pasted verbatim.
+    ///
+    /// The adjustments are hand-picked rather than solved: each one pins a case of the
+    /// one-decimal-place rule both surfaces must agree on, ties included (see
+    /// `the_printed_adjustments_are_the_stored_rows_at_the_apps_precision`). They are
+    /// physically ordered so the card still reads like a card.
+    fn stored_range_table() -> Value {
+        let row = |range: f64, drop_linear: f64, drop_adj: f64, wind_linear: f64, wind_adj: f64,
+                   velocity: f64, energy: f64, time: f64| {
+            json!({
+                "range": range, "drop_linear": drop_linear, "drop_adj": drop_adj,
+                "wind_linear": wind_linear, "wind_adj": wind_adj,
+                "velocity": velocity, "energy": energy, "time": time
+            })
+        };
+        json!({
+            "schema_version": 1,
+            "kind": "range_table",
+            "zero_distance": 100.0,
+            "bc_for_solve": 0.2381,
+            "units": {
+                "distance": "yd", "velocity": "fps", "energy": "ft-lb", "drop": "in",
+                "wind_speed": "mph",
+                "elevation_adjustment": "MIL", "windage_adjustment": "MIL"
+            },
+            "rows": [
+                row(100.0,    0.0, 0.0,     0.0,  0.0,    2447.0, 2327.0, 0.117),
+                row(200.0,   -4.4, 0.65,   -1.1, -0.105,  2302.0, 2059.0, 0.244),
+                row(300.0,  -15.7, 1.4551, -2.4, -0.21,   2162.0, 1816.0, 0.372),
+                row(400.0,  -35.2, 2.4478, -4.6, -0.315,  2026.0, 1595.0, 0.52),
+                row(500.0,  -64.3, 3.575,  -7.4, -0.42,   1894.0, 1394.0, 0.68),
+                row(600.0, -104.6, 4.8412, -11.0, -0.55,  1766.0, 1212.0, 0.86),
+                row(700.0, -158.0, 6.25,  -15.0, -0.65,   1642.0, 1047.0, 1.06),
+                row(800.0, -225.0, 7.35,  -20.0, -0.75,   1522.0,  900.0, 1.28)
+            ]
+        })
+    }
+
+    /// `[range, drop, wind]` for every stored row, formatted the way the apps format a
+    /// stored row for the screen: whole yards, and **one** decimal place on a MIL/MOA/SMOA/
+    /// IPHY adjustment (turret resolution is 0.1 — the apps' old two decimals are what put
+    /// `2.45` on screen against `2.4` on paper).
+    ///
+    /// These are hard-coded strings, not `format!("{:.1}")` of the fixture: a test that
+    /// derives the expectation from the same rule it is checking cannot fail. The two
+    /// pinned near-ties are the cross-platform hazard — `6.25` is an exact binary tie
+    /// (renders `6.2`, half-to-even) and `7.35` is just BELOW the tie (renders `7.3`), so a
+    /// client that rounds the shortest decimal string half-up prints `6.3`/`7.4` and
+    /// disagrees with the paper by a click.
+    fn expected_stored_runs() -> Vec<Vec<String>> {
+        [
+            ["100", "0.0", "0.0"],
+            ["200", "0.7", "-0.1"],
+            ["300", "1.5", "-0.2"],
+            ["400", "2.4", "-0.3"],
+            ["500", "3.6", "-0.4"],
+            ["600", "4.8", "-0.6"],
+            ["700", "6.2", "-0.7"],
+            ["800", "7.3", "-0.8"],
+        ]
+        .iter()
+        .map(|run| run.iter().map(|s| s.to_string()).collect())
+        .collect()
+    }
+
+    /// The full `stored_card` block: the stored response plus the provenance the footer
+    /// prints, so a reprint can be reconciled with the screen afterwards.
+    fn stored_card_block() -> Value {
+        json!({
+            "card": stored_range_table(),
+            "engine_version": "0.34.1",
+            "bc5d_table_version": "2.5.0"
+        })
+    }
+
+    /// The fixture request with the stored card attached — an app's export call.
+    fn stored_request() -> Value {
+        let mut request = fixture_request();
+        request["end"] = json!(800.0);
+        request["stored_card"] = stored_card_block();
+        request
+    }
+
     /// `[range, drop, wind]` per on-screen row, in the card's own display formatting.
     fn expected_runs(range_table: &Value) -> Vec<Vec<String>> {
         range_table["rows"]
@@ -304,9 +395,15 @@ mod pdf_present {
         );
     }
 
-    /// (b) THE load-bearing test: one stored request, replayed against both surfaces, must
-    /// put the same figures on the screen and on the paper. Every row's
-    /// `range / drop / wind` triple from `card.range_table` has to appear in the PDF's text.
+    /// (b) The solve path's row-for-row correspondence: `card.range_table` and `card.pdf`,
+    /// given the same request in the same build, must put the same figures on the screen and
+    /// on the paper.
+    ///
+    /// NOTE what this test is not. It derives its expectation with `cell_adjustment`, i.e.
+    /// with the PDF's own rounding rule, so it cannot detect a PRECISION disagreement — that
+    /// is what `the_printed_adjustments_are_the_stored_rows_at_the_apps_precision` is for,
+    /// with hard-coded strings. And it holds only within one build for one request, which is
+    /// why a saved card is reprinted from `stored_card` instead.
     #[test]
     fn the_printed_figures_are_the_on_screen_figures_for_the_same_request() {
         let request = fixture_request();
@@ -529,11 +626,14 @@ mod pdf_present {
         let out = call("card.pdf", request);
         assert_eq!(out["ok"], false, "an over-cap card must not be returned: {}", out["ok"]);
         assert_eq!(out["error"]["code"], "resource_limit", "{}", out["error"]);
-        assert!(
-            out["error"]["message"].as_str().unwrap().contains("the limit is"),
-            "{}",
-            out["error"]
-        );
+        let message = out["error"]["message"].as_str().unwrap();
+        assert!(message.contains("the limit is"), "{message}");
+        // The refusal describes the document — six rows on one page, made huge by a label —
+        // and names no control a saved card does not have.
+        assert!(message.contains("6 rows") && message.contains("1 pages"), "{message}");
+        for absent in ["coarsen", "shorten"] {
+            assert!(!message.contains(absent), "{message}");
+        }
     }
 
     /// Presentation options are validated rather than silently coerced: a stored request
@@ -565,5 +665,272 @@ mod pdf_present {
         let out = call("card.pdf", request);
         assert_eq!(out["ok"], false, "{out}");
         assert_eq!(out["error"]["code"], "invalid_request", "{out}");
+    }
+
+    // -- printing the stored rows (E1) ----------------------------------------------------
+
+    /// THE falsifiable test for "a reprint is a reprint": the stored request points
+    /// `bc5d_table_path` at a table that is not on this machine.
+    ///
+    /// * Without `stored_card`, `card.pdf` re-solves — so it opens that table and fails.
+    /// * With `stored_card`, nothing is solved and no table is opened, so the SAME request
+    ///   succeeds and prints the stored rows.
+    ///
+    /// A shooter who deletes a correction table (or whose app refreshes the table set,
+    /// overwriting `bc5d_<caliber>.bin` in place) can still reprint the card in his pocket.
+    #[test]
+    fn stored_rows_print_without_a_solve_or_a_correction_table() {
+        let missing_table = std::env::temp_dir().join("bx_no_such_bc5d_308.bin");
+        assert!(!missing_table.exists(), "fixture path must not exist");
+
+        let mut solving = fixture_request();
+        solving["end"] = json!(800.0);
+        solving["bc5d_table_path"] = json!(missing_table.to_str().unwrap());
+        let out = call("card.pdf", solving.clone());
+        assert_eq!(
+            out["ok"], false,
+            "a re-solving export must open the table (and fail when it is gone): {out}"
+        );
+
+        let mut reprinting = solving;
+        reprinting["stored_card"] = stored_card_block();
+        let out = call("card.pdf", reprinting);
+        assert_eq!(out["ok"], true, "printing stored rows must not open the table: {out}");
+        assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+        assert_eq!(out["result"]["row_count"], 8, "{out}");
+
+        let bytes = pdf_bytes(&out["result"]);
+        assert_is_a_pdf(&bytes, "reprinted card");
+        let printed = tokens(&bytes, "reprinted card");
+        for run in expected_stored_runs() {
+            assert_run_present(&printed, &run, "reprinted card");
+        }
+    }
+
+    /// (b) One precision per axis unit, on both surfaces. The stored rows are formatted the
+    /// way the apps format them for the screen — one decimal place on an angular
+    /// adjustment — and those exact strings must be the ones on the paper.
+    ///
+    /// This is the test the old parity check could not be: it formatted the on-screen rows
+    /// *to the PDF's own precision* before searching for them, so a screen that printed two
+    /// decimals still passed. `expected_stored_runs` is a table of literals instead.
+    #[test]
+    fn the_printed_adjustments_are_the_stored_rows_at_the_apps_precision() {
+        let (bytes, pages) = generate(stored_request());
+        assert_eq!(pages, 1, "eight rows are one page");
+        let printed = tokens(&bytes, "stored card");
+        for run in expected_stored_runs() {
+            assert_run_present(&printed, &run, "stored card");
+        }
+        // ...and nothing on the paper carries a second decimal place for an adjustment: the
+        // two-decimal spellings of the same rows must be absent.
+        for absent in ["2.45", "1.46", "3.57", "-0.31", "6.25", "7.35"] {
+            assert!(
+                !printed.iter().any(|t| t == absent),
+                "{absent} must not appear: the card prints one decimal place, {printed:?}"
+            );
+        }
+    }
+
+    /// The response says which card it printed and where the rows came from, so a client can
+    /// verify it got a reprint rather than a re-solve (and that every stored row was drawn).
+    #[test]
+    fn the_response_states_which_card_it_printed_and_where_the_rows_came_from() {
+        let out = call("card.pdf", fixture_request());
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["kind"], "range_table", "{out}");
+        assert_eq!(out["result"]["source"], "solve", "{out}");
+        assert_eq!(out["result"]["row_count"], 6, "{out}");
+
+        let out = call("card.pdf", stored_request());
+        assert_eq!(out["result"]["kind"], "range_table", "{out}");
+        assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+        assert_eq!(out["result"]["row_count"], 8, "{out}");
+    }
+
+    /// (E2) A stored `card.wind` request must not come back as a range-table PDF with a
+    /// Wind column of zeroes. `wind_speeds`/`wind_angles_deg` are the wind card's defining
+    /// fields; a range-table PDF ignores them, so the request is refused rather than
+    /// silently answered.
+    #[test]
+    fn a_wind_card_request_is_refused_instead_of_printed_as_a_range_table() {
+        for field in ["wind_speeds", "wind_angles_deg"] {
+            let mut request = fixture_request();
+            request["wind_speed"] = json!(0.0);
+            request[field] = json!([5.0, 10.0, 15.0, 20.0]);
+            let out = call("card.pdf", request);
+            assert_eq!(out["ok"], false, "{field} must be refused, not ignored: {out}");
+            // The service's own typed rejections ride as `command_failed`, exactly like the
+            // sibling card commands; `invalid_request` is the bridge's own decode failure.
+            assert_eq!(out["error"]["code"], "command_failed", "{field}: {out}");
+            let message = out["error"]["message"].as_str().unwrap();
+            assert!(message.contains(field), "the refusal must name {field}: {message}");
+            assert!(
+                message.contains("range_table"),
+                "the refusal must say which card card.pdf prints: {message}"
+            );
+        }
+    }
+
+    /// (E2) ...and the same for a stored card of a kind this surface cannot print: the
+    /// stored response's own `kind` is consulted, so a come-ups card is refused instead of
+    /// being reprinted as a range table with a Wind column the shooter never saw.
+    #[test]
+    fn a_stored_card_of_a_kind_this_surface_cannot_print_is_refused() {
+        for kind in ["come_ups", "wind_card", "truing"] {
+            let mut request = stored_request();
+            request["stored_card"]["card"]["kind"] = json!(kind);
+            let out = call("card.pdf", request);
+            assert_eq!(out["ok"], false, "a {kind} card must be refused: {out}");
+            assert_eq!(out["error"]["code"], "command_failed", "{kind}: {out}");
+            assert!(
+                out["error"]["message"].as_str().unwrap().contains(kind),
+                "the refusal must name the stored kind: {out}"
+            );
+        }
+    }
+
+    /// (E1 fix 3) Provenance on the paper: the footer states the engine version and the
+    /// correction-table version the rows came from, so a printed card and a screen can be
+    /// reconciled later. A solve prints THIS build's version; a reprint prints the stored
+    /// card's. The footer BC is the stored card's own `bc_for_solve`, not the request's
+    /// published BC — a BC5D-corrected card's footer states the BC its numbers used.
+    #[test]
+    fn the_footer_states_the_engine_and_table_versions() {
+        let (bytes, _pages) = generate(stored_request());
+        let printed = tokens(&bytes, "stored card");
+        assert!(
+            printed.iter().any(|t| t == "Engine:0.34.1"),
+            "the stored engine version must be printed: {printed:?}"
+        );
+        assert!(
+            printed.iter().any(|t| t == "Table:2.5.0"),
+            "the stored table version must be printed: {printed:?}"
+        );
+        assert!(
+            printed.iter().any(|t| t == "BC:0.238"),
+            "the footer BC must be the stored card's bc_for_solve: {printed:?}"
+        );
+
+        let (bytes, _pages) = generate(fixture_request());
+        let printed = tokens(&bytes, "solved card");
+        let this_build = format!("Engine:{}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            printed.contains(&this_build),
+            "a freshly solved card must print this build's version ({this_build}): {printed:?}"
+        );
+        assert!(
+            !printed.iter().any(|t| t.starts_with("Table:")),
+            "no table version is known for a solve, so none is claimed: {printed:?}"
+        );
+    }
+
+    /// The on-screen card reports the BC its rows were computed with, which is what an app
+    /// stores and what a reprint's footer then states. Without it there is no way for a
+    /// saved card to print the corrected BC its numbers came from.
+    #[test]
+    fn the_on_screen_card_reports_the_bc_its_rows_used() {
+        let out = call("card.range_table", fixture_request());
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(
+            out["result"]["bc_for_solve"].as_f64(),
+            Some(0.243),
+            "an uncorrected card reports its published BC: {out}"
+        );
+    }
+
+    /// A stored response and a request that disagree about what a row MEANS cannot be the
+    /// same card: refuse, rather than print MIL numbers under a MOA heading.
+    #[test]
+    fn stored_rows_and_a_request_that_disagree_on_units_are_refused() {
+        let mut request = stored_request();
+        request["adjustment_unit"] = json!("moa");
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], false, "{out}");
+        assert_eq!(out["error"]["code"], "command_failed", "{out}");
+        let message = out["error"]["message"].as_str().unwrap();
+        assert!(message.contains("MOA") && message.contains("MIL"), "{message}");
+
+        let mut request = stored_request();
+        request["units"] = json!("metric");
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], false, "a metric request cannot own yard rows: {out}");
+        assert_eq!(out["error"]["code"], "command_failed", "{out}");
+    }
+
+    /// (E4/E5) Too many rows is refused from the row count itself — before a document is
+    /// built — and the refusal states what is true of a stored card: how many rows and how
+    /// many pages. It names no "coarsen the step" control, because a saved card's domain is
+    /// immutable.
+    #[test]
+    fn too_many_rows_is_refused_with_the_row_and_page_counts() {
+        let rows: Vec<Value> = (0..6_000)
+            .map(|i| json!({"range": 100.0 + i as f64, "drop_adj": 1.0, "wind_adj": 0.1, "time": 0.5}))
+            .collect();
+        let mut request = stored_request();
+        request["end"] = json!(6_100.0);
+        request["stored_card"]["card"]["rows"] = json!(rows);
+
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], false, "{}", out["result"]["page_count"]);
+        assert_eq!(out["error"]["code"], "resource_limit", "{}", out["error"]);
+        let message = out["error"]["message"].as_str().unwrap();
+        assert!(message.contains("6000 rows"), "the refusal must state the rows: {message}");
+        assert!(message.contains("pages"), "the refusal must state the pages: {message}");
+        for absent in ["coarsen", "shorten"] {
+            assert!(
+                !message.contains(absent),
+                "the refusal must not name a control a saved card does not have: {message}"
+            );
+        }
+    }
+
+    /// The same refusal on the solve path, which is the one an app can reach by accident: a
+    /// free-text `step` of 0.1 over a long domain. The rows are counted the moment they exist
+    /// and the document is never built.
+    #[test]
+    fn a_solved_card_with_too_many_rows_is_refused_before_the_document_is_built() {
+        let mut request = fixture_request();
+        request["end"] = json!(800.0);
+        request["step"] = json!(0.1);
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], false, "{}", out["result"]["page_count"]);
+        assert_eq!(out["error"]["code"], "resource_limit", "{}", out["error"]);
+        let message = out["error"]["message"].as_str().unwrap();
+        assert!(message.contains("7001 rows"), "{message}");
+        assert!(message.contains("72 pages"), "{message}");
+    }
+
+    /// `stored_card` is a `card.pdf` key, not part of a saved card: it is the card's stored
+    /// RESPONSE, attached at export time. An app that stored it inside the request would find
+    /// the request no longer replayable, so the on-screen command says so loudly instead of
+    /// ignoring it.
+    #[test]
+    fn stored_card_is_not_a_field_of_the_request_the_screen_replays() {
+        let out = call("card.range_table", stored_request());
+        assert_eq!(out["ok"], false, "{out}");
+        assert_eq!(out["error"]["code"], "invalid_request", "{out}");
+        assert!(
+            out["error"]["message"].as_str().unwrap().contains("stored_card"),
+            "{out}"
+        );
+    }
+
+    /// The Lead column of a reprint is derived from the STORED time of flight — arithmetic
+    /// on the numbers the shooter already has, not a new trajectory. 10 mph across a 400 yd
+    /// row whose stored ToF is 0.52 s is 6.4 MIL of hold.
+    #[test]
+    fn the_lead_column_of_a_reprint_comes_from_the_stored_time_of_flight() {
+        let (bytes, _pages) = generate(stored_request());
+        let printed = tokens(&bytes, "stored card");
+        let anchor = printed
+            .iter()
+            .position(|t| t == "400")
+            .unwrap_or_else(|| panic!("no 400 yd row: {printed:?}"));
+        assert_eq!(
+            printed[anchor..anchor + 4],
+            ["400", "2.4", "-0.3", "6.4"].map(str::to_string),
+            "the 400 yd row, Lead included: {printed:?}"
+        );
     }
 }

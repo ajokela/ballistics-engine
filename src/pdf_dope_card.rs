@@ -49,6 +49,16 @@ pub struct DopeCardConfig {
     /// wind_adj`/`lead_adj` are already expressed in this unit -- may differ from
     /// `elevation_unit_label` (MBA-1410 independent elevation/windage unit selection).
     pub windage_unit_label: String,
+    /// Engine version that produced these rows, printed in the footer as `Engine:<v>`.
+    ///
+    /// A card in a shooter's pocket is otherwise impossible to reconcile with a screen: the
+    /// rows are a function of the engine build and of the correction table, and both move.
+    /// An EMPTY string prints nothing at all -- the same rule the apps' provenance line
+    /// follows, because a placeholder ("unknown") on a printed card is worse than silence.
+    pub engine_version: String,
+    /// Correction-table version these rows were solved against, printed as `Table:<v>`.
+    /// Empty prints nothing, which is the honest rendering of "no correction table".
+    pub table_version: String,
 }
 
 /// Preset font size profiles for dope cards
@@ -525,9 +535,23 @@ fn render_page(
     draw_centered_text(ops, font, footer_size, y, &footer1, COLOR_BLACK);
     y -= 4.0;
 
-    // Footer line 2: timestamp
-    let timestamp = get_timestamp();
-    draw_centered_text(ops, font, footer_size, y, &timestamp, COLOR_BLACK);
+    // Footer line 2: timestamp, plus the provenance of the numbers above it. Truncated
+    // because both strings are caller-supplied and drawn on every page (the same reason the
+    // header truncates), and omitted entirely when empty rather than printing a placeholder.
+    let mut footer2 = get_timestamp();
+    if !config.engine_version.is_empty() {
+        footer2.push_str(&format!(
+            " Engine:{}",
+            truncate_for_header(&config.engine_version, 24)
+        ));
+    }
+    if !config.table_version.is_empty() {
+        footer2.push_str(&format!(
+            " Table:{}",
+            truncate_for_header(&config.table_version, 24)
+        ));
+    }
+    draw_centered_text(ops, font, footer_size, y, &footer2, COLOR_BLACK);
 }
 
 fn draw_row_stripe(ops: &mut Vec<Op>, x: f32, y: f32, width: f32, height: f32) {
@@ -624,6 +648,19 @@ fn draw_table_header(
 /// "CLICKS"` prints with no decimal point -- every other unit (MIL/MOA/SMOA/IPHY) keeps
 /// the pre-existing one-decimal-place format. Before this fix, a clicks dope card printed
 /// e.g. "5.0" instead of "5" for every cell.
+///
+/// ONE decimal place is the contract for an angular adjustment on EVERY surface that shows
+/// these rows, screen included: a turret's resolution is 0.1, and a second decimal is a
+/// precision the shooter cannot dial. It is also how a printed card and a screen came to
+/// disagree -- 2.4478 MIL read `2.45` on screen against `2.4` on paper, half a click apart
+/// on a 0.1-mil turret. Linear columns are unaffected; they keep their own precision.
+///
+/// The rounding is Rust's: correct rounding of the value's exact binary expansion, with
+/// ties-to-even. That differs from rounding the SHORTEST DECIMAL spelling of the same
+/// double, which is what most platform number formatters do -- 7.35 is just below the tie
+/// and prints `7.3` here, while a decimal half-up formatter prints `7.4`. Any client that
+/// must agree with the paper has to match this, which is why
+/// `format_adjustment_pins_one_decimal_place_including_the_near_ties` pins the vectors.
 fn format_adjustment(value: f64, unit_label: &str) -> String {
     if unit_label.eq_ignore_ascii_case("clicks") {
         format!("{:.0}", value)
@@ -892,6 +929,40 @@ mod tests {
         assert_eq!(format_adjustment(2.34, "IPHY"), "2.3");
     }
 
+    /// The one-decimal contract, pinned as vectors any other surface can be held to.
+    ///
+    /// Every client that renders these same rows -- the on-screen card in both mobile apps
+    /// -- must produce these strings from these doubles, or a shooter's screen and his paper
+    /// disagree. The last four are the cases that catch a mismatch: `6.25` is an exact binary
+    /// tie (ties-to-even, so `6.2`), `7.35` and `0.15` are just BELOW their ties (`7.3`,
+    /// `0.1`) while `2.35` is just above (`2.4`). A formatter that rounds the shortest
+    /// decimal spelling half-up prints `6.3`, `7.4` and `0.2` for the first three.
+    #[test]
+    fn format_adjustment_pins_one_decimal_place_including_the_near_ties() {
+        for (value, expected) in [
+            (0.0_f64, "0.0"),
+            (0.65, "0.7"),
+            (1.4551, "1.5"),
+            (2.4478, "2.4"),
+            (3.575, "3.6"),
+            (4.8412, "4.8"),
+            (-0.105, "-0.1"),
+            (-0.21, "-0.2"),
+            (-0.315, "-0.3"),
+            (-0.42, "-0.4"),
+            (-0.55, "-0.6"),
+            (-0.65, "-0.7"),
+            (-0.75, "-0.8"),
+            (6.25, "6.2"),
+            (7.35, "7.3"),
+            (0.15, "0.1"),
+            (2.35, "2.4"),
+        ] {
+            assert_eq!(format_adjustment(value, "MIL"), expected, "{value:?}");
+            assert_eq!(format_adjustment(value, "MOA"), expected, "{value:?}");
+        }
+    }
+
     /// Fix-round I-1: a missing column must render as an honest em-dash, never a
     /// plausible-looking fake `0.0` -- pinned for both a decimal unit and a clicks unit,
     /// since a naive fix might special-case `None` only inside one branch of
@@ -983,6 +1054,8 @@ mod tests {
             bold_data: false,
             elevation_unit_label: "MIL".to_string(),
             windage_unit_label: "MIL".to_string(),
+            engine_version: "0.0.0-test".to_string(),
+            table_version: String::new(),
         }
     }
 
