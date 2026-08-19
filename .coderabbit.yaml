@@ -1,7 +1,19 @@
 # CodeRabbit is disabled for this repository.
+#
+# `auto_review.enabled: false` already stops the reviews themselves, but CodeRabbit
+# still posted a "Review skipped" notice on every pull request — that notice is
+# `review_status`, and the check run on the PR is `commit_status`. Both off here so
+# the bot is silent rather than merely idle.
+#
+# NOTE: this file only makes the bot quiet; the app is still installed and can read
+# the repository. Removing it entirely is a GitHub UI action (Settings ->
+# Applications -> CodeRabbit -> Repository access), which the API does not expose to
+# a normal token.
 reviews:
   auto_review:
     enabled: false
+  review_status: false
+  commit_status: false
   high_level_summary: false
   poem: false
 chat:
