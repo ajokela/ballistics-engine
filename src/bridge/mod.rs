@@ -383,9 +383,14 @@ const STORED_CARD_KEY: &str = "stored_card";
 /// response whose defining field was silently ignored is worse than no response.
 ///
 /// Result: `{ "pdf_base64": ..., "byte_length": <raw PDF bytes>, "page_count": ...,
-/// "row_count": ..., "kind": "range_table", "source": "solve" | "stored_rows" }`.
+/// "row_count": ..., "kind": "range_table", "source": "solve" | "stored_rows",
+/// "unprintable_title_chars": "" }`.
 /// `byte_length` describes the DECODED document, not the base64 text; `source` lets a caller
-/// verify it got a reprint rather than a re-solve. A card too big to print is refused with
+/// verify it got a reprint rather than a re-solve. `unprintable_title_chars` is normally
+/// empty and names the characters of `pdf.title` the card font could not draw when it is not
+/// — the card still printed, with a visible stand-in for each of them, but a caller that
+/// accepts any card name should warn rather than hand over an untitled card. A card too big
+/// to print is refused with
 /// `resource_limit` — on its row/page count first (`card_service::MAX_PDF_ROWS` /
 /// `MAX_PDF_PAGES`), and on [`MAX_PDF_BYTES`] as the backstop.
 ///
@@ -464,6 +469,7 @@ fn run_card_pdf(inner: &Value) -> String {
             "row_count": card.row_count,
             "kind": crate::card_service::PDF_CARD_KIND,
             "source": card.source.as_str(),
+            "unprintable_title_chars": card.unprintable_title_chars,
         }),
     )
 }

@@ -1098,9 +1098,19 @@ pub struct StoredCardV1 {
 /// unchanged, field for field: `kind` and `units` are load-bearing here — they say what the
 /// rows ARE and what a row MEANS — while the descriptive scalars are optional so a card
 /// stored by an older engine still prints.
+///
+/// **Deliberately NOT `deny_unknown_fields`** (unlike [`CardRequestV1`], where the caller
+/// really is the author of the document). What arrives here is this engine's own output,
+/// round-tripped through an app's storage — never hand-written input — so strictness buys
+/// no validation and costs a hard cross-version break: the FIRST field ever added to
+/// `CardResponseV1` would make every card saved by the newer platform completely
+/// unexportable on the older one. The two apps carry independent engine pins and ship
+/// through separate stores, so that staggering is the normal case, not a downgrade. An
+/// unknown field is therefore ignored, exactly as the apps' own decoders ignore it, and the
+/// stored cells still reach the paper. The same reasoning applies to
+/// [`StoredCardUnitsBlockV1`] and [`StoredCardRowV1`] below.
 #[cfg(feature = "pdf")]
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StoredCardResponseV1 {
     /// Which card this is. Anything but [`PDF_CARD_KIND`] is refused.
     pub kind: String,
@@ -1128,9 +1138,9 @@ pub struct StoredCardResponseV1 {
 }
 
 /// The `units` block of a stored response (see [`CardUnitsBlockV1`], which this mirrors).
+/// Unknown fields are ignored, for the reason [`StoredCardResponseV1`] gives.
 #[cfg(feature = "pdf")]
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StoredCardUnitsBlockV1 {
     /// `"yd"` / `"m"` — the unit the stored `range` values are in.
     pub distance: String,
@@ -1150,10 +1160,10 @@ pub struct StoredCardUnitsBlockV1 {
 
 /// One stored row (see [`CardRowV1`], which this mirrors). Only `range` is required; a
 /// column the stored card did not carry stays `None` and prints as an em-dash rather than a
-/// fabricated zero.
+/// fabricated zero. Unknown fields are ignored, for the reason [`StoredCardResponseV1`]
+/// gives.
 #[cfg(feature = "pdf")]
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StoredCardRowV1 {
     pub range: f64,
     #[serde(default)]
@@ -1194,6 +1204,17 @@ pub struct PdfCardV1 {
     pub row_count: usize,
     /// Solved here, or printed from caller-supplied rows.
     pub source: PdfRowSource,
+    /// Characters of the header title (`pdf.title`) the card's font could not draw —
+    /// distinct, in order of first use, and empty when the title printed in full.
+    ///
+    /// Not an error: the document is complete and every ROW printed. But a title is how a
+    /// shooter tells one card from another, and Liberation Sans covers no CJK, Arabic,
+    /// Hebrew, Thai or emoji, so a name in any of those used to vanish from the paper with
+    /// `ok: true` and nothing said. Each such character prints as
+    /// [`crate::pdf_dope_card::UNPRINTABLE_SUBSTITUTE`] and is named here, so a caller that
+    /// accepts any non-empty card name (both apps do) can warn at export time instead of
+    /// handing over an unidentifiable card.
+    pub unprintable_title_chars: String,
 }
 
 /// Resolve the effective table font scale from the mutually exclusive `font_scale` /
@@ -1312,12 +1333,21 @@ fn validate_stored_card(
             card.kind
         )));
     }
-    if !card.wind_speeds.is_empty() || !card.extra_angle_rows.is_empty() {
-        return Err(CardServiceError::InvalidRequest(
-            "the stored card carries a wind matrix (wind_speeds / extra_angle_rows), so it is \
-             not the range_table response it claims to be"
-                .into(),
-        ));
+    // The same "this is not a range table" test the REQUEST gets (see the `wind_speeds` /
+    // `wind_angles_deg` loop in `pdf_card_v1`), field for field. The two halves used to
+    // disagree — `wind_angles_deg` was refused on the request and accepted here — and the
+    // stored half is the one that has to hold when a future kind starts emitting it.
+    for (field, present) in [
+        ("wind_speeds", !card.wind_speeds.is_empty()),
+        ("wind_angles_deg", !card.wind_angles_deg.is_empty()),
+        ("extra_angle_rows", !card.extra_angle_rows.is_empty()),
+    ] {
+        if present {
+            return Err(CardServiceError::InvalidRequest(format!(
+                "the stored card carries {field}, a wind card's defining field, so it is not the \
+                 {PDF_CARD_KIND} response it claims to be"
+            )));
+        }
     }
     if card.rows.is_empty() {
         return Err(CardServiceError::InvalidRequest(
@@ -1559,6 +1589,9 @@ pub fn pdf_card_v1(
     };
 
     let range_unit = if imperial { RangeUnit::Yards } else { RangeUnit::Meters };
+    // Read BEFORE the document is built, off the same string the header will draw, so the
+    // report describes this card's own title rather than a truncation of it.
+    let unprintable_title_chars = crate::pdf_dope_card::unprintable_chars(&config.rifle_name);
     let pdf_bytes = generate_dope_card_pdf(&config, &to_print.rows, range_unit)
         .map_err(|e| CardServiceError::Pdf(e.to_string()))?;
 
@@ -1567,5 +1600,6 @@ pub fn pdf_card_v1(
         row_count: to_print.rows.len(),
         source: to_print.source,
         pdf_bytes,
+        unprintable_title_chars,
     })
 }

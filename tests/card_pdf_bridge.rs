@@ -933,4 +933,114 @@ mod pdf_present {
             "the 400 yd row, Lead included: {printed:?}"
         );
     }
+
+    /// A stored card written by a NEWER engine still reprints its own cells.
+    ///
+    /// The two apps carry independent engine pins and ship through separate stores, so a
+    /// staggered release is the normal case: a card saved on the platform that already
+    /// bumped is synced to the one that has not. The document being read back here is the
+    /// engine's own output, never user input, so a field this build has not heard of is
+    /// something to IGNORE, not to refuse — refusing makes the card unprintable on the
+    /// older platform with a serde message listing internal struct fields, which is the one
+    /// outcome the reprint path exists to prevent.
+    #[test]
+    fn a_stored_card_from_a_newer_engine_still_prints_its_stored_rows() {
+        // A field added to the response, one added to the units block, and one added to a
+        // row: every level of the stored document a future `CardResponseV1` can grow.
+        let mut request = stored_request();
+        request["stored_card"]["card"]["muzzle_regime"] = json!("supersonic");
+        request["stored_card"]["card"]["units"]["lead"] = json!("MIL");
+        request["stored_card"]["card"]["rows"][3]["bc_segments_used"] = json!(2);
+
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], true, "a newer engine's stored card must still print: {out}");
+        assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+        assert_eq!(out["result"]["row_count"], 8, "{out}");
+
+        // ...and it prints the STORED cells, not a re-solve of the request.
+        let bytes = pdf_bytes(&out["result"]);
+        let printed = tokens(&bytes, "stored card from a newer engine");
+        for run in expected_stored_runs() {
+            assert_run_present(&printed, &run, "stored card from a newer engine");
+        }
+    }
+
+    /// The stored-side "this is not a range table" guard must refuse the same fields the
+    /// request-side one does. `wind_angles_deg` on the REQUEST is refused; on the stored
+    /// card it used to be accepted, so the two halves of one guard disagreed — and the
+    /// stored half is the one that has to hold when a future kind starts emitting it.
+    #[test]
+    fn a_stored_card_carrying_a_wind_matrix_is_refused_field_by_field() {
+        for (field, value) in [
+            ("wind_speeds", json!([5.0, 10.0])),
+            ("wind_angles_deg", json!([90.0])),
+            ("extra_angle_rows", json!([[]])),
+        ] {
+            let mut request = stored_request();
+            request["stored_card"]["card"][field] = value;
+            let out = call("card.pdf", request);
+            assert_eq!(out["ok"], false, "stored {field} must be refused: {out}");
+            assert_eq!(out["error"]["code"], "command_failed", "{field}: {out}");
+            let message = out["error"]["message"].as_str().unwrap();
+            assert!(message.contains(field), "the refusal must name {field}: {message}");
+        }
+    }
+
+    /// A card name in a script Liberation Sans does not cover is REPORTED, not silently
+    /// dropped.
+    ///
+    /// Both apps pass the card's name through as `pdf.title` and both accept any non-empty
+    /// name, so a Japanese, Arabic, Hebrew, Thai or emoji-bearing name reached the header
+    /// and vanished from it — an unidentifiable dope card in the shooter's pocket, with
+    /// `ok: true` and no warning anywhere in the result. The characters now come back in
+    /// `unprintable_title_chars`, and the header prints a visible substitute where each one
+    /// stood rather than closing up over the gap.
+    #[test]
+    fn a_title_the_font_cannot_print_is_reported_and_substituted() {
+        // (title, the characters that must be reported, the header token they become)
+        for (title, reported, substituted) in [
+            // Japanese: the Latin part used to survive and the rest to vanish.
+            ("射撃カード 308", "射撃カード", "?????"),
+            // Arabic: EVERY character was unprintable, so the header came out blank.
+            ("بطاقة الرمي", "بطاقةلرمي", "?????"),
+            // An emoji among Latin text — one dropped glyph, no error, no warning.
+            ("Match 🎯 .308", "🎯", "?"),
+        ] {
+            let mut request = stored_request();
+            request["pdf"]["title"] = json!(title);
+
+            let out = call("card.pdf", request);
+            assert_eq!(out["ok"], true, "{title} must still print: {out}");
+            assert_eq!(
+                out["result"]["unprintable_title_chars"],
+                json!(reported),
+                "{title}: the result must name the characters that could not be printed: {out}"
+            );
+
+            let bytes = pdf_bytes(&out["result"]);
+            let printed = tokens(&bytes, "unprintable title");
+            assert!(
+                printed.iter().any(|t| t == substituted),
+                "{title}: the header must show a substitute where the dropped glyphs stood: \
+                 {printed:?}"
+            );
+        }
+    }
+
+    /// A name the font DOES cover reports nothing — the field is a warning, so it must stay
+    /// empty for the Latin, Cyrillic and punctuation names that print correctly today.
+    #[test]
+    fn a_printable_title_reports_no_unprintable_characters() {
+        for title in ["Bridge Card", "Карточка .308", "Ø7.82 – 175gr ™ ±½"] {
+            let mut request = stored_request();
+            request["pdf"]["title"] = json!(title);
+            let out = call("card.pdf", request);
+            assert_eq!(out["ok"], true, "{title}: {out}");
+            assert_eq!(
+                out["result"]["unprintable_title_chars"],
+                json!(""),
+                "{title} prints correctly, so nothing may be reported: {out}"
+            );
+        }
+    }
 }

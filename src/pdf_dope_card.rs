@@ -264,6 +264,77 @@ fn find_in_directory(dir: &str, filename: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// What a character the card font cannot draw is printed as.
+///
+/// A dropped glyph is INVISIBLE: printpdf emits nothing at all for a codepoint the embedded
+/// font has no entry for. Liberation Sans covers Latin, Latin-1, Cyrillic, Greek and the
+/// usual punctuation, and nothing else — so a card renamed "射撃カード 308" used to print a
+/// header reading "308", and an all-Arabic or all-Thai name printed a BLANK header, with no
+/// error and a normal byte length. A visible stand-in at least tells the shooter that
+/// something stood there; [`unprintable_chars`] reports WHAT, so the caller can warn before
+/// the paper leaves the printer.
+pub const UNPRINTABLE_SUBSTITUTE: char = '?';
+
+/// The distinct characters of `text` this card's font has no glyph for, in order of first
+/// use; empty when every character prints.
+///
+/// Resolved against the SAME face [`generate_dope_card_pdf`] draws with (the system copy of
+/// Liberation Sans when one is installed, the embedded copy otherwise), so this cannot
+/// disagree with the document. A font that will not parse at all reports nothing — that
+/// failure surfaces from the generator itself, as an error, rather than being recast here as
+/// "every character is unprintable".
+pub fn unprintable_chars(text: &str) -> String {
+    let Ok(bytes) = find_font_file("LiberationSans-Regular") else {
+        return String::new();
+    };
+    let mut warnings = Vec::new();
+    let Some(font) = ParsedFont::from_bytes(&bytes, 0, &mut warnings) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for c in text.chars() {
+        if font.lookup_glyph_index(c as u32).is_none() && !out.contains(c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `text` with every character `font` cannot draw replaced by [`UNPRINTABLE_SUBSTITUTE`].
+fn substitute_unprintable(font: &ParsedFont, text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if font.lookup_glyph_index(c as u32).is_none() {
+                UNPRINTABLE_SUBSTITUTE
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Every caller-supplied string in `config`, with the characters this font cannot draw
+/// substituted. Applied to ALL of them — the title is the one an app sets from the card's
+/// name, but location, powder, bullet and the two provenance strings are user- or
+/// peer-supplied too, and a silently blank footer is the same defect as a silently blank
+/// header.
+fn substituting_unprintable(config: &DopeCardConfig, font: &ParsedFont) -> DopeCardConfig {
+    let sub = |text: &str| substitute_unprintable(font, text);
+    DopeCardConfig {
+        rifle_name: sub(&config.rifle_name),
+        location: sub(&config.location),
+        solver_mode: sub(&config.solver_mode),
+        powder: sub(&config.powder),
+        bullet: sub(&config.bullet),
+        drag_model: sub(&config.drag_model),
+        elevation_unit_label: sub(&config.elevation_unit_label),
+        windage_unit_label: sub(&config.windage_unit_label),
+        engine_version: sub(&config.engine_version),
+        table_version: sub(&config.table_version),
+        ..config.clone()
+    }
+}
+
 /// Truncate a string for header display, appending "..." if too long
 fn truncate_for_header(s: &str, max_chars: usize) -> String {
     // Count/truncate by CHARACTERS, not bytes. The header concatenates user-controlled
@@ -358,6 +429,12 @@ pub fn generate_dope_card_pdf(
     let parsed_font_bold = ParsedFont::from_bytes(&font_bold_data, 0, &mut font_bold_warnings)
         .ok_or("Failed to parse LiberationSans-Bold font")?;
     let font_bold = doc.add_font(&parsed_font_bold);
+
+    // A character this face cannot draw is dropped silently by printpdf, so substitute a
+    // VISIBLE stand-in for it (see `UNPRINTABLE_SUBSTITUTE`). The regular face is the
+    // authority: the bold face is the same family with the same coverage, and the header and
+    // footer — where the caller's own strings go — are drawn in the regular one.
+    let config = &substituting_unprintable(config, &parsed_font);
 
     // Only scale the data table — header/footer stay at base size
     // so they don't overflow or consume disproportionate page space
