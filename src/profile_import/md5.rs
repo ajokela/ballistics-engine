@@ -24,6 +24,13 @@ const K: [u32; 64] = [
 ];
 
 /// MD5 digest of `data`, as a lowercase hex string.
+// A newer clippy stable added `chunks_exact_to_as_chunks`, which flags a constant chunk
+// size and suggests `as_chunks`. Suppressed rather than restructured: this is binary-format
+// parsing, `as_chunks` changes the element type from `&[u8]` to `&[u8; N]` and so ripples
+// into every use inside the loop, and the change would land in the middle of a 13-platform
+// release. `unknown_lints` is allowed alongside it so toolchains predating the lint do not
+// warn on the name. Adopting `as_chunks` properly is a follow-up.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 pub(crate) fn md5_hex(data: &[u8]) -> String {
     let (mut a0, mut b0, mut c0, mut d0) =
         (0x67452301u32, 0xefcdab89u32, 0x98badcfeu32, 0x10325476u32);

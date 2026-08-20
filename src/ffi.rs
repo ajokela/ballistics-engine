@@ -1353,6 +1353,13 @@ pub struct FFIReticleHold {
 /// `1..=`[`MAX_FFI_RETICLE_MARKS`] BEFORE any element is read (MBA-1407 lesson: the
 /// bound is the only thing standing between a caller typo and an out-of-range read).
 #[no_mangle]
+// A newer clippy stable added `chunks_exact_to_as_chunks`, which flags a constant chunk
+// size and suggests `as_chunks`. Suppressed rather than restructured: this is binary-format
+// parsing, `as_chunks` changes the element type from `&[u8]` to `&[u8; N]` and so ripples
+// into every use inside the loop, and the change would land in the middle of a 13-platform
+// release. `unknown_lints` is allowed alongside it so toolchains predating the lint do not
+// warn on the name. Adopting `as_chunks` properly is a follow-up.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 pub unsafe extern "C" fn ballistics_hold_point_in_reticle(
     drop_mil: c_double,
     wind_mil: c_double,
