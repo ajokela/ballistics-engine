@@ -100,7 +100,32 @@ jobs:
         # fourth gate; executing the browser-gated tests would need a headless browser, so
         # type-checking is the floor CI can hold cheaply. --no-default-features matches the
         # wasm-pack release build (the default pdf/online features do not compile for wasm32).
-        run: cargo check --locked --target wasm32-unknown-unknown --no-default-features --tests
+        #
+        # BOTH ends of the command-gate range are checked. `wasm-terminal` is what the shipped
+        # browser terminal builds (and is the only config that compiles the parity suite in
+        # wasm_tests.rs); the bare build is the smallest embedder config (Calculator +
+        # trajectory only). Checking just one lets a `#[cfg(feature = "wasm-*")]` mistake —
+        # a handler left referencing a gated-out helper, or a helper gated one feature too
+        # tightly — reach main green.
+        run: |
+          cargo check --locked --target wasm32-unknown-unknown --no-default-features \
+            --features wasm-terminal --tests
+          cargo check --locked --target wasm32-unknown-unknown --no-default-features --tests
+
+      - name: Type-check each WASM command feature in isolation
+        # Every wasm-* feature must build on its own, not just as part of `wasm-terminal`:
+        # that is the property an embedder relies on when picking a subset. A helper shared by
+        # two commands but gated on only one of them still compiles in the full set and fails
+        # only here.
+        run: |
+          for f in wasm-zero wasm-lead wasm-monte-carlo wasm-truing wasm-estimate-bc \
+                   wasm-bc-convert wasm-drag-curve wasm-reticle wasm-powder wasm-recoil \
+                   wasm-power-factor; do
+            echo "::group::$f"
+            cargo check --locked --target wasm32-unknown-unknown --no-default-features \
+              --features "$f" --lib
+            echo "::endgroup::"
+          done
 
       - name: Verify the offline minimal-feature process protocol
         # MBA-1331: the binary is behind the default-on `cli` feature ([[bin]]

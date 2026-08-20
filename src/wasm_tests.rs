@@ -1,6 +1,13 @@
 // Unit tests for WASM bindings
+//
+// This is the terminal-parity suite: it drives `WasmBallistics::run_command` across the
+// whole browser-CLI surface, so it requires the full command set (`wasm-terminal`). Run it
+// with `wasm-pack test --node -- --no-default-features --features wasm-terminal`.
+// Coverage for a command-gated build lives in `minimal_surface_tests` below, which compiles
+// under every feature combination.
 #[cfg(test)]
 #[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-terminal")]
 mod tests {
     use crate::wasm::*;
     use wasm_bindgen_test::*;
@@ -3773,5 +3780,136 @@ Impact Velocity: 2510 fps\n";
                 "distance {bad}: {err:?}"
             );
         }
+    }
+}
+
+/// Coverage for the surface that survives every command gate: the `Calculator` API, the
+/// ungated `trajectory`/`version` commands, and the dispatcher's handling of a command that
+/// was gated out. Unlike `tests` above, this module compiles under ANY feature combination,
+/// so a minimal (`--no-default-features`, no `wasm-*`) build is not shipped untested.
+#[cfg(test)]
+#[cfg(target_arch = "wasm32")]
+mod minimal_surface_tests {
+    use crate::wasm::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    fn field(v: &wasm_bindgen::JsValue, key: &str) -> f64 {
+        js_sys::Reflect::get(v, &key.into())
+            .expect("field present")
+            .as_f64()
+            .expect("field is a number")
+    }
+
+    /// The `Calculator` fluent API resolves a trajectory without any `wasm-*` command
+    /// feature — it builds a `trajectory` command line internally, and `trajectory` is
+    /// ungated.
+    #[wasm_bindgen_test]
+    fn calculator_solves_with_no_command_features() {
+        let result = Calculator::new()
+            .set_bc(0.475)
+            .set_velocity(2700.0)
+            .set_mass(168.0)
+            .set_diameter(0.308)
+            .set_drag_model("G7")
+            .set_zero_range(100.0)
+            .calculate_trajectory(500.0)
+            .expect("trajectory solves");
+
+        // 500 yd from a 2700 fps .308: still supersonic, and dropping below the sight line.
+        let velocity = field(&result, "velocity_fps");
+        assert!(
+            velocity > 1200.0 && velocity < 2700.0,
+            "implausible retained velocity: {velocity}"
+        );
+        assert!(field(&result, "drop_inches") < 0.0);
+        assert!(field(&result, "time_seconds") > 0.0);
+    }
+
+    /// The physics setters Bero-style embedders rely on stay wired with no command features:
+    /// each one must move the answer.
+    #[wasm_bindgen_test]
+    fn physics_setters_affect_the_solution() {
+        let base = Calculator::new().set_zero_range(100.0);
+        let plain = base.calculate_trajectory(800.0).expect("baseline solves");
+
+        let windy = Calculator::new()
+            .set_zero_range(100.0)
+            .set_wind(10.0, 90.0)
+            .calculate_trajectory(800.0)
+            .expect("wind solves");
+        assert!(
+            (field(&windy, "windage_inches") - field(&plain, "windage_inches")).abs() > 1.0,
+            "a 10 mph full-value crosswind must move windage"
+        );
+
+        let spun = Calculator::new()
+            .set_zero_range(100.0)
+            .enable_spin_drift_opt(true, Some(11.0))
+            .calculate_trajectory(800.0)
+            .expect("spin drift solves");
+        assert!(
+            (field(&spun, "windage_inches") - field(&plain, "windage_inches")).abs() > 0.1,
+            "spin drift must move windage"
+        );
+
+        let coriolis = Calculator::new()
+            .set_zero_range(100.0)
+            .enable_coriolis_opt(true, Some(45.0))
+            .calculate_trajectory(800.0)
+            .expect("coriolis solves");
+        assert!(
+            (field(&coriolis, "drop_inches") - field(&plain, "drop_inches")).abs() > 0.001
+                || (field(&coriolis, "windage_inches") - field(&plain, "windage_inches")).abs()
+                    > 0.001,
+            "coriolis must perturb the solution"
+        );
+
+        let thin_air = Calculator::new()
+            .set_zero_range(100.0)
+            .set_altitude(10_000.0)
+            .calculate_trajectory(800.0)
+            .expect("altitude solves");
+        assert!(
+            field(&thin_air, "velocity_fps") > field(&plain, "velocity_fps"),
+            "thinner air must retain more velocity"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn full_trajectory_table_is_available() {
+        let table = Calculator::new()
+            .set_zero_range(100.0)
+            .set_max_range(600.0)
+            .get_full_trajectory()
+            .expect("full trajectory solves");
+        let rows = js_sys::Array::from(&table);
+        assert!(rows.length() > 2, "expected a multi-row table");
+    }
+
+    /// `trajectory` and `version` are never gated out.
+    #[wasm_bindgen_test]
+    fn ungated_commands_survive_every_gate() {
+        let wasm = WasmBallistics::new();
+        assert!(wasm.run_command("version").unwrap().contains("Ballistics Engine"));
+        let out = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300")
+            .expect("trajectory runs");
+        assert!(out.contains("300"), "expected the 300 yd row: {out}");
+    }
+
+    /// A command compiled out reports itself unknown (and the help text names only the
+    /// commands actually present) rather than panicking or silently returning nothing.
+    #[cfg(not(feature = "wasm-recoil"))]
+    #[wasm_bindgen_test]
+    fn a_gated_out_command_is_reported_unknown() {
+        let wasm = WasmBallistics::new();
+        let out = wasm.run_command("recoil -b 168 -c 43 -v 2700 -f 8.5").unwrap();
+        assert!(out.contains("Unknown command"), "got: {out}");
+        assert!(
+            !out.contains("Recoil Command:"),
+            "help must not advertise a command that was compiled out"
+        );
     }
 }

@@ -10,6 +10,9 @@ Built with `wasm-pack` and `--no-default-features` — the native crate's defaul
 features pull in dependencies that don't compile for `wasm32-unknown-unknown`, so the PDF dope-card
 export and the online BC-estimation API are not available from WASM.
 
+If you only use the `Calculator` API, you can rebuild this module without the terminal commands
+you never call and cut it roughly in half — see **Size** under [Caveats](#caveats).
+
 > This package is built from `pkg/` (the `wasm-pack --target bundler` output) via
 > `scripts/build-npm.sh` in the source repo. The same script also produces a `pkg-web/` build
 > (`--target web`) for use without a bundler — see "Browser without a bundler" below.
@@ -105,12 +108,32 @@ console.log(calc.runCommand('trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-r
 ```
 
 If you need a CommonJS (`require()`) Node build, generate one yourself:
-`wasm-pack build --target nodejs --no-default-features`.
+`wasm-pack build --target nodejs --no-default-features -- --features wasm-terminal`
+(drop the `--features` half for a trajectory-only module — see **Size** under Caveats).
 
 ## Caveats
 
-- **Size**: the `.wasm` binary is roughly 430 KB (about 175 KB gzipped). It is not code-split or
-  lazily loaded — the whole engine loads up front.
+- **Size**: this package ships the full command surface — 918 KB raw, 345 KB gzipped, 274 KB
+  brotli (measured on 0.33.2; decimal KB). It is not code-split or lazily loaded, so the whole engine loads
+  up front.
+
+  **Most of that is the terminal, and you can drop it.** Every command except `trajectory` is
+  behind its own cargo feature, while the `Calculator` API is never gated. Rebuilding with only
+  what you call gets a trajectory-only module down to **483 KB raw / 191 KB gzipped** — 44% off
+  the wire — with byte-identical trajectory output:
+
+  ```bash
+  # Calculator + trajectory only
+  wasm-pack build --target bundler --no-default-features
+
+  # ...or keep a subset (note the bare `--`: wasm-pack forwards only post-`--` args to cargo)
+  wasm-pack build --target bundler --no-default-features -- --features wasm-zero,wasm-lead
+  ```
+
+  The per-command features and their measured savings are tabulated under
+  "Trimming the WASM module" in the [source repo's
+  README](https://github.com/ajokela/ballistics-engine#trimming-the-wasm-module). The biggest
+  single win is `wasm-monte-carlo` (46 KB gzipped, and it takes the `--wez` sweep with it).
 - **Single-threaded**: no SIMD/threads assumptions; no `SharedArrayBuffer` or
   cross-origin-isolation (COOP/COEP) headers required.
 - **No filesystem/network**: table loaders (`loadDragTable`, `loadBc5dTable`) and any file-based

@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The WASM module's terminal commands are individually removable**, so an app that embeds the
+  engine to solve trajectories no longer ships the twelve commands it never calls. Each
+  non-trajectory command of the browser terminal (`WasmBallistics.runCommand`) now sits behind
+  its own cargo feature — `wasm-zero`, `wasm-lead`, `wasm-monte-carlo`, `wasm-truing`,
+  `wasm-estimate-bc`, `wasm-bc-convert`, `wasm-drag-curve`, `wasm-reticle`, `wasm-powder`,
+  `wasm-recoil`, `wasm-power-factor` — with `wasm-terminal` turning on the whole set. Each one
+  takes its handler, its exclusive helpers, and its help text (including its `Examples:` lines)
+  out of the binary with it.
+
+  `trajectory`, `version`, and the entire `Calculator` builder API are NOT gated: `Calculator`
+  composes a `trajectory` command line internally, so every setter it exposes (BC, drag model,
+  wind and wind segments, spin drift, Coriolis, atmosphere, sight height, zero range) keeps
+  working with all eleven features off. `setZeroRange` in particular is unaffected by
+  `wasm-zero` — it emits `--auto-zero` on `trajectory`, a different code path from the `zero`
+  command.
+
+  Measured on 0.33.2 (`--target web`, default release profile), against 917,924 bytes raw /
+  344,592 gzip for the full set: `wasm-monte-carlo` 115 KB raw / 46 KB gzip (it takes the
+  `--wez` sweep with it, which is a flag on `monte-carlo` rather than a command of its own),
+  `wasm-truing` 92/31, `wasm-bc-convert` 65/22, `wasm-reticle` 55/21, `wasm-lead` 21/7,
+  `wasm-powder` 17/6, `wasm-estimate-bc` 17/7, `wasm-zero` 15/4, `wasm-recoil` 12/3,
+  `wasm-power-factor` 11/4, `wasm-drag-curve` 7/3. The commands share almost nothing, so the
+  rows are close to additive — they sum to 427 KB raw / 153 KB gzip against a measured
+  all-removed saving of 434 KB / 153 KB. A trajectory-only module is 483,496 raw / 191,421
+  gzip / 154,797 brotli, 44% off the wire.
+
+  Removing a command changes nothing the remaining ones compute. The full-terminal build is
+  byte-identical to the ungated build across every command (the only difference is plain
+  `monte-carlo`, which is unseeded and already nondeterministic against itself; the seeded
+  `--wez` sweep matches byte-for-byte), and `Calculator` output is byte-identical between the
+  full and trajectory-only builds across a matrix of drag-model, wind, wind-segment,
+  spin-drift, Coriolis, atmosphere and zero configurations. A command compiled out answers
+  `Unknown command`, and `help` advertises only what is present.
+
+  These features are deliberately **not** in `default`. Every wasm32 build passes
+  `--no-default-features` (the default `pdf`/`online` features don't compile for the target),
+  so a default-on gate would be stripped by the one flag every affected build already uses. The
+  shipped builds therefore pass `--features wasm-terminal` explicitly, and
+  `scripts/build-npm.sh`, `scripts/release/deploy-wasm.sh` and `scripts/release/RELEASE.md`
+  were updated accordingly. Note the bare `--` in those invocations: `wasm-pack` forwards only
+  post-`--` arguments to cargo, so `--features` placed before it is consumed as an invalid
+  `wasm-pack` flag and the build fails rather than silently mis-configuring.
+
+  Splitting the help text into per-command chunks costs the full build ~3 KB raw / ~1 KB
+  gzipped (35 `push_str` calls where there was one literal) — the price of the trimming table.
+
+  Not affected, because they were never in the WASM build: `explain`, `error-budget`,
+  `tolerance`, `dial-plan` and `adaptive-card` (0.33.x decision-support) are native-CLI-only.
+  They have no WASM dispatch entry, and dead-code elimination already keeps them out of the
+  module.
+
+  CI now type-checks both ends of the range (`wasm-terminal` and the bare build) plus each of
+  the eleven features in isolation — a helper gated one feature too tightly compiles fine in
+  the full set and fails only standalone. `wasm_tests.rs`'s 170-test terminal-parity suite
+  requires `wasm-terminal` (it drives the whole command surface); a new always-compiled
+  `minimal_surface_tests` module covers the ungated surface — the `Calculator` fluent API, each
+  physics setter measurably moving the answer, `getFullTrajectory`, and a gated-out command
+  reporting itself unknown — so a trimmed build is not shipped untested.
 - **Bridge command `card.pdf`**: the engine's printable field dope card, returned as
   `{pdf_base64, byte_length, page_count, row_count, kind, source,
   unprintable_title_chars}` (`byte_length` describes

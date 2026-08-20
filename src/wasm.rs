@@ -6,16 +6,30 @@ use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureR
 use crate::bc_table_5d::Bc5dTable;
 use crate::cli_api::{
     calculate_zero_angle_with_conditions, calculate_zero_angle_with_resolved_conditions,
-    calculate_zero_range_from_angle_with_conditions,
-    calculate_zero_range_from_angle_with_resolved_conditions, estimate_bc_fit,
-    run_monte_carlo_with_direction_std_dev, AtmosphericConditions,
-    BallisticInputs as InternalBallisticInputs, BcFitMode, BcReferenceStandard, MonteCarloParams,
-    TrajectorySolver, WindConditions, BC_REFERENCE_STANDARD_INERT_WARNING,
+    AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcReferenceStandard,
+    TrajectorySolver, WindConditions,
 };
+#[cfg(feature = "wasm-zero")]
+use crate::cli_api::{
+    calculate_zero_range_from_angle_with_conditions,
+    calculate_zero_range_from_angle_with_resolved_conditions,
+};
+#[cfg(feature = "wasm-estimate-bc")]
+use crate::cli_api::BcFitMode;
+#[cfg(feature = "wasm-monte-carlo")]
+use crate::cli_api::{MonteCarloParams, BC_REFERENCE_STANDARD_INERT_WARNING};
+#[cfg(feature = "wasm-estimate-bc")]
+use crate::cli_api::estimate_bc_fit;
+#[cfg(feature = "wasm-monte-carlo")]
+use crate::cli_api::run_monte_carlo_with_direction_std_dev;
 use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
-use crate::moving_target::{calculate_lead, mover_ring};
+#[cfg(feature = "wasm-lead")]
+use crate::moving_target::calculate_lead;
+use crate::moving_target::mover_ring;
+#[cfg(feature = "wasm-power-factor")]
 use crate::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
+#[cfg(feature = "wasm-recoil")]
 use crate::recoil::{free_recoil, FirearmType, FreeRecoilInputs, GasVelocityModel, POUNDS_TO_KG};
 use crate::truing_dsf::{apply_dsf, DsfPoint, DsfTable};
 use std::cell::RefCell;
@@ -221,6 +235,7 @@ fn trajectory_json_legend(units: UnitSystem, target_drops: bool) -> serde_json::
 
 /// Map the WASM terminal's session unit system onto the engine-side
 /// [`crate::cli_api::UnitSystem`] shared by the truing and WEZ cores (MBA-1343).
+#[cfg(any(feature = "wasm-truing", feature = "wasm-monte-carlo"))]
 fn engine_units(units: UnitSystem) -> crate::cli_api::UnitSystem {
     match units {
         UnitSystem::Imperial => crate::cli_api::UnitSystem::Imperial,
@@ -249,6 +264,7 @@ fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
 /// The house convention elsewhere in this file is a per-flag `.parse().map_err(...)` with a
 /// hand-written message; this is the same thing factored out, for handlers with enough
 /// numeric flags that repeating it would be the larger risk.
+#[cfg(any(feature = "wasm-bc-convert", feature = "wasm-reticle"))]
 fn parse_f64_arg(value: &str, flag: &str) -> Result<f64, JsValue> {
     value
         .trim()
@@ -329,6 +345,7 @@ fn parse_dsf_points(raw: &[String]) -> Result<Option<DsfTable>, JsValue> {
 /// Local mirror of the native CLI's `MonteCarloOutput` modes for the WEZ path
 /// (MBA-1343 Phase C). The WASM `-o` spellings map onto these in
 /// `run_monte_carlo_wez`.
+#[cfg(feature = "wasm-monte-carlo")]
 enum WezOutputMode {
     Summary,
     Statistics,
@@ -337,6 +354,7 @@ enum WezOutputMode {
 
 /// Dominant-bucket label shared by the WEZ summary-table and statistics-CSV
 /// renderers — replicates the native CLI's `wez_dominant_label` (main.rs) exactly.
+#[cfg(feature = "wasm-monte-carlo")]
 fn wez_dominant_label(row: &crate::wez::WezRow) -> String {
     if row.attribution_unavailable {
         "n/a".to_string()
@@ -348,6 +366,7 @@ fn wez_dominant_label(row: &crate::wez::WezRow) -> String {
 }
 
 /// Meters -> user distance units (native `UnitConverter::distance_from_metric`).
+#[cfg(any(feature = "wasm-monte-carlo", feature = "wasm-truing"))]
 fn distance_from_metric(val: f64, units: UnitSystem) -> f64 {
     match units {
         UnitSystem::Metric => val,
@@ -356,6 +375,7 @@ fn distance_from_metric(val: f64, units: UnitSystem) -> f64 {
 }
 
 /// m/s -> user wind units (native `UnitConverter::wind_from_metric`).
+#[cfg(feature = "wasm-monte-carlo")]
 fn wind_from_metric(val: f64, units: UnitSystem) -> f64 {
     match units {
         UnitSystem::Metric => val,
@@ -366,6 +386,7 @@ fn wind_from_metric(val: f64, units: UnitSystem) -> f64 {
 /// `-o full`: the entire [`crate::wez::WezResult`] as pretty JSON — replicates the
 /// native `print_wez_full` (the 0.25.0 JSON contract) byte-for-byte, including the
 /// trailing newline native's `println!` emits.
+#[cfg(feature = "wasm-monte-carlo")]
 fn format_wez_full(result: &crate::wez::WezResult) -> Result<String, JsValue> {
     let json = serde_json::to_string_pretty(result)
         .map_err(|e| JsValue::from_str(&format!("Error serializing JSON: {e}")))?;
@@ -374,6 +395,7 @@ fn format_wez_full(result: &crate::wez::WezResult) -> Result<String, JsValue> {
 
 /// `-o statistics`: one CSV row per range step — replicates the native
 /// `print_wez_statistics` byte-for-byte.
+#[cfg(feature = "wasm-monte-carlo")]
 fn format_wez_statistics(result: &crate::wez::WezResult, units: UnitSystem) -> String {
     let mut out = String::new();
     out.push_str("range,p_hit,dominant_error_source,wind_call_share,mv_sd_share,other_share\n");
@@ -393,6 +415,7 @@ fn format_wez_statistics(result: &crate::wez::WezResult, units: UnitSystem) -> S
 
 /// Default `-o summary`: the human-readable sweep table — replicates the native
 /// `print_wez_summary` byte-for-byte.
+#[cfg(feature = "wasm-monte-carlo")]
 fn format_wez_summary(result: &crate::wez::WezResult, units: UnitSystem) -> String {
     let dist_unit = match units {
         UnitSystem::Imperial => "yd",
@@ -439,6 +462,7 @@ fn format_wez_summary(result: &crate::wez::WezResult, units: UnitSystem) -> Stri
 /// Render a multi-observation truing report as table / JSON / CSV — replicates the
 /// native CLI's `display_multi_truing_result` (main.rs) byte-for-byte so terminal
 /// parity can be tested against the native binary (MBA-1343 Phase C).
+#[cfg(feature = "wasm-truing")]
 fn format_multi_truing_result(
     report: &crate::truing::MultiTruingReport,
     drop_unit: crate::truing::DropUnit,
@@ -694,6 +718,7 @@ fn format_multi_truing_result(
 
 /// Render a single-observation truing result as table / JSON / CSV — replicates the
 /// native CLI's `display_true_velocity_result` (main.rs) byte-for-byte.
+#[cfg(feature = "wasm-truing")]
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the native display_true_velocity_result signature"
@@ -1036,17 +1061,29 @@ impl WasmBallistics {
                 env!("CARGO_PKG_VERSION")
             )),
             "trajectory" => self.handle_trajectory_command(&args[1..], units),
+            #[cfg(feature = "wasm-zero")]
             "zero" => self.handle_zero_command(&args[1..], units),
+            #[cfg(feature = "wasm-monte-carlo")]
             "monte-carlo" | "montecarlo" => self.handle_monte_carlo_command(&args[1..], units),
+            #[cfg(feature = "wasm-truing")]
             "true-velocity" => self.handle_true_velocity_command(&args[1..], units),
+            #[cfg(feature = "wasm-truing")]
             "true-wind" => self.handle_true_wind_command(&args[1..], units),
+            #[cfg(feature = "wasm-bc-convert")]
             "bc-convert" => self.handle_bc_convert_command(&args[1..], units),
+            #[cfg(feature = "wasm-estimate-bc")]
             "estimate-bc" => self.handle_estimate_bc_command(&args[1..], units),
+            #[cfg(feature = "wasm-lead")]
             "lead" => self.handle_lead_command(&args[1..], units),
+            #[cfg(feature = "wasm-powder")]
             "powder" => self.handle_powder_command(&args[1..], units),
+            #[cfg(feature = "wasm-recoil")]
             "recoil" => self.handle_recoil_command(&args[1..], units),
+            #[cfg(feature = "wasm-drag-curve")]
             "drag-curve" => Self::handle_drag_curve_command(&args[1..]),
+            #[cfg(feature = "wasm-reticle")]
             "reticle" => Self::handle_reticle_command(&args[1..]),
+            #[cfg(feature = "wasm-power-factor")]
             "power-factor" => self.handle_power_factor_command(&args[1..], units),
             _ => Ok(format!(
                 "Error: Unknown command '{}'\n\n{}",
@@ -2820,6 +2857,7 @@ impl WasmBallistics {
         }
     }
 
+    #[cfg(feature = "wasm-zero")]
     fn handle_zero_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
         // Default values
         let (default_velocity, default_mass, default_diameter) = match units {
@@ -3372,6 +3410,7 @@ impl WasmBallistics {
         ))
     }
 
+    #[cfg(feature = "wasm-lead")]
     fn handle_lead_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
         // Default values
         let (default_velocity, default_mass, default_diameter) = match units {
@@ -3982,6 +4021,7 @@ impl WasmBallistics {
         }
     }
 
+    #[cfg(feature = "wasm-monte-carlo")]
     fn handle_monte_carlo_command(
         &self,
         args: &[&str],
@@ -4488,6 +4528,7 @@ impl WasmBallistics {
         clippy::too_many_arguments,
         reason = "flat arguments mirror the stable Monte Carlo CLI command shape (MBA-1317)"
     )]
+    #[cfg(feature = "wasm-monte-carlo")]
     fn run_monte_carlo_wez(
         &self,
         units: UnitSystem,
@@ -4653,6 +4694,7 @@ impl WasmBallistics {
     /// the MBA-1316 joint MV+BC calibration
     /// ([`crate::truing::run_multi_observation_truing_core`]). Unit conversions and all
     /// three output formats mirror the native dispatch/printers byte-for-byte.
+    #[cfg(feature = "wasm-truing")]
     fn handle_true_velocity_command(
         &self,
         args: &[&str],
@@ -5152,6 +5194,7 @@ impl WasmBallistics {
     /// native CLI prints, so the two surfaces emit identical bytes by construction instead
     /// of via a replicated printer. Unit conversions mirror the native
     /// `Commands::TrueWind` dispatch factor for factor.
+    #[cfg(feature = "wasm-truing")]
     fn handle_true_wind_command(
         &self,
         args: &[&str],
@@ -5565,6 +5608,7 @@ impl WasmBallistics {
         ))
     }
 
+    #[cfg(feature = "wasm-estimate-bc")]
     fn handle_estimate_bc_command(
         &self,
         args: &[&str],
@@ -6188,6 +6232,7 @@ impl WasmBallistics {
     /// This method owns only argv parsing and display-unit conversion. The calculation,
     /// banded-family recommendation, JSON schema, and every output byte come from the shared
     /// `bc_conversion` module, exactly as on the native command surface.
+    #[cfg(feature = "wasm-bc-convert")]
     fn handle_bc_convert_command(
         &self,
         args: &[&str],
@@ -6437,6 +6482,7 @@ impl WasmBallistics {
     /// Unknown arguments are a hard error, matching native clap behaviour — not this parser's
     /// older silently-ignore convention, which is the exact "flag that does nothing without
     /// saying so" class the last two releases spent effort closing.
+    #[cfg(feature = "wasm-drag-curve")]
     fn handle_drag_curve_command(args: &[&str]) -> Result<String, JsValue> {
         let mut drag_model = DragModel::G7; // native's default
         let mut output = "table".to_string();
@@ -6509,6 +6555,7 @@ impl WasmBallistics {
     /// angular solution directly with `--drop-mil`/`--wind-mil`, which is what `trajectory`
     /// above already prints. That gap is documented in CLI_USAGE and tracked with the
     /// MBA-1362 WASM-parity follow-up.
+    #[cfg(feature = "wasm-reticle")]
     fn handle_reticle_command(args: &[&str]) -> Result<String, JsValue> {
         use crate::reticle::{
             format_reticle_description, format_reticle_hold, hold_point_in_reticle, FocalPlane,
@@ -6999,6 +7046,7 @@ impl WasmBallistics {
     /// this command always applies the linear model, while trajectory/lead gate it
     /// behind --use-powder-sensitivity (a curve applies there unconditionally).
     /// Output (table/json/csv) is returned as the terminal string.
+    #[cfg(feature = "wasm-powder")]
     fn handle_powder_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
         use crate::cli_api::{parse_powder_sweep, resolve_powder_adjusted_velocity};
 
@@ -7395,6 +7443,7 @@ impl WasmBallistics {
     /// See `ballistics_engine::recoil` for the SAAMI momentum-balance math and the
     /// gas-velocity convention (SAAMI type-keyed factor by default; `--gas-velocity` /
     /// `--gas-velocity-factor` are the fixed/override escape hatches).
+    #[cfg(feature = "wasm-recoil")]
     fn handle_recoil_command(&self, args: &[&str], units: UnitSystem) -> Result<String, JsValue> {
         let mut bullet_weight: Option<f64> = None;
         let mut charge_weight: Option<f64> = None;
@@ -7697,6 +7746,7 @@ impl WasmBallistics {
     /// exactly. PF is intrinsically grains/fps by every rulebook, so weight/velocity are
     /// converted to grains/fps regardless of `--units` before calling into
     /// `ballistics_engine::power_factor`; echoed weight/velocity stay in display units.
+    #[cfg(feature = "wasm-power-factor")]
     fn handle_power_factor_command(
         &self,
         args: &[&str],
@@ -7876,24 +7926,52 @@ impl WasmBallistics {
     }
 
     fn show_help(&self) -> String {
-        r#"Ballistics Engine - WebAssembly Version
+        // Split per command so a gated-out command's help text (and its examples) leave
+        // the binary with it. The chunks concatenate back to the original text exactly.
+        let mut help = String::new();
+        help.push_str(r#"Ballistics Engine - WebAssembly Version
 
 Usage: ballistics [OPTIONS] <COMMAND>
 
 Commands:
-  trajectory      Calculate ballistic trajectory
-  zero           Calculate sight adjustment for zero
-  monte-carlo    Run Monte Carlo simulation
-  true-velocity  Calculate effective muzzle velocity from observed drop
-  true-wind      Back-solve effective crosswind from an observed horizontal miss
-  bc-convert     Convert published BC values between G1 and G7
-  estimate-bc    Estimate BC from trajectory data
-  lead           Calculate moving-target lead (hold)
-  powder         Resolve powder-temperature velocity shift (no trajectory)
-  recoil         Free recoil energy/velocity/impulse (SAAMI momentum balance)
-  power-factor   Power factor + USPSA/IDPA/SASS rulebook pass/fail
-  drag-curve     Print a built-in reference drag function as (Mach, Cd) data
-  reticle        Reticle hold points and parametric reticle generation
+  trajectory      Calculate ballistic trajectory"#);
+        #[cfg(feature = "wasm-zero")]
+        help.push_str(r#"
+  zero           Calculate sight adjustment for zero"#);
+        #[cfg(feature = "wasm-monte-carlo")]
+        help.push_str(r#"
+  monte-carlo    Run Monte Carlo simulation"#);
+        #[cfg(feature = "wasm-truing")]
+        help.push_str(r#"
+  true-velocity  Calculate effective muzzle velocity from observed drop"#);
+        #[cfg(feature = "wasm-truing")]
+        help.push_str(r#"
+  true-wind      Back-solve effective crosswind from an observed horizontal miss"#);
+        #[cfg(feature = "wasm-bc-convert")]
+        help.push_str(r#"
+  bc-convert     Convert published BC values between G1 and G7"#);
+        #[cfg(feature = "wasm-estimate-bc")]
+        help.push_str(r#"
+  estimate-bc    Estimate BC from trajectory data"#);
+        #[cfg(feature = "wasm-lead")]
+        help.push_str(r#"
+  lead           Calculate moving-target lead (hold)"#);
+        #[cfg(feature = "wasm-powder")]
+        help.push_str(r#"
+  powder         Resolve powder-temperature velocity shift (no trajectory)"#);
+        #[cfg(feature = "wasm-recoil")]
+        help.push_str(r#"
+  recoil         Free recoil energy/velocity/impulse (SAAMI momentum balance)"#);
+        #[cfg(feature = "wasm-power-factor")]
+        help.push_str(r#"
+  power-factor   Power factor + USPSA/IDPA/SASS rulebook pass/fail"#);
+        #[cfg(feature = "wasm-drag-curve")]
+        help.push_str(r#"
+  drag-curve     Print a built-in reference drag function as (Mach, Cd) data"#);
+        #[cfg(feature = "wasm-reticle")]
+        help.push_str(r#"
+  reticle        Reticle hold points and parametric reticle generation"#);
+        help.push_str(r#"
   help           Show this help message
 
 Global Options:
@@ -8032,7 +8110,9 @@ Trajectory Command:
                                  defeat ground truncation
     --target-height <HEIGHT>     Target height above ground (inches/mm)
     --powder-temp <TEMP>         Powder temperature
-    --powder-temp-sensitivity <SENS>  Velocity change per degree
+    --powder-temp-sensitivity <SENS>  Velocity change per degree"#);
+        #[cfg(feature = "wasm-zero")]
+        help.push_str(r#"
 
 Zero Command:
   ballistics zero [OPTIONS]
@@ -8064,7 +8144,9 @@ Zero Command:
     --humidity <H>               Relative humidity percent
     --altitude <ALT>             Zero-day altitude (ft/m)
     --density-altitude <DA>      Single-value atmosphere entry (ft/m); supersedes
-                                 --altitude and --pressure/--pressure-type
+                                 --altitude and --pressure/--pressure-type"#);
+        #[cfg(feature = "wasm-drag-curve")]
+        help.push_str(r#"
 
 Drag Curve Command:
   ballistics drag-curve [OPTIONS]
@@ -8079,7 +8161,9 @@ Drag Curve Command:
   Options:
     --drag-model <MODEL>         Model to print (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
                                  [default: g7]
-    -o, --output <FORMAT>        table (default), csv, or json
+    -o, --output <FORMAT>        table (default), csv, or json"#);
+        #[cfg(feature = "wasm-reticle")]
+        help.push_str(r#"
 
 Reticle Command:
   ballistics reticle generate <mil-grid|tree|bdc> [OPTIONS]
@@ -8123,7 +8207,9 @@ Reticle Command:
     -o, --output <FORMAT>        table (default) or json
 
   Native-only: `reticle hold --range` (solve the drop here first with
-  `trajectory` and pass it as --drop-mil) and `--profile`.
+  `trajectory` and pass it as --drop-mil) and `--profile`."#);
+        #[cfg(feature = "wasm-monte-carlo")]
+        help.push_str(r#"
 
 Monte Carlo Command:
   ballistics monte-carlo [OPTIONS]
@@ -8165,7 +8251,9 @@ Monte Carlo Command:
                                  [default: summary]
 
   Browser note: a WEZ sweep runs num-sims full trajectory solves per range step
-  (deterministic but heavy) — prefer -n 300 or fewer for interactive use.
+  (deterministic but heavy) — prefer -n 300 or fewer for interactive use."#);
+        #[cfg(feature = "wasm-truing")]
+        help.push_str(r#"
 
 True Velocity Command:
   ballistics true-velocity --range <DIST> --measured-drop <DROP> [OPTIONS]
@@ -8213,7 +8301,9 @@ True Velocity Command:
     --altitude <A>               Altitude (ft/m) [default: 0]
     --offline                    Accepted for native-command parity (the WASM
                                  terminal always calculates locally)
-    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]
+    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]"#);
+        #[cfg(feature = "wasm-truing")]
+        help.push_str(r#"
 
 True Wind Command:
   ballistics true-wind --miss <RANGE:RIGHT> --twist-rate <TWIST> [OPTIONS]
@@ -8260,7 +8350,9 @@ True Wind Command:
     --altitude <A>               Altitude (ft/m) [default: 0]
     --offline                    Accepted for native-command parity (this command
                                  is local on both surfaces)
-    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]
+    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]"#);
+        #[cfg(feature = "wasm-bc-convert")]
+        help.push_str(r#"
 
 BC Convert Command:
   ballistics bc-convert --source-model <g1|g7> --target-model <g1|g7> [OPTIONS]
@@ -8281,7 +8373,9 @@ BC Convert Command:
                                 Conflicts with --bc, --mach, and --velocity
     --speed-of-sound <VEL>      Speed of sound in the current velocity units; valid with
                                 --velocity or banded mode [default: 1116.437 fps / 340.29 m/s]
-    -o, --output <FORMAT>       Output format (table/json/csv) [default: table]
+    -o, --output <FORMAT>       Output format (table/json/csv) [default: table]"#);
+        #[cfg(feature = "wasm-estimate-bc")]
+        help.push_str(r#"
 
 Estimate BC Command:
   ballistics estimate-bc [OPTIONS]
@@ -8306,7 +8400,9 @@ Estimate BC Command:
   --zero-range (drop is below line of sight) and set the atmosphere it was made at.
   Without --zero-range, drop is treated as bore-referenced (flat-fire). --velocity-data
   gives a velocity-retention fit (immune to zero/angle). A fit that can't be pinned
-  down is flagged UNRELIABLE.
+  down is flagged UNRELIABLE."#);
+        #[cfg(feature = "wasm-lead")]
+        help.push_str(r#"
 
 Lead Command:
   ballistics lead --target-speed <SPEED> [OPTIONS]
@@ -8353,7 +8449,9 @@ Lead Command:
     -o, --output <FORMAT>         Output format (table/json) [default: table]
 
   Time of flight is solved under the supplied wind/atmosphere (wind-aware lead);
-  the lead figure itself is pure target motion — wind hold stays separate.
+  the lead figure itself is pure target motion — wind hold stays separate."#);
+        #[cfg(feature = "wasm-powder")]
+        help.push_str(r#"
 
 Powder Command:
   ballistics powder [OPTIONS]
@@ -8376,7 +8474,9 @@ Powder Command:
                                   --powder-temp-sensitivity; clamped at endpoints)
     --sweep <START:END:STEP>      Velocity table across temperatures (°F/°C)
     -m, --mass <MASS>             Bullet mass (grains/grams): adds muzzle energy
-    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#);
+        #[cfg(feature = "wasm-recoil")]
+        help.push_str(r#"
 
 Recoil Command:
   ballistics recoil [OPTIONS]
@@ -8397,7 +8497,9 @@ Recoil Command:
                                   [default: rifle]
     --gas-velocity-factor <F>     Override: gas velocity = F * muzzle velocity
     --gas-velocity <VEL>          Override: absolute gas velocity (fps/m/s)
-    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#);
+        #[cfg(feature = "wasm-power-factor")]
+        help.push_str(r#"
 
 Power Factor Command:
   ballistics power-factor [OPTIONS]
@@ -8412,35 +8514,52 @@ Power Factor Command:
     -v, --velocity <VEL>          Velocity (fps/m/s) [required]
     --organization <ORG>          Filter to one organization: uspsa/idpa/sass
                                   [default: all]
-    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#);
+        help.push_str(r#"
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
   ballistics trajectory --auto-zero 200 --enable-spin-drift
-  ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9
-  ballistics zero --target-distance 300
+  ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9"#);
+        #[cfg(feature = "wasm-zero")]
+        help.push_str(r#"
+  ballistics zero --target-distance 300"#);
+        #[cfg(feature = "wasm-bc-convert")]
+        help.push_str(r#"
   ballistics bc-convert --source-model g1 --target-model g7 -b 0.475 --velocity 2700
   ballistics bc-convert --source-model g1 --target-model g7 \
-    --bc-segment 2500:3000:0.475 --bc-segment 1500:2500:0.465 -o json
+    --bc-segment 2500:3000:0.475 --bc-segment 1500:2500:0.465 -o json"#);
+        #[cfg(feature = "wasm-estimate-bc")]
+        help.push_str(r#"
   ballistics estimate-bc -v 2700 -m 168 -d 0.308 --data "100,2.1;200,9.4;300,22.8"
   ballistics estimate-bc -v 2650 -m 77 -d 0.224 --data "300,29;500,89.9" \
-    --velocity-data "300,1980;500,1560" --drag-model both
+    --velocity-data "300,1980;500,1560" --drag-model both"#);
+        #[cfg(feature = "wasm-monte-carlo")]
+        help.push_str(r#"
   ballistics monte-carlo -n 1000 --velocity-std 10
   ballistics monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez \
-    --target-size 18x30 -n 300 --wez-start 200 --wez-end 500 --wez-step 100
+    --target-size 18x30 -n 300 --wez-start 200 --wez-end 500 --wez-step 100"#);
+        #[cfg(feature = "wasm-truing")]
+        help.push_str(r#"
   ballistics true-velocity --range 300 --measured-drop 1.8 -b 0.475 -m 168 -d 0.308
   ballistics true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
     --observed 900:10.9 -b 0.475 -m 168 -d 0.308 --chrono-velocity 2700
   ballistics true-wind --miss 500:12.4 --miss 700:26.8 -v 2700 -b 0.475 -m 168 \
-    -d 0.308 --drag-model g7 --twist-rate 11 --called-wind 6
+    -d 0.308 --drag-model g7 --twist-rate 11 --called-wind 6"#);
+        #[cfg(feature = "wasm-reticle")]
+        help.push_str(r#"
   ballistics reticle generate tree --rows 6 --row-spacing 1 --spread-step 0.5 -o json
   ballistics reticle hold --mag 6 --drop-mil 4.2 --wind-mil 1.1 --reticle-json \
     '{"name":"demo","focal_plane":"sfp","reference_magnification":12,
       "marks":[{"down_mil":0,"right_mil":0,"kind":"center"},
-               {"down_mil":2,"right_mil":0,"kind":"hash"}]}'
-  ballistics recoil -b 168 -c 43 -v 2700 -f 8.5
-  ballistics power-factor -w 147 -v 900 --organization uspsa"#
-            .to_string()
+               {"down_mil":2,"right_mil":0,"kind":"hash"}]}'"#);
+        #[cfg(feature = "wasm-recoil")]
+        help.push_str(r#"
+  ballistics recoil -b 168 -c 43 -v 2700 -f 8.5"#);
+        #[cfg(feature = "wasm-power-factor")]
+        help.push_str(r#"
+  ballistics power-factor -w 147 -v 900 --organization uspsa"#);
+        help
     }
 }
 
