@@ -108,8 +108,8 @@ console.log(calc.runCommand('trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-r
 ```
 
 If you need a CommonJS (`require()`) Node build, generate one yourself:
-`wasm-pack build --target nodejs --no-default-features -- --features wasm-terminal`
-(drop the `--features` half for a trajectory-only module — see **Size** under Caveats).
+`scripts/build-wasm.sh --target nodejs` (add `--preset slim` for a trajectory-only module —
+see **Size** under Caveats).
 
 ## Caveats
 
@@ -124,11 +124,13 @@ If you need a CommonJS (`require()`) Node build, generate one yourself:
 
   ```bash
   # Calculator + trajectory only
-  wasm-pack build --target bundler --no-default-features
+  scripts/build-wasm.sh --preset slim --target bundler
 
-  # ...or keep a subset (note the bare `--`: wasm-pack forwards only post-`--` args to cargo)
-  wasm-pack build --target bundler --no-default-features -- --features wasm-zero,wasm-lead
+  # ...or keep a subset
+  scripts/build-wasm.sh --features wasm-zero,wasm-lead --target bundler
   ```
+
+  The script verifies the module it produced actually matches the set you asked for.
 
   The per-command features and their measured savings are tabulated under
   "Trimming the WASM module" in the [source repo's

@@ -127,6 +127,17 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Verify the WASM command gates produce the module they promise
+        # Type-checking proves the cfgs compile; it does not prove the shipped artifact carries
+        # the commands we think it does. scripts/build-wasm.sh builds and then inspects the
+        # emitted .wasm, so a dropped `--features` (or a wasm-pack argument-handling change --
+        # it forwards only post-`--` args to cargo) fails here instead of silently deploying a
+        # trajectory-only terminal to ballistics.rs.
+        run: |
+          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+          ./scripts/build-wasm.sh --preset full --target web --out-dir /tmp/wasm-ci-full
+          ./scripts/build-wasm.sh --preset slim --target web --out-dir /tmp/wasm-ci-slim
+
       - name: Verify the offline minimal-feature process protocol
         # MBA-1331: the binary is behind the default-on `cli` feature ([[bin]]
         # required-features), so the offline-minimal check must enable it explicitly

@@ -59,6 +59,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They have no WASM dispatch entry, and dead-code elimination already keeps them out of the
   module.
 
+  **Build entry point.** All WASM builds now go through `scripts/build-wasm.sh`, which exists
+  because the gate has one dangerous failure mode: a build that forgets the feature flag
+  compiles, deploys, and passes a version check while answering `Unknown command` to everything
+  but `trajectory`. The script closes it from both ends — its DEFAULT preset is `full`, so a
+  missing argument yields the complete terminal rather than a stripped one, and every build is
+  verified against the command set its preset promised by inspecting the emitted `.wasm`.
+  Crucially the expectation for `--preset full` is "all twelve commands" derived from the preset
+  itself, not from the computed feature string: deriving it from the feature list would mean
+  losing that list also lowers the bar, and the verifier would agree that a stripped module is
+  what `full` asked for. `deploy-wasm.sh`, `build-npm.sh`, `RELEASE.md` and CI all route through
+  it; the CI step builds and verifies both presets, so a dropped flag fails there rather than on
+  ballistics.rs.
+
   CI now type-checks both ends of the range (`wasm-terminal` and the bare build) plus each of
   the eleven features in isolation — a helper gated one feature too tightly compiles fine in
   the full set and fails only standalone. `wasm_tests.rs`'s 170-test terminal-parity suite

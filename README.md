@@ -704,19 +704,33 @@ actually call. `trajectory`, `version`, and the whole `Calculator` API are **nev
 `Calculator` composes a `trajectory` command line internally, so it keeps working with every
 feature below turned off.
 
+Build through `scripts/build-wasm.sh`, which is the one entry point every WASM build uses —
+the ballistics.rs deploy and `build-npm.sh` included:
+
 ```bash
-# Everything (what ballistics.sh and the npm package ship)
-wasm-pack build --target web --no-default-features -- --features wasm-terminal
+# Everything. Also what you get with no arguments at all — the default is deliberately the
+# complete terminal, so a forgotten flag can never silently ship a stripped module.
+scripts/build-wasm.sh
 
 # Trajectory only — the Calculator API and nothing else
-wasm-pack build --target web --no-default-features
+scripts/build-wasm.sh --preset slim
 
 # À la carte
-wasm-pack build --target web --no-default-features -- --features wasm-zero,wasm-lead
+scripts/build-wasm.sh --features wasm-zero,wasm-lead
+
+# --target and --out-dir pass through; so does the environment
+CARGO_PROFILE_RELEASE_OPT_LEVEL=z scripts/build-wasm.sh --target nodejs --out-dir /tmp/pkg
 ```
 
-Note the bare `--`: `wasm-pack` forwards only post-`--` arguments to cargo, so `--features`
-placed before it is consumed as an (invalid) `wasm-pack` flag.
+After every build the script **verifies the artifact against the preset it was asked for** —
+it reads the emitted `.wasm` and checks that exactly the promised commands are present, failing
+the build otherwise. `--preset full` expects all twelve regardless of how the feature list was
+computed, so a dropped flag is a hard error rather than a terminal that deploys cleanly and
+then answers `Unknown command` to everything but `trajectory`.
+
+If you invoke `wasm-pack` directly instead, note the bare `--`: it forwards only post-`--`
+arguments to cargo, so `--features` placed before it is consumed as an (invalid) `wasm-pack`
+flag.
 
 Measured on 0.33.2, `--target web`, default release profile (`opt-level = 3`, LTO), against the
 full build's 918 KB raw / 345 KB gzip (all sizes decimal KB):
