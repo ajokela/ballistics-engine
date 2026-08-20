@@ -10,7 +10,10 @@
 # would put a silent trajectory-only deploy one forgotten flag away.
 set -euo pipefail
 V="${1:?usage: deploy-wasm.sh VERSION}"
-ENGINE="$HOME/projects/ballistics-engine"; SITES="$HOME/projects/ballistics.rs"
+# Overridable so the release can be cut from whichever checkout is actually AT the tag --
+# an agent worktree, a detached checkout, a fresh clone -- rather than only from the one
+# under $HOME. The tag gate below is what guarantees correctness; the path never did.
+ENGINE="${ENGINE:-$HOME/projects/ballistics-engine}"; SITES="${SITES:-$HOME/projects/ballistics.rs}"
 ( cd "$ENGINE" && git describe --tags --exact-match 2>/dev/null | grep -q "v$V" ) \
   || { echo "engine checkout is not at tag v$V - refuse to build wasm from the wrong rev"; exit 1; }
 ( cd "$ENGINE" && ./scripts/build-wasm.sh --preset full --target web --out-dir "/tmp/wasm-$V" )
