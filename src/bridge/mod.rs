@@ -51,7 +51,6 @@ const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Commands available in this build, in dispatch order.
 /// `meta.capabilities` reports exactly this list so apps can feature-detect.
 fn command_names() -> Vec<&'static str> {
-    #[allow(unused_mut)] // mut is only exercised by the profile-import push below
     let mut names = vec![
         "meta.capabilities",
         "meta.version",
@@ -59,11 +58,13 @@ fn command_names() -> Vec<&'static str> {
         "card.come_ups",
         "card.range_table",
         "card.wind",
-        "profile.validate",
-        "profile.normalize",
     ];
     // Listed ONLY when compiled in (mirroring compiled_features) so apps feature-detect
-    // the command list instead of probing for unknown_command.
+    // the command list instead of probing for unknown_command. Each conditional push sits
+    // at its dispatch position so this list stays in dispatch order, as documented above.
+    #[cfg(feature = "pdf")]
+    names.push("card.pdf");
+    names.extend(["profile.validate", "profile.normalize"]);
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
     // Filesystem-backed (BC5D tables are loaded from caller-supplied paths), so absent on
@@ -209,6 +210,8 @@ fn dispatch(request_json: &str) -> String {
             run_card(&request.request, "card.range_table", crate::card_service::range_table_v1)
         }
         "card.wind" => run_card(&request.request, "card.wind", crate::card_service::wind_card_v1),
+        #[cfg(feature = "pdf")]
+        "card.pdf" => run_card_pdf(&request.request),
         "profile.validate" => run_profile_validate(&request.request),
         "profile.normalize" => run_profile_normalize(&request.request),
         #[cfg(feature = "profile-import")]
@@ -309,6 +312,198 @@ fn run_card(
             None,
         ),
     }
+}
+
+/// Hard cap on the PDF `card.pdf` will hand back, measured on the RAW document (the
+/// base64 text in the response is ~4/3 of it, so this bounds a ~5.6 MiB response body).
+///
+/// Every dope card carries a ~815 KiB floor: the two Liberation Sans faces
+/// `pdf_dope_card` embeds. Rows are cheap on top of that (~0.5 KiB each — a 300-row,
+/// 4-page card is ~950 KiB).
+///
+/// This is the BACKSTOP, not the first line: the row set is refused on its own row and page
+/// count before any document exists (`card_service::MAX_PDF_ROWS` / `MAX_PDF_PAGES`), because
+/// measuring bytes means having already built and paginated them. What survives that check
+/// and still lands here is a card made huge by its LABELS — the `pdf` block's strings are
+/// drawn verbatim on every page — and for those a typed refusal the caller can act on beats
+/// pushing a multi-megabyte base64 string through an embedded FFI hop.
+#[cfg(feature = "pdf")]
+pub const MAX_PDF_BYTES: usize = 4 * 1024 * 1024;
+
+/// The over-cap envelope for a generated PDF, or `None` when it fits. Split out so the
+/// boundary itself is unit-testable at exactly [`MAX_PDF_BYTES`] and one byte past it.
+///
+/// The message states what is true of the document — its size, and how many rows and pages
+/// it holds. It deliberately does NOT advise "coarsen the step" or "shorten the range
+/// domain": for a saved card those are immutable (there is no editor for a snapshot's
+/// domain), so naming them told the one user who ever sees this message to do something
+/// impossible.
+#[cfg(feature = "pdf")]
+fn pdf_over_cap_error(byte_length: usize, row_count: usize, page_count: usize) -> Option<String> {
+    (byte_length > MAX_PDF_BYTES).then(|| {
+        error(
+            BridgeErrorCode::ResourceLimit,
+            format!(
+                "generated dope card is {byte_length} bytes; the limit is {MAX_PDF_BYTES} \
+                 ({row_count} rows, {page_count} pages)"
+            ),
+            None,
+        )
+    })
+}
+
+/// The one `card.pdf`-only key on the request: the rows to print, instead of solving. Not a
+/// field on [`crate::card_service::CardRequestV1`], because it is not part of a saved card —
+/// it is the card's stored RESPONSE, attached at export time — and a stored request must stay
+/// replayable against `card.range_table` unchanged. Removed from the payload before the card
+/// request is decoded, so `deny_unknown_fields` still governs everything else (a
+/// `stored_cards` typo is an honest `invalid_request`).
+#[cfg(feature = "pdf")]
+const STORED_CARD_KEY: &str = "stored_card";
+
+/// `card.pdf`: the printable dope card, as base64. The request is the SAME
+/// [`crate::card_service::CardRequestV1`] the on-screen card commands take — an app stores
+/// one request per saved card and replays it here — with the optional presentation-only
+/// `pdf` block for the header/footer labels, font size, and the Lead column's target speed,
+/// plus one `card.pdf`-only key:
+///
+/// * `stored_card` (optional): `{ "card": <a stored card.range_table result, verbatim>,
+///   "engine_version": "0.34.1", "bc5d_table_version": "2.5.0" }`. Supply it and this
+///   command PRINTS THOSE ROWS: no zero solve, no trajectory, and `bc5d_table_path` is never
+///   opened, so a saved card reprints identically after an engine bump, after the correction
+///   table at that path is overwritten in place, and even after it is deleted. The footer's
+///   `BC:` is the stored card's own `bc_for_solve`, and its `Engine:`/`Table:` are the two
+///   provenance strings, so paper and screen can be reconciled afterwards.
+/// * Omit it (or send `null`, which means the same thing) and the rows are solved here, from
+///   the same `card_service::range_table_rows` call `card.range_table` makes — the
+///   pre-existing behaviour, unchanged.
+///
+/// This surface prints a range-table card and says so. A request carrying a wind card's
+/// `wind_speeds`/`wind_angles_deg`, or a `stored_card` of another kind, is REFUSED: an `ok`
+/// response whose defining field was silently ignored is worse than no response.
+///
+/// Result: `{ "pdf_base64": ..., "byte_length": <raw PDF bytes>, "page_count": ...,
+/// "row_count": ..., "kind": "range_table", "source": "solve" | "stored_rows",
+/// "unprintable_title_chars": "" }`.
+/// `byte_length` describes the DECODED document, not the base64 text; `source` lets a caller
+/// verify it got a reprint rather than a re-solve. `unprintable_title_chars` is normally
+/// empty and names the characters of `pdf.title` the card font could not draw when it is not
+/// — the card still printed, with a visible stand-in for each of them, but a caller that
+/// accepts any card name should warn rather than hand over an untitled card. A card too big
+/// to print is refused with
+/// `resource_limit` — on its row/page count first (`card_service::MAX_PDF_ROWS` /
+/// `MAX_PDF_PAGES`), and on [`MAX_PDF_BYTES`] as the backstop.
+///
+/// Other errors follow the sibling card commands exactly: a malformed payload is
+/// `invalid_request`, anything the service rejects (including an out-of-band
+/// `pdf.font_scale`) is `command_failed` with the service's own message.
+#[cfg(feature = "pdf")]
+fn run_card_pdf(inner: &Value) -> String {
+    use crate::card_service::CardServiceError;
+
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'card.pdf' requires a request payload (card v1 document)",
+            None,
+        );
+    }
+    let mut payload = inner.clone();
+    let stored_value = payload
+        .as_object_mut()
+        .and_then(|object| object.remove(STORED_CARD_KEY))
+        .filter(|value| !value.is_null());
+    let request: crate::card_service::CardRequestV1 = match serde_json::from_value(payload) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("card.pdf request rejected: {err}"),
+                None,
+            )
+        }
+    };
+    let stored: Option<crate::card_service::StoredCardV1> = match stored_value {
+        Some(value) => match serde_json::from_value(value) {
+            Ok(stored) => Some(stored),
+            Err(err) => {
+                return error(
+                    BridgeErrorCode::InvalidRequest,
+                    format!("card.pdf {STORED_CARD_KEY} rejected: {err}"),
+                    None,
+                )
+            }
+        },
+        None => None,
+    };
+
+    let card = match crate::card_service::pdf_card_v1(&request, stored.as_ref()) {
+        Ok(card) => card,
+        // A card too large to print is a resource refusal, not a command failure: same code
+        // the byte cap below reports, so a caller has one condition to handle.
+        Err(err @ CardServiceError::TooLarge(_)) => {
+            return error(
+                BridgeErrorCode::ResourceLimit,
+                format!("card.pdf refused: {err}"),
+                None,
+            )
+        }
+        Err(err) => {
+            return error(
+                BridgeErrorCode::CommandFailed,
+                format!("card.pdf failed: {err}"),
+                None,
+            )
+        }
+    };
+    let byte_length = card.pdf_bytes.len();
+    if let Some(envelope) = pdf_over_cap_error(byte_length, card.row_count, card.page_count) {
+        return envelope;
+    }
+    success(
+        "card.pdf",
+        json!({
+            "pdf_base64": encode_base64(&card.pdf_bytes),
+            "byte_length": byte_length,
+            "page_count": card.page_count,
+            "row_count": card.row_count,
+            "kind": crate::card_service::PDF_CARD_KIND,
+            "source": card.source.as_str(),
+            "unprintable_title_chars": card.unprintable_title_chars,
+        }),
+    )
+}
+
+/// RFC 4648 standard-alphabet base64 encoder with padding, for `card.pdf`.
+///
+/// Hand-rolled for the same reason as `decode_base64` below (plain text, not a doc link:
+/// that function is gated on `profile-import`, which a pdf-only build need not enable): no
+/// direct base64 dependency
+/// exists in `Cargo.toml`, and adding one for twenty lines of arithmetic would ride along on
+/// all thirteen release targets.
+#[cfg(feature = "pdf")]
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        out.push(char::from(ALPHABET[(triple >> 18) as usize & 63]));
+        out.push(char::from(ALPHABET[(triple >> 12) as usize & 63]));
+        // A 1- or 2-byte tail pads rather than encoding the zero bits it never carried.
+        out.push(if chunk.len() > 1 {
+            char::from(ALPHABET[(triple >> 6) as usize & 63])
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            char::from(ALPHABET[triple as usize & 63])
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Wrap a command's own typed error envelope losslessly in `details`.
@@ -703,7 +898,9 @@ mod tests {
 
     #[test]
     fn unknown_command_lists_supported_ones() {
-        let out = call(json!({"api_version": 1, "command": "card.pdf"}));
+        // Was `card.pdf` until that became a real (pdf-gated) command; use a name no build
+        // can ever dispatch so this test means the same thing in every feature set.
+        let out = call(json!({"api_version": 1, "command": "card.semaphore"}));
         assert_eq!(out["error"]["code"], "unknown_command");
         assert!(out["error"]["message"]
             .as_str()
@@ -807,6 +1004,132 @@ mod tests {
         assert!(decode_base64("Zg=X").is_err(), "inner padding is rejected");
         assert!(decode_base64("Z").is_err(), "4n+1 length is rejected");
         assert!(decode_base64("Zm9v!").is_err(), "non-alphabet byte is rejected");
+    }
+
+    /// `card.pdf` must be listed exactly when the `pdf` feature is compiled in, and be an
+    /// honest `unknown_command` otherwise — the same rule `profile.import_a7p` follows. The
+    /// pdf-absent half of this only runs under `--no-default-features --features bridge`.
+    #[test]
+    fn capabilities_gates_card_pdf_on_the_pdf_feature() {
+        let out = call(json!({"api_version": 1, "command": "meta.capabilities"}));
+        let commands: Vec<String> =
+            serde_json::from_value(out["result"]["commands"].clone()).unwrap();
+        assert_eq!(
+            commands.contains(&"card.pdf".to_string()),
+            cfg!(feature = "pdf"),
+            "card.pdf must be listed exactly when compiled in: {out}"
+        );
+        let features: Vec<String> =
+            serde_json::from_value(out["result"]["features"].clone()).unwrap();
+        assert_eq!(
+            features.contains(&"pdf".to_string()),
+            cfg!(feature = "pdf"),
+            "the command list and the feature list must agree: {out}"
+        );
+    }
+
+    #[cfg(not(feature = "pdf"))]
+    #[test]
+    fn card_pdf_is_an_unknown_command_without_the_pdf_feature() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "card.pdf",
+            "request": {
+                "muzzle_velocity": 2600.0, "ballistic_coefficient": 0.243,
+                "mass": 175.0, "diameter": 0.308,
+                "zero_distance": 100.0, "start": 100.0, "end": 300.0, "step": 100.0
+            }
+        }));
+        assert_eq!(out["error"]["code"], "unknown_command", "{out}");
+    }
+
+    /// The `pdf` presentation block must survive a build that cannot render it: an app
+    /// stores one request per card and replays it against `card.range_table` too, so a
+    /// pdf-less engine has to ACCEPT the field rather than reject it as unknown.
+    #[test]
+    fn the_pdf_presentation_block_is_accepted_by_the_on_screen_card_in_every_build() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "card.range_table",
+            "request": {
+                "muzzle_velocity": 2600.0, "ballistic_coefficient": 0.243,
+                "mass": 175.0, "diameter": 0.308,
+                "zero_distance": 100.0, "start": 100.0, "end": 300.0, "step": 100.0,
+                "pdf": {"title": "Stored Card", "target_speed": 8.0, "font_preset": "large"}
+            }
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["kind"], "range_table", "{out}");
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn card_pdf_without_payload_is_invalid_request() {
+        let out = call(json!({"api_version": 1, "command": "card.pdf"}));
+        assert_eq!(out["error"]["code"], "invalid_request", "{out}");
+        assert!(
+            out["error"]["message"].as_str().unwrap().contains("card v1 document"),
+            "{out}"
+        );
+    }
+
+    /// The output cap's boundary, both sides. Generating a genuinely over-cap dope card
+    /// would take tens of thousands of rows, so the predicate is tested directly — see
+    /// `pdf_over_cap_error`'s own comment.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn pdf_output_cap_refuses_only_over_the_limit() {
+        assert!(pdf_over_cap_error(0, 0, 0).is_none());
+        assert!(
+            pdf_over_cap_error(MAX_PDF_BYTES, 6, 1).is_none(),
+            "a document exactly at the cap fits"
+        );
+        let envelope: Value =
+            serde_json::from_str(&pdf_over_cap_error(MAX_PDF_BYTES + 1, 6, 1).expect("over cap"))
+                .unwrap();
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["error"]["code"], "resource_limit");
+        let message = envelope["error"]["message"].as_str().unwrap();
+        assert!(message.contains("dope card"), "{envelope}");
+        // What is true of the document, not advice about controls a saved card lacks.
+        assert!(message.contains("6 rows"), "{envelope}");
+        assert!(message.contains("1 pages"), "{envelope}");
+        for absent in ["coarsen", "shorten"] {
+            assert!(!message.contains(absent), "{envelope}");
+        }
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn base64_encoder_matches_the_rfc_4648_vectors() {
+        for (bytes, text) in [
+            (&b""[..], ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(encode_base64(bytes), text, "{bytes:?}");
+        }
+        // Full-byte-range coverage: the >> 18 / >> 12 / >> 6 masking must not sign- or
+        // width-mangle a high byte, which is most of a PDF's content.
+        assert_eq!(encode_base64(&[0xff, 0xff, 0xff]), "////");
+        assert_eq!(encode_base64(&[0x00, 0x00, 0x00]), "AAAA");
+        assert_eq!(encode_base64(&[0xfb, 0xff, 0xbf]), "+/+/");
+    }
+
+    /// The encoder and the (profile-import) decoder must be inverses — the property that
+    /// makes `pdf_base64` a lossless transport for a binary document.
+    #[cfg(all(feature = "pdf", feature = "profile-import"))]
+    #[test]
+    fn base64_encode_decode_round_trips_arbitrary_bytes() {
+        for len in 0..=32usize {
+            let bytes: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37).wrapping_add(11)).collect();
+            let decoded = decode_base64(&encode_base64(&bytes)).expect("own output decodes");
+            assert_eq!(decoded, bytes, "len {len}");
+        }
     }
 
     #[test]

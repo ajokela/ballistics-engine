@@ -49,6 +49,16 @@ pub struct DopeCardConfig {
     /// wind_adj`/`lead_adj` are already expressed in this unit -- may differ from
     /// `elevation_unit_label` (MBA-1410 independent elevation/windage unit selection).
     pub windage_unit_label: String,
+    /// Engine version that produced these rows, printed in the footer as `Engine:<v>`.
+    ///
+    /// A card in a shooter's pocket is otherwise impossible to reconcile with a screen: the
+    /// rows are a function of the engine build and of the correction table, and both move.
+    /// An EMPTY string prints nothing at all -- the same rule the apps' provenance line
+    /// follows, because a placeholder ("unknown") on a printed card is worse than silence.
+    pub engine_version: String,
+    /// Correction-table version these rows were solved against, printed as `Table:<v>`.
+    /// Empty prints nothing, which is the honest rendering of "no correction table".
+    pub table_version: String,
 }
 
 /// Preset font size profiles for dope cards
@@ -101,6 +111,11 @@ impl RangeUnit {
         }
     }
 }
+
+/// The `font_scale` band [`generate_dope_card_pdf`] honours; anything outside it is
+/// clamped into it (see [`dope_card_rows_per_page`], which clamps identically so a page
+/// count and the document it describes cannot disagree).
+pub const FONT_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
 
 // Page dimensions (Letter size in mm)
 const PAGE_WIDTH: f32 = 215.9;
@@ -249,6 +264,77 @@ fn find_in_directory(dir: &str, filename: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// What a character the card font cannot draw is printed as.
+///
+/// A dropped glyph is INVISIBLE: printpdf emits nothing at all for a codepoint the embedded
+/// font has no entry for. Liberation Sans covers Latin, Latin-1, Cyrillic, Greek and the
+/// usual punctuation, and nothing else — so a card renamed "射撃カード 308" used to print a
+/// header reading "308", and an all-Arabic or all-Thai name printed a BLANK header, with no
+/// error and a normal byte length. A visible stand-in at least tells the shooter that
+/// something stood there; [`unprintable_chars`] reports WHAT, so the caller can warn before
+/// the paper leaves the printer.
+pub const UNPRINTABLE_SUBSTITUTE: char = '?';
+
+/// The distinct characters of `text` this card's font has no glyph for, in order of first
+/// use; empty when every character prints.
+///
+/// Resolved against the SAME face [`generate_dope_card_pdf`] draws with (the system copy of
+/// Liberation Sans when one is installed, the embedded copy otherwise), so this cannot
+/// disagree with the document. A font that will not parse at all reports nothing — that
+/// failure surfaces from the generator itself, as an error, rather than being recast here as
+/// "every character is unprintable".
+pub fn unprintable_chars(text: &str) -> String {
+    let Ok(bytes) = find_font_file("LiberationSans-Regular") else {
+        return String::new();
+    };
+    let mut warnings = Vec::new();
+    let Some(font) = ParsedFont::from_bytes(&bytes, 0, &mut warnings) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for c in text.chars() {
+        if font.lookup_glyph_index(c as u32).is_none() && !out.contains(c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `text` with every character `font` cannot draw replaced by [`UNPRINTABLE_SUBSTITUTE`].
+fn substitute_unprintable(font: &ParsedFont, text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if font.lookup_glyph_index(c as u32).is_none() {
+                UNPRINTABLE_SUBSTITUTE
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Every caller-supplied string in `config`, with the characters this font cannot draw
+/// substituted. Applied to ALL of them — the title is the one an app sets from the card's
+/// name, but location, powder, bullet and the two provenance strings are user- or
+/// peer-supplied too, and a silently blank footer is the same defect as a silently blank
+/// header.
+fn substituting_unprintable(config: &DopeCardConfig, font: &ParsedFont) -> DopeCardConfig {
+    let sub = |text: &str| substitute_unprintable(font, text);
+    DopeCardConfig {
+        rifle_name: sub(&config.rifle_name),
+        location: sub(&config.location),
+        solver_mode: sub(&config.solver_mode),
+        powder: sub(&config.powder),
+        bullet: sub(&config.bullet),
+        drag_model: sub(&config.drag_model),
+        elevation_unit_label: sub(&config.elevation_unit_label),
+        windage_unit_label: sub(&config.windage_unit_label),
+        engine_version: sub(&config.engine_version),
+        table_version: sub(&config.table_version),
+        ..config.clone()
+    }
+}
+
 /// Truncate a string for header display, appending "..." if too long
 fn truncate_for_header(s: &str, max_chars: usize) -> String {
     // Count/truncate by CHARACTERS, not bytes. The header concatenates user-controlled
@@ -287,6 +373,35 @@ fn draw_separator_line(ops: &mut Vec<Op>, y: f32) {
     });
 }
 
+/// Data rows the two-column table fits on one page at `font_scale`.
+///
+/// Split out of [`generate_dope_card_pdf`] (which now calls it, so there is exactly one
+/// copy of this arithmetic) for callers that must report a page count without holding the
+/// document: the bridge's `card.pdf` returns `page_count` in its response, and a second,
+/// independent copy of the layout maths there could silently drift from the pagination the
+/// generator actually performed.
+///
+/// `font_scale` is clamped to [`FONT_SCALE_RANGE`] exactly as the generator clamps it.
+pub fn dope_card_rows_per_page(font_scale: f32) -> usize {
+    let row_height = ROW_HEIGHT * font_scale.clamp(*FONT_SCALE_RANGE.start(), *FONT_SCALE_RANGE.end());
+    // Leave space for header/footer + separators
+    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 36.0;
+    // The clamp above bounds row_height to 2.25..=13.5 mm against a ~223 mm usable
+    // height, so this is 16..=52 in practice; `.max(1)` only guarantees the caller's
+    // `div_ceil` below can never divide by zero if those page constants are ever edited.
+    let visual_rows_per_page = ((usable_height / row_height) as usize).clamp(1, 52);
+    // Each visual row shows 2 data points (left + right columns)
+    visual_rows_per_page * 2
+}
+
+/// Pages [`generate_dope_card_pdf`] emits for `row_count` rows at `font_scale`.
+///
+/// `0` rows is `0` pages — that call errors rather than producing an empty document, so a
+/// zero here is a caller's row set to reject, not a document to describe.
+pub fn dope_card_page_count(row_count: usize, font_scale: f32) -> usize {
+    row_count.div_ceil(dope_card_rows_per_page(font_scale))
+}
+
 /// Generate a dope card PDF matching Glenn's format with row striping.
 ///
 /// `rows` is display-ready per `CardRow`'s convention (already converted to the card's
@@ -315,20 +430,27 @@ pub fn generate_dope_card_pdf(
         .ok_or("Failed to parse LiberationSans-Bold font")?;
     let font_bold = doc.add_font(&parsed_font_bold);
 
+    // A character this face cannot draw is dropped silently by printpdf, so substitute a
+    // VISIBLE stand-in for it (see `UNPRINTABLE_SUBSTITUTE`). The regular face is the
+    // authority: the bold face is the same family with the same coverage, and the header and
+    // footer — where the caller's own strings go — are drawn in the regular one.
+    let config = &substituting_unprintable(config, &parsed_font);
+
     // Only scale the data table — header/footer stay at base size
     // so they don't overflow or consume disproportionate page space
-    let font_scale = config.font_scale.clamp(0.5, 3.0);
+    let font_scale = config
+        .font_scale
+        .clamp(*FONT_SCALE_RANGE.start(), *FONT_SCALE_RANGE.end());
     let header_size = HEADER_FONT_SIZE; // UNSCALED
     let table_size = TABLE_FONT_SIZE * font_scale; // SCALED
     let footer_size = FOOTER_FONT_SIZE; // UNSCALED
     let row_height = ROW_HEIGHT * font_scale; // SCALED
 
-    // Calculate visual rows per page (accounting for header and footer)
-    // Each visual row shows 2 data points (left + right columns)
-    let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 36.0; // Leave space for header/footer + separators
-    let visual_rows_per_page = ((usable_height / row_height) as usize).min(52);
-    let data_rows_per_page = visual_rows_per_page * 2; // Two-column layout
-    let total_pages = rows.len().div_ceil(data_rows_per_page);
+    // Pagination lives in `dope_card_rows_per_page`/`dope_card_page_count` so a caller
+    // that must report the page count (the bridge's `card.pdf`) reads the same numbers
+    // this loop paginates by, instead of reimplementing them.
+    let data_rows_per_page = dope_card_rows_per_page(config.font_scale);
+    let total_pages = dope_card_page_count(rows.len(), config.font_scale);
 
     let mut pages = Vec::with_capacity(total_pages);
 
@@ -490,9 +612,23 @@ fn render_page(
     draw_centered_text(ops, font, footer_size, y, &footer1, COLOR_BLACK);
     y -= 4.0;
 
-    // Footer line 2: timestamp
-    let timestamp = get_timestamp();
-    draw_centered_text(ops, font, footer_size, y, &timestamp, COLOR_BLACK);
+    // Footer line 2: timestamp, plus the provenance of the numbers above it. Truncated
+    // because both strings are caller-supplied and drawn on every page (the same reason the
+    // header truncates), and omitted entirely when empty rather than printing a placeholder.
+    let mut footer2 = get_timestamp();
+    if !config.engine_version.is_empty() {
+        footer2.push_str(&format!(
+            " Engine:{}",
+            truncate_for_header(&config.engine_version, 24)
+        ));
+    }
+    if !config.table_version.is_empty() {
+        footer2.push_str(&format!(
+            " Table:{}",
+            truncate_for_header(&config.table_version, 24)
+        ));
+    }
+    draw_centered_text(ops, font, footer_size, y, &footer2, COLOR_BLACK);
 }
 
 fn draw_row_stripe(ops: &mut Vec<Op>, x: f32, y: f32, width: f32, height: f32) {
@@ -589,6 +725,19 @@ fn draw_table_header(
 /// "CLICKS"` prints with no decimal point -- every other unit (MIL/MOA/SMOA/IPHY) keeps
 /// the pre-existing one-decimal-place format. Before this fix, a clicks dope card printed
 /// e.g. "5.0" instead of "5" for every cell.
+///
+/// ONE decimal place is the contract for an angular adjustment on EVERY surface that shows
+/// these rows, screen included: a turret's resolution is 0.1, and a second decimal is a
+/// precision the shooter cannot dial. It is also how a printed card and a screen came to
+/// disagree -- 2.4478 MIL read `2.45` on screen against `2.4` on paper, half a click apart
+/// on a 0.1-mil turret. Linear columns are unaffected; they keep their own precision.
+///
+/// The rounding is Rust's: correct rounding of the value's exact binary expansion, with
+/// ties-to-even. That differs from rounding the SHORTEST DECIMAL spelling of the same
+/// double, which is what most platform number formatters do -- 7.35 is just below the tie
+/// and prints `7.3` here, while a decimal half-up formatter prints `7.4`. Any client that
+/// must agree with the paper has to match this, which is why
+/// `format_adjustment_pins_one_decimal_place_including_the_near_ties` pins the vectors.
 fn format_adjustment(value: f64, unit_label: &str) -> String {
     if unit_label.eq_ignore_ascii_case("clicks") {
         format!("{:.0}", value)
@@ -857,6 +1006,40 @@ mod tests {
         assert_eq!(format_adjustment(2.34, "IPHY"), "2.3");
     }
 
+    /// The one-decimal contract, pinned as vectors any other surface can be held to.
+    ///
+    /// Every client that renders these same rows -- the on-screen card in both mobile apps
+    /// -- must produce these strings from these doubles, or a shooter's screen and his paper
+    /// disagree. The last four are the cases that catch a mismatch: `6.25` is an exact binary
+    /// tie (ties-to-even, so `6.2`), `7.35` and `0.15` are just BELOW their ties (`7.3`,
+    /// `0.1`) while `2.35` is just above (`2.4`). A formatter that rounds the shortest
+    /// decimal spelling half-up prints `6.3`, `7.4` and `0.2` for the first three.
+    #[test]
+    fn format_adjustment_pins_one_decimal_place_including_the_near_ties() {
+        for (value, expected) in [
+            (0.0_f64, "0.0"),
+            (0.65, "0.7"),
+            (1.4551, "1.5"),
+            (2.4478, "2.4"),
+            (3.575, "3.6"),
+            (4.8412, "4.8"),
+            (-0.105, "-0.1"),
+            (-0.21, "-0.2"),
+            (-0.315, "-0.3"),
+            (-0.42, "-0.4"),
+            (-0.55, "-0.6"),
+            (-0.65, "-0.7"),
+            (-0.75, "-0.8"),
+            (6.25, "6.2"),
+            (7.35, "7.3"),
+            (0.15, "0.1"),
+            (2.35, "2.4"),
+        ] {
+            assert_eq!(format_adjustment(value, "MIL"), expected, "{value:?}");
+            assert_eq!(format_adjustment(value, "MOA"), expected, "{value:?}");
+        }
+    }
+
     /// Fix-round I-1: a missing column must render as an honest em-dash, never a
     /// plausible-looking fake `0.0` -- pinned for both a decimal unit and a clicks unit,
     /// since a naive fix might special-case `None` only inside one branch of
@@ -948,6 +1131,8 @@ mod tests {
             bold_data: false,
             elevation_unit_label: "MIL".to_string(),
             windage_unit_label: "MIL".to_string(),
+            engine_version: "0.0.0-test".to_string(),
+            table_version: String::new(),
         }
     }
 
@@ -1021,6 +1206,62 @@ mod tests {
         let err = generate_dope_card_pdf(&config, &[], RangeUnit::Yards)
             .expect_err("an empty row set must not silently produce a PDF");
         assert!(err.to_string().contains("rows"), "{err}");
+    }
+
+    /// The pagination `generate_dope_card_pdf` uses is now a public function (the bridge's
+    /// `card.pdf` reports a page count from it), so pin its numbers: they are part of that
+    /// response contract, and a silent change here would silently mislabel every PDF the
+    /// bridge returns.
+    #[test]
+    fn dope_card_rows_per_page_pins_the_preset_scales() {
+        // 279.4 - 20 - 36 = 223.4 mm usable / (4.5 * scale) mm per visual row, floored,
+        // capped at 52 visual rows, doubled for the two-column layout.
+        // The 52-visual-row cap bites below ~0.955 scale (223.4 / 4.5 / 52), so Small and
+        // every scale under it are cap-limited rather than height-limited — which is why
+        // Small and the 0.5 floor agree.
+        assert_eq!(dope_card_rows_per_page(FontSizePreset::Small.scale()), 104);
+        assert_eq!(dope_card_rows_per_page(FontSizePreset::Medium.scale()), 98);
+        assert_eq!(dope_card_rows_per_page(FontSizePreset::Large.scale()), 70);
+        assert_eq!(dope_card_rows_per_page(0.5), 104);
+        // Out-of-band scales are clamped, exactly as the generator clamps them.
+        assert_eq!(dope_card_rows_per_page(0.01), dope_card_rows_per_page(0.5));
+        assert_eq!(dope_card_rows_per_page(99.0), dope_card_rows_per_page(3.0));
+    }
+
+    #[test]
+    fn dope_card_page_count_rounds_up_and_reports_zero_for_no_rows() {
+        let per_page = dope_card_rows_per_page(1.0);
+        assert_eq!(dope_card_page_count(0, 1.0), 0);
+        assert_eq!(dope_card_page_count(1, 1.0), 1);
+        assert_eq!(dope_card_page_count(per_page, 1.0), 1);
+        assert_eq!(dope_card_page_count(per_page + 1, 1.0), 2);
+        assert_eq!(dope_card_page_count(per_page * 3, 1.0), 3);
+    }
+
+    /// The generator must paginate by the same function it reports: a PDF built from
+    /// `per_page + 1` rows has to carry a second page's worth of ops, which shows up as a
+    /// materially larger document than the single-page case.
+    #[test]
+    fn generated_pdf_grows_when_page_count_grows() {
+        let config = test_config();
+        let per_page = dope_card_rows_per_page(config.font_scale);
+        let rows: Vec<CardRow> = (0..per_page).map(|i| test_row(100.0 + i as f64)).collect();
+        let one_page = generate_dope_card_pdf(&config, &rows, RangeUnit::Yards).unwrap();
+        assert_eq!(dope_card_page_count(rows.len(), config.font_scale), 1);
+
+        let mut rows_plus_one = rows.clone();
+        rows_plus_one.push(test_row(100.0 + per_page as f64));
+        let two_pages = generate_dope_card_pdf(&config, &rows_plus_one, RangeUnit::Yards).unwrap();
+        assert_eq!(
+            dope_card_page_count(rows_plus_one.len(), config.font_scale),
+            2
+        );
+        assert!(
+            two_pages.len() > one_page.len(),
+            "a second page must add bytes: {} vs {}",
+            one_page.len(),
+            two_pages.len()
+        );
     }
 
     /// `RangeUnit::label()` untested was Task 10 review Minor #3: a swapped `Yd`/`M` would
