@@ -5,6 +5,46 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.4] - 2026-08-20
+
+### Fixed
+- **The BC5D path cache could serve a stale table after an in-place replacement.** Entries were
+  keyed by `(canonical path, file size, mtime)`. Replace a table in place with same-size content
+  inside one filesystem mtime tick and the key was unchanged, so the cached parse was returned
+  and the new bytes were never read. Both halves of that are ordinary here rather than exotic: a
+  table-set refresh overwrites `bc5d_<caliber>.bin` in place, and a regenerated table with
+  identical dimensions has an identical size. Single-byte corruption was missed the same way,
+  contradicting the module's documented promise that corrupt files are never cached.
+
+  Entries are now keyed by `(canonical path, file size, CRC32 of the file's bytes)` — by
+  CONTENT. Any change invalidates, including same-size replacement and one flipped byte, and
+  restoring the original bytes is a cache hit again because identity is the content rather than
+  its history. The file is consequently read on every call and only the parse is cached; at the
+  once-per-request call sites (bridge cards, bridge `solve`, `solve-json`, `bc5d.info`) that
+  read is not measurable against the solve itself. The CRC is taken over the whole file, not the
+  checksum field stored inside the table — that field describes only the data section, and a
+  corrupted data byte leaves it untouched, which is precisely the case that must invalidate.
+
+  Introduced in 0.33.3 with the BC5D bridge work. It reached a release because mtime granularity
+  on macOS and Linux is fine enough to hide it; it surfaced on an OpenBSD aarch64 guest whose
+  granularity is coarse enough for two consecutive writes to collide. The pre-existing test only
+  caught it where the filesystem happened to cooperate, so it is now joined by one that pins both
+  writes to an identical mtime and asserts content still decides — deterministic on every
+  platform, and verified to fail against the old key.
+
+### Changed
+- `scripts/release/deploy-wasm.sh` takes `ENGINE`/`SITES` from the environment, so a release can
+  be cut from whichever checkout is actually at the tag rather than only from one path under
+  `$HOME`. The tag gate that guarantees correctness is unchanged.
+- The changelog's 0.33.1 section is marked **WITHDRAWN**: that release was removed from the
+  crates.io index, and its entries were being credited to a version nobody can install. The
+  changes it lists ship unchanged from 0.33.2 onward.
+- README and `scripts/build-wasm.sh` now state that a trimmed `.wasm` and its generated JS glue
+  are a matched pair. Dropping `wasm-monte-carlo` removes the last user of `rand`, so the slim
+  module stops importing `crypto.getRandomValues` and the slim glue stops supplying it; a stale
+  `.wasm` against fresh glue then fails to instantiate with a `LinkError`. The reverse pairing
+  happens to load, but only because of which imports differ today — it is not a guarantee.
+
 ## [0.33.3] - 2026-08-20
 
 ### Added

@@ -827,11 +827,23 @@ const fn make_crc32_table() -> [u32; 256] {
 /// Process-wide cache of BC5D tables loaded from explicit filesystem paths.
 ///
 /// The bridge/solve-json surfaces accept a caller-supplied table PATH (mobile apps
-/// download the `.bin` themselves and hand the engine a file path), and a parsed
-/// table is several MB — re-reading and re-CRC-ing it on every card or solve call
-/// would dominate the request. Entries are keyed by `(canonical path, file size,
-/// mtime)` so replacing a downloaded table under the same name is picked up on the
-/// next call, and the cache is bounded (oldest entry evicted at capacity).
+/// download the `.bin` themselves and hand the engine a file path), and PARSING a
+/// several-MB table on every card or solve call would dominate the request. What the
+/// cache saves is the parse; the read and CRC are the price of knowing what is
+/// actually on disk.
+///
+/// Entries are keyed by `(canonical path, file size, CRC32 of the file's bytes)` —
+/// i.e. by CONTENT. An earlier version keyed on `(canonical path, file size, mtime)`
+/// and could serve a stale parsed table when a file was replaced in place by
+/// same-size content within one filesystem mtime tick: the key was unchanged, so the
+/// new bytes were never read. That is a live scenario here, not a theoretical one —
+/// a table-set refresh overwrites `bc5d_<caliber>.bin` in place, and a regenerated
+/// table with identical dimensions has identical size. It reached a release because
+/// mtime granularity is fine enough on macOS and Linux to hide it, and only surfaced
+/// on an OpenBSD guest whose granularity is coarse enough to collide.
+///
+/// Size is retained alongside the CRC purely as a second, free discriminator.
+/// The cache is bounded (oldest entry evicted at capacity).
 ///
 /// Filesystem-only by construction, so the whole module is compiled out on
 /// `wasm32` (where WASM callers pass table BYTES via `loadBc5dTable` instead).
@@ -840,7 +852,6 @@ pub mod path_cache {
     use super::{Bc5dError, Bc5dTable};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, OnceLock, RwLock};
-    use std::time::SystemTime;
 
     /// Small on purpose: a mobile app realistically has one or two calibers live.
     const CACHE_CAPACITY: usize = 4;
@@ -849,7 +860,10 @@ pub mod path_cache {
     struct CacheKey {
         canonical_path: PathBuf,
         file_size: u64,
-        modified: Option<SystemTime>,
+        /// CRC32 of the file's ENTIRE byte content. Not the checksum field stored
+        /// inside the table (that describes only the data section, and a corrupted
+        /// data byte leaves it untouched — exactly the case that must invalidate).
+        content_crc: u32,
     }
 
     type CacheEntries = Vec<(CacheKey, Arc<Bc5dTable>)>;
@@ -863,16 +877,24 @@ pub mod path_cache {
     /// dimensions) and the stored CRC32 exactly as [`Bc5dTable::load`] does, with
     /// the parsed result cached process-wide.
     ///
-    /// A cache hit requires the canonical path, file size, AND mtime to match, so
-    /// an in-place re-download invalidates naturally. Corrupt, truncated, or
-    /// missing files are never cached.
+    /// A cache hit requires the canonical path, file size, AND a CRC32 over the
+    /// file's bytes to match, so ANY change to the content invalidates — including a
+    /// same-size in-place replacement and single-byte corruption, neither of which a
+    /// timestamp reliably distinguishes. Corrupt, truncated, or missing files are
+    /// never cached.
+    ///
+    /// The file is therefore read on every call; only the parse is cached. At the
+    /// once-per-request call sites (bridge cards, bridge `solve`, `solve-json`,
+    /// `bc5d.info`) that trade is not measurable against the solve itself.
     pub fn load_verified(path: &Path) -> Result<Arc<Bc5dTable>, Bc5dError> {
         let canonical_path = std::fs::canonicalize(path)?;
-        let metadata = std::fs::metadata(&canonical_path)?;
+        // Read BEFORE consulting the cache: the bytes are the identity, so there is
+        // nothing trustworthy to look up until we have them.
+        let bytes = std::fs::read(&canonical_path)?;
         let key = CacheKey {
             canonical_path,
-            file_size: metadata.len(),
-            modified: metadata.modified().ok(),
+            file_size: bytes.len() as u64,
+            content_crc: super::crc32_ieee(&bytes),
         };
 
         if let Ok(entries) = cache().read() {
@@ -881,7 +903,6 @@ pub mod path_cache {
             }
         }
 
-        let bytes = std::fs::read(&key.canonical_path)?;
         let table = Arc::new(Bc5dTable::from_bytes(&bytes)?);
 
         if let Ok(mut entries) = cache().write() {
@@ -952,6 +973,89 @@ mod tests {
             api_version: "test".to_string(),
             timestamp: 0,
         }
+    }
+
+    /// The defect that reached 0.33.3: the cache keyed on `(path, size, mtime)`, so a
+    /// file replaced IN PLACE by same-size content within one mtime tick kept its key
+    /// and the stale parsed table was served. The sibling test above only caught it on
+    /// filesystems whose timestamp granularity happens to collide (it failed on an
+    /// OpenBSD guest and passed everywhere else), so this one removes the luck: it
+    /// pins both writes to an IDENTICAL mtime and asserts content still decides.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn path_cache_detects_same_size_replacement_under_an_identical_mtime() {
+        use super::path_cache;
+        use std::time::{Duration, SystemTime};
+
+        let dir = std::env::temp_dir().join(format!(
+            "bc5d_same_mtime_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bc5d_308.bin");
+
+        // A fixed, explicitly-set mtime that BOTH writes will carry, emulating a
+        // filesystem that cannot separate them. `File::set_modified` is std, so this
+        // stays portable instead of shelling out to `touch`.
+        let pinned = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        let pin = |p: &std::path::Path| {
+            let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+            f.set_modified(pinned).unwrap();
+            f.sync_all().unwrap();
+        };
+
+        let original = create_test_table();
+        let good = serialize_test_table(&original);
+        std::fs::write(&path, &good).unwrap();
+        pin(&path);
+        let first = path_cache::load_verified(&path).expect("valid table loads");
+
+        // 1. A same-size VALID replacement must be parsed, not served from cache.
+        let mut replacement = create_test_table();
+        let last = replacement.data.len() - 1;
+        replacement.data[last] = 0.5; // different content, identical dimensions => identical size
+        let replaced = serialize_test_table(&replacement);
+        assert_eq!(replaced.len(), good.len(), "test requires an identical size");
+        std::fs::write(&path, &replaced).unwrap();
+        pin(&path);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            pinned,
+            "both writes must share one mtime for this test to mean anything"
+        );
+        let second = path_cache::load_verified(&path).expect("replacement loads");
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &second),
+            "a same-size replacement under an identical mtime must NOT be served from cache"
+        );
+
+        // 2. Same-size CORRUPTION must be reported, never served from cache. The stored
+        //    checksum field is untouched here, so only hashing the real bytes catches it.
+        let mut corrupt = good.clone();
+        *corrupt.last_mut().unwrap() ^= 0xFF;
+        assert_eq!(corrupt.len(), good.len());
+        std::fs::write(&path, &corrupt).unwrap();
+        pin(&path);
+        assert!(
+            matches!(
+                path_cache::load_verified(&path),
+                Err(Bc5dError::ChecksumMismatch { .. })
+            ),
+            "corruption under an identical mtime must be detected, not cached"
+        );
+
+        // 3. Restoring the original bytes is a cache HIT again — content, not history.
+        std::fs::write(&path, &good).unwrap();
+        pin(&path);
+        let restored = path_cache::load_verified(&path).expect("original loads again");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &restored),
+            "identical content must still be served from the cache"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn create_single_cell_test_table() -> Bc5dTable {
