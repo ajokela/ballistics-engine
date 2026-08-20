@@ -8600,6 +8600,15 @@ pub struct Calculator {
     twist_rate_inches: Option<f64>,
     latitude_deg: Option<f64>,
 
+    // Ground-impact handling. The solver stops the trajectory when the projectile reaches
+    // the ground plane, which sits `bore_height` below the muzzle and defaults to 60 in
+    // (5 ft). For a typical .308 that terminates the solve around 516 yd, so a long-range
+    // request silently came back short: `calculateTrajectory(1000)` returned the impact
+    // point, which reports its true `range_yards` but carries no other signal. Both knobs
+    // exist on the `trajectory` command; they had no builder equivalent until now.
+    bore_height_inches: Option<f64>,
+    ignore_ground_impact: bool,
+
     // MBA-1368: wind entry frame ("shooter" | "compass") and the shot's compass
     // bearing. Both additive — no existing method signature changed (R6).
     wind_reference: Option<String>,
@@ -8635,6 +8644,11 @@ impl Calculator {
             enable_coriolis: false,
             twist_rate_inches: None,
             latitude_deg: None,
+
+            // None = defer to the trajectory command's own 60 in default, so an existing
+            // caller that never touches these keeps byte-identical output.
+            bore_height_inches: None,
+            ignore_ground_impact: false,
 
             wind_reference: None,
             shot_direction_deg: None,
@@ -8779,6 +8793,27 @@ impl Calculator {
         self
     }
 
+    /// Height of the bore above the ground, in inches (default 60 = 5 ft). The solve stops
+    /// when the projectile falls this far below the muzzle, so raising it pushes the
+    /// ground-impact cutoff further downrange. Use [`Self::ignore_ground_impact`] to remove
+    /// the cutoff entirely rather than setting an implausible height.
+    #[wasm_bindgen(js_name = setBoreHeight)]
+    pub fn set_bore_height(mut self, height_inches: f64) -> Self {
+        self.bore_height_inches = Some(height_inches);
+        self
+    }
+
+    /// Solve all the way to the requested range instead of stopping at ground impact.
+    ///
+    /// Without this, `calculateTrajectory(range)` returns the closest point it actually
+    /// solved, which for a typical .308 is around 516 yd — short of a 1000 yd request, and
+    /// reported only by the `range_yards` field of the returned object.
+    #[wasm_bindgen(js_name = ignoreGroundImpact)]
+    pub fn ignore_ground_impact(mut self, ignore: bool) -> Self {
+        self.ignore_ground_impact = ignore;
+        self
+    }
+
     #[wasm_bindgen(js_name = enableCoriolis)]
     pub fn enable_coriolis_opt(mut self, enabled: bool, latitude: Option<f64>) -> Self {
         self.enable_coriolis = enabled;
@@ -8850,6 +8885,14 @@ impl Calculator {
             if let Some(lat) = self.latitude_deg {
                 cmd.push_str(&format!(" --latitude {}", lat));
             }
+        }
+
+        if let Some(bore_height) = self.bore_height_inches {
+            cmd.push_str(&format!(" --bore-height {}", bore_height));
+        }
+
+        if self.ignore_ground_impact {
+            cmd.push_str(" --ignore-ground-impact");
         }
 
         // Use JSON output format for easy parsing
@@ -9008,6 +9051,14 @@ impl Calculator {
             if let Some(lat) = self.latitude_deg {
                 cmd.push_str(&format!(" --latitude {}", lat));
             }
+        }
+
+        if let Some(bore_height) = self.bore_height_inches {
+            cmd.push_str(&format!(" --bore-height {}", bore_height));
+        }
+
+        if self.ignore_ground_impact {
+            cmd.push_str(" --ignore-ground-impact");
         }
 
         cmd.push_str(" -o json");

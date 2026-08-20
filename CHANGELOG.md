@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`Calculator` can now solve past ground impact** (WASM), via two setters that had no
+  builder equivalent despite existing on the `trajectory` command: `setBoreHeight(inches)` and
+  `ignoreGroundImpact(bool)`. The solver ends a trajectory where the projectile reaches the
+  ground plane, which sits `bore_height` below the muzzle and defaults to 60 in (5 ft); for a
+  .308 at 2700 fps zeroed at 100 yd that is ~516 yd. `calculateTrajectory(1000)` therefore
+  returned the impact point — correctly labelled by its own `range_yards`, but with no other
+  signal, and with no way to ask for more from the builder API. The native CLI has always said
+  so out loud ("Bullet struck ground at 516 yd"); `Calculator` had neither the message nor the
+  escape hatch. `ignoreGroundImpact(true)` now reaches the requested range, and
+  `setBoreHeight` moves the cutoff downrange (300 in -> 917 yd) for callers modelling a real
+  firing position rather than removing the physics.
+
+  Both default to the previous behaviour — `bore_height` is `None` (defer to the command's own
+  60 in default) and `ignore_ground_impact` is `false` — so nothing is emitted onto the command
+  line unless asked for, and existing callers get byte-identical output. Pinned by two tests in
+  the always-compiled `minimal_surface_tests`: one that both knobs extend the solve, and one
+  that they are inert on a trajectory that never reaches the ground plane.
+
 - **The WASM module's terminal commands are individually removable**, so an app that embeds the
   engine to solve trajectories no longer ships the twelve commands it never calls. Each
   non-trajectory command of the browser terminal (`WasmBallistics.runCommand`) now sits behind

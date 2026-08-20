@@ -143,6 +143,18 @@ see **Size** under Caveats).
   `loadDragTable` above.
 - **`pdf`/`online` features are unavailable**: this build excludes them (see above), so
   PDF dope-card export and the online BC-estimation API are not part of the WASM surface.
+- **Solves stop at ground impact.** The trajectory ends where the projectile reaches the ground
+  plane, which sits `boreHeight` below the muzzle and defaults to 60 in (5 ft) — for a typical
+  .308 that is around 516 yd. `calculateTrajectory(1000)` on such a setup returns the impact
+  point, not a 1000 yd point; the returned `range_yards` tells you which you got. Use
+  `.ignoreGroundImpact(true)` to solve to the requested range regardless, or
+  `.setBoreHeight(inches)` to model a genuinely higher firing position:
+
+  ```js
+  new Calculator().setBC(0.243).setVelocity(2700).setDragModel('G7')
+    .setZeroRange(100).ignoreGroundImpact(true)
+    .calculateTrajectory(1000);          // reaches 1000 yd
+  ```
 - Full API surface (including the `Calculator` builder class) is documented in the bundled
   `.d.ts`; the full CLI flag reference `runCommand` accepts is documented in the source repo's
   `CLI_USAGE.md`.

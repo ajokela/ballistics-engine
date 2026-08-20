@@ -3877,6 +3877,73 @@ mod minimal_surface_tests {
         );
     }
 
+    /// The solve stops at the ground plane (60 in below the muzzle by default), which for a
+    /// typical .308 lands around 516 yd — so a 1000 yd request came back short with no signal
+    /// beyond the returned `range_yards`. Both escape hatches must reach the requested range.
+    #[wasm_bindgen_test]
+    fn ground_impact_can_be_pushed_out_or_ignored() {
+        let cfg = || {
+            Calculator::new()
+                .set_bc(0.243)
+                .set_velocity(2700.0)
+                .set_mass(168.0)
+                .set_diameter(0.308)
+                .set_drag_model("G7")
+                .set_sight_height(2.0)
+                .set_zero_range(100.0)
+                .set_max_range(1400.0)
+        };
+
+        // Default: terminates at ground impact, well short of the request.
+        let capped = cfg().calculate_trajectory(1000.0).expect("solves");
+        let capped_range = field(&capped, "range_yards");
+        assert!(
+            capped_range < 900.0,
+            "expected a ground-impact cutoff short of 1000 yd, got {capped_range}"
+        );
+
+        // ignoreGroundImpact reaches the requested range.
+        let ignored = cfg()
+            .ignore_ground_impact(true)
+            .calculate_trajectory(1000.0)
+            .expect("solves");
+        assert!(
+            (field(&ignored, "range_yards") - 1000.0).abs() < 5.0,
+            "ignoreGroundImpact should reach 1000 yd, got {}",
+            field(&ignored, "range_yards")
+        );
+
+        // A taller bore height moves the cutoff downrange without removing it.
+        let raised = cfg()
+            .set_bore_height(300.0)
+            .calculate_trajectory(1000.0)
+            .expect("solves");
+        let raised_range = field(&raised, "range_yards");
+        assert!(
+            raised_range > capped_range,
+            "a taller bore height must push the cutoff out: {raised_range} vs {capped_range}"
+        );
+    }
+
+    /// Neither knob may perturb a solve that never reaches the ground plane — callers who
+    /// don't touch them must see byte-identical numbers.
+    #[wasm_bindgen_test]
+    fn ground_impact_knobs_are_inert_within_range() {
+        let cfg = || Calculator::new().set_zero_range(100.0).set_max_range(500.0);
+        let base = cfg().calculate_trajectory(300.0).expect("solves");
+        let ignored = cfg()
+            .ignore_ground_impact(true)
+            .calculate_trajectory(300.0)
+            .expect("solves");
+        for key in ["range_yards", "drop_inches", "velocity_fps", "time_seconds"] {
+            assert_eq!(
+                field(&base, key),
+                field(&ignored, key),
+                "ignoreGroundImpact perturbed {key} on a solve that never hit the ground"
+            );
+        }
+    }
+
     #[wasm_bindgen_test]
     fn full_trajectory_table_is_available() {
         let table = Calculator::new()
