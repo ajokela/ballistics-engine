@@ -31,8 +31,13 @@
 # published to npm, and is what this script does.
 #
 # Both builds use --no-default-features: the crate's default `pdf`/`online` features pull in
-# printpdf / ureq+ring, which do not compile for wasm32-unknown-unknown (see CLAUDE.md's
-# "Updating the WASM Module").
+# printpdf / ureq+ring, which do not compile for wasm32-unknown-unknown.
+#
+# Both go through scripts/build-wasm.sh rather than calling wasm-pack directly. That script
+# defaults to the FULL terminal and verifies the emitted .wasm actually carries every gateable
+# command, so the published package cannot silently ship as trajectory-only. Embedders who want
+# a smaller module select their own subset with the same script -- see README.md's
+# "Trimming the WASM module".
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,10 +57,10 @@ command -v node >/dev/null 2>&1 || {
 }
 
 echo "==> building bundler target -> ${bundler_dir}/"
-wasm-pack build --target bundler --no-default-features --out-dir "$bundler_dir"
+./scripts/build-wasm.sh --preset full --target bundler --out-dir "$bundler_dir"
 
 echo "==> building web target -> ${web_dir}/"
-wasm-pack build --target web --no-default-features --out-dir "$web_dir"
+./scripts/build-wasm.sh --preset full --target web --out-dir "$web_dir"
 
 echo "==> post-processing ${bundler_dir}/package.json"
 node "$script_dir/build-npm-postprocess.mjs" "$repo_root/$bundler_dir/package.json" "ballistics-engine"

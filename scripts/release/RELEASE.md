@@ -62,7 +62,7 @@ MIPS). This is non-negotiable: stale binaries have shipped-adjacent twice.
    deployed with `cd ~/projects/ballistics && firebase deploy --only hosting:tools`.
    Two real build artifacts live there, both of which must be REBUILT, not just relinked:
    - **Node WASM package** (`downloads/ballistics-wasm-node/` + its `.zip`):
-     `wasm-pack build --target nodejs --no-default-features --out-dir /tmp/wasm-node-X.Y.Z`,
+     `scripts/build-wasm.sh --target nodejs --out-dir /tmp/wasm-node-X.Y.Z`,
      copy the five files over, re-zip. Smoke-test it with the site's OWN documented example
      before publishing — the API is a consuming builder, so every setter must be chained.
    - **Three BSD Python wheels** (FreeBSD/OpenBSD/NetBSD x86_64): PyPI cannot host these, so
@@ -105,8 +105,12 @@ MIPS). This is non-negotiable: stale binaries have shipped-adjacent twice.
 - build-server: run ON .27, `python3` not `python`, 1800 s docker timeout falsely
   fails the ~37 min emulated aarch64 build (artifact is still good + reproducible).
 - K3S: make targets only; never co-schedule host builds on orangepi5-max.
-- wasm-pack needs `--no-default-features`; firebase project is `ballistics-rs`
-  (the engine CLAUDE.md's ballistics-buddy reference is stale).
+- Build WASM through `scripts/build-wasm.sh`, never `wasm-pack` directly. It defaults to
+  the full terminal and verifies the emitted .wasm carries every gateable command. Built
+  by hand you must pass `--no-default-features` AND `-- --features wasm-terminal`, and
+  omitting the second ships a terminal with only `trajectory` and `version` — it builds,
+  deploys, and passes the badge check, then fails on the first `zero`. Firebase project
+  is `ballistics-rs` (the engine CLAUDE.md's ballistics-buddy reference is stale).
 - Registry front pages cache-lag: verify via index.crates.io, PyPI /simple/,
   and the RubyGems JSON API only.
 - Hermetic tests: no $HOME, no network. A network-dependent test failed CI ON the

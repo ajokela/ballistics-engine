@@ -78,6 +78,48 @@ bridge = []
 # one binary (e.g. the differential fuzz target) must turn it off on the extra edge, since the
 # no_mangle symbols would otherwise collide.
 ffi = []
+# --- WASM terminal command surface (src/wasm.rs) ---
+# Each feature gates one top-level command of the browser terminal (`WasmBallistics::
+# run_command`) plus that command's help text and its exclusive helpers. The `trajectory`
+# command and the `Calculator` API are UNGATED — `Calculator` builds a `trajectory`
+# command line internally, so it works with every one of these turned off.
+#
+# NOTE ON POLARITY: these are deliberately NOT in `default`. Every wasm32 build passes
+# `--no-default-features` (the default `pdf`/`online` features don't compile for wasm32),
+# so a default-on gate would be silently dropped from exactly the build it's meant to
+# configure. The full terminal is `--features wasm-terminal`; see scripts/build-npm.sh
+# and scripts/release/deploy-wasm.sh.
+wasm-zero = []
+wasm-lead = []
+# Includes the `--wez` sweep sub-mode (Weapon Employment Zone), which has no separate gate:
+# it is reachable only as a flag on `monte-carlo`.
+wasm-monte-carlo = []
+# `true-velocity` + `true-wind`: the two observed-data back-solvers share their result
+# formatters, so they gate together.
+wasm-truing = []
+wasm-estimate-bc = []
+wasm-bc-convert = []
+wasm-drag-curve = []
+wasm-reticle = []
+wasm-powder = []
+wasm-recoil = []
+wasm-power-factor = []
+# Everything the ballistics.sh browser terminal ships. This is what the WASM build scripts
+# pass; consumers of the `Calculator` API alone need none of it.
+wasm-terminal = [
+    "wasm-zero",
+    "wasm-lead",
+    "wasm-monte-carlo",
+    "wasm-truing",
+    "wasm-estimate-bc",
+    "wasm-bc-convert",
+    "wasm-drag-curve",
+    "wasm-reticle",
+    "wasm-powder",
+    "wasm-recoil",
+    "wasm-power-factor",
+]
+
 # MBA-1318: gate the golden-reference physics validation harness (tests/golden_physics.rs).
 # Non-default so the normal `cargo test` build stays fast and dependency-free; the harness
 # uses only serde/serde_json, which are already core dependencies.

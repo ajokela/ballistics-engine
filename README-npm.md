@@ -10,6 +10,9 @@ Built with `wasm-pack` and `--no-default-features` — the native crate's defaul
 features pull in dependencies that don't compile for `wasm32-unknown-unknown`, so the PDF dope-card
 export and the online BC-estimation API are not available from WASM.
 
+If you only use the `Calculator` API, you can rebuild this module without the terminal commands
+you never call and cut it roughly in half — see **Size** under [Caveats](#caveats).
+
 > This package is built from `pkg/` (the `wasm-pack --target bundler` output) via
 > `scripts/build-npm.sh` in the source repo. The same script also produces a `pkg-web/` build
 > (`--target web`) for use without a bundler — see "Browser without a bundler" below.
@@ -105,12 +108,34 @@ console.log(calc.runCommand('trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-r
 ```
 
 If you need a CommonJS (`require()`) Node build, generate one yourself:
-`wasm-pack build --target nodejs --no-default-features`.
+`scripts/build-wasm.sh --target nodejs` (add `--preset slim` for a trajectory-only module —
+see **Size** under Caveats).
 
 ## Caveats
 
-- **Size**: the `.wasm` binary is roughly 430 KB (about 175 KB gzipped). It is not code-split or
-  lazily loaded — the whole engine loads up front.
+- **Size**: this package ships the full command surface — 918 KB raw, 345 KB gzipped, 274 KB
+  brotli (measured on 0.33.2; decimal KB). It is not code-split or lazily loaded, so the whole engine loads
+  up front.
+
+  **Most of that is the terminal, and you can drop it.** Every command except `trajectory` is
+  behind its own cargo feature, while the `Calculator` API is never gated. Rebuilding with only
+  what you call gets a trajectory-only module down to **483 KB raw / 191 KB gzipped** — 44% off
+  the wire — with byte-identical trajectory output:
+
+  ```bash
+  # Calculator + trajectory only
+  scripts/build-wasm.sh --preset slim --target bundler
+
+  # ...or keep a subset
+  scripts/build-wasm.sh --features wasm-zero,wasm-lead --target bundler
+  ```
+
+  The script verifies the module it produced actually matches the set you asked for.
+
+  The per-command features and their measured savings are tabulated under
+  "Trimming the WASM module" in the [source repo's
+  README](https://github.com/ajokela/ballistics-engine#trimming-the-wasm-module). The biggest
+  single win is `wasm-monte-carlo` (46 KB gzipped, and it takes the `--wez` sweep with it).
 - **Single-threaded**: no SIMD/threads assumptions; no `SharedArrayBuffer` or
   cross-origin-isolation (COOP/COEP) headers required.
 - **No filesystem/network**: table loaders (`loadDragTable`, `loadBc5dTable`) and any file-based
@@ -118,6 +143,18 @@ If you need a CommonJS (`require()`) Node build, generate one yourself:
   `loadDragTable` above.
 - **`pdf`/`online` features are unavailable**: this build excludes them (see above), so
   PDF dope-card export and the online BC-estimation API are not part of the WASM surface.
+- **Solves stop at ground impact.** The trajectory ends where the projectile reaches the ground
+  plane, which sits `boreHeight` below the muzzle and defaults to 60 in (5 ft) — for a typical
+  .308 that is around 516 yd. `calculateTrajectory(1000)` on such a setup returns the impact
+  point, not a 1000 yd point; the returned `range_yards` tells you which you got. Use
+  `.ignoreGroundImpact(true)` to solve to the requested range regardless, or
+  `.setBoreHeight(inches)` to model a genuinely higher firing position:
+
+  ```js
+  new Calculator().setBC(0.243).setVelocity(2700).setDragModel('G7')
+    .setZeroRange(100).ignoreGroundImpact(true)
+    .calculateTrajectory(1000);          // reaches 1000 yd
+  ```
 - Full API surface (including the `Calculator` builder class) is documented in the bundled
   `.d.ts`; the full CLI flag reference `runCommand` accepts is documented in the source repo's
   `CLI_USAGE.md`.

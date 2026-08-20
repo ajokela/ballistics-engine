@@ -673,7 +673,9 @@ scripts/build-npm.sh
 
 This builds two `wasm-bindgen` targets, both with `--no-default-features` (the default
 `pdf`/`online` features pull in `printpdf`/`ureq`+`ring`, which do not compile for
-`wasm32-unknown-unknown` — see "Updating the WASM Module" in `CLAUDE.md`):
+`wasm32-unknown-unknown`) plus
+`--features wasm-terminal` (the browser terminal's command set — see
+[Trimming the WASM module](#trimming-the-wasm-module)):
 
 - **`pkg/`** — `--target bundler`, the package meant for `npm publish`. Consumed via a native
   `.wasm` ES import by bundlers that understand it (webpack with `experiments.asyncWebAssembly`,
@@ -688,6 +690,87 @@ output into one package.json via manual `exports` conditions isn't something `wa
 or tests for you — see the comment header of `scripts/build-npm.sh` for the full reasoning. A
 single bundler-target package as the published npm artifact, with the web build documented
 separately, is the ecosystem-standard shape for `wasm-bindgen` crates on npm.
+
+### Trimming the WASM module
+
+The published module carries two independent surfaces: the **`Calculator`** builder API
+(`setBC`, `setDragModel`, `setWind`, `enableSpinDrift`, `enableCoriolis`, `calculateTrajectory`,
+`getFullTrajectory`, …) and the **browser terminal** (`WasmBallistics.runCommand`) that powers
+ballistics.sh. An app that only solves trajectories pays for the terminal's other twelve
+commands, which is most of the binary.
+
+Each non-trajectory command sits behind its own cargo feature, so you can select the subset you
+actually call. `trajectory`, `version`, and the whole `Calculator` API are **never** gated —
+`Calculator` composes a `trajectory` command line internally, so it keeps working with every
+feature below turned off.
+
+Build through `scripts/build-wasm.sh`, which is the one entry point every WASM build uses —
+the ballistics.rs deploy and `build-npm.sh` included:
+
+```bash
+# Everything. Also what you get with no arguments at all — the default is deliberately the
+# complete terminal, so a forgotten flag can never silently ship a stripped module.
+scripts/build-wasm.sh
+
+# Trajectory only — the Calculator API and nothing else
+scripts/build-wasm.sh --preset slim
+
+# À la carte
+scripts/build-wasm.sh --features wasm-zero,wasm-lead
+
+# --target and --out-dir pass through; so does the environment
+CARGO_PROFILE_RELEASE_OPT_LEVEL=z scripts/build-wasm.sh --target nodejs --out-dir /tmp/pkg
+```
+
+After every build the script **verifies the artifact against the preset it was asked for** —
+it reads the emitted `.wasm` and checks that exactly the promised commands are present, failing
+the build otherwise. `--preset full` expects all twelve regardless of how the feature list was
+computed, so a dropped flag is a hard error rather than a terminal that deploys cleanly and
+then answers `Unknown command` to everything but `trajectory`.
+
+If you invoke `wasm-pack` directly instead, note the bare `--`: it forwards only post-`--`
+arguments to cargo, so `--features` placed before it is consumed as an (invalid) `wasm-pack`
+flag.
+
+Measured on 0.33.2, `--target web`, default release profile (`opt-level = 3`, LTO), against the
+full build's 918 KB raw / 345 KB gzip (all sizes decimal KB):
+
+| feature | command(s) removed | raw | gzip |
+|---|---|---:|---:|
+| `wasm-monte-carlo` | `monte-carlo`, including its `--wez` sweep | 115 KB | 46 KB |
+| `wasm-truing` | `true-velocity`, `true-wind` | 92 KB | 31 KB |
+| `wasm-bc-convert` | `bc-convert` | 65 KB | 22 KB |
+| `wasm-reticle` | `reticle` | 55 KB | 21 KB |
+| `wasm-lead` | `lead` | 21 KB | 7 KB |
+| `wasm-powder` | `powder` | 17 KB | 6 KB |
+| `wasm-estimate-bc` | `estimate-bc` | 17 KB | 7 KB |
+| `wasm-zero` | `zero` | 15 KB | 4 KB |
+| `wasm-recoil` | `recoil` | 12 KB | 3 KB |
+| `wasm-power-factor` | `power-factor` | 11 KB | 4 KB |
+| `wasm-drag-curve` | `drag-curve` | 7 KB | 3 KB |
+| **all of the above** | **`Calculator` + `trajectory` only** | **434 KB** | **153 KB** |
+
+Each row is that feature's marginal cost, measured by dropping it from the full set. The
+commands share almost nothing, so the rows are close to additive: they sum to 427 KB raw /
+153 KB gzip against a measured all-removed saving of 434 KB / 153 KB — pick any subset and the
+rows add up. A trajectory-only module is **483,496 bytes raw, 191,421 gzip, 154,797 brotli**,
+against 917,924 / 344,592 / 273,503 for the full build — 44% off the wire.
+
+Splitting the help text into per-command chunks costs the full build about 3 KB raw / 1 KB
+gzipped (35 `push_str` calls where there was one literal). That is the price of the table
+above; every configuration that drops a command is far ahead.
+
+Removing a command does not change any number the remaining ones produce: the full-terminal
+build is byte-identical to an ungated build across every command, and `Calculator` output is
+byte-identical between the full and trajectory-only builds. A command compiled out reports
+`Unknown command`, and the `help` text lists only what is actually present.
+
+Two things are *not* separable, because they are not separate to begin with:
+
+- **`--wez`** is a flag on `monte-carlo`, not a command, so it leaves with `wasm-monte-carlo`.
+- **`explain`, `error-budget`, `tolerance`, `dial-plan`, `adaptive-card`** (0.33.x
+  decision-support) are native-CLI-only — they were never wired into the WASM dispatch, and
+  dead-code elimination already keeps them out of the module. There is nothing to remove.
 
 The script also post-processes each `package.json` (name, description, license, repository,
 keywords, and the `files` list — including an `LICENSE-APACHE` entry `wasm-pack` itself omits even
