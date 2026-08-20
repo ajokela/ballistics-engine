@@ -293,7 +293,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   material is not part of the engine and has been withdrawn; `data/validation/` again
   contains only golden-physics case files.
 
-## [0.33.1] - 2026-08-17
+## [0.33.1] - 2026-08-17 — WITHDRAWN
+
+**This release was withdrawn and is no longer available from crates.io.** It was
+published with files that should never have been packaged, using `--allow-dirty` to
+override the check that would have stopped it. Do not attempt to install it.
+
+Nothing below is lost: every change in this section ships unchanged from **0.33.2**
+onward, so 0.33.2 or later is the version to use. `scripts/release/prepublish-check.sh`
+was added in response and now gates every publish on a pristine working tree, a HEAD at
+the release tag, and a pinned packaged-file manifest.
 
 ### Added
 - **G1/G7 ballistic-coefficient drag-family conversion** (MBA-1375): the new `bc-convert`
