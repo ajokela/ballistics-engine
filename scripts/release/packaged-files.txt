@@ -1,6 +1,9 @@
 .cargo_vcs_info.json
+.coderabbit.yaml
 .gitattributes
+.githooks/pre-commit
 .gitignore
+.sensitive-patterns
 benches/trajectory_bench.rs
 Cargo.lock
 Cargo.toml
@@ -70,6 +73,7 @@ src/bc_table_download.rs
 src/bc_table.rs
 src/bridge/ffi.rs
 src/bridge/mod.rs
+src/card_service.rs
 src/card.rs
 src/cli_api.rs
 src/cluster_bc.rs
@@ -101,9 +105,11 @@ src/pitch_damping.rs
 src/power_factor.rs
 src/precession_nutation.rs
 src/profile_import/a7p.rs
+src/profile_import/map.rs
 src/profile_import/md5.rs
 src/profile_import/mod.rs
 src/profile_import/wire.rs
+src/profile.rs
 src/recoil.rs
 src/request_roundtrip.rs
 src/reticle_import.rs
