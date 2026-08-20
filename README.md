@@ -760,6 +760,22 @@ Splitting the help text into per-command chunks costs the full build about 3 KB 
 gzipped (35 `push_str` calls where there was one literal). That is the price of the table
 above; every configuration that drops a command is far ahead.
 
+**The `.wasm` and the JS glue are a matched pair — replace both together.** `wasm-bindgen`
+generates the glue to match one specific module, and trimming genuinely changes the module's
+import list: dropping `wasm-monte-carlo` removes the last user of `rand`, so the slim `.wasm`
+no longer imports `crypto.getRandomValues` and the slim glue no longer supplies it. Ship a
+stale full `.wasm` against new slim glue and instantiation fails outright:
+
+```
+LinkError: WebAssembly.Instance(): Import #4 "./ballistics_engine_bg.js"
+  "__wbg_getRandomValues_..." function import requires a callable
+```
+
+The reverse pairing — slim `.wasm` with full glue — happens to load, because the extra import
+simply goes unused. Do not rely on that: it is a coincidence of which imports differ today, not
+a compatibility guarantee, and it will not hold for a different feature subset. Copy every file
+`build-wasm.sh` emits, from the same run, and clear any bundler cache that may hold the old one.
+
 Removing a command does not change any number the remaining ones produce: the full-terminal
 build is byte-identical to an ungated build across every command, and `Calculator` output is
 byte-identical between the full and trajectory-only builds. A command compiled out reports

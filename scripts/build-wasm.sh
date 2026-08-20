@@ -179,3 +179,9 @@ size=$(wc -c < "$wasm_file" | tr -d ' ')
 gz=$(gzip -9 -c "$wasm_file" | wc -c | tr -d ' ')
 echo "==> verified: ${#expected_headers[@]} gateable command section(s) present, ${#unexpected_headers[@]} correctly absent"
 echo "==> $wasm_file: $size bytes raw, $gz gzipped"
+# Trimming changes the module's IMPORT list, not just its size: dropping wasm-monte-carlo
+# removes the last user of `rand`, so the slim .wasm stops importing crypto.getRandomValues
+# and the generated glue stops supplying it. A stale .wasm against fresh glue then fails to
+# instantiate with a LinkError naming __wbg_getRandomValues. Say so on every build -- this
+# already cost an embedder a debugging session.
+echo "==> deploy ALL files in $built_dir together; the .wasm and its JS glue are a matched pair"
