@@ -10,7 +10,7 @@
 
 use std::error::Error;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cli_api::UnitSystem;
 use crate::constants::GRAINS_TO_KG;
@@ -24,7 +24,7 @@ use crate::{
 /// onto the engine's [`DragModel`] inside the solvers; unlike [`DragModel`] it
 /// deliberately offers only the two standard models the truing forward model
 /// supports.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum DragModelArg {
@@ -36,7 +36,7 @@ pub enum DragModelArg {
 /// `true-velocity`'s multi-observation joint calibration (MBA-1316). The
 /// historical single-observation path is always MIL, so `mil` is the default and
 /// leaves that path byte-identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum DropUnit {
@@ -924,7 +924,8 @@ pub struct TruingObservation {
 /// models one scalar G1/G7 coefficient: a velocity-banded BC schedule or custom
 /// Mach/Cd deck does not have a single BC parameter to identify and must not be
 /// silently reduced to one.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TruingModelInputsV1 {
     /// Nominal muzzle velocity about which a plan is designed, in feet/second.
     pub muzzle_velocity_fps: f64,

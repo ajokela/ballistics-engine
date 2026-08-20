@@ -11,7 +11,7 @@
 //! the optimum is on a parameter bound, but intervals and predictive bands are
 //! replaced by a structured approximation failure.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::truing::{
@@ -56,7 +56,8 @@ const MAP_OBJECTIVE_MAX_POLL_EVALUATIONS: usize = 1_024;
 /// range is always in internal yards.  Repeated ranges are accepted: repeated
 /// shots tighten the same parameter combination and permit chi-square
 /// consistency checks, but they do not, by themselves, separate MV from BC.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WeightedTruingObservationV1 {
     pub range_yd: f64,
     pub drop: f64,
@@ -64,7 +65,8 @@ pub struct WeightedTruingObservationV1 {
 }
 
 /// An explicit independent normal prior, in the parameter's physical units.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NormalPriorV1 {
     pub mean: f64,
     pub sigma: f64,
@@ -74,14 +76,16 @@ pub struct NormalPriorV1 {
 ///
 /// There are no hidden priors.  `None` means that parameter contributes no
 /// prior precision or penalty.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TruingPriorsV1 {
     pub muzzle_velocity_fps: Option<NormalPriorV1>,
     pub ballistic_coefficient: Option<NormalPriorV1>,
 }
 
 /// A range at which to propagate parameter uncertainty into predicted drop.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TruingPredictionRequestV1 {
     pub range_yd: f64,
     /// Optional absolute measurement sigma in the request's drop unit.  When
@@ -91,7 +95,8 @@ pub struct TruingPredictionRequestV1 {
 }
 
 /// Complete request for weighted joint MV+BC MAP truing.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UncertaintyTruingRequestV1 {
     pub model: TruingModelInputsV1,
     pub drop_unit: DropUnit,
@@ -1231,4 +1236,36 @@ fn unreachable_range_error(range_yd: f64) -> UncertaintyTruingErrorV1 {
     UncertaintyTruingErrorV1::ForwardModel(format!(
         "trajectory did not reach requested range {range_yd:.3} yd"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_deserializes_from_the_wire_and_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "model": {
+                "muzzle_velocity_fps": 2700.0, "ballistic_coefficient": 0.243,
+                "drag_model": "g7", "mass_gr": 168.0, "diameter_in": 0.308,
+                "zero_distance_yd": 100.0, "sight_height_in": 2.0,
+                "temperature_f": 59.0, "pressure_inhg": 29.92,
+                "humidity_pct": 50.0, "altitude_ft": 0.0
+            },
+            "drop_unit": "mil",
+            "observations": [{"range_yd": 600.0, "drop": 4.2, "sigma": 0.1}],
+            "priors": {"muzzle_velocity_fps": {"mean": 2700.0, "sigma": 15.0},
+                       "ballistic_coefficient": null},
+            "predictions": [{"range_yd": 800.0, "future_observation_sigma": null}]
+        });
+        let req: UncertaintyTruingRequestV1 =
+            serde_json::from_value(json.clone()).expect("valid request deserializes");
+        assert_eq!(req.observations.len(), 1);
+        assert_eq!(req.model.muzzle_velocity_fps, 2700.0);
+
+        // A misspelled field must be rejected, not silently dropped.
+        let mut bad = json;
+        bad["observations"][0]["sigmaa"] = serde_json::json!(0.2);
+        assert!(serde_json::from_value::<UncertaintyTruingRequestV1>(bad).is_err());
+    }
 }
