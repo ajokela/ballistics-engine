@@ -41,7 +41,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli_api::TrajectoryResult;
+use crate::cli_api::{TrajectoryPoint, TrajectoryResult};
 
 /// Upper bound (exclusive) of the Mach domain a [`DsfPoint`] may describe. Observations at
 /// or above this Mach belong to muzzle-velocity truing, not the DSF table; it doubles as
@@ -301,6 +301,108 @@ pub fn apply_dsf(result: &mut TrajectoryResult, table: &DsfTable) {
             sample.drop_m *= table.factor_at(mach);
         }
     }
+}
+
+/// Linearly interpolate `(position.y, velocity_magnitude)` at horizontal distance
+/// `target_dist_m` from a solved trajectory's points (`position.x` = downrange). Mirrors
+/// `cli_api::fit_value_at`'s interpolation (private to that module), but resolves both
+/// quantities from the same bracketing pair in one pass since the `dsf` verb needs drop
+/// AND Mach at the identical range. `None` if the trajectory never reaches `target_dist_m`.
+pub fn interpolate_position_and_velocity(
+    points: &[TrajectoryPoint],
+    target_dist_m: f64,
+) -> Option<(f64, f64)> {
+    for i in 0..points.len() {
+        if points[i].position.x >= target_dist_m {
+            if i == 0 {
+                return Some((points[0].position.y, points[0].velocity_magnitude));
+            }
+            let p1 = &points[i - 1];
+            let p2 = &points[i];
+            let dx = p2.position.x - p1.position.x;
+            if dx.abs() < 1e-9 {
+                return Some((p2.position.y, p2.velocity_magnitude));
+            }
+            let t = (target_dist_m - p1.position.x) / dx;
+            let y = p1.position.y + t * (p2.position.y - p1.position.y);
+            let v = p1.velocity_magnitude + t * (p2.velocity_magnitude - p1.velocity_magnitude);
+            return Some((y, v));
+        }
+    }
+    None
+}
+
+/// Whether an observation range is beyond 90% of the trajectory's solved max range —
+/// past this point the solution's reliability degrades (short-range extrapolation of a
+/// trajectory that terminated, e.g., at ground impact just past the observation).
+///
+/// Moved out of `main.rs` alongside [`dsf_observation_warrants_90pct_warning`] (MBA-1357
+/// Task 8): it isn't one of that task's four named helpers, but
+/// `dsf_observation_warrants_90pct_warning` calls it, and a library function cannot call a
+/// private binary-crate function, so it had to move too. Verbatim, unchanged.
+pub fn dsf_observation_beyond_90pct(range_m: f64, solved_max_range_m: f64) -> bool {
+    solved_max_range_m > 0.0 && range_m > 0.9 * solved_max_range_m
+}
+
+/// The downrange distance (meters) where the trajectory's station Mach first drops
+/// below 1.0 (the "crossed_subsonic" transition), linearly interpolated between the
+/// bracketing solved points.
+///
+/// Mirrors `MachTransitionTracker::record_downward_crossings`'s `crossed_subsonic` event
+/// (`cli_api.rs` ~1744), reimplemented here because that tracker is a private
+/// `cli_api.rs` type, and the crossing distances it collects (`transonic_distances`)
+/// aren't retained on `TrajectoryResult` itself — they're only consumed to flag
+/// `TrajectorySample`s (`trajectory_sampling::add_trajectory_flags`), which requires
+/// trajectory sampling to be enabled. `solve_profile_for_dsf` solves with sampling off
+/// (it only needs `result.points`), so this recomputes the same crossing from the plain
+/// points array using the identical Mach divisor `apply_dsf` and the observation path
+/// use (`velocity_magnitude / station_speed_of_sound_mps`).
+///
+/// Returns `None` if the trajectory never goes subsonic within the solved points (still
+/// supersonic/transonic at the last point, an empty/degenerate solve, or a non-finite
+/// station speed of sound).
+pub fn mach_1_crossing_range_m(result: &TrajectoryResult) -> Option<f64> {
+    let sos = result.station_speed_of_sound_mps;
+    if sos <= 0.0 || !sos.is_finite() {
+        return None;
+    }
+
+    let mut previous: Option<(f64, f64)> = None; // (downrange_m, mach)
+    for point in &result.points {
+        let mach = point.velocity_magnitude / sos;
+        if let Some((prev_x, prev_mach)) = previous {
+            if prev_mach >= 1.0 && mach < 1.0 {
+                let denom = prev_mach - mach;
+                if denom.abs() < f64::EPSILON {
+                    return Some(point.position.x);
+                }
+                let t = (prev_mach - 1.0) / denom;
+                return Some(prev_x + t * (point.position.x - prev_x));
+            }
+        }
+        previous = Some((point.position.x, mach));
+    }
+    None
+}
+
+/// Whether the `dsf` verb's "solution reliability degrades" warning should fire.
+///
+/// Two independent gates, BOTH required (MBA-1357 Task 2 review, Critical #1): a solve
+/// envelope sized to comfortably exceed a typical observation made the 90%-of-solved-
+/// range check alone fire unconditionally, since the envelope tracked the observation
+/// itself rather than the profile's own real reach. Requiring the observation to also be
+/// beyond the trajectory's Mach-1.0 crossing ties the warning to an actual downrange-
+/// position judgment (deep into the subsonic regime the DSF table's low end targets),
+/// not merely wherever the caller happened to stop solving.
+pub fn dsf_observation_warrants_90pct_warning(
+    range_m: f64,
+    mach_1_crossing_range_m: Option<f64>,
+    solved_max_range_m: f64,
+) -> bool {
+    let beyond_mach_1_crossing = mach_1_crossing_range_m
+        .map(|crossing_m| range_m > crossing_m)
+        .unwrap_or(false);
+    beyond_mach_1_crossing && dsf_observation_beyond_90pct(range_m, solved_max_range_m)
 }
 
 #[cfg(test)]

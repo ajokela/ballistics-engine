@@ -6530,35 +6530,6 @@ fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
     Ok((value, unit))
 }
 
-/// Linearly interpolate `(position.y, velocity_magnitude)` at horizontal distance
-/// `target_dist_m` from a solved trajectory's points (`position.x` = downrange). Mirrors
-/// `cli_api::fit_value_at`'s interpolation (private to that module), but resolves both
-/// quantities from the same bracketing pair in one pass since the `dsf` verb needs drop
-/// AND Mach at the identical range. `None` if the trajectory never reaches `target_dist_m`.
-fn interpolate_position_and_velocity(
-    points: &[ballistics_engine::cli_api::TrajectoryPoint],
-    target_dist_m: f64,
-) -> Option<(f64, f64)> {
-    for i in 0..points.len() {
-        if points[i].position.x >= target_dist_m {
-            if i == 0 {
-                return Some((points[0].position.y, points[0].velocity_magnitude));
-            }
-            let p1 = &points[i - 1];
-            let p2 = &points[i];
-            let dx = p2.position.x - p1.position.x;
-            if dx.abs() < 1e-9 {
-                return Some((p2.position.y, p2.velocity_magnitude));
-            }
-            let t = (target_dist_m - p1.position.x) / dx;
-            let y = p1.position.y + t * (p2.position.y - p1.position.y);
-            let v = p1.velocity_magnitude + t * (p2.velocity_magnitude - p1.velocity_magnitude);
-            return Some((y, v));
-        }
-    }
-    None
-}
-
 /// Solve a saved profile's OWN trajectory for the `dsf` command's derivation step, using
 /// only the profile's stored fields — no CLI overrides, since `dsf` exposes none of the
 /// physics flags (`--saved-profile`/`--range`/`--observed-drop` are its entire surface).
@@ -6572,8 +6543,9 @@ fn interpolate_position_and_velocity(
 /// `profile` must already be converted to `units` (i.e. loaded via
 /// `load_profile_for_units`). `max_range_m` should exceed the target observation range so
 /// the solved points bracket it (a short solve, e.g. ground impact before the requested
-/// range, is reported by the caller via [`interpolate_position_and_velocity`] returning
-/// `None`, not by this function).
+/// range, is reported by the caller via
+/// [`ballistics_engine::truing_dsf::interpolate_position_and_velocity`] returning `None`,
+/// not by this function).
 fn solve_profile_for_dsf(
     profile: &ProfileData,
     units: UnitSystem,
@@ -6795,74 +6767,6 @@ fn dsf_supersonic_error(mach: f64) -> String {
         "error: observation is supersonic (Mach {mach:.2}); calibrate muzzle velocity first \
          (true-velocity), then collect DSF points at Mach <= 1.2"
     )
-}
-
-/// Whether an observation range is beyond 90% of the trajectory's solved max range —
-/// past this point the solution's reliability degrades (short-range extrapolation of a
-/// trajectory that terminated, e.g., at ground impact just past the observation).
-fn dsf_observation_beyond_90pct(range_m: f64, solved_max_range_m: f64) -> bool {
-    solved_max_range_m > 0.0 && range_m > 0.9 * solved_max_range_m
-}
-
-/// The downrange distance (meters) where the trajectory's station Mach first drops
-/// below 1.0 (the "crossed_subsonic" transition), linearly interpolated between the
-/// bracketing solved points.
-///
-/// Mirrors `MachTransitionTracker::record_downward_crossings`'s `crossed_subsonic` event
-/// (`cli_api.rs` ~1744), reimplemented here because that tracker is a private
-/// `cli_api.rs` type, and the crossing distances it collects (`transonic_distances`)
-/// aren't retained on `TrajectoryResult` itself — they're only consumed to flag
-/// `TrajectorySample`s (`trajectory_sampling::add_trajectory_flags`), which requires
-/// trajectory sampling to be enabled. `solve_profile_for_dsf` solves with sampling off
-/// (it only needs `result.points`), so this recomputes the same crossing from the plain
-/// points array using the identical Mach divisor `apply_dsf` and the observation path
-/// use (`velocity_magnitude / station_speed_of_sound_mps`).
-///
-/// Returns `None` if the trajectory never goes subsonic within the solved points (still
-/// supersonic/transonic at the last point, an empty/degenerate solve, or a non-finite
-/// station speed of sound).
-fn mach_1_crossing_range_m(result: &ballistics_engine::cli_api::TrajectoryResult) -> Option<f64> {
-    let sos = result.station_speed_of_sound_mps;
-    if sos <= 0.0 || !sos.is_finite() {
-        return None;
-    }
-
-    let mut previous: Option<(f64, f64)> = None; // (downrange_m, mach)
-    for point in &result.points {
-        let mach = point.velocity_magnitude / sos;
-        if let Some((prev_x, prev_mach)) = previous {
-            if prev_mach >= 1.0 && mach < 1.0 {
-                let denom = prev_mach - mach;
-                if denom.abs() < f64::EPSILON {
-                    return Some(point.position.x);
-                }
-                let t = (prev_mach - 1.0) / denom;
-                return Some(prev_x + t * (point.position.x - prev_x));
-            }
-        }
-        previous = Some((point.position.x, mach));
-    }
-    None
-}
-
-/// Whether the `dsf` verb's "solution reliability degrades" warning should fire.
-///
-/// Two independent gates, BOTH required (MBA-1357 Task 2 review, Critical #1): a solve
-/// envelope sized to comfortably exceed a typical observation made the 90%-of-solved-
-/// range check alone fire unconditionally, since the envelope tracked the observation
-/// itself rather than the profile's own real reach. Requiring the observation to also be
-/// beyond the trajectory's Mach-1.0 crossing ties the warning to an actual downrange-
-/// position judgment (deep into the subsonic regime the DSF table's low end targets),
-/// not merely wherever the caller happened to stop solving.
-fn dsf_observation_warrants_90pct_warning(
-    range_m: f64,
-    mach_1_crossing_range_m: Option<f64>,
-    solved_max_range_m: f64,
-) -> bool {
-    let beyond_mach_1_crossing = mach_1_crossing_range_m
-        .map(|crossing_m| range_m > crossing_m)
-        .unwrap_or(false);
-    beyond_mach_1_crossing && dsf_observation_beyond_90pct(range_m, solved_max_range_m)
 }
 
 /// Exact text for the "observation beyond 90% of the solved range" warning.
@@ -10829,7 +10733,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
 
             let (position_y, velocity_mag) =
-                interpolate_position_and_velocity(&result.points, range_m).unwrap_or_else(|| {
+                ballistics_engine::truing_dsf::interpolate_position_and_velocity(&result.points, range_m).unwrap_or_else(|| {
                     let solved_range_display =
                         UnitConverter::distance_from_metric(result.max_range, cli.units);
                     eprintln!(
@@ -10856,8 +10760,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Gate 2: warn when the observation is BOTH beyond the trajectory's Mach-1.0
             // crossing AND beyond 90% of the solved max range (MBA-1357 Task 2 review,
             // Critical #1 — a compound condition, not the 90% ratio alone).
-            let crossing_m = mach_1_crossing_range_m(&result);
-            if dsf_observation_warrants_90pct_warning(range_m, crossing_m, result.max_range) {
+            let crossing_m = ballistics_engine::truing_dsf::mach_1_crossing_range_m(&result);
+            if ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(range_m, crossing_m, result.max_range) {
                 eprintln!("{}", dsf_beyond_90pct_warning(range, dist_unit));
             }
 
@@ -22776,11 +22680,11 @@ mod dsf_cli_tests {
 
     #[test]
     fn observation_beyond_90pct_boundary() {
-        assert!(!dsf_observation_beyond_90pct(899.9, 1000.0));
-        assert!(!dsf_observation_beyond_90pct(900.0, 1000.0)); // exactly 90%: not beyond
-        assert!(dsf_observation_beyond_90pct(900.1, 1000.0));
-        assert!(dsf_observation_beyond_90pct(1000.0, 1000.0));
-        assert!(!dsf_observation_beyond_90pct(500.0, 0.0)); // degenerate solved range
+        assert!(!ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(899.9, 1000.0));
+        assert!(!ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(900.0, 1000.0)); // exactly 90%: not beyond
+        assert!(ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(900.1, 1000.0));
+        assert!(ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(1000.0, 1000.0));
+        assert!(!ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(500.0, 0.0)); // degenerate solved range
     }
 
     // ---- mach_1_crossing_range_m / dsf_observation_warrants_90pct_warning (Critical #1) ----
@@ -22838,7 +22742,7 @@ mod dsf_cli_tests {
             sos,
             500.0,
         );
-        let crossing = mach_1_crossing_range_m(&result).expect("must find a crossing");
+        let crossing = ballistics_engine::truing_dsf::mach_1_crossing_range_m(&result).expect("must find a crossing");
         assert!((crossing - (100.0 + 100.0 / 3.0)).abs() < 1e-6, "{crossing}");
     }
 
@@ -22851,26 +22755,26 @@ mod dsf_cli_tests {
             sos,
             500.0,
         );
-        assert!(mach_1_crossing_range_m(&result).is_none());
+        assert!(ballistics_engine::truing_dsf::mach_1_crossing_range_m(&result).is_none());
     }
 
     #[test]
     fn mach_1_crossing_range_m_none_for_degenerate_station_speed_of_sound() {
         let result = traj_result_fixture(vec![traj_point(0.0, 300.0)], 0.0, 500.0);
-        assert!(mach_1_crossing_range_m(&result).is_none());
+        assert!(ballistics_engine::truing_dsf::mach_1_crossing_range_m(&result).is_none());
     }
 
     #[test]
     fn warrants_90pct_warning_requires_both_gates() {
         // Beyond 90% of range but still upstream of (or with no) Mach-1.0 crossing: no warning.
-        assert!(!dsf_observation_warrants_90pct_warning(950.0, None, 1000.0));
-        assert!(!dsf_observation_warrants_90pct_warning(950.0, Some(960.0), 1000.0));
+        assert!(!ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(950.0, None, 1000.0));
+        assert!(!ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(950.0, Some(960.0), 1000.0));
 
         // Beyond the crossing but NOT beyond 90% of range: no warning.
-        assert!(!dsf_observation_warrants_90pct_warning(500.0, Some(400.0), 1000.0));
+        assert!(!ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(500.0, Some(400.0), 1000.0));
 
         // Beyond both: warns.
-        assert!(dsf_observation_warrants_90pct_warning(950.0, Some(400.0), 1000.0));
+        assert!(ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(950.0, Some(400.0), 1000.0));
     }
 
     #[test]
@@ -22917,7 +22821,7 @@ mod dsf_cli_tests {
     #[test]
     fn interpolates_linearly_between_bracketing_points() {
         let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
-        let (y, v) = interpolate_position_and_velocity(&points, 50.0).unwrap();
+        let (y, v) = ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 50.0).unwrap();
         assert!((y - 0.75).abs() < 1e-9);
         assert!((v - 750.0).abs() < 1e-9);
     }
@@ -22925,13 +22829,13 @@ mod dsf_cli_tests {
     #[test]
     fn interpolation_returns_none_past_the_last_point() {
         let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
-        assert!(interpolate_position_and_velocity(&points, 200.0).is_none());
+        assert!(ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 200.0).is_none());
     }
 
     #[test]
     fn interpolation_at_or_before_the_first_point_returns_its_own_values() {
         let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
-        let (y, v) = interpolate_position_and_velocity(&points, 0.0).unwrap();
+        let (y, v) = ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 0.0).unwrap();
         assert_eq!(y, 1.0);
         assert_eq!(v, 800.0);
     }
