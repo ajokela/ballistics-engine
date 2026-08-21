@@ -79,3 +79,27 @@ fn true_fit_rejects_a_null_payload_and_unknown_fields() {
     }));
     assert_eq!(v["error"]["code"], "invalid_request");
 }
+
+#[test]
+fn true_wind_fits_a_crosswind_from_an_observed_miss() {
+    let v = call("true.wind", json!({
+        "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
+        "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
+        "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
+        "sight_height_in": 2.0, "temperature_f": 59.0, "pressure_inhg": 29.92,
+        "humidity_pct": 50.0, "altitude_ft": 0.0,
+        "twist": {"rate_in": 11.0, "right_hand": true},
+        "earth": null, "called_crosswind_mph": null
+    }));
+    assert_eq!(v["ok"], true, "response was {v}");
+    assert!(v["result"]["mean_crosswind_mph"].is_number());
+    assert_eq!(v["result"]["solutions"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn true_wind_is_advertised_in_capabilities() {
+    let v = call("meta.capabilities", json!(null));
+    let names: Vec<&str> = v["result"]["commands"]
+        .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+    assert!(names.contains(&"true.wind"), "capabilities were {names:?}");
+}
