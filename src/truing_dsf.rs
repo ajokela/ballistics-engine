@@ -481,15 +481,25 @@ pub struct DsfSolveInputs {
     /// `None` is ICAO (matches every profile saved before this field existed). A real,
     /// non-cosmetic ~1.8% retardation difference when Army Standard Metro.
     pub bc_reference_standard: Option<BcReferenceStandard>,
-    /// Velocity-banded BC schedule (MBA-1323 Phase 2). `None` uses the scalar
-    /// `ballistic_coefficient` alone. When `Some` and non-empty, this REPLACES the scalar
-    /// BC for the solve — the solver's own segments-then-scalar precedence, same as the
-    /// profile path always used. No separate `use_bc_segments` bool: an empty/absent
-    /// schedule is a no-op regardless of such a flag (the solver gates on
-    /// `use_bc_segments && !segments.is_empty()`), and a populated schedule is honored
-    /// unconditionally once present, so the historical `profile.use_bc_segments` flag
-    /// could never actually suppress a populated one — carrying it here would be
-    /// redundant, not lossy.
+    /// The profile's own `use_bc_segments` opt-in flag (MBA-1357 Task 8 review round 2,
+    /// Finding: this is NOT redundant with `bc_segments.is_some()`, despite what an
+    /// earlier version of this doc comment claimed). `solve_for_dsf` ORs this with
+    /// `bc_segments.is_some()` (reproducing the historical
+    /// `profile.use_bc_segments.unwrap_or(false) || bc_segments_data.is_some()` exactly)
+    /// because the RK4 derivative path (`derivatives.rs`'s `get_bc_for_velocity` /
+    /// `estimate_bc_segments_for`) treats `use_bc_segments == true` with NO explicit
+    /// segments as an opt-in to AUTO-ESTIMATE a velocity-dependent BC curve from
+    /// diameter/mass/BC — a real drag-model change, not a no-op. Only the separate,
+    /// Mach-keyed gate in `cli_api.rs` (`use_bc_segments && !segments.is_empty()`) treats
+    /// an empty/absent table as inert; the derivative path does not. `profile save
+    /// --use-bc-segments` makes flag-true-with-no-array a real saved state, so this is
+    /// reachable, not theoretical.
+    pub use_bc_segments: bool,
+    /// Velocity-banded BC schedule (MBA-1323 Phase 2). `None`/empty falls through to
+    /// `use_bc_segments` above (auto-estimation if that's `true`, the scalar
+    /// `ballistic_coefficient` otherwise). When `Some` and non-empty, this REPLACES the
+    /// scalar BC for the solve unconditionally (the solver's segments-then-scalar
+    /// precedence), same as the profile path always used.
     pub bc_segments: Option<Vec<crate::BCSegmentData>>,
     /// Full Mach/Cd drag curve (MBA-1323 Phase 2, `.a7p` CUSTOM import). `None` uses
     /// `ballistic_coefficient`/`bc_segments` instead. When `Some`, replaces the BC model
@@ -508,7 +518,8 @@ impl From<&TruingModelInputsV1> for DsfSolveInputs {
     /// no profile-shaped extras reaches (Task 9's `true.dsf` bridge command). EXPLICIT
     /// bridge defaults — spelled out here because an app author needs to know what this
     /// assumes: **no wind, a level shot (0.0 shooting angle), no zero-POI bias, no
-    /// sight-mount offset, ICAO BC reference, no BC-segment schedule, no custom drag
+    /// sight-mount offset, ICAO BC reference, no BC-segment auto-estimation
+    /// (`use_bc_segments: false`), no explicit BC-segment schedule, no custom drag
     /// curve.** `zero_distance_yd` carries `inputs.zero_distance_yd` (mandatory on
     /// `TruingModelInputsV1`, so always `Some` here — never the "flat, no zero" case).
     fn from(inputs: &TruingModelInputsV1) -> Self {
@@ -530,6 +541,7 @@ impl From<&TruingModelInputsV1> for DsfSolveInputs {
             zero_poi_horizontal_m: None,
             sight_offset_lateral_m: None,
             bc_reference_standard: None,
+            use_bc_segments: false,
             bc_segments: None,
             custom_drag_table: None,
             zero_distance_yd: Some(inputs.zero_distance_yd),
@@ -592,7 +604,13 @@ pub fn solve_for_dsf(
         .bc_reference_standard
         .unwrap_or(BcReferenceStandard::Icao);
     let bc_segments_data = inputs.bc_segments.clone();
-    let use_bc_segments = bc_segments_data.is_some();
+    // MBA-1357 Task 8 review round 2: reproduces the historical
+    // profile.use_bc_segments.unwrap_or(false) || bc_segments_data.is_some() exactly — the
+    // OR matters because the RK4 derivative path auto-estimates a velocity-dependent BC
+    // curve when use_bc_segments is true even with no explicit segments (see
+    // DsfSolveInputs::use_bc_segments's doc comment); this is NOT simplifiable to
+    // bc_segments_data.is_some() alone.
+    let use_bc_segments = inputs.use_bc_segments || bc_segments_data.is_some();
 
     let wind = WindConditions {
         speed: wind_speed_m,

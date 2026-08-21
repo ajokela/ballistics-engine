@@ -6634,6 +6634,11 @@ fn solve_profile_for_dsf(
         // MBA-1396: honor a stored lateral sight-mount offset the same way.
         sight_offset_lateral_m: profile.sight_offset_lateral_m,
         bc_reference_standard,
+        // MBA-1357 Task 8 review round 2: the flag itself, independent of whether
+        // bc_segments is populated — solve_for_dsf ORs it with bc_segments.is_some(),
+        // reproducing the historical
+        // profile.use_bc_segments.unwrap_or(false) || bc_segments_data.is_some() exactly.
+        use_bc_segments: profile.use_bc_segments.unwrap_or(false),
         bc_segments,
         custom_drag_table,
         zero_distance_yd,
