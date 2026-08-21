@@ -41,7 +41,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli_api::{TrajectoryPoint, TrajectoryResult};
+use crate::cli_api::{
+    calculate_zero_angle_with_conditions, AtmosphericConditions, BallisticInputs,
+    BcReferenceStandard, DropsReference, TrajectoryPoint, TrajectoryResult, TrajectorySolver,
+    WindConditions,
+};
+use crate::truing::{fallback_bullet_length_m, DragModelArg, TruingModelInputsV1};
+use crate::DragModel;
 
 /// Upper bound (exclusive) of the Mach domain a [`DsfPoint`] may describe. Observations at
 /// or above this Mach belong to muzzle-velocity truing, not the DSF table; it doubles as
@@ -403,6 +409,176 @@ pub fn dsf_observation_warrants_90pct_warning(
         .map(|crossing_m| range_m > crossing_m)
         .unwrap_or(false);
     beyond_mach_1_crossing && dsf_observation_beyond_90pct(range_m, solved_max_range_m)
+}
+
+/// Solve a [`TruingModelInputsV1`]'s own trajectory for the `dsf` command's derivation step
+/// (MBA-1357 Task 8), given the model's scalar-BC inputs directly rather than a saved
+/// `Profile` — the JSON bridge cannot construct a `Profile`, and must not read one from
+/// disk, so it needs a solve entry point that takes plain values.
+///
+/// This is the library half of what was `main.rs`'s private `solve_profile_for_dsf`: the
+/// CLI keeps its saved-profile path by adapting a loaded `Profile` into a
+/// `TruingModelInputsV1` (see `main.rs`'s reshaped `solve_profile_for_dsf`) and delegating
+/// here. That adaptation necessarily drops every profile field this shared model has no
+/// slot for — wind speed/direction, a stored twist-rate override, a velocity-banded BC
+/// schedule, a custom Mach/Cd drag curve, sight-mount/zero-POI offsets, shooting angle, and
+/// a non-ICAO BC reference — the same fields every other truing command (`true-velocity`,
+/// `true-wind`, `plan-truing`) already builds this same model without. A profile that sets
+/// any of those solves differently through `dsf` after this change than before it.
+///
+/// `zero_distance` is the resolved zero distance in YARDS — the same imperial convention
+/// `inputs`'s own fields use (see its doc comment). Unlike the CLI's historical
+/// `Option<f64>` (an unconfigured profile solved flat, `muzzle_angle` left at 0.0), this is
+/// mandatory: every other truing command already requires a zero, and a caller supplying
+/// model inputs rather than a `Profile` has no "no zero configured" state to forward.
+///
+/// Advanced physics toggles this model has no field for (Magnus/Coriolis/spin-drift/
+/// aerodynamic-jump/wind-shear/pitch-damping/precession/powder-sensitivity/`cd_scale`) stay
+/// off/neutral — matching `solve_profile_for_dsf`'s own historical behaviour for every
+/// profile-only command (`come-ups`, `lead`, `mpbr`).
+pub fn solve_for_dsf(
+    inputs: &TruingModelInputsV1,
+    max_range_m: f64,
+    zero_distance: f64,
+) -> Result<TrajectoryResult, String> {
+    let velocity_m = inputs.muzzle_velocity_fps * 0.3048;
+    let mass_kg = inputs.mass_gr * crate::constants::GRAINS_TO_KG;
+    let diameter_m = inputs.diameter_in * 0.0254;
+    let sight_height_m = inputs.sight_height_in * 0.0254;
+    let bullet_length_m = fallback_bullet_length_m(diameter_m, mass_kg);
+
+    // Saved profiles predate the CLI's unified --bore-height flag and never stored one;
+    // solve_profile_for_dsf always fell back to this same constant (60 in) regardless of
+    // profile contents, so reusing it here is not a narrowing — it was already
+    // unconditional.
+    let bore_height_m = 60.0 * 0.0254;
+
+    let temperature_c = (inputs.temperature_f - 32.0) * 5.0 / 9.0;
+    let pressure_hpa = inputs.pressure_inhg * 33.8639;
+    let altitude_m = inputs.altitude_ft * 0.3048;
+
+    let drag_model = match inputs.drag_model {
+        DragModelArg::G1 => DragModel::G1,
+        DragModelArg::G7 => DragModel::G7,
+    };
+
+    let wind = WindConditions {
+        speed: 0.0,
+        direction: 0.0,
+        vertical_speed: 0.0,
+    };
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        // NOTE: matches solve_profile_for_dsf's (and run_trajectory's) own convention —
+        // the same raw (0-100) value feeds both AtmosphericConditions.humidity (percent,
+        // what the solve actually reads) and BallisticInputs.humidity below (nominally a
+        // 0-1 fraction per its own doc comment). Replicated rather than "fixed" — see
+        // that helper's own note; BallisticInputs.humidity is otherwise inert for a plain
+        // (non-Monte-Carlo) solve.
+        humidity: inputs.humidity_pct,
+        altitude: altitude_m,
+    };
+
+    let mut ballistic_inputs = BallisticInputs {
+        bc_value: inputs.ballistic_coefficient,
+        bc_type: drag_model,
+        bc_reference_standard: BcReferenceStandard::Icao,
+        bullet_mass: mass_kg,
+        muzzle_velocity: velocity_m,
+        bullet_diameter: diameter_m,
+        bullet_length: bullet_length_m,
+
+        muzzle_angle: 0.0,
+        target_distance: max_range_m,
+        azimuth_angle: 0.0,
+        shot_azimuth: 0.0,
+        shooting_angle: 0.0,
+        cant_angle: 0.0,
+        sight_height: sight_height_m,
+        sight_offset_lateral_m: 0.0,
+        muzzle_height: bore_height_m,
+        target_height: 0.0,
+        zero_poi_vertical_m: 0.0,
+        zero_poi_horizontal_m: 0.0,
+        // Ground-impact detection ON (0.0), matching solve_profile_for_dsf's override of
+        // the engine's own default (-100.0, effectively disabled) — the `dsf` command has
+        // no way to disable it.
+        ground_threshold: 0.0,
+
+        altitude: altitude_m,
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity: inputs.humidity_pct,
+        latitude: None,
+
+        wind_speed: 0.0,
+        wind_angle: 0.0,
+
+        twist_rate: crate::stability::default_twist_inches(diameter_m, mass_kg, velocity_m),
+        is_twist_right: true,
+        caliber_inches: diameter_m / 0.0254,
+        weight_grains: mass_kg / crate::constants::GRAINS_TO_KG,
+        manufacturer: None,
+        bullet_model: None,
+        bullet_id: None,
+        bullet_cluster: None,
+
+        use_rk4: true,
+        use_adaptive_rk45: true,
+
+        enable_advanced_effects: false,
+        enable_magnus: false,
+        enable_coriolis: false,
+        use_powder_sensitivity: false,
+        powder_temp_sensitivity: 0.0,
+        powder_temp: 0.0,
+        powder_temp_curve: None,
+        powder_curve_temp_c: None,
+        tipoff_yaw: 0.0,
+        cd_delta2: 7.5,
+        tipoff_decay_distance: 50.0,
+
+        use_bc_segments: false,
+        bc_segments: None,
+        bc_segments_data: None,
+        use_enhanced_spin_drift: false,
+        use_form_factor: false,
+        enable_wind_shear: false,
+        wind_shear_model: "none".to_string(),
+        enable_trajectory_sampling: false,
+        sample_interval: 0.0,
+        drops_reference: DropsReference::Los,
+        enable_pitch_damping: false,
+        enable_precession_nutation: false,
+        enable_aerodynamic_jump: false,
+        use_cluster_bc: false,
+
+        custom_drag_table: None,
+        cd_scale: 1.0,
+
+        bc_type_str: None,
+    };
+
+    let zero_distance_m = zero_distance * 0.9144;
+    ballistic_inputs.muzzle_angle = calculate_zero_angle_with_conditions(
+        ballistic_inputs.clone(),
+        zero_distance_m,
+        bore_height_m + sight_height_m,
+        wind.clone(),
+        atmosphere.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    // MBA-1359: a no-op today — sight_offset_lateral_m and zero_poi_horizontal_m are
+    // always 0.0 above, this model has no fields for either — kept for the same reason
+    // solve_profile_for_dsf keeps it: correct without another edit if either ever gains
+    // one.
+    ballistic_inputs.azimuth_angle += ballistic_inputs.windage_zero_bias_rad(zero_distance_m);
+
+    let mut solver = TrajectorySolver::new(ballistic_inputs, wind, atmosphere);
+    solver.set_max_range(max_range_m);
+    solver.set_time_step(0.001);
+    solver.solve().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

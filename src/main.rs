@@ -6533,12 +6533,18 @@ fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
 /// Solve a saved profile's OWN trajectory for the `dsf` command's derivation step, using
 /// only the profile's stored fields — no CLI overrides, since `dsf` exposes none of the
 /// physics flags (`--saved-profile`/`--range`/`--observed-drop` are its entire surface).
-/// This mirrors the subset of `trajectory --saved-profile NAME` (with no other flags)
-/// reachable from [`ProfileData`] alone: the same baseline `trajectory`/`come-ups` auto-
-/// apply corrects later, so the derived DSF point's "predicted drop" needs to match it.
-/// Advanced physics toggles absent from `ProfileData` (Magnus/Coriolis/spin-drift/
-/// aerodynamic-jump/wind-shear/pitch-damping/precession/powder-sensitivity/cd_scale) are
-/// off/neutral here, same as every other profile-only command (`come-ups`, `lead`, `mpbr`).
+///
+/// A thin adapter (MBA-1357 Task 8): the actual solve is
+/// [`ballistics_engine::truing_dsf::solve_for_dsf`], which the JSON bridge can also reach
+/// directly without a `Profile` — this converts a loaded profile into that function's
+/// `TruingModelInputsV1` shape and delegates. That shape is the same one every other
+/// truing command (`true-velocity`, `true-wind`, `plan-truing`) already builds from a
+/// profile, so it carries no wind, no stored twist-rate override, no BC-segment schedule,
+/// no custom drag curve, no sight-mount/zero-POI offsets, no shooting angle, and no
+/// non-ICAO BC reference — a profile that sets any of those now solves differently through
+/// `dsf` than it did before this change (see `solve_for_dsf`'s doc comment). Drag model is
+/// coerced to G1/G7 the same way (`parse_drag_model_arg_for_truing`, with the same stderr
+/// warning on anything else).
 ///
 /// `profile` must already be converted to `units` (i.e. loaded via
 /// `load_profile_for_units`). `max_range_m` should exceed the target observation range so
@@ -6546,30 +6552,37 @@ fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
 /// range, is reported by the caller via
 /// [`ballistics_engine::truing_dsf::interpolate_position_and_velocity`] returning `None`,
 /// not by this function).
+///
+/// `zero_distance_display` is the RESOLVED zero distance (display units) from
+/// `resolve_zero_selection`, same as before — but now mandatory: `solve_for_dsf` has no
+/// "no zero configured" state to forward, so `None` here (a profile with neither
+/// `auto_zero` nor `zero_distance` set, and no `--zero-set` selected) is now a hard error
+/// instead of the historical silent flat-trajectory solve.
 fn solve_profile_for_dsf(
     profile: &ProfileData,
     units: UnitSystem,
     max_range_m: f64,
-    // MBA-1360: the RESOLVED zero distance (display units) from resolve_zero_selection —
-    // the caller passes the profile's own auto_zero/zero_distance chain when no
-    // --zero-set is selected, so this stays byte-identical to the historical internal
-    // resolution; a selected set's zero_distance flows in the same way.
     zero_distance_display: Option<f64>,
 ) -> Result<ballistics_engine::cli_api::TrajectoryResult, Box<dyn Error>> {
+    let Some(zero_distance_display) = zero_distance_display else {
+        return Err(format!(
+            "saved profile '{}' has no zero distance configured; `dsf` requires a resolved \
+             zero (save one with --zero-distance or --auto-zero, or select a --zero-set)",
+            profile.name
+        )
+        .into());
+    };
+    let zero_distance_yd = match units {
+        UnitSystem::Imperial => zero_distance_display,
+        UnitSystem::Metric => zero_distance_display / 0.9144,
+    };
+
     let velocity_m = UnitConverter::velocity_to_metric(profile.velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(profile.mass, units);
     let diameter_m = UnitConverter::diameter_to_metric(profile.diameter, units);
-    let drag_model = parse_drag_model_arg(&profile.drag_model);
+    let drag_model = parse_drag_model_arg_for_truing(&profile.drag_model);
 
-    let bullet_length_m = profile
-        .bullet_length
-        .map(|l| match units {
-            UnitSystem::Imperial => l * 0.0254,
-            UnitSystem::Metric => l * 0.001,
-        })
-        .unwrap_or_else(|| fallback_bullet_length_m(diameter_m, mass_kg));
-
-    // Same defaults `trajectory --saved-profile`/`come-ups --profile` fall back to when a
+    // Same default `trajectory --saved-profile`/`come-ups --profile` fall back to when a
     // profile doesn't carry the field.
     let sight_height_default = match units {
         UnitSystem::Imperial => 2.0,
@@ -6579,175 +6592,32 @@ fn solve_profile_for_dsf(
         profile.sight_height.unwrap_or(sight_height_default),
         units,
     );
-    // Saved profiles predate MBA-1339's unified --bore-height flag and never stored one;
-    // use the same default `trajectory --saved-profile` falls back to (60 in / 1500 mm).
-    let bore_height_default_display = match units {
-        UnitSystem::Imperial => 60.0,
-        UnitSystem::Metric => 1500.0,
-    };
-    let bore_height_m = match units {
-        UnitSystem::Imperial => bore_height_default_display * 0.0254,
-        UnitSystem::Metric => bore_height_default_display * 0.001,
-    };
 
     let temperature_c = UnitConverter::temperature_to_metric(profile.temperature, units);
     let pressure_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
-    // NOTE: matches run_trajectory's own convention — the same raw (0-100) value feeds
-    // both AtmosphericConditions.humidity (percent) and BallisticInputs.humidity below,
-    // despite the latter's doc comment describing a 0-1 fraction. This is pre-existing
-    // behavior this helper deliberately replicates rather than "fixes" (see run_trajectory).
-    let humidity = profile.humidity;
     let altitude_m = UnitConverter::altitude_to_metric(profile.altitude, units);
 
-    let wind_speed_m = profile
-        .wind_speed
-        .map(|w| UnitConverter::wind_to_metric(w, units))
-        .unwrap_or(0.0);
-    let wind_direction_rad = profile.wind_direction.unwrap_or(0.0).to_radians();
-    let shooting_angle_rad = profile.shooting_angle.unwrap_or(0.0).to_radians();
-
-    // --twist-rate is inches/turn in imperial, mm/turn in metric; BallisticInputs always
-    // wants inches/turn (MBA-970 convention, same as the Trajectory command's own resolution).
-    let twist_rate_in = profile.twist_rate.map(|t| match units {
-        UnitSystem::Imperial => t,
-        UnitSystem::Metric => t / 25.4,
-    });
-    let twist_right = profile.twist_right.unwrap_or(true);
-
-    let bc_segments_data = profile
-        .bc_segments
-        .as_ref()
-        .map(|rows| bc_segments_from_profile(rows));
-    let custom_drag_table = profile
-        .drag_curve
-        .as_ref()
-        .map(|pts| drag_table_from_profile(pts))
-        .transpose()
-        .map_err(|e| format!("saved profile's drag curve is invalid: {e}"))?;
-    let use_bc_segments = profile.use_bc_segments.unwrap_or(false) || bc_segments_data.is_some();
-
-    let wind = WindConditions {
-        speed: wind_speed_m,
-        direction: wind_direction_rad,
-        vertical_speed: 0.0,
-    };
-    let atmosphere = AtmosphericConditions {
-        temperature: temperature_c,
-        pressure: pressure_hpa,
-        humidity,
-        altitude: altitude_m,
+    let inputs = ballistics_engine::truing::TruingModelInputsV1 {
+        muzzle_velocity_fps: velocity_m / 0.3048,
+        ballistic_coefficient: profile.bc,
+        drag_model,
+        mass_gr: mass_kg / GRAINS_TO_KG,
+        diameter_in: diameter_m / 0.0254,
+        zero_distance_yd,
+        sight_height_in: sight_height_m / 0.0254,
+        temperature_f: temperature_c * 9.0 / 5.0 + 32.0,
+        pressure_inhg: pressure_hpa / 33.8639,
+        // profile.humidity is already 0-100 regardless of `units` (humidity has no
+        // imperial/metric distinction), matching TruingModelInputsV1::humidity_pct.
+        humidity_pct: profile.humidity,
+        altitude_ft: altitude_m / 0.3048,
     };
 
-    let bc_reference_standard =
-        parse_bc_reference_profile_field(profile.bc_reference.as_deref())?;
-    let mut inputs = BallisticInputs {
-        bc_value: profile.bc,
-        bc_type: drag_model,
-        bc_reference_standard,
-        bullet_mass: mass_kg,
-        muzzle_velocity: velocity_m,
-        bullet_diameter: diameter_m,
-        bullet_length: bullet_length_m,
-
-        muzzle_angle: 0.0,
-        target_distance: max_range_m,
-        azimuth_angle: 0.0,
-        shot_azimuth: 0.0,
-        shooting_angle: shooting_angle_rad,
-        cant_angle: 0.0,
-        sight_height: sight_height_m,
-        muzzle_height: bore_height_m,
-        target_height: 0.0,
-        // MBA-1359: honor a stored zero POI offset when solving from a saved profile.
-        zero_poi_vertical_m: profile.zero_poi_up_m.unwrap_or(0.0),
-        zero_poi_horizontal_m: profile.zero_poi_right_m.unwrap_or(0.0),
-        // MBA-1396: honor a stored lateral sight-mount offset the same way.
-        sight_offset_lateral_m: profile.sight_offset_lateral_m.unwrap_or(0.0),
-        // Ground-impact detection ON (0.0), matching run_trajectory's default (Default::default()
-        // otherwise leaves this at -100.0 = effectively disabled) — `dsf` has no
-        // --ignore-ground-impact flag.
-        ground_threshold: 0.0,
-
-        altitude: altitude_m,
-        temperature: temperature_c,
-        pressure: pressure_hpa,
-        humidity,
-        latitude: None,
-
-        wind_speed: wind_speed_m,
-        wind_angle: wind_direction_rad,
-
-        twist_rate: twist_rate_in.unwrap_or_else(|| {
-            ballistics_engine::stability::default_twist_inches(diameter_m, mass_kg, velocity_m)
-        }),
-        is_twist_right: twist_right,
-        caliber_inches: diameter_m / 0.0254,
-        weight_grains: mass_kg / GRAINS_TO_KG,
-        manufacturer: None,
-        bullet_model: None,
-        bullet_id: None,
-        bullet_cluster: None,
-
-        use_rk4: true,
-        use_adaptive_rk45: true,
-
-        enable_advanced_effects: false,
-        enable_magnus: false,
-        enable_coriolis: false,
-        use_powder_sensitivity: false,
-        powder_temp_sensitivity: 0.0,
-        powder_temp: 0.0,
-        powder_temp_curve: None,
-        powder_curve_temp_c: None,
-        tipoff_yaw: 0.0,
-        cd_delta2: 7.5,
-        tipoff_decay_distance: 50.0,
-
-        use_bc_segments,
-        bc_segments: None,
-        bc_segments_data,
-        use_enhanced_spin_drift: false,
-        use_form_factor: false,
-        enable_wind_shear: false,
-        wind_shear_model: "none".to_string(),
-        enable_trajectory_sampling: false,
-        sample_interval: 0.0,
-        // MBA-1403: sampler output-mode toggle; this profile-driven DSF solve never
-        // samples (enable_trajectory_sampling is false above), so LOS is inert here.
-        drops_reference: ballistics_engine::DropsReference::Los,
-        enable_pitch_damping: false,
-        enable_precession_nutation: false,
-        enable_aerodynamic_jump: false,
-        use_cluster_bc: false,
-
-        custom_drag_table,
-        cd_scale: 1.0,
-
-        bc_type_str: None,
-    };
-
-    // Zero angle: the caller-resolved zero (profile.auto_zero falling back to
-    // profile.zero_distance when no zero set is selected — matching `trajectory
-    // --saved-profile`'s own resolution) — else flat (0.0), same as a bare
-    // `trajectory --saved-profile NAME` with no --auto-zero.
-    if let Some(zero_distance_display) = zero_distance_display {
-        let zero_distance_m = UnitConverter::distance_to_metric(zero_distance_display, units);
-        inputs.muzzle_angle = ballistics_engine::calculate_zero_angle_with_conditions(
-            inputs.clone(),
-            zero_distance_m,
-            bore_height_m + sight_height_m,
-            wind.clone(),
-            atmosphere.clone(),
-        )?;
-        // MBA-1359: the returned angle carries the vertical POI bias; the horizontal bias
-        // is an azimuth term the flight inputs must apply themselves. Exact no-op at 0.0.
-        inputs.azimuth_angle += inputs.windage_zero_bias_rad(zero_distance_m);
-    }
-
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
-    solver.set_max_range(max_range_m);
-    solver.set_time_step(0.001);
-    Ok(solver.solve()?)
+    Ok(ballistics_engine::truing_dsf::solve_for_dsf(
+        &inputs,
+        max_range_m,
+        zero_distance_yd,
+    )?)
 }
 
 /// Mirrors `Commands::Trajectory`'s own `--max-range` default (1000.0, in the active
