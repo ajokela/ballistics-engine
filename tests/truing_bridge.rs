@@ -16,6 +16,30 @@ fn model() -> Value {
     })
 }
 
+/// Same bullet as `model()`, but a 900 yd zero rather than 100 yd — DELIBERATELY NOT
+/// `model()` itself (`true.fit`'s tests depend on that one staying at a 100 yd zero).
+///
+/// The `dsf` solve path runs with ground-impact detection unconditionally on, terminating
+/// the trajectory once it has dropped ~60 in below the muzzle line (a fixed historical
+/// default — saved profiles predate the CLI's unified `--bore-height` flag and never
+/// stored one). With `model()`'s 100 yd zero, the bore is barely angled up, so the
+/// trajectory sinks through that ground plane at ~516 yd — while still Mach 1.6+, well
+/// short of the Mach <= 1.2 transonic band `dsf` requires. Swept every reachable range for
+/// that fixture and confirmed there is no way to land in-band with it (see the task-10
+/// report). A long zero angles the bore up substantially, keeping the projectile above the
+/// ground plane far enough downrange to actually go transonic before impact; 900 yd was
+/// chosen empirically (swept 700/800/900/1000/1100 yd zeros) as the one that lands
+/// squarely mid-band rather than hugging an edge. Do not "simplify" this back to `model()`.
+fn dsf_model() -> Value {
+    json!({
+        "muzzle_velocity_fps": 2700.0, "ballistic_coefficient": 0.243,
+        "drag_model": "g7", "mass_gr": 168.0, "diameter_in": 0.308,
+        "zero_distance_yd": 900.0, "sight_height_in": 2.0,
+        "temperature_f": 59.0, "pressure_inhg": 29.92,
+        "humidity_pct": 50.0, "altitude_ft": 0.0
+    })
+}
+
 #[test]
 fn true_fit_is_advertised_in_capabilities() {
     let v = call("meta.capabilities", json!(null));
@@ -154,4 +178,37 @@ fn true_tall_target_rejects_clicks() {
         v["error"]["message"].as_str().unwrap().contains("clicks"),
         "expected the clicks guard, got: {}", v["error"]["message"]
     );
+}
+
+#[test]
+fn true_dsf_derives_a_point_without_touching_a_profile() {
+    // 900 yd zero, 950 yd observation: predicted drop is 0.9468 mil there (read off a
+    // first run, per this fixture's own doc comment on `dsf_model`), so 1.0 mil observed
+    // sits close to it without being an exact, untestable match — dsf lands at ~1.056,
+    // comfortably inside the sane band below rather than hugging either edge of it.
+    let v = call("true.dsf", json!({
+        "model": dsf_model(), "range_yd": 950.0,
+        "observed_drop": 1.0, "drop_unit": "mil"
+    }));
+    assert_eq!(v["ok"], true, "response was {v}");
+    let mach = v["result"]["mach"].as_f64().unwrap();
+    let dsf = v["result"]["dsf"].as_f64().unwrap();
+    // The observation must land in the transonic band DSF exists for: at or below the
+    // DSF_MACH_CEILING of 1.2, and still moving. `> 0.0` would pass on a supersonic or
+    // nonsense Mach, which is the case the service is supposed to REFUSE.
+    assert!(mach > 0.5 && mach <= 1.2, "mach was {mach}, outside the DSF band");
+    // dsf is observed/predicted drop. A sane correction is near unity; 0.5..2.0 still
+    // catches a unit error or an inverted ratio, which `> 0.0` would not.
+    assert!(dsf > 0.5 && dsf < 2.0, "dsf was {dsf}");
+    assert!(v["result"]["warnings"].is_array());
+}
+
+#[test]
+fn all_four_true_commands_are_advertised() {
+    let v = call("meta.capabilities", json!(null));
+    let names: Vec<&str> = v["result"]["commands"]
+        .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+    for c in ["true.fit", "true.wind", "true.tall_target", "true.dsf"] {
+        assert!(names.contains(&c), "{c} missing from {names:?}");
+    }
 }

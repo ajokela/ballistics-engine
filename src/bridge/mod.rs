@@ -67,7 +67,7 @@ fn command_names() -> Vec<&'static str> {
     names.extend(["profile.validate", "profile.normalize"]);
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
-    names.extend(["true.fit", "true.wind", "true.tall_target"]);
+    names.extend(["true.fit", "true.wind", "true.tall_target", "true.dsf"]);
     // Filesystem-backed (BC5D tables are loaded from caller-supplied paths), so absent on
     // wasm32 — the same "list only what this build can run" rule as profile.import_a7p.
     #[cfg(not(target_arch = "wasm32"))]
@@ -236,6 +236,12 @@ fn dispatch(request_json: &str) -> String {
             "true.tall_target",
             crate::truing_service::tall_target_v1,
         ),
+        "true.dsf" => run_service_detailed(
+            &request.request,
+            "true.dsf",
+            crate::truing_service::derive_dsf_point_v1,
+            crate::truing_service::DsfServiceErrorV1::failure_details,
+        ),
         #[cfg(not(target_arch = "wasm32"))]
         "bc5d.info" => run_bc5d_info(&request.request),
         other => error(
@@ -340,9 +346,8 @@ where
 /// "out_of_range" instead of pattern-matching prose. `code` stays `command_failed`, so
 /// existing callers are unaffected.
 ///
-/// Unused until Task 10 wires up `true.dsf`, which is the first command whose service
-/// error carries a machine-readable reason worth surfacing in `error.details`.
-#[allow(dead_code)]
+/// First (and so far only) caller: `true.dsf`, whose service error carries a
+/// machine-readable reason worth surfacing in `error.details`.
 fn run_service_detailed<Req, Resp, E, F, D>(
     inner: &Value,
     command: &'static str,

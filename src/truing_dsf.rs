@@ -511,6 +511,16 @@ pub struct DsfSolveInputs {
     /// profile with neither `auto_zero` nor `zero_distance` set and no `--zero-set`
     /// selected (MBA-1357 Task 8 review, Finding 2).
     pub zero_distance_yd: Option<f64>,
+    /// Bore height above ground, meters — the same MBA-1339 `--bore-height` geometry
+    /// `trajectory`/`come-ups` take explicitly, used here only to size the ground-impact
+    /// plane the solve terminates at (`target_height: 0.0`, `ground_threshold: 0.0` in
+    /// [`solve_for_dsf`]). Saved profiles predate that unified flag and never stored one,
+    /// so the CLI adapter falls back to the same historical default
+    /// `trajectory --saved-profile` uses absent an explicit value: 60 in (imperial units)
+    /// or 1500 mm (metric units) — NOT the same numeric default in both unit systems
+    /// (60 in = 1.524 m, 1500 mm = 1.500 m, a genuine ~24 mm difference, not a rounding
+    /// artifact of one shared constant).
+    pub bore_height_m: f64,
 }
 
 impl From<&TruingModelInputsV1> for DsfSolveInputs {
@@ -520,7 +530,10 @@ impl From<&TruingModelInputsV1> for DsfSolveInputs {
     /// assumes: **no wind, a level shot (0.0 shooting angle), no zero-POI bias, no
     /// sight-mount offset, ICAO BC reference, no BC-segment auto-estimation
     /// (`use_bc_segments: false`), no explicit BC-segment schedule, no custom drag
-    /// curve.** `zero_distance_yd` carries `inputs.zero_distance_yd` (mandatory on
+    /// curve, and a 60 in (1.524 m) imperial-default bore height** (a bridge caller has
+    /// no unit system of its own — every other field here is already imperial, e.g.
+    /// `mass_gr`/`diameter_in`, so the imperial bore-height default is the consistent
+    /// choice). `zero_distance_yd` carries `inputs.zero_distance_yd` (mandatory on
     /// `TruingModelInputsV1`, so always `Some` here — never the "flat, no zero" case).
     fn from(inputs: &TruingModelInputsV1) -> Self {
         DsfSolveInputs {
@@ -545,6 +558,7 @@ impl From<&TruingModelInputsV1> for DsfSolveInputs {
             bc_segments: None,
             custom_drag_table: None,
             zero_distance_yd: Some(inputs.zero_distance_yd),
+            bore_height_m: 60.0 * 0.0254,
         }
     }
 }
@@ -579,11 +593,12 @@ pub fn solve_for_dsf(
     let sight_height_m = inputs.sight_height_in * 0.0254;
     let bullet_length_m = fallback_bullet_length_m(diameter_m, mass_kg);
 
-    // Saved profiles predate the CLI's unified --bore-height flag and never stored one;
-    // solve_profile_for_dsf always fell back to this same constant (60 in) regardless of
-    // profile contents, so reusing it here is not a narrowing — it was already
-    // unconditional.
-    let bore_height_m = 60.0 * 0.0254;
+    // Unit-aware bore height (MBA-1357 Task 10 review, Fix 2): the CLI adapter and the
+    // bridge's `From<&TruingModelInputsV1>` each resolve their own default (60 in
+    // imperial / 1500 mm metric for the CLI, always the imperial 60 in for the bridge,
+    // which has no unit system) and hand it in here; this function no longer picks one
+    // itself.
+    let bore_height_m = inputs.bore_height_m;
 
     let temperature_c = (inputs.temperature_f - 32.0) * 5.0 / 9.0;
     let pressure_hpa = inputs.pressure_inhg * 33.8639;

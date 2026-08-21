@@ -6592,6 +6592,20 @@ fn solve_profile_for_dsf(
         units,
     );
 
+    // Saved profiles predate MBA-1339's unified --bore-height flag and never stored one;
+    // use the same unit-aware default `trajectory --saved-profile`/`come-ups --profile`
+    // fall back to (60 in imperial / 1500 mm metric — NOT the same default in both
+    // systems, restored here after MBA-1357 Task 10 review Fix 2 found the DsfSolveInputs
+    // reshape had silently narrowed this to the imperial constant regardless of units).
+    let bore_height_default_display = match units {
+        UnitSystem::Imperial => 60.0,
+        UnitSystem::Metric => 1500.0,
+    };
+    let bore_height_m = match units {
+        UnitSystem::Imperial => bore_height_default_display * 0.0254,
+        UnitSystem::Metric => bore_height_default_display * 0.001,
+    };
+
     let temperature_c = UnitConverter::temperature_to_metric(profile.temperature, units);
     let pressure_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
     let altitude_m = UnitConverter::altitude_to_metric(profile.altitude, units);
@@ -6645,6 +6659,7 @@ fn solve_profile_for_dsf(
         bc_segments,
         custom_drag_table,
         zero_distance_yd,
+        bore_height_m,
     };
 
     Ok(ballistics_engine::truing_dsf::solve_for_dsf(
