@@ -40,6 +40,8 @@
 
 use std::error::Error;
 
+use serde::{Deserialize, Serialize};
+
 use crate::cli_api::UnitSystem;
 use crate::truing::{
     DragModelArg, TruingEarthFrame, TruingEnvironment, TruingTwist, TRUING_BC_MAX, TRUING_BC_MIN,
@@ -89,7 +91,8 @@ pub const MIN_WIND_SENSITIVITY_IN_PER_MPH: f64 = 0.25;
 ///
 /// SI throughout; front ends convert their display units once at the boundary (see
 /// [`parse_wind_observation`]).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WindObservation {
     /// Range at which the group centre was measured, meters.
     pub range_m: f64,
@@ -151,7 +154,8 @@ pub fn parse_wind_observation(s: &str, units: UnitSystem) -> Result<WindObservat
 /// internal convention; the observations themselves are SI. Unlike the drop-based truing
 /// commands this carries a KNOWN muzzle velocity — wind is the unknown being fitted, so
 /// velocity is an input, not an output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WindTruingRequest {
     /// One or more observed horizontal misses. Ranges must be distinct.
     pub observations: Vec<WindObservation>,
@@ -295,7 +299,7 @@ impl WindTruingRequest {
 }
 
 /// The wind fitted from ONE observed miss (MBA-1392).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct WindTruingSolution {
     /// Observation range, meters.
     pub range_m: f64,
@@ -328,7 +332,7 @@ pub struct WindTruingSolution {
 }
 
 /// The complete wind-truing result: one fit per observation plus the combined answer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WindTruingReport {
     /// Per-observation fits, in the order the observations were supplied.
     pub solutions: Vec<WindTruingSolution>,
@@ -1324,5 +1328,26 @@ mod tests {
         }]);
         zero_call.called_crosswind_mph = Some(0.0);
         assert!(zero_call.validate().unwrap_err().contains("non-zero"));
+    }
+
+    /// Bridge contract: a `WindTruingRequest` deserializes from JSON with the field names
+    /// documented on the struct, and a solved `WindTruingReport` serializes back out.
+    #[test]
+    fn request_deserializes_and_report_serializes() {
+        let json = serde_json::json!({
+            "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
+            "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
+            "sight_height_in": 2.0, "temperature_f": 59.0, "pressure_inhg": 29.92,
+            "humidity_pct": 50.0, "altitude_ft": 0.0,
+            "twist": {"rate_in": 11.0, "right_hand": true},
+            "earth": null, "called_crosswind_mph": null
+        });
+        let req: WindTruingRequest =
+            serde_json::from_value(json).expect("request deserializes");
+        let report = solve_wind_truing(&req).expect("solves");
+        let out = serde_json::to_value(&report).expect("report serializes");
+        assert!(out["mean_crosswind_mph"].is_number());
+        assert!(out["solutions"].as_array().unwrap().len() == 1);
     }
 }

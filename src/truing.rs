@@ -109,7 +109,7 @@ pub fn fallback_bullet_length_m(diameter_m: f64, mass_kg: f64) -> f64 {
 /// modelled, or it is mistaken for wind. Supplying this turns
 /// [`crate::BallisticInputs::use_enhanced_spin_drift`] on for the truing solves;
 /// omitting it leaves the flag off, exactly as every pre-MBA-1392 truing solve did.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TruingTwist {
     /// Twist rate in inches per turn, positive (e.g. `11.0` for a 1:11" barrel).
     pub rate_in: f64,
@@ -122,7 +122,7 @@ pub struct TruingTwist {
 /// Coriolis needs BOTH latitude and the shot's compass bearing, so the two travel as one
 /// value: there is no meaningful "latitude but no azimuth" configuration, and modelling
 /// one without the other would silently invent the missing half.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TruingEarthFrame {
     /// Firing latitude in degrees, north positive.
     pub latitude_deg: f64,
