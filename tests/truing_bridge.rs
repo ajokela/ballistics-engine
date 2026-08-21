@@ -26,13 +26,16 @@ fn true_fit_is_advertised_in_capabilities() {
 
 #[test]
 fn true_fit_returns_estimates_with_their_uncertainty() {
+    // Observations derived from the engine's own solve on the model below:
+    // .308 caliber, 168 gr, 0.308 in dia, G7 BC 0.243, 2700 fps, 100 yd zero, ICAO conditions.
+    // Drops (mil) at range: 400 yd -> 2.6882, 600 yd -> 4.8626, 800 yd -> 7.6598
     let v = call("true.fit", json!({
         "model": model(),
         "drop_unit": "mil",
         "observations": [
-            {"range_yd": 400.0, "drop": 1.9, "sigma": 0.1},
-            {"range_yd": 600.0, "drop": 4.3, "sigma": 0.1},
-            {"range_yd": 800.0, "drop": 7.8, "sigma": 0.1}
+            {"range_yd": 400.0, "drop": 2.6882, "sigma": 0.1},
+            {"range_yd": 600.0, "drop": 4.8626, "sigma": 0.1},
+            {"range_yd": 800.0, "drop": 7.6598, "sigma": 0.1}
         ],
         "priors": {"muzzle_velocity_fps": {"mean": 2700.0, "sigma": 20.0},
                    "ballistic_coefficient": {"mean": 0.243, "sigma": 0.01}},
@@ -42,8 +45,25 @@ fn true_fit_returns_estimates_with_their_uncertainty() {
     let r = &v["result"];
     assert!(r["map_muzzle_velocity_fps"].as_f64().unwrap() > 0.0);
     assert!(r["map_ballistic_coefficient"].as_f64().unwrap() > 0.0);
+
     // The honesty invariant: a point estimate never travels without its uncertainty.
-    assert!(!r["approximation"].is_null(), "approximation missing from {r}");
+    // Assert that the approximation is available and carries valid intervals for both parameters.
+    assert_eq!(r["approximation"]["status"], "available",
+        "approximation must be available, got: {}", r["approximation"]["status"]);
+    let details = &r["approximation"]["details"];
+
+    // Verify that both parameters have finite intervals.
+    let mv_lower = details["muzzle_velocity_interval_95"]["lower"].as_f64().unwrap();
+    let mv_upper = details["muzzle_velocity_interval_95"]["upper"].as_f64().unwrap();
+    assert!(mv_lower.is_finite() && mv_upper.is_finite(),
+        "muzzle velocity interval bounds must be finite");
+    assert!(mv_lower < mv_upper, "muzzle velocity lower bound must be less than upper");
+
+    let bc_lower = details["ballistic_coefficient_interval_95"]["lower"].as_f64().unwrap();
+    let bc_upper = details["ballistic_coefficient_interval_95"]["upper"].as_f64().unwrap();
+    assert!(bc_lower.is_finite() && bc_upper.is_finite(),
+        "ballistic coefficient interval bounds must be finite");
+    assert!(bc_lower < bc_upper, "ballistic coefficient lower bound must be less than upper");
 }
 
 #[test]
