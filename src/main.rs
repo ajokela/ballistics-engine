@@ -6534,17 +6534,20 @@ fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
 /// only the profile's stored fields — no CLI overrides, since `dsf` exposes none of the
 /// physics flags (`--saved-profile`/`--range`/`--observed-drop` are its entire surface).
 ///
-/// A thin adapter (MBA-1357 Task 8): the actual solve is
-/// [`ballistics_engine::truing_dsf::solve_for_dsf`], which the JSON bridge can also reach
-/// directly without a `Profile` — this converts a loaded profile into that function's
-/// `TruingModelInputsV1` shape and delegates. That shape is the same one every other
-/// truing command (`true-velocity`, `true-wind`, `plan-truing`) already builds from a
-/// profile, so it carries no wind, no stored twist-rate override, no BC-segment schedule,
-/// no custom drag curve, no sight-mount/zero-POI offsets, no shooting angle, and no
-/// non-ICAO BC reference — a profile that sets any of those now solves differently through
-/// `dsf` than it did before this change (see `solve_for_dsf`'s doc comment). Drag model is
-/// coerced to G1/G7 the same way (`parse_drag_model_arg_for_truing`, with the same stderr
-/// warning on anything else).
+/// A thin adapter (MBA-1357 Task 8, reshaped again per Task 8 review Finding 1): the
+/// actual solve is [`ballistics_engine::truing_dsf::solve_for_dsf`], which the JSON
+/// bridge can also reach directly without a `Profile` — this converts a loaded profile
+/// into that function's [`ballistics_engine::truing_dsf::DsfSolveInputs`] shape and
+/// delegates. Unlike the model shape `true-velocity`/`true-wind`/`plan-truing` share,
+/// `DsfSolveInputs` carries every field this profile-driven solve has always honored —
+/// wind, shooting angle, zero-POI offsets, sight-mount offset, BC reference, BC segments,
+/// a custom drag curve — so nothing here changes what `dsf` computes from a profile that
+/// sets any of them; see `DsfSolveInputs`'s own doc comment for the (empirically
+/// confirmed inert) fields it deliberately omits. Drag model is coerced to G1/G7 the same
+/// way every other truing command already does (`parse_drag_model_arg_for_truing`, with
+/// the same stderr warning on anything else) — that coercion is unchanged from before
+/// this review round and is the one place `dsf`'s scope has always differed from a bare
+/// `trajectory --saved-profile` (which honors the full G1/G2/G5/G6/G7/G8/GI/GS/RA4 family).
 ///
 /// `profile` must already be converted to `units` (i.e. loaded via
 /// `load_profile_for_units`). `max_range_m` should exceed the target observation range so
@@ -6554,28 +6557,21 @@ fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
 /// not by this function).
 ///
 /// `zero_distance_display` is the RESOLVED zero distance (display units) from
-/// `resolve_zero_selection`, same as before — but now mandatory: `solve_for_dsf` has no
-/// "no zero configured" state to forward, so `None` here (a profile with neither
-/// `auto_zero` nor `zero_distance` set, and no `--zero-set` selected) is now a hard error
-/// instead of the historical silent flat-trajectory solve.
+/// `resolve_zero_selection`. `None` (a profile with neither `auto_zero` nor
+/// `zero_distance` set, and no `--zero-set` selected) solves flat (`muzzle_angle` 0.0),
+/// byte-identical to the pre-Task-8 behaviour — restored here after Task 8 review
+/// Finding 2 flagged that the first version of this reshape had turned it into a hard
+/// error.
 fn solve_profile_for_dsf(
     profile: &ProfileData,
     units: UnitSystem,
     max_range_m: f64,
     zero_distance_display: Option<f64>,
 ) -> Result<ballistics_engine::cli_api::TrajectoryResult, Box<dyn Error>> {
-    let Some(zero_distance_display) = zero_distance_display else {
-        return Err(format!(
-            "saved profile '{}' has no zero distance configured; `dsf` requires a resolved \
-             zero (save one with --zero-distance or --auto-zero, or select a --zero-set)",
-            profile.name
-        )
-        .into());
-    };
-    let zero_distance_yd = match units {
+    let zero_distance_yd = zero_distance_display.map(|zero_distance_display| match units {
         UnitSystem::Imperial => zero_distance_display,
         UnitSystem::Metric => zero_distance_display / 0.9144,
-    };
+    });
 
     let velocity_m = UnitConverter::velocity_to_metric(profile.velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(profile.mass, units);
@@ -6597,26 +6593,55 @@ fn solve_profile_for_dsf(
     let pressure_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
     let altitude_m = UnitConverter::altitude_to_metric(profile.altitude, units);
 
-    let inputs = ballistics_engine::truing::TruingModelInputsV1 {
+    let wind_speed_mps = profile
+        .wind_speed
+        .map(|w| UnitConverter::wind_to_metric(w, units));
+    let wind_direction_rad = profile.wind_direction.map(|d| d.to_radians());
+    let shooting_angle_rad = profile.shooting_angle.map(|a| a.to_radians());
+
+    let bc_segments = profile
+        .bc_segments
+        .as_ref()
+        .map(|rows| bc_segments_from_profile(rows));
+    let custom_drag_table = profile
+        .drag_curve
+        .as_ref()
+        .map(|pts| drag_table_from_profile(pts))
+        .transpose()
+        .map_err(|e| format!("saved profile's drag curve is invalid: {e}"))?;
+    let bc_reference_standard =
+        Some(parse_bc_reference_profile_field(profile.bc_reference.as_deref())?);
+
+    let inputs = ballistics_engine::truing_dsf::DsfSolveInputs {
         muzzle_velocity_fps: velocity_m / 0.3048,
         ballistic_coefficient: profile.bc,
         drag_model,
         mass_gr: mass_kg / GRAINS_TO_KG,
         diameter_in: diameter_m / 0.0254,
-        zero_distance_yd,
         sight_height_in: sight_height_m / 0.0254,
         temperature_f: temperature_c * 9.0 / 5.0 + 32.0,
         pressure_inhg: pressure_hpa / 33.8639,
         // profile.humidity is already 0-100 regardless of `units` (humidity has no
-        // imperial/metric distinction), matching TruingModelInputsV1::humidity_pct.
+        // imperial/metric distinction), matching DsfSolveInputs::humidity_pct.
         humidity_pct: profile.humidity,
         altitude_ft: altitude_m / 0.3048,
+        wind_speed_mps,
+        wind_direction_rad,
+        shooting_angle_rad,
+        // MBA-1359: honor a stored zero POI offset when solving from a saved profile.
+        zero_poi_vertical_m: profile.zero_poi_up_m,
+        zero_poi_horizontal_m: profile.zero_poi_right_m,
+        // MBA-1396: honor a stored lateral sight-mount offset the same way.
+        sight_offset_lateral_m: profile.sight_offset_lateral_m,
+        bc_reference_standard,
+        bc_segments,
+        custom_drag_table,
+        zero_distance_yd,
     };
 
     Ok(ballistics_engine::truing_dsf::solve_for_dsf(
         &inputs,
         max_range_m,
-        zero_distance_yd,
     )?)
 }
 

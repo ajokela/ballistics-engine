@@ -411,35 +411,155 @@ pub fn dsf_observation_warrants_90pct_warning(
     beyond_mach_1_crossing && dsf_observation_beyond_90pct(range_m, solved_max_range_m)
 }
 
-/// Solve a [`TruingModelInputsV1`]'s own trajectory for the `dsf` command's derivation step
-/// (MBA-1357 Task 8), given the model's scalar-BC inputs directly rather than a saved
-/// `Profile` — the JSON bridge cannot construct a `Profile`, and must not read one from
-/// disk, so it needs a solve entry point that takes plain values.
+/// Full input set for [`solve_for_dsf`] — the scalar-BC model (mirroring
+/// [`TruingModelInputsV1`]'s fields) plus every profile field the CLI's historical
+/// `solve_profile_for_dsf` fed into the physics that `TruingModelInputsV1` alone has no
+/// slot for (MBA-1357 Task 8 review, Finding 1). `None` on any `Option` field means
+/// exactly what it meant to the historical code when a profile didn't carry that field —
+/// the same physically neutral default, documented per field below — so a profile that
+/// sets none of them solves byte-identically to a bare converted `TruingModelInputsV1`,
+/// and one that does gets ALL of it honored, not silently dropped.
 ///
-/// This is the library half of what was `main.rs`'s private `solve_profile_for_dsf`: the
-/// CLI keeps its saved-profile path by adapting a loaded `Profile` into a
-/// `TruingModelInputsV1` (see `main.rs`'s reshaped `solve_profile_for_dsf`) and delegating
-/// here. That adaptation necessarily drops every profile field this shared model has no
-/// slot for — wind speed/direction, a stored twist-rate override, a velocity-banded BC
-/// schedule, a custom Mach/Cd drag curve, sight-mount/zero-POI offsets, shooting angle, and
-/// a non-ICAO BC reference — the same fields every other truing command (`true-velocity`,
-/// `true-wind`, `plan-truing`) already builds this same model without. A profile that sets
-/// any of those solves differently through `dsf` after this change than before it.
+/// Three fields the old profile-driven solve also read are intentionally NOT carried
+/// here, confirmed empirically rather than just by reading the physics: a stored
+/// twist-rate override, twist direction, and a stored bullet-length override. Every place
+/// any of the three reaches the trajectory (`enable_magnus`'s Magnus force,
+/// `enable_aerodynamic_jump`'s Litz jump estimator, `enable_precession_nutation`'s
+/// spin-rate term) is gated behind one of those flags, all permanently off in this solve
+/// (see [`solve_for_dsf`]); the only other consumer is the CLI's own separately-computed
+/// "Stability (SG)" display line, which `dsf` never prints. Verified by diffing
+/// `trajectory --saved-profile` output between two otherwise-identical saved profiles
+/// differing only in `--twist-rate` (7 vs 20) and, separately, only in `--bullet-length`
+/// (1.0in vs 2.5in): `Max Range`, `Max Height`, `Zero Angle`, `Time of Flight`, `Impact
+/// Velocity`, `Impact Energy`, and the ground-impact range were byte-identical in both
+/// pairs; only the SG display line (not part of `TrajectoryResult`) differed.
+#[derive(Debug, Clone)]
+pub struct DsfSolveInputs {
+    /// Muzzle velocity, feet/second.
+    pub muzzle_velocity_fps: f64,
+    /// Nominal scalar ballistic coefficient — superseded by `bc_segments`/
+    /// `custom_drag_table` when either is `Some`, same precedence the solver applies.
+    pub ballistic_coefficient: f64,
+    pub drag_model: DragModelArg,
+    /// Bullet mass, grains.
+    pub mass_gr: f64,
+    /// Bullet diameter, inches.
+    pub diameter_in: f64,
+    /// Sight height over bore, inches.
+    pub sight_height_in: f64,
+    /// Ambient temperature, degrees Fahrenheit.
+    pub temperature_f: f64,
+    /// Station pressure, inches of mercury.
+    pub pressure_inhg: f64,
+    /// Relative humidity, percent (0 through 100).
+    pub humidity_pct: f64,
+    /// Altitude, feet.
+    pub altitude_ft: f64,
+
+    /// Wind speed, meters/second. `None` (the default) is calm — byte-identical to a bare
+    /// `TruingModelInputsV1` solve.
+    pub wind_speed_mps: Option<f64>,
+    /// Wind direction, radians, wind-FROM convention (0 = headwind). `None` is 0.0.
+    pub wind_direction_rad: Option<f64>,
+    /// Uphill (positive) / downhill (negative) shooting angle, radians. `None` is level
+    /// (0.0). Materially changes predicted drop when set — this is the field most likely
+    /// to matter of everything in this struct.
+    pub shooting_angle_rad: Option<f64>,
+    /// Deliberate vertical point-of-impact offset AT THE ZERO RANGE, meters (MBA-1359
+    /// semantics — see [`crate::cli_api::BallisticInputs::zero_poi_vertical_m`]). `None`
+    /// is 0.0 (no bias). Directly shifts predicted drop, unlike the two lateral-only
+    /// fields below.
+    pub zero_poi_vertical_m: Option<f64>,
+    /// Deliberate horizontal point-of-impact offset at the zero range, meters. `None` is
+    /// 0.0. Carried for full-fidelity `TrajectoryResult` output (lateral position); inert
+    /// for the vertical drop/Mach the `dsf` command itself reads off the result.
+    pub zero_poi_horizontal_m: Option<f64>,
+    /// Lateral sight-to-bore mount offset, meters (MBA-1396). `None` is 0.0. Same
+    /// "carried for fidelity, lateral-only" note as `zero_poi_horizontal_m`.
+    pub sight_offset_lateral_m: Option<f64>,
+    /// Which standard atmosphere `ballistic_coefficient`/`bc_segments` are referenced to.
+    /// `None` is ICAO (matches every profile saved before this field existed). A real,
+    /// non-cosmetic ~1.8% retardation difference when Army Standard Metro.
+    pub bc_reference_standard: Option<BcReferenceStandard>,
+    /// Velocity-banded BC schedule (MBA-1323 Phase 2). `None` uses the scalar
+    /// `ballistic_coefficient` alone. When `Some` and non-empty, this REPLACES the scalar
+    /// BC for the solve — the solver's own segments-then-scalar precedence, same as the
+    /// profile path always used. No separate `use_bc_segments` bool: an empty/absent
+    /// schedule is a no-op regardless of such a flag (the solver gates on
+    /// `use_bc_segments && !segments.is_empty()`), and a populated schedule is honored
+    /// unconditionally once present, so the historical `profile.use_bc_segments` flag
+    /// could never actually suppress a populated one — carrying it here would be
+    /// redundant, not lossy.
+    pub bc_segments: Option<Vec<crate::BCSegmentData>>,
+    /// Full Mach/Cd drag curve (MBA-1323 Phase 2, `.a7p` CUSTOM import). `None` uses
+    /// `ballistic_coefficient`/`bc_segments` instead. When `Some`, replaces the BC model
+    /// entirely, same as the profile path.
+    pub custom_drag_table: Option<crate::drag::DragTable>,
+    /// Resolved zero distance, YARDS (the same imperial convention every other field here
+    /// that has one uses). `None` means no zero is configured — the solve stays flat
+    /// (`muzzle_angle` 0.0), byte-identical to the CLI's historical behaviour for a
+    /// profile with neither `auto_zero` nor `zero_distance` set and no `--zero-set`
+    /// selected (MBA-1357 Task 8 review, Finding 2).
+    pub zero_distance_yd: Option<f64>,
+}
+
+impl From<&TruingModelInputsV1> for DsfSolveInputs {
+    /// Widen a bare scalar-BC model into the full [`DsfSolveInputs`] shape a caller with
+    /// no profile-shaped extras reaches (Task 9's `true.dsf` bridge command). EXPLICIT
+    /// bridge defaults — spelled out here because an app author needs to know what this
+    /// assumes: **no wind, a level shot (0.0 shooting angle), no zero-POI bias, no
+    /// sight-mount offset, ICAO BC reference, no BC-segment schedule, no custom drag
+    /// curve.** `zero_distance_yd` carries `inputs.zero_distance_yd` (mandatory on
+    /// `TruingModelInputsV1`, so always `Some` here — never the "flat, no zero" case).
+    fn from(inputs: &TruingModelInputsV1) -> Self {
+        DsfSolveInputs {
+            muzzle_velocity_fps: inputs.muzzle_velocity_fps,
+            ballistic_coefficient: inputs.ballistic_coefficient,
+            drag_model: inputs.drag_model,
+            mass_gr: inputs.mass_gr,
+            diameter_in: inputs.diameter_in,
+            sight_height_in: inputs.sight_height_in,
+            temperature_f: inputs.temperature_f,
+            pressure_inhg: inputs.pressure_inhg,
+            humidity_pct: inputs.humidity_pct,
+            altitude_ft: inputs.altitude_ft,
+            wind_speed_mps: None,
+            wind_direction_rad: None,
+            shooting_angle_rad: None,
+            zero_poi_vertical_m: None,
+            zero_poi_horizontal_m: None,
+            sight_offset_lateral_m: None,
+            bc_reference_standard: None,
+            bc_segments: None,
+            custom_drag_table: None,
+            zero_distance_yd: Some(inputs.zero_distance_yd),
+        }
+    }
+}
+
+/// Solve a [`DsfSolveInputs`]'s own trajectory for the `dsf` command's derivation step
+/// (MBA-1357 Task 8), given plain values directly rather than a saved `Profile` — the
+/// JSON bridge cannot construct a `Profile`, and must not read one from disk.
 ///
-/// `zero_distance` is the resolved zero distance in YARDS — the same imperial convention
-/// `inputs`'s own fields use (see its doc comment). Unlike the CLI's historical
-/// `Option<f64>` (an unconfigured profile solved flat, `muzzle_angle` left at 0.0), this is
-/// mandatory: every other truing command already requires a zero, and a caller supplying
-/// model inputs rather than a `Profile` has no "no zero configured" state to forward.
+/// This is the library half of what was `main.rs`'s private `solve_profile_for_dsf`. The
+/// CLI keeps its saved-profile path by converting a loaded profile into `DsfSolveInputs`
+/// (ALL of the profile fields the historical solve honored — see that struct's own doc
+/// comment for exactly which, and which three are deliberately absent because they're
+/// provably inert here) and delegating. A bridge caller with only a `TruingModelInputsV1`
+/// can go through `DsfSolveInputs::from` instead — see that impl's doc comment for the
+/// explicit defaults it assumes.
 ///
-/// Advanced physics toggles this model has no field for (Magnus/Coriolis/spin-drift/
-/// aerodynamic-jump/wind-shear/pitch-damping/precession/powder-sensitivity/`cd_scale`) stay
-/// off/neutral — matching `solve_profile_for_dsf`'s own historical behaviour for every
+/// `max_range_m` is the solve envelope; `inputs.zero_distance_yd` (`None` = flat, no zero
+/// applied — see that field's doc comment) supplies the zero.
+///
+/// Advanced physics toggles this struct has no field for (Magnus/Coriolis/spin-drift/
+/// aerodynamic-jump/wind-shear/pitch-damping/precession/powder-sensitivity/`cd_scale`,
+/// plus twist rate/direction and bullet length — see `DsfSolveInputs`'s doc comment) stay
+/// off/neutral, matching `solve_profile_for_dsf`'s own historical behaviour for every
 /// profile-only command (`come-ups`, `lead`, `mpbr`).
 pub fn solve_for_dsf(
-    inputs: &TruingModelInputsV1,
+    inputs: &DsfSolveInputs,
     max_range_m: f64,
-    zero_distance: f64,
 ) -> Result<TrajectoryResult, String> {
     let velocity_m = inputs.muzzle_velocity_fps * 0.3048;
     let mass_kg = inputs.mass_gr * crate::constants::GRAINS_TO_KG;
@@ -462,9 +582,21 @@ pub fn solve_for_dsf(
         DragModelArg::G7 => DragModel::G7,
     };
 
+    let wind_speed_m = inputs.wind_speed_mps.unwrap_or(0.0);
+    let wind_direction_rad = inputs.wind_direction_rad.unwrap_or(0.0);
+    let shooting_angle_rad = inputs.shooting_angle_rad.unwrap_or(0.0);
+    let zero_poi_vertical_m = inputs.zero_poi_vertical_m.unwrap_or(0.0);
+    let zero_poi_horizontal_m = inputs.zero_poi_horizontal_m.unwrap_or(0.0);
+    let sight_offset_lateral_m = inputs.sight_offset_lateral_m.unwrap_or(0.0);
+    let bc_reference_standard = inputs
+        .bc_reference_standard
+        .unwrap_or(BcReferenceStandard::Icao);
+    let bc_segments_data = inputs.bc_segments.clone();
+    let use_bc_segments = bc_segments_data.is_some();
+
     let wind = WindConditions {
-        speed: 0.0,
-        direction: 0.0,
+        speed: wind_speed_m,
+        direction: wind_direction_rad,
         vertical_speed: 0.0,
     };
     let atmosphere = AtmosphericConditions {
@@ -483,7 +615,7 @@ pub fn solve_for_dsf(
     let mut ballistic_inputs = BallisticInputs {
         bc_value: inputs.ballistic_coefficient,
         bc_type: drag_model,
-        bc_reference_standard: BcReferenceStandard::Icao,
+        bc_reference_standard,
         bullet_mass: mass_kg,
         muzzle_velocity: velocity_m,
         bullet_diameter: diameter_m,
@@ -493,14 +625,14 @@ pub fn solve_for_dsf(
         target_distance: max_range_m,
         azimuth_angle: 0.0,
         shot_azimuth: 0.0,
-        shooting_angle: 0.0,
+        shooting_angle: shooting_angle_rad,
         cant_angle: 0.0,
         sight_height: sight_height_m,
-        sight_offset_lateral_m: 0.0,
+        sight_offset_lateral_m,
         muzzle_height: bore_height_m,
         target_height: 0.0,
-        zero_poi_vertical_m: 0.0,
-        zero_poi_horizontal_m: 0.0,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
         // Ground-impact detection ON (0.0), matching solve_profile_for_dsf's override of
         // the engine's own default (-100.0, effectively disabled) — the `dsf` command has
         // no way to disable it.
@@ -512,9 +644,13 @@ pub fn solve_for_dsf(
         humidity: inputs.humidity_pct,
         latitude: None,
 
-        wind_speed: 0.0,
-        wind_angle: 0.0,
+        wind_speed: wind_speed_m,
+        wind_angle: wind_direction_rad,
 
+        // Confirmed inert for this solve's own drop/Mach output (see DsfSolveInputs's doc
+        // comment) — kept at the same historical default this helper always fell back to
+        // when a profile carried no override (twist_right stays the historical `true`
+        // default too, for the same reason).
         twist_rate: crate::stability::default_twist_inches(diameter_m, mass_kg, velocity_m),
         is_twist_right: true,
         caliber_inches: diameter_m / 0.0254,
@@ -539,9 +675,9 @@ pub fn solve_for_dsf(
         cd_delta2: 7.5,
         tipoff_decay_distance: 50.0,
 
-        use_bc_segments: false,
+        use_bc_segments,
         bc_segments: None,
-        bc_segments_data: None,
+        bc_segments_data,
         use_enhanced_spin_drift: false,
         use_form_factor: false,
         enable_wind_shear: false,
@@ -554,26 +690,30 @@ pub fn solve_for_dsf(
         enable_aerodynamic_jump: false,
         use_cluster_bc: false,
 
-        custom_drag_table: None,
+        custom_drag_table: inputs.custom_drag_table.clone(),
         cd_scale: 1.0,
 
         bc_type_str: None,
     };
 
-    let zero_distance_m = zero_distance * 0.9144;
-    ballistic_inputs.muzzle_angle = calculate_zero_angle_with_conditions(
-        ballistic_inputs.clone(),
-        zero_distance_m,
-        bore_height_m + sight_height_m,
-        wind.clone(),
-        atmosphere.clone(),
-    )
-    .map_err(|e| e.to_string())?;
-    // MBA-1359: a no-op today — sight_offset_lateral_m and zero_poi_horizontal_m are
-    // always 0.0 above, this model has no fields for either — kept for the same reason
-    // solve_profile_for_dsf keeps it: correct without another edit if either ever gains
-    // one.
-    ballistic_inputs.azimuth_angle += ballistic_inputs.windage_zero_bias_rad(zero_distance_m);
+    // Zero angle: flat (0.0) when no zero is configured, same as a bare
+    // `trajectory --saved-profile NAME` with no --auto-zero (MBA-1357 Task 8 review,
+    // Finding 2 — restores the historical Option<f64> semantics the first version of this
+    // function dropped).
+    if let Some(zero_distance_yd) = inputs.zero_distance_yd {
+        let zero_distance_m = zero_distance_yd * 0.9144;
+        ballistic_inputs.muzzle_angle = calculate_zero_angle_with_conditions(
+            ballistic_inputs.clone(),
+            zero_distance_m,
+            bore_height_m + sight_height_m,
+            wind.clone(),
+            atmosphere.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        // MBA-1359: the returned angle carries the vertical POI bias; the horizontal bias
+        // is an azimuth term the flight inputs must apply themselves.
+        ballistic_inputs.azimuth_angle += ballistic_inputs.windage_zero_bias_rad(zero_distance_m);
+    }
 
     let mut solver = TrajectorySolver::new(ballistic_inputs, wind, atmosphere);
     solver.set_max_range(max_range_m);
