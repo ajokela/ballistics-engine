@@ -38,36 +38,36 @@ pub struct TallTargetResultV1 {
     pub within_accepted_band: bool,
 }
 
-/// Errors returned by [`tall_target_v1`].
+/// Errors returned by [`tall_target_v1`]. One variant per guard (not a single stringly-typed
+/// variant) so a caller — in particular a future JSON bridge — can match exhaustively instead
+/// of sniffing message text; adding a fifth guard here forces every `match` on this type to be
+/// updated at compile time.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum TallTargetErrorV1 {
-    #[error("invalid tall-target request: {0}")]
-    InvalidInput(String),
+    #[error("clicks is not an angular unit; enter the dialed travel in mil, moa, smoa, or iphy")]
+    ClicksNotAngular,
+    #[error("dialed must be a positive angular travel")]
+    InvalidDialed,
+    #[error("measured must be a positive measured travel")]
+    InvalidMeasured,
+    #[error("range must be at least 1 yard/meter")]
+    InvalidRange,
 }
 
 /// Computes the tall-target correction factor: same arithmetic and validation guards as the
 /// CLI's `tall-target` command, minus the printing.
 pub fn tall_target_v1(req: &TallTargetRequestV1) -> Result<TallTargetResultV1, TallTargetErrorV1> {
     if req.unit == AdjustmentUnit::Clicks {
-        return Err(TallTargetErrorV1::InvalidInput(
-            "clicks is not an angular unit; enter the dialed travel in mil, moa, smoa, or iphy"
-                .to_string(),
-        ));
+        return Err(TallTargetErrorV1::ClicksNotAngular);
     }
     if !req.dialed.is_finite() || req.dialed <= 0.0 {
-        return Err(TallTargetErrorV1::InvalidInput(
-            "dialed must be a positive angular travel".to_string(),
-        ));
+        return Err(TallTargetErrorV1::InvalidDialed);
     }
     if !req.measured.is_finite() || req.measured <= 0.0 {
-        return Err(TallTargetErrorV1::InvalidInput(
-            "measured must be a positive measured travel".to_string(),
-        ));
+        return Err(TallTargetErrorV1::InvalidMeasured);
     }
     if !req.range.is_finite() || req.range < 1.0 {
-        return Err(TallTargetErrorV1::InvalidInput(
-            "range must be at least 1 yard/meter".to_string(),
-        ));
+        return Err(TallTargetErrorV1::InvalidRange);
     }
     let drop_len = if req.metric {
         req.measured / 100.0
@@ -113,24 +113,31 @@ mod tests {
             unit: AdjustmentUnit::Clicks,
             ..req
         };
-        assert!(tall_target_v1(&bad).is_err());
+        assert_eq!(tall_target_v1(&bad), Err(TallTargetErrorV1::ClicksNotAngular));
 
-        // Non-positive and sub-1 range are rejected, matching the CLI guards.
-        assert!(tall_target_v1(&TallTargetRequestV1 {
-            dialed: 0.0,
-            ..req
-        })
-        .is_err());
-        assert!(tall_target_v1(&TallTargetRequestV1 {
-            measured: -1.0,
-            ..req
-        })
-        .is_err());
-        assert!(tall_target_v1(&TallTargetRequestV1 {
-            range: 0.5,
-            ..req
-        })
-        .is_err());
+        // Non-positive and sub-1 range are rejected, matching the CLI guards, each with its
+        // own variant (not a shared stringly-typed error).
+        assert_eq!(
+            tall_target_v1(&TallTargetRequestV1 {
+                dialed: 0.0,
+                ..req
+            }),
+            Err(TallTargetErrorV1::InvalidDialed)
+        );
+        assert_eq!(
+            tall_target_v1(&TallTargetRequestV1 {
+                measured: -1.0,
+                ..req
+            }),
+            Err(TallTargetErrorV1::InvalidMeasured)
+        );
+        assert_eq!(
+            tall_target_v1(&TallTargetRequestV1 {
+                range: 0.5,
+                ..req
+            }),
+            Err(TallTargetErrorV1::InvalidRange)
+        );
     }
 
     #[test]

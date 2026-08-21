@@ -9516,13 +9516,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 metric,
             })
             .map_err(|e| {
-                // The service's message text is the same guard wording the CLI has always
-                // used, minus the leading `--flag`; restore it here so stderr is unchanged.
-                let TallTargetErrorV1::InvalidInput(msg) = e;
-                if msg.starts_with("clicks") {
-                    format!("--unit {msg}")
-                } else {
-                    format!("--{msg}")
+                // Exhaustive match (no catch-all): a fifth guard added to the service without
+                // a corresponding arm here fails to compile, instead of silently emitting a
+                // wrong or malformed `--flag` prefix. Strings are the CLI's historical
+                // `--flag`-prefixed wording, unchanged from before the extraction.
+                match e {
+                    TallTargetErrorV1::ClicksNotAngular => {
+                        "--unit clicks is not an angular unit; enter the dialed travel in mil, moa, smoa, or iphy".to_string()
+                    }
+                    TallTargetErrorV1::InvalidDialed => {
+                        "--dialed must be a positive angular travel".to_string()
+                    }
+                    TallTargetErrorV1::InvalidMeasured => {
+                        "--measured must be a positive measured travel".to_string()
+                    }
+                    TallTargetErrorV1::InvalidRange => {
+                        "--range must be at least 1 yard/meter".to_string()
+                    }
                 }
             })?;
             let unit_label = adjustment_unit_label(unit);
