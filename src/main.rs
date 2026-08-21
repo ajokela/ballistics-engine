@@ -73,9 +73,7 @@ use ballistics_engine::truing_wind::{
     format_wind_truing_report, parse_wind_observation, solve_wind_truing, WindTruingOutput,
     WindTruingRequest, MPH_TO_MPS,
 };
-use ballistics_engine::truing_dsf::{
-    apply_dsf, DsfPoint, DsfTable, UpsertOutcome, DSF_MACH_CEILING,
-};
+use ballistics_engine::truing_dsf::{apply_dsf, DsfPoint, DsfTable, UpsertOutcome};
 use ballistics_engine::truing_plan::{
     plan_truing_experiment_v1, TruingExperimentPlanRequestV1, TruingExperimentPlanV1,
     TruingPlanModeV1,
@@ -85,7 +83,12 @@ use ballistics_engine::truing_uncertainty::{
     UncertaintyTruingReportV1, UncertaintyTruingRequestV1, WeightedTruingObservationV1,
 };
 // Task 6 (truing JSON bridge): the tall-target arithmetic, shared with a future bridge command.
-use ballistics_engine::truing_service::{TallTargetErrorV1, TallTargetRequestV1, tall_target_v1};
+// Task 9: the `dsf` verb's post-solve derivation (interpolation, Mach, both gates, the DSF
+// ratio), shared with the model-driven bridge entry point `derive_dsf_point_v1`.
+use ballistics_engine::truing_service::{
+    derive_dsf_point_from_solve_v1, tall_target_v1, DsfServiceErrorV1, TallTargetErrorV1,
+    TallTargetRequestV1,
+};
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 // MBA-1372: SAAMI free-recoil and power-factor calculators.
 use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
@@ -6660,7 +6663,7 @@ fn solve_profile_for_dsf(
 const DSF_DEFAULT_SOLVE_ENVELOPE: f64 = 1000.0;
 
 /// Exact text for the `dsf` verb's supersonic-observation rejection gate: the target
-/// range's predicted Mach is at or above [`DSF_MACH_CEILING`] (1.2) — that's MV-truing
+/// range's predicted Mach is at or above [`ballistics_engine::truing_dsf::DSF_MACH_CEILING`] (1.2) — that's MV-truing
 /// territory (`true-velocity`), not the DSF table's domain.
 fn dsf_supersonic_error(mach: f64) -> String {
     format!(
@@ -6679,7 +6682,7 @@ fn dsf_beyond_90pct_warning(range_display: f64, dist_unit: &str) -> String {
 }
 
 /// Whether a DSF table's highest-Mach point sits below Mach 0.9 — since [`DsfTable`] sorts
-/// ascending by Mach and every point is < [`DSF_MACH_CEILING`] (1.2) by construction, the
+/// ascending by Mach and every point is < [`ballistics_engine::truing_dsf::DSF_MACH_CEILING`] (1.2) by construction, the
 /// highest point being < 0.9 already means nothing in the table covers the 0.9-1.2
 /// transonic band.
 fn dsf_table_missing_transonic_coverage(points: &[DsfPoint]) -> bool {
@@ -10632,48 +10635,53 @@ fn main() -> Result<(), Box<dyn Error>> {
                 dsf_zero_selection.zero_distance,
             )?;
 
-            let (position_y, velocity_mag) =
-                ballistics_engine::truing_dsf::interpolate_position_and_velocity(&result.points, range_m).unwrap_or_else(|| {
-                    let solved_range_display =
-                        UnitConverter::distance_from_metric(result.max_range, cli.units);
-                    eprintln!(
-                        "error: saved profile '{}' trajectory does not reach {range:.0} {dist_unit} \
-                         (solved to {solved_range_display:.0} {dist_unit})",
-                        profile.name
-                    );
+            // MBA-1357 Task 9: the derivation itself (interpolation, Mach, both gates, the
+            // DSF ratio) is shared with the bridge's model-driven `derive_dsf_point_v1` via
+            // this function — see truing_service.rs's module doc comment for why the CLI
+            // still solves through the profile-rich DsfSolveInputs above rather than going
+            // through that narrower model-driven entry point directly. Error variants are
+            // matched exhaustively and reformatted into the CLI's own historical,
+            // units-aware wording (the service's own text is yard-only, since a bare
+            // TruingModelInputsV1 has no metric/imperial distinction) so output stays
+            // byte-identical to before this extraction.
+            let derived = derive_dsf_point_from_solve_v1(&result, range_m, observed_value, drop_unit)
+                .unwrap_or_else(|e| {
+                    match e {
+                        DsfServiceErrorV1::Supersonic { mach, .. } => {
+                            eprintln!("{}", dsf_supersonic_error(mach));
+                        }
+                        DsfServiceErrorV1::OutOfRange { .. } => {
+                            let solved_range_display =
+                                UnitConverter::distance_from_metric(result.max_range, cli.units);
+                            eprintln!(
+                                "error: saved profile '{}' trajectory does not reach {range:.0} \
+                                 {dist_unit} (solved to {solved_range_display:.0} {dist_unit})",
+                                profile.name
+                            );
+                        }
+                        DsfServiceErrorV1::DegenerateDrop { .. } => {
+                            eprintln!(
+                                "error: predicted drop at {range:.0} {dist_unit} is zero or \
+                                 non-finite; cannot compute a DSF ratio"
+                            );
+                        }
+                        DsfServiceErrorV1::InvalidInput(_) | DsfServiceErrorV1::ForwardModel(_) => {
+                            eprintln!("error: {e}");
+                        }
+                    }
                     std::process::exit(1);
                 });
 
-            let predicted_drop_m = result.line_of_sight_height_m - position_y;
-            let mach = if result.station_speed_of_sound_mps > 0.0 {
-                velocity_mag / result.station_speed_of_sound_mps
-            } else {
-                0.0
-            };
-
-            // Gate 1: reject a supersonic observation outright — that's true-velocity's job.
-            if mach > DSF_MACH_CEILING {
-                eprintln!("{}", dsf_supersonic_error(mach));
-                std::process::exit(1);
-            }
-
-            // Gate 2: warn when the observation is BOTH beyond the trajectory's Mach-1.0
-            // crossing AND beyond 90% of the solved max range (MBA-1357 Task 2 review,
-            // Critical #1 — a compound condition, not the 90% ratio alone).
-            let crossing_m = ballistics_engine::truing_dsf::mach_1_crossing_range_m(&result);
-            if ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(range_m, crossing_m, result.max_range) {
+            // Gate 2's warning (MBA-1357 Task 2 review, Critical #1 — a compound condition,
+            // not the 90% ratio alone) is signalled by a non-empty warnings vec; the CLI
+            // reconstructs its own exact, units-aware wording rather than printing the
+            // service's yard-only text.
+            if !derived.warnings.is_empty() {
                 eprintln!("{}", dsf_beyond_90pct_warning(range, dist_unit));
             }
 
-            let predicted_value = drop_unit.express_drop_m(predicted_drop_m, range_m);
-            if !predicted_value.is_finite() || predicted_value == 0.0 {
-                eprintln!(
-                    "error: predicted drop at {range:.0} {dist_unit} is zero or non-finite; \
-                     cannot compute a DSF ratio"
-                );
-                std::process::exit(1);
-            }
-            let dsf = observed_value / predicted_value;
+            let mach = derived.mach;
+            let dsf = derived.dsf;
 
             let mut table =
                 DsfTable::from_points(profile.dsf_points.clone().unwrap_or_default())
