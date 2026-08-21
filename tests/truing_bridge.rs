@@ -124,3 +124,28 @@ fn true_wind_is_advertised_in_capabilities() {
         .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
     assert!(names.contains(&"true.wind"), "capabilities were {names:?}");
 }
+#[test]
+fn true_tall_target_computes_a_correction_factor() {
+    let v = call("true.tall_target", json!({
+        "dialed": 10.0, "measured": 30.0, "range": 100.0,
+        "unit": "mil", "metric": false
+    }));
+    assert_eq!(v["ok"], true, "response was {v}");
+    // 30 in at 100 yd is 30/36 yd, i.e. 8.3333 mil of ACTUAL travel against 10 mil dialed,
+    // so the correction factor is 0.83333. Assert the number, not a band a 10x error survives.
+    let actual = v["result"]["actual"].as_f64().unwrap();
+    let cf = v["result"]["correction_factor"].as_f64().unwrap();
+    assert!((actual - 8.3333).abs() < 1e-3, "actual travel was {actual}");
+    assert!((cf - 0.83333).abs() < 1e-4, "cf was {cf}");
+    assert_eq!(v["result"]["within_accepted_band"], true);
+}
+
+#[test]
+fn true_tall_target_rejects_clicks() {
+    let v = call("true.tall_target", json!({
+        "dialed": 10.0, "measured": 30.0, "range": 100.0,
+        "unit": "clicks", "metric": false
+    }));
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "command_failed");
+}
