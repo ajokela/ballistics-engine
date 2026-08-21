@@ -19,9 +19,12 @@ mod solve_json_command;
 // flags (--elevation-click-value/--windage-click-value) and profile fields.
 use ballistics_engine::adjustment::{
     adjustment_display, adjustment_factor, adjustment_unit_label, click_size_mil, clicks_for,
-    drop_to_adjustment, parse_click_value, windage_adjustment_display, AdjustmentUnit, ClickBase,
-    ClickValue,
+    parse_click_value, windage_adjustment_display, AdjustmentUnit, ClickBase, ClickValue,
 };
+// Task 6 (truing JSON bridge): drop_to_adjustment's non-test caller (the tall-target arm)
+// moved into truing_service; the unit tests below still exercise it directly.
+#[cfg(test)]
+use ballistics_engine::adjustment::drop_to_adjustment;
 // MBA-1348: the saved-profile turret/reticle model (Plan B Task 5) -- ProfileData::optic_profile
 // assembles one of these from the profile's twelve turret/hold fields.
 use ballistics_engine::optic::{OpticProfile, TravelLimits, TurretState};
@@ -81,6 +84,8 @@ use ballistics_engine::truing_uncertainty::{
     run_uncertainty_truing_v1, NormalPriorV1, TruingApproximationV1, TruingPredictionRequestV1, TruingPriorsV1,
     UncertaintyTruingReportV1, UncertaintyTruingRequestV1, WeightedTruingObservationV1,
 };
+// Task 6 (truing JSON bridge): the tall-target arithmetic, shared with a future bridge command.
+use ballistics_engine::truing_service::{TallTargetErrorV1, TallTargetRequestV1, tall_target_v1};
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 // MBA-1372: SAAMI free-recoil and power-factor calculators.
 use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
@@ -9496,44 +9501,47 @@ fn main() -> Result<(), Box<dyn Error>> {
             range,
             unit,
         } => {
-            if unit == AdjustmentUnit::Clicks {
-                return Err(
-                    "--unit clicks is not an angular unit; enter the dialed travel in \
-                     mil, moa, smoa, or iphy"
-                        .into(),
-                );
-            }
-            if !dialed.is_finite() || dialed <= 0.0 {
-                return Err("--dialed must be a positive angular travel".into());
-            }
-            if !measured.is_finite() || measured <= 0.0 {
-                return Err("--measured must be a positive measured travel".into());
-            }
-            if !range.is_finite() || range < 1.0 {
-                return Err("--range must be at least 1 yard/meter".into());
-            }
             // drop_to_adjustment only needs a consistent drop/range length ratio:
             // imperial measures inches at yards (36 in/yd), metric cm at meters.
-            let (drop_len, range_len, measured_label, range_label) = match cli.units {
-                UnitSystem::Imperial => (measured / 36.0, range, "in", "yd"),
-                UnitSystem::Metric => (measured / 100.0, range, "cm", "m"),
+            let (measured_label, range_label) = match cli.units {
+                UnitSystem::Imperial => ("in", "yd"),
+                UnitSystem::Metric => ("cm", "m"),
             };
-            let actual = drop_to_adjustment(drop_len, range_len, unit);
-            let cf = actual / dialed;
+            let metric = matches!(cli.units, UnitSystem::Metric);
+            let result = tall_target_v1(&TallTargetRequestV1 {
+                dialed,
+                measured,
+                range,
+                unit,
+                metric,
+            })
+            .map_err(|e| {
+                // The service's message text is the same guard wording the CLI has always
+                // used, minus the leading `--flag`; restore it here so stderr is unchanged.
+                let TallTargetErrorV1::InvalidInput(msg) = e;
+                if msg.starts_with("clicks") {
+                    format!("--unit {msg}")
+                } else {
+                    format!("--{msg}")
+                }
+            })?;
             let unit_label = adjustment_unit_label(unit);
             println!();
             println!("Tall-Target Test Result");
             println!("  Dialed travel:   {:.2} {}", dialed, unit_label);
             println!(
                 "  Actual travel:   {:.2} {} ({:.2} {} at {:.0} {})",
-                actual, unit_label, measured, measured_label, range, range_label
+                result.actual, unit_label, measured, measured_label, range, range_label
             );
-            println!("  Correction factor (actual / dialed): {:.4}", cf);
-            if validate_tracking_cf(cf, "the computed factor").is_err() {
+            println!(
+                "  Correction factor (actual / dialed): {:.4}",
+                result.correction_factor
+            );
+            if !result.within_accepted_band {
                 println!(
                     "  warning: {:.4} is outside the accepted (0.5, 1.5) band — the engine \
                      will reject it as a CF; re-check the tall-target measurement",
-                    cf
+                    result.correction_factor
                 );
             } else {
                 println!(

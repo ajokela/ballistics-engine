@@ -84,6 +84,11 @@ pub mod truing_dsf;
 // truing). Carries its own shared table/JSON/CSV formatter so the native CLI and the WASM
 // terminal render identical bytes. No feature gate: must compile for wasm32.
 pub mod truing_wind;
+// Task 6 (truing JSON bridge): the tall-target correction-factor arithmetic, extracted out
+// of the CLI's `Commands::TallTarget` arm so the CLI and a future bridge command share one
+// implementation. No feature gate: must compile for wasm32; fs-free (the CLI keeps its
+// println! formatting, only the arithmetic and validation moved here).
+pub mod truing_service;
 // MBA-1349: robust hold corridors across named segmented-wind scenarios. No feature gate:
 // must compile for wasm32 (the CLI surface is native-only this train, but the core and its
 // shared formatter are ready for the WASM follow-up); fs-free — file reading stays in
