@@ -86,6 +86,18 @@ fn a_request_at_the_size_limit_boundary_is_still_rejected_cleanly() {
 }
 
 #[test]
+fn card_commands_keep_their_error_shape_through_the_generic_adapter() {
+    // A null payload must still be InvalidRequest, not a panic or CommandFailed.
+    let out = ballistics_engine::bridge::bridge_call(
+        r#"{"api_version":1,"command":"card.range_table","request":null}"#,
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["code"], "invalid_request");
+    assert!(v["error"]["message"].as_str().unwrap().contains("card.range_table"));
+}
+
+#[test]
 fn error_envelopes_always_carry_versions() {
     for bad in [
         r#"{"#,

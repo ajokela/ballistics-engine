@@ -205,11 +205,15 @@ fn dispatch(request_json: &str) -> String {
             json!({ "engine_version": ENGINE_VERSION }),
         ),
         "solve" => run_solve(&request.request),
-        "card.come_ups" => run_card(&request.request, "card.come_ups", crate::card_service::come_ups_v1),
-        "card.range_table" => {
-            run_card(&request.request, "card.range_table", crate::card_service::range_table_v1)
+        "card.come_ups" => {
+            run_service(&request.request, "card.come_ups", crate::card_service::come_ups_v1)
         }
-        "card.wind" => run_card(&request.request, "card.wind", crate::card_service::wind_card_v1),
+        "card.range_table" => run_service(
+            &request.request,
+            "card.range_table",
+            crate::card_service::range_table_v1,
+        ),
+        "card.wind" => run_service(&request.request, "card.wind", crate::card_service::wind_card_v1),
         #[cfg(feature = "pdf")]
         "card.pdf" => run_card_pdf(&request.request),
         "profile.validate" => run_profile_validate(&request.request),
@@ -270,33 +274,33 @@ fn run_solve(inner: &Value) -> String {
     }
 }
 
-/// Shared runner for the three card commands: decode the typed request (rejecting
-/// unknown fields), run the transport-free service, serialize the typed response.
-fn run_card(
-    inner: &Value,
-    command: &'static str,
-    service: fn(
-        &crate::card_service::CardRequestV1,
-    ) -> Result<crate::card_service::CardResponseV1, crate::card_service::CardServiceError>,
-) -> String {
+/// Shared adapter for every command backed by a transport-free service: null-check the
+/// payload, deserialize the request, call the service, serialize the response. The error
+/// mapping is fixed so all commands report failures identically.
+fn run_service<Req, Resp, E, F>(inner: &Value, command: &'static str, service: F) -> String
+where
+    Req: serde::de::DeserializeOwned,
+    Resp: serde::Serialize,
+    E: std::fmt::Display,
+    F: FnOnce(&Req) -> Result<Resp, E>,
+{
     if inner.is_null() {
         return error(
             BridgeErrorCode::InvalidRequest,
-            format!("'{command}' requires a request payload (card v1 document)"),
+            format!("'{command}' requires a request payload"),
             None,
         );
     }
-    let request: crate::card_service::CardRequestV1 =
-        match serde_json::from_value(inner.clone()) {
-            Ok(request) => request,
-            Err(err) => {
-                return error(
-                    BridgeErrorCode::InvalidRequest,
-                    format!("{command} request rejected: {err}"),
-                    None,
-                )
-            }
-        };
+    let request: Req = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("{command} request rejected: {err}"),
+                None,
+            )
+        }
+    };
     match service(&request) {
         Ok(response) => match serde_json::to_value(&response) {
             Ok(result) => success(command, result),
@@ -311,6 +315,65 @@ fn run_card(
             format!("{command} failed: {err}"),
             None,
         ),
+    }
+}
+
+/// [`run_service`] for a service whose error carries a machine-readable reason.
+///
+/// `details` lands in `error.details` so a wizard can branch on "supersonic" or
+/// "out_of_range" instead of pattern-matching prose. `code` stays `command_failed`, so
+/// existing callers are unaffected.
+///
+/// Unused until Task 10 wires up `true.dsf`, which is the first command whose service
+/// error carries a machine-readable reason worth surfacing in `error.details`.
+#[allow(dead_code)]
+fn run_service_detailed<Req, Resp, E, F, D>(
+    inner: &Value,
+    command: &'static str,
+    service: F,
+    details: D,
+) -> String
+where
+    Req: serde::de::DeserializeOwned,
+    Resp: serde::Serialize,
+    E: std::fmt::Display,
+    F: FnOnce(&Req) -> Result<Resp, E>,
+    D: FnOnce(&E) -> Option<Value>,
+{
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            format!("'{command}' requires a request payload"),
+            None,
+        );
+    }
+    let request: Req = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("{command} request rejected: {err}"),
+                None,
+            )
+        }
+    };
+    match service(&request) {
+        Ok(response) => match serde_json::to_value(&response) {
+            Ok(result) => success(command, result),
+            Err(err) => error(
+                BridgeErrorCode::InternalError,
+                format!("failed to serialize {command} result: {err}"),
+                None,
+            ),
+        },
+        Err(err) => {
+            let d = details(&err);
+            error(
+                BridgeErrorCode::CommandFailed,
+                format!("{command} failed: {err}"),
+                d,
+            )
+        }
     }
 }
 
