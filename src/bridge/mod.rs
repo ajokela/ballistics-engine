@@ -67,6 +67,7 @@ fn command_names() -> Vec<&'static str> {
     names.extend(["profile.validate", "profile.normalize"]);
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
+    names.extend(["true.fit"]);
     // Filesystem-backed (BC5D tables are loaded from caller-supplied paths), so absent on
     // wasm32 — the same "list only what this build can run" rule as profile.import_a7p.
     #[cfg(not(target_arch = "wasm32"))]
@@ -220,6 +221,11 @@ fn dispatch(request_json: &str) -> String {
         "profile.normalize" => run_profile_normalize(&request.request),
         #[cfg(feature = "profile-import")]
         "profile.import_a7p" => run_profile_import_a7p(&request.request),
+        "true.fit" => run_service(
+            &request.request,
+            "true.fit",
+            crate::truing_uncertainty::run_uncertainty_truing_v1,
+        ),
         #[cfg(not(target_arch = "wasm32"))]
         "bc5d.info" => run_bc5d_info(&request.request),
         other => error(
