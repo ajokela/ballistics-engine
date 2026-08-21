@@ -92,8 +92,29 @@ fn true_wind_fits_a_crosswind_from_an_observed_miss() {
         "earth": null, "called_crosswind_mph": null
     }));
     assert_eq!(v["ok"], true, "response was {v}");
-    assert!(v["result"]["mean_crosswind_mph"].is_number());
     assert_eq!(v["result"]["solutions"].as_array().unwrap().len(), 1);
+
+    // Physics band, not a bare "is a number": sensitivity_m_per_mph ~= 0.05263 m/mph,
+    // no_wind_lateral_m (spin drift, 1:11 twist) ~= 0.0533 m, observed miss = 0.315 m,
+    // so wind-attributable miss = 0.315 - 0.0533 = 0.2617 m, / 0.05263 ~= 4.97 mph.
+    // A wide band (not an exact float) so this isn't brittle against future solver tuning,
+    // but tight enough that a sign flip, unit error, or 10x scale error fails it.
+    let mean = v["result"]["mean_crosswind_mph"].as_f64().unwrap();
+    assert!(mean > 4.5 && mean < 5.5, "mean_crosswind_mph out of band: {mean}");
+    // Sign check: a rightward miss must solve to a positive crosswind (from the left,
+    // pushing right) -- catches a sign flip, which a bare is_number() cannot.
+    assert!(mean > 0.0, "expected a positive (from-the-left) crosswind, got {mean}");
+
+    // Convergence check: the fit must actually reproduce the observation, within the
+    // solver's own WIND_SOLVE_TOLERANCE_M (1.0e-5 m), loosened slightly for headroom.
+    let solution = &v["result"]["solutions"][0];
+    let modeled = solution["modeled_miss_right_m"].as_f64().unwrap();
+    assert!(
+        (modeled - 0.315).abs() < 1.0e-4,
+        "modeled_miss_right_m did not reproduce the observed 0.315 m miss: {modeled}"
+    );
+    let residual = solution["residual_m"].as_f64().unwrap();
+    assert!(residual.abs() < 1.0e-4, "residual_m too large: {residual}");
 }
 
 #[test]
