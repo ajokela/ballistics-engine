@@ -275,6 +275,53 @@ pub enum OpticError {
     NonPositiveTrackingFactor { field: &'static str, value: f64 },
 }
 
+impl OpticError {
+    /// Structured detail payload for a JSON bridge error envelope, mirroring
+    /// [`crate::truing_service::DsfServiceErrorV1::failure_details`]: an INHERENT method
+    /// (not a trait impl — a blanket trait impl collides with specific ones under E0119,
+    /// and this type must keep compiling with the `bridge` feature off, since `optic` is
+    /// unconditional). One stable `reason` per variant, plus that variant's own fields, so
+    /// a wizard can branch on the failure kind without parsing the Display message.
+    pub fn failure_details(&self) -> Option<serde_json::Value> {
+        Some(match self {
+            Self::NonFinite { field } => serde_json::json!({
+                "reason": "non_finite",
+                "field": field,
+            }),
+            Self::NegativeLimit { field, value } => serde_json::json!({
+                "reason": "negative_limit",
+                "field": field,
+                "value": value,
+            }),
+            Self::NonPositiveClickSize { field, size } => serde_json::json!({
+                "reason": "non_positive_click_size",
+                "field": field,
+                "size": size,
+            }),
+            Self::ZeroClicksPerRevolution => serde_json::json!({
+                "reason": "zero_clicks_per_revolution",
+            }),
+            Self::StateOutsideTravel {
+                axis,
+                dialed_mil,
+                down_mil,
+                up_mil,
+            } => serde_json::json!({
+                "reason": "state_outside_travel",
+                "axis": axis,
+                "dialed_mil": dialed_mil,
+                "down_mil": down_mil,
+                "up_mil": up_mil,
+            }),
+            Self::NonPositiveTrackingFactor { field, value } => serde_json::json!({
+                "reason": "non_positive_tracking_factor",
+                "field": field,
+                "value": value,
+            }),
+        })
+    }
+}
+
 impl OpticProfile {
     /// Checks internal consistency: every angular field is finite, both click sizes are
     /// positive, every travel/hold-bound magnitude is non-negative, `clicks_per_revolution`

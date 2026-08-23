@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adjustment::{drop_to_adjustment, AdjustmentUnit};
 use crate::cli_api::TrajectoryResult;
+use crate::optic::{plan_corrections, AngularCorrection, DialPlanReportV1, OpticError, OpticProfile, Preferences};
 use crate::truing::{DropUnit, TruingModelInputsV1};
 use crate::truing_dsf::{
     dsf_observation_warrants_90pct_warning, interpolate_position_and_velocity,
@@ -325,6 +326,70 @@ pub fn derive_dsf_point_from_solve_v1(
         drop_unit,
         warnings,
     })
+}
+
+// ============================================================================
+// `dial-plan` (MBA-1348's `plan_corrections`, bridge wrapper)
+// ============================================================================
+
+/// Yards-to-metres, matching `dsf_solve_envelope_m`'s own constant above: `plan_corrections`
+/// takes `range_m` in metres, but every other `true.*` command except `true.wind` is
+/// imperial on the wire, so the request stays imperial and this is the one conversion the
+/// service performs.
+const YARDS_TO_METRES: f64 = 0.9144;
+
+/// Serde default for `DialPlanRequestV1::elevation_cf`/`windage_cf`: 1.0, the neutral
+/// tracking-correction-factor value. Most callers have no tall-target CF measured yet, so
+/// requiring the field would be a trap — see the struct's own doc comment.
+fn unity_cf() -> f64 {
+    1.0
+}
+
+/// Request for [`dial_plan_v1`]: the bridge's wrapper around [`plan_corrections`]'s six
+/// flat parameters (MBA-1348 Task 6's CLI wraps the same six from `--elevation`/`--windage`,
+/// `--profile`/inline optic flags, `--range`, and `--prefer-hold`/`--max-hold`).
+///
+/// `range_yd` is in YARDS: `plan_corrections` itself takes metres, but every other `true.*`
+/// command except `true.wind` is imperial on the wire, so this one stays imperial too and
+/// [`dial_plan_v1`] converts at the boundary. `elevation_cf`/`windage_cf` default to `1.0`
+/// (the neutral value) rather than being required — the CLI's own `--profile`-less inline
+/// mode has no tracking-CF flags at all and always passes 1.0, and most callers have no
+/// tall-target correction factor measured yet, so requiring the field here would be a trap.
+///
+/// The optic is supplied INLINE (`optic: OpticProfile`), never loaded from a named profile:
+/// the CLI's `--profile` mode reads a saved profile from disk (`load_profile`), and that
+/// filesystem dependency must not enter this module — see the module's own doc comment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DialPlanRequestV1 {
+    pub correction: AngularCorrection,
+    pub optic: OpticProfile,
+    /// Range in YARDS for the linear-miss-at-range residual. See the struct doc comment.
+    pub range_yd: f64,
+    #[serde(default = "unity_cf")]
+    pub elevation_cf: f64,
+    #[serde(default = "unity_cf")]
+    pub windage_cf: f64,
+    #[serde(default)]
+    pub preferences: Preferences,
+}
+
+/// Turn a TRUE angular [`AngularCorrection`] into ranked dial/hold/hybrid plans for an
+/// inline [`OpticProfile`] — the JSON bridge's entry point to [`plan_corrections`].
+///
+/// Contains NO arithmetic beyond the yards-to-metres conversion: everything else is
+/// [`plan_corrections`] itself, so there is no second implementation of the CF rule or the
+/// ranking logic to drift from the CLI's `dial-plan` command or from `plan_corrections`'s
+/// own tests.
+pub fn dial_plan_v1(req: &DialPlanRequestV1) -> Result<DialPlanReportV1, OpticError> {
+    plan_corrections(
+        req.correction,
+        &req.optic,
+        req.range_yd * YARDS_TO_METRES,
+        req.elevation_cf,
+        req.windage_cf,
+        &req.preferences,
+    )
 }
 
 #[cfg(test)]

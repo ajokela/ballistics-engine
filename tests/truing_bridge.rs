@@ -1,5 +1,5 @@
 //! Integration tests for the bridge's `true.*` truing commands: `true.fit`, `true.wind`,
-//! `true.tall_target`, `true.dsf`, `true.plan`.
+//! `true.tall_target`, `true.dsf`, `true.plan`, `true.dial_plan`.
 //!
 //! The `_matches_cli` tests at the bottom are golden cross-checks (same pattern as
 //! `tests/card_bridge_golden.rs`): they run the real `ballistics` binary and the bridge
@@ -237,11 +237,13 @@ fn true_dsf_derives_a_point_without_touching_a_profile() {
 }
 
 #[test]
-fn all_five_true_commands_are_advertised() {
+fn all_six_true_commands_are_advertised() {
     let v = call("meta.capabilities", json!(null));
     let names: Vec<&str> = v["result"]["commands"]
         .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-    for c in ["true.fit", "true.wind", "true.tall_target", "true.dsf", "true.plan"] {
+    for c in [
+        "true.fit", "true.wind", "true.tall_target", "true.dsf", "true.plan", "true.dial_plan",
+    ] {
         assert!(names.contains(&c), "{c} missing from {names:?}");
     }
 }
@@ -348,6 +350,92 @@ fn true_plan_reports_insufficient_candidates_with_rejection_diagnostics() {
     assert_eq!(by_index(1)["reason"], "duplicate_range", "{rejected:?}");
     assert_eq!(by_index(2)["reason"], "invalid_range", "{rejected:?}");
     assert_eq!(by_index(2)["range_yd"], -50.0, "{rejected:?}");
+}
+
+// ============================================================================
+// true.dial_plan
+// ============================================================================
+
+/// An inline optic whose elevation correction (2.3 mil) is an exact multiple of its 0.1 mil
+/// click, with no reticle hold bounds declared: `dial_all` should rank first and feasible,
+/// while `hybrid`/`hold_all` cannot verify their hold component (no bound data) and are
+/// therefore infeasible -- exactly the scenario `tests/dial_plan_cli.rs`'s
+/// `exact_click_alignment_ranks_dial_all_first_with_near_zero_residual` exercises for the
+/// CLI. `range_yd: 600.0` is chosen so the yards-to-metres conversion
+/// (`600.0 * 0.9144 = 548.64`) is itself an assertable, exact value.
+fn dial_plan_request() -> Value {
+    json!({
+        "correction": {"elevation_mil": 2.3, "windage_mil": 0.0},
+        "optic": {
+            "elevation_click": "0.1mil",
+            "windage_click": "0.1mil",
+            "clicks_per_revolution": null,
+            "zero_stop": false,
+            "elevation_travel": {"down_mil": 5.0, "up_mil": 30.0},
+            "windage_travel": null,
+            "turret_state": null,
+            "reticle_hold_bounds": null
+        },
+        "range_yd": 600.0
+    })
+}
+
+#[test]
+fn true_dial_plan_ranks_dial_all_first_for_an_exact_click_alignment() {
+    let v = call("true.dial_plan", dial_plan_request());
+    assert_eq!(v["ok"], true, "response was {v}");
+    let r = &v["result"];
+
+    // The yards-to-metres conversion this service performs, exactly.
+    assert!(
+        (r["range_m"].as_f64().unwrap() - 548.64).abs() < 1e-9,
+        "range_m conversion wrong: {r}"
+    );
+
+    let best = &r["plans"][0];
+    assert_eq!(best["strategy"], "dial_all", "{r}");
+    assert_eq!(best["feasible"], true, "{r}");
+    let elevation_instr = &best["instructions"][0];
+    assert_eq!(elevation_instr["axis"], "elevation", "{r}");
+    assert_eq!(elevation_instr["direction"], "up", "{r}");
+    // 2.3 mil / 0.1 mil per click = 23 clicks exactly.
+    assert_eq!(elevation_instr["target_clicks_from_zero"], 23, "{r}");
+    assert_eq!(elevation_instr["delta_clicks"], 23, "{r}");
+
+    // Neither hold-based plan can verify its hold fits (no reticle_hold_bounds declared),
+    // so both are reported infeasible -- never silently upgraded to feasible.
+    for plan in r["plans"].as_array().unwrap() {
+        if plan["strategy"] == "hybrid" || plan["strategy"] == "hold_all" {
+            assert_eq!(plan["feasible"], false, "{plan}");
+            assert_eq!(
+                plan["limits_hit"][0]["kind"], "no_hold_bound_data",
+                "{plan}"
+            );
+        }
+    }
+}
+
+#[test]
+fn true_dial_plan_rejects_unknown_fields_on_an_otherwise_valid_request() {
+    let mut req = dial_plan_request();
+    assert_eq!(call("true.dial_plan", req.clone())["ok"], true);
+    req["typo_field"] = json!(1.0);
+    let v = call("true.dial_plan", req);
+    assert_eq!(v["error"]["code"], "invalid_request", "{v}");
+}
+
+#[test]
+fn true_dial_plan_rejects_a_non_positive_tracking_factor_with_diagnostics() {
+    let mut req = dial_plan_request();
+    req["elevation_cf"] = json!(0.0);
+    let v = call("true.dial_plan", req);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "command_failed", "{v}");
+    assert_eq!(
+        v["error"]["details"]["reason"], "non_positive_tracking_factor",
+        "{v}"
+    );
+    assert_eq!(v["error"]["details"]["field"], "elevation_cf", "{v}");
 }
 
 // ============================================================================
@@ -584,4 +672,40 @@ fn true_plan_matches_cli() {
             bridge_station["scaled_mv_sensitivity"].as_f64().unwrap(),
         );
     }
+}
+
+#[test]
+fn true_dial_plan_matches_cli() {
+    // `dial-plan -o json` prints `DialPlanReportV1` VERBATIM (unlike `plan-truing`, which
+    // restructures its payload -- see `true_plan_matches_cli`'s own comment) -- MBA-1348
+    // Task 6 built it to be the exact same versioned struct the bridge serializes, so the
+    // two documents must be structurally IDENTICAL, not merely close.
+    let out = cli()
+        .args([
+            "dial-plan",
+            "--elevation", "2.3mil",
+            "--range", "600",
+            "--elevation-click", "0.1mil",
+            "--travel-up", "30mil",
+            "--travel-down", "5mil",
+            "-o", "json",
+        ])
+        .output()
+        .expect("run dial-plan");
+    assert!(
+        out.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cli_json: Value =
+        serde_json::from_slice(&out.stdout).expect("dial-plan -o json printed valid JSON");
+
+    let v = call("true.dial_plan", dial_plan_request());
+    assert_eq!(v["ok"], true, "bridge true.dial_plan failed: {v}");
+
+    assert_eq!(
+        cli_json, v["result"],
+        "CLI and bridge dial-plan reports must be structurally identical:\ncli: {cli_json}\nbridge: {}",
+        v["result"]
+    );
 }

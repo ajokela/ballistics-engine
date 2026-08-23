@@ -35,9 +35,9 @@
 //!
 //! ## The `true.*` truing family
 //!
-//! `true.fit`, `true.wind`, `true.tall_target`, `true.dsf`, and `true.plan` expose the
-//! engine's truing methods. All five are unconditional (no filesystem access, so all five
-//! are present on wasm32), but they are not otherwise uniform:
+//! `true.fit`, `true.wind`, `true.tall_target`, `true.dsf`, `true.plan`, and `true.dial_plan`
+//! expose the engine's truing methods. All six are unconditional (no filesystem access, so
+//! all six are present on wasm32), but they are not otherwise uniform:
 //!
 //! - `true.fit` (joint MV+BC truing) is backed by the uncertainty solver, so its result
 //!   always carries `approximation` — a required enum that is either `Available` with
@@ -63,9 +63,15 @@
 //!   machine-readable `code` (`invalid_request`, `insufficient_reachable_candidates`,
 //!   `no_feasible_design`) and `rejected_candidates` diagnostics the typed error itself
 //!   carries.
+//! - `true.dial_plan` turns a TRUE angular correction into ranked dial/hold/hybrid
+//!   execution plans for an INLINE optic (`crate::truing_service::dial_plan_v1`, wrapping
+//!   `crate::optic::plan_corrections`). Unlike the CLI's `dial-plan --profile` mode, there
+//!   is no profile-loading path here — the optic is supplied inline in the request, since a
+//!   saved-profile filesystem read must not enter this bridge. Its error also carries
+//!   structured `error.details`: a stable `reason` per `OpticError` variant.
 //!
-//! None of this needed a `BRIDGE_API_VERSION` bump: the five commands are additive within
-//! api_version 1, and `meta.capabilities` lists all five for feature detection.
+//! None of this needed a `BRIDGE_API_VERSION` bump: the six commands are additive within
+//! api_version 1, and `meta.capabilities` lists all six for feature detection.
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -101,7 +107,14 @@ fn command_names() -> Vec<&'static str> {
     names.extend(["profile.validate", "profile.normalize"]);
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
-    names.extend(["true.fit", "true.wind", "true.tall_target", "true.dsf", "true.plan"]);
+    names.extend([
+        "true.fit",
+        "true.wind",
+        "true.tall_target",
+        "true.dsf",
+        "true.plan",
+        "true.dial_plan",
+    ]);
     // Filesystem-backed (BC5D tables are loaded from caller-supplied paths), so absent on
     // wasm32 — the same "list only what this build can run" rule as profile.import_a7p.
     #[cfg(not(target_arch = "wasm32"))]
@@ -282,6 +295,12 @@ fn dispatch(request_json: &str) -> String {
             crate::truing_plan::plan_truing_experiment_v1,
             crate::truing_plan::TruingPlanErrorV1::failure_details,
         ),
+        "true.dial_plan" => run_service_detailed(
+            &request.request,
+            "true.dial_plan",
+            crate::truing_service::dial_plan_v1,
+            crate::optic::OpticError::failure_details,
+        ),
         #[cfg(not(target_arch = "wasm32"))]
         "bc5d.info" => run_bc5d_info(&request.request),
         other => error(
@@ -386,8 +405,8 @@ where
 /// "out_of_range" instead of pattern-matching prose. `code` stays `command_failed`, so
 /// existing callers are unaffected.
 ///
-/// Callers: `true.dsf` and `true.plan`, each of whose service error carries a
-/// machine-readable reason worth surfacing in `error.details`.
+/// Callers: `true.dsf`, `true.plan`, and `true.dial_plan`, each of whose service error
+/// carries a machine-readable reason worth surfacing in `error.details`.
 fn run_service_detailed<Req, Resp, E, F, D>(
     inner: &Value,
     command: &'static str,
