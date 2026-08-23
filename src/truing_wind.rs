@@ -1700,9 +1700,10 @@ mod tests {
             let got = T_95_TWO_SIDED[dof - 1];
             assert!((got - want).abs() < 5e-6, "dof {dof}: {got} vs {want}");
         }
-        // The interval widens as dof shrinks -- a two-shot fit must not look as tight as a ten-shot one.
-        assert!(T_95_TWO_SIDED[0] > T_95_TWO_SIDED[9]);
-        assert!(T_95_TWO_SIDED[29] > NORMAL_95_TWO_SIDED_Z);
+        // The interval widens as dof shrinks -- a two-shot fit must not look as tight as a
+        // ten-shot one. Both operands are constants, so these are checked at compile time.
+        const { assert!(T_95_TWO_SIDED[0] > T_95_TWO_SIDED[9]) };
+        const { assert!(T_95_TWO_SIDED[29] > NORMAL_95_TWO_SIDED_Z) };
     }
 
     #[test]
