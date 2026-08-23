@@ -439,6 +439,139 @@ fn true_dial_plan_rejects_a_non_positive_tracking_factor_with_diagnostics() {
 }
 
 // ============================================================================
+// `OpticError::failure_details` JSON-level coverage, one test per bridge-reachable
+// variant (whole-branch review, Finding 3). `NonPositiveTrackingFactor` above is the
+// sixth. `NonFinite` and `NonPositiveClickSize` are NOT covered here -- see the doc
+// comment on `true_dial_plan_non_finite_and_non_positive_click_size_are_unreachable`
+// below for why no amount of crafted JSON can reach either one through this bridge.
+// ============================================================================
+
+#[test]
+fn true_dial_plan_rejects_a_negative_travel_limit_with_diagnostics() {
+    let mut req = dial_plan_request();
+    req["optic"]["elevation_travel"] = json!({"down_mil": -5.0, "up_mil": 30.0});
+    let v = call("true.dial_plan", req);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "command_failed", "{v}");
+    assert_eq!(
+        v["error"]["details"],
+        json!({
+            "reason": "negative_limit",
+            "field": "elevation_travel.down_mil",
+            "value": -5.0
+        }),
+        "{v}"
+    );
+}
+
+#[test]
+fn true_dial_plan_rejects_a_zero_clicks_per_revolution_with_diagnostics() {
+    let mut req = dial_plan_request();
+    req["optic"]["clicks_per_revolution"] = json!(0);
+    let v = call("true.dial_plan", req);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "command_failed", "{v}");
+    assert_eq!(
+        v["error"]["details"],
+        json!({"reason": "zero_clicks_per_revolution"}),
+        "{v}"
+    );
+}
+
+#[test]
+fn true_dial_plan_rejects_a_turret_state_outside_travel_with_diagnostics() {
+    let mut req = dial_plan_request();
+    // The request's own elevation_travel is -5..=30 mil (see `dial_plan_request`'s doc
+    // comment); 999 mil dialed is far outside it on the up side.
+    req["optic"]["turret_state"] = json!({"elevation_mil": 999.0, "windage_mil": 0.0});
+    let v = call("true.dial_plan", req);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "command_failed", "{v}");
+    assert_eq!(
+        v["error"]["details"],
+        json!({
+            "reason": "state_outside_travel",
+            "axis": "elevation",
+            "dialed_mil": 999.0,
+            "down_mil": 5.0,
+            "up_mil": 30.0
+        }),
+        "{v}"
+    );
+}
+
+/// `OpticError::NonFinite` and `OpticError::NonPositiveClickSize` are unreachable through
+/// `true.dial_plan` (and every other bridge command that takes an inline `OpticProfile`),
+/// so unlike the three tests above, this one does not -- cannot -- drive either variant
+/// end-to-end. It instead pins the two reasons that make them unreachable, so a future
+/// change that accidentally opens a path to either one has something to break:
+///
+/// - **`NonFinite`**: every `f64` field `OpticProfile::validate`'s `require_finite` calls
+///   guard (`elevation_click.size`/`windage_click.size`, both `TravelLimits`, both
+///   `TurretState` fields, all four `HoldBounds` fields) is deserialized either as a bare
+///   JSON number or, for the two click sizes, via `crate::adjustment::ClickValue`'s
+///   `Deserialize` (`parse_click_value`). Standard JSON has no token for NaN or infinity,
+///   and `serde_json` does not silently coerce an out-of-range numeral (e.g. `1e400`) to
+///   `f64::INFINITY` -- it rejects the numeral outright with a "number out of range"
+///   parse error, at the bridge's request-decode step, before `OpticProfile::validate`
+///   (or even `dial_plan_v1`) ever runs. The assertion below pins that rejection.
+/// - **`NonPositiveClickSize`**: `parse_click_value` itself already rejects a zero or
+///   negative click size (`crate::adjustment`'s own doc comment: "the magnitude must be a
+///   positive, finite number"), so a malformed click string like `"0mil"` fails
+///   `ClickValue::deserialize` -- and therefore the whole request's decode -- before
+///   `OpticProfile::validate`'s own `require_positive_click_size` call is ever reached.
+///   `OpticError::NonPositiveClickSize` is reachable ONLY by constructing an `OpticProfile`
+///   directly in Rust and setting its `pub size` field after the fact (exactly what
+///   `optic.rs`'s own unit tests do), which no bridge request can do.
+///
+/// Both cases are asserted as `invalid_request`/`invalid_json`-class failures, never
+/// `command_failed` -- confirming the request never got far enough to reach `dial_plan_v1`
+/// (and therefore `OpticError::failure_details`) at all.
+#[test]
+fn true_dial_plan_non_finite_and_non_positive_click_size_are_unreachable() {
+    // A `1e400` travel bound is syntactically valid JSON (digits + exponent) but has no
+    // finite `f64` representation; `serde_json` rejects it as malformed input rather than
+    // rounding it to infinity, so this never reaches `OpticProfile::validate`'s
+    // `NonFinite` check. Built as a raw string (not `json!(1e400)`, which is itself an
+    // out-of-range Rust `f64` literal) so the malformed numeral only ever exists as text.
+    let envelope = r#"{
+        "api_version": 1,
+        "command": "true.dial_plan",
+        "request": {
+            "correction": {"elevation_mil": 2.3, "windage_mil": 0.0},
+            "optic": {
+                "elevation_click": "0.1mil",
+                "windage_click": "0.1mil",
+                "clicks_per_revolution": null,
+                "zero_stop": false,
+                "elevation_travel": {"down_mil": 5.0, "up_mil": 1e400},
+                "windage_travel": null,
+                "turret_state": null,
+                "reticle_hold_bounds": null
+            },
+            "range_yd": 600.0
+        }
+    }"#;
+    let out: Value = serde_json::from_str(&ballistics_engine::bridge::bridge_call(envelope))
+        .expect("bridge_call always returns valid JSON");
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(out["error"]["code"], "invalid_json", "{out}");
+
+    // A zero click size is rejected by `parse_click_value` -- the sole `ClickValue`
+    // deserializer -- as a request-decode failure, never as a `command_failed` reaching
+    // `OpticError::NonPositiveClickSize`.
+    let mut req = dial_plan_request();
+    req["optic"]["elevation_click"] = json!("0mil");
+    let v = call("true.dial_plan", req);
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "invalid_request", "{v}");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("positive, finite graduation"),
+        "{v}"
+    );
+}
+
+// ============================================================================
 // CLI-vs-bridge parity (whole-branch review, Finding 2)
 // ============================================================================
 
