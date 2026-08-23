@@ -132,6 +132,7 @@ src/trajectory_sampling.rs
 src/transonic_drag.rs
 src/truing_dsf.rs
 src/truing_plan.rs
+src/truing_service.rs
 src/truing_uncertainty.rs
 src/truing_wind.rs
 src/truing.rs
