@@ -1,14 +1,42 @@
 //! Integration tests for the bridge's `true.*` truing commands: `true.fit`, `true.wind`,
 //! `true.tall_target`, `true.dsf`.
+//!
+//! The `_matches_cli` tests at the bottom are golden cross-checks (same pattern as
+//! `tests/card_bridge_golden.rs`): they run the real `ballistics` binary and the bridge
+//! over the same inputs and assert the numbers agree. The CLI is the reference
+//! implementation; without these, a future change to either `main.rs` or
+//! `truing_service.rs` could silently diverge from the other with nothing to catch it —
+//! exactly how this branch's three CLI-vs-library field-loss regressions were only ever
+//! caught by manual worktree diffing. Requires both the `bridge` and `cli` features (the
+//! default set) because they execute the actual binary via `CARGO_BIN_EXE`.
 
-#![cfg(feature = "bridge")]
+#![cfg(all(feature = "bridge", feature = "cli"))]
 
 use ballistics_engine::bridge::bridge_call;
 use serde_json::{json, Value};
+use std::process::Command;
 
 fn call(command: &str, request: Value) -> Value {
     let envelope = json!({"api_version": 1, "command": command, "request": request});
     serde_json::from_str(&bridge_call(&envelope.to_string())).unwrap()
+}
+
+/// Spawn the real `ballistics` binary.
+fn cli() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_ballistics"))
+}
+
+const PARITY_TOL: f64 = 1e-9;
+
+/// Same shape as `card_bridge_golden.rs`'s `assert_close`, but over two bare `f64`s
+/// (one of the two truing CLI outputs being compared is parsed from plain-text stdout,
+/// not JSON, so there is no pair of `serde_json::Value`s to hand it).
+fn assert_close_f64(label: &str, cli_value: f64, bridge_value: f64) {
+    let scale = cli_value.abs().max(bridge_value.abs()).max(1.0);
+    assert!(
+        (cli_value - bridge_value).abs() <= PARITY_TOL * scale,
+        "{label}: CLI {cli_value} vs bridge {bridge_value}"
+    );
 }
 
 fn model() -> Value {
@@ -216,4 +244,144 @@ fn all_four_true_commands_are_advertised() {
     for c in ["true.fit", "true.wind", "true.tall_target", "true.dsf"] {
         assert!(names.contains(&c), "{c} missing from {names:?}");
     }
+}
+
+// ============================================================================
+// CLI-vs-bridge parity (whole-branch review, Finding 2)
+// ============================================================================
+
+/// `tall-target` has no `-o json`; the CLI's only output is the plain-text report
+/// (`Commands::TallTarget`'s handler, `src/main.rs`). Pull the "Actual travel" and
+/// "Correction factor" numbers back out of it so they can be compared against the
+/// bridge's JSON result.
+fn parse_tall_target_stdout(stdout: &str) -> (f64, f64) {
+    let mut actual = None;
+    let mut correction_factor = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Actual travel:") {
+            actual = rest.split_whitespace().next().and_then(|s| s.parse::<f64>().ok());
+        } else if let Some(rest) = line.strip_prefix("Correction factor (actual / dialed):") {
+            correction_factor = rest.split_whitespace().next().and_then(|s| s.parse::<f64>().ok());
+        }
+    }
+    (
+        actual.expect("CLI printed an 'Actual travel' line"),
+        correction_factor.expect("CLI printed a 'Correction factor' line"),
+    )
+}
+
+#[test]
+fn true_tall_target_matches_cli() {
+    // 45 in at 100 yd against a 10 mil dial: actual = (45/36/100)*1000 = 12.5 mil exactly,
+    // cf = 1.25 exactly (both terminate at <= 2 decimal places), so the CLI's rounded
+    // 2/4-decimal display loses no information a tight tolerance would need to absorb —
+    // this really is the exact-arithmetic check the design spec calls for, not merely a
+    // close one.
+    let out = cli()
+        .args([
+            "tall-target", "--dialed", "10", "--measured", "45", "--range", "100",
+            "--unit", "mil",
+        ])
+        .output()
+        .expect("run tall-target");
+    assert!(
+        out.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (cli_actual, cli_cf) = parse_tall_target_stdout(&String::from_utf8_lossy(&out.stdout));
+
+    let v = call(
+        "true.tall_target",
+        json!({"dialed": 10.0, "measured": 45.0, "range": 100.0, "unit": "mil", "metric": false}),
+    );
+    assert_eq!(v["ok"], true, "bridge true.tall_target failed: {v}");
+    let bridge_actual = v["result"]["actual"].as_f64().unwrap();
+    let bridge_cf = v["result"]["correction_factor"].as_f64().unwrap();
+
+    assert_close_f64("actual", cli_actual, bridge_actual);
+    assert_close_f64("correction_factor", cli_cf, bridge_cf);
+}
+
+/// Unique-per-call `$HOME` so `profile save`/`dsf` (which persist to
+/// `$HOME/.ballistics/profiles`) never collide with another test running concurrently —
+/// same isolation pattern `tests/dsf_workflow.rs` uses for the same reason.
+fn temp_home_dir(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "truing-bridge-{tag}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn true_dsf_matches_cli() {
+    // `dsf --saved-profile` has no bare-model equivalent in the bridge (its whole point is
+    // the profile-shaped extras `DsfSolveInputs` carries — see `truing_service.rs`'s module
+    // doc comment), so the only way to drive it through the CLI is a real saved profile
+    // under an isolated $HOME, same as `tests/dsf_workflow.rs`. This profile mirrors
+    // `dsf_model()` above field-for-field (same 900 yd zero, for the same reason
+    // `dsf_model()`'s own doc comment gives: it is what lands the observation in-band).
+    let home = temp_home_dir("dsf");
+    let name = "parity";
+
+    let save_out = cli()
+        .env("HOME", &home)
+        .args([
+            "profile", "save", name,
+            "-v", "2700", "-b", "0.243", "-m", "168", "-d", "0.308",
+            "--drag-model", "g7",
+            "--zero-distance", "900",
+            "--sight-height", "2.0",
+            "--temperature", "59",
+            "--pressure", "29.92",
+            "--humidity", "50",
+            "--altitude", "0",
+        ])
+        .output()
+        .expect("spawn profile save");
+    assert!(
+        save_out.status.success(),
+        "profile save failed: {}",
+        String::from_utf8_lossy(&save_out.stderr)
+    );
+
+    let dsf_out = cli()
+        .env("HOME", &home)
+        .args(["dsf", "--saved-profile", name, "--range", "950"])
+        .arg("--observed-drop=1.0mil")
+        .output()
+        .expect("spawn dsf");
+    assert!(
+        dsf_out.status.success(),
+        "dsf failed: {}",
+        String::from_utf8_lossy(&dsf_out.stderr)
+    );
+
+    let profile_path = home.join(".ballistics").join("profiles").join(format!("{name}.json"));
+    let profile: Value =
+        serde_json::from_str(&std::fs::read_to_string(&profile_path).expect("read saved profile"))
+            .expect("saved profile is valid JSON");
+    let points = profile["dsf_points"].as_array().expect("saved profile has dsf_points");
+    let point = points.last().expect("dsf wrote at least one point");
+    let cli_mach = point["mach"].as_f64().unwrap();
+    let cli_dsf = point["dsf"].as_f64().unwrap();
+
+    let v = call(
+        "true.dsf",
+        json!({"model": dsf_model(), "range_yd": 950.0, "observed_drop": 1.0, "drop_unit": "mil"}),
+    );
+    assert_eq!(v["ok"], true, "bridge true.dsf failed: {v}");
+    let bridge_mach = v["result"]["mach"].as_f64().unwrap();
+    let bridge_dsf = v["result"]["dsf"].as_f64().unwrap();
+
+    assert_close_f64("mach", cli_mach, bridge_mach);
+    assert_close_f64("dsf", cli_dsf, bridge_dsf);
+
+    let _ = std::fs::remove_dir_all(&home);
 }
