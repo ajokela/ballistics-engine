@@ -9,7 +9,7 @@
 use std::error::Error;
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::truing::{
     truing_jacobian_rows, DropUnit, TruingJacobianRow, TruingModelInputsV1,
@@ -29,7 +29,8 @@ const SEPARATION_TOLERANCE_YD: f64 = 1.0e-9;
 const INFORMATION_EIGENVALUE_FLOOR: f64 = 1.0e-12;
 
 /// Input to the v1 range-design planner.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TruingExperimentPlanRequestV1 {
     /// Nominal scalar-BC load and atmospheric model.
     pub model: TruingModelInputsV1,
@@ -198,6 +199,20 @@ impl TruingPlanErrorV1 {
             message: message.into(),
             rejected_candidates: Vec::new(),
         }
+    }
+
+    /// Structured detail payload for a JSON bridge error envelope, mirroring
+    /// [`crate::truing_service::DsfServiceErrorV1::failure_details`]: an INHERENT method
+    /// (not a trait impl — a blanket trait impl collides with specific ones under E0119,
+    /// and this type must keep compiling with the `bridge` feature off). Surfaces the
+    /// machine-readable `code` this error already carries, plus the rejected-candidate
+    /// diagnostics (`InsufficientReachableCandidates`/`NoFeasibleDesign` both retain them)
+    /// a wizard would branch on to suggest a different candidate range or observation count.
+    pub fn failure_details(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "code": self.code,
+            "rejected_candidates": self.rejected_candidates,
+        }))
     }
 }
 

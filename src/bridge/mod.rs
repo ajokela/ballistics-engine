@@ -35,9 +35,9 @@
 //!
 //! ## The `true.*` truing family
 //!
-//! `true.fit`, `true.wind`, `true.tall_target`, and `true.dsf` expose the engine's truing
-//! methods. All four are unconditional (no filesystem access, so all four are present on
-//! wasm32), but they are not otherwise uniform:
+//! `true.fit`, `true.wind`, `true.tall_target`, `true.dsf`, and `true.plan` expose the
+//! engine's truing methods. All five are unconditional (no filesystem access, so all five
+//! are present on wasm32), but they are not otherwise uniform:
 //!
 //! - `true.fit` (joint MV+BC truing) is backed by the uncertainty solver, so its result
 //!   always carries `approximation` — a required enum that is either `Available` with
@@ -57,9 +57,15 @@
 //!   machine-readable `reason` (`invalid_input`, `supersonic`, `out_of_range`,
 //!   `degenerate_drop`, `forward_model`) alongside the message; `error.code` stays
 //!   `command_failed` for all commands, so existing callers are unaffected.
+//! - `true.plan` recommends which candidate ranges to shoot for a joint MV/BC truing
+//!   experiment (`crate::truing_plan::plan_truing_experiment_v1`, wired directly — no new
+//!   service function). Its error also carries structured `error.details`: the same
+//!   machine-readable `code` (`invalid_request`, `insufficient_reachable_candidates`,
+//!   `no_feasible_design`) and `rejected_candidates` diagnostics the typed error itself
+//!   carries.
 //!
-//! None of this needed a `BRIDGE_API_VERSION` bump: the four commands are additive within
-//! api_version 1, and `meta.capabilities` lists all four for feature detection.
+//! None of this needed a `BRIDGE_API_VERSION` bump: the five commands are additive within
+//! api_version 1, and `meta.capabilities` lists all five for feature detection.
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -95,7 +101,7 @@ fn command_names() -> Vec<&'static str> {
     names.extend(["profile.validate", "profile.normalize"]);
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
-    names.extend(["true.fit", "true.wind", "true.tall_target", "true.dsf"]);
+    names.extend(["true.fit", "true.wind", "true.tall_target", "true.dsf", "true.plan"]);
     // Filesystem-backed (BC5D tables are loaded from caller-supplied paths), so absent on
     // wasm32 — the same "list only what this build can run" rule as profile.import_a7p.
     #[cfg(not(target_arch = "wasm32"))]
@@ -270,6 +276,12 @@ fn dispatch(request_json: &str) -> String {
             crate::truing_service::derive_dsf_point_v1,
             crate::truing_service::DsfServiceErrorV1::failure_details,
         ),
+        "true.plan" => run_service_detailed(
+            &request.request,
+            "true.plan",
+            crate::truing_plan::plan_truing_experiment_v1,
+            crate::truing_plan::TruingPlanErrorV1::failure_details,
+        ),
         #[cfg(not(target_arch = "wasm32"))]
         "bc5d.info" => run_bc5d_info(&request.request),
         other => error(
@@ -374,7 +386,7 @@ where
 /// "out_of_range" instead of pattern-matching prose. `code` stays `command_failed`, so
 /// existing callers are unaffected.
 ///
-/// First (and so far only) caller: `true.dsf`, whose service error carries a
+/// Callers: `true.dsf` and `true.plan`, each of whose service error carries a
 /// machine-readable reason worth surfacing in `error.details`.
 fn run_service_detailed<Req, Resp, E, F, D>(
     inner: &Value,

@@ -1,5 +1,5 @@
 //! Integration tests for the bridge's `true.*` truing commands: `true.fit`, `true.wind`,
-//! `true.tall_target`, `true.dsf`.
+//! `true.tall_target`, `true.dsf`, `true.plan`.
 //!
 //! The `_matches_cli` tests at the bottom are golden cross-checks (same pattern as
 //! `tests/card_bridge_golden.rs`): they run the real `ballistics` binary and the bridge
@@ -237,13 +237,117 @@ fn true_dsf_derives_a_point_without_touching_a_profile() {
 }
 
 #[test]
-fn all_four_true_commands_are_advertised() {
+fn all_five_true_commands_are_advertised() {
     let v = call("meta.capabilities", json!(null));
     let names: Vec<&str> = v["result"]["commands"]
         .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-    for c in ["true.fit", "true.wind", "true.tall_target", "true.dsf"] {
+    for c in ["true.fit", "true.wind", "true.tall_target", "true.dsf", "true.plan"] {
         assert!(names.contains(&c), "{c} missing from {names:?}");
     }
+}
+
+// ============================================================================
+// true.plan
+// ============================================================================
+
+/// Same bullet as `model()`. Five candidate ranges, 3-station design, 0.1 mil measurement
+/// resolution: the 600/800/1000 yd trio is the informative one for this load (farther
+/// stations separate MV and BC better than the two short ones), so a regression that
+/// mangles the sensitivity math or the station selection changes which three ranges come
+/// back, not just the numbers attached to them. Values below were read off a real run of
+/// this exact fixture (see `dsf_model`'s neighboring doc comments for why this crate reads
+/// real solver output rather than hand-deriving it).
+#[test]
+fn true_plan_selects_the_farthest_stations_for_a_joint_mv_bc_design() {
+    let v = call("true.plan", json!({
+        "model": model(),
+        "candidate_ranges_yd": [200.0, 400.0, 600.0, 800.0, 1000.0],
+        "observation_count": 3,
+        "minimum_separation_yd": 100.0,
+        "measurement_sigma_1sd": 0.1,
+        "drop_unit": "mil"
+    }));
+    assert_eq!(v["ok"], true, "response was {v}");
+    let r = &v["result"];
+
+    assert_eq!(r["mode"], "joint_mv_bc", "{r}");
+    assert_eq!(r["search_strategy"], "exhaustive", "{r}");
+    // All 5 candidates are unique and reachable at this load -- none rejected.
+    assert_eq!(r["eligible_candidate_count"], 5, "{r}");
+    assert!(r["rejected_candidates"].as_array().unwrap().is_empty(), "{r}");
+
+    // The optimizer picks the three FARTHEST candidates, not the three closest or a
+    // scattered set -- this is the substantive claim a broken sensitivity calculation
+    // would falsify first.
+    let selected_ranges: Vec<f64> = r["selected_stations"]
+        .as_array().unwrap().iter()
+        .map(|s| s["range_yd"].as_f64().unwrap())
+        .collect();
+    assert_eq!(selected_ranges, vec![600.0, 800.0, 1000.0], "{r}");
+    let unselected: Vec<f64> = r["unselected_candidate_ranges_yd"]
+        .as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert_eq!(unselected, vec![200.0, 400.0], "{r}");
+
+    // BC sensitivity ratio and the weak-axis singular value are real physics-derived
+    // numbers, not merely "some positive float" -- a wide-but-real band that would catch a
+    // sign flip or an order-of-magnitude regression while surviving ordinary solver tuning.
+    let sensitivity_ratio = r["information"]["sensitivity_ratio"].as_f64().unwrap();
+    assert!(
+        sensitivity_ratio > 0.25 && sensitivity_ratio < 0.4,
+        "sensitivity_ratio out of band: {sensitivity_ratio}"
+    );
+    let min_singular = r["information"]["minimum_singular_value"].as_f64().unwrap();
+    assert!(
+        min_singular > 10.0 && min_singular < 25.0,
+        "minimum_singular_value out of band: {min_singular}"
+    );
+}
+
+#[test]
+fn true_plan_rejects_unknown_fields_on_an_otherwise_valid_request() {
+    let mut req = json!({
+        "model": model(),
+        "candidate_ranges_yd": [200.0, 400.0, 600.0],
+        "observation_count": 2,
+        "minimum_separation_yd": 100.0,
+        "measurement_sigma_1sd": 0.1,
+        "drop_unit": "mil"
+    });
+    // Confirm the request is valid BEFORE poisoning it, so rejection below can only be
+    // attributed to the unknown field.
+    assert_eq!(call("true.plan", req.clone())["ok"], true);
+    req["typo_field"] = json!(1.0);
+    let v = call("true.plan", req);
+    assert_eq!(v["error"]["code"], "invalid_request", "{v}");
+}
+
+#[test]
+fn true_plan_reports_insufficient_candidates_with_rejection_diagnostics() {
+    // 200 yd duplicated (rejected as duplicate_range) and -50 yd invalid (rejected as
+    // invalid_range) leave only ONE unique reachable candidate for a 3-station request.
+    let v = call("true.plan", json!({
+        "model": model(),
+        "candidate_ranges_yd": [200.0, 200.0, -50.0],
+        "observation_count": 3,
+        "minimum_separation_yd": 100.0,
+        "measurement_sigma_1sd": 0.1,
+        "drop_unit": "mil"
+    }));
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["error"]["code"], "command_failed", "{v}");
+    assert_eq!(
+        v["error"]["details"]["code"], "insufficient_reachable_candidates",
+        "{v}"
+    );
+    let rejected = v["error"]["details"]["rejected_candidates"].as_array().unwrap();
+    let by_index = |index: i64| {
+        rejected.iter().find(|c| c["input_index"] == index).unwrap_or_else(|| {
+            panic!("no rejected candidate at input_index {index} in {rejected:?}")
+        })
+    };
+    assert_eq!(by_index(1)["reason"], "duplicate_range", "{rejected:?}");
+    assert_eq!(by_index(2)["reason"], "invalid_range", "{rejected:?}");
+    assert_eq!(by_index(2)["range_yd"], -50.0, "{rejected:?}");
 }
 
 // ============================================================================
@@ -384,4 +488,100 @@ fn true_dsf_matches_cli() {
     assert_close_f64("dsf", cli_dsf, bridge_dsf);
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn true_plan_matches_cli() {
+    // Same load and design parameters as `true_plan_selects_the_farthest_stations...`.
+    // `plan-truing -o json` restructures the payload (unit-suffixed keys, a nested
+    // `information`/`optimizer` split -- see `display_truing_experiment_plan` in
+    // `main.rs`) rather than serializing `TruingExperimentPlanV1` verbatim, so this
+    // compares the underlying VALUES field-by-field instead of the two JSON documents
+    // wholesale.
+    let out = cli()
+        .args([
+            "plan-truing",
+            "-v", "2700", "-b", "0.243", "--drag-model", "g7", "-m", "168", "-d", "0.308",
+            "--candidate-ranges", "200,400,600,800,1000",
+            "--observation-count", "3",
+            "--minimum-separation", "100",
+            "--measurement-resolution", "0.1",
+            "--drop-unit", "mil",
+            "--zero-distance", "100",
+            "--sight-height", "2.0",
+            "--temperature", "59",
+            "--pressure", "29.92",
+            "--humidity", "50",
+            "--altitude", "0",
+            "-o", "json",
+        ])
+        .output()
+        .expect("run plan-truing");
+    assert!(
+        out.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cli_json: Value =
+        serde_json::from_slice(&out.stdout).expect("plan-truing -o json printed valid JSON");
+
+    let v = call("true.plan", json!({
+        "model": model(),
+        "candidate_ranges_yd": [200.0, 400.0, 600.0, 800.0, 1000.0],
+        "observation_count": 3,
+        "minimum_separation_yd": 100.0,
+        "measurement_sigma_1sd": 0.1,
+        "drop_unit": "mil"
+    }));
+    assert_eq!(v["ok"], true, "bridge true.plan failed: {v}");
+    let r = &v["result"];
+
+    assert_eq!(cli_json["mode"], r["mode"], "mode: cli {cli_json} vs bridge {r}");
+    assert_eq!(
+        cli_json["requested_observation_count"], r["requested_observation_count"],
+        "requested_observation_count"
+    );
+    assert_eq!(
+        cli_json["optimizer"]["eligible_candidate_count"], r["eligible_candidate_count"],
+        "eligible_candidate_count"
+    );
+    assert_eq!(
+        cli_json["optimizer"]["search_strategy"], r["search_strategy"],
+        "search_strategy"
+    );
+    assert_close_f64(
+        "sensitivity_ratio",
+        cli_json["information"]["bc_sensitivity_ratio"].as_f64().unwrap(),
+        r["information"]["sensitivity_ratio"].as_f64().unwrap(),
+    );
+    assert_close_f64(
+        "minimum_singular_value",
+        cli_json["information"]["minimum_singular_value"].as_f64().unwrap(),
+        r["information"]["minimum_singular_value"].as_f64().unwrap(),
+    );
+
+    let cli_stations = cli_json["selected_stations"].as_array().unwrap();
+    let bridge_stations = r["selected_stations"].as_array().unwrap();
+    assert_eq!(cli_stations.len(), bridge_stations.len(), "selected station count");
+    for (cli_station, bridge_station) in cli_stations.iter().zip(bridge_stations) {
+        assert_eq!(
+            cli_station["input_index"], bridge_station["input_index"],
+            "input_index: {cli_station} vs {bridge_station}"
+        );
+        assert_close_f64(
+            "range_yd",
+            cli_station["range_yd"].as_f64().unwrap(),
+            bridge_station["range_yd"].as_f64().unwrap(),
+        );
+        assert_close_f64(
+            "predicted_drop",
+            cli_station["predicted_drop_mil"].as_f64().unwrap(),
+            bridge_station["predicted_drop"].as_f64().unwrap(),
+        );
+        assert_close_f64(
+            "scaled_mv_sensitivity",
+            cli_station["scaled_mv_sensitivity"].as_f64().unwrap(),
+            bridge_station["scaled_mv_sensitivity"].as_f64().unwrap(),
+        );
+    }
 }
