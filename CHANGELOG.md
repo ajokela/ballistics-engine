@@ -5,6 +5,40 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Wind truing now always reports a 95% interval.** `true.wind` and the `true-wind` CLI
+  previously reported an uncertainty only when the shooter supplied a measurement `sigma`
+  on every observation; without one they returned a bare crosswind number, which is the
+  common case. `WindTruingReport` gains a required `uncertainty` field carrying either an
+  interval or a structured reason there is not one, mirroring `true.fit`'s
+  `Available | Unavailable { code, message }` shape so an absent interval is explained
+  rather than silently missing.
+
+  Two independent estimates are computed and **the wider one sets the interval**: the
+  measurement sigmas propagated into wind units (as before), and the shot-to-shot scatter
+  of the per-observation solved winds, which needs no input from the shooter. Both are
+  always reported alongside `basis`, naming which one won. A shooter whose stated sigmas
+  are optimistic relative to their own scatter now gets the honest interval instead of the
+  flattering one — in a three-shot fit whose per-shot winds span 8.4-9.5 mph, a claimed
+  0.1 in measurement sigma yielded `+/- 0.02 mph`, where the observed scatter gives
+  `[+7.09, +10.07] mph`.
+
+  The scatter interval uses Student-t on `n-1` degrees of freedom, so a two-shot fit is
+  correctly much wider than a ten-shot one; the propagated interval stays normal, since a
+  supplied sigma is treated as known rather than estimated. A single observation with no
+  sigma reports `single_observation` rather than inventing a spread, and observations that
+  agree exactly report `no_usable_estimate` rather than a zero-width interval, because
+  zero scatter means too few distinct observations, not a perfectly known wind.
+
+### Changed
+- The `true-wind` human-readable output no longer prints the propagated measurement sigma
+  as a bare `+/- x.xx`. It sat directly above the new interval and was frequently an order
+  of magnitude tighter, inviting the reader to believe the smaller number. The existing
+  `mean_sigma_mph` / `effective_crosswind_sigma` JSON fields are unchanged, so this is not
+  a wire-contract change.
+
 ## [0.34.0] - 2026-08-23
 
 ### Added
