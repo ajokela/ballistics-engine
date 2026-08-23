@@ -6546,11 +6546,15 @@ fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
 /// wind, shooting angle, zero-POI offsets, sight-mount offset, BC reference, BC segments,
 /// a custom drag curve — so nothing here changes what `dsf` computes from a profile that
 /// sets any of them; see `DsfSolveInputs`'s own doc comment for the (empirically
-/// confirmed inert) fields it deliberately omits. Drag model is coerced to G1/G7 the same
-/// way every other truing command already does (`parse_drag_model_arg_for_truing`, with
-/// the same stderr warning on anything else) — that coercion is unchanged from before
-/// this review round and is the one place `dsf`'s scope has always differed from a bare
-/// `trajectory --saved-profile` (which honors the full G1/G2/G5/G6/G7/G8/GI/GS/RA4 family).
+/// confirmed inert) fields it deliberately omits. Drag model resolves through
+/// `parse_drag_model_arg` — the FULL G1/G2/G5/G6/G7/G8/GI/GS/RA4 family, same as
+/// `trajectory --saved-profile`, and with no coercion warning for any of them (only a
+/// genuinely unrecognized string still warns and falls back to G1). This restores the
+/// pre-MBA-1357 behaviour: `DsfSolveInputs::drag_model` was briefly narrowed to
+/// `truing::DragModelArg` (G1/G7 only) when this adapter was first written, which
+/// silently coerced any other saved profile's drag model to G1 on every `dsf` solve
+/// (whole-branch review, Finding 1/Critical) — `dsf`'s scope now matches
+/// `trajectory --saved-profile` here exactly, as it always did before this feature.
 ///
 /// `profile` must already be converted to `units` (i.e. loaded via
 /// `load_profile_for_units`). `max_range_m` should exceed the target observation range so
@@ -6579,7 +6583,7 @@ fn solve_profile_for_dsf(
     let velocity_m = UnitConverter::velocity_to_metric(profile.velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(profile.mass, units);
     let diameter_m = UnitConverter::diameter_to_metric(profile.diameter, units);
-    let drag_model = parse_drag_model_arg_for_truing(&profile.drag_model);
+    let drag_model = parse_drag_model_arg(&profile.drag_model);
 
     // Same default `trajectory --saved-profile`/`come-ups --profile` fall back to when a
     // profile doesn't carry the field.

@@ -440,7 +440,16 @@ pub struct DsfSolveInputs {
     /// Nominal scalar ballistic coefficient — superseded by `bc_segments`/
     /// `custom_drag_table` when either is `Some`, same precedence the solver applies.
     pub ballistic_coefficient: f64,
-    pub drag_model: DragModelArg,
+    /// Full drag-model family (MBA-1357 Task 8 review round 3, Critical #1): a saved
+    /// profile can be built with any of G1/G2/G5/G6/G7/G8/GI/GS/RA4 (`profile save
+    /// --drag-model`), and `dsf`'s solve honors whichever one the profile actually
+    /// carries — same as `trajectory --saved-profile`. Unlike this struct, the
+    /// scalar-BC [`TruingModelInputsV1`] model `true-velocity`/`true-wind`/`plan-truing`
+    /// share is deliberately G1/G7-only ([`DragModelArg`]); this field is wider because
+    /// `dsf`'s historical profile-driven solve was always wider, and narrowing it here
+    /// silently coerced non-G1/G7 profiles to G1 — see the `From<&TruingModelInputsV1>`
+    /// impl below for how a bridge caller's G1/G7-only model maps onto this field.
+    pub drag_model: DragModel,
     /// Bullet mass, grains.
     pub mass_gr: f64,
     /// Bullet diameter, inches.
@@ -535,11 +544,19 @@ impl From<&TruingModelInputsV1> for DsfSolveInputs {
     /// `mass_gr`/`diameter_in`, so the imperial bore-height default is the consistent
     /// choice). `zero_distance_yd` carries `inputs.zero_distance_yd` (mandatory on
     /// `TruingModelInputsV1`, so always `Some` here — never the "flat, no zero" case).
+    /// `drag_model` widens `inputs.drag_model` ([`DragModelArg`], G1 or G7 only — the
+    /// bridge request's own model has no wider choice) into the corresponding
+    /// [`DragModel`] variant; since the bridge never offers anything outside G1/G7,
+    /// nothing is lost by this widening, unlike the CLI's saved-profile path which can
+    /// carry the full family.
     fn from(inputs: &TruingModelInputsV1) -> Self {
         DsfSolveInputs {
             muzzle_velocity_fps: inputs.muzzle_velocity_fps,
             ballistic_coefficient: inputs.ballistic_coefficient,
-            drag_model: inputs.drag_model,
+            drag_model: match inputs.drag_model {
+                DragModelArg::G1 => DragModel::G1,
+                DragModelArg::G7 => DragModel::G7,
+            },
             mass_gr: inputs.mass_gr,
             diameter_in: inputs.diameter_in,
             sight_height_in: inputs.sight_height_in,
@@ -604,10 +621,9 @@ pub fn solve_for_dsf(
     let pressure_hpa = inputs.pressure_inhg * 33.8639;
     let altitude_m = inputs.altitude_ft * 0.3048;
 
-    let drag_model = match inputs.drag_model {
-        DragModelArg::G1 => DragModel::G1,
-        DragModelArg::G7 => DragModel::G7,
-    };
+    // `inputs.drag_model` is already the full `DragModel` family (MBA-1357 Task 8 review
+    // round 3, Critical #1) — no G1/G7 coercion here.
+    let drag_model = inputs.drag_model;
 
     let wind_speed_m = inputs.wind_speed_mps.unwrap_or(0.0);
     let wind_direction_rad = inputs.wind_direction_rad.unwrap_or(0.0);
