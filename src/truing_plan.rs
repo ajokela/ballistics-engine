@@ -205,12 +205,17 @@ impl TruingPlanErrorV1 {
     /// [`crate::truing_service::DsfServiceErrorV1::failure_details`]: an INHERENT method
     /// (not a trait impl — a blanket trait impl collides with specific ones under E0119,
     /// and this type must keep compiling with the `bridge` feature off). Surfaces the
-    /// machine-readable `code` this error already carries, plus the rejected-candidate
-    /// diagnostics (`InsufficientReachableCandidates`/`NoFeasibleDesign` both retain them)
-    /// a wizard would branch on to suggest a different candidate range or observation count.
+    /// machine-readable [`TruingPlanErrorCodeV1`] under the same `reason` key its siblings
+    /// (`DsfServiceErrorV1::failure_details`, `OpticError::failure_details`) use as their
+    /// top-level discriminator — including the `rejected_candidates` entries nested in this
+    /// same payload, which already use `reason` per item — so a caller can branch on
+    /// `error.details.reason` uniformly across the whole `true.*` family instead of
+    /// special-casing `true.plan`. Also carries the rejected-candidate diagnostics
+    /// (`InsufficientReachableCandidates`/`NoFeasibleDesign` both retain them) a wizard
+    /// would branch on to suggest a different candidate range or observation count.
     pub fn failure_details(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({
-            "code": self.code,
+            "reason": self.code,
             "rejected_candidates": self.rejected_candidates,
         }))
     }

@@ -338,7 +338,7 @@ fn true_plan_reports_insufficient_candidates_with_rejection_diagnostics() {
     assert_eq!(v["ok"], false, "{v}");
     assert_eq!(v["error"]["code"], "command_failed", "{v}");
     assert_eq!(
-        v["error"]["details"]["code"], "insufficient_reachable_candidates",
+        v["error"]["details"]["reason"], "insufficient_reachable_candidates",
         "{v}"
     );
     let rejected = v["error"]["details"]["rejected_candidates"].as_array().unwrap();
