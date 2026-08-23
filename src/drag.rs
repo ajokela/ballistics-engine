@@ -1212,14 +1212,27 @@ mod tests {
         }
     }
 
+    /// Catches a CATASTROPHIC regression in the drag lookup -- per-call file IO, re-parsing
+    /// the table, an allocation storm -- and nothing finer.
+    ///
+    /// The bound is deliberately enormous relative to the real cost (2000 interpolations
+    /// take well under a millisecond in release, and single-digit milliseconds in debug).
+    /// It used to be 100 ms, which measured the HOST rather than the code: this suite runs
+    /// in debug on virtualised BSD guests that share a physical machine, and a NetBSD guest
+    /// co-scheduled with another VM blew the 100 ms bound while every solo run passed. That
+    /// is a release-blocking flake, because the K3S BSD builders run `cargo test --release
+    /// --lib` and a failure there costs a fleet re-run.
+    ///
+    /// A wall-clock assertion cannot distinguish slow code from a busy machine, so the only
+    /// threshold worth asserting is one no amount of contention can reach but a genuine
+    /// order-of-magnitude regression will. Real performance tracking belongs in the criterion
+    /// benches, which measure against a baseline instead of a constant.
     #[test]
     fn test_performance_characteristics() {
-        // This test ensures the implementation is efficient
         use std::time::Instant;
 
         let start = Instant::now();
 
-        // Perform many calculations
         for i in 0..1000 {
             let mach = 0.5 + (i as f64) * 0.004; // 0.5 to 4.5
             let _g1 = get_drag_coefficient(mach, &DragModel::G1);
@@ -1228,11 +1241,13 @@ mod tests {
 
         let elapsed = start.elapsed();
 
-        // Should complete 2000 calculations quickly (within 100ms)
         assert!(
-            elapsed.as_millis() < 100,
-            "Performance test took {}ms",
-            elapsed.as_millis()
+            elapsed.as_secs() < 2,
+            "2000 drag lookups took {}ms — that is ~{}us per lookup, which means the lookup \
+             is doing real work (IO, parsing, or allocation) rather than interpolating an \
+             in-memory table",
+            elapsed.as_millis(),
+            elapsed.as_micros() / 2000
         );
     }
 
