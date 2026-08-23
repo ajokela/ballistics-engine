@@ -8,14 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **JSON bridge commands `true.fit`, `true.wind`, `true.tall_target`, `true.dsf`** expose the
-  engine's truing methods over the same versioned bridge (`bridge_call`) that already serves
-  `solve` and the `card.*`/`profile.*` families: `true.fit` performs joint muzzle-velocity+BC
-  truing from observed drops, `true.wind` back-solves the effective crosswind that reproduces
-  an observed horizontal miss, `true.tall_target` returns a scope's tracking correction factor
-  from a tall-target test, and `true.dsf` derives a single Mach-keyed drop-scale-factor point
-  from an observed transonic drop. All four are unconditional and listed in
-  `meta.capabilities` in every build, including wasm32 — none of them touches the filesystem.
+- **JSON bridge commands `true.fit`, `true.wind`, `true.tall_target`, `true.dsf`, `true.plan`,
+  `true.dial_plan`** expose the engine's truing methods over the same versioned bridge
+  (`bridge_call`) that already serves `solve` and the `card.*`/`profile.*` families:
+  `true.fit` performs joint muzzle-velocity+BC truing from observed drops, `true.wind`
+  back-solves the effective crosswind that reproduces an observed horizontal miss,
+  `true.tall_target` returns a scope's tracking correction factor from a tall-target test,
+  `true.dsf` derives a single Mach-keyed drop-scale-factor point from an observed transonic
+  drop, `true.plan` recommends which ranges to shoot so a later `true.fit` is actually
+  identifiable, and `true.dial_plan` ranks the ways to execute a known angular correction on
+  a real optic. All six are unconditional and listed in `meta.capabilities` in every build,
+  including wasm32 — none of them touches the filesystem.
 
   **`true.fit` always returns uncertainty.** It is backed by the same uncertainty solver as
   the CLI's `--uncertainty` truing path, so the MAP muzzle velocity and BC never travel
@@ -41,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `miss_right_m` meaning right of the aim point. This is deliberate rather than an
   inconsistency waiting to be fixed: the underlying wind report and solution types are SI
   internally too, so an imperial request wrapper would only fix half the mismatch. Apps must
-  convert at the boundary for `true.wind` specifically; the other three commands need no such
+  convert at the boundary for `true.wind` specifically; the other five commands need no such
   conversion.
 
   **`true.dsf` derives a point; it does not persist one.** It returns the Mach-keyed DSF value
@@ -60,14 +63,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   900 yd zero works for that same bullet). Nothing about this is a bug; it will otherwise bite
   an app author exactly once, confusingly.
 
-  `true.dsf` is also the only `true.*` command, and the only bridge command overall, returning
-  structured `error.details`: a machine-readable `reason` — `invalid_input`, `supersonic`,
-  `out_of_range`, `degenerate_drop`, or `forward_model` — travels alongside the human-readable
-  `message`, so a wizard can branch on the reason instead of parsing prose. `error.code` stays
-  `command_failed` for all of them, so existing callers checking only `code` are unaffected.
+  **`true.plan` is arguably the step BEFORE truing, not truing itself.** Given a model, a list
+  of candidate ranges the shooter could use, and how many observations they can afford, it
+  recommends which stations to actually shoot so the resulting
+  muzzle-velocity+BC fit is identifiable in the first place — rather than a shooter guessing
+  at ranges and later discovering, after the trip to the range, that their chosen stations
+  were too closely spaced (or too few) to separate MV from BC at all. It reports the selected
+  stations alongside the candidates it rejected (duplicates, off-facility ranges, ranges the
+  forward model never reaches) and the ones it found reachable but did not select, so a caller
+  can see why a station was passed over rather than simply vanishing from the response.
+
+  **`true.dial_plan` ranks dial/hold/hybrid ways to execute a known angular correction on a
+  real optic** — dial the whole thing in whole clicks, hold it on the reticle, or split it
+  (dial what the turret can reach, hold the true-angular remainder) — via the same
+  `plan_corrections` engine behind the CLI's `dial-plan` command. The optic arrives INLINE in
+  the request body (`optic: OpticProfile`), never loaded from a saved profile: the CLI's
+  `--profile` mode reads one from disk, and that filesystem dependency deliberately has no
+  bridge equivalent, which is what keeps `true.dial_plan` — and the whole `true.*` family —
+  unconditional rather than gated the way `bc5d.info` is. `range_yd` is imperial, matching the
+  rest of the family (`plan_corrections` itself takes metres; the conversion happens inside
+  `true.dial_plan`), and `elevation_cf`/`windage_cf` default to `1.0`, the neutral
+  tracking-correction-factor value, since most callers have no tall-target CF measured yet.
+
+  A caveat worth stating plainly: **`true.plan` models a scalar G1/G7 BC only.** A caller
+  whose real profile uses BC segments or a custom drag curve can still submit a single derived
+  scalar BC — nothing in the request schema stops them — and the engine has no way to detect
+  that the number came from a segmented model. The returned plan is silently computed against
+  the scalar approximation and will not reflect where a segmented BC actually needs the most
+  resolving power. The CLI rejects such profiles outright before planning; the bridge cannot
+  reproduce that guard, because `TruingExperimentPlanRequestV1` has no field capable of
+  expressing BC segments or a custom drag curve to reject in the first place.
+
+  `true.dsf` established the `true.*` family's structured-`error.details` convention, now
+  shared by `true.plan` and `true.dial_plan`: a machine-readable `reason` travels alongside
+  the human-readable `message`, so a wizard can branch on the failure kind instead of parsing
+  prose. `true.dsf`'s own reasons are `invalid_input`, `supersonic`, `out_of_range`,
+  `degenerate_drop`, and `forward_model`; `true.plan`'s are `invalid_request`,
+  `insufficient_reachable_candidates`, and `no_feasible_design`; `true.dial_plan`'s come from
+  the optic's own validation (`negative_limit`, `zero_clicks_per_revolution`,
+  `state_outside_travel`, `non_positive_tracking_factor`, and two more that `validate` can
+  raise but no bridge request can actually reach). `error.code` stays `command_failed` for all
+  of them, so existing callers checking only `code` are unaffected.
 
   No `BRIDGE_API_VERSION` bump was needed: new commands are additive within `api_version` 1,
-  and apps feature-detect via `meta.capabilities`, which now lists all four alongside the
+  and apps feature-detect via `meta.capabilities`, which now lists all six alongside the
   existing `solve`/`card.*`/`profile.*` commands.
 
 ## [0.33.4] - 2026-08-20

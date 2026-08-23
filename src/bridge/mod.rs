@@ -53,16 +53,16 @@
 //!   test.
 //! - `true.dsf` derives a single Mach-keyed drop-scale-factor point from an observed
 //!   transonic drop; it never persists into a profile's DSF table, which is the caller's
-//!   job. It is the only bridge command whose error carries structured `error.details` — a
+//!   job. It established this family's structured-`error.details` convention: a
 //!   machine-readable `reason` (`invalid_input`, `supersonic`, `out_of_range`,
 //!   `degenerate_drop`, `forward_model`) alongside the message; `error.code` stays
 //!   `command_failed` for all commands, so existing callers are unaffected.
 //! - `true.plan` recommends which candidate ranges to shoot for a joint MV/BC truing
 //!   experiment (`crate::truing_plan::plan_truing_experiment_v1`, wired directly — no new
-//!   service function). Its error also carries structured `error.details`: the same
-//!   machine-readable `code` (`invalid_request`, `insufficient_reachable_candidates`,
-//!   `no_feasible_design`) and `rejected_candidates` diagnostics the typed error itself
-//!   carries.
+//!   service function). Its error also carries structured `error.details`, under the same
+//!   `reason` key as every other command in this family (`invalid_request`,
+//!   `insufficient_reachable_candidates`, `no_feasible_design`) plus the `rejected_candidates`
+//!   diagnostics the typed error itself carries.
 //! - `true.dial_plan` turns a TRUE angular correction into ranked dial/hold/hybrid
 //!   execution plans for an INLINE optic (`crate::truing_service::dial_plan_v1`, wrapping
 //!   `crate::optic::plan_corrections`). Unlike the CLI's `dial-plan --profile` mode, there
