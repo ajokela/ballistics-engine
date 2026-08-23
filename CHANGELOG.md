@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of magnitude tighter, inviting the reader to believe the smaller number. The existing
   `mean_sigma_mph` / `effective_crosswind_sigma` JSON fields are unchanged, so this is not
   a wire-contract change.
+- Dependencies: `printpdf` 0.12.4 -> 0.12.5, `clap` 4.6.4 -> 4.6.6, `clap_complete`
+  4.5.66 -> 4.6.9, `serde_json` 1.0.149 -> 1.0.151, `thiserror` 2.0.18 -> 2.0.19. No
+  API or numerical change.
+- CI: the BSD release builds move to `cross-platform-actions` 1.4.0, which stops exposing
+  AMX to x86-64 guests. Which runner a job landed on could previously decide whether the
+  VM booted at all, and VM-boot hangs are now bounded by a wall clock rather than a
+  connection-attempt count. The pinned guest versions (FreeBSD 14.0, NetBSD 10.0,
+  OpenBSD 7.8) are unchanged. `docker/setup-qemu-action`, which backs only the aarch64
+  `--version` gate, moves to v4.
+
+### Fixed
+- Corrects the 0.34.0 release notes, which said `true.wind` had "no uncertainty model to
+  draw one from". It already propagated supplied measurement sigmas; what it lacked was
+  any uncertainty when none were supplied, and an interval. Both are addressed above.
 
 ## [0.34.0] - 2026-08-23
 
