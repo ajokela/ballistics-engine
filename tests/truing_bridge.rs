@@ -1,3 +1,8 @@
+//! Integration tests for the bridge's `true.*` truing commands: `true.fit`, `true.wind`,
+//! `true.tall_target`, `true.dsf`.
+
+#![cfg(feature = "bridge")]
+
 use ballistics_engine::bridge::bridge_call;
 use serde_json::{json, Value};
 

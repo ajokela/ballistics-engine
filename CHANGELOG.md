@@ -5,6 +5,71 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **JSON bridge commands `true.fit`, `true.wind`, `true.tall_target`, `true.dsf`** expose the
+  engine's truing methods over the same versioned bridge (`bridge_call`) that already serves
+  `solve` and the `card.*`/`profile.*` families: `true.fit` performs joint muzzle-velocity+BC
+  truing from observed drops, `true.wind` back-solves the effective crosswind that reproduces
+  an observed horizontal miss, `true.tall_target` returns a scope's tracking correction factor
+  from a tall-target test, and `true.dsf` derives a single Mach-keyed drop-scale-factor point
+  from an observed transonic drop. All four are unconditional and listed in
+  `meta.capabilities` in every build, including wasm32 — none of them touches the filesystem.
+
+  **`true.fit` always returns uncertainty.** It is backed by the same uncertainty solver as
+  the CLI's `--uncertainty` truing path, so the MAP muzzle velocity and BC never travel
+  without their confidence intervals, covariance, convergence state and warnings —
+  `approximation` is a required enum that is either `Available` with intervals for both MV and
+  BC, or `Unavailable` with a reason, never simply absent. There is deliberately no bridge
+  command that returns a bare truing point estimate: truing from a handful of shots produces a
+  confident-looking number that is mostly noise, and making the dishonest response
+  unrepresentable in the wire schema is a stronger guarantee than discouraging it in
+  documentation.
+
+  **`true.wind` returns a point value with no interval**, and this is a deliberate carve-out
+  from the guarantee above, not an oversight: `solve_wind_truing` has no uncertainty model to
+  draw one from. It is accepted for now because giving the wind fit an uncertainty model is
+  new physics, not plumbing that could piggyback on this bridge work. Apps must not present a
+  `true.wind` result with the same confidence as a `true.fit` result — there is no statistical
+  basis for doing so today.
+
+  **`true.wind` is also the one command whose wire shape is SI.** `true.fit`,
+  `true.tall_target`, `true.dsf`, and the rest of every request (muzzle velocity in fps, mass
+  in grains, distances in inches/yards) are imperial throughout, but `true.wind`'s
+  `observations` carry `range_m`, `miss_right_m`, and `sigma_m` in meters, with positive
+  `miss_right_m` meaning right of the aim point. This is deliberate rather than an
+  inconsistency waiting to be fixed: the underlying wind report and solution types are SI
+  internally too, so an imperial request wrapper would only fix half the mismatch. Apps must
+  convert at the boundary for `true.wind` specifically; the other three commands need no such
+  conversion.
+
+  **`true.dsf` derives a point; it does not persist one.** It returns the Mach-keyed DSF value
+  and its warnings — writing it into a profile's DSF table is the caller's job. Model inputs
+  (muzzle velocity, BC, mass, diameter, zero, atmosphere) travel entirely in the request body;
+  there is no profile path and no filesystem access, which is what keeps the whole `true.*`
+  family unconditional across every build rather than gated the way `bc5d.info` has to be
+  (BC5D tables are loaded from caller-supplied paths, so that command is absent on wasm32).
+
+  A `true.dsf` gotcha worth calling out explicitly: the underlying solve stops at the ground
+  plane, which sits roughly 5 ft below the muzzle. A model with a short zero reaches that plane
+  well before it slows into the transonic band DSF exists to calibrate — a .308 at 2700 fps
+  zeroed at 100 yd hits the ground plane around 516 yd while still near Mach 1.6, so every
+  transonic range for that load comes back `out_of_range`. A caller wanting a DSF point needs
+  a model whose zero keeps the trajectory above the ground plane out to the transonic band (a
+  900 yd zero works for that same bullet). Nothing about this is a bug; it will otherwise bite
+  an app author exactly once, confusingly.
+
+  `true.dsf` is also the only `true.*` command, and the only bridge command overall, returning
+  structured `error.details`: a machine-readable `reason` — `invalid_input`, `supersonic`,
+  `out_of_range`, `degenerate_drop`, or `forward_model` — travels alongside the human-readable
+  `message`, so a wizard can branch on the reason instead of parsing prose. `error.code` stays
+  `command_failed` for all of them, so existing callers checking only `code` are unaffected.
+
+  No `BRIDGE_API_VERSION` bump was needed: new commands are additive within `api_version` 1,
+  and apps feature-detect via `meta.capabilities`, which now lists all four alongside the
+  existing `solve`/`card.*`/`profile.*` commands.
+
 ## [0.33.4] - 2026-08-20
 
 ### Fixed

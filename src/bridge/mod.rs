@@ -32,6 +32,34 @@
 //! and new OPTIONAL response fields may appear within api_version 1; anything that
 //! would break an existing well-formed caller bumps `BRIDGE_API_VERSION`. Callers
 //! feature-detect with `meta.capabilities` instead of sniffing versions.
+//!
+//! ## The `true.*` truing family
+//!
+//! `true.fit`, `true.wind`, `true.tall_target`, and `true.dsf` expose the engine's truing
+//! methods. All four are unconditional (no filesystem access, so all four are present on
+//! wasm32), but they are not otherwise uniform:
+//!
+//! - `true.fit` (joint MV+BC truing) is backed by the uncertainty solver, so its result
+//!   always carries `approximation` — a required enum that is either `Available` with
+//!   intervals for both muzzle velocity and BC, or `Unavailable` with a reason, never simply
+//!   absent. There is deliberately no command that returns a bare truing point estimate.
+//! - `true.wind` (effective crosswind from an observed miss) is the one exception to that
+//!   guarantee: `solve_wind_truing` has no uncertainty model, so its result is a bare point
+//!   value with no interval. Callers must not present it with `true.fit`'s confidence.
+//!   `true.wind` is also the one command whose wire shape is SI throughout (`range_m`,
+//!   `miss_right_m`, `sigma_m`) while every other command, including the rest of this
+//!   family, is imperial; apps convert at the boundary for `true.wind` specifically.
+//! - `true.tall_target` returns a scope's tracking correction factor from a tall-target
+//!   test.
+//! - `true.dsf` derives a single Mach-keyed drop-scale-factor point from an observed
+//!   transonic drop; it never persists into a profile's DSF table, which is the caller's
+//!   job. It is the only bridge command whose error carries structured `error.details` — a
+//!   machine-readable `reason` (`invalid_input`, `supersonic`, `out_of_range`,
+//!   `degenerate_drop`, `forward_model`) alongside the message; `error.code` stays
+//!   `command_failed` for all commands, so existing callers are unaffected.
+//!
+//! None of this needed a `BRIDGE_API_VERSION` bump: the four commands are additive within
+//! api_version 1, and `meta.capabilities` lists all four for feature detection.
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
