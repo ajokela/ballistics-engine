@@ -29,3 +29,41 @@ sleep 5
 LIVE=$(curl -s https://ballistics.rs/sh/ | grep -o "Ballistics Engine v[0-9.]*" | head -1)
 [ "$LIVE" = "Ballistics Engine v$V" ] || { echo "LIVE BADGE MISMATCH: $LIVE"; exit 1; }
 echo "OK: live terminal serves v$V"
+
+# Commit what was just published.
+#
+# This script deploys four copies of the wasm bundle and seds the terminal
+# badge, then exited — so the sites repo was left dirty after every release and
+# the drift was only ever noticed later. The badge in git sat at v0.22.9 for
+# eleven releases while production served something newer, and the same gap
+# reopened at 0.35.0.
+#
+# Staged by path, never `git add -A`: that repo accumulates unrelated
+# work-in-progress and a release script must not sweep it up. Not pushed either
+# — the deploy has already happened, so nothing is blocked by leaving the push
+# to a human who has read the diff.
+(
+  cd "$SITES" || exit 0
+  git rev-parse --git-dir >/dev/null 2>&1 || exit 0
+  git add -- wasm ballistics-sh-site/wasm ballistics-rs-site/wasm \
+              ballistics-rs-site/sh/wasm ballistics-rs-site/sh/index.html \
+              .firebase 2>/dev/null || true
+  if git diff --cached --quiet; then
+    echo "sites repo: nothing to commit (already recorded)"
+  else
+    git commit -q -m "Publish engine $V to the browser terminals
+
+Deployed by scripts/release/deploy-wasm.sh during the $V release: four copies of
+the wasm bundle and the terminal badge. Recorded here so the repo matches what
+ballistics.rs actually serves.
+
+The .wasm and its JS glue are a matched pair and move together; a new .wasm
+beside old glue fails at runtime, not at build time."
+    echo "sites repo: committed the $V bundle."
+    echo "            review with 'git -C $SITES show', then: git -C $SITES push origin main"
+  fi
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "sites repo: other uncommitted changes remain (left alone):"
+    git status --short | sed "s/^/            /"
+  fi
+)
