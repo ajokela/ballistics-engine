@@ -16,9 +16,24 @@ FEATURES="bridge,ffi,pdf,profile-import"
 OUT="$ENGINE_DIR/target/mobile"
 HEADER_DIR="$OUT/include"
 
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios >/dev/null
+# Simulator architectures.
+#
+# arm64 only by default. The x86_64 slice exists solely so an INTEL Mac can run
+# the simulator, and Xcode 26 is arm64-only — its own xcodebuild, clang and
+# swiftc carry no x86_64 slice — so no Intel Mac can host a simulator on a
+# current toolchain at all. Building it cost a third of this script's runtime
+# and 128 MB inside the fat library, for a slice nothing could load.
+#
+# Set BALLISTICS_IOS_SIM_X86_64=1 if you are on an older Xcode that still runs
+# on Intel and genuinely need it.
+SIM_X86_64="${BALLISTICS_IOS_SIM_X86_64:-0}"
 
-for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim)
+[ "$SIM_X86_64" = "1" ] && TARGETS+=(x86_64-apple-ios)
+
+rustup target add "${TARGETS[@]}" >/dev/null
+
+for target in "${TARGETS[@]}"; do
   echo "==> $target"
   cargo build --release --no-default-features --features "$FEATURES" --target "$target"
 done
@@ -35,12 +50,13 @@ module BallisticsEngine {
 }
 EOF
 
-# Fat simulator lib (arm64 + x86_64)
+# Simulator library. `lipo -create` with one input still produces a valid
+# single-architecture archive, so the xcframework layout below is unchanged
+# either way — only the architectures inside the simulator slice differ.
 SIM_FAT="$OUT/libballistics_engine_sim.a"
-lipo -create \
-  "target/aarch64-apple-ios-sim/release/libballistics_engine.a" \
-  "target/x86_64-apple-ios/release/libballistics_engine.a" \
-  -output "$SIM_FAT"
+SIM_INPUTS=("target/aarch64-apple-ios-sim/release/libballistics_engine.a")
+[ "$SIM_X86_64" = "1" ] && SIM_INPUTS+=("target/x86_64-apple-ios/release/libballistics_engine.a")
+lipo -create "${SIM_INPUTS[@]}" -output "$SIM_FAT"
 
 rm -rf "$OUT/BallisticsEngine.xcframework"
 xcodebuild -create-xcframework \
@@ -49,3 +65,4 @@ xcodebuild -create-xcframework \
   -output "$OUT/BallisticsEngine.xcframework"
 
 echo "OK: $OUT/BallisticsEngine.xcframework (features: $FEATURES, engine $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2))"
+echo "    simulator archs: $(lipo -archs "$SIM_FAT")"
