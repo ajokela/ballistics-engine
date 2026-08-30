@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The README's network-free install command installed nothing.** `cargo install
+  ballistics-engine --no-default-features` was offered as the local-only option, but the
+  `[[bin]]` target is `required-features = ["cli"]` and `cli` is a default feature, so
+  dropping defaults skipped the binary entirely. Now `--no-default-features --features cli`,
+  which still leaves `online` off.
 - **`cargo install ballistics-engine` installs the CLI binary again.** The `exclude` list
   has carried `src/main.rs` since the "exclude broken binaries" cleanup that also dropped
   `src/ffi.rs` (later restored), while the `[[bin]]` target stayed in Cargo.toml.

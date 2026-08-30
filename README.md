@@ -548,7 +548,7 @@ Online mode benefits:
 
 To use only local calculations (no network, no data transmission):
 ```bash
-cargo install ballistics-engine --no-default-features
+cargo install ballistics-engine --no-default-features --features cli
 ```
 
 ### Integration Methods
