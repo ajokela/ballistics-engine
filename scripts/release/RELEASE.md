@@ -38,6 +38,17 @@ proves the binary self-reports correctly under emulation, NOT that it runs on re
 hardware. Restore with `RISCV_MODE=native` and `BSD_NODE=orangepi5-max` once the
 hosts are back.
 
+**Known-bad golden image (2026-08-30): NetBSD on nanopct6.** The NetBSD guest
+aborts its boot at the automatic fsck —
+`/dev/rdk1: DIRECTORY CORRUPTED I=1994256` → `ABORTING BOOT` — so it never
+reaches sshd. This breaks **both** aarch64 lanes identically (the in-guest build
+and the cross-lane's validation step), and it is a property of
+`/opt/vms/base/netbsd-aarch64.qcow2`, not of either script. The binary itself is
+fine: fsck'ing a disposable overlay and booting that runs the cross-built
+`0.35.1` NetBSD binary correctly. **Fix the image once, properly** — boot it,
+`fsck_ffs -y`, shut down cleanly, re-capture — rather than adding a repair step
+to the pipeline, which would hide a degrading image on every future run.
+
 ## The aarch64 BSD lane: build on x86_64, validate on ARM
 
 Two scripts, run in this order. Neither is optional.
