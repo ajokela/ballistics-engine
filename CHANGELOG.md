@@ -5,6 +5,20 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`cargo install ballistics-engine` installs the CLI binary again.** The `exclude` list
+  has carried `src/main.rs` since the "exclude broken binaries" cleanup that also dropped
+  `src/ffi.rs` (later restored), while the `[[bin]]` target stayed in Cargo.toml.
+  `cargo publish` normalizes a target whose file is not in the package away silently: the
+  shipped manifest had no `[[bin]]` section at all, so `cargo install ballistics-engine`
+  failed with `error: no packages found with binaries or examples`. The `cli` feature is
+  default-on precisely so plain `cargo build`/`cargo install` stays unchanged — the
+  exclude contradicted it. `src/main.rs` (and the stale, always-empty `src/bin/` entry)
+  leave the exclude list, and `packaged-files.txt` is regenerated in the same commit, so
+  `prepublish-check.sh` will catch any future re-exclusion as manifest drift.
+
 ## [0.35.0] - 2026-08-23
 
 ### Added

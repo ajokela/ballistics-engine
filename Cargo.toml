@@ -27,8 +27,6 @@ exclude = [
     "ballistics_standalone.rs",
     "ballistics/",
     "ballistics",
-    "src/main.rs",
-    "src/bin/",
     "ballistics-engine-py/",
     "ballistics-engine-rb/",
     "ballistics-engine-rb.bak/",

@@ -91,6 +91,7 @@ src/ffi.rs
 src/form_factor.rs
 src/hold_curve.rs
 src/lib.rs
+src/main.rs
 src/mc_stats.rs
 src/mcp_command.rs
 src/monte_carlo.rs
