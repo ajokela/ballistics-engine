@@ -384,6 +384,7 @@ explicit `shot.shot_azimuth_rad` — omitting it is a `conflicting_fields` error
 | `effects.magnus` | `false` | Enable the engine's Magnus-force model. |
 | `effects.coriolis` | `false` | Enable Earth-rotation deflection. |
 | `effects.enhanced_spin_drift` | `false` | Enable enhanced spin-drift modeling. |
+| `effects.wind_shear_model` | omitted (`"none"`) | Altitude-dependent wind shear: `none`, `logarithmic`, `power_law`, or `ekman_spiral` (alias `ekman`). |
 | `sampling.interval_m` | `10` | Regular downrange result interval. |
 
 Supplying `solver.time_step_s` with `rk45` is valid, but RK45 owns its adaptive step size. The
@@ -406,6 +407,44 @@ Magnus and enhanced spin drift are experimental engine models. Enabling either p
 `effects.magnus` and `effects.enhanced_spin_drift` cannot both be true in v1. The engine's legacy
 solver silently suppresses Magnus in that combination; the request decoder instead reports
 `conflicting_fields` so the resolved request never misstates which physics ran.
+
+### `effects.wind_shear_model`
+
+Additive and optional: omitting it is byte-identical to requests from before it existed, echo
+included, and solves exactly as an explicit `"none"` does. Wind shear scales the request's wind by
+a boundary-layer profile keyed off the projectile's height above the ground — the operative wind
+is a floor, so the profile only ever increases it. Below the 10 m meteorological reference height
+the ratio is exactly 1.0, which means an ordinary flat-fire solve is unaffected by any model; the
+shear becomes visible on lofted, high-angle, and ELR trajectories that climb well clear of it.
+
+The height driving the profile is height above the *muzzle* (plus an assumed 1.5 m muzzle height),
+not above sea level. `atmosphere.altitude_m` is deliberately not an input to it: boundary-layer
+shear is relative to the local ground, and altitude's effect on the shot is air density, which
+`atmosphere.altitude_m` already carries.
+
+| Value | Meaning |
+| --- | --- |
+| omitted / `none` | No altitude dependence. The request's wind applies at every height. |
+| `logarithmic` | `ln(z / z0) / ln(z_ref / z0)`, with `z0 = 0.03 m` (short grass) and `z_ref = 10 m`. |
+| `power_law` | `(z / z_ref)^(1/7)`, the neutral-stability power law. |
+| `ekman_spiral` (alias `ekman`) | Accepted for parity with the CLI's `--wind-shear-model`, but this solve path's evaluator has no near-ground profile for it and leaves the wind at the operative value. Emits a `wind_shear_model_not_modeled` warning; it is never silently inert. |
+
+An unrecognized model is an `invalid_value` error at `$.effects.wind_shear_model` listing the
+accepted spellings — never a silent fall back to `"none"`, which would return unsheared numbers
+indistinguishable from sheared ones. The engine's `custom_layers` model is deliberately not
+exposed: it needs a caller-supplied layer table this contract has no field for.
+
+The model is echoed at `resolved_request.effects.wind_shear_model` whenever the request supplies
+one, including an explicit `"none"` — which therefore solves identically to omission but is no
+longer byte-identical at the envelope level, since the echo then appears where an omitted-field
+response leaves it absent. Aliases are canonicalized in the echo: `"ekman"` in, `"ekman_spiral"`
+out.
+
+Wind shear cannot be combined with `wind.segments`: downrange segments plus altitude shear is not
+a defined model, and the solver's segment lookup takes precedence over its shear branch, so the
+pair would drop the shear while the resolved request still named a model. The combination is a
+`conflicting_fields` error at `$.effects.wind_shear_model`, matching the CLI's and WASM front
+end's refusal of `--wind-segment` with `--enable-wind-shear`.
 
 ### Optional `corrections` block
 
@@ -461,9 +500,11 @@ to station pressure (MBA-1397), and `estimated_projectile_length` when the engin
 inferred projectile geometry. Stable v1 warning codes are `partial_wind_coverage`,
 `experimental_effect`, `rk45_time_step_ignored`, `zero_distance_elevation_not_resolved` (an
 explicit `muzzle_angle_rad` supplied together with `zero_distance_m`, so the elevation search did
-not run — see `shot.muzzle_angle_rad` above), and `bc5d_drag_model_coerced` (a
+not run — see `shot.muzzle_angle_rad` above), `bc5d_drag_model_coerced` (a
 `corrections.bc5d_table_path` request whose drag model is outside the table's G1/G7 planes — see
-the optional `corrections` block above). Messages are descriptive text rather than
+the optional `corrections` block above), and `wind_shear_model_not_modeled` (an accepted
+`effects.wind_shear_model` this solve path has no profile for, so the wind is left unchanged — see
+`effects.wind_shear_model` above). Messages are descriptive text rather than
 a compatibility surface.
 
 ```json

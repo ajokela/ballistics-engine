@@ -528,7 +528,13 @@ fn solve_input_schema() -> Value {
                 "properties": {
                     "magnus": {"type": "boolean"},
                     "coriolis": {"type": "boolean"},
-                    "enhanced_spin_drift": {"type": "boolean"}
+                    "enhanced_spin_drift": {"type": "boolean"},
+                    "wind_shear_model": {
+                        "type": "string",
+                        "enum": [
+                            "none", "logarithmic", "power_law", "ekman_spiral", "ekman"
+                        ]
+                    }
                 }
             },
             "sampling": {

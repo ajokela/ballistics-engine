@@ -322,6 +322,10 @@ fn wez_resolved_request(
             magnus: false,
             coriolis: false,
             enhanced_spin_drift: false,
+            // WEZ rows are rebuilt from BallisticInputs, which the WEZ path never configures
+            // for shear; `None` here keeps the rebuilt request asking for none, matching the
+            // baseline solve it is perturbing around.
+            wind_shear_model: None,
         },
         // Unused by `perturbation::evaluate` (it queries a specific range off the solved
         // trajectory directly, never the regular sampling grid); any positive value is inert.

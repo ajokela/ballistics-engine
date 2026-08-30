@@ -5,7 +5,8 @@ use ballistics_engine::solve_json::{
     AtmosphereV1, DragModelV1, DropsReferenceV1, EffectsV1, PressureReferenceV1, ProjectileV1,
     ResolvedWindV1, RifleV1, SamplingV1,
     SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
-    TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1, WindV1,
+    MAX_SOLVE_JSON_SAMPLES_V1,
 };
 
 use crate::domain::{ranged, wild};
@@ -176,6 +177,23 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
     let magnus = effect == 2;
     let enhanced_spin_drift = effect == 3;
 
+    // 0.36.0: generate the wind-shear model rather than pinning it, so the boundary-layer
+    // path is fuzzed instead of only its disabled default. Segmented wind combined with a
+    // shear model is a documented `conflicting_fields` refusal (the solver's segment lookup
+    // takes precedence over its shear branch), and this generator's contract is that every
+    // request it produces solves, so the model stays absent whenever segments were generated.
+    let wind_shear_model = if wind.segments.is_some() {
+        None
+    } else {
+        match u.int_in_range(0u8..=4)? {
+            0 => None,
+            1 => Some(WindShearModelV1::None),
+            2 => Some(WindShearModelV1::Logarithmic),
+            3 => Some(WindShearModelV1::PowerLaw),
+            _ => Some(WindShearModelV1::EkmanSpiral),
+        }
+    };
+
     Ok(SolveRequestV1 {
         schema_version: SchemaVersionV1,
         projectile: ProjectileV1 {
@@ -248,6 +266,7 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             magnus: Some(magnus),
             coriolis: Some(coriolis),
             enhanced_spin_drift: Some(enhanced_spin_drift),
+            wind_shear_model,
         },
         sampling: SamplingV1 {
             interval_m: Some(ranged(u, 0.05, 25.0)?),

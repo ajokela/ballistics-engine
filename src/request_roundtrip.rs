@@ -90,6 +90,13 @@ impl From<&ResolvedSolveRequestV1> for SolveRequestV1 {
                 magnus: Some(r.effects.magnus),
                 coriolis: Some(r.effects.coriolis),
                 enhanced_spin_drift: Some(r.effects.enhanced_spin_drift),
+                // Carried straight across, unlike the two reference modes above: the shear
+                // model is not a declaration about how a sibling value was ENTERED, it is
+                // the model itself, and the resolved echo is already the canonical name the
+                // solver ran. Re-supplying it re-applies the same shear rather than
+                // compounding a transform. `None` stays `None`, so a rebuilt request that
+                // never asked for shear still does not.
+                wind_shear_model: r.effects.wind_shear_model,
             },
             sampling: SamplingV1 {
                 interval_m: Some(r.sampling.interval_m),
@@ -140,7 +147,9 @@ fn wind_from_resolved(w: &ResolvedWindV1) -> WindV1 {
 #[cfg(test)]
 mod tests {
     use crate::solve_json::decode_solve_request_v1;
-    use crate::solve_json::{PressureReferenceV1, ResolvedWindV1, SolveRequestV1, WindReferenceV1};
+    use crate::solve_json::{
+        PressureReferenceV1, ResolvedWindV1, SolveRequestV1, WindReferenceV1, WindShearModelV1,
+    };
     use crate::solve_v1::solve_v1;
 
     fn sample_json() -> String {
@@ -346,6 +355,67 @@ mod tests {
         assert_eq!(
             second_wind.direction_from_rad, first_direction_from_rad,
             "a round-tripped compass wind must not be re-referenced a second time"
+        );
+    }
+
+    /// `effects.wind_shear_model` (0.36.0) is carried straight across, unlike the two
+    /// reference modes above. It is not a declaration about how a sibling value was entered,
+    /// so re-supplying it re-applies the same shear rather than compounding a transform --
+    /// and dropping it would misattribute the whole of the shear's effect to whatever a
+    /// perturbation caller happened to be perturbing.
+    ///
+    /// The trajectory is compared, not just the resolved request: the shear only shows up in
+    /// the numbers, so a rebuilt request that quietly lost the model would still produce an
+    /// identical-looking `resolved_request` if the echo alone were carried.
+    #[test]
+    fn roundtrip_preserves_the_wind_shear_model() {
+        // Lofted well above the 10 m boundary-layer reference height so the profile is
+        // actually engaged; a flat shot would agree either way. `muzzle_angle_rad` is given
+        // directly so no zero search runs between the two solves.
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 2000.0, "muzzle_angle_rad": 0.15,
+                     "ground_threshold_m": -2000.0},
+            "atmosphere": {},
+            "wind": {"speed_mps": 4.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
+            "solver": {}, "effects": {"wind_shear_model": "logarithmic"},
+            "sampling": {"interval_m": 250.0}
+        })
+        .to_string();
+
+        let first = solve_v1(decode_solve_request_v1(&json).unwrap()).unwrap();
+        assert_eq!(
+            first.resolved_request.effects.wind_shear_model,
+            Some(WindShearModelV1::Logarithmic)
+        );
+
+        let rebuilt: SolveRequestV1 = (&first.resolved_request).into();
+        assert_eq!(
+            rebuilt.effects.wind_shear_model,
+            Some(WindShearModelV1::Logarithmic),
+            "the shear model must be carried onto the rebuilt request"
+        );
+
+        let second = solve_v1(rebuilt).unwrap();
+        assert_eq!(
+            second.resolved_request.effects.wind_shear_model,
+            Some(WindShearModelV1::Logarithmic)
+        );
+        assert_eq!(
+            first.samples, second.samples,
+            "a round-tripped request must re-apply the same shear, not drop it"
+        );
+
+        // Sanity check that the assertion above has teeth: this shot really is one where the
+        // model changes the answer, so "identical samples" is not vacuously true.
+        let unsheared_json = json.replace(r#""wind_shear_model":"logarithmic""#, "");
+        let unsheared = solve_v1(decode_solve_request_v1(&unsheared_json).unwrap()).unwrap();
+        assert_ne!(
+            unsheared.samples, first.samples,
+            "the fixture must be a shot where wind shear actually changes the trajectory"
         );
     }
 }

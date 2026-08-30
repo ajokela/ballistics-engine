@@ -5,6 +5,34 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Wind shear is reachable from the JSON solve surface.** The engine has modelled
+  altitude-dependent wind since MBA-728 and both the CLI (`--enable-wind-shear
+  --wind-shear-model`) and the C ABI could switch it on, but `solve_v1` hard-coded
+  `enable_wind_shear: false`, so the solve-json path — the mobile embedding surface — had no
+  shear at all. Requests may now supply `effects.wind_shear_model`: `"none"`,
+  `"logarithmic"`, `"power_law"`, or `"ekman_spiral"` (alias `"ekman"`). Omitting the field is
+  byte-identical to every previous response, echo included, and solves exactly as an explicit
+  `"none"` does. The applied model is echoed at
+  `resolved_request.effects.wind_shear_model` in its canonical spelling whenever the request
+  supplies one, following the `atmosphere.pressure_reference` / `wind.wind_reference` echo
+  contract, and survives the resolved-request round trip.
+
+  Shear scales the request's wind by a boundary-layer profile keyed off height above the
+  muzzle, floored at the operative wind, so ordinary flat-fire solves are unchanged and the
+  effect appears on lofted and ELR trajectories that climb clear of the 10 m reference height.
+  `atmosphere.altitude_m` is deliberately not an input to the profile — shear is relative to
+  the local ground, and altitude reaches the solve as air density, as before.
+
+  Three things fail loudly rather than quietly: an unrecognized model is an `invalid_value` at
+  `$.effects.wind_shear_model` listing the accepted spellings, never a fall back to `"none"`;
+  `wind.segments` combined with a shear model is a `conflicting_fields` error, matching the CLI
+  and WASM front ends, because the solver's segment lookup takes precedence over its shear
+  branch; and `"ekman_spiral"`, which this solve path has no near-ground profile for, carries a
+  new `wind_shear_model_not_modeled` warning instead of being applied in name only.
+
 ## [0.35.1] - 2026-08-30
 
 ### Fixed

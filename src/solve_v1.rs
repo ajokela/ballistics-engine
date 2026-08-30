@@ -12,7 +12,7 @@ use crate::solve_json::{
     SampleFlagV1, SamplingV1, SchemaVersionV1, ShotV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
     SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SolverMethodV1,
     SolverV1, SuccessStatusV1, TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1,
-    WindReferenceV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    WindReferenceV1, WindShearModelV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
 use crate::trajectory_observation::{
     bracket_param, Bracket, TrajectoryObservation, TrajectoryObservationError,
@@ -70,6 +70,13 @@ pub const WARNING_ZERO_DISTANCE_ELEVATION_NOT_RESOLVED: &str =
 /// model outside the table's G1/G7 planes and the lookup is typed as G1 (the same coercion
 /// the CLI's `--bc-table-dir` path performs, surfaced instead of silent).
 pub const WARNING_BC5D_DRAG_MODEL_COERCED: &str = "bc5d_drag_model_coerced";
+/// Stable warning code emitted when an accepted `effects.wind_shear_model` has no profile on
+/// this solve path and therefore leaves the wind unchanged (0.36.0). Only `"ekman_spiral"`
+/// reaches it today: the boundary-layer evaluator behind `TrajectorySolver` implements the
+/// logarithmic and power-law profiles, and returns the operative wind for anything else. The
+/// model is still echoed in `resolved_request`, so this warning is what distinguishes "applied
+/// and it moved the numbers" from "applied and it could not".
+pub const WARNING_WIND_SHEAR_MODEL_NOT_MODELED: &str = "wind_shear_model_not_modeled";
 
 #[derive(Debug)]
 pub(crate) struct PreparedSolveV1 {
@@ -344,6 +351,25 @@ pub(crate) fn prepare_request(
     )?;
     let sampling = resolve_sampling(&request.sampling, &mut assumptions)?;
 
+    // Downrange segments and altitude shear are not a defined combination, and the solver does
+    // not treat them as one: `TrajectorySolver::calculate_acceleration` takes the segmented
+    // wind sock in preference to the shear branch, so a request asking for both would get its
+    // shear dropped on the floor while `resolved_request` still claimed a model was applied.
+    // The CLI (`--wind-segment` + `--enable-wind-shear`) and the WASM front end already refuse
+    // this pairing; refuse it here too rather than inventing the third front end that solves it
+    // silently.
+    if matches!(resolved_wind, ResolvedWindV1::Segmented(_))
+        && effects
+            .wind_shear_model
+            .is_some_and(WindShearModelV1::is_enabled)
+    {
+        return Err(conflicting_fields(
+            "$.effects.wind_shear_model",
+            "wind.segments cannot be combined with effects.wind_shear_model (downrange \
+             segments plus altitude shear is not yet a defined model)",
+        ));
+    }
+
     let resolved_request = ResolvedSolveRequestV1 {
         schema_version: SchemaVersionV1,
         projectile,
@@ -479,8 +505,32 @@ pub(crate) fn prepare_request(
         bc_segments_data: None,
         use_enhanced_spin_drift: resolved_request.effects.enhanced_spin_drift,
         use_form_factor: false,
-        enable_wind_shear: false,
-        wind_shear_model: "none".to_owned(),
+        // Altitude-dependent wind shear (0.36.0). `enable_wind_shear` is derived from the
+        // model rather than carried as its own request flag: `cli_api`'s shear branch maps
+        // any name it does not recognize -- `"none"` included -- to the power law, so an
+        // "enabled, model none" pair would silently run power-law shear. One field cannot
+        // express that state.
+        //
+        // No shooter altitude is passed, and none exists to pass: this solve path runs on
+        // `TrajectorySolver`, whose `get_wind_at_altitude` keys the boundary-layer profile off
+        // height above the MUZZLE (McCoy Y plus an assumed 1.5 m muzzle height), and
+        // `wind_shear::get_wind_at_position` -- the fast-integrate path's evaluator, which does
+        // take a `shooter_altitude_m` -- discards it for the same reason. Shear is relative to
+        // the local ground; `atmosphere.altitude_m` is height above SEA LEVEL, so feeding it in
+        // would treat a shooter standing at 1500 m MSL as a bullet flying 1500 m above the
+        // ground and inflate the ratio by an order of magnitude. `atmosphere.altitude_m`
+        // continues to reach the solve exactly where it belongs, through `inputs.altitude`
+        // above, as air density.
+        enable_wind_shear: resolved_request
+            .effects
+            .wind_shear_model
+            .is_some_and(WindShearModelV1::is_enabled),
+        wind_shear_model: resolved_request
+            .effects
+            .wind_shear_model
+            .unwrap_or_default()
+            .as_engine_str()
+            .to_owned(),
         enable_trajectory_sampling: false,
         sample_interval: resolved_request.sampling.interval_m,
         // MBA-1403: consumed straight from the request for the engine inputs here.
@@ -1342,10 +1392,36 @@ fn resolve_effects(
         }
     }
 
+    // Wind shear (0.36.0). Deliberately NOT run through `bool_default`/`literal_default`: an
+    // omitted field pushes no assumption notice and leaves the echo absent, so every request
+    // written before this field existed still serializes byte-identically -- the same
+    // additive-echo contract as `atmosphere.pressure_reference` and `wind.wind_reference`.
+    //
+    // The name reaching the engine is always the canonical one, so an `"ekman"` request and
+    // an `"ekman_spiral"` request resolve to a single spelling in the echo. Unknown names
+    // never arrive here: `decode_solve_request_v1` refuses them at
+    // `$.effects.wind_shear_model`, and the typed enum makes them unrepresentable for a
+    // caller that builds the DTO in Rust.
+    let wind_shear_model = effects.wind_shear_model;
+    if wind_shear_model == Some(WindShearModelV1::EkmanSpiral) {
+        // Not silence: `cli_api`'s boundary-layer evaluator scales the operative wind by a
+        // height ratio, and it has no near-ground closed form for the Ekman spiral, so the
+        // ratio is 1.0 and the solve matches an unsheared one. Say so in the response
+        // instead of letting a caller read "ekman_spiral applied" off the echo and believe
+        // the numbers moved.
+        warnings.push(notice(
+            WARNING_WIND_SHEAR_MODEL_NOT_MODELED,
+            "The ekman_spiral wind shear model has no near-ground profile on this solve path; \
+             the wind is left at the operative value, so the result matches an unsheared solve.",
+            "$.effects.wind_shear_model",
+        ));
+    }
+
     Ok(ResolvedEffectsV1 {
         magnus,
         coriolis,
         enhanced_spin_drift,
+        wind_shear_model,
     })
 }
 

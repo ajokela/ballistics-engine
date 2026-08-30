@@ -607,6 +607,72 @@ pub struct EffectsV1 {
         deserialize_with = "deserialize_present"
     )]
     pub enhanced_spin_drift: Option<bool>,
+    /// Altitude-dependent wind shear model (0.36.0). `None` (the omitted-field default, and
+    /// every request from before this field existed) means no shear at all — byte-identical
+    /// to pre-0.36.0 behavior, exactly as an explicit `"none"` solves. The model is echoed at
+    /// [`ResolvedEffectsV1::wind_shear_model`] whenever the raw request supplies one,
+    /// including an explicit `"none"`.
+    ///
+    /// An unrecognized model name is an `invalid_value` error at
+    /// `$.effects.wind_shear_model`, never a silent fall back to no shear: a typo'd model
+    /// must not quietly produce unsheared numbers that look like sheared ones.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub wind_shear_model: Option<WindShearModelV1>,
+}
+
+/// Wire values for [`EffectsV1::wind_shear_model`] (0.36.0).
+///
+/// These are the engine's own model names (see [`crate::wind_shear`]), so a v1 request and the
+/// CLI's `--wind-shear-model` name the same physics with the same spelling.
+/// [`crate::wind_shear::WindShearModel::CustomLayers`] is deliberately NOT exposed: it needs a
+/// caller-supplied layer table that this contract has no field for, and would silently degrade
+/// to the surface wind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindShearModelV1 {
+    /// No altitude dependence: the request's wind is used at every height (the historical
+    /// default, and what an omitted field means).
+    #[default]
+    None,
+    /// Logarithmic boundary-layer profile, `ln(z / z0) / ln(z_ref / z0)`.
+    Logarithmic,
+    /// 1/7 power-law boundary-layer profile, `(z / z_ref)^(1/7)`.
+    PowerLaw,
+    /// Ekman spiral. Accepted for parity with the CLI and the engine's model names, but this
+    /// solve path's boundary-layer evaluator has no near-ground closed form for it, so it
+    /// leaves the wind at the operative value. Enabling it emits a
+    /// `wind_shear_model_not_modeled` warning rather than passing silently.
+    #[serde(alias = "ekman")]
+    EkmanSpiral,
+}
+
+impl WindShearModelV1 {
+    /// The canonical lower-snake name the engine's `wind_shear` / `cli_api` code understands.
+    ///
+    /// Aliases resolve to their canonical spelling here, which is also what the resolved
+    /// request echoes: `"ekman"` in, `"ekman_spiral"` out.
+    pub fn as_engine_str(self) -> &'static str {
+        match self {
+            WindShearModelV1::None => "none",
+            WindShearModelV1::Logarithmic => "logarithmic",
+            WindShearModelV1::PowerLaw => "power_law",
+            WindShearModelV1::EkmanSpiral => "ekman_spiral",
+        }
+    }
+
+    /// Whether this model asks the solver for altitude-dependent wind at all.
+    ///
+    /// `"none"` must map to `enable_wind_shear: false` rather than to an enabled solver
+    /// holding the string `"none"`: [`crate::cli_api`]'s shear branch maps any unrecognized
+    /// model name — `"none"` included — to the power law, so an enabled-but-`"none"` solve
+    /// would quietly run power-law shear.
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, WindShearModelV1::None)
+    }
 }
 
 /// Regular downrange output sampling configuration.
@@ -795,6 +861,11 @@ pub struct ResolvedEffectsV1 {
     pub magnus: bool,
     pub coriolis: bool,
     pub enhanced_spin_drift: bool,
+    /// Echo of the wind shear model that was actually applied (0.36.0), in its canonical
+    /// spelling. Present only when the raw request supplied one — an omitted field leaves
+    /// this absent, so responses to pre-0.36.0 requests serialize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wind_shear_model: Option<WindShearModelV1>,
 }
 
 /// Resolved result-sampling configuration.
@@ -1620,10 +1691,28 @@ fn validate_effects(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     validate_members(
         object,
         path,
-        &["magnus", "coriolis", "enhanced_spin_drift"],
+        &["magnus", "coriolis", "enhanced_spin_drift", "wind_shear_model"],
         &[],
     )?;
     validate_optional_booleans(object, path, &["magnus", "coriolis", "enhanced_spin_drift"])?;
+
+    // An unknown shear model is rejected here, with the exact path and the accepted spellings,
+    // rather than deserializing to the `none` default. Silently unsheared numbers are
+    // indistinguishable from sheared ones downstream.
+    if let Some(model) = object.get("wind_shear_model") {
+        validate_string_enum(
+            model,
+            "$.effects.wind_shear_model",
+            &[
+                "none",
+                "logarithmic",
+                "power_law",
+                "ekman_spiral",
+                // Alias, canonicalized to `ekman_spiral` in the resolved echo.
+                "ekman",
+            ],
+        )?;
+    }
 
     if object.get("magnus").and_then(Value::as_bool) == Some(true)
         && object.get("enhanced_spin_drift").and_then(Value::as_bool) == Some(true)
