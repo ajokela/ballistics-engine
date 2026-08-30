@@ -20,13 +20,22 @@ the 13 platforms is present exactly once.
 | Where | Platforms | How |
 |---|---|---|
 | GitHub-hosted CI | macos x2, linux x86_64/aarch64, windows, 3x BSD x86_64 | `build-and-release.yml` on tag |
-| K3S cluster | 3x BSD aarch64 (+provenance) | `build-k3s-bsds.sh` / fleet runner |
-| 10.1.1.26 (real RISC-V) | linux-riscv64 | `build-riscv.sh` |
-| 10.1.1.10 (Orange Pi, cross) | linux-mips64el | `build-mips.sh` |
+| K3S cluster (`BSD_NODE`, default nanopct6) | 3x BSD aarch64 (+provenance) | `build-k3s-bsds.sh` / fleet runner |
+| 10.1.1.27 cross (or 10.1.1.26 native via `RISCV_MODE=native`) | linux-riscv64 | `build-riscv.sh` |
+| 10.1.1.27 cross (`MIPS_HOST`) | linux-mips64el | `build-mips.sh` |
 | 10.1.1.27 build-server | fallback for the 8 hosted ones | `build-server-x86.sh` |
 
 Every binary must pass a `--version == X.Y.Z` gate ON its target (or under qemu for
 MIPS). This is non-negotiable: stale binaries have shipped-adjacent twice.
+
+**Degraded-fleet defaults (2026-08-30 power outage).** `orangepi5-max` (10.1.1.10)
+and the RISC-V board (10.1.1.26) are down, so three lanes were re-pointed:
+BSD aarch64 -> `BSD_NODE=nanopct6`, and RISC-V + MIPS -> cross-compiled in Docker
+on 10.1.1.27 and gated under qemu-user. MIPS was ALWAYS cross-compiled, so only
+its host moved; RISC-V previously built natively on real silicon, so its gate now
+proves the binary self-reports correctly under emulation, NOT that it runs on real
+hardware. Restore with `RISCV_MODE=native` and `BSD_NODE=orangepi5-max` once the
+hosts are back.
 
 ## Channels, in order
 
