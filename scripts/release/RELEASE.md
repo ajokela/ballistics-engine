@@ -20,7 +20,8 @@ the 13 platforms is present exactly once.
 | Where | Platforms | How |
 |---|---|---|
 | GitHub-hosted CI | macos x2, linux x86_64/aarch64, windows, 3x BSD x86_64 | `build-and-release.yml` on tag |
-| K3S cluster (`BSD_NODE`, default nanopct6) | 3x BSD aarch64 (+provenance) | `build-k3s-bsds.sh` / fleet runner |
+| **build** 10.1.1.27 cross (`CROSS_HOST`) + **validate** ARM KVM node (`VALIDATE_NODE`, default nanopct6) | 3x BSD aarch64 (+provenance) | `build-bsd-aarch64-cross.sh` **then** `validate-bsd-aarch64.sh` |
+| K3S cluster (`BSD_NODE`, default nanopct6) | 3x BSD aarch64 — *fallback* | `build-k3s-bsds.sh` / fleet runner |
 | 10.1.1.27 cross (or 10.1.1.26 native via `RISCV_MODE=native`) | linux-riscv64 | `build-riscv.sh` |
 | 10.1.1.27 cross (`MIPS_HOST`) | linux-mips64el | `build-mips.sh` |
 | 10.1.1.27 build-server | fallback for the 8 hosted ones | `build-server-x86.sh` |
@@ -36,6 +37,144 @@ its host moved; RISC-V previously built natively on real silicon, so its gate no
 proves the binary self-reports correctly under emulation, NOT that it runs on real
 hardware. Restore with `RISCV_MODE=native` and `BSD_NODE=orangepi5-max` once the
 hosts are back.
+
+**Known-bad golden image (2026-08-30): NetBSD on nanopct6.** The NetBSD guest
+aborts its boot at the automatic fsck —
+`/dev/rdk1: DIRECTORY CORRUPTED I=1994256` → `ABORTING BOOT` — so it never
+reaches sshd. This breaks **both** aarch64 lanes identically (the in-guest build
+and the cross-lane's validation step), and it is a property of
+`/opt/vms/base/netbsd-aarch64.qcow2`, not of either script. The binary itself is
+fine: fsck'ing a disposable overlay and booting that runs the cross-built
+`0.35.1` NetBSD binary correctly. **Fix the image once, properly** — boot it,
+`fsck_ffs -y`, shut down cleanly, re-capture — rather than adding a repair step
+to the pipeline, which would hide a degrading image on every future run.
+
+## The aarch64 BSD lane: build on x86_64, validate on ARM
+
+Two scripts, run in this order. Neither is optional.
+
+```bash
+scripts/release/build-bsd-aarch64-cross.sh X.Y.Z ~/release-X.Y.Z   # ~3 min/OS on 10.1.1.27
+scripts/release/validate-bsd-aarch64.sh    X.Y.Z ~/release-X.Y.Z   # boots each guest on ARM
+```
+
+### Why it is split
+
+The old lane (`build-k3s-bsds.sh`, still present as the fallback) compiles
+*inside* each aarch64 BSD guest. That takes ~45 min per OS, and all three
+guests run on one ARM KVM node, so the whole lane is ~2.5 h of critical path
+gated on a single machine — a machine that has taken the release down more than
+once (orangepi5-max went NotReady in the 2026-08-30 power outage; before that it
+was CPU exhaustion during the Longhorn migration, and before that host-build
+contention broke netbsd in 0.27.0).
+
+Cross-compiling on the 32-core x86_64 build server takes ~3 min per OS. But
+cross-compiling on its own would *lose* something the in-guest build gave us for
+free: proof that the binary actually runs. A compiler that emits a valid ELF for
+a target it cannot execute has told you nothing about whether the program works
+there. So the runtime proof is not dropped, it is moved into its own step —
+`validate-bsd-aarch64.sh` boots the matching golden guest under KVM on the ARM
+node and runs the binary there:
+
+1. `--version`, hard-gated to equal `X.Y.Z`. Mismatch fails the run.
+2. a real trajectory solve, checked for a coherent results table.
+
+The solve is deliberately **not** asserted against exact numbers — physics
+output legitimately moves between engine versions, and a numeric-equality gate
+would turn every intentional change into a false release blocker. The
+`--version` gate is the strict one.
+
+The build half never touches ARM hardware, so the validate half **must**. If you
+find yourself tempted to ship cross-built binaries without running
+`validate-bsd-aarch64.sh`, you have re-created the exact gap this split was
+designed to make impossible.
+
+### Toolchain constraints (all load-bearing)
+
+- **clang-22 + lld-22, not older.** clang 14 *and* clang 19 both **segfault**
+  (exit 139, frontend crash) compiling `ring`'s
+  `crypto/curve25519/curve25519.c` for `aarch64-unknown-openbsd`. clang-22
+  compiles it. Debian bookworm-security carries clang-22
+  (`1:22.1.8-1~deb12u1`), so plain `apt-get install -y clang-22 lld-22` on
+  `rust:1-bookworm` is enough — no apt.llvm.org repo needed.
+
+- **All three targets build on the nightly toolchain**, for two different
+  reasons. `aarch64-unknown-openbsd` and `aarch64-unknown-netbsd` are Tier 3:
+  no std is distributed at all, so cargo compiles it from `rust-src` via
+  `-Z build-std=std,panic_abort`, a nightly-only flag.
+  `aarch64-unknown-freebsd` *does* have a prebuilt std, but as of rust 1.97.1 it
+  is published on the **nightly channel only** — `rustup target add
+  aarch64-unknown-freebsd` on stable fails with *"has no prebuilt artifacts
+  available for target"*. Re-check on future stables; if it lands there,
+  FreeBSD can move back to stable without touching anything else.
+
+- **OpenBSD needs an unversioned-`.so` symlink farm in the sysroot.** OpenBSD
+  ships *only* versioned shared objects (`libc.so.102.0`) and no plain
+  `libc.so`. lld does not implement OpenBSD's versioned-library search, so given
+  `-lc` it finds nothing shared, **silently falls back to the static `libc.a`**,
+  and the link then dies with `duplicate symbol: atexit` against `crtbeginS.o` —
+  an error that points nowhere near the actual cause. The sysroot prep creates
+  an unversioned symlink for every `lib*.so.*` in `usr/lib` (42 of them at 7.8).
+  With it, zero link errors. Do not remove this step to "clean up".
+
+- **NetBSD needs `usr/include/machine -> aarch64` in the sysroot.** The comp set
+  ships the arch headers as `usr/include/aarch64/`, but the `machine` symlink is
+  created by the installer and is not carried in the tarball. Without it
+  `<sys/cdefs.h>` fails on `#include <machine/cdefs.h>` and every C dependency
+  dies with *"'machine/cdefs.h' file not found"*. NetBSD *does* already ship a
+  plain `libc.so`, so it needs no OpenBSD-style symlink farm — the two BSDs need
+  two different fixes, and neither implies the other.
+
+- **Sysroots match the GUEST release, not the newest available**: FreeBSD 14.3,
+  OpenBSD 7.8, NetBSD 10.1. A binary linked against an older base runs on a
+  newer system; the reverse does not. If a golden image is upgraded, bump the
+  matching `*_REL` in the build script.
+
+- Changing the sysroot extraction recipe requires bumping `SYSROOT_RECIPE` in
+  the build script, or already-cached sysroots keep their old, broken layout.
+
+### Validation-host constraint
+
+`taskset -c 4-7` in the QEMU invocation is a **correctness** requirement, not a
+tuning knob. RK3588 is big.LITTLE (4x A76 + 4x A55); a vCPU that migrates from
+an A76 onto an A55 sees a different CPU feature set mid-execution and the guest
+dies in early firmware with a Synchronous Exception. Any replacement node must
+have ≥8 cores in that layout — a 4-core Raspberry Pi 5 cannot satisfy the pin.
+The validation pods carry `app: bsd-build` with the same required
+podAntiAffinity as the build Jobs, so only one guest ever holds cores 4-7.
+
+Golden images at `/opt/vms/base/<os>-aarch64.qcow2` are mounted read-only and
+every run boots a disposable qcow2 overlay; nothing in this lane can modify one.
+
+### Caching, idempotence, overrides
+
+Both scripts are re-runnable. The builder image is content-addressed by its
+Dockerfile, the three sysroots are downloaded once and stamped, and the cargo
+registry plus target dir persist under `~/bsd-cross` on the build host. A repeat
+run of one OS is ~30 s. Validation deletes any pod left over from an interrupted
+run before creating its own.
+
+| Env | Default | Effect |
+|---|---|---|
+| `CROSS_HOST` | `alex@10.1.1.27` | ssh destination of the x86_64 build server |
+| `CROSS_WORKDIR` | `~/bsd-cross` | sysroot/cargo/target cache on that host |
+| `CROSS_ONLY_OS` | all three | build one of `freebsd`/`openbsd`/`netbsd` |
+| `CROSS_REBUILD_IMAGE` | `0` | force a builder-image rebuild |
+| `VALIDATE_NODE` | `nanopct6` | k8s node with `/dev/kvm` + golden images |
+| `VALIDATE_ONLY_OS` | all three | validate one OS |
+| `SSH_WAIT_SECS` | `600` | guest boot budget |
+
+### Falling back to the in-guest build
+
+`build-k3s-bsds.sh X.Y.Z` still works and still produces the same artifact set.
+Use it when the cross lane cannot: the build server is down, a new dependency
+needs a sysroot piece that is not extracted, or a cross-built binary fails
+validation in a way that suggests the cross toolchain rather than the code. It
+is slower (~45 min/OS) and it builds *and* tests inside the guest, so it needs
+no separate validation step — but it puts the ARM node back on the critical
+path, which is the thing this lane exists to avoid. Note that it emits a **bare
+64-hex digest** in its `.sha256` files and normalizes them afterwards; the cross
+script emits the correct `<hash>  <file>` two-space form directly.
 
 ## Channels, in order
 
