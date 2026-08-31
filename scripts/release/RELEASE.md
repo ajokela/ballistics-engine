@@ -38,16 +38,25 @@ proves the binary self-reports correctly under emulation, NOT that it runs on re
 hardware. Restore with `RISCV_MODE=native` and `BSD_NODE=orangepi5-max` once the
 hosts are back.
 
-**Known-bad golden image (2026-08-30): NetBSD on nanopct6.** The NetBSD guest
-aborts its boot at the automatic fsck —
-`/dev/rdk1: DIRECTORY CORRUPTED I=1994256` → `ABORTING BOOT` — so it never
-reaches sshd. This breaks **both** aarch64 lanes identically (the in-guest build
-and the cross-lane's validation step), and it is a property of
-`/opt/vms/base/netbsd-aarch64.qcow2`, not of either script. The binary itself is
-fine: fsck'ing a disposable overlay and booting that runs the cross-built
-`0.35.1` NetBSD binary correctly. **Fix the image once, properly** — boot it,
-`fsck_ffs -y`, shut down cleanly, re-capture — rather than adding a repair step
-to the pipeline, which would hide a degrading image on every future run.
+**Golden image repaired (2026-08-31): NetBSD on nanopct6.** The NetBSD guest used
+to abort its boot at the automatic fsck — `/dev/rdk1: DIRECTORY CORRUPTED
+I=1994256` → `ABORTING BOOT` — so it never reached sshd. That broke **both**
+aarch64 lanes identically (the in-guest build and the cross-lane's validation
+step), because it was a property of `/opt/vms/base/netbsd-aarch64.qcow2` rather
+than of either script.
+
+Fixed the way this file prescribed, rather than by adding a repair step to the
+pipeline that would have hidden a degrading image on every future run: booted
+single-user, `fsck_ffs -y` on `/` and `/usr` (three `SALVAGE`s, `FILE SYSTEM WAS
+MODIFIED`), shut down cleanly, then **verified by booting the repaired copy
+normally** — the path that was failing — before promoting it. The pre-repair
+image is retained beside it as `netbsd-aarch64.qcow2.bak-precorrupt`.
+
+Two things worth keeping from the diagnosis. Promote by `mv`, not `cp`: the host
+was at 89% and a copy silently truncated the image to 5.18 GB, which
+`qemu-img check` then reported as 19,226 errors. And a single-user fsck passing
+is NOT the pass criterion — the original passed that too. The criterion is a
+normal boot reaching `login:` with sshd up.
 
 ## The aarch64 BSD lane: build on x86_64, validate on ARM
 
