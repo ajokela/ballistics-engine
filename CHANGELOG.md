@@ -5,6 +5,22 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.1] - 2026-08-31
+
+### Fixed
+- **The wind-shear flag now does something on the Monte Carlo path.** A C ABI
+  caller has only `FFIBallisticInputs.enable_wind_shear` — there is no model name
+  on the struct — so an asking caller inherited `BallisticInputs`' default
+  `"none"`. The two solvers read that oppositely:
+  `TrajectorySolver::get_wind_at_altitude` falls unknown names onto `PowerLaw`,
+  so the trajectory path always applied the power law, while `fast_integrate`
+  resolves them through `boundary_layer_model_from_name` to
+  `WindShearModel::None` and then drops the model entirely. Monte Carlo runs
+  `fast_integrate`, so the flag was silently inert there — at every range and
+  every angle. `convert_inputs` now names `power_law` when the flag is set, which
+  is the profile the trajectory path was already applying, so the two C ABI
+  solvers agree and no existing trajectory result moves.
+
 ## [0.36.0] - 2026-08-30
 
 ### Added

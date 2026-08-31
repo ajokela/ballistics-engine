@@ -316,6 +316,17 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
 
     // New advanced physics flags
     ballistic_inputs.enable_wind_shear = inputs.enable_wind_shear != 0;
+    // FFIBallisticInputs carries no model name, so a C ABI caller asking for shear
+    // would otherwise inherit BallisticInputs' default "none" — and the two solvers
+    // read that oppositely. TrajectorySolver::get_wind_at_altitude falls unknown
+    // names onto PowerLaw, so the trajectory path has always applied the power law;
+    // fast_integrate resolves them through boundary_layer_model_from_name to
+    // WindShearModel::None and then drops the model entirely, so the Monte Carlo
+    // path applied NOTHING and the caller's flag was silently inert. Name the
+    // profile the trajectory path already used, so both agree.
+    if ballistic_inputs.enable_wind_shear {
+        ballistic_inputs.wind_shear_model = "power_law".to_string();
+    }
     ballistic_inputs.enable_trajectory_sampling = inputs.enable_trajectory_sampling != 0;
     ballistic_inputs.sample_interval = inputs.sample_interval;
     ballistic_inputs.enable_pitch_damping = inputs.enable_pitch_damping != 0;
@@ -1504,6 +1515,110 @@ mod tests {
         );
         // The new struct is 6 fields: 4 doubles + 2 ints, C-laid-out.
         assert_eq!(std::mem::align_of::<FFIReticleHold>(), 8);
+    }
+
+    /// Asking for shear over the C ABI has to survive model resolution.
+    ///
+    /// `FFIBallisticInputs` carries no model name, so a caller that set the flag
+    /// used to inherit `BallisticInputs`' default `"none"` — and the two solvers
+    /// read that oppositely. `TrajectorySolver::get_wind_at_altitude` falls
+    /// unknown names onto `PowerLaw`, so the trajectory path always applied the
+    /// power law; `fast_integrate` resolves them to `WindShearModel::None` and
+    /// then drops the model, so the Monte Carlo path applied nothing at all and
+    /// the flag was silently inert. The assertion that matters is the second one:
+    /// the name has to be one the fast path KEEPS.
+    #[test]
+    fn asking_for_shear_over_the_c_abi_names_a_profile_the_fast_path_keeps() {
+        let mut inputs = valid_trajectory_inputs();
+        inputs.enable_wind_shear = 1;
+
+        let converted = convert_inputs(&inputs);
+
+        assert!(converted.enable_wind_shear);
+        assert_ne!(
+            crate::wind_shear::boundary_layer_model_from_name(&converted.wind_shear_model),
+            crate::wind_shear::WindShearModel::None,
+            "the fast-integrate path would drop this model and leave the flag inert"
+        );
+        // power_law specifically, because that is what the trajectory path has
+        // always applied for an unset name — this makes the two agree rather than
+        // moving either one onto a new profile.
+        assert_eq!(converted.wind_shear_model, "power_law");
+    }
+
+    /// The behaviour the naming exists for: Monte Carlo must actually move.
+    ///
+    /// Deterministic by construction — every std dev is zero, so the samples are
+    /// one repeated trajectory and any difference is the shear itself. The shot
+    /// is lofted on purpose: `boundary_layer_speed_ratio` floors at 1.0 below
+    /// H_REF = 10 m, so a flat-fire Monte Carlo is bit-identical either way and
+    /// would prove nothing.
+    #[test]
+    fn shear_moves_the_monte_carlo_result_it_used_to_leave_untouched() {
+        let mut lofted = valid_trajectory_inputs();
+        lofted.muzzle_angle = 0.15; // mirrors the engine's own shear fixture: ~186 m apex
+
+        // Built independently rather than cloned: FFIBallisticInputs is a public
+        // C-ABI struct and does not derive Clone, which a test has no business changing.
+        let mut sheared = valid_trajectory_inputs();
+        sheared.muzzle_angle = lofted.muzzle_angle;
+        sheared.enable_wind_shear = 1;
+
+        let atmo = FFIAtmosphericConditions {
+            temperature: 15.0,
+            pressure: 1013.25,
+            humidity: 50.0,
+            altitude: 0.0,
+        };
+        let params = FFIMonteCarloParams {
+            num_simulations: 4,
+            velocity_std_dev: 0.0,
+            angle_std_dev: 0.0,
+            bc_std_dev: 0.0,
+            wind_speed_std_dev: 0.0,
+            target_distance: 2500.0,
+            base_wind_speed: 10.0,
+            // radians; from the right, so the whole wind is crosswind
+            base_wind_direction: std::f64::consts::FRAC_PI_2,
+            azimuth_std_dev: 0.0,
+        };
+
+        unsafe {
+            let off = ballistics_monte_carlo(&lofted, &atmo, &params);
+            let on = ballistics_monte_carlo(&sheared, &atmo, &params);
+            assert!(!off.is_null() && !on.is_null());
+            assert!((*off).num_results > 0 && (*on).num_results > 0);
+
+            // mean_range, not impact_positions_*: those arrays stay unpopulated in
+            // this configuration (x, y and z are all zero for every sample), so they
+            // would report "no difference" no matter what the solver did.
+            let range_off = (*off).mean_range;
+            let range_on = (*on).mean_range;
+
+            assert!(
+                (range_off - range_on).abs() > 1.0e-2,
+                "the shear flag must change the Monte Carlo result; it was inert until \
+                 convert_inputs named a profile: off={range_off} on={range_on}"
+            );
+
+            ballistics_free_monte_carlo_results(off);
+            ballistics_free_monte_carlo_results(on);
+        }
+    }
+
+    /// Not asking must stay not asking: the default may not acquire a profile.
+    #[test]
+    fn leaving_shear_off_over_the_c_abi_names_no_profile() {
+        let mut inputs = valid_trajectory_inputs();
+        inputs.enable_wind_shear = 0;
+
+        let converted = convert_inputs(&inputs);
+
+        assert!(!converted.enable_wind_shear);
+        assert_eq!(
+            crate::wind_shear::boundary_layer_model_from_name(&converted.wind_shear_model),
+            crate::wind_shear::WindShearModel::None
+        );
     }
 
     fn zeroed_hold() -> FFIReticleHold {
