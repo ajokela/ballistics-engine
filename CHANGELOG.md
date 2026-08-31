@@ -5,6 +5,23 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.2] - 2026-08-31
+
+### Added
+- **The JSON command bridge is reachable from JavaScript** as `bridgeCall`, one
+  request envelope in and one response envelope out. It is the only route from a
+  browser or Node to `corrections.bc5d_table_path` and
+  `atmosphere.pressure_reference`, and the only one that validates
+  `effects.wind_shear_model` against a typed enum instead of silently resolving an
+  unrecognised name to the power law. Failures arrive inside the returned JSON;
+  it never throws.
+- The bridge now rides every `scripts/build-wasm.sh` preset. It is not a terminal
+  command and has no help header, so the per-command gating cannot see it — it is
+  the module's programmatic surface, and a `slim` consumer wants it as much as a
+  `full` one. The build verifier asserts `bridgeCall` reached the JS bindings, so
+  losing the feature wiring fails the build rather than shipping a module missing
+  its programmatic half.
+
 ## [0.36.1] - 2026-08-31
 
 ### Fixed

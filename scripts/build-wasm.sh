@@ -106,6 +106,13 @@ for entry in "${ALL_COMMANDS[@]}"; do
   if $on; then expected_headers+=("$header"); else unexpected_headers+=("$header"); fi
 done
 
+# The JSON command bridge rides EVERY preset. It is not a terminal command and has no
+# help header, so it is invisible to the gating above; it is the module's programmatic
+# surface, and a `slim` consumer wants it just as much as a `full` one. Appended AFTER
+# the expected-header resolution on purpose, so it cannot be mistaken for a per-command
+# feature and flip a header expectation.
+features="${features:+$features,}bridge"
+
 command -v wasm-pack >/dev/null 2>&1 || {
   echo "error: wasm-pack not found on PATH (https://rustwasm.github.io/wasm-pack/installer/)" >&2
   exit 1
@@ -167,6 +174,12 @@ fi
 # SIGPIPE and, under `set -o pipefail`, reports failure on a SUCCESSFUL match.
 if ! grep -qa -- "calculateTrajectory" "$built_dir"/*.js "$built_dir"/*.d.ts 2>/dev/null; then
   echo "MISSING: Calculator.calculateTrajectory in the JS bindings (never gated)" >&2; fail=1
+fi
+
+# The bridge is never gated off by a preset, so its absence means the feature wiring
+# above broke rather than that someone asked for a smaller module.
+if ! grep -qa -- "bridgeCall" "$built_dir"/*.js "$built_dir"/*.d.ts 2>/dev/null; then
+  echo "MISSING: bridgeCall in the JS bindings (never gated)" >&2; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then
