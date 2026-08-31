@@ -88,6 +88,19 @@ cross_pull() {
   if (( CROSS_LOCAL )); then cp "$1" "$2"; else scp -q "$CROSS_HOST:$1" "$2"; fi
 }
 CROSS_WORKDIR="${CROSS_WORKDIR:-bsd-cross}"
+# ssh and scp both resolve a relative path against the REMOTE $HOME, because they
+# start there. Local mode runs in whatever directory the caller happened to be in,
+# so a relative workdir would land the staged source next to the checkout while the
+# build driver went looking for it under $HOME - which is exactly what happened.
+# Anchor it here so both modes mean the same directory. Only in local mode: doing
+# it unconditionally would substitute THIS machine's $HOME into a remote path, and
+# the two are not the same when the caller is a laptop.
+if (( CROSS_LOCAL )); then
+  case "$CROSS_WORKDIR" in
+    /*) ;;
+    *)  CROSS_WORKDIR="$HOME/$CROSS_WORKDIR" ;;
+  esac
+fi
 CROSS_ONLY_OS="${CROSS_ONLY_OS:-}"
 CROSS_REBUILD_IMAGE="${CROSS_REBUILD_IMAGE:-0}"
 if [[ -n "$CROSS_ONLY_OS" ]]; then
