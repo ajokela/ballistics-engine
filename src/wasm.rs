@@ -9124,3 +9124,33 @@ impl Calculator {
         }
     }
 }
+
+/// The engine's versioned JSON command bridge, as one JavaScript function.
+///
+/// One request envelope in, one response envelope out, both as strings:
+///
+/// ```text
+/// in:   {"api_version":1,"command":"solve","request":{ … }}
+/// ok:   {"ok":true,"api_version":1,"engine_version":"…","command":"solve","result":{ … }}
+/// err:  {"ok":false,"api_version":1,"engine_version":"…","error":{"code":"…","message":"…"}}
+/// ```
+///
+/// This is the module's programmatic surface, deliberately separate from the
+/// browser terminal above. The terminal's commands are per-feature gated because a
+/// stripped build is a smaller download; the bridge is not gateable that way — it
+/// is a single entry point onto every command the build actually contains, and it
+/// costs nothing but serde, which is already a core dependency.
+///
+/// It is the ONLY route from JavaScript to `corrections.bc5d_table_path` and
+/// `atmosphere.pressure_reference`, and the only one that validates
+/// `effects.wind_shear_model` against a typed enum rather than silently resolving
+/// an unrecognised name to the power law.
+///
+/// Failures arrive INSIDE the returned JSON — this never throws. Ask
+/// `meta.capabilities` for the command list, which depends on what this build
+/// compiled in rather than on what the bridge knows how to dispatch.
+#[cfg(feature = "bridge")]
+#[wasm_bindgen(js_name = bridgeCall)]
+pub fn bridge_call(request_json: &str) -> String {
+    crate::bridge::bridge_call(request_json)
+}
