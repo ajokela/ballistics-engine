@@ -131,7 +131,13 @@ else
 fi
 # A release build must be reproducible from a committed lockfile, not from
 # whatever cargo resolves today.
-tar -tzf "$STAGE/src.tar.gz" | grep -qx 'Cargo.lock' ||
+# Listed to a FILE, then grepped - deliberately not piped. `grep -q` exits on its
+# first match, which hands `tar` a SIGPIPE partway through 451 entries; under
+# `set -o pipefail` the pipeline then reports failure ON A SUCCESSFUL MATCH, and
+# this check dies claiming the tag has no Cargo.lock while holding an archive that
+# does. (build-wasm.sh carries the same warning for the same reason.)
+tar -tzf "$STAGE/src.tar.gz" > "$STAGE/src.manifest"
+grep -qx 'Cargo.lock' "$STAGE/src.manifest" ||
   die "$TAG does not contain Cargo.lock; a release cross-build requires one"
 
 echo "==> host $CROSS_HOST  runid $RUNID  targets: $OS_LIST"
