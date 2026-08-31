@@ -58,6 +58,10 @@ NODE="${VALIDATE_NODE:-nanopct6}"
 NS="${VALIDATE_NAMESPACE:-default}"
 IMAGE="${VALIDATE_IMAGE:-registry.localnet/bsd-builder:latest}"
 SSH_WAIT_SECS="${SSH_WAIT_SECS:-600}"
+# How many times a guest may fail to BOOT before the OS is called failed. Boot
+# flakes only; a failed gate is never retried.
+BOOT_ATTEMPTS="${BOOT_ATTEMPTS:-3}"
+
 if [[ -n "${VALIDATE_ONLY_OS:-}" ]]; then
   case "$VALIDATE_ONLY_OS" in freebsd|openbsd|netbsd) ;; *) die "VALIDATE_ONLY_OS must be freebsd, openbsd or netbsd" ;; esac
   OS_LIST="$VALIDATE_ONLY_OS"
@@ -305,6 +309,21 @@ for os in $OS_LIST; do
   echo "================================================================"
   started=$(date +%s)
 
+  # The FreeBSD guest boots only about half the time: when it does not, AAVMF dies
+  # immediately with "Synchronous Exception at 0x00000000BFAF1A14" and the console
+  # holds nothing but the firmware banner. Measured directly - the SAME binary was
+  # validated twice minutes apart on an idle node, failing at 614s then passing at
+  # 29s - so it is the guest, not the artifact and not the release.
+  #
+  # Retried here rather than by re-running the whole job, which re-does a clean
+  # cross-build to get back to a coin flip.
+  #
+  # ONLY a guest that never came up is retried. A version gate or solve gate that
+  # fails is a real defect in the binary and must stay fatal on the first failure -
+  # retrying those would turn this script from a gate into a slot machine.
+  boot_attempt=1
+  while :; do
+
   # Idempotent: a pod left behind by an interrupted run is removed first.
   kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 
@@ -370,13 +389,13 @@ spec:
 POD_YAML
 
   kubectl -n "$NS" apply -f "$TMP/pod-$os.yaml" >/dev/null ||
-    { echo "!! $os: could not create pod $POD"; overall_rc=1; continue; }
+    { echo "!! $os: could not create pod $POD"; overall_rc=1; break; }
 
   if ! kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=300s >/dev/null 2>&1; then
     echo "!! $os: pod $POD never became Ready"
     kubectl -n "$NS" describe pod "$POD" 2>&1 | tail -25
     kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    overall_rc=1; continue
+    overall_rc=1; break
   fi
 
   # Deliver via tar on stdin - the same mechanism `kubectl cp` uses, but with
@@ -389,7 +408,7 @@ POD_YAML
        kubectl -n "$NS" exec -i "$POD" -- tar -xf - -C /work; then
     echo "!! $os: failed to deliver the binary into $POD"
     kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    overall_rc=1; continue
+    overall_rc=1; break
   fi
 
   set +e
@@ -401,6 +420,13 @@ POD_YAML
   printf '%s\n' "$elapsed" > "$TMP/$os.secs"
 
   if (( exec_rc != 0 )) || ! grep -q "^VALIDATION-OK $os " "$TMP/$os.log"; then
+    if grep -q 'never came up within' "$TMP/$os.log" && (( boot_attempt < BOOT_ATTEMPTS )); then
+      echo "== $os guest never booted (attempt $boot_attempt/$BOOT_ATTEMPTS); retrying"
+      kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+      boot_attempt=$(( boot_attempt + 1 ))
+      started=$(date +%s)
+      continue
+    fi
     echo "!! $os VALIDATION FAILED after ${elapsed}s (exec rc=$exec_rc)"
     overall_rc=1
   else
@@ -408,6 +434,9 @@ POD_YAML
     sed -n 's/^==> guest: //p' "$TMP/$os.log" | tail -1 > "$TMP/$os.uname"
     echo "== $os validated in ${elapsed}s"
   fi
+
+  break
+  done
 
   kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=true >/dev/null 2>&1 || true
   POD=""
