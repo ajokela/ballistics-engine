@@ -59,6 +59,34 @@ OUT="${2:-$HOME/release-$V}"
 [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$ ]] || die "bad VERSION: $V"
 
 CROSS_HOST="${CROSS_HOST:-alex@10.1.1.27}"
+
+# CROSS_HOST=local runs the build right here instead of over ssh.
+#
+# Needed because the fleet CI runner IS the cross host: `ssh alex@10.1.1.27` from
+# 10.1.1.27 is a self-connection the box does not authorize ("Permission denied
+# (publickey,password)"), so the default would fail on the one caller that matters
+# most. Handled here rather than by authorizing a self-ssh key, because a key is
+# invisible machine state that the next person cannot discover from the repo.
+CROSS_LOCAL=0
+case "$CROSS_HOST" in
+  local|localhost|"") CROSS_LOCAL=1; CROSS_HOST="local" ;;
+esac
+
+# Run a command on the build host.
+cross_sh() {
+  if (( CROSS_LOCAL )); then bash -c "$1"; else ssh -o ConnectTimeout=15 "$CROSS_HOST" "$1"; fi
+}
+# Run a script fed on stdin, with positional arguments, on the build host.
+cross_stdin() {
+  if (( CROSS_LOCAL )); then bash -s -- "$@"; else ssh -o ConnectTimeout=15 "$CROSS_HOST" 'bash -s' -- "$@"; fi
+}
+# Copy INTO / OUT OF the build host.
+cross_push() {
+  if (( CROSS_LOCAL )); then mkdir -p "$(dirname "$2")" && cp "$1" "$2"; else scp -q "$1" "$CROSS_HOST:$2"; fi
+}
+cross_pull() {
+  if (( CROSS_LOCAL )); then cp "$1" "$2"; else scp -q "$CROSS_HOST:$1" "$2"; fi
+}
 CROSS_WORKDIR="${CROSS_WORKDIR:-bsd-cross}"
 CROSS_ONLY_OS="${CROSS_ONLY_OS:-}"
 CROSS_REBUILD_IMAGE="${CROSS_REBUILD_IMAGE:-0}"
@@ -107,9 +135,9 @@ tar -tzf "$STAGE/src.tar.gz" | grep -qx 'Cargo.lock' ||
   die "$TAG does not contain Cargo.lock; a release cross-build requires one"
 
 echo "==> host $CROSS_HOST  runid $RUNID  targets: $OS_LIST"
-ssh -o ConnectTimeout=15 "$CROSS_HOST" "mkdir -p '$CROSS_WORKDIR/staging/$RUNID'" ||
+cross_sh "mkdir -p '$CROSS_WORKDIR/staging/$RUNID'" ||
   die "cannot reach build host $CROSS_HOST"
-scp -q "$STAGE/src.tar.gz" "$CROSS_HOST:$CROSS_WORKDIR/staging/$RUNID/src.tar.gz" ||
+cross_push "$STAGE/src.tar.gz" "$CROSS_WORKDIR/staging/$RUNID/src.tar.gz" ||
   die "failed to stage source on $CROSS_HOST"
 
 # ---------------------------------------------------------------------------
@@ -474,7 +502,7 @@ REMOTE_DRIVER
 echo "==> running the cross build on $CROSS_HOST"
 REMOTE_LOG="$STAGE/remote.log"
 set +e
-ssh -o ConnectTimeout=15 "$CROSS_HOST" 'bash -s' -- \
+cross_stdin \
   "$V" "$RUNID" "$SRC_SHA256" "$SOURCE_SHA" "$SOURCE_DATE_EPOCH" "$TAG" \
   "$OS_LIST" "$CROSS_WORKDIR" "$CROSS_REBUILD_IMAGE" \
   < "$STAGE/remote.sh" 2>&1 | tee "$REMOTE_LOG"
@@ -490,7 +518,7 @@ mkdir -p "$OUT"
 for os in $OS_LIST; do
   name="ballistics-$V-$os-aarch64"
   for ext in "" .sha256 .provenance.json; do
-    scp -q "$CROSS_HOST:$REMOTE_OUT/$os/$name$ext" "$OUT/" ||
+    cross_pull "$REMOTE_OUT/$os/$name$ext" "$OUT/" ||
       die "failed to fetch $name$ext from $CROSS_HOST"
   done
 done
