@@ -12,3 +12,11 @@ cdm_
 drag[_-]surface
 lapua_radar
 \.drg$
+# BC5D solver material — a patent application is pending, so NEW material must
+# not enter this PUBLIC repo. These are deliberately narrow: BC5D source, tests
+# and scripts are ALREADY tracked here and must stay maintainable, so matching
+# the bare string would only teach everyone to reflex SENSITIVE_OK=1. These
+# catch document-shaped artifacts by path; the content rule in
+# .githooks/pre-commit catches a new file whose path gives nothing away.
+bc[_-]?5d.*(report|solver|notes|design|spec|whitepaper|patent|invention|claims|internal|draft)
+(report|solver|notes|design|spec|whitepaper|patent|invention|claims).*bc[_-]?5d
