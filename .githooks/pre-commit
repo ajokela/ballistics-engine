@@ -30,8 +30,17 @@ done < <(git diff --cached --name-only --diff-filter=ACMR)
 while IFS= read -r path; do
     # The guard's own files legitimately name the sensitive party; skip them.
     case "$path" in .githooks/*|.sensitive-patterns) continue ;; esac
-    if git show ":$path" 2>/dev/null | head -c 200000 | grep -qiE 'applied[ _-]?ballistics'; then
+    body="$(git show ":$path" 2>/dev/null | head -c 200000)"
+    if printf '%s' "$body" | grep -qiE 'applied[ _-]?ballistics'; then
         echo "pre-commit GUARD: newly added '$path' names Applied Ballistics" >&2
+        viol=1
+    fi
+    # Same shape, same reasoning, different subject: a patent application on the
+    # BC5D solver is pending. The 31 files already tracked here that discuss BC5D
+    # are grandfathered by scoping this to ADDED files only -- editing them is
+    # ordinary maintenance; introducing a NEW one is the eyes-open case.
+    if printf '%s' "$body" | grep -qiE 'bc[ _-]?5d'; then
+        echo "pre-commit GUARD: newly added '$path' contains BC5D material (patent pending)" >&2
         viol=1
     fi
 done < <(git diff --cached --name-only --diff-filter=A)
