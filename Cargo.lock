@@ -1495,9 +1495,9 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "printpdf"
-version = "0.12.5"
+version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8830a8a6c6431286333c8a64d109f7f0e7e050270c8b8eba0a4c541626059da5"
+checksum = "e75e1f6d16f80c8f34918a4cc68743d703e8ee5016fac9508e223eb8e60445a0"
 dependencies = [
  "allsorts-azul",
  "base64",
