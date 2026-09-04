@@ -14,7 +14,9 @@ V="${1:?usage: deploy-wasm.sh VERSION}"
 # an agent worktree, a detached checkout, a fresh clone -- rather than only from the one
 # under $HOME. The tag gate below is what guarantees correctness; the path never did.
 ENGINE="${ENGINE:-$HOME/projects/ballistics-engine}"; SITES="${SITES:-$HOME/projects/ballistics.rs}"
-( cd "$ENGINE" && git describe --tags --exact-match 2>/dev/null | grep -q "v$V" ) \
+# grep -qx, not -q: an unanchored match accepts a NEIGHBOURING tag, so a request for
+# 0.36.3 would pass on a checkout sitting at v0.36.30.
+( cd "$ENGINE" && git describe --tags --exact-match 2>/dev/null | grep -qx "v$V" ) \
   || { echo "engine checkout is not at tag v$V - refuse to build wasm from the wrong rev"; exit 1; }
 ( cd "$ENGINE" && ./scripts/build-wasm.sh --preset full --target web --out-dir "/tmp/wasm-$V" )
 [ "$(python3 -c "import json;print(json.load(open('/tmp/wasm-$V/package.json'))['version'])")" = "$V" ] || { echo "pkg version mismatch"; exit 1; }
