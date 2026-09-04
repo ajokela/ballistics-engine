@@ -236,6 +236,10 @@ jobs:
     if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
     name: Build FreeBSD binary
+    # Hard ceiling so a wedged guest fails in ~1.5 h instead of running to
+    # the 360-minute default. Worst legitimate case is two 30-min install
+    # attempts plus the build; healthy runs finish in 8-26 min.
+    timeout-minutes: 90
 
     steps:
     - uses: actions/checkout@v7
@@ -251,7 +255,41 @@ jobs:
         environment_variables: VERSION
         run: |
           # Install Rust
-          sudo pkg install -y rust git
+          # Bounded, retrying toolchain install. This fetches the whole Rust
+          # toolchain from a third-party mirror, the longest and least reliable
+          # phase of the job. Unbounded, a degraded mirror hangs until GitHub's
+          # 6-hour ceiling: in v0.36.3 NetBSD sat 54 min with no output and had
+          # to be cancelled by hand; the retry then succeeded in 25.8 min.
+          #
+          # ATTEMPT_SECS must stay WELL ABOVE a healthy install, not near it. A
+          # measured-good NetBSD install is ~16.8 min of a ~26 min job, so a
+          # "sensible-looking" 10-minute bound would fail every normal build.
+          # 30 min is ~1.8x the healthy case: long enough never to fire on a
+          # working mirror, short enough that two attempts still fit the job
+          # timeout below.
+          #
+          # timeout(1) is in base on FreeBSD 10+, NetBSD 8+ and OpenBSD 6.4+, so
+          # it is present on every guest here -- but it is resolved rather than
+          # assumed, because a missing timeout would silently restore the old
+          # unbounded behaviour. Without it we still retry, and the job-level
+          # timeout-minutes stays the hard ceiling either way.
+          ATTEMPT_SECS=1800
+          TIMEOUT=$(command -v timeout || true)
+          [ -n "$TIMEOUT" ] || echo "note: timeout(1) not found; relying on job timeout-minutes"
+          n=0
+          until [ "$n" -ge 2 ]; do
+            n=$((n + 1))
+            echo "toolchain install: attempt $n/2"
+            if sudo ${TIMEOUT:+$TIMEOUT $ATTEMPT_SECS} pkg install -y rust git; then
+              break
+            fi
+            if [ "$n" -ge 2 ]; then
+              echo "toolchain install failed after $n attempts (mirror slow or down)"
+              exit 1
+            fi
+            echo "attempt $n failed or exceeded ${ATTEMPT_SECS}s; retrying"
+            sleep 30
+          done
 
           # Build the project
           cargo build --release --locked
@@ -280,6 +318,10 @@ jobs:
     if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
     name: Build NetBSD binary
+    # Hard ceiling so a wedged guest fails in ~1.5 h instead of running to
+    # the 360-minute default. Worst legitimate case is two 30-min install
+    # attempts plus the build; healthy runs finish in 8-26 min.
+    timeout-minutes: 90
 
     steps:
     - uses: actions/checkout@v7
@@ -295,7 +337,41 @@ jobs:
         environment_variables: VERSION
         run: |
           # Install Rust
-          sudo pkgin -y install rust git
+          # Bounded, retrying toolchain install. This fetches the whole Rust
+          # toolchain from a third-party mirror, the longest and least reliable
+          # phase of the job. Unbounded, a degraded mirror hangs until GitHub's
+          # 6-hour ceiling: in v0.36.3 NetBSD sat 54 min with no output and had
+          # to be cancelled by hand; the retry then succeeded in 25.8 min.
+          #
+          # ATTEMPT_SECS must stay WELL ABOVE a healthy install, not near it. A
+          # measured-good NetBSD install is ~16.8 min of a ~26 min job, so a
+          # "sensible-looking" 10-minute bound would fail every normal build.
+          # 30 min is ~1.8x the healthy case: long enough never to fire on a
+          # working mirror, short enough that two attempts still fit the job
+          # timeout below.
+          #
+          # timeout(1) is in base on FreeBSD 10+, NetBSD 8+ and OpenBSD 6.4+, so
+          # it is present on every guest here -- but it is resolved rather than
+          # assumed, because a missing timeout would silently restore the old
+          # unbounded behaviour. Without it we still retry, and the job-level
+          # timeout-minutes stays the hard ceiling either way.
+          ATTEMPT_SECS=1800
+          TIMEOUT=$(command -v timeout || true)
+          [ -n "$TIMEOUT" ] || echo "note: timeout(1) not found; relying on job timeout-minutes"
+          n=0
+          until [ "$n" -ge 2 ]; do
+            n=$((n + 1))
+            echo "toolchain install: attempt $n/2"
+            if sudo ${TIMEOUT:+$TIMEOUT $ATTEMPT_SECS} pkgin -y install rust git; then
+              break
+            fi
+            if [ "$n" -ge 2 ]; then
+              echo "toolchain install failed after $n attempts (mirror slow or down)"
+              exit 1
+            fi
+            echo "attempt $n failed or exceeded ${ATTEMPT_SECS}s; retrying"
+            sleep 30
+          done
 
           # Build the project
           cargo build --release --locked
@@ -324,6 +400,10 @@ jobs:
     if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'bsd')
     runs-on: ubuntu-latest
     name: Build OpenBSD binary
+    # Hard ceiling so a wedged guest fails in ~1.5 h instead of running to
+    # the 360-minute default. Worst legitimate case is two 30-min install
+    # attempts plus the build; healthy runs finish in 8-26 min.
+    timeout-minutes: 90
 
     steps:
     - uses: actions/checkout@v7
@@ -339,7 +419,41 @@ jobs:
         environment_variables: VERSION
         run: |
           # Install Rust
-          sudo pkg_add -I rust git
+          # Bounded, retrying toolchain install. This fetches the whole Rust
+          # toolchain from a third-party mirror, the longest and least reliable
+          # phase of the job. Unbounded, a degraded mirror hangs until GitHub's
+          # 6-hour ceiling: in v0.36.3 NetBSD sat 54 min with no output and had
+          # to be cancelled by hand; the retry then succeeded in 25.8 min.
+          #
+          # ATTEMPT_SECS must stay WELL ABOVE a healthy install, not near it. A
+          # measured-good NetBSD install is ~16.8 min of a ~26 min job, so a
+          # "sensible-looking" 10-minute bound would fail every normal build.
+          # 30 min is ~1.8x the healthy case: long enough never to fire on a
+          # working mirror, short enough that two attempts still fit the job
+          # timeout below.
+          #
+          # timeout(1) is in base on FreeBSD 10+, NetBSD 8+ and OpenBSD 6.4+, so
+          # it is present on every guest here -- but it is resolved rather than
+          # assumed, because a missing timeout would silently restore the old
+          # unbounded behaviour. Without it we still retry, and the job-level
+          # timeout-minutes stays the hard ceiling either way.
+          ATTEMPT_SECS=1800
+          TIMEOUT=$(command -v timeout || true)
+          [ -n "$TIMEOUT" ] || echo "note: timeout(1) not found; relying on job timeout-minutes"
+          n=0
+          until [ "$n" -ge 2 ]; do
+            n=$((n + 1))
+            echo "toolchain install: attempt $n/2"
+            if sudo ${TIMEOUT:+$TIMEOUT $ATTEMPT_SECS} pkg_add -I rust git; then
+              break
+            fi
+            if [ "$n" -ge 2 ]; then
+              echo "toolchain install failed after $n attempts (mirror slow or down)"
+              exit 1
+            fi
+            echo "attempt $n failed or exceeded ${ATTEMPT_SECS}s; retrying"
+            sleep 30
+          done
 
           # OpenBSD's default login-class datasize limit is too low for a release
           # rustc/LLVM build; raise the soft limit to the hard cap for this shell.
