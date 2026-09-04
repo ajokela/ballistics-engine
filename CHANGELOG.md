@@ -5,6 +5,17 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.3] - 2026-09-03
+
+### Changed
+- **Dependency maintenance only — no engine behavior changes.** `printpdf` 0.12.5 -> 0.12.6,
+  `thiserror` 2.0.19 -> 2.0.20 and `ureq` 3.3.0 -> 3.4.0 in both lockfiles, and CI's
+  `cross-platform-actions/action` 1.4.0 -> 1.5.0. The `Cargo.toml` dependency ranges are
+  unchanged, so a crate consumer resolving fresh already picked these up; what actually moves
+  is the set of crates the published binaries link. `printpdf` is held at 0.12.6 with
+  `default-features = false` — that flag is what keeps the BSD targets linking, so the
+  fuzz lockfile is pinned to match rather than floated forward.
+
 ## [0.36.2] - 2026-08-31
 
 ### Added
