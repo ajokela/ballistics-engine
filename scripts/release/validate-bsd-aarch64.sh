@@ -354,7 +354,16 @@ spec:
   containers:
   - name: validator
     image: $IMAGE
-    imagePullPolicy: Always
+    # IfNotPresent, not Always: validation must not depend on registry
+    # uptime. In v0.36.3 the cluster registry (zot) was down -- its pod
+    # stuck Unknown on a half-dead node, its Longhorn volume unable to
+    # move because Longhorn's own CSI pods were stuck on the same node --
+    # and `Always` turned that into a release blocker even though the
+    # correct builder image was ALREADY cached on the validation node.
+    # The image is a stable test harness, not the artifact under test:
+    # what is being validated is the binary in $OUT, which is staged in
+    # fresh every run. Refresh the image explicitly when it changes.
+    imagePullPolicy: IfNotPresent
     # Override the builder image ENTRYPOINT, which would otherwise start a full
     # in-guest build. We only want its qemu/ssh/AAVMF toolbox.
     command: ["sleep", "infinity"]
