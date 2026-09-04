@@ -327,6 +327,27 @@ for os in $OS_LIST; do
   # Idempotent: a pod left behind by an interrupted run is removed first.
   kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 
+  # ...and so is any validation pod from an EARLIER run. Pod names carry $RUNID,
+  # so a stale pod never collides by name -- but every validation pod carries
+  # `app: bsd-build` under a REQUIRED podAntiAffinity on hostname, so one left
+  # behind still occupies the node's only slot and the new pod cannot schedule.
+  # In v0.36.3 a run that died in ImagePullBackOff left its pods behind, and the
+  # next run's freebsd -- validated first -- could not schedule, while openbsd
+  # and netbsd passed once the stale pod had been reaped. The runbook already
+  # claimed this cleanup happened; only the same-name case actually did.
+  #
+  # Matched by NAME PREFIX, not by the label: `app: bsd-build` is shared with the
+  # real build Jobs, and deleting by label alone would kill an in-progress build.
+  stale=$(kubectl -n "$NS" get pods -o name 2>/dev/null \
+            | sed 's|^pod/||' \
+            | grep '^bsd-validate-' \
+            | grep -v -- "-$RUNID\$" || true)
+  if [[ -n "$stale" ]]; then
+    echo "==> reaping stale validation pod(s) holding the anti-affinity slot:"
+    echo "$stale" | sed 's/^/      /'
+    echo "$stale" | xargs -n1 kubectl -n "$NS" delete pod --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  fi
+
   cat > "$TMP/pod-$os.yaml" <<POD_YAML
 apiVersion: v1
 kind: Pod
@@ -358,11 +379,14 @@ spec:
     # uptime. In v0.36.3 the cluster registry (zot) was down -- its pod
     # stuck Unknown on a half-dead node, its Longhorn volume unable to
     # move because Longhorn's own CSI pods were stuck on the same node --
-    # and `Always` turned that into a release blocker even though the
-    # correct builder image was ALREADY cached on the validation node.
+    # and an always-pull turned that into a release blocker even though
+    # the correct builder image was ALREADY cached on the node.
     # The image is a stable test harness, not the artifact under test:
-    # what is being validated is the binary in $OUT, which is staged in
-    # fresh every run. Refresh the image explicitly when it changes.
+    # what is validated is the freshly staged binary. Refresh the image
+    # explicitly when it actually changes.
+    #
+    # NB: this comment lives inside an unquoted heredoc, where backticks
+    # and dollar signs are still evaluated -- keep both out of it.
     imagePullPolicy: IfNotPresent
     # Override the builder image ENTRYPOINT, which would otherwise start a full
     # in-guest build. We only want its qemu/ssh/AAVMF toolbox.
@@ -403,7 +427,21 @@ POD_YAML
   if ! kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=300s >/dev/null 2>&1; then
     echo "!! $os: pod $POD never became Ready"
     kubectl -n "$NS" describe pod "$POD" 2>&1 | tail -25
-    kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    kubectl -n "$NS" delete pod "$POD" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    # A pod that never goes Ready has not run the binary at all, so this says
+    # nothing about the artifact: it is the node, the image, or the scheduler
+    # (anti-affinity contention, a slow pull, transient node pressure). Same
+    # class as a guest that never boots, so it gets the same budget instead of
+    # being fatal on the first try. The GATES stay fatal on first failure --
+    # retrying a version or solve failure would turn this script from a gate
+    # into a slot machine.
+    if (( boot_attempt < BOOT_ATTEMPTS )); then
+      echo "== $os pod never became Ready (attempt $boot_attempt/$BOOT_ATTEMPTS); retrying"
+      boot_attempt=$(( boot_attempt + 1 ))
+      started=$(date +%s)
+      continue
+    fi
+    echo "!! $os: pod never became Ready after $BOOT_ATTEMPTS attempts"
     overall_rc=1; break
   fi
 
