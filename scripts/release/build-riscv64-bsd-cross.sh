@@ -31,7 +31,10 @@ done
 # branch before that tag exists -- otherwise this script is untestable until the
 # moment it has to work.
 REF="${RISCV64_REF:-v$V}"
-rm -rf "$W"
+# sudo, because the container runs as root (it apt-gets a toolchain) and leaves
+# root-owned files under $W/target. A plain rm then fails on the SECOND run --
+# the first release works and every rebuild after it dies in cleanup.
+sudo rm -rf "$W"
 git clone -q --depth 1 --branch "$REF" "https://github.com/$PUB" "$W"
 cp "$W/scripts/release/cross-riscv64.sh" "$W/cross-riscv64.sh"
 
