@@ -27,8 +27,12 @@ for os in freebsd netbsd openbsd; do
   [ -d "$SYSROOTS/$os" ] || { echo "missing sysroot $SYSROOTS/$os (run k8s-cluster scripts/riscv64-sysroots.sh)" >&2; exit 1; }
 done
 
+# REF defaults to the release tag. Overridable so the lane can be exercised on a
+# branch before that tag exists -- otherwise this script is untestable until the
+# moment it has to work.
+REF="${RISCV64_REF:-v$V}"
 rm -rf "$W"
-git clone -q --depth 1 --branch "v$V" "https://github.com/$PUB" "$W"
+git clone -q --depth 1 --branch "$REF" "https://github.com/$PUB" "$W"
 cp "$W/scripts/release/cross-riscv64.sh" "$W/cross-riscv64.sh"
 
 for os in freebsd netbsd openbsd; do
