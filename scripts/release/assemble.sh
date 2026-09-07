@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Assemble the GitHub release + GCS upload from a directory of built artifacts.
-# Refuses to run unless all 13 binaries are present and every checksum verifies.
+# Refuses to run unless all 16 binaries are present and every checksum verifies.
 set -euo pipefail
 V="${1:?usage: assemble.sh VERSION [DIR]}"; DIR="${2:-$HOME/release-$V}"
 cd "$DIR"
 EXPECTED=(macos-aarch64 macos-x86_64 linux-x86_64 linux-aarch64 linux-riscv64 linux-mips64el
           windows-x86_64.exe freebsd-x86_64 openbsd-x86_64 netbsd-x86_64
-          freebsd-aarch64 openbsd-aarch64 netbsd-aarch64)
+          freebsd-aarch64 openbsd-aarch64 netbsd-aarch64
+          freebsd-riscv64 openbsd-riscv64 netbsd-riscv64)
 missing=0
 for p in "${EXPECTED[@]}"; do
   [ -f "ballistics-$V-$p" ] || { echo "MISSING: ballistics-$V-$p"; missing=1; }

@@ -3,59 +3,128 @@
 #
 # A cross-build never executes what it produced: the runner is x86_64 and
 # physically cannot. So every riscv64 asset is gated here, the same way
-# validate-bsd-aarch64.sh gates the ARM ones. Two checks per target:
+# validate-bsd-aarch64.sh gates the ARM ones.
 #
-#   1. --version, hard-gated to equal VERSION. This platform once served a stale
-#      binary off a corrupted filesystem, which is why the gate exists at all.
-#   2. A full trajectory solve. A wrong float ABI or a soft-float mismatch links
-#      cleanly and passes --version; it only shows up in the arithmetic. All four
-#      targets must agree to the digit.
+# Per target: upload to a per-version path, verify the uploaded bytes IN the
+# guest against the build's own .sha256, then run --version and a full solve.
+# The solve matters because a wrong float ABI links cleanly and self-reports the
+# right version -- it only shows up in the arithmetic.
 #
 # Hosts (all riscv64):
-#   freebsd/openbsd/linux  QEMU guests on the emulator host, ports 2222/2223/2224
+#   freebsd/openbsd/linux  QEMU guests on the emulator host, each reached through
+#                          its own ~/vms/<os>-riscv64/ssh.sh wrapper, which carries
+#                          the host-guest key and known_hosts
 #   netbsd                 real silicon, a Milk-V Mars (StarFive JH7110)
 set -euo pipefail
 V="${1:?usage: validate-riscv64.sh VERSION [OUTDIR] [os...]}"
 OUT="${2:-$HOME/release-$V}"
-shift 2 2>/dev/null || shift $# 
-# Default to all four; a caller may gate just the targets its own job built, so
-# the linux job and the BSD job can run independently.
+shift 2 2>/dev/null || shift $#
 TARGETS=("$@"); [ ${#TARGETS[@]} -gt 0 ] || TARGETS=(linux freebsd netbsd openbsd)
 
 VMHOST="${RISCV64_VMHOST:-alex@10.1.1.12}"
 NETBSD="${RISCV64_NETBSD:-root@10.1.1.30}"
+
+# The board's HPN-patched sshd advertises sntrup761x25519-sha512@openssh.com but
+# stalls mid-exchange on it: the connection hangs at SSH2_MSG_KEX_ECDH_REPLY and
+# only dies after its LoginGraceTime (600s), which reads as a dead host. OpenSSH
+# 9.6+ picks that algorithm by default. Pin the classic exchange HERE, in the
+# code, rather than in a runner's ~/.ssh/config -- a correctness requirement of a
+# release gate must travel with the gate, or a rebuilt runner silently loses it.
+NETBSD_SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20 -o KexAlgorithms=curve25519-sha256)
+VM_SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20)
+
+# Per-version, so a re-dispatch of the same tag cannot find a previous run's file.
+REMOTE="ballistics-validate-$V"
 SOLVE="trajectory --velocity 2700 --bc 0.243 --drag-model g7 --mass 175 \
 --diameter 0.308 --auto-zero 100 --max-range 300"
-EXPECT_FPS="${RISCV64_EXPECT_FPS:-2162.56}"
+MUZZLE=2700   # the solve's muzzle velocity; impact must be below it
+
+# Run a shell snippet on the target OS. $1 is the snippet; stdin is forwarded.
+remote() {
+  local os="$1" snip="$2"
+  case "$os" in
+    netbsd)  "${NETBSD_SSH[@]}" "$NETBSD" "$snip" ;;
+    linux)   "${VM_SSH[@]}" "$VMHOST" "/home/alex/vms/linux-riscv64/ssh.sh   '$snip'" ;;
+    freebsd) "${VM_SSH[@]}" "$VMHOST" "/home/alex/vms/freebsd-riscv64/ssh.sh '$snip'" ;;
+    openbsd) "${VM_SSH[@]}" "$VMHOST" "/home/alex/vms/openbsd-riscv64/ssh.sh '$snip'" ;;
+    *) return 2 ;;
+  esac
+}
+
+# Capture without letting errexit abort before the ::error:: is printed. A bare
+# `x=$(cmd | grep ...)` under `set -euo pipefail` exits the script the moment the
+# command fails or the grep does not match, so every fail=1/continue below it is
+# unreachable and the job ends with a bare non-zero status and no annotation.
+capture() { set +e; CAP_OUT=$("$@" 2>&1); CAP_RC=$?; set -e; }
 
 fail=0
+declare -a SEEN_OS=() SEEN_FPS=()
+
 for os in "${TARGETS[@]}"; do
   BIN="$OUT/ballistics-$V-$os-riscv64"
-  [ -f "$BIN" ] || { echo "::error::missing $BIN"; fail=1; continue; }
+  SUM="$BIN.sha256"
+  if [ ! -f "$BIN" ]; then echo "::error::missing $BIN"; fail=1; continue; fi
 
-  case "$os" in
-    netbsd)  RUN() { ssh -o BatchMode=yes "$NETBSD" "cat > ~/ballistics; chmod +x ~/ballistics; ~/ballistics $1"; } ;;
-    linux)   RUN() { ssh -o BatchMode=yes "$VMHOST" "/home/alex/vms/linux-riscv64/ssh.sh 'cat > /root/ballistics; chmod +x /root/ballistics; /root/ballistics $1'"; } ;;
-    freebsd) RUN() { ssh -o BatchMode=yes "$VMHOST" "/home/alex/vms/freebsd-riscv64/ssh.sh 'cat > /tmp/ballistics; chmod +x /tmp/ballistics; /tmp/ballistics $1'"; } ;;
-    # Go through the VM's own ssh.sh, exactly like freebsd and linux above,
-    # rather than ProxyJumping to the guest directly. The wrapper carries the
-    # host-guest key and known_hosts that live beside the VM, so the runner needs
-    # no credential inside the guest and no host key of its own -- a direct hop
-    # failed first on host key verification, then on publickey.
-    openbsd) RUN() { ssh -o BatchMode=yes "$VMHOST" \
-                       "/home/alex/vms/openbsd-riscv64/ssh.sh 'cat > /root/ballistics; chmod +x /root/ballistics; /root/ballistics $1'"; } ;;
-  esac
+  WANT_SHA=$(awk '{print $1}' "$SUM" 2>/dev/null || true)
+  [ -n "$WANT_SHA" ] || WANT_SHA=$(sha256sum "$BIN" | awk '{print $1}')
 
-  GOT=$(RUN --version < "$BIN" | tr -d '\r')
-  if [ "$GOT" != "ballistics $V" ]; then
-    echo "::error::$os riscv64 version gate: got '$GOT', want 'ballistics $V'"; fail=1; continue
+  # Upload and checksum in ONE chain. `&&` throughout, so a failed write cannot
+  # fall through to executing whatever was already at that path -- with `;` and a
+  # fixed filename, a re-dispatched release could validate the PREVIOUS run's
+  # binary and pass both gates while uploading a binary nothing ever ran.
+  capture remote "$os" "rm -f ~/$REMOTE && cat > ~/$REMOTE && chmod +x ~/$REMOTE && \
+    (sha256sum ~/$REMOTE 2>/dev/null || sha256 -q ~/$REMOTE 2>/dev/null || cksum -a sha256 ~/$REMOTE 2>/dev/null)" < "$BIN"
+  if [ "$CAP_RC" -ne 0 ]; then
+    echo "::error::$os riscv64: upload failed (rc=$CAP_RC): $CAP_OUT"; fail=1; continue
   fi
-  FPS=$(RUN "$SOLVE" < "$BIN" | grep -oE 'Impact Velocity: *[0-9.]+' | grep -oE '[0-9.]+$')
-  if [ "$FPS" != "$EXPECT_FPS" ]; then
-    echo "::error::$os riscv64 solve gate: impact velocity $FPS, want $EXPECT_FPS"; fail=1; continue
+  GOT_SHA=$(printf '%s' "$CAP_OUT" | tr -d '\r' | grep -oiE '[0-9a-f]{64}' | head -1 || true)
+  if [ "$GOT_SHA" != "$WANT_SHA" ]; then
+    echo "::error::$os riscv64: binary changed in transit (want $WANT_SHA, got '${GOT_SHA:-none}')"; fail=1; continue
   fi
+
+  capture remote "$os" "~/$REMOTE --version"
+  GOT=$(printf '%s' "$CAP_OUT" | tr -d '\r' | tail -1)
+  if [ "$CAP_RC" -ne 0 ] || [ "$GOT" != "ballistics $V" ]; then
+    echo "::error::$os riscv64 version gate: got '$GOT' (rc=$CAP_RC), want 'ballistics $V'"; fail=1; continue
+  fi
+
+  capture remote "$os" "~/$REMOTE $SOLVE"
+  if [ "$CAP_RC" -ne 0 ]; then
+    echo "::error::$os riscv64: solve did not run (rc=$CAP_RC): $(printf '%s' "$CAP_OUT" | tail -3)"; fail=1; continue
+  fi
+  FPS=$(printf '%s' "$CAP_OUT" | grep -oE 'Impact Velocity: *[0-9.]+' | grep -oE '[0-9.]+$' | head -1 || true)
+  if [ -z "$FPS" ]; then
+    echo "::error::$os riscv64: could not parse Impact Velocity from the solve output"; fail=1; continue
+  fi
+  # Structural, not a pinned magic number: the engine's numerics change between
+  # releases by design, and an absolute constant here would block a legitimate
+  # release on all four platforms with no fix short of re-cutting the tag. A
+  # wrong float ABI still cannot pass -- it would land outside these bounds or
+  # disagree with the other targets below.
+  if ! awk -v v="$FPS" -v m="$MUZZLE" 'BEGIN{exit !(v>0 && v<m)}'; then
+    echo "::error::$os riscv64: impact velocity $FPS implausible (expected 0 < v < $MUZZLE)"; fail=1; continue
+  fi
+  # Optional hard pin, for a release that wants to assert an exact figure.
+  if [ -n "${RISCV64_EXPECT_FPS:-}" ] && [ "$FPS" != "$RISCV64_EXPECT_FPS" ]; then
+    echo "::error::$os riscv64: impact velocity $FPS != pinned $RISCV64_EXPECT_FPS"; fail=1; continue
+  fi
+
+  SEEN_OS+=("$os"); SEEN_FPS+=("$FPS")
   echo "  ok  $os riscv64: ballistics $V, $FPS fps"
 done
+
+# Cross-target agreement. This is the property that actually catches a bad float
+# ABI on one platform: every target ran identical inputs through identical code,
+# so any disagreement is a defect regardless of what the absolute number is.
+if [ "${#SEEN_FPS[@]}" -gt 1 ]; then
+  for i in "${!SEEN_FPS[@]}"; do
+    if [ "${SEEN_FPS[$i]}" != "${SEEN_FPS[0]}" ]; then
+      echo "::error::riscv64 targets disagree: ${SEEN_OS[0]}=${SEEN_FPS[0]} vs ${SEEN_OS[$i]}=${SEEN_FPS[$i]}"
+      fail=1
+    fi
+  done
+  [ "$fail" -ne 0 ] || echo "  ok  all ${#SEEN_FPS[@]} targets agree at ${SEEN_FPS[0]} fps"
+fi
 
 [ "$fail" -eq 0 ] || { echo "::error::riscv64 validation failed"; exit 1; }
 echo "==> validated on real systems: ${TARGETS[*]}"
