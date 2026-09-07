@@ -19,7 +19,14 @@ V="${1:?usage: build-riscv64-bsd-cross.sh VERSION [OUTDIR]}"
 OUT="${2:-$HOME/release-$V}"; mkdir -p "$OUT"
 
 SYSROOTS="${RISCV64_SYSROOTS:-/home/alex/riscv-poc/sysroots}"
-IMAGE="${RISCV64_IMAGE:-rustlang/rust:nightly-bookworm}"
+# Pinned by DIGEST, not by the floating :nightly-bookworm tag. -Z build-std is an
+# unstable interface that has broken across nightlies before, so "whatever nightly
+# the tag points at today" is not a build input a release can rest on. Today this
+# lane only works because the runner happens to have this image cached; a
+# `docker system prune` would silently change the compiler under it. Pinning also
+# makes the shipped binary attributable: this digest is rustc 1.100.0-nightly
+# (a69a63265 2026-09-03). Bump deliberately, and re-run the lane when you do.
+IMAGE="${RISCV64_IMAGE:-rustlang/rust@sha256:429e94b9fc4c29a16ac6546821a749401620652c14b8dd5033064267b37ab9aa}"
 W="${RISCV64_WORKDIR:-/tmp/riscv64-bsd-$V}"
 PUB="${PUB:-ajokela/ballistics-engine}"
 
@@ -54,6 +61,13 @@ for os in freebsd netbsd openbsd; do
   install -m 0755 "$W/target/$T/release/ballistics" "$OUT/ballistics-$V-$os-riscv64"
   ( cd "$OUT" && sha256sum "ballistics-$V-$os-riscv64" > "ballistics-$V-$os-riscv64.sha256" )
 done
+
+# Record the toolchain, so a shipped binary can be attributed after the fact.
+# The aarch64 lane writes a provenance json per binary; this is the same
+# information for a lane that does not (yet) emit one.
+sudo docker run --rm "$IMAGE" bash -c 'rustc -V; cargo -V' 2>/dev/null \
+  | sed "s/^/riscv64-bsd toolchain: /" | tee "$OUT/ballistics-$V-riscv64-bsd.toolchain.txt"
+echo "image: $IMAGE" >> "$OUT/ballistics-$V-riscv64-bsd.toolchain.txt"
 
 echo "==> built:"
 ls -l "$OUT"/ballistics-"$V"-*-riscv64

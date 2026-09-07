@@ -111,6 +111,15 @@ for os in "${TARGETS[@]}"; do
 
   SEEN_OS+=("$os"); SEEN_FPS+=("$FPS")
   echo "  ok  $os riscv64: ballistics $V, $FPS fps"
+
+  # Remove it. These four guests are long-lived and mutable -- unlike the aarch64
+  # lane, which boots a disposable overlay of a read-only golden image per run --
+  # so anything left behind persists into the next release. That persistence is
+  # what made a stale-binary false pass reachable in the first place; the
+  # versioned path and the in-guest checksum above close the hole, and this keeps
+  # the guests from accumulating release binaries besides.
+  capture remote "$os" "rm -f ~/$REMOTE"
+  [ "$CAP_RC" -eq 0 ] || echo "  note: could not remove ~/$REMOTE on $os (rc=$CAP_RC)"
 done
 
 # Cross-target agreement. This is the property that actually catches a bad float
