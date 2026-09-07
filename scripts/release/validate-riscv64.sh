@@ -37,13 +37,13 @@ for os in "${TARGETS[@]}"; do
     netbsd)  RUN() { ssh -o BatchMode=yes "$NETBSD" "cat > ~/ballistics; chmod +x ~/ballistics; ~/ballistics $1"; } ;;
     linux)   RUN() { ssh -o BatchMode=yes "$VMHOST" "/home/alex/vms/linux-riscv64/ssh.sh 'cat > /root/ballistics; chmod +x /root/ballistics; /root/ballistics $1'"; } ;;
     freebsd) RUN() { ssh -o BatchMode=yes "$VMHOST" "/home/alex/vms/freebsd-riscv64/ssh.sh 'cat > /tmp/ballistics; chmod +x /tmp/ballistics; /tmp/ballistics $1'"; } ;;
-    # accept-new, because this is the one hop the runner makes directly rather
-    # than through a VM wrapper script that carries its own known_hosts. On a
-    # fresh runner the guest key is unknown and the whole lane fails at the last
-    # target with "Host key verification failed".
-    openbsd) RUN() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-                       -o HostKeyAlias=openbsd-riscv64-qemu -J "$VMHOST" -p 2223 alex@127.0.0.1 \
-                       "cat > ~/ballistics; chmod +x ~/ballistics; ~/ballistics $1"; } ;;
+    # Go through the VM's own ssh.sh, exactly like freebsd and linux above,
+    # rather than ProxyJumping to the guest directly. The wrapper carries the
+    # host-guest key and known_hosts that live beside the VM, so the runner needs
+    # no credential inside the guest and no host key of its own -- a direct hop
+    # failed first on host key verification, then on publickey.
+    openbsd) RUN() { ssh -o BatchMode=yes "$VMHOST" \
+                       "/home/alex/vms/openbsd-riscv64/ssh.sh 'cat > /root/ballistics; chmod +x /root/ballistics; /root/ballistics $1'"; } ;;
   esac
 
   GOT=$(RUN --version < "$BIN" | tr -d '\r')
