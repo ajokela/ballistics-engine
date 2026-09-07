@@ -191,6 +191,35 @@ pub struct WeightedTruingObservationResultV1 {
     pub standardized_residual: f64,
 }
 
+/// The same residual diagnostics evaluated *before* the fit, at the muzzle
+/// velocity and BC the request was entered with.
+///
+/// [`UncertaintyTruingReportV1::observations`] is always evaluated at the fitted
+/// MAP, so on its own it can only draw an "after" column.  Pairing the two lets a
+/// client show what truing actually changed per observation.  A client cannot
+/// reconstruct this itself without reproducing this module's forward model
+/// exactly -- same zero solve, same interpolation, same opt-in effects -- and a
+/// baseline computed any other way is not comparable with the fitted column it
+/// sits beside.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TruingBaselineV1 {
+    /// The request's entered `model.muzzle_velocity_fps`.  Echoed, like
+    /// [`UncertaintyTruingReportV1::priors`], so a rendered "before" column can
+    /// be labeled from the report alone.
+    pub muzzle_velocity_fps: f64,
+    /// The request's entered `model.ballistic_coefficient`, echoed for the same
+    /// reason.
+    pub ballistic_coefficient: f64,
+    /// Data chi-square at those entered parameters, directly comparable with
+    /// [`TruingUncertaintyDiagnosticsV1::chi_square`] at the MAP.  Prior penalties
+    /// are excluded on both sides of that comparison: this is a statement about
+    /// how well the entered load described the observations, not about the
+    /// objective the fitter minimized.
+    pub chi_square: f64,
+    /// One entry per request observation, in request order.
+    pub observations: Vec<WeightedTruingObservationResultV1>,
+}
+
 /// Parameter-propagated drop uncertainty at one requested range.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct TruingPredictiveBandV1 {
@@ -293,6 +322,16 @@ pub struct UncertaintyTruingReportV1 {
     pub converged: bool,
     pub priors: TruingPriorsV1,
     pub observations: Vec<WeightedTruingObservationResultV1>,
+    /// Pre-fit counterpart to `observations`, for a before/after residual view.
+    /// Additive and optional: the schema stays at version 1 and a consumer
+    /// written against the original document decodes an unchanged report.
+    ///
+    /// `None` means the forward model could not be evaluated at the entered
+    /// parameters.  A baseline is a diagnostic, never the answer, so that is
+    /// reported as a missing column rather than failing an otherwise good fit.
+    /// It is not reachable today -- the optimizer starts at those same entered
+    /// parameters, so such a failure has already surfaced as an error.
+    pub baseline: Option<TruingBaselineV1>,
     pub diagnostics: TruingUncertaintyDiagnosticsV1,
     pub approximation: TruingApproximationV1,
     pub predictive_bands: Vec<TruingPredictiveBandV1>,
@@ -596,6 +635,7 @@ fn run_with_model(
         converged,
         priors: request.priors,
         observations: evaluation.observation_results,
+        baseline: baseline_at_entered_parameters(request, model),
         diagnostics: TruingUncertaintyDiagnosticsV1 {
             chi_square: evaluation.chi_square,
             prior_penalty: evaluation.prior_penalty,
@@ -1026,6 +1066,65 @@ fn evaluate(
         prior_penalty,
         bc_sensitivity_ratio,
         data_condition_number,
+    })
+}
+
+/// Residuals at the request's entered MV and BC, for the report's pre-fit
+/// baseline.
+///
+/// One [`TruingForwardModel::predict_many_in_unit`] call, deliberately not
+/// [`truing_jacobian_rows`]: a baseline needs predictions only, and the Jacobian
+/// path spends five trajectories per range set computing derivatives nothing here
+/// reads.  That keeps the cost of the new column at one extra trajectory for the
+/// whole report, against the ~100 iterations the fit itself already runs.
+///
+/// See [`UncertaintyTruingReportV1::baseline`] for why a forward-model failure is
+/// `None` rather than an error.
+fn baseline_at_entered_parameters(
+    request: &UncertaintyTruingRequestV1,
+    model: &TruingForwardModel<'_>,
+) -> Option<TruingBaselineV1> {
+    let muzzle_velocity_fps = request.model.muzzle_velocity_fps;
+    let ballistic_coefficient = request.model.ballistic_coefficient;
+    let ranges: Vec<f64> = request
+        .observations
+        .iter()
+        .map(|observation| observation.range_yd)
+        .collect();
+    let predictions = model
+        .predict_many_in_unit(
+            muzzle_velocity_fps,
+            ballistic_coefficient,
+            &ranges,
+            request.drop_unit,
+        )
+        .ok()?;
+
+    let mut chi_square = 0.0;
+    let mut observations = Vec::with_capacity(request.observations.len());
+    for (observation, predicted_drop) in request.observations.iter().zip(predictions) {
+        let predicted_drop = predicted_drop?;
+        let residual = predicted_drop - observation.drop;
+        let standardized_residual = residual / observation.sigma;
+        chi_square += standardized_residual * standardized_residual;
+        observations.push(WeightedTruingObservationResultV1 {
+            range_yd: observation.range_yd,
+            observed_drop: observation.drop,
+            sigma: observation.sigma,
+            predicted_drop,
+            residual,
+            standardized_residual,
+        });
+    }
+    if !chi_square.is_finite() {
+        return None;
+    }
+
+    Some(TruingBaselineV1 {
+        muzzle_velocity_fps,
+        ballistic_coefficient,
+        chi_square,
+        observations,
     })
 }
 

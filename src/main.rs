@@ -9937,6 +9937,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             } else {
                                 eprintln!("API Error: {}", e);
+                                // This endpoint is moving behind auth, and "go
+                                // offline" was the only advice here — which reads
+                                // as an outage when the real cause is a missing or
+                                // expired token, and talks the user out of the
+                                // online path permanently over a fixable problem.
+                                //
+                                // Printed unconditionally rather than through
+                                // `ApiError::cli_hint()`, which would be the
+                                // obvious way to show it only on a 401/402: that
+                                // matches on `ServerError`, and nothing builds one
+                                // here. ureq 3.x's `http_status_as_error` defaults
+                                // on, so an HTTP 401 comes back from `send` as
+                                // `Error::StatusCode` and `map_ureq_error` files it
+                                // under `NetworkError("http status: 401")` — the
+                                // one case this hint exists for is exactly the case
+                                // a conditional hint would stay silent on.
+                                eprintln!("Hint: If the service rejected your credentials, run `ballistics login` (create a token at https://ballisticsinsight.com/account)");
                                 eprintln!("Hint: Use --offline for local calculation or --offline-fallback for automatic fallback");
                                 std::process::exit(1);
                             }

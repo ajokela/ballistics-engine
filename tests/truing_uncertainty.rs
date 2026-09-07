@@ -183,6 +183,90 @@ fn covariance_is_psd_and_absolute_sigma_scales_intervals_and_predictive_bands() 
     assert_eq!(json["approximation"]["status"], "available");
 }
 
+/// The report has to carry both columns of a before/after residual table. The
+/// observations are the truth at 2700 fps, so entering 2600 fps makes the "before"
+/// column genuinely wrong and the fit's job visible: same ranges, same readings,
+/// materially different residuals.
+#[test]
+fn the_pre_fit_baseline_is_the_before_column_the_fit_improves_on() {
+    const ENTERED_MV_FPS: f64 = 2_600.0;
+    let mut off_nominal = request(&[300.0, 600.0, 900.0], 0.03, TruingPriorsV1::default());
+    off_nominal.model.muzzle_velocity_fps = ENTERED_MV_FPS;
+
+    let report = run_uncertainty_truing_v1(&off_nominal).expect("off-nominal entered MV fits");
+    let baseline = report.baseline.as_ref().expect("pre-fit baseline");
+
+    // The baseline is pinned to what was entered, not to what was fitted.
+    assert_eq!(baseline.muzzle_velocity_fps, ENTERED_MV_FPS);
+    assert_eq!(
+        baseline.ballistic_coefficient,
+        model().ballistic_coefficient
+    );
+    // Loose against the optimizer, not against the physics: from a seed 100 fps
+    // out, LM stops at its scaled-gradient tolerance rather than machine zero
+    // (the on-nominal fixtures above hold to 1e-8 because they start at the
+    // answer). 0.01 fps still fails any real recovery regression.
+    assert!(
+        (report.map_muzzle_velocity_fps - model().muzzle_velocity_fps).abs() < 0.01,
+        "fit should recover the true MV, got {}",
+        report.map_muzzle_velocity_fps
+    );
+
+    // Both columns describe the same readings in the same order, or they cannot
+    // be rendered side by side.
+    assert_eq!(baseline.observations.len(), report.observations.len());
+    let mut baseline_chi_square = 0.0;
+    for (before, after) in baseline.observations.iter().zip(&report.observations) {
+        assert_eq!(before.range_yd, after.range_yd);
+        assert_eq!(before.observed_drop, after.observed_drop);
+        assert_eq!(before.sigma, after.sigma);
+        assert!((before.residual - (before.predicted_drop - before.observed_drop)).abs() < 1.0e-12);
+        assert!((before.standardized_residual - before.residual / before.sigma).abs() < 1.0e-12);
+        assert!(
+            before.residual.abs() > 10.0 * after.residual.abs(),
+            "before residual {} should dwarf the fitted {}",
+            before.residual,
+            after.residual
+        );
+        baseline_chi_square += before.standardized_residual.powi(2);
+    }
+    assert!((baseline.chi_square - baseline_chi_square).abs() < 1.0e-9);
+    assert!(
+        baseline.chi_square > report.diagnostics.chi_square,
+        "truing must reduce the data chi-square: {} -> {}",
+        baseline.chi_square,
+        report.diagnostics.chi_square
+    );
+
+    // Additive on the wire, and the schema stays at 1.
+    let json = serde_json::to_value(&report).expect("report serializes to JSON");
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["baseline"]["muzzle_velocity_fps"], ENTERED_MV_FPS);
+    assert_eq!(
+        json["baseline"]["observations"].as_array().unwrap().len(),
+        3
+    );
+}
+
+/// A fit seeded at the answer still reports a baseline; it is simply the same
+/// column twice. Rendering code must not have to special-case that.
+#[test]
+fn a_baseline_at_the_map_matches_the_fitted_column() {
+    let report = run_uncertainty_truing_v1(&request(
+        &[300.0, 600.0, 900.0],
+        0.03,
+        TruingPriorsV1::default(),
+    ))
+    .expect("on-nominal fit");
+    let baseline = report.baseline.as_ref().expect("pre-fit baseline");
+
+    assert_eq!(baseline.muzzle_velocity_fps, model().muzzle_velocity_fps);
+    for (before, after) in baseline.observations.iter().zip(&report.observations) {
+        assert!((before.predicted_drop - after.predicted_drop).abs() < 1.0e-6);
+    }
+    assert!((baseline.chi_square - report.diagnostics.chi_square).abs() < 1.0e-6);
+}
+
 #[test]
 fn adding_a_consistent_long_range_observation_contracts_both_marginals() {
     let base = run_uncertainty_truing_v1(&request(

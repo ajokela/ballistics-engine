@@ -5,6 +5,52 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **The uncertainty truing report carries a pre-fit baseline, so before/after residuals
+  can be drawn.** `UncertaintyTruingReportV1` had exactly one residual column, evaluated
+  at the fitted MAP: enough to show what the trued load predicts, not enough to show what
+  truing changed. It now also carries `baseline` — the entered muzzle velocity and BC,
+  their data chi-square, and the same per-observation row (range, reading, sigma,
+  predicted drop, residual, standardized residual) evaluated there, in request order. A
+  client cannot assemble that column itself without reproducing this module's forward
+  model exactly — same zero solve, same interpolation, same opt-in effects — and a
+  baseline built any other way is not comparable with the fitted column sitting beside it.
+
+  The cost is one extra trajectory for the whole report: a single `predict_many_in_unit`
+  across every observation range, deliberately not the Jacobian path that spends five
+  solves computing derivatives nothing here reads, against the up-to-100 iterations the
+  fit already runs. The field is additive and optional, so the schema stays at version 1
+  and a consumer written against the original document decodes an unchanged report; a
+  forward-model failure at the entered parameters drops the column rather than failing an
+  otherwise good fit, which today is unreachable because the optimizer starts at those
+  same parameters and has already errored.
+
+  The native CLI's `truing-uncertainty-v1` JSON is deliberately not given this column.
+  `true-velocity`'s pre-fit muzzle velocity is the fitter's seed — `--mv-prior`'s mean, or
+  3000 fps when no prior is declared — not a load the shooter entered, so a "before"
+  column there would describe the optimizer rather than the rifle. `true.fit` and library
+  callers supply the muzzle velocity themselves, which is what makes the comparison mean
+  something.
+
+### Changed
+- **A failed online `true-velocity` now names `ballistics login`, not only `--offline`.**
+  That endpoint is moving behind authentication, and the hard-failure path's only advice
+  was to go offline — which reads as "the service is down" when the actual cause is an
+  absent or expired token, and talks a user into abandoning the online path permanently
+  over a fixable problem. Both pointers are now printed, the login one hedged ("if the
+  service rejected your credentials") because it is unconditional.
+
+  Unconditional rather than shown only on a 401/402 via `ApiError::cli_hint()`, which is
+  what that helper exists for, because nothing on this path can produce the error it
+  matches on: ureq 3.x's `http_status_as_error` defaults on, so an HTTP 401 returns from
+  `send` as `Error::StatusCode` and `map_ureq_error` files it under
+  `NetworkError("http status: 401")` rather than reaching the explicit status check that
+  would build `ServerError(401, _)`. A conditional hint would have stayed silent on
+  exactly the failure it was added for. Runs passing `--offline-fallback` are untouched:
+  they fall back and report the underlying error as before.
+
 ## [0.36.3] - 2026-09-03
 
 ### Changed
