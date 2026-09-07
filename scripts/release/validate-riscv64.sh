@@ -112,6 +112,43 @@ for os in "${TARGETS[@]}"; do
   SEEN_OS+=("$os"); SEEN_FPS+=("$FPS")
   echo "  ok  $os riscv64: ballistics $V, $FPS fps"
 
+  # Stamp the outcome into provenance, as validate-bsd-aarch64.sh does. A
+  # cross-build leaves the runtime test "pending"; only an actual run on riscv64
+  # may mark it passed, and it records WHERE that happened. Stamped per OS and
+  # not gated on the overall result, so an OS that genuinely passed says so even
+  # when a sibling failed -- and one that failed stays visibly unvalidated.
+  PROV="$OUT/ballistics-$V-$os-riscv64.provenance.json"
+  if [ -f "$PROV" ] && command -v jq >/dev/null 2>&1; then
+    capture remote "$os" "uname -srm"
+    GUEST=$(printf '%s' "$CAP_OUT" | tr -d '\r' | tail -1)
+    # netbsd is a Milk-V Mars, real silicon. The other three are TCG-emulated
+    # guests on an amd64 host -- no KVM exists for riscv64 there -- and saying
+    # so is the difference between provenance and decoration.
+    case "$os" in
+      netbsd) METHOD="native-riscv64-hardware"; HOSTREF="$NETBSD" ;;
+      *)      METHOD="qemu-tcg-riscv64-guest";  HOSTREF="$VMHOST" ;;
+    esac
+    jq --arg method "$METHOD" --arg host "$HOSTREF" --arg guest "$GUEST" \
+       --arg at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" --arg ver "ballistics $V" \
+       --arg fps "$FPS" --arg sha "$GOT_SHA" '
+      .validation = {
+        method: $method,
+        host: $host,
+        guest_os: $guest,
+        validated_at_utc: $at,
+        version_reported: $ver,
+        impact_velocity_fps: $fps,
+        binary_sha256_on_target: $sha
+      }
+      | .builder.guest_os = $guest
+      | .tests = ([ .tests[] | if .name == "cli-version-and-trajectory-smoke"
+            then .status = "passed"
+               | .command = ("executed on riscv64 (" + $method + "): --version gate + trajectory solve")
+            else . end ])
+    ' "$PROV" > "$PROV.tmp" && mv "$PROV.tmp" "$PROV"
+    echo "      provenance stamped ($METHOD)"
+  fi
+
   # Remove it. These four guests are long-lived and mutable -- unlike the aarch64
   # lane, which boots a disposable overlay of a read-only golden image per run --
   # so anything left behind persists into the next release. That persistence is

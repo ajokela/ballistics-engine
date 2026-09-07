@@ -45,6 +45,25 @@ sudo rm -rf "$W"
 git clone -q --depth 1 --branch "$REF" "https://github.com/$PUB" "$W"
 cp "$W/scripts/release/cross-riscv64.sh" "$W/cross-riscv64.sh"
 
+command -v jq >/dev/null 2>&1 || { echo "jq not on PATH (needed for provenance)" >&2; exit 1; }
+
+# Reproducibility inputs, recorded the way the aarch64 lane records them.
+SOURCE_SHA="$(git -C "$W" rev-parse HEAD)"
+SOURCE_DATE_EPOCH="$(git -C "$W" log -1 --pretty=%ct)"
+LOCK_SHA="$(sha256sum "$W/Cargo.lock" | awk '{print $1}')"
+# The aarch64 lane pins by TAG and appends the resolved image id to make the
+# provenance reference exact. This lane already pins by digest, so appending
+# would emit "rustlang/rust@sha256:429e...@sha256:db89..." -- two digests and not
+# a resolvable reference. Append only when the pin is not already a digest.
+IMG_ID="$(sudo docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo unknown)"
+case "$IMAGE" in
+  *@sha256:*) IMAGE_REF="$IMAGE" ;;
+  *)          IMAGE_REF="$IMAGE@$IMG_ID" ;;
+esac
+RUNID="${GITHUB_RUN_ID:-local-$SOURCE_DATE_EPOCH}"
+NODE="$(hostname)"
+BUILT_AT_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
 for os in freebsd netbsd openbsd; do
   echo "==> $os riscv64"
   sudo docker run --rm \
@@ -55,19 +74,79 @@ for os in freebsd netbsd openbsd; do
       apt-get update -qq >/dev/null
       apt-get install -y -qq clang lld llvm >/dev/null
       rustup component add rust-src >/dev/null 2>&1 || true
-      bash /src/cross-riscv64.sh $os" >/dev/null
+      bash /src/cross-riscv64.sh $os
+      # Record the exact toolchain that produced THIS binary, from inside the
+      # container that produced it -- asking the host afterwards would describe a
+      # different machine.
+      rustc -V  > /src/rustc.txt
+      cargo -V  > /src/cargo.txt
+      clang --version | head -1 > /src/compiler.txt" >/dev/null
 
   T="riscv64gc-unknown-$os"
-  install -m 0755 "$W/target/$T/release/ballistics" "$OUT/ballistics-$V-$os-riscv64"
-  ( cd "$OUT" && sha256sum "ballistics-$V-$os-riscv64" > "ballistics-$V-$os-riscv64.sha256" )
-done
+  NAME="ballistics-$V-$os-riscv64"
+  install -m 0755 "$W/target/$T/release/ballistics" "$OUT/$NAME"
+  DIGEST="$(sha256sum "$OUT/$NAME" | awk '{print $1}')"
+  SIZE="$(stat -c '%s' "$OUT/$NAME")"
+  printf '%s  %s\n' "$DIGEST" "$NAME" > "$OUT/$NAME.sha256"
 
-# Record the toolchain, so a shipped binary can be attributed after the fact.
-# The aarch64 lane writes a provenance json per binary; this is the same
-# information for a lane that does not (yet) emit one.
-sudo docker run --rm "$IMAGE" bash -c 'rustc -V; cargo -V' 2>/dev/null \
-  | sed "s/^/riscv64-bsd toolchain: /" | tee "$OUT/ballistics-$V-riscv64-bsd.toolchain.txt"
-echo "image: $IMAGE" >> "$OUT/ballistics-$V-riscv64-bsd.toolchain.txt"
+  # Same schema as build-bsd-aarch64-cross.sh, so both fleet lanes are readable
+  # by one consumer. The runtime test stays "pending" and validation stays null
+  # until validate-riscv64.sh actually runs the binary on the target OS -- a
+  # cross-build on x86_64 cannot make any claim about runtime behaviour.
+  jq -n \
+    --arg package_version "$V" --arg release_tag "v$V" \
+    --arg source_ref "$REF" --arg source_sha "$SOURCE_SHA" \
+    --arg cargo_lock_sha256 "$LOCK_SHA" \
+    --arg os "$os" --arg target "$T" \
+    --arg sysroot "$SYSROOTS/$os" \
+    --arg rustc "$(cat "$W/rustc.txt")" --arg cargo "$(cat "$W/cargo.txt")" \
+    --arg cc "$(cat "$W/compiler.txt")" \
+    --arg image "$IMAGE_REF" --arg node "$NODE" --arg run_id "$RUNID" \
+    --arg built_at_utc "$BUILT_AT_UTC" --arg name "$NAME" --arg sha256 "$DIGEST" \
+    --arg filedesc "$(file -b "$OUT/$NAME")" \
+    --argjson size_bytes "$SIZE" --argjson source_date_epoch "$SOURCE_DATE_EPOCH" \
+    '{
+      schema_version: 1,
+      project: "ballistics-engine",
+      package_version: $package_version,
+      release_tag: $release_tag,
+      source_ref: $source_ref,
+      source_sha: $source_sha,
+      source_date_epoch: $source_date_epoch,
+      source_archive_sha256: null,
+      cargo_lock_sha256: $cargo_lock_sha256,
+      lock_origin: "source",
+      os: $os,
+      arch: "riscv64",
+      target: $target,
+      profile: "release",
+      locked: true,
+      mode: "release",
+      toolchain: {rustc: $rustc, cargo: $cargo, cc: $cc},
+      builder: {
+        kind: "docker-cross-x86_64",
+        image: $image,
+        node: $node,
+        guest_os: null,
+        run_id: $run_id,
+        sysroot: $sysroot,
+        cross_note: "Built on an x86_64 host, which cannot execute this binary. These are tier-3 Rust targets with no prebuilt std, so std was compiled from source with -Z build-std against a sysroot taken from the matching verification host. Runtime behaviour is established by validate-riscv64.sh on the real OS."
+      },
+      built_at_utc: $built_at_utc,
+      tests: [
+        {name: "locked-release-cross-build", status: "passed",
+         command: ("cargo build -Z build-std=std,panic_abort --locked --release --target " + $target)},
+        {name: "target-object-format-check", status: "passed", command: ("file(1): " + $filedesc)},
+        {name: "release-library-tests", status: "skipped",
+         command: "not runnable on an x86_64 cross host"},
+        {name: "cli-version-and-trajectory-smoke", status: "pending",
+         command: "run validate-riscv64.sh to execute this binary on riscv64"}
+      ],
+      validation: null,
+      artifacts: [{name: $name, sha256: $sha256, size_bytes: $size_bytes}]
+    }' > "$OUT/$NAME.provenance.json"
+done
+rm -f "$W/rustc.txt" "$W/cargo.txt" "$W/compiler.txt"
 
 echo "==> built:"
 ls -l "$OUT"/ballistics-"$V"-*-riscv64
