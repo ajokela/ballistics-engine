@@ -37,7 +37,12 @@ for os in "${TARGETS[@]}"; do
     netbsd)  RUN() { ssh -o BatchMode=yes "$NETBSD" "cat > ~/ballistics; chmod +x ~/ballistics; ~/ballistics $1"; } ;;
     linux)   RUN() { ssh -o BatchMode=yes "$VMHOST" "/home/alex/vms/linux-riscv64/ssh.sh 'cat > /root/ballistics; chmod +x /root/ballistics; /root/ballistics $1'"; } ;;
     freebsd) RUN() { ssh -o BatchMode=yes "$VMHOST" "/home/alex/vms/freebsd-riscv64/ssh.sh 'cat > /tmp/ballistics; chmod +x /tmp/ballistics; /tmp/ballistics $1'"; } ;;
-    openbsd) RUN() { ssh -o BatchMode=yes -o HostKeyAlias=openbsd-riscv64-qemu -J "$VMHOST" -p 2223 alex@127.0.0.1 \
+    # accept-new, because this is the one hop the runner makes directly rather
+    # than through a VM wrapper script that carries its own known_hosts. On a
+    # fresh runner the guest key is unknown and the whole lane fails at the last
+    # target with "Host key verification failed".
+    openbsd) RUN() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+                       -o HostKeyAlias=openbsd-riscv64-qemu -J "$VMHOST" -p 2223 alex@127.0.0.1 \
                        "cat > ~/ballistics; chmod +x ~/ballistics; ~/ballistics $1"; } ;;
   esac
 
