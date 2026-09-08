@@ -22,7 +22,8 @@ use crate::adjustment::{
     AdjustmentUnit, ClickValue,
 };
 use crate::hold_curve::{
-    range_not_sampled_message, run_sampled_trajectory, sample_at_range, CARD_SAMPLE_INTERVAL_M,
+    card_sample_max_range_m, range_not_sampled_message, run_sampled_flight, sample_at_range,
+    CardTruncation, SampledFlight, CARD_SAMPLE_INTERVAL_M,
 };
 use crate::{AtmosphericConditions, BallisticInputs, BCSegmentData, DragModel, WindConditions};
 
@@ -329,6 +330,38 @@ pub struct CardResponseV1 {
     /// Wind card with multiple angles: rows for angles beyond the first.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub extra_angle_rows: Vec<Vec<CardRowV1>>,
+    /// Present ONLY when the solved flight stopped short of the rows requested, in which case
+    /// `rows` holds every row it did reach and nothing past them (MBA-1476 follow-up).
+    ///
+    /// Additive and absent on every card that ran to its requested `end`, so a caller reading
+    /// an untruncated card sees byte-identical JSON to before. It is a field rather than only
+    /// a log line because the apps and the Flask layer consume this shape: a card that quietly
+    /// returns fewer rows than were asked for, with nothing on the response saying so, is the
+    /// same class of silent failure as the substituted row this work removed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub truncation: Option<CardTruncationV1>,
+}
+
+/// The wire form of [`CardTruncation`]: the rows a card could not print and why.
+/// Distances are in the response's own `units.distance`.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CardTruncationV1 {
+    /// The furthest row the request asked for.
+    pub requested_end: f64,
+    /// The last row actually present in `rows`.
+    pub last_row: f64,
+    /// How far the solved flight got — a property of the load, not of the request.
+    pub reach: f64,
+}
+
+impl CardTruncationV1 {
+    fn new(truncation: CardTruncation) -> Self {
+        Self {
+            requested_end: truncation.requested_end,
+            last_row: truncation.last_row,
+            reach: truncation.reach,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -679,8 +712,8 @@ fn sampled(
     wind_speed_m: f64,
     wind_direction_deg: f64,
     zero_angle: f64,
-) -> Result<Vec<crate::trajectory_sampling::TrajectorySample>, CardServiceError> {
-    run_sampled_trajectory(
+) -> Result<SampledFlight, CardServiceError> {
+    run_sampled_flight(
         r.velocity_m,
         r.bc_for_solve,
         r.mass_kg,
@@ -693,7 +726,9 @@ fn sampled(
         req.altitude,
         wind_speed_m,
         wind_direction_deg,
-        r.end_m * 1.1,
+        // MBA-1476: at least one whole grid cell past the last row asked for — see
+        // card_sample_max_range_m for why that headroom decides reachability.
+        card_sample_max_range_m(r.end_m),
         // MBA-1476: the engine's own card grid, never the request's row spacing.
         CARD_SAMPLE_INTERVAL_M,
         zero_angle,
@@ -710,26 +745,44 @@ fn sampled(
     .map_err(|e| CardServiceError::Trajectory(e.to_string()))
 }
 
-/// Read one card row's sample off a solved flight, or fail loudly (MBA-1476).
+/// Read one card row's sample off a solved flight, or `None` when the flight does not span it
+/// (MBA-1476).
 ///
 /// The nearest-sample-within-one-and-a-half-steps search this replaces answered a range the
 /// flight had no sample for with a neighbour's numbers, invisibly. There is no tolerance to
 /// tune here: [`sample_at_range`] interpolates exactly at the requested range whenever the
-/// flight spans it, and anything it cannot span is a `Trajectory` error naming the range.
+/// flight spans it, and a range it cannot span yields nothing at all. The caller ends the card
+/// there and records a [`CardTruncation`] — it never substitutes, and it never drops the row
+/// without saying so.
 fn row_sample(
     samples: &[crate::trajectory_sampling::TrajectorySample],
     range_m: f64,
-    range_display: f64,
+) -> Option<crate::trajectory_sampling::TrajectorySample> {
+    sample_at_range(samples, range_m)
+}
+
+/// The error a card returns when its flight reaches NONE of the rows requested — there is no
+/// card to truncate, so this stays a refusal (MBA-1476 follow-up).
+fn no_rows_error(first_row_display: f64, reach_m: f64, u: &Units) -> CardServiceError {
+    CardServiceError::Trajectory(range_not_sampled_message(
+        first_row_display,
+        u.distance_from_metric(reach_m),
+        u.distance_label(),
+    ))
+}
+
+/// Record the truncation of a card whose row loop stopped early, in display units.
+fn truncation_of(
+    requested_end: f64,
+    last_row: f64,
+    reach_m: f64,
     u: &Units,
-) -> Result<crate::trajectory_sampling::TrajectorySample, CardServiceError> {
-    sample_at_range(samples, range_m).ok_or_else(|| {
-        CardServiceError::Trajectory(range_not_sampled_message(
-            samples,
-            range_display,
-            u.distance_label(),
-            |m| u.distance_from_metric(m),
-        ))
-    })
+) -> Option<CardTruncationV1> {
+    Some(CardTruncationV1::new(CardTruncation {
+        requested_end,
+        last_row,
+        reach: u.distance_from_metric(reach_m),
+    }))
 }
 
 fn units_block(req: &CardRequestV1, windage_unit: AdjustmentUnit) -> CardUnitsBlockV1 {
@@ -750,7 +803,7 @@ fn units_block(req: &CardRequestV1, windage_unit: AdjustmentUnit) -> CardUnitsBl
 pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceError> {
     let r = resolve(req)?;
     let zero_angle = solve_zero(req, &r)?;
-    let samples = sampled(
+    let flight = sampled(
         req,
         &r,
         r.u.wind_to_metric(req.wind_speed),
@@ -758,12 +811,19 @@ pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceErr
         zero_angle,
     )?;
 
-    let mut rows = Vec::new();
+    let mut rows: Vec<CardRowV1> = Vec::new();
+    let mut truncation = None;
     let mut prev_drop_adj: f64 = 0.0;
     let mut current_range = req.start;
     while current_range <= req.end + 0.1 {
         let range_m = r.u.distance_to_metric(current_range);
-        let sample = row_sample(&samples, range_m, current_range, &r.u)?;
+        let Some(sample) = row_sample(&flight.samples, range_m) else {
+            let Some(last) = rows.last() else {
+                return Err(no_rows_error(current_range, flight.reach_m, &r.u));
+            };
+            truncation = truncation_of(req.end, last.range, flight.reach_m, &r.u);
+            break;
+        };
         let drop_yd = r.u.distance_from_metric(sample.drop_m);
         // MBA-1476: the row's OWN range, not a nearby sample's — the angular conversion
         // divides by the distance the row is labelled with.
@@ -802,6 +862,7 @@ pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceErr
         wind_angles_deg: Vec::new(),
         rows,
         extra_angle_rows: Vec::new(),
+        truncation,
     })
 }
 
@@ -834,23 +895,34 @@ fn range_table_rows(
 ) -> Result<(CardResponseV1, Vec<Option<f64>>, f64), CardServiceError> {
     let r = resolve(req)?;
     let zero_angle = solve_zero(req, &r)?;
-    let wind_samples = sampled(
+    let wind_flight = sampled(
         req,
         &r,
         r.u.wind_to_metric(req.wind_speed),
         req.wind_direction_deg,
         zero_angle,
     )?;
-    let no_wind_samples = sampled(req, &r, 0.0, 0.0, zero_angle)?;
+    let no_wind_flight = sampled(req, &r, 0.0, 0.0, zero_angle)?;
+    // Both flights feed every row, so the card can only run as far as the shorter of them.
+    let reach_m = wind_flight.reach_m.min(no_wind_flight.reach_m);
     let lead_speed_mps = lead_target_speed.map(|speed| r.u.wind_to_metric(speed));
 
-    let mut rows = Vec::new();
+    let mut rows: Vec<CardRowV1> = Vec::new();
     let mut lead_adj = Vec::new();
+    let mut truncation = None;
     let mut current_range = req.start;
     while current_range <= req.end + 0.1 {
         let range_m = r.u.distance_to_metric(current_range);
-        let nw = row_sample(&no_wind_samples, range_m, current_range, &r.u)?;
-        let w = row_sample(&wind_samples, range_m, current_range, &r.u)?;
+        let (Some(nw), Some(w)) = (
+            row_sample(&no_wind_flight.samples, range_m),
+            row_sample(&wind_flight.samples, range_m),
+        ) else {
+            let Some(last) = rows.last() else {
+                return Err(no_rows_error(current_range, reach_m, &r.u));
+            };
+            truncation = truncation_of(req.end, last.range, reach_m, &r.u);
+            break;
+        };
         // MBA-1476: the row's OWN range on both axes.
         let range_display = current_range;
         let drop_yd = r.u.distance_from_metric(nw.drop_m);
@@ -921,6 +993,7 @@ fn range_table_rows(
             wind_angles_deg: Vec::new(),
             rows,
             extra_angle_rows: Vec::new(),
+            truncation,
         },
         lead_adj,
         r.bc_for_solve,
@@ -952,16 +1025,26 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
         current += req.step;
     }
 
-    let mut per_angle_rows: Vec<Vec<CardRowV1>> = Vec::new();
+    // Every angle/speed combination is its own flight and they do not all reach equally far
+    // (a crosswind bleeds a little velocity), but the matrix has ONE range axis. So the card
+    // runs to the shortest of them: `reachable` is the number of leading ranges every flight
+    // supplies, and the ragged tails are trimmed once, below.
+    let mut reachable = ranges.len();
+    let mut reach_m = f64::INFINITY;
+    let mut per_angle_drifts: Vec<Vec<Vec<f64>>> = Vec::new();
     for &angle_deg in &angles {
         let mut all_drifts: Vec<Vec<f64>> = vec![Vec::new(); ranges.len()];
         for &ws in &req.wind_speeds {
-            let samples = sampled(req, &r, r.u.wind_to_metric(ws), angle_deg, zero_angle)?;
-            for (ri, &range_display) in ranges.iter().enumerate() {
+            let flight = sampled(req, &r, r.u.wind_to_metric(ws), angle_deg, zero_angle)?;
+            reach_m = reach_m.min(flight.reach_m);
+            for (ri, &range_display) in ranges.iter().enumerate().take(reachable) {
                 let range_m = r.u.distance_to_metric(range_display);
                 // MBA-1476: a range the flight cannot supply used to become a 0.0 cell —
                 // indistinguishable from "no drift at all" on a wind card.
-                let sample = row_sample(&samples, range_m, range_display, &r.u)?;
+                let Some(sample) = row_sample(&flight.samples, range_m) else {
+                    reachable = ri;
+                    break;
+                };
                 let drift_yd = r.u.distance_from_metric(sample.wind_drift_m);
                 let drift_adj = adjustment_display(
                     drift_yd,
@@ -975,11 +1058,27 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
                 all_drifts[ri].push(drift_adj);
             }
         }
-        per_angle_rows.push(
+        per_angle_drifts.push(all_drifts);
+    }
+
+    let truncation = if reachable < ranges.len() {
+        if reachable == 0 {
+            return Err(no_rows_error(ranges[0], reach_m, &r.u));
+        }
+        let last = ranges[reachable - 1];
+        ranges.truncate(reachable);
+        truncation_of(req.end, last, reach_m, &r.u)
+    } else {
+        None
+    };
+
+    let mut per_angle_rows: Vec<Vec<CardRowV1>> = per_angle_drifts
+        .into_iter()
+        .map(|all_drifts| {
             ranges
                 .iter()
-                .enumerate()
-                .map(|(i, &range)| CardRowV1 {
+                .zip(all_drifts)
+                .map(|(&range, wind_columns)| CardRowV1 {
                     range,
                     drop_linear: None,
                     drop_adj: None,
@@ -989,11 +1088,11 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
                     velocity: None,
                     energy: None,
                     time: None,
-                    wind_columns: all_drifts[i].clone(),
+                    wind_columns,
                 })
-                .collect(),
-        );
-    }
+                .collect()
+        })
+        .collect();
 
     let first = per_angle_rows.remove(0);
     Ok(CardResponseV1 {
@@ -1006,6 +1105,7 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
         wind_angles_deg: angles,
         rows: first,
         extra_angle_rows: per_angle_rows,
+        truncation,
     })
 }
 

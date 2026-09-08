@@ -106,12 +106,87 @@ pub fn build_trajectory_components(
     (inputs, wind, atmosphere)
 }
 
-/// Run a trajectory and return sampled points at the given zero angle
+/// A solved flight: the sampled grid, plus how far the bullet ACTUALLY got (MBA-1476).
+///
+/// `reach_m` is the solved trajectory's own terminal downrange distance — where it hit the
+/// ground, ran out of flight time, or was stopped by the caller's `max_range` — not the last
+/// point on the sampling grid. The two differ by up to one grid cell, and only `reach_m` is
+/// independent of the grid the caller chose: it is the figure a card quotes when it has to
+/// tell a shooter the bullet does not get out to the row they asked for. Quoting the last
+/// SAMPLE there instead made that number a function of the request (`--end` sets the sampled
+/// span), so the same load's "reaches only …" figure moved when nothing about the load had.
+pub struct SampledFlight {
+    pub samples: Vec<trajectory_sampling::TrajectorySample>,
+    /// Terminal downrange distance of the solved flight, meters.
+    pub reach_m: f64,
+}
+
+/// Run a trajectory and return sampled points at the given zero angle.
+///
+/// Discards the flight's own reach; [`run_sampled_flight`] keeps it, and every card surface
+/// uses that one because a truncated card has to state how far the load actually flew.
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments preserve the shared sampled-trajectory compatibility helper"
 )]
 pub fn run_sampled_trajectory(
+    velocity: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    drag_model: DragModel,
+    sight_height: f64,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    max_range: f64,
+    sample_interval: f64,
+    zero_angle_rad: f64,
+    bc_segments_data: Option<Vec<BCSegmentData>>,
+    custom_drag_table: Option<crate::drag::DragTable>,
+    dsf_table: Option<&DsfTable>,
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
+    sight_offset_lateral_m: f64,
+    zero_solve_distance_m: Option<f64>,
+) -> Result<Vec<trajectory_sampling::TrajectorySample>, Box<dyn Error>> {
+    Ok(run_sampled_flight(
+        velocity,
+        bc,
+        mass,
+        diameter,
+        drag_model,
+        sight_height,
+        temperature,
+        pressure,
+        humidity,
+        altitude,
+        wind_speed,
+        wind_direction,
+        max_range,
+        sample_interval,
+        zero_angle_rad,
+        bc_segments_data,
+        custom_drag_table,
+        dsf_table,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
+        sight_offset_lateral_m,
+        zero_solve_distance_m,
+    )?
+    .samples)
+}
+
+/// Run a trajectory and return its sampled points AND its terminal reach at the given zero
+/// angle. See [`SampledFlight`] for why the reach is carried out alongside the samples.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the shared sampled-trajectory compatibility helper"
+)]
+pub fn run_sampled_flight(
     velocity: f64,
     bc: f64,
     mass: f64,
@@ -146,7 +221,7 @@ pub fn run_sampled_trajectory(
     // below when a zero was solved.
     sight_offset_lateral_m: f64,
     zero_solve_distance_m: Option<f64>,
-) -> Result<Vec<trajectory_sampling::TrajectorySample>, Box<dyn Error>> {
+) -> Result<SampledFlight, Box<dyn Error>> {
     let (mut inputs, wind, atmosphere) = build_trajectory_components(
         velocity,
         bc,
@@ -197,7 +272,12 @@ pub fn run_sampled_trajectory(
         }
     }
 
-    Ok(samples)
+    Ok(SampledFlight {
+        samples,
+        // `TrajectoryResult::max_range` is the terminal point's downrange distance, not the
+        // ceiling that was requested — the flight's own reach.
+        reach_m: result.max_range,
+    })
 }
 
 /// Distance interval every DOPE-card surface samples its trajectory on, meters (~1 yard).
@@ -256,22 +336,71 @@ pub fn sample_at_range(
     })
 }
 
-/// The one wording every card surface uses for a row its solved flight cannot supply
-/// (MBA-1476) — stated in the caller's display unit, because that is the unit the request
-/// named the range in.
+/// How far out a card's trajectory must be solved and sampled, given the furthest row it
+/// asked for (`end_m`). Meters in, meters out.
 ///
-/// `to_display` converts meters to that unit; `unit` labels it ("yd" / "m").
-pub fn range_not_sampled_message(
-    samples: &[trajectory_sampling::TrajectorySample],
-    requested_display: f64,
-    unit: &str,
-    to_display: impl Fn(f64) -> f64,
-) -> String {
-    let reach = to_display(samples.last().map_or(0.0, |s| s.distance_m));
+/// **The headroom past the last row is load-bearing, not a leftover.** The sampling grid is
+/// anchored at zero with a fixed [`CARD_SAMPLE_INTERVAL_M`] spacing, so the last grid point
+/// inside a span is the largest multiple of that interval the span contains: a span ending
+/// only 10 % past the last requested row leaves less than one whole cell of headroom as soon
+/// as `end_m` drops below ten intervals (~10 yd), and the last grid point then lands SHORT of
+/// the last row. That row is genuinely unsampled, and the card correctly declines to invent
+/// it — which is how a request as ordinary as a 5.1 yd card ended up with no rows at all.
+///
+/// Trimming the 10 % — reading it as vestigial because the row-spacing grid it once fed is
+/// gone — widens that hole rather than closing it. The floor is what closes it: at least one
+/// whole grid cell beyond the last row, so a flight that gets there is always sampled there.
+pub fn card_sample_max_range_m(end_m: f64) -> f64 {
+    (end_m * 1.1).max(end_m + CARD_SAMPLE_INTERVAL_M)
+}
+
+/// The one wording every card surface uses when its solved flight supplies NONE of the rows
+/// asked for (MBA-1476) — stated in the caller's display unit, because that is the unit the
+/// request named the range in.
+///
+/// A flight that supplies some but not all of them is not an error: the card prints the rows
+/// it has and says what it left out, via [`CardTruncation`].
+pub fn range_not_sampled_message(requested_display: f64, reach_display: f64, unit: &str) -> String {
     format!(
         "no trajectory sample at {requested_display:.0} {unit}: this load's solved flight \
-         reaches only {reach:.0} {unit}"
+         reaches only {reach_display:.0} {unit}"
     )
+}
+
+/// A card that stopped short of the rows it was asked for, in the caller's DISPLAY unit
+/// (MBA-1476 follow-up).
+///
+/// Refusing to FABRICATE a row the flight never reached is right, and stays. Refusing to
+/// print the rows it did reach is not: a `.22 LR` asked for the default 1200 yd card should
+/// see its hundred-yard lines and learn where the bullet stops, not a bare exit code. So the
+/// card truncates, and this is the record of that — carried to stderr for a CLI reader and as
+/// a structured field on every JSON/bridge surface, because a truncation a caller cannot
+/// detect is its own silent failure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CardTruncation {
+    /// The furthest row the card asked for (its `--end`).
+    pub requested_end: f64,
+    /// The last row it could actually print.
+    pub last_row: f64,
+    /// How far the solved flight itself got — a property of the load, not of the request.
+    pub reach: f64,
+}
+
+impl CardTruncation {
+    /// The one wording every truncated card surface uses. `unit` labels the display distance
+    /// unit ("yd" / "m").
+    pub fn message(&self, unit: &str) -> String {
+        let Self {
+            requested_end,
+            last_row,
+            reach,
+        } = *self;
+        format!(
+            "card truncated at {last_row:.0} {unit}: {requested_end:.0} {unit} was requested, \
+             but this load's solved flight reaches only {reach:.0} {unit}; the rows past that \
+             are left out rather than filled in from a range the bullet does reach"
+        )
+    }
 }
 
 /// Everything one sampled hold curve needs, already in METRIC (MBA-1361/MBA-1362).

@@ -54,12 +54,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for, and `hold_curve::sample_at_range` interpolates between the two samples bracketing
   the requested range — so the row is read AT the range, not near it, and the angular
   conversion divides by the distance the row is labelled with. There is no tolerance left
-  to mistune: a range the solved flight does not span is an error naming that range,
-  replacing the substituted row on `come-ups`/`range-table`/`compare` and the fabricated
+  to mistune: a range the solved flight does not span is never substituted and never
+  fabricated, replacing the borrowed row on `come-ups`/`range-table`/`compare` and the
   `0.0` drift cell on `wind-card`. Cards whose `--start` was already a multiple of
   `--step` are byte-identical to before. Refining the grid costs one extra interpolation
   pass over the solver's existing knots, not another integration: about +0.17 ms on a
   100–1000 yd range table (1.15 ms to 1.32 ms measured in-process).
+
+- **A card whose load does not fly as far as `--end` is truncated with a warning, not
+  refused.** Declining to fabricate the unreachable row is right; declining to print the
+  reachable ones with it was not. `range-table` defaults `--end` to 1200 yd, which a `.22
+  LR`, a `9 mm` and a `.45 ACP` all fall short of, so on those loads a no-flags invocation
+  exited 1 with no output at all where nineteen genuine rows were available. All four card
+  surfaces now stop at the last row the flight reaches, print it, and say so — on stderr
+  for a CLI reader (`card truncated at 800 yd: 2000 yd was requested, but this load's
+  solved flight reaches only 872 yd; …`) and as an additive `truncated` block
+  (`requested_end`, `last_row`, `reach`, `message`; plus `load` on `compare`) on the JSON
+  surfaces and as `CardResponseV1::truncation` on the bridge, because a truncation a caller
+  cannot detect is its own silent failure. The surviving rows are byte-identical to the same
+  card asked for that end exactly. A card that reaches NO requested row is still an error —
+  there is nothing to print.
+
+- **A card with a fractional `--end` below about 7.2 yd no longer fails.** The trajectory
+  behind a card was sampled out to `--end × 1.1`, which leaves less than one ~1-yard grid
+  cell of headroom past the last row once `--end` drops below ten yards: the last grid point
+  landed short of the last requested row, and the row was unreachable through no fault of
+  the load. 36 of the 150 fractional ends between 0.1 and 15.0 yd behaved that way, while
+  every integer end (an exact multiple of the grid) worked, which is what made it easy to
+  miss. `hold_curve::card_sample_max_range_m` now floors the span at one whole grid cell
+  past the last row.
+
+- **The reach a card quotes is the load's, not the request's.** The "…reaches only N yd"
+  figure was the last SAMPLE distance, and the sampled span is derived from `--end`, so the
+  same load's reach moved when only `--end` had — a `.308` at 2600 fps was told it "reaches
+  only 7 yd" off a `--end 7.1` card. `hold_curve::run_sampled_flight` now carries the solved
+  flight's own terminal distance out with its samples, and that is what every card reports.
 
 ### Changed
 - **A failed online `true-velocity` now names `ballistics login`, not only `--offline`.**

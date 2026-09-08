@@ -16,11 +16,14 @@
 //!
 //! Nothing in the output said any of this had happened. There was no test for the invariant
 //! itself, which is why it shipped — so the first test here is that property, stated directly,
-//! and the rest are the exact reproductions plus the refusal that replaces the substitution.
+//! and the rest are the exact reproductions plus the truncation that replaces the substitution.
 //!
 //! Sampling is now on the engine's own `CARD_SAMPLE_INTERVAL_M` grid (independent of the rows
-//! asked for) and the value at a range is interpolated at exactly that range; a range the
-//! solved flight does not span is an error naming it.
+//! asked for) and the value at a range is interpolated at exactly that range. A range the
+//! solved flight does not span is never fabricated and never substituted: the card ends at
+//! the last row the flight reaches and says what it left out, on stderr for a CLI reader and
+//! as a structured field on the JSON and bridge surfaces. Only a card that reaches NO row at
+//! all is an error — there is nothing to print.
 
 use std::process::Command;
 
@@ -286,10 +289,10 @@ fn mba_1476_extending_end_does_not_rewrite_an_existing_row() {
 }
 
 // ---------------------------------------------------------------------------------------
-// 3. A row the flight cannot supply is an error, never a substitution.
+// 3. A row the flight cannot supply is never a substitution -- and never the whole card.
 // ---------------------------------------------------------------------------------------
 
-/// A light, low-BC bullet whose solved flight ends around 871 yd. Asked for rows out to
+/// A light, low-BC bullet whose solved flight ends around 872 yd. Asked for rows out to
 /// 2000 yd, the shipped code answered 900 yd with the 800 yd sample — the two rows printed
 /// byte-identical — and then silently truncated the card. Nothing on screen said the 900 yd
 /// line was a copy.
@@ -298,51 +301,256 @@ const UNREACHABLE_LOAD: &[&str] = &[
     "100",
 ];
 
+/// The rows a card CAN supply are still the shooter's card.
+///
+/// This test deliberately replaces `a_range_the_flight_cannot_reach_is_refused_not_substituted`,
+/// which asserted that a card containing any unreachable row failed outright with no output.
+/// Not fabricating the unreachable row was right and is still asserted here; refusing the
+/// reachable ones with it was an overcorrection, and on a no-flags invocation — `range-table`
+/// defaults `--end` to 1200 yd, which ordinary .22 LR / 9 mm / .45 ACP loads do not reach —
+/// it made the command look broken. The card now truncates: every row the flight reaches,
+/// none it does not, and a warning naming the requested end and the load's actual reach.
 #[test]
-fn a_range_the_flight_cannot_reach_is_refused_not_substituted() {
+fn a_card_prints_the_rows_it_reaches_and_says_what_it_truncated() {
     let mut args: Vec<&str> = vec!["range-table"];
     args.extend_from_slice(UNREACHABLE_LOAD);
     args.extend_from_slice(&["--start", "100", "--end", "2000", "--step", "100", "-o", "csv"]);
     let out = run(&args);
 
     assert!(
-        !out.status.success(),
-        "a card asking for ranges past the flight must fail, but it printed:\n{}",
-        String::from_utf8_lossy(&out.stdout)
+        out.status.success(),
+        "the reachable rows must still print; got: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Present: every row inside the flight.
+    for range in [100, 200, 300, 400, 500, 600, 700, 800] {
+        assert!(
+            stdout.contains(&format!("\n{range},")),
+            "the {range} yd row is inside this flight and must be printed:\n{stdout}"
+        );
+    }
+    // Absent: the rows past it — left out, never fabricated from a range the bullet does
+    // reach, which is the substitution this whole change removed.
+    for range in [900, 1000, 1100, 2000] {
+        assert!(
+            !stdout.contains(&format!("\n{range},")),
+            "a {range} yd row was printed for a flight that does not reach it:\n{stdout}"
+        );
+    }
+
+    // And the truncation is stated, not silent.
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no trajectory sample at 900 yd"),
-        "the error must name the range it could not supply; got: {stderr}"
+        stderr.contains("card truncated at 800 yd")
+            && stderr.contains("2000 yd was requested")
+            && stderr.contains("reaches only 872 yd"),
+        "the warning must name the last row, the requested end and the load's reach; \
+         got: {stderr}"
     );
-    // The unreachable row is refused, not printed with borrowed numbers.
-    assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("\n900,"),
-        "a 900 yd row was printed for a flight that does not reach it"
+
+    // The rows it kept are byte-identical to the same card asked for exactly that end:
+    // truncating must not perturb the rows that survive it.
+    let mut exact: Vec<&str> = vec!["range-table"];
+    exact.extend_from_slice(UNREACHABLE_LOAD);
+    exact.extend_from_slice(&["--start", "100", "--end", "800", "--step", "100", "-o", "csv"]);
+    assert_eq!(
+        stdout,
+        stdout_of(&exact),
+        "a truncated card must equal the card that asked for its last row exactly"
     );
 }
 
-/// The same refusal on the wind card, whose unsatisfiable cells used to become `0.0` —
-/// a drift of zero is a perfectly plausible-looking number, and it was printed for a range
-/// the bullet never reached.
+/// The machine-readable half of the same notice. A mobile or Flask caller reading JSON cannot
+/// see a stderr line, and a card that quietly returns fewer rows than were asked for, with
+/// nothing on the response saying so, is the same class of silent failure as the substituted
+/// row this work removed.
 #[test]
-fn wind_card_refuses_a_range_the_flight_cannot_reach() {
-    let mut args: Vec<&str> = vec!["wind-card"];
+fn a_truncated_card_carries_a_structured_field_on_json() {
+    let mut args: Vec<&str> = vec!["range-table"];
     args.extend_from_slice(UNREACHABLE_LOAD);
-    args.extend_from_slice(&[
-        "--wind-speeds", "10", "--start", "100", "--end", "2000", "--step", "100", "-o", "csv",
-    ]);
+    args.extend_from_slice(&["--start", "100", "--end", "2000", "--step", "100", "-o", "json"]);
+    let card: serde_json::Value =
+        serde_json::from_str(&stdout_of(&args)).expect("range-table json");
+
+    let truncated = card
+        .get("truncated")
+        .expect("a truncated card must carry a `truncated` block");
+    assert_eq!(truncated["requested_end"], 2000.0);
+    assert_eq!(truncated["last_row"], 800.0);
+    assert!(
+        (truncated["reach"].as_f64().expect("reach") - 871.7).abs() < 1.0,
+        "reach must be the flight's own terminal distance; got {truncated}"
+    );
+    assert_eq!(
+        card["data"].as_array().expect("rows").len(),
+        8,
+        "only the reachable rows belong in the card"
+    );
+
+    // Additive: a card that runs to its requested end says nothing at all.
+    let mut whole: Vec<&str> = vec!["range-table"];
+    whole.extend_from_slice(UNREACHABLE_LOAD);
+    whole.extend_from_slice(&["--start", "100", "--end", "800", "--step", "100", "-o", "json"]);
+    let whole: serde_json::Value = serde_json::from_str(&stdout_of(&whole)).expect("json");
+    assert!(
+        whole.get("truncated").is_none(),
+        "an untruncated card must be byte-identical to before: {whole}"
+    );
+}
+
+/// A card whose flight reaches NONE of its rows has no card to print, so it stays a refusal
+/// naming the first range it could not supply.
+#[test]
+fn a_card_whose_flight_reaches_no_row_at_all_is_still_refused() {
+    let mut args: Vec<&str> = vec!["range-table"];
+    args.extend_from_slice(UNREACHABLE_LOAD);
+    args.extend_from_slice(&["--start", "1000", "--end", "2000", "--step", "100", "-o", "csv"]);
     let out = run(&args);
 
     assert!(
         !out.status.success(),
-        "the wind card must fail rather than print zero-drift cells, but it printed:\n{}",
+        "there is no card to print here, so this must fail:\n{}",
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("no trajectory sample at"),
-        "the error must name the range it could not supply"
+        String::from_utf8_lossy(&out.stderr).contains("no trajectory sample at 1000 yd"),
+        "the error must name the range it could not supply; got: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// The same truncation on the wind card, whose unsatisfiable cells used to become `0.0` —
+/// a drift of zero is a perfectly plausible-looking number, and it was printed for a range
+/// the bullet never reached. It is now the end of the matrix, for every wind column at once.
+#[test]
+fn wind_card_truncates_rather_than_printing_zero_drift_cells() {
+    let mut args: Vec<&str> = vec!["wind-card"];
+    args.extend_from_slice(UNREACHABLE_LOAD);
+    args.extend_from_slice(&[
+        "--wind-speeds", "10,20", "--start", "100", "--end", "2000", "--step", "100", "-o", "csv",
+    ]);
+    let out = run(&args);
+
+    assert!(
+        out.status.success(),
+        "the reachable rows must still print; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\n800,"),
+        "the 800 yd row is inside this flight:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\n900,"),
+        "a 900 yd drift row was printed for a flight that does not reach it:\n{stdout}"
+    );
+    // Every printed row still carries one cell per wind speed.
+    for row in stdout.lines().skip(1).filter(|l| !l.trim().is_empty()) {
+        assert_eq!(
+            row.split(',').count(),
+            3,
+            "row `{row}` is missing a wind column"
+        );
+    }
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("card truncated at 800 yd"),
+        "the truncation must be stated"
+    );
+}
+
+/// `come-ups` and `compare` truncate on the same terms, and `compare` names the load that
+/// ended the range axis all of its loads share.
+#[test]
+fn come_ups_and_compare_truncate_on_the_same_terms() {
+    let mut come_ups: Vec<&str> = vec!["come-ups"];
+    come_ups.extend_from_slice(UNREACHABLE_LOAD);
+    come_ups.extend_from_slice(&["--start", "100", "--end", "2000", "--step", "100", "-o", "csv"]);
+    let out = run(&come_ups);
+    assert!(
+        out.status.success(),
+        "come-ups must print its reachable rows; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\n800,") && !stdout.contains("\n900,"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("card truncated at 800 yd"),
+        "come-ups must state the truncation"
+    );
+
+    // compare: one load reaches far, one does not. The card runs to the shorter, and says so.
+    let out = run(&[
+        "compare", "--load", "far:g7:0.3:175:2800", "--load", "short:g1:0.1:40:900",
+        "--zero-distance", "100", "--start", "100", "--end", "2000", "--step", "100", "-o", "csv",
+    ]);
+    assert!(
+        out.status.success(),
+        "compare must print its reachable rows; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\n800,") && !stdout.contains("\n900,"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("load 'short'") && stderr.contains("card truncated at 800 yd"),
+        "compare must name the load that ended the shared range axis; got: {stderr}"
+    );
+}
+
+/// A card's sampled span must clear its last row by at least one whole grid cell.
+///
+/// The span was `end * 1.1`, which leaves less than one ~1-yard grid cell of headroom once
+/// `--end` drops below about 10 yd: the last grid point then lands SHORT of the last requested
+/// row, and the row is unreachable through no fault of the load. 36 of the 150 fractional ends
+/// between 0.1 and 15.0 yd failed that way — 0.1-0.8, 1.1-1.7, 2.1-2.6 and so on — while every
+/// integer end (an exact multiple of the grid) passed, which is what made it easy to miss.
+#[test]
+fn a_fractional_end_is_still_inside_the_sampled_span() {
+    for tenths in 1..=150u32 {
+        let end = format!("{}.{}", tenths / 10, tenths % 10);
+        let mut args: Vec<&str> = vec!["range-table"];
+        args.extend_from_slice(LOAD);
+        args.extend_from_slice(&["--start", &end, "--end", &end, "--step", "1", "-o", "csv"]);
+        let out = run(&args);
+        assert!(
+            out.status.success(),
+            "--end {end} must be inside its own card's sampled span; got: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The reach a truncated card quotes is a property of the LOAD, not of the request.
+///
+/// It used to be the last SAMPLE distance, and the sampled span is derived from `--end`, so
+/// the same load's "reaches only ..." figure moved when only `--end` had. It is now the solved
+/// flight's own terminal distance, identical across a 5x spread of `--end`.
+#[test]
+fn the_reported_reach_does_not_move_with_end() {
+    let reach_of = |end: &str| -> String {
+        let mut args: Vec<&str> = vec!["range-table"];
+        args.extend_from_slice(UNREACHABLE_LOAD);
+        args.extend_from_slice(&["--start", "100", "--end", end, "--step", "100", "-o", "csv"]);
+        let out = run(&args);
+        assert!(out.status.success(), "--end {end} must still print its rows");
+        let stderr = String::from_utf8(out.stderr).expect("utf8");
+        let (_, tail) = stderr
+            .split_once("reaches only ")
+            .unwrap_or_else(|| panic!("--end {end} printed no truncation warning: {stderr}"));
+        tail.split(';').next().expect("reach").trim().to_string()
+    };
+
+    let baseline = reach_of("1000");
+    for end in ["1200", "1500", "2000", "3000", "5000"] {
+        assert_eq!(
+            reach_of(end),
+            baseline,
+            "the load's reach must not depend on the --end that was asked for"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -431,10 +639,15 @@ mod bridge {
         value.to_string()
     }
 
-    /// The bridge refuses an unsatisfiable row too, with a message naming the range —
-    /// rather than handing a mobile caller a row built from a different range's numbers.
+    /// The bridge truncates on the same terms as the CLI, and says so in a field a caller can
+    /// read — rather than handing a mobile caller a row built from a different range's numbers,
+    /// and rather than failing the whole card over its unreachable tail.
+    ///
+    /// This test deliberately replaces `card_services_refuse_a_range_the_flight_cannot_reach`,
+    /// which asserted the whole-card refusal. Not fabricating the row is still asserted here;
+    /// refusing the reachable rows with it was the overcorrection being fixed.
     #[test]
-    fn card_services_refuse_a_range_the_flight_cannot_reach() {
+    fn card_services_truncate_a_card_the_flight_outruns() {
         let unreachable: CardRequestV1 = serde_json::from_value(serde_json::json!({
             "units": "imperial",
             "muzzle_velocity": 900.0,
@@ -455,18 +668,81 @@ mod bridge {
             ("come_ups", come_ups_v1),
             ("wind", wind_card_v1),
         ] {
-            match service(&unreachable) {
+            let card = service(&unreachable)
+                .unwrap_or_else(|e| panic!("card.{name}: the reachable rows must survive: {e}"));
+
+            let last = card.rows.last().expect("at least one reachable row").range;
+            assert_eq!(last, 800.0, "card.{name}: rows must stop at the flight's reach");
+            assert!(
+                !card.rows.iter().any(|row| row.range > 800.0),
+                "card.{name}: a row past the flight's reach was fabricated"
+            );
+
+            let truncation = card
+                .truncation
+                .unwrap_or_else(|| panic!("card.{name}: a truncated card must say so"));
+            assert_eq!(truncation.requested_end, 2000.0);
+            assert_eq!(truncation.last_row, 800.0);
+            assert!(
+                (truncation.reach - 871.7).abs() < 1.0,
+                "card.{name}: reach must be the flight's own terminal distance, got {}",
+                truncation.reach
+            );
+        }
+    }
+
+    /// A card whose flight reaches none of its rows still fails, with the range named.
+    #[test]
+    fn card_services_refuse_a_card_with_no_reachable_row_at_all() {
+        let hopeless: CardRequestV1 = serde_json::from_value(serde_json::json!({
+            "units": "imperial",
+            "muzzle_velocity": 900.0,
+            "ballistic_coefficient": 0.1,
+            "mass": 40.0,
+            "diameter": 0.224,
+            "drag_model": "g1",
+            "zero_distance": 100.0,
+            "start": 1000.0,
+            "end": 2000.0,
+            "step": 100.0,
+            "wind_speeds": [10.0],
+        }))
+        .expect("card request");
+
+        for (name, service) in [
+            ("range_table", range_table_v1 as fn(&CardRequestV1) -> _),
+            ("come_ups", come_ups_v1),
+            ("wind", wind_card_v1),
+        ] {
+            match service(&hopeless) {
                 Err(CardServiceError::Trajectory(message)) => assert!(
-                    message.contains("no trajectory sample at"),
+                    message.contains("no trajectory sample at 1000 yd"),
                     "card.{name}: the error must name the range it could not supply, \
                      got: {message}"
                 ),
                 Err(other) => panic!("card.{name}: unexpected error {other}"),
                 Ok(card) => panic!(
-                    "card.{name}: returned {} rows for a flight that does not reach 2000 yd",
+                    "card.{name}: returned {} rows for a flight that reaches none of them",
                     card.rows.len()
                 ),
             }
+        }
+    }
+
+    /// An untruncated card carries no truncation at all — the field is additive, so a caller
+    /// reading a card that ran to its requested end sees exactly what it saw before.
+    #[test]
+    fn an_untruncated_card_service_response_has_no_truncation() {
+        for (name, service) in [
+            ("range_table", range_table_v1 as fn(&CardRequestV1) -> _),
+            ("come_ups", come_ups_v1),
+            ("wind", wind_card_v1),
+        ] {
+            let card = service(&request(100.0, 1000.0, 100.0)).expect("card");
+            assert!(
+                card.truncation.is_none(),
+                "card.{name}: a card that ran to its requested end must not claim truncation"
+            );
         }
     }
 }
