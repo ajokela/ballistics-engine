@@ -5,8 +5,8 @@
 # `npm publish` with an OIDC trusted-publisher identity; run it by hand to see precisely what a
 # release would ship, without shipping anything:
 #
-#   scripts/release/npm-package.sh 0.36.3 /tmp/npm-0.36.3
-#   npm pack --dry-run /tmp/npm-0.36.3        # lists the tarball contents, touches no registry
+#   scripts/release/npm-package.sh 0.36.3 /tmp/npm-0.36.3   # prints the tarball's file list
+#   npm pack --dry-run /tmp/npm-0.36.3                      # the same list with sizes + shasum
 #
 # WHICH BUILD IS THE PUBLISHED ONE
 #
@@ -47,6 +47,9 @@ CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
   echo "error: asked for $V but Cargo.toml at this checkout says $CARGO_VERSION" >&2; exit 1; }
 
 command -v node >/dev/null 2>&1 || { echo "error: node not on PATH" >&2; exit 1; }
+# For the tarball listing at the end. `npm pack --dry-run` writes nothing and contacts no
+# registry, so needing npm here does not make this script a publish path.
+command -v npm >/dev/null 2>&1 || { echo "error: npm not on PATH" >&2; exit 1; }
 
 # Absolute, because build-wasm.sh cds to the repo root and a relative --out-dir would land
 # somewhere the caller did not name.
@@ -93,7 +96,9 @@ done
 # npm auto-includes README, package.json and `LICENSE` whatever `files` says, but NOT
 # `LICENSE-APACHE` -- checked against the published 0.36.3 tarball, which ships LICENSE and
 # omits LICENSE-APACHE even though wasm-pack had copied both into the directory. The crate is
-# dual MIT/Apache-2.0, so the post-process adds it to `files`; assert that it stuck.
+# dual MIT/Apache-2.0, so the post-process adds it to `files`; assert that it stuck. This one
+# names the cause, which is why it is worth keeping alongside the tarball check below: if it
+# fires, the post-process is what changed.
 node -e '
   const p = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
   if (!Array.isArray(p.files) || !p.files.includes("LICENSE-APACHE")) {
@@ -101,6 +106,24 @@ node -e '
     process.exit(1);
   }
 ' "$OUT/package.json" || fail=1
+
+# ...and then ask npm what it would ACTUALLY pack, rather than inferring it from `files[]`.
+# Everything above reads the directory and package.json; only npm knows the result of its own
+# auto-include rules, `files[]`, and any .npmignore. `--dry-run` builds no tarball and touches
+# no registry. Seven entries is the whole package: six that npm already shipped in 0.36.3, plus
+# the LICENSE-APACHE that has been silently dropped from every release so far.
+echo "==> what npm would actually pack"
+packed=$(npm pack --dry-run --json "$OUT" | node -e '
+  let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+    const [tarball] = JSON.parse(s);
+    process.stdout.write(tarball.files.map(f => f.path).sort().join("\n"));
+  });
+')
+printf '%s\n' "$packed" | sed 's/^/      /'
+for f in LICENSE LICENSE-APACHE README.md package.json \
+         ballistics_engine_bg.wasm ballistics_engine.js ballistics_engine.d.ts; do
+  printf '%s\n' "$packed" | grep -qxF "$f" || say_fail "npm would not pack $f"
+done
 
 [ "$fail" -eq 0 ] || { echo "error: $OUT is not publishable as described above" >&2; exit 1; }
 
