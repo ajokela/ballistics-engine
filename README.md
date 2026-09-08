@@ -662,34 +662,38 @@ These bindings depend on the `ballistics-engine` crate published on [crates.io](
 
 ### WASM / npm Package
 
-The engine also compiles to WebAssembly (`src/wasm.rs`, `wasm-bindgen`) and already powers
-[ballistics.sh](https://ballistics.sh) and [ballistics.rs](https://ballistics.rs) in the browser.
-It is not yet published to npm for third-party use — `scripts/build-npm.sh` builds and prepares a
-publish-ready package; publishing itself is a manual step (see below).
+The engine also compiles to WebAssembly (`src/wasm.rs`, `wasm-bindgen`), powers
+[ballistics.sh](https://ballistics.sh) and [ballistics.rs](https://ballistics.rs) in the browser,
+and is published to npm as
+[**`ballistics-engine`**](https://www.npmjs.com/package/ballistics-engine).
 
 ```bash
-scripts/build-npm.sh
+npm install ballistics-engine
 ```
 
-This builds two `wasm-bindgen` targets, both with `--no-default-features` (the default
-`pdf`/`online` features pull in `printpdf`/`ureq`+`ring`, which do not compile for
-`wasm32-unknown-unknown`) plus
-`--features wasm-terminal` (the browser terminal's command set — see
-[Trimming the WASM module](#trimming-the-wasm-module)):
+The published package is the `wasm-pack --target web` build: the entry point is an ES module with
+an explicit async `init()`, which is the same artifact ballistics.sh loads. It is built with
+`--no-default-features` (the default `pdf`/`online` features pull in `printpdf`/`ureq`+`ring`,
+which do not compile for `wasm32-unknown-unknown`) plus `--features wasm-terminal` — the browser
+terminal's command set, see [Trimming the WASM module](#trimming-the-wasm-module).
 
-- **`pkg/`** — `--target bundler`, the package meant for `npm publish`. Consumed via a native
-  `.wasm` ES import by bundlers that understand it (webpack with `experiments.asyncWebAssembly`,
-  Vite, Rollup + `@rollup/plugin-wasm`, Parcel).
-- **`pkg-web/`** — `--target web`, a no-bundler build for direct `<script type="module">` browser
-  use or manual Node usage without a bundler — the same `--target` already used to build
-  ballistics.sh/ballistics.rs's WASM. Documented and built for completeness; not published under
-  the primary package name in this initial pass.
+Publishing is automated: `.github/workflows/publish-npm.yml` runs on every `v*` tag and publishes
+with npm trusted publishing (OIDC), so there is no npm token anywhere in this repository and every
+release carries a provenance attestation. `scripts/release/npm-package.sh` builds and verifies the
+exact directory that gets published, and is worth running by hand to inspect a release:
 
-`wasm-pack` has no built-in dual-target/"publish both" mode, and stitching bundler- and web-target
-output into one package.json via manual `exports` conditions isn't something `wasm-pack` generates
-or tests for you — see the comment header of `scripts/build-npm.sh` for the full reasoning. A
-single bundler-target package as the published npm artifact, with the web build documented
-separately, is the ecosystem-standard shape for `wasm-bindgen` crates on npm.
+```bash
+scripts/release/npm-package.sh 0.36.3 /tmp/npm-0.36.3
+npm pack --dry-run /tmp/npm-0.36.3     # lists the tarball contents, publishes nothing
+```
+
+`scripts/build-npm.sh` is a separate, exploratory script that builds **both** `wasm-bindgen`
+targets side by side — `pkg/` (`--target bundler`, for webpack with
+`experiments.asyncWebAssembly`, Vite, Rollup + `@rollup/plugin-wasm`, Parcel) and `pkg-web/`
+(`--target web`). Only the web build is published under the `ballistics-engine` name; `wasm-pack`
+has no dual-target/"publish both" mode, and the two targets' module wiring differs enough that
+they cannot be stitched into one package via `exports` conditions without hand-written glue
+`wasm-pack` neither generates nor tests.
 
 ### Trimming the WASM module
 
@@ -788,25 +792,17 @@ Two things are *not* separable, because they are not separate to begin with:
   decision-support) are native-CLI-only — they were never wired into the WASM dispatch, and
   dead-code elimination already keeps them out of the module. There is nothing to remove.
 
-The script also post-processes each `package.json` (name, description, license, repository,
-keywords, and the `files` list — including an `LICENSE-APACHE` entry `wasm-pack` itself omits even
-though it copies the file) and installs `README-npm.md` as the package's `README.md`.
+Both packaging scripts post-process the generated `package.json` through
+`scripts/build-npm-postprocess.mjs` (name, description, license, repository, keywords, and the
+`files` list — including a `LICENSE-APACHE` entry `wasm-pack` omits even though it copies the file,
+so the dual-licensed crate would otherwise ship only half its licence text). `build-npm.sh`
+additionally installs `README-npm.md` as its packages' `README.md`; the published package keeps the
+crate's own `README.md`, which is what `wasm-pack` copies.
 
-**Before publishing**, edit `pkg/package.json`'s `"name"` — it ships as the placeholder
-`"@SCOPE/ballistics-engine"`. Replace `SCOPE` with the maintainer's real npm org/user scope (a
-scope decision, plus an npm account with publish rights to it, are both needed and don't exist yet
-as of this writing). Then:
-
-```bash
-scripts/build-npm.sh
-cd pkg
-npm pack --dry-run   # sanity-check the tarball contents first
-npm publish --access public
-```
-
-(`--access public` is required the first time a scoped package is published, since scoped packages
-default to private on free npm accounts; `pkg/package.json` also sets `publishConfig.access` to
-`public` so a plain `npm publish` works too.)
+Publishing is not a manual step. `.github/workflows/publish-npm.yml` builds and publishes on a
+`v*` tag using npm trusted publishing; see `scripts/release/RELEASE.md` ("The npm channel") for the
+one-time npmjs.com setup, what breaks the trust relationship, and how to backfill a version that
+was missed while the channel was still hand-run.
 
 ## FFI Layer
 

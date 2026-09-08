@@ -1,0 +1,253 @@
+name: Publish npm package
+
+# The npm channel, automated (MBA-1434).
+#
+# npm was the last hand-run release channel. Publishing needed the maintainer at a passkey
+# prompt on their own machine, so it was skipped whenever that was inconvenient: of the 24
+# crate versions from 0.25.0 through 0.36.3, only 14 reached npm. The ten that did not are
+# 0.25.2, 0.27.0, 0.27.1, 0.28.0, 0.28.1, 0.29.0, 0.33.2, 0.34.0, 0.35.1 and 0.36.1, and
+# "npm owed" became a standing line in the release notes.
+#
+# HOW THIS AUTHENTICATES: npm trusted publishing (OIDC). GitHub Actions presents a short-lived
+# OIDC token, npm exchanges it for an equally short-lived publish credential, and the identity
+# npm checks is "this repository, this workflow file". There is NO npm token here, no GitHub
+# secret, and nothing to rotate or leak — which is also why this job can live in the PUBLIC
+# repo at all. Every other channel publishes from the private ballistics-release repo
+# precisely because it needs long-lived secrets; this one has none, so the "no publishing
+# secrets in the public repo" rule in build-and-release.yml is upheld rather than bent.
+#
+# The alternative — an npm automation token in a GitHub secret — is no longer on the table:
+# npm removed legacy/automation tokens in November 2025. The closest survivor is a granular
+# token with "Bypass 2FA", which expires and must be rotated by hand. Trusted publishing has
+# neither problem and gets provenance attestations for free.
+#
+# THREE THINGS WILL BREAK THIS, ALL SILENTLY-LOOKING:
+#
+#   1. RENAMING OR MOVING THIS FILE. npm's trusted-publisher record is keyed to this file's
+#      exact name, `publish-npm.yml`, case-sensitively. Rename it and publishing fails with an
+#      authentication error that says nothing about renames. Change the record on npmjs.com
+#      first (Settings -> Trusted publishing), in the same change.
+#   2. MOVING THE JOB TO A SELF-HOSTED RUNNER. npm trusted publishing does not support
+#      self-hosted runners. The fleet runner that builds the BSD/RISC-V/MIPS binaries cannot
+#      run this job; `ubuntu-latest` is a requirement, not a default.
+#   3. CALLING THIS THROUGH `workflow_call`. npm validates the CALLING workflow's filename, so
+#      a wrapper workflow presents the wrong name and is rejected.
+#
+# npm docs: https://docs.npmjs.com/trusted-publishers
+
+on:
+  # The normal path: the same v* tag that drives build-and-release.yml. npm therefore ships
+  # from the tag, in parallel with the binaries, instead of after them — a red BSD guest can
+  # no longer strand the npm channel.
+  push:
+    tags: ['v*']
+  # The catch-up path, for the ten versions already missing and any future miss. Dispatch it
+  # AGAINST THE TAG (`gh workflow run publish-npm.yml --ref v0.36.1`), never against a branch:
+  # the version gate below refuses a non-tag ref, and provenance records the ref it ran on, so
+  # dispatching from main would attest that main's HEAD produced a tagged release's bytes.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ballistics-engine to npm
+    # GitHub-hosted, mandatory — see note 2 in the header.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # The entire authentication story. Without it npm has nothing to verify and the publish
+      # fails as unauthenticated.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve and cross-check the version
+        id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # A tag ref is the only thing that may publish. On a dispatch this is what stops
+          # somebody publishing a branch's HEAD under a released version number.
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::this workflow publishes tags only; got $REF_TYPE '$REF_NAME'." \
+                 "Dispatch it against the tag: gh workflow run publish-npm.yml --ref vX.Y.Z"
+            exit 1
+          fi
+          case "$REF_NAME" in
+            v*) VERSION="${REF_NAME#v}" ;;
+            *)  echo "::error::tag '$REF_NAME' is not a v* release tag"; exit 1 ;;
+          esac
+          # Same gate build-and-release.yml applies, for the same reason: a tag placed on the
+          # wrong commit otherwise publishes the wrong bytes under the right number.
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::version mismatch: tag says '$VERSION', Cargo.toml at this ref says '$CARGO_VERSION'"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "publishing ballistics-engine@$VERSION"
+
+      - name: Skip if this version is already on npm
+        id: exists
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          # Idempotence, so a re-run after a half-failed release is safe rather than a
+          # guaranteed E403. The version-specific registry endpoint is the source of truth;
+          # the npmjs.com web UI lags it (the same reason verify-channels.sh only ever reads
+          # sparse indexes and /simple/ endpoints).
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+                 "https://registry.npmjs.org/ballistics-engine/$VERSION")
+          case "$CODE" in
+            200) echo "already=true"  >> "$GITHUB_OUTPUT"
+                 echo "::notice::ballistics-engine@$VERSION is already published; nothing to do." ;;
+            404) echo "already=false" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "::error::registry returned HTTP $CODE for ballistics-engine/$VERSION"; exit 1 ;;
+          esac
+
+      - name: Install Rust
+        if: steps.exists.outputs.already == 'false'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        if: steps.exists.outputs.already == 'false'
+        # Pinned and built from source rather than `curl | sh` of the installer script that
+        # ci.yml uses. This job's output is a published, provenance-attested artifact, so what
+        # produced it should be a version we can name: 0.13.1 is the version the release has
+        # always used by hand. Bump it deliberately, not incidentally.
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: Set up Node
+        if: steps.exists.outputs.already == 'false'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          # Set here and nowhere else, exactly as npm's trusted-publishing example does.
+          # setup-node writes an npmrc into RUNNER_TEMP and points NPM_CONFIG_USERCONFIG at it,
+          # so it applies no matter which directory the publish runs from. That npmrc contains
+          # `_authToken=${NODE_AUTH_TOKEN}`, and NODE_AUTH_TOKEN is deliberately never set:
+          # under trusted publishing the OIDC exchange supplies the credential instead. If a
+          # first publish ever fails 401/ENEEDAUTH rather than for a policy reason, this
+          # interaction is the first place to look.
+          registry-url: 'https://registry.npmjs.org'
+          # No caching in a release build; there is nothing to cache here anyway (the package
+          # has no dependencies and no lockfile).
+          package-manager-cache: false
+
+      - name: Require an npm new enough for trusted publishing
+        if: steps.exists.outputs.already == 'false'
+        run: |
+          # npm's floors for OIDC publishing are npm >= 11.5.1 and node >= 22.14.0. Node 24
+          # clears its floor by construction; npm does NOT — early Node 24.x shipped npm
+          # 11.3.x, below the line — so pin the major and then assert the floor. The assert is
+          # the contract; the pin only keeps a future npm 12 from changing publish semantics
+          # under us without anyone choosing that.
+          npm install -g npm@11
+          FLOOR=11.5.1
+          HAVE=$(npm --version)
+          LOWEST=$(printf '%s\n%s\n' "$FLOOR" "$HAVE" | sort -V | head -1)
+          if [ "$LOWEST" != "$FLOOR" ]; then
+            echo "::error::npm $HAVE is below the $FLOOR floor for trusted publishing"
+            exit 1
+          fi
+          echo "npm $HAVE, node $(node --version)"
+
+      - name: Build the publishable package
+        if: steps.exists.outputs.already == 'false'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        # Builds the wasm-pack WEB target — the one already on the registry — and verifies the
+        # package around it. The wasm build inside also verifies the module carries all twelve
+        # gateable terminal commands, so a stripped module cannot be published.
+        run: scripts/release/npm-package.sh "$VERSION" "$RUNNER_TEMP/npm-pkg"
+
+      - name: Show exactly what will be published
+        if: steps.exists.outputs.already == 'false'
+        # `npm pack --dry-run`, not `npm publish --dry-run`: it lists the identical tarball
+        # contents but never contacts the registry, so this step cannot fail on an auth or
+        # network condition that the real (OIDC-authenticated) publish would sail through.
+        # Nobody sees the artifact in an automated channel; this is the log that records it.
+        run: npm pack --dry-run "$RUNNER_TEMP/npm-pkg"
+
+      - name: Choose the dist-tag
+        id: tag
+        if: steps.exists.outputs.already == 'false'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          # A backfill must not become `latest`. Publishing 0.34.0 today would otherwise move
+          # the default install from 0.36.3 back to a version six releases old — the runbook's
+          # old advice ("publish older versions first") only worked because a human was
+          # sequencing it. Decide from the registry instead.
+          LATEST=$(curl -sS https://registry.npmjs.org/ballistics-engine \
+                   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)["dist-tags"].latest))')
+          NEWER=$(VERSION="$VERSION" LATEST="$LATEST" node -e '
+            const parse = (v) => {
+              const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
+              if (!m) { console.error(`not a plain X.Y.Z version: ${v}`); process.exit(2); }
+              return m.slice(1).map(Number);
+            };
+            const [a, b] = [parse(process.env.VERSION), parse(process.env.LATEST)];
+            const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+            process.stdout.write(cmp > 0 ? "yes" : "no");
+          ')
+          if [ "$NEWER" = "yes" ]; then
+            echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
+            echo "$VERSION is newer than the current latest ($LATEST): publishing as latest"
+          else
+            echo "dist_tag=backfill" >> "$GITHUB_OUTPUT"
+            echo "::notice::$VERSION is not newer than latest ($LATEST): publishing under the 'backfill' dist-tag so 'latest' is left alone"
+          fi
+
+      - name: Publish
+        if: steps.exists.outputs.already == 'false'
+        env:
+          DIST_TAG: ${{ steps.tag.outputs.dist_tag }}
+        # No NODE_AUTH_TOKEN and no npm secret of any kind: the OIDC token granted by
+        # `id-token: write` is the credential, and npm picks it up on its own.
+        #
+        # --provenance is passed explicitly even though npm documents it as automatic under
+        # trusted publishing. Explicit means a failure to attest fails the publish loudly
+        # instead of quietly shipping an unattested tarball, and it survives npm changing that
+        # default. It needs a public repo (this one) and `id-token: write` (granted above).
+        run: npm publish --provenance --tag "$DIST_TAG" "$RUNNER_TEMP/npm-pkg"
+
+      - name: Verify the registry serves it
+        if: steps.exists.outputs.already == 'false'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          # The publish command exiting 0 is not the same as the registry serving the version;
+          # allow a little propagation before calling it done.
+          for _ in 1 2 3 4 5 6; do
+            BODY=$(curl -sS "https://registry.npmjs.org/ballistics-engine/$VERSION" || true)
+            if printf '%s' "$BODY" | grep -q '"version"'; then
+              printf '%s' "$BODY" | node -e '
+                let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+                  const v = JSON.parse(s);
+                  console.log(`published ${v.name}@${v.version}, ${v.dist.fileCount} files, ${v.dist.unpackedSize} bytes unpacked`);
+                  // Informational, not a gate: attestation metadata can trail the version
+                  // document by a few seconds, and the publish above already failed hard if
+                  // provenance could not be generated.
+                  console.log(v.dist.attestations
+                    ? `provenance: ${v.dist.attestations.url}`
+                    : "provenance: not visible on the registry yet");
+                });
+              '
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::npm published but the registry is not serving ballistics-engine@$VERSION"
+          exit 1

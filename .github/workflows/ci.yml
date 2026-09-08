@@ -138,6 +138,18 @@ jobs:
           ./scripts/build-wasm.sh --preset full --target web --out-dir /tmp/wasm-ci-full
           ./scripts/build-wasm.sh --preset slim --target web --out-dir /tmp/wasm-ci-slim
 
+      - name: Verify the npm package still assembles
+        # MBA-1434: npm publishing is automated on a v* tag, so the first time the packaging
+        # runs for real is DURING a release. Run it here on every PR instead — same script,
+        # same checks (package name, version, entry points, both licences in the tarball) —
+        # so a regression in the post-process or in wasm-pack's package.json output is a red
+        # PR rather than a red release. Publishes nothing: `npm pack --dry-run` never contacts
+        # the registry. wasm-pack is on PATH from the step above; the wasm build is incremental.
+        run: |
+          V=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          ./scripts/release/npm-package.sh "$V" /tmp/npm-ci
+          npm pack --dry-run /tmp/npm-ci
+
       - name: Verify the offline minimal-feature process protocol
         # MBA-1331: the binary is behind the default-on `cli` feature ([[bin]]
         # required-features), so the offline-minimal check must enable it explicitly
