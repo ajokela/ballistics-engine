@@ -1343,6 +1343,27 @@ Energy vs Range:
 └ x:[0.00, 448.79] ──────────────────────────────────────────────────────┘
 ```
 
+### Card rows and the sampling grid (MBA-1476)
+
+The four card commands — `come-ups`, `range-table`, `wind-card` and `compare` — share one
+rule: **the row printed against a range is read AT that range, and does not depend on
+`--start`, `--end` or `--step`.** `700 yd` is the same drop, drift, velocity and time on a
+`--start 100 --step 100` card, a `--start 300 --step 200` card and a one-row card, byte for
+byte.
+
+The trajectory behind a card is solved once and sampled on a fixed ~1-yard grid (the same
+grid `reticle`/`adaptive-card` read holds off), independent of the rows you asked for; each
+row is then linearly interpolated between the two samples bracketing its range. `--step`
+chooses which ranges are printed and nothing else.
+
+**A range the load's flight does not span is an error, not a row.** Ask for `--end 2000`
+with a load that goes subsonic and falls out of the solve at 871 yd and the command fails
+with `no trajectory sample at 900 yd: this load's solved flight reaches only 871 yd`,
+naming the range it could not supply. It does not fill the row from the nearest sample it
+has, and `wind-card` does not print a `0.0` drift cell for it — an unreachable range and a
+range with no drift are not the same answer. Lower `--end` (or check the load) and the card
+prints.
+
 ### Wind Card
 
 Generate a wind-drift dope card: deflection at a sweep of ranges, one column per wind

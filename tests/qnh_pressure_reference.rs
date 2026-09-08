@@ -499,8 +499,14 @@ mod pressure_mode_on_calculator_subcommands {
         push(
             "compare",
             vec![
-                "--zero-distance", "100", "--load", "A:g7:0.243:2700:175:0.308", "--load",
-                "B:g7:0.250:2750:180:0.308",
+                // NAME:DRAG:BC:MASS:VELOCITY:DIAMETER. MBA-1476: these two specs had MASS
+                // and VELOCITY transposed (a 2700-grain bullet at 175 fps), which lobs a
+                // 300 yd arc; `compare`'s old nearest-sample row lookup then filled the
+                // 400 and 500 yd rows from the 300 yd sample and the test passed on
+                // fabricated rows. Interpolation refuses those rows outright, which is how
+                // the transposition surfaced.
+                "--zero-distance", "100", "--load", "A:g7:0.243:175:2700:0.308", "--load",
+                "B:g7:0.250:180:2750:0.308",
             ],
             false,
         );

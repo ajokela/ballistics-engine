@@ -21,7 +21,9 @@ use crate::adjustment::{
     adjustment_display, adjustment_unit_label, parse_click_value, windage_adjustment_display,
     AdjustmentUnit, ClickValue,
 };
-use crate::hold_curve::run_sampled_trajectory;
+use crate::hold_curve::{
+    range_not_sampled_message, run_sampled_trajectory, sample_at_range, CARD_SAMPLE_INTERVAL_M,
+};
 use crate::{AtmosphericConditions, BallisticInputs, BCSegmentData, DragModel, WindConditions};
 
 /// Schema version of the card request/response contract.
@@ -391,6 +393,10 @@ impl Units {
     fn drop_linear_from_metric(&self, v: f64) -> f64 {
         if self.imperial { v / 0.0254 } else { v * 1000.0 }
     }
+    /// Label for the distance axis, for error messages that must name a range.
+    fn distance_label(&self) -> &'static str {
+        if self.imperial { "yd" } else { "m" }
+    }
 }
 
 struct Resolved {
@@ -406,7 +412,6 @@ struct Resolved {
     temperature_c: f64,
     pressure_hpa: f64,
     end_m: f64,
-    sample_m: f64,
     elevation_click: Option<ClickValue>,
     windage_click: Option<ClickValue>,
     windage_unit: AdjustmentUnit,
@@ -526,7 +531,6 @@ fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved
         temperature_c: u.temperature_to_metric(temperature),
         pressure_hpa: u.pressure_to_metric(pressure),
         end_m: u.distance_to_metric(req.end),
-        sample_m: u.distance_to_metric(req.step),
         elevation_click,
         windage_click,
         windage_unit,
@@ -690,7 +694,8 @@ fn sampled(
         wind_speed_m,
         wind_direction_deg,
         r.end_m * 1.1,
-        r.sample_m,
+        // MBA-1476: the engine's own card grid, never the request's row spacing.
+        CARD_SAMPLE_INTERVAL_M,
         zero_angle,
         // The same schedule as the zero solve above, on every card surface
         // (come-ups, range table, wind card) consistently.
@@ -705,15 +710,25 @@ fn sampled(
     .map_err(|e| CardServiceError::Trajectory(e.to_string()))
 }
 
-fn nearest(
+/// Read one card row's sample off a solved flight, or fail loudly (MBA-1476).
+///
+/// The nearest-sample-within-one-and-a-half-steps search this replaces answered a range the
+/// flight had no sample for with a neighbour's numbers, invisibly. There is no tolerance to
+/// tune here: [`sample_at_range`] interpolates exactly at the requested range whenever the
+/// flight spans it, and anything it cannot span is a `Trajectory` error naming the range.
+fn row_sample(
     samples: &[crate::trajectory_sampling::TrajectorySample],
     range_m: f64,
-) -> Option<&crate::trajectory_sampling::TrajectorySample> {
-    samples.iter().min_by(|a, b| {
-        (a.distance_m - range_m)
-            .abs()
-            .partial_cmp(&(b.distance_m - range_m).abs())
-            .unwrap()
+    range_display: f64,
+    u: &Units,
+) -> Result<crate::trajectory_sampling::TrajectorySample, CardServiceError> {
+    sample_at_range(samples, range_m).ok_or_else(|| {
+        CardServiceError::Trajectory(range_not_sampled_message(
+            samples,
+            range_display,
+            u.distance_label(),
+            |m| u.distance_from_metric(m),
+        ))
     })
 }
 
@@ -748,34 +763,32 @@ pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceErr
     let mut current_range = req.start;
     while current_range <= req.end + 0.1 {
         let range_m = r.u.distance_to_metric(current_range);
-        if let Some(sample) = nearest(&samples, range_m) {
-            if (sample.distance_m - range_m).abs() < r.sample_m * 1.5 {
-                let drop_yd = r.u.distance_from_metric(sample.drop_m);
-                let range_display = r.u.distance_from_metric(sample.distance_m);
-                let drop_adj = adjustment_display(
-                    drop_yd,
-                    range_display,
-                    req.adjustment_unit,
-                    r.elevation_click,
-                    req.zero_set_elevation_bias_mil,
-                    req.elevation_cf,
-                )
-                .value;
-                rows.push(CardRowV1 {
-                    range: current_range,
-                    drop_linear: None,
-                    drop_adj: Some(drop_adj),
-                    come_up: Some(drop_adj - prev_drop_adj),
-                    wind_linear: None,
-                    wind_adj: None,
-                    velocity: Some(r.u.velocity_from_metric(sample.velocity_mps)),
-                    energy: Some(r.u.energy_from_metric(sample.energy_j)),
-                    time: Some(sample.time_s),
-                    wind_columns: Vec::new(),
-                });
-                prev_drop_adj = drop_adj;
-            }
-        }
+        let sample = row_sample(&samples, range_m, current_range, &r.u)?;
+        let drop_yd = r.u.distance_from_metric(sample.drop_m);
+        // MBA-1476: the row's OWN range, not a nearby sample's — the angular conversion
+        // divides by the distance the row is labelled with.
+        let drop_adj = adjustment_display(
+            drop_yd,
+            current_range,
+            req.adjustment_unit,
+            r.elevation_click,
+            req.zero_set_elevation_bias_mil,
+            req.elevation_cf,
+        )
+        .value;
+        rows.push(CardRowV1 {
+            range: current_range,
+            drop_linear: None,
+            drop_adj: Some(drop_adj),
+            come_up: Some(drop_adj - prev_drop_adj),
+            wind_linear: None,
+            wind_adj: None,
+            velocity: Some(r.u.velocity_from_metric(sample.velocity_mps)),
+            energy: Some(r.u.energy_from_metric(sample.energy_j)),
+            time: Some(sample.time_s),
+            wind_columns: Vec::new(),
+        });
+        prev_drop_adj = drop_adj;
         current_range += req.step;
     }
 
@@ -836,64 +849,63 @@ fn range_table_rows(
     let mut current_range = req.start;
     while current_range <= req.end + 0.1 {
         let range_m = r.u.distance_to_metric(current_range);
-        if let (Some(nw), Some(w)) = (nearest(&no_wind_samples, range_m), nearest(&wind_samples, range_m)) {
-            if (nw.distance_m - range_m).abs() < r.sample_m * 1.5 {
-                let range_display = r.u.distance_from_metric(nw.distance_m);
-                let drop_yd = r.u.distance_from_metric(nw.drop_m);
-                let drop_adj = adjustment_display(
-                    drop_yd,
-                    range_display,
-                    req.adjustment_unit,
-                    r.elevation_click,
-                    req.zero_set_elevation_bias_mil,
-                    req.elevation_cf,
-                )
-                .value;
-                let drift_yd = r.u.distance_from_metric(w.wind_drift_m);
-                let wind_adj = windage_adjustment_display(
-                    drift_yd,
-                    range_display,
-                    r.windage_unit,
-                    r.windage_click,
-                    req.zero_set_windage_bias_mil,
-                    req.windage_cf,
-                )
-                .value;
-                // Lead is the windage-axis hold for a full-value 90° crossing target:
-                // `speed * time-of-flight` (MBA-1287's shared moving-target math), on the
-                // no-wind sample whose time this row already reports. It is a COMPONENT
-                // hold composed on top of the wind dial, which already carries the
-                // zero-set bias, so it stays bias-free (bias 0.0) while still being
-                // divided by the windage tracking CF — the same treatment
-                // `main.rs::dope_card_row_from_sample` gives the CLI's Lead column.
-                lead_adj.push(lead_speed_mps.map(|speed_mps| {
-                    let lead_display = r.u.distance_from_metric(
-                        crate::lead_from_tof(speed_mps, 90.0, nw.time_s, nw.distance_m).lead_m,
-                    );
-                    windage_adjustment_display(
-                        lead_display,
-                        range_display,
-                        r.windage_unit,
-                        r.windage_click,
-                        0.0,
-                        req.windage_cf,
-                    )
-                    .value
-                }));
-                rows.push(CardRowV1 {
-                    range: current_range,
-                    drop_linear: Some(r.u.drop_linear_from_metric(nw.drop_m)),
-                    drop_adj: Some(drop_adj),
-                    come_up: None,
-                    wind_linear: Some(r.u.drop_linear_from_metric(w.wind_drift_m)),
-                    wind_adj: Some(wind_adj),
-                    velocity: Some(r.u.velocity_from_metric(nw.velocity_mps)),
-                    energy: Some(r.u.energy_from_metric(nw.energy_j)),
-                    time: Some(nw.time_s),
-                    wind_columns: Vec::new(),
-                });
-            }
-        }
+        let nw = row_sample(&no_wind_samples, range_m, current_range, &r.u)?;
+        let w = row_sample(&wind_samples, range_m, current_range, &r.u)?;
+        // MBA-1476: the row's OWN range on both axes.
+        let range_display = current_range;
+        let drop_yd = r.u.distance_from_metric(nw.drop_m);
+        let drop_adj = adjustment_display(
+            drop_yd,
+            range_display,
+            req.adjustment_unit,
+            r.elevation_click,
+            req.zero_set_elevation_bias_mil,
+            req.elevation_cf,
+        )
+        .value;
+        let drift_yd = r.u.distance_from_metric(w.wind_drift_m);
+        let wind_adj = windage_adjustment_display(
+            drift_yd,
+            range_display,
+            r.windage_unit,
+            r.windage_click,
+            req.zero_set_windage_bias_mil,
+            req.windage_cf,
+        )
+        .value;
+        // Lead is the windage-axis hold for a full-value 90° crossing target:
+        // `speed * time-of-flight` (MBA-1287's shared moving-target math), on the
+        // no-wind sample whose time this row already reports. It is a COMPONENT
+        // hold composed on top of the wind dial, which already carries the
+        // zero-set bias, so it stays bias-free (bias 0.0) while still being
+        // divided by the windage tracking CF — the same treatment
+        // `main.rs::dope_card_row_from_sample` gives the CLI's Lead column.
+        lead_adj.push(lead_speed_mps.map(|speed_mps| {
+            let lead_display = r.u.distance_from_metric(
+                crate::lead_from_tof(speed_mps, 90.0, nw.time_s, nw.distance_m).lead_m,
+            );
+            windage_adjustment_display(
+                lead_display,
+                range_display,
+                r.windage_unit,
+                r.windage_click,
+                0.0,
+                req.windage_cf,
+            )
+            .value
+        }));
+        rows.push(CardRowV1 {
+            range: current_range,
+            drop_linear: Some(r.u.drop_linear_from_metric(nw.drop_m)),
+            drop_adj: Some(drop_adj),
+            come_up: None,
+            wind_linear: Some(r.u.drop_linear_from_metric(w.wind_drift_m)),
+            wind_adj: Some(wind_adj),
+            velocity: Some(r.u.velocity_from_metric(nw.velocity_mps)),
+            energy: Some(r.u.energy_from_metric(nw.energy_j)),
+            time: Some(nw.time_s),
+            wind_columns: Vec::new(),
+        });
         current_range += req.step;
     }
 
@@ -947,21 +959,19 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
             let samples = sampled(req, &r, r.u.wind_to_metric(ws), angle_deg, zero_angle)?;
             for (ri, &range_display) in ranges.iter().enumerate() {
                 let range_m = r.u.distance_to_metric(range_display);
-                let drift_adj = match nearest(&samples, range_m) {
-                    Some(sample) if (sample.distance_m - range_m).abs() < r.sample_m * 1.5 => {
-                        let drift_yd = r.u.distance_from_metric(sample.wind_drift_m);
-                        adjustment_display(
-                            drift_yd,
-                            range_display,
-                            req.adjustment_unit,
-                            r.windage_click,
-                            req.zero_set_windage_bias_mil,
-                            req.windage_cf,
-                        )
-                        .value
-                    }
-                    _ => 0.0,
-                };
+                // MBA-1476: a range the flight cannot supply used to become a 0.0 cell —
+                // indistinguishable from "no drift at all" on a wind card.
+                let sample = row_sample(&samples, range_m, range_display, &r.u)?;
+                let drift_yd = r.u.distance_from_metric(sample.wind_drift_m);
+                let drift_adj = adjustment_display(
+                    drift_yd,
+                    range_display,
+                    req.adjustment_unit,
+                    r.windage_click,
+                    req.zero_set_windage_bias_mil,
+                    req.windage_cf,
+                )
+                .value;
                 all_drifts[ri].push(drift_adj);
             }
         }

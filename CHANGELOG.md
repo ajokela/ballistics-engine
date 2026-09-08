@@ -34,6 +34,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callers supply the muzzle velocity themselves, which is what makes the comparison mean
   something.
 
+### Fixed
+- **A card row now reports the range it is labelled with, whatever `--start`, `--end` and
+  `--step` were.** All four card surfaces (`come-ups`, `range-table`, `wind-card`,
+  `compare`) and their bridge equivalents (`card.come_ups`, `card.range_table`,
+  `card.wind`) sampled the trajectory on a grid whose spacing WAS the requested `--step`,
+  anchored at zero, then filled each row from the sample NEAREST it, accepting anything
+  within one and a half whole steps. Any card whose `--start` was not a multiple of its
+  `--step` therefore had every row sitting between two samples: `--start 300 --step 200`
+  printed the 200-yard numbers against the 300-yard line, and `--step 400` printed the
+  400-yard ones — 2334 fps and 1999 fps where the correct answer is 2162 fps, from
+  ordinary flags, with nothing on screen indicating a substitution. Extending `--end`
+  moved the grid and rewrote rows that had not moved, and a range past the end of a load's
+  flight was answered with the last sample, so a card's final rows could be byte-identical
+  100 or 200 yards apart.
+
+  Sampling now runs on the engine's own `hold_curve::CARD_SAMPLE_INTERVAL_M` grid (~1
+  yard, the same grid `HoldCurve` reads reticle holds off), independent of the rows asked
+  for, and `hold_curve::sample_at_range` interpolates between the two samples bracketing
+  the requested range — so the row is read AT the range, not near it, and the angular
+  conversion divides by the distance the row is labelled with. There is no tolerance left
+  to mistune: a range the solved flight does not span is an error naming that range,
+  replacing the substituted row on `come-ups`/`range-table`/`compare` and the fabricated
+  `0.0` drift cell on `wind-card`. Cards whose `--start` was already a multiple of
+  `--step` are byte-identical to before. Refining the grid costs one extra interpolation
+  pass over the solver's existing knots, not another integration: about +0.17 ms on a
+  100–1000 yd range table (1.15 ms to 1.32 ms measured in-process).
+
 ### Changed
 - **A failed online `true-velocity` now names `ballistics login`, not only `--offline`.**
   That endpoint is moving behind authentication, and the hard-failure path's only advice

@@ -108,8 +108,8 @@ use ballistics_engine::{
 // `HoldCurve::at_range` -- this file has no direct reference to either symbol. CLI argument
 // resolution (InverseSolverLoadArgs::resolve) stays here and constructs HoldCurveLoad.
 use ballistics_engine::hold_curve::{
-    build_trajectory_components, run_sampled_trajectory, HoldCurve, HoldCurveLoad,
-    MarkToRangeOutcome,
+    build_trajectory_components, range_not_sampled_message, run_sampled_trajectory,
+    sample_at_range, HoldCurve, HoldCurveLoad, MarkToRangeOutcome, CARD_SAMPLE_INTERVAL_M,
 };
 // 0.33.0 decision-support Task 9: CardRow, the shared display-ready row type behind the
 // come-ups/range-table/wind-card/compare surfaces (replacing four function-local row
@@ -17593,6 +17593,37 @@ fn handle_mpbr(
     Ok(())
 }
 
+/// Read one card row's sample off a solved flight, or fail loudly (MBA-1476).
+///
+/// The four card surfaces (`come-ups`, `range-table`, `wind-card`, `compare`) used to pick
+/// the sample NEAREST the requested range out of a grid whose spacing was the card's own
+/// `--step`, accepting anything within one and a half whole steps. That grid is anchored at
+/// zero, so any card whose `--start` was not a multiple of its `--step` had every row sitting
+/// between two samples, and the row then reported a neighbouring range's drop, drift,
+/// velocity and time with nothing in the output to say so. Sampling is now on the engine's
+/// own [`CARD_SAMPLE_INTERVAL_M`] grid, independent of the requested rows, and the value at a
+/// range is interpolated exactly at that range — so a range's row is the same row on every
+/// card that contains it, whatever `--start`, `--end` and `--step` were.
+///
+/// A range the solved flight does not span is an error naming that range, never a
+/// substitution and never a silently dropped row.
+fn card_row_sample(
+    samples: &[trajectory_sampling::TrajectorySample],
+    range_display: f64,
+    units: UnitSystem,
+) -> Result<trajectory_sampling::TrajectorySample, Box<dyn Error>> {
+    let range_m = UnitConverter::distance_to_metric(range_display, units);
+    sample_at_range(samples, range_m).ok_or_else(|| {
+        let unit = match units {
+            UnitSystem::Imperial => "yd",
+            UnitSystem::Metric => "m",
+        };
+        Box::<dyn Error>::from(range_not_sampled_message(samples, range_display, unit, |m| {
+            UnitConverter::distance_from_metric(m, units)
+        }))
+    })
+}
+
 /// Come-ups handler
 #[allow(
     clippy::too_many_arguments,
@@ -17656,7 +17687,6 @@ fn handle_come_ups(
     let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
     let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
     let end_m = UnitConverter::distance_to_metric(end, units);
-    let sample_m = UnitConverter::distance_to_metric(step, units);
 
     // Calculate zero angle
     let drag_model_enum = drag_model;
@@ -17712,7 +17742,8 @@ fn handle_come_ups(
         wind_speed_m,
         wind_direction, // degrees, converted internally
         end_m * 1.1,
-        sample_m,
+        // MBA-1476: the engine's own card grid, never the requested row spacing.
+        CARD_SAMPLE_INTERVAL_M,
         zero_angle,
         bc_segments_data,
         custom_drag_table,
@@ -17742,49 +17773,36 @@ fn handle_come_ups(
     let mut prev_drop_adj: f64 = 0.0;
 
     while current_range <= end + 0.1 {
-        let range_m = UnitConverter::distance_to_metric(current_range, units);
+        let sample = card_row_sample(&samples, current_range, units)?;
+        let drop_yd = UnitConverter::distance_from_metric(sample.drop_m, units);
+        // MBA-1476: the row's OWN range — the angular conversion divides by the distance
+        // the row is labelled with, not by some nearby sample's.
+        let drop_adj = adjustment_display(
+            drop_yd,
+            current_range,
+            adjustment_unit,
+            elevation_click,
+            zero_set_elevation_bias_mil,
+            elevation_cf,
+        )
+        .value;
+        let come_up = drop_adj - prev_drop_adj;
 
-        // Find closest sampled point
-        let closest = samples.iter().min_by(|a, b| {
-            (a.distance_m - range_m)
-                .abs()
-                .partial_cmp(&(b.distance_m - range_m).abs())
-                .unwrap()
+        rows.push(CardRow {
+            range: current_range,
+            drop_linear: None,
+            drop_adj: Some(drop_adj),
+            come_up: Some(come_up),
+            wind_linear: None,
+            wind_adj: None,
+            velocity: Some(UnitConverter::velocity_from_metric(sample.velocity_mps, units)),
+            energy: Some(UnitConverter::energy_from_metric(sample.energy_j, units)),
+            time: Some(sample.time_s),
+            lead_adj: None,
+            wind_columns: Vec::new(),
         });
 
-        if let Some(sample) = closest {
-            if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
-                let drop_yd = UnitConverter::distance_from_metric(sample.drop_m, units);
-                let range_display = UnitConverter::distance_from_metric(sample.distance_m, units);
-                let drop_adj = adjustment_display(
-                    drop_yd,
-                    range_display,
-                    adjustment_unit,
-                    elevation_click,
-                    zero_set_elevation_bias_mil,
-                    elevation_cf,
-                )
-                .value;
-                let come_up = drop_adj - prev_drop_adj;
-
-                rows.push(CardRow {
-                    range: current_range,
-                    drop_linear: None,
-                    drop_adj: Some(drop_adj),
-                    come_up: Some(come_up),
-                    wind_linear: None,
-                    wind_adj: None,
-                    velocity: Some(UnitConverter::velocity_from_metric(sample.velocity_mps, units)),
-                    energy: Some(UnitConverter::energy_from_metric(sample.energy_j, units)),
-                    time: Some(sample.time_s),
-                    lead_adj: None,
-                    wind_columns: Vec::new(),
-                });
-
-                prev_drop_adj = drop_adj;
-            }
-        }
-
+        prev_drop_adj = drop_adj;
         current_range += step;
     }
 
@@ -18926,7 +18944,6 @@ fn handle_wind_card(
     let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
     let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
     let end_m = UnitConverter::distance_to_metric(end, units);
-    let sample_m = UnitConverter::distance_to_metric(step, units);
 
     // Calculate zero angle (no wind)
     let drag_model_enum = drag_model;
@@ -19004,7 +19021,8 @@ fn handle_wind_card(
                 ws_m,
                 angle_deg,
                 end_m * 1.1,
-                sample_m,
+                // MBA-1476: the engine's own card grid, never the requested row spacing.
+                CARD_SAMPLE_INTERVAL_M,
                 zero_angle,
                 // wind-card does not yet consume saved-profile bc_segments/drag_curve
                 // (MBA-1323 Phase 2 follow-up) — see CLI_USAGE.md's a7p import section.
@@ -19018,36 +19036,21 @@ fn handle_wind_card(
             )?;
 
             for (ri, &range_display) in ranges.iter().enumerate() {
-                let range_m = UnitConverter::distance_to_metric(range_display, units);
-
-                let closest = samples.iter().min_by(|a, b| {
-                    (a.distance_m - range_m)
-                        .abs()
-                        .partial_cmp(&(b.distance_m - range_m).abs())
-                        .unwrap()
-                });
-
-                let drift_adj = if let Some(sample) = closest {
-                    if (sample.distance_m - range_m).abs() < sample_m * 1.5 {
-                        let drift_yd =
-                            UnitConverter::distance_from_metric(sample.wind_drift_m, units);
-                        // MBA-1358: windage CF applied once at the conversion boundary.
-                        // MBA-1360: zero-set windage bias added before that division.
-                        adjustment_display(
-                            drift_yd,
-                            range_display,
-                            adjustment_unit,
-                            windage_click,
-                            zero_set_windage_bias_mil,
-                            windage_cf,
-                        )
-                        .value
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
+                // MBA-1476: a range the flight cannot supply used to become a 0.0 cell —
+                // indistinguishable from "no drift at all" on a wind card.
+                let sample = card_row_sample(&samples, range_display, units)?;
+                let drift_yd = UnitConverter::distance_from_metric(sample.wind_drift_m, units);
+                // MBA-1358: windage CF applied once at the conversion boundary.
+                // MBA-1360: zero-set windage bias added before that division.
+                let drift_adj = adjustment_display(
+                    drift_yd,
+                    range_display,
+                    adjustment_unit,
+                    windage_click,
+                    zero_set_windage_bias_mil,
+                    windage_cf,
+                )
+                .value;
 
                 all_drifts[ri].push(drift_adj);
             }
@@ -19425,7 +19428,6 @@ fn handle_range_table(
     let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
     let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
     let end_m = UnitConverter::distance_to_metric(end, units);
-    let sample_m = UnitConverter::distance_to_metric(step, units);
 
     // Calculate zero angle (no wind for clean zero)
     let drag_model_enum = drag_model;
@@ -19477,7 +19479,8 @@ fn handle_range_table(
         wind_speed_m,
         wind_direction,
         end_m * 1.1,
-        sample_m,
+        // MBA-1476: the engine's own card grid, never the requested row spacing.
+        CARD_SAMPLE_INTERVAL_M,
         zero_angle,
         None,
         None,
@@ -19503,7 +19506,8 @@ fn handle_range_table(
         0.0,
         0.0,
         end_m * 1.1,
-        sample_m,
+        // MBA-1476: the engine's own card grid, never the requested row spacing.
+        CARD_SAMPLE_INTERVAL_M,
         zero_angle,
         None,
         None,
@@ -19528,57 +19532,40 @@ fn handle_range_table(
     let mut current_range = start;
 
     while current_range <= end + 0.1 {
-        let range_m = UnitConverter::distance_to_metric(current_range, units);
+        let nw = card_row_sample(&no_wind_samples, current_range, units)?;
+        let w = card_row_sample(&wind_samples, current_range, units)?;
+        // MBA-1476: the row's OWN range on both axes.
+        let range_display = current_range;
 
-        let nw_closest = no_wind_samples.iter().min_by(|a, b| {
-            (a.distance_m - range_m)
-                .abs()
-                .partial_cmp(&(b.distance_m - range_m).abs())
-                .unwrap()
+        let drop_linear = match units {
+            UnitSystem::Imperial => nw.drop_m / 0.0254,
+            UnitSystem::Metric => nw.drop_m * 1000.0,
+        };
+
+        let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
+        let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value;
+
+        let wind_linear = match units {
+            UnitSystem::Imperial => w.wind_drift_m / 0.0254,
+            UnitSystem::Metric => w.wind_drift_m * 1000.0,
+        };
+
+        let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
+        let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value;
+
+        rows.push(CardRow {
+            range: current_range,
+            drop_linear: Some(drop_linear),
+            drop_adj: Some(drop_adj),
+            come_up: None,
+            wind_linear: Some(wind_linear),
+            wind_adj: Some(wind_adj),
+            velocity: Some(UnitConverter::velocity_from_metric(nw.velocity_mps, units)),
+            energy: Some(UnitConverter::energy_from_metric(nw.energy_j, units)),
+            time: Some(nw.time_s),
+            lead_adj: None,
+            wind_columns: Vec::new(),
         });
-
-        let w_closest = wind_samples.iter().min_by(|a, b| {
-            (a.distance_m - range_m)
-                .abs()
-                .partial_cmp(&(b.distance_m - range_m).abs())
-                .unwrap()
-        });
-
-        if let (Some(nw), Some(w)) = (nw_closest, w_closest) {
-            if (nw.distance_m - range_m).abs() < sample_m * 1.5 {
-                let range_display = UnitConverter::distance_from_metric(nw.distance_m, units);
-
-                let drop_linear = match units {
-                    UnitSystem::Imperial => nw.drop_m / 0.0254,
-                    UnitSystem::Metric => nw.drop_m * 1000.0,
-                };
-
-                let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-                let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value;
-
-                let wind_linear = match units {
-                    UnitSystem::Imperial => w.wind_drift_m / 0.0254,
-                    UnitSystem::Metric => w.wind_drift_m * 1000.0,
-                };
-
-                let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-                let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value;
-
-                rows.push(CardRow {
-                    range: current_range,
-                    drop_linear: Some(drop_linear),
-                    drop_adj: Some(drop_adj),
-                    come_up: None,
-                    wind_linear: Some(wind_linear),
-                    wind_adj: Some(wind_adj),
-                    velocity: Some(UnitConverter::velocity_from_metric(nw.velocity_mps, units)),
-                    energy: Some(UnitConverter::energy_from_metric(nw.energy_j, units)),
-                    time: Some(nw.time_s),
-                    lead_adj: None,
-                    wind_columns: Vec::new(),
-                });
-            }
-        }
 
         current_range += step;
     }
@@ -19821,7 +19808,6 @@ fn handle_compare(
     let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
     let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
     let end_m = UnitConverter::distance_to_metric(end, units);
-    let sample_m = UnitConverter::distance_to_metric(step, units);
 
     let atmosphere = AtmosphericConditions {
         temperature: temperature_c,
@@ -19898,7 +19884,8 @@ fn handle_compare(
             wind_speed_m,
             wind_direction,
             end_m * 1.1,
-            sample_m,
+            // MBA-1476: the engine's own card grid, never the requested row spacing.
+            CARD_SAMPLE_INTERVAL_M,
             zero_angle,
             load.bc_segments_data.clone(),
             load.custom_drag_table.clone(),
@@ -19923,7 +19910,8 @@ fn handle_compare(
             0.0,
             0.0,
             end_m * 1.1,
-            sample_m,
+            // MBA-1476: the engine's own card grid, never the requested row spacing.
+            CARD_SAMPLE_INTERVAL_M,
             zero_angle,
             load.bc_segments_data.clone(),
             load.custom_drag_table.clone(),
@@ -19937,30 +19925,13 @@ fn handle_compare(
 
         let mut rows: Vec<CardRow> = Vec::new();
         for &range_display in &ranges {
-            let range_m = UnitConverter::distance_to_metric(range_display, units);
-            let nw = no_wind_samples.iter().min_by(|a, b| {
-                (a.distance_m - range_m)
-                    .abs()
-                    .partial_cmp(&(b.distance_m - range_m).abs())
-                    .unwrap()
-            });
-            let w = wind_samples.iter().min_by(|a, b| {
-                (a.distance_m - range_m)
-                    .abs()
-                    .partial_cmp(&(b.distance_m - range_m).abs())
-                    .unwrap()
-            });
-            let (nw, w) = match (nw, w) {
-                (Some(nw), Some(w)) => (nw, w),
-                _ => {
-                    return Err(format!(
-                        "load '{}': no trajectory samples near {range_display} \
-                         (bullet may not reach --end)",
-                        load.name
-                    )
-                    .into())
-                }
+            // MBA-1476: interpolated exactly at the requested range, never the nearest
+            // sample; a range this load's flight does not span names itself in the error.
+            let label = |e: Box<dyn Error>| -> Box<dyn Error> {
+                format!("load '{}': {e}", load.name).into()
             };
+            let nw = card_row_sample(&no_wind_samples, range_display, units).map_err(label)?;
+            let w = card_row_sample(&wind_samples, range_display, units).map_err(label)?;
             let drop_linear = match units {
                 UnitSystem::Imperial => nw.drop_m / 0.0254,
                 UnitSystem::Metric => nw.drop_m * 1000.0,

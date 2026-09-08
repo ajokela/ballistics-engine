@@ -200,6 +200,80 @@ pub fn run_sampled_trajectory(
     Ok(samples)
 }
 
+/// Distance interval every DOPE-card surface samples its trajectory on, meters (~1 yard).
+///
+/// **Deliberately independent of the card's row spacing** (MBA-1476). Sampling on a grid
+/// whose spacing was the card's own `--step` made the value printed against a range depend
+/// on the step, the start and the end of the card that asked for it: the grid is anchored at
+/// zero, so a card starting anywhere that is not a multiple of its step put every requested
+/// row between two samples, and [`sample_at_range`]'s predecessor -- a nearest-sample search
+/// with a tolerance of one and a half whole steps -- then substituted a neighbouring range's
+/// data without saying so. A shooter dialing `300 yd` off a `--start 300 --step 200` card was
+/// reading the 200-yard line. The grid spacing is now a constant of the engine, and the value
+/// at a range is read off it by interpolation, so a range's row is the same row on every card
+/// that contains it.
+///
+/// Same grid as [`HoldCurve::SAMPLE_INTERVAL_M`], and for the same reason: fine enough that
+/// linear interpolation between neighbours is orders of magnitude below what any card
+/// resolves, coarse enough that a 1500 m card is a couple of thousand points. Sampling is
+/// pure post-integration interpolation over the solver's knots -- it does not re-integrate --
+/// so refining it is measurably free next to the solve that produced those knots.
+pub const CARD_SAMPLE_INTERVAL_M: f64 = HoldCurve::SAMPLE_INTERVAL_M;
+
+/// Read a sampled trajectory at an EXACT range by linear interpolation between the two
+/// samples that bracket it (MBA-1476).
+///
+/// `None` when `range_m` lies outside the sampled span (or the span is degenerate) — that is
+/// a row the solved flight genuinely cannot supply, and every caller reports it as an error.
+/// It must never be answered with the closest sample lying around: the substitution is
+/// invisible in the output, and a card row is a number someone dials.
+///
+/// The returned sample carries `distance_m == range_m` — the range asked for, which is also
+/// the range the row is labelled with — so the angular conversion downstream divides by the
+/// same distance the shooter reads. `flags` are dropped: they mark grid points (zero
+/// crossing, apex, Mach transition), not arbitrary interpolated ranges.
+pub fn sample_at_range(
+    samples: &[trajectory_sampling::TrajectorySample],
+    range_m: f64,
+) -> Option<trajectory_sampling::TrajectorySample> {
+    if !range_m.is_finite() {
+        return None;
+    }
+    let Bracket::Inside { lo, t } = bracket_param(samples.len(), |i| samples[i].distance_m, range_m)
+    else {
+        return None;
+    };
+    let hi = lo + 1;
+    let lerp = |a: f64, b: f64| a + (b - a) * t;
+    Some(trajectory_sampling::TrajectorySample {
+        distance_m: range_m,
+        drop_m: lerp(samples[lo].drop_m, samples[hi].drop_m),
+        wind_drift_m: lerp(samples[lo].wind_drift_m, samples[hi].wind_drift_m),
+        velocity_mps: lerp(samples[lo].velocity_mps, samples[hi].velocity_mps),
+        energy_j: lerp(samples[lo].energy_j, samples[hi].energy_j),
+        time_s: lerp(samples[lo].time_s, samples[hi].time_s),
+        flags: Vec::new(),
+    })
+}
+
+/// The one wording every card surface uses for a row its solved flight cannot supply
+/// (MBA-1476) — stated in the caller's display unit, because that is the unit the request
+/// named the range in.
+///
+/// `to_display` converts meters to that unit; `unit` labels it ("yd" / "m").
+pub fn range_not_sampled_message(
+    samples: &[trajectory_sampling::TrajectorySample],
+    requested_display: f64,
+    unit: &str,
+    to_display: impl Fn(f64) -> f64,
+) -> String {
+    let reach = to_display(samples.last().map_or(0.0, |s| s.distance_m));
+    format!(
+        "no trajectory sample at {requested_display:.0} {unit}: this load's solved flight \
+         reaches only {reach:.0} {unit}"
+    )
+}
+
 /// Everything one sampled hold curve needs, already in METRIC (MBA-1361/MBA-1362).
 ///
 /// Flat and small on purpose: it is built once at a CLI boundary and handed to
