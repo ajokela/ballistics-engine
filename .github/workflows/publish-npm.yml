@@ -145,14 +145,17 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
-          # Set here and nowhere else, exactly as npm's trusted-publishing example does.
-          # setup-node writes an npmrc into RUNNER_TEMP and points NPM_CONFIG_USERCONFIG at it,
-          # so it applies no matter which directory the publish runs from. That npmrc contains
-          # `_authToken=${NODE_AUTH_TOKEN}`, and NODE_AUTH_TOKEN is deliberately never set:
-          # under trusted publishing the OIDC exchange supplies the credential instead. If a
-          # first publish ever fails 401/ENEEDAUTH rather than for a policy reason, this
-          # interaction is the first place to look.
-          registry-url: 'https://registry.npmjs.org'
+          # THERE IS DELIBERATELY NO `registry-url:` HERE, even though npm's own
+          # trusted-publishing example passes one. `registry-url` is the only thing that makes
+          # setup-node write an npmrc at all (into RUNNER_TEMP, with NPM_CONFIG_USERCONFIG
+          # pointed at it, so it applies from every directory), and the npmrc it writes contains
+          # `_authToken=${NODE_AUTH_TOKEN}` — a variable this job never sets, so it expands to
+          # an empty token that npm can still find and try. Under trusted publishing the
+          # credential comes from the OIDC exchange, and npm publishes to registry.npmjs.org by
+          # default with no publishConfig.registry to redirect it, so the line buys nothing and
+          # is the one known way to interfere with the credential. Do not add it back by
+          # copying the example; if a publish ever fails 401/ENEEDAUTH, an npmrc reappearing on
+          # the runner is the first thing to look for.
           # No caching in a release build; there is nothing to cache here anyway (the package
           # has no dependencies and no lockfile).
           package-manager-cache: false
