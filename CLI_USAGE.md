@@ -1343,6 +1343,47 @@ Energy vs Range:
 └ x:[0.00, 448.79] ──────────────────────────────────────────────────────┘
 ```
 
+### Card rows and the sampling grid (MBA-1476)
+
+The four card commands — `come-ups`, `range-table`, `wind-card` and `compare` — share one
+rule: **the row printed against a range is read AT that range, and does not depend on
+`--start`, `--end` or `--step`.** `700 yd` is the same drop, drift, velocity and time on a
+`--start 100 --step 100` card, a `--start 300 --step 200` card and a one-row card, byte for
+byte.
+
+The trajectory behind a card is solved once and sampled on a fixed ~1-yard grid (the same
+grid `reticle`/`adaptive-card` read holds off), independent of the rows you asked for; each
+row is then linearly interpolated between the two samples bracketing its range. `--step`
+chooses which ranges are printed and nothing else.
+
+**A range the load's flight does not span is never a row — but it does not cost you the
+rows the flight does reach either.** Ask for `--end 2000` with a load that falls out of the
+solve at 872 yd and you get every row out to 800 yd, then this on stderr:
+
+```
+warning: card truncated at 800 yd: 2000 yd was requested, but this load's solved flight
+reaches only 872 yd; the rows past that are left out rather than filled in from a range
+the bullet does reach
+```
+
+The card is not padded to the range you asked for: no row is filled from the nearest sample
+the solve has, and `wind-card` prints no `0.0` drift cell for a range the bullet never
+reached — an unreachable range and a range with no drift are not the same answer. The rows
+that do print are byte-identical to the same card asked for that end exactly.
+
+The `--end` default is 1200 yd, which plenty of ordinary loads (`.22 LR`, `9 mm`, `.45 ACP`)
+do not reach, so this is the normal way those cards come out.
+
+`-o json` carries the same facts as a `truncated` block (`requested_end`, `last_row`,
+`reach`, `message`) so a program can detect it; `compare` adds the `load` whose flight ended
+the shared range axis. The block is absent entirely on a card that runs to its requested
+end. The reach quoted is the solved flight's own terminal distance — a property of the load,
+identical whatever `--end` was asked for.
+
+Only a card whose flight reaches **no** requested row at all is an error, because there is
+nothing to print: `no trajectory sample at 1000 yd: this load's solved flight reaches only
+872 yd`.
+
 ### Wind Card
 
 Generate a wind-drift dope card: deflection at a sweep of ranges, one column per wind
