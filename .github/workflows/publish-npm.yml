@@ -98,6 +98,19 @@ jobs:
             v*) VERSION="${REF_NAME#v}" ;;
             *)  echo "::error::tag '$REF_NAME' is not a v* release tag"; exit 1 ;;
           esac
+          # Plain X.Y.Z only, rejected HERE. A pre-release tag (v0.37.0-rc.1) otherwise passes
+          # every gate in this step and dies ~15 minutes later inside the "Choose the dist-tag"
+          # parser, after the whole wasm build, with a message about a regex. It fails safe
+          # either way — nothing publishes — but late and opaque. Rejecting it up front also
+          # puts the real question where it belongs: a pre-release needs a dist-tag policy
+          # ('next', never 'latest'), which is a decision to make before tagging one, not a
+          # parser to patch afterwards.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag '$REF_NAME' is not a plain vX.Y.Z release tag." \
+                 "If it is a pre-release, npm publishing here has no dist-tag policy for one:" \
+                 "decide it and teach the 'Choose the dist-tag' step before cutting the tag."
+            exit 1
+          fi
           # Same gate build-and-release.yml applies, for the same reason: a tag placed on the
           # wrong commit otherwise publishes the wrong bytes under the right number.
           CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
@@ -209,6 +222,9 @@ jobs:
           LATEST=$(curl -sS https://registry.npmjs.org/ballistics-engine \
                    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)["dist-tags"].latest))')
           NEWER=$(VERSION="$VERSION" LATEST="$LATEST" node -e '
+            // The tag was already checked against this shape in the version-resolve step; this
+            // catches the other operand, whatever dist-tags.latest the registry hands back.
+            // (No apostrophes in here: this whole script is a single-quoted shell argument.)
             const parse = (v) => {
               const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v);
               if (!m) { console.error(`not a plain X.Y.Z version: ${v}`); process.exit(2); }
