@@ -801,8 +801,9 @@ crate's own `README.md`, which is what `wasm-pack` copies.
 
 Publishing is not a manual step. `.github/workflows/publish-npm.yml` builds and publishes on a
 `v*` tag using npm trusted publishing; see `scripts/release/RELEASE.md` ("The npm channel") for the
-one-time npmjs.com setup, what breaks the trust relationship, and how to backfill a version that
-was missed while the channel was still hand-run.
+one-time npmjs.com setup, what breaks the trust relationship, and how to re-run a tag whose publish
+failed. Ten versions between 0.25.0 and 0.36.3 are missing from npm because the channel was hand-run
+at the time; they are not backfillable and are documented as staying missing.
 
 ## FFI Layer
 

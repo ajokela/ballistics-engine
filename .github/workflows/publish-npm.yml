@@ -8,6 +8,10 @@ name: Publish npm package
 # 0.25.2, 0.27.0, 0.27.1, 0.28.0, 0.28.1, 0.29.0, 0.33.2, 0.34.0, 0.35.1 and 0.36.1, and
 # "npm owed" became a standing line in the release notes.
 #
+# THOSE TEN STAY MISSING. This workflow covers tags cut from here on; it cannot reach back,
+# and the reasons are worth knowing before anyone tries — RELEASE.md, "The ten missing
+# versions stay missing".
+#
 # HOW THIS AUTHENTICATES: npm trusted publishing (OIDC). GitHub Actions presents a short-lived
 # OIDC token, npm exchanges it for an equally short-lived publish credential, and the identity
 # npm checks is "this repository, this workflow file". There is NO npm token here, no GitHub
@@ -41,10 +45,18 @@ on:
   # no longer strand the npm channel.
   push:
     tags: ['v*']
-  # The catch-up path, for the ten versions already missing and any future miss. Dispatch it
-  # AGAINST THE TAG (`gh workflow run publish-npm.yml --ref v0.36.1`), never against a branch:
-  # the version gate below refuses a non-tag ref, and provenance records the ref it ran on, so
-  # dispatching from main would attest that main's HEAD produced a tagged release's bytes.
+  # The re-run path, for a tag whose scheduled publish died on something unrelated to the
+  # package (runner outage, registry 5xx). Dispatch it AGAINST THE TAG
+  # (`gh workflow run publish-npm.yml --ref v0.37.0`), never against a branch: the version gate
+  # below refuses a non-tag ref, and provenance records the ref it ran on, so dispatching from
+  # main would attest that main's HEAD produced a tagged release's bytes. The
+  # already-published check makes a re-run after a partial failure a no-op rather than an E403.
+  #
+  # THIS REACHES ONLY TAGS CUT AFTER THIS FILE MERGED. GitHub reads a workflow file AT THE REF
+  # YOU DISPATCH, so `--ref v0.36.1` is refused with a 422 ("Workflow does not have
+  # 'workflow_dispatch' trigger") before anything runs: that tag's tree has no publish-npm.yml.
+  # The ten versions named above therefore cannot be caught up this way, and are not worth
+  # catching up by hand either — RELEASE.md, "The ten missing versions stay missing".
   workflow_dispatch:
 
 permissions:
@@ -186,10 +198,11 @@ jobs:
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          # A backfill must not become `latest`. Publishing 0.34.0 today would otherwise move
-          # the default install from 0.36.3 back to a version six releases old — the runbook's
-          # old advice ("publish older versions first") only worked because a human was
-          # sequencing it. Decide from the registry instead.
+          # An out-of-order publish must not become `latest`. It happens on a re-run: 0.37.1's
+          # tag-triggered publish fails on a runner outage, 0.38.0 ships in the meantime, and
+          # somebody then dispatches v0.37.1 — which would otherwise drag the default install
+          # backwards. The runbook's old advice ("publish older versions first") only worked
+          # because a human was sequencing it. Decide from the registry instead.
           LATEST=$(curl -sS https://registry.npmjs.org/ballistics-engine \
                    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)["dist-tags"].latest))')
           NEWER=$(VERSION="$VERSION" LATEST="$LATEST" node -e '
