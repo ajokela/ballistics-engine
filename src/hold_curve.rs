@@ -401,6 +401,28 @@ impl CardTruncation {
              are left out rather than filled in from a range the bullet does reach"
         )
     }
+
+    /// The same notice sized for PAPER: the one line a printed card carries in its footer
+    /// (MBA-1477).
+    ///
+    /// [`Self::message`] is written for a terminal, where a 180-character sentence wraps and
+    /// costs nothing. A dope card footer is a single centred line about eighty characters
+    /// wide at the fixed footer size, drawn on every page beside the engine/table provenance,
+    /// so the printed form states the same three facts — where the card stops, what was
+    /// asked for, how far the load flies — and drops the sentence explaining that the missing
+    /// rows were not fabricated. Both live on this type so the paper and the terminal cannot
+    /// come to say different things about the same card.
+    pub fn printed_note(&self, unit: &str) -> String {
+        let Self {
+            requested_end,
+            last_row,
+            reach,
+        } = *self;
+        format!(
+            "TRUNCATED at {last_row:.0} {unit}: {requested_end:.0} {unit} requested, this load \
+             reaches only {reach:.0} {unit}"
+        )
+    }
 }
 
 /// Everything one sampled hold curve needs, already in METRIC (MBA-1361/MBA-1362).
@@ -451,6 +473,8 @@ pub struct HoldPoint {
 /// reuse it too rather than growing a fourth.
 pub struct HoldCurve {
     samples: Vec<trajectory_sampling::TrajectorySample>,
+    /// The solved flight's own terminal distance, meters — see [`Self::reach_m`].
+    reach_m: f64,
 }
 
 /// Result of inverting the hold curve for one mark subtension (MBA-1362).
@@ -513,7 +537,10 @@ impl HoldCurve {
             atmosphere,
         )?;
 
-        let samples = run_sampled_trajectory(
+        // MBA-1478: the FLIGHT, not just its samples. A card built on this curve has to be
+        // able to quote how far the load actually flew (see `SampledFlight::reach_m`), and
+        // the last sample is not that figure — it moves with the span the caller asked for.
+        let flight = run_sampled_flight(
             load.velocity_mps,
             load.bc,
             load.mass_kg,
@@ -537,17 +564,29 @@ impl HoldCurve {
             0.0,
             Some(load.zero_distance_m),
         )?;
+        let SampledFlight { samples, reach_m } = flight;
         if samples.len() < 2 {
             return Err(
                 "the trajectory produced too few sampled points to read a hold from".into(),
             );
         }
-        Ok(Self { samples })
+        Ok(Self { samples, reach_m })
     }
 
     /// The furthest range this curve reaches, meters.
     pub fn max_sampled_range_m(&self) -> f64 {
         self.samples.last().map_or(0.0, |s| s.distance_m)
+    }
+
+    /// The solved flight's own terminal downrange distance, meters (MBA-1478).
+    ///
+    /// Distinct from [`Self::max_sampled_range_m`], which is the last point on the sampling
+    /// grid and therefore a function of the span the CALLER asked to sample. This one is a
+    /// property of the load: it is the figure a truncated card quotes when it tells a shooter
+    /// the bullet does not get out to the row they asked for. See [`SampledFlight`], whose
+    /// doc comment records why quoting the last sample there was wrong.
+    pub fn reach_m(&self) -> f64 {
+        self.reach_m
     }
 
     /// This curve's own sample ranges, in order, meters.

@@ -3669,7 +3669,11 @@ enum Commands {
     ///
     /// This does NOT reliably produce fewer rows than a well-chosen fixed step (measured: on
     /// a smooth trajectory it does not beat uniform spacing) -- the value here is a MEASURED
-    /// error bound, every requested anchor always present, and no step size to guess.
+    /// error bound, every anchor the flight reaches present, and no step size to guess.
+    ///
+    /// An anchor past the end of a truncated card is DROPPED, not fabricated, and the
+    /// truncation notice says the card stopped short. On a card the flight covers, an
+    /// anchor outside the requested domain is still an error.
     AdaptiveCard {
         #[command(flatten)]
         load: InverseSolverLoadArgs,
@@ -14045,6 +14049,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 // correction-table version is knowable here, so none is claimed.
                 engine_version: env!("CARGO_PKG_VERSION").to_string(),
                 table_version: String::new(),
+                // `trajectory -o pdf` prints the sampled points the solve produced, from the
+                // zero range out to wherever the flight ended — there is no requested last
+                // row for it to fall short of, so there is nothing to declare.
+                truncation_note: String::new(),
             };
 
             // Convert sampled trajectory to dope card rows
@@ -25704,9 +25712,19 @@ fn handle_adaptive_card(
     let anchors_m: Vec<f64> =
         anchors.iter().map(|&a| UnitConverter::distance_to_metric(a, units)).collect();
 
-    // Search a little past --end so a domain end landing exactly on the curve's last sample
-    // still brackets -- the same 2% headroom `mark-to-range`/`bdc-match` solve with.
-    let max_solve_range_m = if end_m.is_finite() && end_m > 0.0 { end_m * 1.02 } else { end_m };
+    // MBA-1478: the SHARED card headroom, `card_sample_max_range_m`, the same one the other
+    // four surfaces sample with. It replaces a private `end_m * 1.02`, which left this
+    // command with the identical fractional-`--end` hole MBA-1476 closed everywhere else and
+    // then some: the hold curve's grid is anchored at zero with a fixed
+    // `HoldCurve::SAMPLE_INTERVAL_M` spacing, so a 2% span leaves less than one whole cell of
+    // headroom for every `--end` under ~50 yd, the last grid point lands short of the domain
+    // end, and an ordinary request was refused outright as "past the solved trajectory's last
+    // reachable point" through no fault of the load.
+    let max_solve_range_m = if end_m.is_finite() && end_m > 0.0 {
+        card_sample_max_range_m(end_m)
+    } else {
+        end_m
+    };
     // Named explicitly rather than let `?` surface HoldCurve::solve's own message bare: that
     // message says nothing about which CLI flag supplied the bad value (e.g. `--end inf`),
     // the same "name the flag" gap N-3 fixed for the budget flags.
@@ -25717,6 +25735,42 @@ fn handle_adaptive_card(
         };
         format!("--end {end:.3} {dist_unit}: {e}").into()
     })?;
+
+    // MBA-1478: truncate like every other card surface instead of refusing the whole card.
+    //
+    // `adaptive_card` still returns `DomainOutsideCurve` for a domain running past the
+    // curve — it is a library entry point and a caller that hands it an unreachable domain
+    // has asked for rows there is no ground truth for. What was wrong was the CLI passing
+    // the request straight through: a `.22 LR --end 1200` exited 1 with no rows at all,
+    // where `come-ups` on the same load prints its eighteen reachable ones and says what it
+    // left out. The card now ends at the furthest range the curve supplies, and anchors past
+    // that end go with the rows past it — the notice below is what says so.
+    let reachable_end_m = curve.max_sampled_range_m();
+    let truncation = if end_m.is_finite() && end_m > reachable_end_m {
+        if start_m > reachable_end_m {
+            // No row at all is reachable, so there is no card to truncate — the same
+            // refusal, in the same words, the other four surfaces give that case.
+            return Err(card_no_rows_error(start, curve.reach_m(), units));
+        }
+        Some(card_truncation(
+            end,
+            UnitConverter::distance_from_metric(reachable_end_m, units),
+            curve.reach_m(),
+            units,
+        ))
+    } else {
+        None
+    };
+    // Only a TRUNCATED card drops anchors, and only the ones past its new end. On an
+    // untruncated card an anchor outside the domain is still `AnchorOutsideDomain`, because
+    // there the flight can reach it and the request is simply self-contradictory.
+    let (end_m, anchors_m) = match truncation {
+        Some(_) => (
+            reachable_end_m,
+            anchors_m.into_iter().filter(|&a| a <= reachable_end_m).collect(),
+        ),
+        None => (end_m, anchors_m),
+    };
 
     let click = optic.as_ref().map(|o| (&o.elevation_click, &o.windage_click));
     let req = AdaptiveRequest {
@@ -25747,7 +25801,34 @@ fn handle_adaptive_card(
             // Verbatim: AdaptiveCardReportV1's own Serialize impl IS the wire format here,
             // unlike the four Task 9 surfaces' hand-built json! objects -- no footer, since
             // every fact the footer states is already a field on this struct.
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            //
+            // MBA-1478: except the truncation, which is not a fact about the card the engine
+            // produced but about the card the CALLER asked for and did not get. It is spelled
+            // `truncated`, with the identical block the other four surfaces emit, so one
+            // reader handles all five.
+            //
+            // Flattened onto the report and serialized STRAIGHT TO TEXT rather than through
+            // `serde_json::to_value`: a `Value`'s object is a sorted map, so routing this
+            // report through one would silently re-alphabetize every key of an output that
+            // has always been in the struct's own field order. The report's keys stay where
+            // they were, `truncated` joins them at the end, and a card that ran to its
+            // requested end serializes byte-identically to before.
+            #[derive(serde::Serialize)]
+            struct AdaptiveCardJson<'a> {
+                #[serde(flatten)]
+                report: &'a AdaptiveCardReportV1,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                truncated: Option<serde_json::Value>,
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&AdaptiveCardJson {
+                    report: &report,
+                    truncated: truncation
+                        .as_ref()
+                        .map(|t| card_truncation_json(t, units)),
+                })?
+            );
         }
         OutputFormat::Csv => {
             let unit_lower = unit_label.to_lowercase();
@@ -25848,6 +25929,13 @@ fn handle_adaptive_card(
                 windage_unit_label: unit_label.to_string(),
                 engine_version: env!("CARGO_PKG_VERSION").to_string(),
                 table_version: String::new(),
+                // MBA-1477/MBA-1478: a printed card that stops short says so on the paper.
+                // A dope card is the one card surface that leaves the machine it was made
+                // on, so a stderr warning it cannot carry is no notice at all.
+                truncation_note: truncation
+                    .as_ref()
+                    .map(|t| t.printed_note(card_distance_unit(units)))
+                    .unwrap_or_default(),
             };
 
             let pdf_bytes = ballistics_engine::pdf_dope_card::generate_dope_card_pdf(
@@ -25866,6 +25954,12 @@ fn handle_adaptive_card(
                     .into(),
             );
         }
+    }
+
+    // MBA-1478: on stderr for every format, exactly as the other four surfaces do it — the
+    // csv/json arms keep stdout machine-clean and carry the same facts structurally.
+    if let Some(truncation) = &truncation {
+        warn_card_truncated(truncation, units);
     }
 
     Ok(())
