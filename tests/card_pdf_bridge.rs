@@ -15,23 +15,17 @@
 //!
 //! ## Reading text back out of a dope card
 //!
-//! `printpdf` 0.12 writes uncompressed content streams whose text is hex-encoded GLYPH IDS
-//! of the embedded Liberation Sans subset, not ASCII — so a naive `grep` for "4.8" finds
-//! nothing (an older comment in `tests/dope_card_units.rs` blames compression; the real
-//! reason is the glyph encoding). Two extractors are used:
-//!
-//! * `pdftotext` (poppler) when it is on PATH — the real thing, via the font's ToUnicode map;
-//! * otherwise a glyph scan: pull every `<hex> Tj` operand and map glyph id -> character.
-//!   Liberation Sans lays its ASCII glyphs out contiguously, so ONE constant offset decodes
-//!   the whole card, and the offset is calibrated from the card's own "Range" column header
-//!   rather than hard-coded.
-//!
-//! `both_extractors_agree_on_the_same_card` cross-checks the two whenever pdftotext is
-//! available, so the fallback is not an untested path on machines that have the tool.
+//! A dope card's text is not ASCII in the file; see `tests/support/pdf_text.rs`, which owns
+//! both extractors and explains why. `both_extractors_agree_on_the_same_card` below
+//! cross-checks them whenever poppler's `pdftotext` is available, so the fallback is not an
+//! untested path on machines that have the tool.
 
 #![cfg(feature = "bridge")]
 
 use serde_json::{json, Value};
+
+#[path = "support/pdf_text.rs"]
+mod pdf_text;
 
 /// One bridge exchange, returning the whole envelope (callers assert `ok` themselves).
 fn call(command: &str, request: Value) -> Value {
@@ -159,102 +153,12 @@ mod pdf_present {
     }
 
     // -- text extraction ----------------------------------------------------------------
+    //
+    // Both extractors moved to `tests/support/pdf_text.rs` for MBA-1477, which needed the
+    // same reading in the truncation tests. One reader, so two test files cannot come to
+    // disagree about what a card says.
 
-    /// Every `<hex> Tj` operand in the document, as glyph-id runs, in draw order.
-    fn glyph_runs(pdf: &[u8]) -> Vec<Vec<u32>> {
-        fn hex_value(c: u8) -> Option<u32> {
-            match c {
-                b'0'..=b'9' => Some(u32::from(c - b'0')),
-                b'a'..=b'f' => Some(u32::from(c - b'a') + 10),
-                b'A'..=b'F' => Some(u32::from(c - b'A') + 10),
-                _ => None,
-            }
-        }
-        let mut runs = Vec::new();
-        let mut i = 0;
-        while i < pdf.len() {
-            if pdf[i] != b'<' {
-                i += 1;
-                continue;
-            }
-            let mut digits = Vec::new();
-            let mut j = i + 1;
-            while j < pdf.len() {
-                match hex_value(pdf[j]) {
-                    Some(v) => {
-                        digits.push(v);
-                        j += 1;
-                    }
-                    None => break,
-                }
-            }
-            // Only a well-formed `<....> Tj` show-text operand counts; PDF dictionaries
-            // (`<<`) and hex strings used for anything else are skipped.
-            let closed = j < pdf.len() && pdf[j] == b'>' && !digits.is_empty() && digits.len() % 4 == 0;
-            let mut k = j + 1;
-            while k < pdf.len() && pdf[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if closed && pdf[k..].starts_with(b"Tj") {
-                runs.push(digits.chunks(4).map(|q| q.iter().fold(0, |acc, d| acc * 16 + d)).collect());
-                i = k + 2;
-            } else {
-                i += 1;
-            }
-        }
-        runs
-    }
-
-    fn decode_runs(runs: &[Vec<u32>], offset: u32) -> Vec<String> {
-        runs.iter()
-            .map(|run| run.iter().filter_map(|&g| char::from_u32(g + offset)).collect())
-            .collect()
-    }
-
-    /// Fallback extraction: decode the glyph ids with the one constant offset that makes the
-    /// card's own "Range" column header appear. Self-calibrating, so a different font subset
-    /// ordering fails loudly here instead of silently producing garbage that no assertion
-    /// happens to notice.
-    fn glyph_scan(pdf: &[u8], label: &str) -> String {
-        let runs = glyph_runs(pdf);
-        assert!(!runs.is_empty(), "{label}: no show-text operands found in the PDF");
-        let offset = (0u32..=0x2000)
-            .find(|&offset| decode_runs(&runs, offset).iter().any(|s| s == "Range"))
-            .unwrap_or_else(|| {
-                panic!("{label}: could not calibrate the glyph offset against the \"Range\" header")
-            });
-        decode_runs(&runs, offset).join("\n")
-    }
-
-    /// Real extraction via poppler, or `None` when `pdftotext` is not installed. Feeds the
-    /// document on stdin (`pdftotext - -`) so no temporary file is involved.
-    fn pdftotext(pdf: &[u8]) -> Option<String> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        let mut child = Command::new("pdftotext")
-            .args(["-layout", "-", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        child.stdin.take()?.write_all(pdf).ok()?;
-        let out = child.wait_with_output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    }
-
-    /// The card's drawn text as whitespace-separated tokens. Both the two-column table's
-    /// visual line order (`pdftotext -layout`) and the generator's draw order (glyph scan)
-    /// emit a row as `range drop wind lead`, so a row's cells are a contiguous token run
-    /// under either extractor.
-    fn tokens(pdf: &[u8], label: &str) -> Vec<String> {
-        let text = pdftotext(pdf).unwrap_or_else(|| glyph_scan(pdf, label));
-        text.split_whitespace().map(str::to_string).collect()
-    }
+    use crate::pdf_text::{glyph_scan, pdftotext, tokens};
 
     fn assert_run_present(tokens: &[String], run: &[String], label: &str) {
         assert!(
@@ -822,6 +726,62 @@ mod pdf_present {
         assert!(
             !printed.iter().any(|t| t.starts_with("Table:")),
             "no table version is known for a solve, so none is claimed: {printed:?}"
+        );
+    }
+
+    /// (MBA-1477) A truncated card is DESCRIBED as truncated in the response, additively and
+    /// in `card.range_table`'s own spelling.
+    ///
+    /// Until this existed the bridge's printed card carried no truncation signal whatsoever —
+    /// not the stderr warning a CLI reader gets, not the `truncated` block of CLI JSON, not
+    /// `CardResponseV1::truncation` — so a short document came back indistinguishable from a
+    /// complete one, with only a smaller `row_count` for a caller to notice, against a row
+    /// count it had no independent way to predict.
+    #[test]
+    fn a_truncated_printed_card_is_described_as_truncated() {
+        let mut request = fixture_request();
+        // A .22-class load whose flight ends around 872 yd, asked out to 1200.
+        for (field, value) in [
+            ("muzzle_velocity", json!(900.0)),
+            ("ballistic_coefficient", json!(0.1)),
+            ("mass", json!(40.0)),
+            ("diameter", json!(0.224)),
+            ("drag_model", json!("g1")),
+            ("end", json!(1200.0)),
+        ] {
+            request[field] = value;
+        }
+
+        let out = call("card.pdf", request.clone());
+        assert_eq!(out["ok"], true, "the reachable rows must still print: {out}");
+        let result = &out["result"];
+        let truncation = &result["truncation"];
+        assert_eq!(truncation["requested_end"], 1200.0, "{result}");
+        assert_eq!(truncation["last_row"], 800.0, "{result}");
+        assert!(
+            (truncation["reach"].as_f64().expect("reach") - 871.7).abs() < 1.0,
+            "the reach must be the flight's own terminal distance: {result}"
+        );
+
+        // The same three facts, on the paper, in the shared wording.
+        let bytes = pdf_bytes(result);
+        let printed = tokens(&bytes, "truncated card").join(" ");
+        assert!(
+            printed.contains("TRUNCATED at 800 yd: 1200 yd requested, this load reaches only"),
+            "the printed card must state its truncation:\n{printed}"
+        );
+
+        // Additive: the same card asked for an end it reaches says nothing, and prints nothing.
+        request["end"] = json!(800.0);
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], true, "{out}");
+        assert!(
+            out["result"].get("truncation").is_none(),
+            "an untruncated card must be byte-identical to before: {out}"
+        );
+        assert!(
+            !tokens(&pdf_bytes(&out["result"]), "whole card").iter().any(|t| t == "TRUNCATED"),
+            "an untruncated card must print no notice"
         );
     }
 

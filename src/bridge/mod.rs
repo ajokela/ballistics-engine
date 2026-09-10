@@ -603,18 +603,31 @@ fn run_card_pdf(inner: &Value) -> String {
     if let Some(envelope) = pdf_over_cap_error(byte_length, card.row_count, card.page_count) {
         return envelope;
     }
-    success(
-        "card.pdf",
-        json!({
-            "pdf_base64": encode_base64(&card.pdf_bytes),
-            "byte_length": byte_length,
-            "page_count": card.page_count,
-            "row_count": card.row_count,
-            "kind": crate::card_service::PDF_CARD_KIND,
-            "source": card.source.as_str(),
-            "unprintable_title_chars": card.unprintable_title_chars,
-        }),
-    )
+    let mut response = json!({
+        "pdf_base64": encode_base64(&card.pdf_bytes),
+        "byte_length": byte_length,
+        "page_count": card.page_count,
+        "row_count": card.row_count,
+        "kind": crate::card_service::PDF_CARD_KIND,
+        "source": card.source.as_str(),
+        "unprintable_title_chars": card.unprintable_title_chars,
+    });
+    // MBA-1477: additive, and spelled exactly as `card.range_table`'s own block, so an app
+    // that already reads a truncation off the on-screen card reads the printed one the same
+    // way. Absent on a card that reached every row it asked for, which is every card the
+    // previous shape could describe at all — a truncated document used to come back here
+    // indistinguishable from a complete one, with only a smaller `row_count` to notice.
+    if let (Some(truncation), Some(object)) = (card.truncation, response.as_object_mut()) {
+        object.insert(
+            "truncation".to_string(),
+            json!({
+                "requested_end": truncation.requested_end,
+                "last_row": truncation.last_row,
+                "reach": truncation.reach,
+            }),
+        );
+    }
+    success("card.pdf", response)
 }
 
 /// RFC 4648 standard-alphabet base64 encoder with padding, for `card.pdf`.

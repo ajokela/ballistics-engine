@@ -1384,6 +1384,26 @@ Only a card whose flight reaches **no** requested row at all is an error, becaus
 nothing to print: `no trajectory sample at 1000 yd: this load's solved flight reaches only
 872 yd`.
 
+`adaptive-card` is the fifth card surface and behaves the same way (MBA-1478). It has no
+`--step` — it chooses its own rows — so it ends its domain at the furthest range its flight
+supplies and prints the same warning, with the same `truncated` block on `-o json`. Its rows
+were never read from the wrong range (it goes through the interpolating `HoldCurve`), but
+until MBA-1478 it refused the whole card rather than truncating it, and quoted a reach that
+moved with `--end`. An `--anchor` past the truncated end is dropped along with the rows past
+it; an anchor outside the domain of a card that is *not* truncated is still an error.
+
+**A printed card says it too (MBA-1477).** `-o pdf`, and the bridge's `card.pdf`, put the
+notice in the document's own footer beside the engine/table provenance, on every page:
+
+```
+TRUNCATED at 850 yd: 1200 yd requested, this load reaches only 872 yd
+```
+
+A printed card is the one that gets carried to a range with no screen beside it, so a
+stderr warning it cannot carry is no notice at all. A card saved by an app and reprinted
+later keeps the notice it was saved with. A card that runs to its requested end prints no
+such line.
+
 ### Wind Card
 
 Generate a wind-drift dope card: deflection at a sweep of ranges, one column per wind
@@ -3865,6 +3885,13 @@ The optic (for click quantization) and its tracking correction factors come only
 `--profile NAME` here -- unlike `dial-plan`, there is no inline-flag optic path for
 `adaptive-card`, since quantization is optional for a range card: the exact, unrounded angle
 is a perfectly good answer with no optic declared at all.
+
+**A card whose load does not fly out to `--end` is truncated, not refused** (MBA-1478): the
+domain ends at the furthest range the solved flight supplies, the rows inside it print, and
+the same warning, `truncated` JSON block and PDF footer line the other four card surfaces use
+say what was left out. See [Card rows and the sampling
+grid](#card-rows-and-the-sampling-grid-mba-1476) for the shared wording and the one case that
+is still an error (a card whose flight reaches no requested row at all).
 
 **Honest limits**, carried in the report's own `assumptions` field (quoted above verbatim):
 verification is limited to the hold curve's declared sample grid together with the card's own

@@ -59,6 +59,20 @@ pub struct DopeCardConfig {
     /// Correction-table version these rows were solved against, printed as `Table:<v>`.
     /// Empty prints nothing, which is the honest rendering of "no correction table".
     pub table_version: String,
+    /// One line stating that these rows stop short of the card that was asked for, drawn in
+    /// the footer under the provenance line (MBA-1477). Empty prints nothing.
+    ///
+    /// Supply [`crate::hold_curve::CardTruncation::printed_note`] — the paper form of the
+    /// one wording every truncated card surface uses. Pre-formatted rather than structured
+    /// for the same reason `engine_version` and `table_version` are: this module renders a
+    /// card, it does not decide what a card has to say about itself.
+    ///
+    /// A truncated card is otherwise indistinguishable on paper from a complete one. The
+    /// notice reaches a CLI reader on stderr and an app through a response field, and a
+    /// printed card carries neither: it is the artifact most likely to be taken to a range
+    /// with no screen beside it, so a card that stopped short of the range it was asked for
+    /// has to say so in the shooter's hand.
+    pub truncation_note: String,
 }
 
 /// Preset font size profiles for dope cards
@@ -126,6 +140,14 @@ const MARGIN: f32 = 10.0;
 const HEADER_FONT_SIZE: f32 = 9.0;
 const TABLE_FONT_SIZE: f32 = 8.0;
 const FOOTER_FONT_SIZE: f32 = 8.0;
+/// Character budget for the footer's truncation note (MBA-1477).
+///
+/// `draw_centered_text` approximates a glyph at `size * 0.28` mm, so at the unscaled footer
+/// size the printable width between the margins is `(PAGE_WIDTH - 2*MARGIN) / (8 * 0.28)`
+/// ~= 87 characters. This is that with a margin of error, and it is a GUARD rather than a
+/// budget the wording works to: `CardTruncation::printed_note` is ~71 characters at its
+/// longest realistic ranges, so nothing a card actually prints reaches it.
+const FOOTER_NOTE_MAX_CHARS: usize = 80;
 
 // Table layout
 const ROW_HEIGHT: f32 = 4.5;
@@ -331,6 +353,7 @@ fn substituting_unprintable(config: &DopeCardConfig, font: &ParsedFont) -> DopeC
         windage_unit_label: sub(&config.windage_unit_label),
         engine_version: sub(&config.engine_version),
         table_version: sub(&config.table_version),
+        truncation_note: sub(&config.truncation_note),
         ..config.clone()
     }
 }
@@ -629,6 +652,29 @@ fn render_page(
         ));
     }
     draw_centered_text(ops, font, footer_size, y, &footer2, COLOR_BLACK);
+
+    // Footer line 3: this card stops short of what was asked for (MBA-1477). Drawn on EVERY
+    // page for the same reason the provenance is — pages get separated, and the page in a
+    // shooter's hand is the one that has to be self-describing. Bold and red because it is
+    // not provenance: it is the difference between "the card ends here" and "the bullet ends
+    // here", and a field card is read in bad light. Omitted entirely when the card ran to its
+    // requested end, so an untruncated card is laid out exactly as before — which is also why
+    // the extra line is NOT reserved in `dope_card_rows_per_page`: reserving it would move
+    // every complete card's pagination to make room for a line it never prints. The line fits
+    // inside the bottom margin at every shipped font scale (>=16.9 mm at 0.5/0.8/1.0/1.4/2.0/
+    // 3.0) and stays on the page for every `--font-scale` in between (>=9.9 mm at the worst,
+    // ~2.92).
+    if !config.truncation_note.is_empty() {
+        y -= 4.0;
+        draw_centered_text(
+            ops,
+            font_bold,
+            footer_size,
+            y,
+            &truncate_for_header(&config.truncation_note, FOOTER_NOTE_MAX_CHARS),
+            COLOR_RED,
+        );
+    }
 }
 
 fn draw_row_stripe(ops: &mut Vec<Op>, x: f32, y: f32, width: f32, height: f32) {
@@ -1133,6 +1179,7 @@ mod tests {
             windage_unit_label: "MIL".to_string(),
             engine_version: "0.0.0-test".to_string(),
             table_version: String::new(),
+            truncation_note: String::new(),
         }
     }
 

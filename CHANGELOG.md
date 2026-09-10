@@ -90,6 +90,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only 7 yd" off a `--end 7.1` card. `hold_curve::run_sampled_flight` now carries the solved
   flight's own terminal distance out with its samples, and that is what every card reports.
 
+- **A truncated card now says so on the paper.** The truncation notice above reached a CLI
+  reader on stderr, a JSON caller in the `truncated` block and an app through
+  `CardResponseV1::truncation`. The PDF got none of the three: a `.22 LR` asked for a
+  100–1200 yd printable card came back `ok` with sixteen rows, one page, and nothing anywhere
+  on the document explaining why it stopped at 850 yd — on the one card most likely to be
+  carried to a range with no screen beside it. (Before the truncation work above, that same
+  request printed a FABRICATED duplicate row rather than stopping short. The PDF has never
+  described a card that outruns its load; it has only changed which way it got it wrong.)
+
+  `PdfCardV1` now carries the same `truncation` block the on-screen card does, on both of its
+  paths — a fresh solve takes it from the very `card.range_table` rows it printed, a reprint
+  takes the one the stored card was saved with — and the bridge's `card.pdf` response reports
+  it under the same name. The document states it in its own footer, beside the engine/table
+  provenance and on every page, in the wording every card surface shares: `TRUNCATED at 850
+  yd: 1200 yd requested, this load reaches only 872 yd`. `StoredCardResponseV1` grew a
+  matching `truncation` field; without one a saved truncated card lost its notice on the way
+  back in (unknown fields are ignored there by design, so that a card saved by a newer engine
+  still prints on an older one) and reprinted silently short. An untruncated card carries no
+  block and prints no line, so both its response and its document are byte-identical to
+  before, and the footer line is not reserved in the pagination it would otherwise move.
+
+- **`adaptive-card` truncates like the other four card surfaces instead of refusing the whole
+  card.** It was not touched by the row-sampling fix above and did not need to be — it reads
+  its rows through `HoldCurve`, which already interpolates, so its rows were never taken from
+  the wrong range — but it kept all three of the behaviours the other four shed. A `.22 LR
+  --end 1200` exited 1 with no rows at all, where `come-ups` on the same load now prints
+  eighteen and a notice. Its own `--end × 1.02` sampling headroom left less than one grid
+  cell for every `--end` under about 50 yd, a wider version of the fractional-end hole above.
+  And the reach in its message was the last grid SAMPLE rather than the flight's own terminal
+  distance, so the figure moved with the request.
+
+  It now samples through `hold_curve::card_sample_max_range_m`, ends the card at the furthest
+  range its solved flight supplies, and states the truncation the same three ways every other
+  surface does: the stderr warning, an additive `truncated` block on `-o json` (the identical
+  four fields, so one reader handles all five surfaces), and the footer line on `-o pdf`.
+  `HoldCurve` now carries the solved flight's own reach alongside its samples
+  (`HoldCurve::reach_m`), so the figure it quotes is a property of the load. An `--anchor`
+  past the truncated end is dropped with the rows past it; an anchor outside the domain of a
+  card that was NOT truncated is still an error, because there the flight can reach it and
+  the request is simply self-contradictory. A card whose flight reaches none of its rows is
+  still refused, in the same wording the other four use. The library entry point
+  `adaptive_card()` is unchanged and still returns `DomainOutsideCurve` for a domain running
+  past the curve it was handed: a caller that hands it an unreachable domain has asked for
+  rows there is no ground truth for.
+
+  With this, all five card surfaces sample through one helper and truncate through one
+  record. The invariance and truncation tests are asserted against the whole table of five
+  rather than against one surface each, so a surface that quietly grows its own sampling
+  headroom, its own reach figure or its own refusal fails them.
+
 ### Changed
 - **A failed online `true-velocity` now names `ballistics login`, not only `--offline`.**
   That endpoint is moving behind authentication, and the hard-failure path's only advice

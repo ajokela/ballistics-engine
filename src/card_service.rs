@@ -364,6 +364,18 @@ impl CardTruncationV1 {
     }
 }
 
+/// Back to the engine type, so the wording lives on [`CardTruncation`] alone and no surface
+/// has to restate the field mapping in order to say the same sentence.
+impl From<CardTruncationV1> for CardTruncation {
+    fn from(wire: CardTruncationV1) -> Self {
+        Self {
+            requested_end: wire.requested_end,
+            last_row: wire.last_row,
+            reach: wire.reach,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CardServiceError {
     #[error("invalid request: {0}")]
@@ -1245,6 +1257,43 @@ pub struct StoredCardResponseV1 {
     pub wind_angles_deg: Vec<f64>,
     #[serde(default)]
     pub extra_angle_rows: Vec<Vec<StoredCardRowV1>>,
+    /// Present only when the stored card itself stopped short of the rows its request asked
+    /// for — the [`CardResponseV1::truncation`] block, round-tripped (MBA-1477).
+    ///
+    /// Without this the reprint path loses the notice: `StoredCardResponseV1` ignores unknown
+    /// fields by design, so a saved card whose rows stopped short came back through here as an
+    /// unremarkable short card and printed with nothing on the paper saying rows were missing.
+    /// The screen it was saved from said so; the paper made from that very document did not.
+    ///
+    /// A card saved before this field existed simply has no block, which is indistinguishable
+    /// from an untruncated card and is the best that can be said of it.
+    #[serde(default)]
+    pub truncation: Option<StoredCardTruncationV1>,
+}
+
+/// The truncation block of a stored response (see [`CardTruncationV1`], which this mirrors).
+///
+/// All three numbers are REQUIRED, unlike the descriptive scalars elsewhere in a stored card:
+/// they are printed together as one sentence, and a block missing one of them would print
+/// "TRUNCATED at 0 yd" on a field card. A card that was not truncated omits the whole block,
+/// which is the only shape that means "nothing to say".
+#[cfg(feature = "pdf")]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct StoredCardTruncationV1 {
+    pub requested_end: f64,
+    pub last_row: f64,
+    pub reach: f64,
+}
+
+#[cfg(feature = "pdf")]
+impl From<StoredCardTruncationV1> for CardTruncationV1 {
+    fn from(stored: StoredCardTruncationV1) -> Self {
+        Self {
+            requested_end: stored.requested_end,
+            last_row: stored.last_row,
+            reach: stored.reach,
+        }
+    }
 }
 
 /// The `units` block of a stored response (see [`CardUnitsBlockV1`], which this mirrors).
@@ -1325,6 +1374,17 @@ pub struct PdfCardV1 {
     /// accepts any non-empty card name (both apps do) can warn at export time instead of
     /// handing over an unidentifiable card.
     pub unprintable_title_chars: String,
+    /// Present ONLY when the printed rows stop short of the card that was asked for — the
+    /// same block [`CardResponseV1::truncation`] carries, for the same reason (MBA-1477).
+    ///
+    /// Both paths fill it: a SOLVE takes the truncation of the very `card.range_table` rows
+    /// it printed, and a REPRINT takes the one the stored card was saved with. Until this
+    /// existed the PDF was the only card surface with no truncation signal at all — not the
+    /// stderr warning a CLI reader gets, not the `truncated` block in CLI JSON, not
+    /// `CardResponseV1::truncation` on the bridge — so a caller could not even tell that the
+    /// document it was about to hand a shooter was short. It is also printed in the
+    /// document's own footer, which is the half that survives being carried to a range.
+    pub truncation: Option<CardTruncationV1>,
 }
 
 /// Resolve the effective table font scale from the mutually exclusive `font_scale` /
@@ -1375,6 +1435,9 @@ struct RowsToPrint {
     elevation_unit_label: String,
     /// Wind and Lead column label.
     windage_unit_label: String,
+    /// Footer truncation notice — `None` on a card that reached every row it asked for.
+    /// Both paths fill it, so the printed notice cannot depend on where the rows came from.
+    truncation: Option<CardTruncationV1>,
 }
 
 /// Turn a stored response's rows into printable rows, deriving only the Lead column.
@@ -1493,6 +1556,22 @@ fn validate_stored_card(
         }
     }
 
+    // Same rule as the cells below: a non-finite figure would print "NaN"/"inf" — here in a
+    // sentence telling a shooter where their card stops, which is worse than in a column.
+    if let Some(t) = &card.truncation {
+        for (field, value) in [
+            ("requested_end", t.requested_end),
+            ("last_row", t.last_row),
+            ("reach", t.reach),
+        ] {
+            if !value.is_finite() {
+                return Err(CardServiceError::InvalidRequest(format!(
+                    "the stored card's truncation.{field} is not a finite number"
+                )));
+            }
+        }
+    }
+
     // A non-finite cell would print "NaN"/"inf" on a field card.
     for (index, row) in card.rows.iter().enumerate() {
         for (field, value) in [
@@ -1588,6 +1667,10 @@ pub fn pdf_card_v1(
                 table_version: stored.bc5d_table_version.clone().unwrap_or_default(),
                 elevation_unit_label: stored.card.units.elevation_adjustment.clone(),
                 windage_unit_label: stored.card.units.windage_adjustment.clone(),
+                // The truncation the card was SAVED with. Nothing is re-derived from the
+                // stored row set here — a reprint prints the card it was handed, and that
+                // includes what the card already said about itself.
+                truncation: stored.card.truncation.map(CardTruncationV1::from),
             }
         }
         None => {
@@ -1631,6 +1714,10 @@ pub fn pdf_card_v1(
                 // MBA-1410) windage unit.
                 elevation_unit_label: card.units.elevation_adjustment.clone(),
                 windage_unit_label: card.units.windage_adjustment.clone(),
+                // The truncation of the very rows above, not a second determination of it:
+                // `range_table_rows` IS `card.range_table`, so the paper and the screen
+                // truncate identically or not at all.
+                truncation: card.truncation,
             }
         }
     };
@@ -1696,6 +1783,13 @@ pub fn pdf_card_v1(
         // Provenance on the paper, so a printed card and a screen can be reconciled later.
         engine_version: to_print.engine_version.clone(),
         table_version: to_print.table_version.clone(),
+        // MBA-1477: and the truncation on the paper too, in the one wording every card
+        // surface uses, denominated in the card's own distance unit (which
+        // `validate_stored_card` has already forced to agree with the request's).
+        truncation_note: to_print
+            .truncation
+            .map(|t| CardTruncation::from(t).printed_note(if imperial { "yd" } else { "m" }))
+            .unwrap_or_default(),
     };
 
     let range_unit = if imperial { RangeUnit::Yards } else { RangeUnit::Meters };
@@ -1711,5 +1805,6 @@ pub fn pdf_card_v1(
         source: to_print.source,
         pdf_bytes,
         unprintable_title_chars,
+        truncation: to_print.truncation,
     })
 }
