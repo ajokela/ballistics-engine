@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Invented fixture: well-formed XML the format allows syntactically, but the second
+     <bdc> entry's position-y carries no unit suffix. There is no document-level unit to
+     fall back on, so this is unreadable rather than assumed-MOA: mis-scaling a holdover
+     by 3.44x would be a silent, dangerous answer. -->
+<reticle name="Fixture Unitless" size-x="30moa" size-y="30moa" zero-x="15moa" zero-y="15moa">
+  <elements>
+    <reticle-line start-x="0moa" start-y="0moa" end-x="0moa" end-y="8moa" line-width="0.2moa" line-color="black" />
+  </elements>
+  <bdc>
+    <bdc position-x="0moa" position-y="-3moa" />
+    <bdc position-x="0moa" position-y="-6" />
+  </bdc>
+</reticle>

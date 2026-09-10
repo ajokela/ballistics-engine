@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Invented fixture. Same three <bdc> entries as duplex_bdc_moa.reticle, but the zero
+     sits low and left on the canvas instead of at its centre. zero-x/zero-y are canvas
+     placement: element coordinates are already measured from the zero, so the imported
+     marks must be byte-for-byte the same as the centred document's. -->
+<reticle name="Fixture Offset Zero MOA" size-x="60moa" size-y="60moa" zero-x="19moa" zero-y="41moa">
+  <elements>
+    <reticle-rectangle position-x="-19moa" position-y="41moa" size-x="60moa" size-y="60moa" fill="true" color="black" />
+    <reticle-line start-x="0moa" start-y="0moa" end-x="0moa" end-y="10moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="0moa" start-y="0moa" end-x="0moa" end-y="-12moa" line-width="0.25moa" line-color="black" />
+  </elements>
+  <bdc>
+    <bdc position-x="0moa" position-y="-2moa" text-offset="1.2moa" text-height="0.9moa" />
+    <bdc position-x="0moa" position-y="-5moa" text-offset="1.2moa" text-height="0.9moa" />
+    <bdc position-x="0moa" position-y="-9moa" text-offset="1.2moa" text-height="0.9moa" />
+  </bdc>
+</reticle>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Invented fixture: deliberately malformed. <elements> is never closed, so </reticle>
+     arrives while it is still open. The importer must refuse the document rather than
+     import a reticle out of a file it evidently cannot read. -->
+<reticle name="Fixture Malformed" size-x="30moa" size-y="30moa" zero-x="15moa" zero-y="15moa">
+  <elements>
+    <reticle-line start-x="0moa" start-y="0moa" end-x="0moa" end-y="8moa" line-width="0.2moa" line-color="black" />
+  <bdc>
+    <bdc position-x="0moa" position-y="-3moa" />
+    <bdc position-x="0moa" position-y="-6moa" />
+  </bdc>
+</reticle>

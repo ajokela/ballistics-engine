@@ -103,6 +103,13 @@ pub mod reticle;
 // transform + serde, no I/O; must compile for wasm32. Deliberately NOT wired into the
 // CLI / solve-json / WASM / FFI surfaces yet (that exposure is held for review).
 pub mod reticle_import;
+// Cleanroom import of the third-party `.reticle` XML drawing format into
+// `reticle::ReticleDescription`, the sibling of `reticle_import` for a format that is a
+// picture rather than a mark list: its `<bdc>` entries are the holds, its `<elements>`
+// drawing is dropped (and counted, so the rule is visible). Pure transform, no I/O; must
+// compile for wasm32. Deliberately NOT wired into the CLI / solve-json / WASM / FFI
+// surfaces (that exposure is a separate decision).
+pub mod reticle_document_import;
 // MBA-1343 Phase B: WEZ (`monte-carlo --wez`) sweep core, shared by the CLI and the WASM terminal.
 pub mod wez;
 // MBA-1355: turret adjustment-unit conversions (SMOA/IPHY/clicks) and click-value parsing,
