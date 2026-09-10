@@ -3669,7 +3669,11 @@ enum Commands {
     ///
     /// This does NOT reliably produce fewer rows than a well-chosen fixed step (measured: on
     /// a smooth trajectory it does not beat uniform spacing) -- the value here is a MEASURED
-    /// error bound, every requested anchor always present, and no step size to guess.
+    /// error bound, every anchor the flight reaches present, and no step size to guess.
+    ///
+    /// An anchor past the end of a truncated card is DROPPED, not fabricated, and the
+    /// truncation notice says the card stopped short. On a card the flight covers, an
+    /// anchor outside the requested domain is still an error.
     AdaptiveCard {
         #[command(flatten)]
         load: InverseSolverLoadArgs,

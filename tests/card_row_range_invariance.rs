@@ -295,13 +295,19 @@ fn mba_1476_extending_end_does_not_rewrite_an_existing_row() {
 // 3. A row the flight cannot supply is never a substitution -- and never the whole card.
 // ---------------------------------------------------------------------------------------
 
-/// A light, low-BC bullet whose solved flight ends around 872 yd. Asked for rows out to
+/// A light, low-BC bullet whose solved flight ends around 871 yd. Asked for rows out to
 /// 2000 yd, the shipped code answered 900 yd with the 800 yd sample — the two rows printed
 /// byte-identical — and then silently truncated the card. Nothing on screen said the 900 yd
 /// line was a copy.
+/// Sight height is stated rather than left to a default ON PURPOSE.
+///
+/// `compare` and `range-table` do not share one: solving this load with each command's own
+/// default puts the flight's terminal distance a yard apart (871 yd against 872 yd), which
+/// is enough to fail the cross-surface reach equality below for a reason that has nothing
+/// to do with the sampling behaviour it exists to guard. Pin it and the two agree exactly.
 const UNREACHABLE_LOAD: &[&str] = &[
     "-v", "900", "-b", "0.1", "-m", "40", "-d", "0.224", "--drag-model", "g1", "--zero-distance",
-    "100",
+    "100", "--sight-height", "1.5",
 ];
 
 // ---------------------------------------------------------------------------------------
@@ -327,7 +333,7 @@ const UNREACHABLE_LOAD: &[&str] = &[
 enum Load {
     /// The .308-class reference load: reaches far past any card asked for below.
     Reference,
-    /// [`UNREACHABLE_LOAD`]: a flight that ends around 872 yd, so an ordinary card outruns it.
+    /// [`UNREACHABLE_LOAD`]: a flight that ends around 871 yd, so an ordinary card outruns it.
     Short,
 }
 
@@ -346,8 +352,21 @@ impl Load {
     /// with the .22-class flight, which is then the load that sets the shared end.
     fn compare_flags(self) -> &'static [&'static str] {
         match self {
-            Self::Reference => &["--load", "far:g7:0.3:175:2800", "--load", "also:g7:0.243:175:2700"],
-            Self::Short => &["--load", "far:g7:0.3:175:2800", "--load", "short:g1:0.1:40:900"],
+            Self::Reference => &[
+                "--load",
+                "far:g7:0.3:175:2800:0.308",
+                "--load",
+                "also:g7:0.243:175:2700:0.308",
+            ],
+            // The second load is [`UNREACHABLE_LOAD`] spelled compare's way, DIAMETER
+            // included, so this surface solves the very flight the other four do and its
+            // reach can be held to theirs to the yard.
+            Self::Short => &[
+                "--load",
+                "far:g7:0.3:175:2800:0.308",
+                "--load",
+                "short:g1:0.1:40:900:0.224",
+            ],
         }
     }
 }
@@ -365,9 +384,14 @@ struct Surface {
     /// is the only thing this is used for — a card whose last row sits exactly on `--end`,
     /// which is the row the sampled span has to clear.
     furthest_row_argv: fn(Load, f64, &str) -> Vec<String>,
-    /// True when this surface takes [`Load::flags`], i.e. solves the very same flight as the
-    /// others that do. `compare` does not: it names its loads in its own
-    /// `name:drag:bc:mass:velocity` spelling, which carries no diameter.
+    /// True when this surface solves the very same flight as the others that do.
+    ///
+    /// Every surface sets this. `compare` names its loads in its own spelling rather than
+    /// taking [`Load::flags`], but that spelling is
+    /// `NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]` (src/main.rs, `parse_compare_load_spec`) —
+    /// the diameter is optional, not absent — so it can and does describe the same bullet.
+    /// An earlier version of this file claimed otherwise and left `compare` outside the
+    /// equality below, which is the one place a surface could have drifted unnoticed.
     ///
     /// Used to hold every surface that solves ONE flight to ONE reach figure, to the yard.
     /// That equality is what separates the flight's own terminal distance from the last point
@@ -431,7 +455,9 @@ fn surfaces() -> Vec<Surface> {
             argv: |load, start, end, output| {
                 let mut argv = vec!["compare".to_string()];
                 argv.extend(owned(load.compare_flags()));
-                argv.extend(owned(&["--zero-distance", "100"]));
+                // Same reason as UNREACHABLE_LOAD's: this command's default sight height is
+                // not range-table's, and the reach equality below would catch the difference.
+                argv.extend(owned(&["--zero-distance", "100", "--sight-height", "1.5"]));
                 argv.extend(owned(&[
                     "--start", start, "--end", end, "--step", "100", "-o", output,
                 ]));
@@ -444,13 +470,15 @@ fn surfaces() -> Vec<Surface> {
                     (format!("{:.4}", end / 2.0), format!("{:.4}", end / 2.0), format!("{end}"));
                 let mut argv = vec!["compare".to_string()];
                 argv.extend(owned(load.compare_flags()));
-                argv.extend(owned(&["--zero-distance", "100"]));
+                // Same reason as UNREACHABLE_LOAD's: this command's default sight height is
+                // not range-table's, and the reach equality below would catch the difference.
+                argv.extend(owned(&["--zero-distance", "100", "--sight-height", "1.5"]));
                 argv.extend(owned(&[
                     "--start", &start, "--end", &end, "--step", &step, "-o", output,
                 ]));
                 argv
             },
-            solves_the_shared_load: false,
+            solves_the_shared_load: true,
         },
         Surface {
             name: "adaptive-card",
@@ -724,7 +752,7 @@ fn a_card_prints_the_rows_it_reaches_and_says_what_it_truncated() {
     assert!(
         stderr.contains("card truncated at 800 yd")
             && stderr.contains("2000 yd was requested")
-            && stderr.contains("reaches only 872 yd"),
+            && stderr.contains("reaches only 871 yd"),
         "the warning must name the last row, the requested end and the load's reach; \
          got: {stderr}"
     );
@@ -1159,7 +1187,7 @@ mod printed {
     use ballistics_engine::card_service::{pdf_card_v1, range_table_v1, CardRequestV1, StoredCardV1};
 
     /// The ticket's own reproduction: a .22-class load asked for a 100..1200 yd card. The
-    /// solved flight ends around 872 yd, so 18 rows print and the rest do not.
+    /// solved flight ends around 871 yd, so 18 rows print and the rest do not.
     fn truncating_request() -> CardRequestV1 {
         serde_json::from_value(serde_json::json!({
             "units": "imperial",

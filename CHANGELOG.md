@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- **`DopeCardConfig` gained a required public field, `truncation_note: String`.** External
+  code that constructs that struct literally no longer compiles until it supplies the field;
+  pass an empty string for the previous behaviour, which prints no notice and lays the page
+  out exactly as before. Callers that build the config through the engine's own card
+  services are unaffected. Every other addition in this release is additive: `PdfCardV1`,
+  `StoredCardResponseV1` and the adaptive-card JSON gain optional fields, so a consumer
+  written against the earlier documents decodes an unchanged one.
+
 ### Added
 - **The uncertainty truing report carries a pre-fit baseline, so before/after residuals
   can be drawn.** `UncertaintyTruingReportV1` had exactly one residual column, evaluated
