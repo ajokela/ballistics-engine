@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Build npm-publishable package(s) from the WASM (wasm-bindgen) build (MBA-1321).
 #
-# PREP ONLY: this script builds and post-processes the package(s); it does NOT publish.
-# Publishing needs an npm scope decided by the crate owner and an npm account with rights to
-# it — neither exists yet as of this writing. See this repo's README.md ("WASM / npm Package"
-# section) for the manual publish command, and README-npm.md's placeholder scope name.
+# NOT THE PUBLISH PATH. This script builds both wasm-bindgen targets side by side so the two
+# shapes can be compared; it does not publish, and neither of its outputs is what ships.
+#
+# The package on npm — `ballistics-engine` — is the WEB build, produced and verified by
+# scripts/release/npm-package.sh and published by .github/workflows/publish-npm.yml on a v* tag
+# (MBA-1434, OIDC trusted publishing, no token). The "meant for npm publish" note on pkg/ below
+# is how this was expected to go in MBA-1321, before the package existed; the first real publish
+# went out of deploy-wasm.sh's --target web output instead and every version since has matched
+# it. Do not "fix" that by publishing pkg/: the web build's entry point takes an explicit
+# `await init()` and the bundler build's does not, so swapping them breaks every consumer's
+# import inside a patch release. See RELEASE.md, "The npm channel".
 #
 # Produces two directories at the repo root, both gitignored and rebuilt from scratch on every
 # run (safe to delete and re-run):
@@ -76,14 +83,16 @@ cat <<EOF
 
 ==> done.
 
-  ${bundler_dir}/      (bundler target -- the package meant for "npm publish")
-  ${web_dir}/  (web target -- no-bundler / direct-browser build; documented, not
-             published under the primary package name)
+  ${bundler_dir}/      (bundler target -- for comparison; NOT what is published)
+  ${web_dir}/  (web target -- the shape that IS published, as "ballistics-engine")
 
-Package name: "ballistics-engine" -- resumes the existing npm package
-(published through 0.13.4 in 2025); versions now track the crate. Publish:
-cd ${bundler_dir} && npm publish   (requires the maintainer's npm login).
+Neither directory is published from here. npm publishing is automated on a v* tag by
+.github/workflows/publish-npm.yml, from the directory scripts/release/npm-package.sh
+builds. To inspect what a release would actually ship:
 
-Verify the tarball contents before publishing:
-  cd ${bundler_dir} && npm pack --dry-run
+  scripts/release/npm-package.sh X.Y.Z /tmp/npm-X.Y.Z
+  npm pack --dry-run /tmp/npm-X.Y.Z
+
+Compare the two tarballs here without publishing either:
+  npm pack --dry-run ./${bundler_dir} && npm pack --dry-run ./${web_dir}
 EOF

@@ -125,6 +125,9 @@ MIPS_BUILD_NOTES.md
 /pkg/
 /pkg-web/
 /pkg-nodejs/
+# The directory scripts/release/npm-package.sh builds by default — the one that is actually
+# published to npm (MBA-1434). CI builds it under RUNNER_TEMP; this covers local inspection runs.
+/pkg-npm/
 release-artifacts/
 
 # Second defense layer behind .githooks/pre-commit: AB-derived / private-repo

@@ -13,6 +13,13 @@ chk "crates.io sparse index" "$(curl -s https://index.crates.io/ba/ll/ballistics
 # never published.
 chk "PyPI /simple/ has wheels" "$(curl -s https://pypi.org/simple/ballistics-engine/ | grep -cF "ballistics_engine-$V-" | awk '{print ($1>0)?"yes":"no"}')" "yes"
 chk "RubyGems" "$(curl -s https://rubygems.org/api/v1/gems/ballistics-engine.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')" "$V"
+# npm was invisible here until MBA-1434, and it is exactly the channel that went missing:
+# ten releases between 0.25.0 and 0.36.3 never reached npm and nothing said so. Reads the
+# registry packument (registry.npmjs.org), not the npmjs.com package page, which lags it.
+# `dist-tags.latest` rather than "the version exists somewhere": an out-of-order re-run
+# publishes under the `backfill` dist-tag on purpose, so a version can be present on the
+# registry without being the release. Only the release under test should be moving `latest`.
+chk "npm" "$(curl -s https://registry.npmjs.org/ballistics-engine | python3 -c 'import json,sys;print(json.load(sys.stdin)["dist-tags"]["latest"])')" "$V"
 chk "GH release assets (38 = 16 bins + 16 sha + 6 provenance)" "$(gh release view "v$V" --repo ajokela/ballistics-engine --json assets --jq '.assets|length')" "38"
 chk "GCS objects" "$(gsutil ls "gs://ballistics-releases/$V/" 2>/dev/null | wc -l | tr -d ' ')" "38"
 chk "live terminal badge" "$(curl -s https://ballistics.rs/sh/ | grep -o "Ballistics Engine v[0-9.]*" | head -1)" "Ballistics Engine v$V"

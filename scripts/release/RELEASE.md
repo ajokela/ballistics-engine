@@ -211,8 +211,11 @@ script emits the correct `<hash>  <file>` two-space form directly.
 5. Bindings: bump + tag ballistics-engine-py (its CI publishes to PyPI on tag);
    bump ballistics-engine-rb (3 spots: Cargo.toml version, Cargo.toml dep, gemspec —
    plus lib/ballistics_engine.rb VERSION), `gem build` + container-validate + `gem push`.
-6. npm: passkey-gated, human-only until an automation token / OIDC trusted publishing
-   is set up.
+6. npm: **automatic on the tag** (MBA-1434) — `.github/workflows/publish-npm.yml` publishes
+   `ballistics-engine` with OIDC trusted publishing, no token and no human. Nothing to do
+   here beyond reading the job; `verify-channels.sh` checks it. See
+   [The npm channel](#the-npm-channel) below for the one-time account setup, what breaks it,
+   and how to re-run a tag whose publish failed.
 7. **ballistics.tools** (the download hub) — the channel everyone forgets: it drifted from
    0.22.0 to 0.31.0 unnoticed because it was not listed here. Source is
    `~/projects/ballistics-tools-site` (NOT the stale duplicate under `ballistics.rs/`),
@@ -229,6 +232,124 @@ script emits the correct `<hash>  <file>` two-space form directly.
    Do NOT touch `downloads/bc5d*/manifest.json` — those carry the table/Flask versioning
    (0.34.x), not the engine's.
 8. `verify-channels.sh X.Y.Z` — the release is done when this exits 0, not before.
+
+## The npm channel
+
+`.github/workflows/publish-npm.yml` publishes `ballistics-engine` to npm on every `v*` tag,
+authenticated by **npm trusted publishing (OIDC)**. There is no npm token, no GitHub secret,
+and nothing to rotate: GitHub Actions presents a short-lived OIDC token and npm checks that it
+came from this repository and this workflow file. That is also why this one channel is allowed
+to publish from the *public* repo — the rule the private `ballistics-release` repo exists to
+enforce is "no publishing **secrets** here", and this has none.
+
+An npm automation token in a GitHub secret is not an alternative any more: npm removed
+legacy/automation tokens in November 2025. The nearest survivor is a granular token with
+"Bypass 2FA", which expires and has to be re-minted by hand — the same manual step in a new
+place. Trusted publishing also gets provenance attestations, which the package never had.
+
+> **The workflow has to be on `main` before the tag is cut.** A `push: tags` trigger only fires
+> if the workflow file exists *in the tagged commit*, and a tag is cut from `main`. Tag a `main`
+> that predates this file and npm publishes nothing — loudly now rather than quietly, because
+> `verify-channels.sh` checks npm, but still a release you have to chase. Same reason a missed
+> version cannot be caught up afterwards; see below.
+
+### What is actually published
+
+The `wasm-pack --target web` build, post-processed by `scripts/build-npm-postprocess.mjs`,
+built and self-checked by `scripts/release/npm-package.sh`. **Not** the `--target bundler`
+output, even though `scripts/build-npm.sh` describes that one as "the package meant for
+`npm publish`" — that header predates the package existing. Every version on npm from 0.25.0
+on is the web build, because that is what the old manual step published out of
+`deploy-wasm.sh`'s `/tmp` directory. The two targets have different entry-point semantics (the
+web build needs an explicit `await init()`), so switching would break every existing consumer
+inside a patch release.
+
+To see exactly what a tag would ship, without shipping it:
+
+```bash
+scripts/release/npm-package.sh X.Y.Z /tmp/npm-X.Y.Z
+npm pack --dry-run /tmp/npm-X.Y.Z
+```
+
+### One-time setup on npmjs.com
+
+Done once, by the account owner; nothing in this repo can do it. On
+<https://www.npmjs.com/package/ballistics-engine> → **Settings** → **Trusted publishing**,
+under **Select your publisher** choose **GitHub Actions** and enter:
+
+| Field | Value |
+|---|---|
+| Organization or user | `ajokela` |
+| Repository | `ballistics-engine` |
+| Workflow filename | `publish-npm.yml` — filename only, no path, with the `.yml` |
+| Environment name | leave blank (the workflow declares no environment) |
+| Allowed actions | must permit **direct `npm publish`** |
+
+That last row is the one to get right. Trusted-publisher configurations created after
+2026-09-03 default to allowing only `npm stage publish`, which parks the version in a staging
+queue until somebody runs `npm stage approve` — a 2FA prompt, i.e. the human this work exists
+to remove. Staged publishing is a reasonable *choice* (it keeps a human eye on every release
+while still moving the build into CI), but it is a choice, and taking it means the workflow's
+publish step has to change to match.
+
+Once a tag has published green, consider tightening the account: **Settings → Publishing access
+→ "Require two-factor authentication and disallow tokens."** Do this one *last* and *watch the
+next publish*: it is the only step in this list that can break what was just automated, and
+whether "disallow tokens" also gates the OIDC path is worth confirming on npm's docs at the time
+rather than assuming from the wording. If the next tag fails to publish, revert this setting
+first.
+
+### What breaks it
+
+- **Renaming or moving `publish-npm.yml`.** npm matches the workflow filename exactly and
+  case-sensitively; a rename fails the publish with an authentication error that mentions
+  nothing about renames. Change the npmjs.com record in the same commit.
+- **Moving the job to the fleet runner.** npm trusted publishing does not support self-hosted
+  runners. `runs-on: ubuntu-latest` is a requirement.
+- **Wrapping it in a `workflow_call`.** npm validates the *calling* workflow's filename.
+
+### Re-running a tag whose publish failed
+
+If a tag's publish dies on something unrelated to the package — runner outage, registry 5xx —
+dispatch the same workflow **against the tag**, never against a branch:
+
+```bash
+gh workflow run publish-npm.yml --ref v0.37.0
+```
+
+The workflow refuses a non-tag ref: provenance records the ref it ran on, so a dispatch from
+`main` would attest that `main`'s HEAD produced a tagged release's bytes. A re-run after a
+partial failure is a no-op rather than an `E403`, because the job checks the registry for the
+version first. And anything not newer than the registry's current `latest` publishes under a
+`backfill` dist-tag instead, so re-running an older tag after a newer one has shipped cannot
+drag the default install backwards.
+
+**This only works for tags cut after the workflow merged to `main`.** GitHub reads a workflow
+file *at the ref you dispatch*. Dispatching a tag whose tree has no `publish-npm.yml` is
+refused with a 422 (`Workflow does not have 'workflow_dispatch' trigger`) before anything runs.
+
+### The ten missing versions stay missing
+
+0.25.2, 0.27.0, 0.27.1, 0.28.0, 0.28.1, 0.29.0, 0.33.2, 0.34.0, 0.35.1 and 0.36.1 are on
+crates.io and not on npm — the direct cost of the channel having been hand-run. **They are not
+backfillable, and the decision is to leave them.** Do not spend an afternoon rediscovering why:
+
+- `gh workflow run publish-npm.yml --ref v0.34.0` returns a 422. None of the ten tags contains
+  `publish-npm.yml`, and GitHub evaluates the workflow file at the dispatched ref, not on
+  `main`.
+- Re-tagging an old commit so it carries the workflow is not a workaround, it is worse. `v*`
+  tags also trigger `build-and-release.yml`, so it would re-run the entire 13-platform release,
+  and it would move a released tag off the commit it names.
+- Seven of the ten (everything before 0.34.0) predate `scripts/build-wasm.sh` entirely.
+  Building them means a bare `wasm-pack` invocation at that revision, without the verifier that
+  proves the module carries all twelve gateable terminal commands — which is exactly how a
+  trajectory-only module ships.
+- Publishing them from a laptop needs the passkey login this work exists to remove. Trusted
+  publishing covers CI only; it does not authenticate a local `npm publish`.
+
+The gap is not worth that. `latest` is correct, nothing depends on an absent old version
+resolving, every version from here on publishes on its own tag, and `verify-channels.sh` now
+fails the release if one does not.
 
 ## What the first automated release (0.30.1) taught
 
@@ -251,9 +372,11 @@ script emits the correct `<hash>  <file>` two-space form directly.
   `shasum -c`/`sha256sum -c` reject outright. Normalize to `<hash>  <file>` before
   verifying or uploading. Everything else (hosted, riscv, mips) already emits the
   two-space form; the release must be uniform.
-- **npm lives in the wasm-pack output dir** that `deploy-wasm.sh` writes:
-  `cd /tmp/wasm-X.Y.Z && npm publish` (after `npm login`; it is passkey-gated).
-  Publish older versions first so `latest` ends up on the newest.
+- **npm used to live in the wasm-pack output dir** that `deploy-wasm.sh` writes
+  (`cd /tmp/wasm-X.Y.Z && npm publish`, after a passkey-gated `npm login`). That is
+  history as of MBA-1434 — CI builds and publishes it now — but it is why the published
+  package is the `--target web` build rather than the bundler build `build-npm.sh`
+  advertises. See [The npm channel](#the-npm-channel).
 
 ## Standing gotchas (hard-won; do not relearn)
 
