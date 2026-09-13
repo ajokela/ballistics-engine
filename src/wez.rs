@@ -326,6 +326,10 @@ fn wez_resolved_request(
             // for shear; `None` here keeps the rebuilt request asking for none, matching the
             // baseline solve it is perturbing around.
             wind_shear_model: None,
+            // WEZ perturbs a resolved request through BallisticInputs defaults, which never
+            // set aerodynamic jump; absent here keeps the WEZ path's numbers exactly as they
+            // were before the flag existed.
+            aerodynamic_jump: None,
         },
         // Unused by `perturbation::evaluate` (it queries a specific range off the solved
         // trajectory directly, never the regular sampling grid); any positive value is inert.

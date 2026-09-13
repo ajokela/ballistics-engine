@@ -385,6 +385,7 @@ explicit `shot.shot_azimuth_rad` — omitting it is a `conflicting_fields` error
 | `effects.coriolis` | `false` | Enable Earth-rotation deflection. |
 | `effects.enhanced_spin_drift` | `false` | Enable enhanced spin-drift modeling. |
 | `effects.wind_shear_model` | omitted (`"none"`) | Altitude-dependent wind shear: `none`, `logarithmic`, `power_law`, or `ekman_spiral` (alias `ekman`). |
+| `effects.aerodynamic_jump` | omitted (`false`) | Enable crosswind aerodynamic (gyroscopic) jump as a muzzle launch-angle perturbation. |
 | `sampling.interval_m` | `10` | Regular downrange result interval. |
 
 Supplying `solver.time_step_s` with `rk45` is valid, but RK45 owns its adaptive step size. The
@@ -401,12 +402,48 @@ truncate or thin the requested sample sequence to fit the limit.
 Effects remain opt-in. The service may require projectile length, twist data, latitude, or other
 documented prerequisites when a corresponding effect is enabled.
 
-Magnus and enhanced spin drift are experimental engine models. Enabling either produces an
-`experimental_effect` warning at the corresponding request path.
+Magnus, enhanced spin drift and aerodynamic jump are experimental engine models. Enabling any of
+them produces an `experimental_effect` warning at the corresponding request path.
 
 `effects.magnus` and `effects.enhanced_spin_drift` cannot both be true in v1. The engine's legacy
 solver silently suppresses Magnus in that combination; the request decoder instead reports
 `conflicting_fields` so the resolved request never misstates which physics ran.
+
+### `effects.aerodynamic_jump`
+
+Crosswind aerodynamic jump: the fixed angular departure a spinning projectile takes as it leaves
+the constrained bore, applied as an initial launch-angle offset rather than as a downrange force.
+Omitted or `false` is byte-identical to every response from before the field existed. An explicit
+`false` is echoed in `resolved_request.effects` while an omitted field is not, so a round-tripped
+request says exactly what the original said.
+
+The model is Bryan Litz's regression, `Y = 0.01*Sg - 0.0024*L + 0.032` MOA per mph of crosswind,
+fed by the engine's own Miller stability factor. It is a fit that is best near `Sg` ~ 1.75, not a
+first-principles derivation, which is why enabling it raises `experimental_effect`.
+
+Three properties a caller has to know, because none of them is visible in the trajectory:
+
+- **It is vertical.** The jump perturbs elevation only. Windage is unchanged to within rounding,
+  and the effect is independent of `magnus`, `coriolis` and `enhanced_spin_drift` — there is no
+  suppression rule between them.
+- **It is computed from the crosswind AT THE MUZZLE.** A shot with no crosswind at the muzzle is
+  unaffected however much wind it meets downrange, including a segmented-wind request whose first
+  segment is calm. That case is a present, exactly-zero `summary.aerodynamic_jump_moa`, which is a
+  different response from the effect never running (the field is absent then).
+- **It reads the barrel and the bullet.** The jump scales with stability and bullet length, so it
+  consumes `rifle.twist_rate_m_per_turn`, `rifle.twist_direction` and `projectile.length_m`.
+  Omitting them does **not** disable the correction and does not zero it: the solve proceeds
+  against the assumed 1:12 twist and the mass/diameter length estimate and returns a confident
+  number computed for a rifle the request never described. A .308 175 gr at 800 m in a 10 mph
+  full-value crosswind moves 10.79 cm with a stated 1:10 twist and 9.08 cm with the twist omitted.
+  Enabling the flag without either field therefore raises `aerodynamic_jump_assumed_geometry` at
+  `$.effects.aerodynamic_jump`, in addition to the ordinary assumption notices for the defaults
+  themselves.
+
+The applied jump is reported as `summary.aerodynamic_jump_moa`, in MOA, positive up. It is present
+only when the effect ran, because a launch-angle offset is folded into every drop in the table and
+is otherwise unobservable: a caller comparing two solves cannot tell a jump that applied from one
+that silently came out at zero.
 
 ### `effects.wind_shear_model`
 
@@ -502,9 +539,11 @@ inferred projectile geometry. Stable v1 warning codes are `partial_wind_coverage
 explicit `muzzle_angle_rad` supplied together with `zero_distance_m`, so the elevation search did
 not run — see `shot.muzzle_angle_rad` above), `bc5d_drag_model_coerced` (a
 `corrections.bc5d_table_path` request whose drag model is outside the table's G1/G7 planes — see
-the optional `corrections` block above), and `wind_shear_model_not_modeled` (an accepted
+the optional `corrections` block above), `wind_shear_model_not_modeled` (an accepted
 `effects.wind_shear_model` this solve path has no profile for, so the wind is left unchanged — see
-`effects.wind_shear_model` above). Messages are descriptive text rather than
+`effects.wind_shear_model` above), and `aerodynamic_jump_assumed_geometry` (`effects.aerodynamic_jump`
+enabled without `rifle.twist_rate_m_per_turn` or `projectile.length_m`, so the jump was computed
+from an assumed barrel rather than disabled — see `effects.aerodynamic_jump` above). Messages are descriptive text rather than
 a compatibility surface.
 
 ```json
@@ -551,6 +590,12 @@ Summary fields have fixed evaluation frames:
 - `spin_drift_m` is the signed gyroscopic spin-drift contribution at the terminal sample, positive
   to the shooter's right. It excludes wind drift and is absent when enhanced spin drift is disabled
   or cannot be calculated.
+- `aerodynamic_jump_moa` (MBA-959) is the vertical crosswind aerodynamic jump actually applied at
+  the muzzle, in MOA, positive up. Present only when `effects.aerodynamic_jump` was enabled and the
+  solver produced components; absent otherwise, so every response that predates the field is
+  byte-identical. A present `0.0` means the effect ran against no muzzle crosswind — a different
+  fact from an absent field, which means it never ran. It is reported because a launch-angle offset
+  is folded into every drop rather than appearing as its own column, and is otherwise invisible.
 - `equivalent_horizontal_range_m` (MBA-1395) is the flat-fire range whose angular elevation
   correction — against the same solved zero — matches the inclined solution's at the terminal
   range: the BDC "shoot-to" range (SIG AMR / Leica EHR / Gunwerks style). It is defined by

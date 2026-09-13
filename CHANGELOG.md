@@ -5,6 +5,42 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`effects.aerodynamic_jump` on the solve-json v1 wire (MBA-959).** The engine has applied
+  Litz's crosswind aerodynamic jump since MBA-959 and the native CLI reaches it with
+  `--enable-aerodynamic-jump`, but the JSON bridge hard-coded `enable_aerodynamic_jump: false`
+  and `EffectsV1` is `deny_unknown_fields` — so an app built on the bridge could not ask for it
+  at all: the field was a parse error, not a no-op. Reported by Alfredo Mendiola Loyola against
+  an Android app, with the change request that this implements.
+
+  Additive and opt-in. Omitting the field, or sending `false`, leaves responses byte-identical
+  to earlier engines; an explicit `false` is echoed in `resolved_request.effects` while an
+  omitted field is not, so a round-tripped request says what the original said. Measured on a
+  .308 175 gr at 800 m in a 10 mph full-value crosswind, enabling it raises the impact by
+  10.79 cm (0.1348 mil / 0.4634 MOA) and moves windage by less than 0.002 cm — the jump is
+  vertical, and exactly zero in a headwind.
+
+- **`summary.aerodynamic_jump_moa`.** The jump applied at the muzzle, in MOA, positive up.
+  Present only when the effect ran. A launch-angle offset is folded into every drop rather than
+  appearing as its own column, so without this a caller cannot tell a jump that applied from
+  one that silently came out at zero.
+
+- **`aerodynamic_jump_assumed_geometry` warning.** The jump scales with gyroscopic stability and
+  bullet length, so it reads `rifle.twist_rate_m_per_turn` and `projectile.length_m`. Omitting
+  either does not disable the correction and does not zero it — the solve proceeds against the
+  assumed 1:12 barrel and returns a confident number for a rifle the request never described
+  (10.79 cm becomes 9.08 cm on the load above, a 16% error, invisible in the response). The
+  warning is raised at `$.effects.aerodynamic_jump` whenever the flag is on and either field
+  was defaulted.
+
+- **`effects.aerodynamic_jump` in the MCP `solve` tool schema.** That schema is hand-written with
+  `additionalProperties: false`, so an omission there is a rejection rather than a passthrough —
+  which is how `wind_shear_model` reached the JSON wire in 0.36.0 and never reached MCP callers.
+  Both vocabularies now come from `solve_json::SOLVE_JSON_EFFECT_NAMES_V1`, and a test pins them
+  together so the next additive effect cannot diverge.
+
 ## [0.37.0] - 2026-09-10
 
 ### Breaking
