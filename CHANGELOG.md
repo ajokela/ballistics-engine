@@ -5,7 +5,16 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.38.0] - 2026-09-13
+
+### Breaking
+- **`ResolvedEffectsV1` and `SolveSummaryV1` each gained a public field** —
+  `aerodynamic_jump: Option<bool>` and `aerodynamic_jump_moa: Option<f64>`. Rust code that
+  constructs either struct with a literal no longer compiles until it supplies them; pass
+  `None` for the previous behaviour in both cases. This is a source break for direct API
+  consumers only. It is NOT a wire break: both fields are `skip_serializing_if` and absent
+  unless the effect was requested, so JSON responses to every pre-existing request are
+  byte-identical, and a consumer parsing the wire sees no change at all.
 
 ### Added
 - **`effects.aerodynamic_jump` on the solve-json v1 wire (MBA-959).** The engine has applied
