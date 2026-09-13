@@ -547,7 +547,7 @@ pub(crate) fn prepare_request(
         },
         enable_pitch_damping: false,
         enable_precession_nutation: false,
-        enable_aerodynamic_jump: false,
+        enable_aerodynamic_jump: resolved_request.effects.aerodynamic_jump,
         use_cluster_bc: false,
         custom_drag_table: None,
         // MBA-1356: solve-json v1 has no custom-drag-table field (see the module doc — the
@@ -1417,11 +1417,16 @@ fn resolve_effects(
         ));
     }
 
+    // Aerodynamic (gyroscopic) jump from crosswind. Omitted field (None) defaults to false
+    // to preserve byte-identical responses for pre-existing requests.
+    let aerodynamic_jump = effects.aerodynamic_jump.unwrap_or(false);
+
     Ok(ResolvedEffectsV1 {
         magnus,
         coriolis,
         enhanced_spin_drift,
         wind_shear_model,
+        aerodynamic_jump,
     })
 }
 

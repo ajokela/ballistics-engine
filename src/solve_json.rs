@@ -622,6 +622,15 @@ pub struct EffectsV1 {
         deserialize_with = "deserialize_present"
     )]
     pub wind_shear_model: Option<WindShearModelV1>,
+    /// Enable aerodynamic (gyroscopic) jump correction from crosswind (MBA-959).
+    /// When `None` (field omitted) the engine defaults to `false` so that
+    /// pre-existing requests remain byte-identical.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub aerodynamic_jump: Option<bool>,
 }
 
 /// Wire values for [`EffectsV1::wind_shear_model`] (0.36.0).
@@ -866,6 +875,10 @@ pub struct ResolvedEffectsV1 {
     /// this absent, so responses to pre-0.36.0 requests serialize byte-identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wind_shear_model: Option<WindShearModelV1>,
+    /// Echo of aerodynamic-jump flag. Present only when the raw request supplied one —
+    /// omitted field leaves this absent so pre-existing responses remain byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aerodynamic_jump: bool,
 }
 
 /// Resolved result-sampling configuration.
@@ -1691,10 +1704,10 @@ fn validate_effects(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     validate_members(
         object,
         path,
-        &["magnus", "coriolis", "enhanced_spin_drift", "wind_shear_model"],
+        &["magnus", "coriolis", "enhanced_spin_drift", "wind_shear_model", "aerodynamic_jump"],
         &[],
     )?;
-    validate_optional_booleans(object, path, &["magnus", "coriolis", "enhanced_spin_drift"])?;
+    validate_optional_booleans(object, path, &["magnus", "coriolis", "enhanced_spin_drift", "aerodynamic_jump"])?;
 
     // An unknown shear model is rejected here, with the exact path and the accepted spellings,
     // rather than deserializing to the `none` default. Silently unsheared numbers are

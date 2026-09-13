@@ -134,6 +134,7 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
             coriolis: request.effects.coriolis.unwrap_or(false),
             enhanced_spin_drift: request.effects.enhanced_spin_drift.unwrap_or(false),
             wind_shear_model: request.effects.wind_shear_model,
+            aerodynamic_jump: request.effects.aerodynamic_jump.unwrap_or(false),
         },
         sampling: ResolvedSamplingV1 {
             interval_m: request.sampling.interval_m.unwrap_or(10.0),
