@@ -1,4 +1,35 @@
 //! FFI bindings for iOS/Swift integration
+//!
+//! # Station temperature and pressure: this ABI uses the legacy default sentinels
+//!
+//! Every export here that takes an [`FFIAtmosphericConditions`] resolves its `temperature`
+//! and `pressure` through [`crate::atmosphere::resolve_station_conditions`] — the
+//! `StationAtmosphereResolution::LegacyDefaultSentinels` behaviour of
+//! [`crate::cli_api::TrajectorySolver::new`]. Concretely: at an `altitude` above 1 m, a
+//! `temperature` of 15 °C (±0.1) or a `pressure` of 1013.25 hPa (±0.5) is read as "not
+//! supplied — give me the ICAO standard atmosphere at this altitude", NOT as a station
+//! reading of exactly 15 °C / 1013.25 hPa.
+//!
+//! solve-json ([`crate::solve_json`], [`mod@crate::solve_v1`]) does the opposite: it builds through
+//! [`crate::cli_api::TrajectorySolver::new_with_resolved_station_atmosphere`], so a supplied
+//! `temperature_k`/`pressure_pa` is authoritative even when it happens to equal a sentinel
+//! value. The two surfaces therefore return DIFFERENT numbers for the same nominal inputs —
+//! a 300 m zero at 2000 m with 15 °C / 1013.25 hPa differs by about 0.29 MOA, because this
+//! ABI is solving it at the ICAO 2.00 °C / 795.01 hPa instead.
+//!
+//! This divergence is deliberate, and is the only correct answer for each surface. The
+//! difference is the input type, not the physics: `AtmosphereV1` carries `Option<f64>` behind a
+//! presence-preserving deserializer, so a JSON caller can say "omitted" directly and needs no
+//! heuristic (MBA-1397). [`FFIAtmosphericConditions`] is a `repr(C)` struct of plain
+//! `c_double`s with no presence channel at all, so the sentinel IS how a C caller says
+//! "omitted" — and it is what `tests/test_ffi.c` and every shipped example do. Making the C
+//! ABI authoritative would leave those callers computing sea-level density at altitude and
+//! under-stating drop, which is the exact defect `resolve_station_pressure` /
+//! `resolve_station_temperature` were introduced to fix. A C caller that genuinely IS at
+//! 15 °C at 2000 m must perturb the value (e.g. 15.2 °C) to escape the sentinel band, or use
+//! the JSON bridge (`crate::bridge`, behind the `bridge` feature) instead.
+//!
+//! `tests/ffi_atmosphere_resolution.rs` pins both halves of this.
 
 use crate::{
     calculate_zero_angle_with_conditions, run_monte_carlo_with_direction_std_dev,
@@ -101,6 +132,14 @@ pub struct FFIWindConditions {
     pub vertical_speed: c_double,
 }
 
+/// Station atmosphere for the C ABI.
+///
+/// `temperature` and `pressure` are resolved through the LEGACY DEFAULT SENTINELS: at a
+/// nonzero `altitude`, 15 °C and/or 1013.25 hPa mean "omitted, use the ICAO standard at this
+/// altitude" rather than a literal station reading. This struct has no presence channel, so
+/// that sentinel is the only way a C caller can express omission — see this module's
+/// documentation for why solve-json deliberately does NOT behave this way, and for the size
+/// of the resulting divergence.
 #[repr(C)]
 pub struct FFIAtmosphericConditions {
     pub temperature: c_double, // Celsius
@@ -739,6 +778,28 @@ unsafe fn calculate_zero_angle_impl(
 }
 
 /// Calculate the zero angle for a target distance through the C ABI.
+///
+/// Solves to the classic sight-line zero contract (`ZeroTargetFrame::SightLine`, MBA-1412):
+/// the target height is sight geometry and the rifle zeroes LEVEL. `inputs.shooting_angle`
+/// applies to the subsequent shot, not to the zero.
+///
+/// # This is NOT the same solve as solve-json's `zero_distance_m`
+///
+/// Two deliberate differences, neither of which is a defect — see the module documentation
+/// for the reasoning and for the numbers:
+///
+/// * Atmosphere. This export goes through
+///   [`crate::calculate_zero_angle_with_conditions`], which applies the legacy
+///   default-sentinel heuristic to `atmosphere`. solve-json goes through
+///   [`crate::cli_api::TrajectorySolver::new_with_resolved_station_atmosphere`] and trusts a
+///   supplied station temperature/pressure as given. Feeding both surfaces 15 °C /
+///   1013.25 hPa at 2000 m is about a 0.29 MOA disagreement on a 300 m zero.
+/// * Target frame. solve-json's documented contract (`docs/SOLVE_JSON_V1.md`) is
+///   `WorldVertical` — an absolute height above the ground datum, with inclined zeroing
+///   projected into the world frame — not this export's `SightLine`.
+///
+/// A caller that needs solve-json's semantics over a C ABI should use the JSON bridge
+/// (`crate::bridge`, `src/bridge/ffi.rs`) rather than this export.
 ///
 /// # Safety
 ///

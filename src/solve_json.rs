@@ -415,6 +415,19 @@ pub enum DropsReferenceV1 {
 }
 
 /// Atmospheric station conditions.
+///
+/// Every field is `Option` behind a presence-preserving deserializer, so omission is stated
+/// directly on the wire and a SUPPLIED value is always authoritative — solve-json builds
+/// through [`crate::cli_api::TrajectorySolver::new_with_resolved_station_atmosphere`] and
+/// never re-interprets it (MBA-1397). In particular `temperature_k` of exactly 288.15 K or
+/// `pressure_pa` of exactly 101325 Pa mean those readings, not "omitted".
+///
+/// The C ABI (`crate::ffi`, behind the `ffi` feature) deliberately does NOT behave this way:
+/// `FFIAtmosphericConditions` is a `repr(C)` struct of plain doubles with no
+/// presence channel, so it keeps the legacy default-sentinel heuristic in which those same
+/// values at a nonzero altitude mean "resolve the ICAO standard here". The two surfaces
+/// therefore disagree on identical nominal inputs (~0.29 MOA on a 300 m zero at 2000 m); see
+/// that module's documentation for the full account.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtmosphereV1 {
