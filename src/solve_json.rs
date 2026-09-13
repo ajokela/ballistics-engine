@@ -1733,7 +1733,7 @@ fn validate_solver(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
 
 /// Every member name `effects` accepts on the v1 wire, in declaration order.
 ///
-/// One list, because there are two readers: [`validate_effects`] rejects anything outside it,
+/// One list, because there are two readers: `validate_effects` rejects anything outside it,
 /// and the MCP `solve` tool publishes an `inputSchema` with `additionalProperties: false` over
 /// the same vocabulary. Those drifted apart once already — `wind_shear_model` reached the JSON
 /// wire in 0.36.0 and never reached the MCP schema, so an MCP caller could not ask for shear

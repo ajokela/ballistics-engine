@@ -194,6 +194,18 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
         }
     };
 
+    // MBA-959: generate the aerodynamic-jump flag rather than pinning it, so the Litz
+    // launch-angle path is fuzzed instead of only its disabled default. Unlike the three
+    // mutually-exclusive effects above it composes with all of them -- there is no
+    // suppression rule between the jump and magnus/coriolis/enhanced spin drift -- so it is
+    // an independent draw. Absent as often as present, because the omitted field is its own
+    // contract (no echo, byte-identical response) and deserves the coverage.
+    let aerodynamic_jump = match u.int_in_range(0u8..=2)? {
+        0 => None,
+        1 => Some(false),
+        _ => Some(true),
+    };
+
     Ok(SolveRequestV1 {
         schema_version: SchemaVersionV1,
         projectile: ProjectileV1 {
@@ -267,6 +279,7 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             coriolis: Some(coriolis),
             enhanced_spin_drift: Some(enhanced_spin_drift),
             wind_shear_model,
+            aerodynamic_jump,
         },
         sampling: SamplingV1 {
             interval_m: Some(ranged(u, 0.05, 25.0)?),
@@ -368,6 +381,7 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
                 request.effects.magnus = maybe_bool(u)?;
                 request.effects.coriolis = maybe_bool(u)?;
                 request.effects.enhanced_spin_drift = maybe_bool(u)?;
+                request.effects.aerodynamic_jump = maybe_bool(u)?;
             }
             26 => {
                 // A tiny but finite interval exercises the checked response-resource path. It
