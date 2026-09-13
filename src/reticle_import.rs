@@ -20,6 +20,12 @@
 //! * `line`, `circle`, `rect`, `grid`, and any unknown future element type are pure
 //!   decoration and are dropped.
 //!
+//! **Nothing is dropped silently.** [`import_ventum_reticle_with_report`] returns a
+//! [`VentumImportReport`] tallying every element that produced no hold point, so a caller can
+//! say "this document drew 6 things I cannot aim with" instead of handing back a reticle that
+//! is quietly missing hold points and looks merely sparse. [`import_ventum_reticle`] is that
+//! function with the report discarded; it exists for callers that genuinely do not care.
+//!
 //! # Coordinate and unit conventions
 //!
 //! Ventum uses `+x = right`, `+y = down`, origin at the reticle center — identical to the
@@ -32,7 +38,7 @@
 //! downward (a 4-unit holdover is `y: 4`; a stadia mark 5 up is `y: -5`), which is plain SVG
 //! screen convention and happens to match shooter intuition.
 //!
-//! ## Arc angles (not yet consumed — recorded so the mapping is not guessed later)
+//! ## Arc angles
 //!
 //! Ventum draws arcs as a `circle` element carrying `start`/`end` angles. Those angles are
 //! measured from 3 o'clock (`0° = +x`, right) and sweep **CLOCKWISE**:
@@ -58,9 +64,25 @@
 //! formula above, and the arc's 140° clockwise sweep passes through 270° (the top), leaving the
 //! gap at the bottom.
 //!
-//! This module currently drops `circle` as decoration (see above), so nothing here depends on
-//! these angles yet; the note exists so that whoever makes arcs hold-bearing does not have to
-//! re-derive the convention.
+//! ## Why an arc still contributes no mark (MBA-1441)
+//!
+//! A horseshoe's apex and its two tips are real aiming references on Vortex-style reticles,
+//! so "does an arc carry a hold?" has no single answer — and the Ventum format gives the
+//! document no way to say. A `circle` with a sweep is spelled identically whether it is a
+//! ranging horseshoe or a decorative ring segment, and turning every one of them into three
+//! marks would do two bad things at once: fabricate aiming points a reticle may not have, and
+//! silently change what [`hold_point_in_reticle`](crate::reticle::hold_point_in_reticle)
+//! answers for every Ventum reticle already imported since 0.32.0, since the nearest mark it
+//! reports would start snapping to invented geometry. Inventing holds out of decoration is the
+//! same sin as dropping holds without saying so.
+//!
+//! So an arc is still not a mark — but it is no longer a silence either. Each one is resolved
+//! (using exactly the convention above, which is why the convention was recorded) into the
+//! three points a shooter could actually index on, and handed back on the report as a
+//! [`VentumArc`]: its two tips and its apex, in the engine's own `right_mil` / `down_mil`. A
+//! caller who knows their horseshoe is hold-bearing turns them into marks with three
+//! [`ReticleMark::new`] calls and never re-derives the clockwise/`+y`-down trap; a caller who
+//! does not, at least learns the document drew something they cannot aim with.
 //!
 //! # Safety
 //!
@@ -72,6 +94,7 @@
 
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::reticle::{
@@ -87,6 +110,99 @@ pub const MOA_TO_MIL: f64 = 0.2908882;
 /// treated as free-floating decoration and dropped.
 pub const DEFAULT_TEXT_BIND_MIL: f64 = 1.0;
 
+/// The tag [`VentumImportReport::dropped_element_types`] uses for a `circle` that carries a
+/// sweep. The format has no `arc` element — an arc IS a `circle` with `start`/`end` — but the
+/// two are worth telling apart in a report, because only one of them might have been a hold.
+pub const ARC_TAG: &str = "arc";
+
+/// A point on an imported arc, in the engine's own mark coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct VentumArcPoint {
+    /// Milliradians right of the optical center (negative = left).
+    pub right_mil: f64,
+    /// Milliradians below the optical center (negative = above).
+    pub down_mil: f64,
+}
+
+/// One `circle` element that carried a sweep — a horseshoe or other arc — resolved into the
+/// points a shooter could index on, but NOT imported as marks. See the module documentation
+/// for why the decision is left to the caller.
+///
+/// Every field is in milliradians from the optical center (angles excepted, which are the
+/// document's own degrees), so
+/// `ReticleMark::new(arc.apex.down_mil, arc.apex.right_mil, MarkKind::Dot)` is all it takes to
+/// adopt one.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct VentumArc {
+    /// The arc's center — the point its radius is measured from, NOT an aiming point.
+    pub center: VentumArcPoint,
+    /// Arc radius in milliradians.
+    pub radius_mil: f64,
+    /// The document's `start` angle, degrees, measured from 3 o'clock and sweeping clockwise
+    /// (so 270° is the TOP of the reticle — see the module documentation).
+    pub start_degrees: f64,
+    /// The document's `end` angle, same convention.
+    pub end_degrees: f64,
+    /// How far the arc sweeps clockwise from `start` to `end`, in `(0, 360)` degrees. A
+    /// `circle` whose angles describe a whole revolution is a ring, not an arc, and never
+    /// appears here.
+    pub sweep_degrees: f64,
+    /// Where the arc begins: the visible tip at `start_degrees`.
+    pub start_tip: VentumArcPoint,
+    /// The sweep midpoint — a horseshoe's apex, the closed end opposite its gap. The one
+    /// point on an arc a shooter can index without measuring.
+    pub apex: VentumArcPoint,
+    /// Where the arc ends: the visible tip at `end_degrees`.
+    pub end_tip: VentumArcPoint,
+}
+
+/// What an import could not turn into a hold point, so a sparse reticle is explained rather
+/// than merely suspicious. Returned by [`import_ventum_reticle_with_report`].
+///
+/// # How the counts are taken
+///
+/// `arc` and `circle` entries count *expanded* instances, because this report resolves each
+/// instance's own geometry and a mirrored pair of horseshoes is genuinely two of them.
+/// `line`, `rect`, `grid`, `text` and unknown types count elements *as the document writes
+/// them* — a `repeat` on one of those counts once, since the report carries no geometry to
+/// distinguish a dropped shape's copies from the shape itself.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct VentumImportReport {
+    /// How many elements produced no hold point — the sum of [`Self::dropped_element_types`].
+    /// Zero means the whole document is in the returned [`ReticleDescription`].
+    pub dropped_elements: usize,
+    /// Per-type counts of that drop, sorted by tag so the report is deterministic. Tags are
+    /// the format's own element types, plus [`ARC_TAG`] for a `circle` carrying a sweep and
+    /// `"unknown"` for an element type this module does not know. A `"text"` entry counts
+    /// only UNBOUND text: text that landed on a mark became its label and was not dropped.
+    pub dropped_element_types: Vec<(String, usize)>,
+    /// Every dropped arc, resolved. See [`VentumArc`] and the module documentation.
+    pub arcs: Vec<VentumArc>,
+    /// Arcs that could not be resolved into points because the element omitted `r` or gave a
+    /// non-finite coordinate. They are counted in [`Self::dropped_element_types`] under
+    /// [`ARC_TAG`] like any other, so `arcs.len()` plus this equals that tally — the
+    /// discrepancy is stated rather than left to be noticed.
+    pub arcs_unresolved: usize,
+}
+
+impl VentumImportReport {
+    /// Whether anything at all was dropped. A caller that only wants to know "should I warn
+    /// the user" asks this.
+    pub fn is_empty(&self) -> bool {
+        self.dropped_elements == 0
+    }
+
+    /// The per-type tally as `"arc x1, line x3"`, for a one-line notice. Empty string when
+    /// nothing was dropped.
+    pub fn tally(&self) -> String {
+        self.dropped_element_types
+            .iter()
+            .map(|(tag, count)| format!("{tag} x{count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Import a Ventum reticle spec into a [`ReticleDescription`].
 ///
 /// `json` is a single Ventum reticle object (see the module documentation for the fields).
@@ -100,11 +216,31 @@ pub const DEFAULT_TEXT_BIND_MIL: f64 = 1.0;
 /// reports as [`ReticleError::NoMarks`]). It DOES enforce
 /// [`crate::reticle::MAX_RETICLE_MARKS`] during expansion.
 ///
+/// Use [`import_ventum_reticle_with_report`] when you want to know what the document drew
+/// that could not become a hold point — which is most callers, since a reticle missing its
+/// arcs looks sparse rather than wrong.
+///
 /// # Errors
 ///
 /// Returns [`ReticleError::InvalidSpec`] if `json` cannot be parsed as a Ventum reticle,
 /// and [`ReticleError::TooManyMarks`] if repeat expansion would exceed the mark cap.
 pub fn import_ventum_reticle(json: &str) -> Result<ReticleDescription, ReticleError> {
+    import_ventum_reticle_with_report(json).map(|(description, _)| description)
+}
+
+/// Import a Ventum reticle spec, also returning a [`VentumImportReport`] of everything the
+/// hold/decoration split left behind.
+///
+/// Identical to [`import_ventum_reticle`] in every other respect; that function is this one
+/// with the report discarded. The description is byte-for-byte what it has returned since
+/// 0.32.0 — resolving arcs added a report, not a mark.
+///
+/// # Errors
+///
+/// As [`import_ventum_reticle`].
+pub fn import_ventum_reticle_with_report(
+    json: &str,
+) -> Result<(ReticleDescription, VentumImportReport), ReticleError> {
     let reticle: VentumReticle =
         serde_json::from_str(json).map_err(|e| ReticleError::InvalidSpec(e.to_string()))?;
 
@@ -115,11 +251,16 @@ pub fn import_ventum_reticle(json: &str) -> Result<ReticleDescription, ReticleEr
 
     // Expand every element's `repeat` into concrete, unit-scaled instances first, with the
     // mark cap enforced during expansion.
-    let instances = expand_elements(&reticle.spec.0, scale)?;
+    let mut dropped: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let instances = expand_elements(&reticle.spec.0, scale, &mut dropped)?;
 
-    // Classify: dot/tick become marks; text is collected for nearest-mark binding.
+    // Classify: dot/tick become marks; text is collected for nearest-mark binding; a circle
+    // is decoration that gets counted, and an arc is decoration that gets counted AND
+    // resolved.
     let mut marks: Vec<ReticleMark> = Vec::new();
     let mut texts: Vec<TextLabel> = Vec::new();
+    let mut arcs: Vec<VentumArc> = Vec::new();
+    let mut arcs_unresolved = 0usize;
     for instance in instances {
         match instance.role {
             Role::Dot => marks.push(ReticleMark::new(instance.down, instance.right, MarkKind::Dot)),
@@ -131,10 +272,29 @@ pub fn import_ventum_reticle(json: &str) -> Result<ReticleDescription, ReticleEr
                 right: instance.right,
                 label,
             }),
+            Role::Circle(circle) => {
+                let tag = if circle.sweep_degrees().is_some() {
+                    ARC_TAG
+                } else {
+                    "circle"
+                };
+                *dropped.entry(tag).or_insert(0) += 1;
+                if tag == ARC_TAG {
+                    match circle.resolve(instance.down, instance.right) {
+                        Some(arc) => arcs.push(arc),
+                        None => arcs_unresolved += 1,
+                    }
+                }
+            }
         }
     }
 
-    bind_text_labels(&mut marks, &texts);
+    // Text that found no mark inside the bind radius is dropped, and that is a lost label,
+    // not a lost shape — count it here, where binding is what decides it.
+    let unbound = bind_text_labels(&mut marks, &texts);
+    if unbound > 0 {
+        *dropped.entry("text").or_insert(0) += unbound;
+    }
 
     // `ref_magnification` is meaningful only for SFP; an FFP reticle's subtensions do not
     // depend on magnification, so we normalize its reference to 1.0 (as the engine does).
@@ -143,12 +303,25 @@ pub fn import_ventum_reticle(json: &str) -> Result<ReticleDescription, ReticleEr
         FocalPlane::First => 1.0,
     };
 
-    Ok(ReticleDescription {
-        name: reticle.name,
-        focal_plane: reticle.plane,
-        reference_magnification,
-        marks,
-    })
+    let report = VentumImportReport {
+        dropped_elements: dropped.values().sum(),
+        dropped_element_types: dropped
+            .into_iter()
+            .map(|(tag, count)| (tag.to_string(), count))
+            .collect(),
+        arcs,
+        arcs_unresolved,
+    };
+
+    Ok((
+        ReticleDescription {
+            name: reticle.name,
+            focal_plane: reticle.plane,
+            reference_magnification,
+            marks,
+        },
+        report,
+    ))
 }
 
 /// A `text` element after expansion: its position (already unit-scaled, in milliradians)
@@ -162,7 +335,12 @@ struct TextLabel {
 /// Bind each collected text to the nearest mark within [`DEFAULT_TEXT_BIND_MIL`], setting
 /// that mark's label. Text with no mark inside the cap is dropped. When two texts bind to
 /// the same mark the later one wins.
-fn bind_text_labels(marks: &mut [ReticleMark], texts: &[TextLabel]) {
+///
+/// Returns how many texts bound to nothing, so MBA-1441's report can say a label was lost
+/// rather than leave a mark looking as though the document never named it. A reticle with no
+/// marks at all drops every text, which is the same answer by a shorter route.
+fn bind_text_labels(marks: &mut [ReticleMark], texts: &[TextLabel]) -> usize {
+    let mut unbound = 0usize;
     for text in texts {
         let mut nearest: Option<usize> = None;
         let mut nearest_distance = f64::INFINITY;
@@ -175,12 +353,14 @@ fn bind_text_labels(marks: &mut [ReticleMark], texts: &[TextLabel]) {
                 nearest = Some(index);
             }
         }
-        if let Some(index) = nearest {
-            if nearest_distance <= DEFAULT_TEXT_BIND_MIL {
+        match nearest {
+            Some(index) if nearest_distance <= DEFAULT_TEXT_BIND_MIL => {
                 marks[index].label = Some(text.label.clone());
             }
+            _ => unbound += 1,
         }
     }
+    unbound
 }
 
 /// The role an expanded point instance plays once classified.
@@ -190,6 +370,109 @@ enum Role {
     Tick,
     /// A text label carrying its (possibly auto-numbered) string.
     Text(String),
+    /// A `circle` element, with the sweep that makes it an arc when it has one. Not a hold —
+    /// carried through expansion so MBA-1441's report can count and resolve each instance.
+    Circle(CircleShape),
+}
+
+impl Role {
+    /// This role as it appears in a [`Repeat`]'s mirrored twin.
+    ///
+    /// Only an arc changes: mirroring reflects its angles AND reverses its direction of
+    /// travel, so the clockwise sweep `start -> end` becomes the clockwise sweep
+    /// `f(end) -> f(start)`. Reflecting about the vertical axis (a stepped `x`, so
+    /// `right -> -right`) maps `theta -> 180 - theta`; about the horizontal axis (a stepped
+    /// `y`, so `down -> -down`) it maps `theta -> -theta`. Both fall straight out of
+    /// `(cos t, sin t)` under the module's `+y`-down convention; neither is a guess.
+    ///
+    /// Dots, ticks and text are unchanged, which is what keeps mirrored ladder labels
+    /// unsigned (see [`expand_point`]).
+    fn mirrored(&self, axis: Axis) -> Role {
+        match self {
+            Role::Circle(circle) => Role::Circle(circle.mirrored(axis)),
+            other => other.clone(),
+        }
+    }
+}
+
+/// A `circle` element's geometry, already unit-scaled. The center is carried by the
+/// [`ExpandedInstance`] around this, so only the radius and the optional sweep live here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CircleShape {
+    /// Radius in milliradians, or `None` when the element omitted `r` (or gave a value that
+    /// is not a usable length). Such an element is still counted; it just cannot be resolved.
+    radius_mil: Option<f64>,
+    /// The document's `start`/`end` angles in degrees, when it declared both. `None` is a
+    /// plain ring, which is decoration under any reading and gets no [`VentumArc`].
+    angles: Option<(f64, f64)>,
+}
+
+impl CircleShape {
+    /// How far this circle sweeps clockwise, in `(0, 360)` degrees, or `None` when it is a
+    /// full ring — either because it declared no angles, or because the angles it declared
+    /// describe a whole revolution (`start == end`, or a multiple of 360 apart).
+    fn sweep_degrees(&self) -> Option<f64> {
+        let (start, end) = self.angles?;
+        if !start.is_finite() || !end.is_finite() {
+            return None;
+        }
+        let sweep = (end - start).rem_euclid(360.0);
+        // A zero remainder is a closed circle drawn as an arc, not a degenerate arc.
+        (sweep > 0.0).then_some(sweep)
+    }
+
+    /// This shape reflected for a mirrored [`Repeat`] twin. See [`Role::mirrored`] for the
+    /// derivation; note the swap, which is the direction reversal.
+    fn mirrored(&self, axis: Axis) -> CircleShape {
+        let angles = self.angles.map(|(start, end)| match axis {
+            Axis::X => (180.0 - end, 180.0 - start),
+            Axis::Y => (-end, -start),
+        });
+        CircleShape {
+            radius_mil: self.radius_mil,
+            angles,
+        }
+    }
+
+    /// Resolve this circle, centered at `(down, right)` milliradians, into the arc points a
+    /// caller could adopt as holds. `None` when it is a ring, or when the element gave no
+    /// usable radius or center — the caller counts those separately rather than reporting a
+    /// zero-radius arc whose apex and tips all sit on the center.
+    fn resolve(&self, down: f64, right: f64) -> Option<VentumArc> {
+        let sweep = self.sweep_degrees()?;
+        let radius = self.radius_mil?;
+        if !radius.is_finite() || radius <= 0.0 || !down.is_finite() || !right.is_finite() {
+            return None;
+        }
+        let (start, end) = self.angles?;
+
+        // x = r*cos(theta), y = r*sin(theta) about the center, degrees, +y DOWN — the module
+        // documentation's formula, verified against the format author's reference diagram.
+        // The PLUS on the sine is the whole trap: a y-up convention negates it.
+        let point = |degrees: f64| {
+            let radians = degrees.to_radians();
+            VentumArcPoint {
+                right_mil: right + radius * radians.cos(),
+                down_mil: down + radius * radians.sin(),
+            }
+        };
+
+        Some(VentumArc {
+            center: VentumArcPoint {
+                right_mil: right,
+                down_mil: down,
+            },
+            radius_mil: radius,
+            start_degrees: start,
+            end_degrees: end,
+            sweep_degrees: sweep,
+            start_tip: point(start),
+            // Halfway along the sweep, travelling clockwise from `start` — for a horseshoe,
+            // the closed end opposite its gap.
+            apex: point(start + sweep / 2.0),
+            end_tip: point(end),
+        })
+    }
 }
 
 /// One expanded point instance: a hold-bearing mark or a text label, positioned in
@@ -208,6 +491,7 @@ enum PointRole<'a> {
     Dot,
     Tick,
     Text(&'a str),
+    Circle(CircleShape),
 }
 
 impl PointRole<'_> {
@@ -218,6 +502,7 @@ impl PointRole<'_> {
             PointRole::Dot => Role::Dot,
             PointRole::Tick => Role::Tick,
             PointRole::Text(base) => Role::Text(ladder_label.unwrap_or_else(|| (*base).to_string())),
+            PointRole::Circle(shape) => Role::Circle(*shape),
         }
     }
 
@@ -234,9 +519,17 @@ impl PointRole<'_> {
 }
 
 /// Expand every element's `repeat` into concrete instances, applying `scale` to positions
-/// and enforcing the mark cap along the way. Decoration and unknown element types are
-/// dropped (not emitted, not counted).
-fn expand_elements(elements: &[Element], scale: f64) -> Result<Vec<ExpandedInstance>, ReticleError> {
+/// and enforcing the mark cap along the way.
+///
+/// MBA-1441: nothing is dropped without a tally any more. `line`/`rect`/`grid`/unknown carry
+/// no geometry this module reads, so each is counted once into `dropped` and skipped;
+/// `circle` goes through the expander like a point element, because an arc's resolved apex
+/// and tips are per-instance and a mirrored pair of horseshoes is two distinct arcs.
+fn expand_elements(
+    elements: &[Element],
+    scale: f64,
+    dropped: &mut BTreeMap<&'static str, usize>,
+) -> Result<Vec<ExpandedInstance>, ReticleError> {
     let mut out: Vec<ExpandedInstance> = Vec::new();
     for element in elements {
         let (x, y, repeat, base) = match element {
@@ -245,12 +538,42 @@ fn expand_elements(elements: &[Element], scale: f64) -> Result<Vec<ExpandedInsta
             Element::Text {
                 x, y, text, repeat,
             } => (*x, *y, repeat.as_ref(), PointRole::Text(text)),
-            // Decoration and unknown future element types carry no hold and no label.
-            Element::Line {}
-            | Element::Circle {}
-            | Element::Rect {}
-            | Element::Grid {}
-            | Element::Unknown => continue,
+            Element::Circle {
+                x,
+                y,
+                r,
+                start,
+                end,
+                repeat,
+            } => (
+                x.unwrap_or(0.0),
+                y.unwrap_or(0.0),
+                repeat.as_ref(),
+                PointRole::Circle(CircleShape {
+                    // The radius is a length in the reticle's unit, so it scales with the
+                    // coordinates; the angles are angles and do not.
+                    radius_mil: r.map(|r| r * scale),
+                    angles: start.zip(*end),
+                }),
+            ),
+            // Decoration this module reads no geometry from, and element types it has never
+            // heard of. Counted, then skipped.
+            Element::Line {} => {
+                *dropped.entry("line").or_insert(0) += 1;
+                continue;
+            }
+            Element::Rect {} => {
+                *dropped.entry("rect").or_insert(0) += 1;
+                continue;
+            }
+            Element::Grid {} => {
+                *dropped.entry("grid").or_insert(0) += 1;
+                continue;
+            }
+            Element::Unknown => {
+                *dropped.entry("unknown").or_insert(0) += 1;
+                continue;
+            }
         };
         expand_point(x, y, repeat, scale, base, &mut out)?;
     }
@@ -304,8 +627,12 @@ fn expand_point(
                 Axis::X => (down, -right),
                 Axis::Y => (-down, right),
             };
-            push_capped(down, right, role.clone(), out)?;
-            push_capped(mirror_down, mirror_right, role, out)?;
+            // MBA-1441: an arc's ANGLES have to be reflected along with its center, or a
+            // mirrored horseshoe reports an apex on the wrong side of itself. Every other
+            // role mirrors to itself, so this is a no-op for the marks.
+            let mirror_role = role.mirrored(repeat.axis);
+            push_capped(down, right, role, out)?;
+            push_capped(mirror_down, mirror_right, mirror_role, out)?;
         } else {
             push_capped(down, right, role, out)?;
         }
@@ -455,8 +782,30 @@ enum Element {
     /// Decoration — dropped. Its geometry fields are ignored (empty struct variant so
     /// serde skips every field).
     Line {},
-    /// Decoration — dropped.
-    Circle {},
+    /// A ring, or — when it carries `start`/`end` — an arc such as a horseshoe. Decoration
+    /// either way: still dropped, but no longer in silence (MBA-1441). Every field is
+    /// optional so a cosmetic ring that names none of them still parses, exactly as it did
+    /// when this variant read nothing at all.
+    Circle {
+        /// Center, `+x` right. `cx` is the schema's other spelling of the same field.
+        #[serde(default, alias = "cx")]
+        x: Option<f64>,
+        /// Center, `+y` down.
+        #[serde(default, alias = "cy")]
+        y: Option<f64>,
+        /// Radius, in the reticle's own unit.
+        #[serde(default)]
+        r: Option<f64>,
+        /// Sweep start in degrees from 3 o'clock, clockwise (see the module documentation —
+        /// 270 is the TOP of the reticle). Present only on an arc.
+        #[serde(default)]
+        start: Option<f64>,
+        /// Sweep end, same convention. An arc needs BOTH: one angle alone describes no sweep.
+        #[serde(default)]
+        end: Option<f64>,
+        #[serde(default)]
+        repeat: Option<Repeat>,
+    },
     /// Decoration — dropped.
     Rect {},
     /// Decoration — dropped.
@@ -684,7 +1033,9 @@ mod tests {
                 label_step: 1.0,
             }),
         }];
-        let instances = expand_elements(&elements, 1.0).unwrap();
+        let mut dropped = BTreeMap::new();
+        let instances = expand_elements(&elements, 1.0, &mut dropped).unwrap();
+        assert!(dropped.is_empty(), "a text ladder drops nothing");
         assert_eq!(
             instances,
             vec![
@@ -746,6 +1097,223 @@ mod tests {
         assert_eq!(desc.marks.len(), 1);
         assert_eq!(desc.marks[0].down_mil, 2.0);
         assert_eq!(desc.marks[0].kind, MarkKind::Dot);
+    }
+
+    // ----------------------------------------------------------------------------------
+    // MBA-1441: dropped elements are reported, and an arc is resolved rather than guessed.
+    // ----------------------------------------------------------------------------------
+
+    /// The author's reference horseshoe: `start: 200, end: 340` opens DOWNWARD, so its apex
+    /// is at 270 degrees, which is the TOP of the reticle — the one consequence of the
+    /// clockwise/`+y`-down convention that is opposite to a compass. This test is the
+    /// convention's regression guard: flip the sine's sign and the apex lands at the bottom.
+    #[test]
+    fn a_horseshoe_apex_resolves_to_the_top_of_the_reticle() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"H","unit":"mil","spec":[
+                {"type":"dot","x":0,"y":1},
+                {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(report.arcs.len(), 1, "the horseshoe is reported");
+        let arc = report.arcs[0];
+        assert!((arc.sweep_degrees - 140.0).abs() < 1e-9, "200 -> 340 clockwise is 140 deg");
+
+        // Apex at 270 deg, radius 2: (cos 270, sin 270) = (0, -1) with +y DOWN, so 2 mil UP.
+        assert!(arc.apex.right_mil.abs() < 1e-9, "apex is on the vertical axis");
+        assert!(
+            (arc.apex.down_mil + 2.0).abs() < 1e-9,
+            "apex must be 2 mil ABOVE center (down_mil -2), not below: {:?}",
+            arc.apex
+        );
+        // Both tips sit below the apex and straddle it, leaving the gap at the bottom.
+        assert!(arc.start_tip.right_mil < 0.0, "the 200 deg tip is on the left");
+        assert!(arc.end_tip.right_mil > 0.0, "the 340 deg tip is on the right");
+        for tip in [arc.start_tip, arc.end_tip] {
+            assert!(
+                tip.down_mil > arc.apex.down_mil,
+                "a tip of a downward-opening horseshoe is below its apex: {tip:?}"
+            );
+        }
+    }
+
+    /// An arc is reported, not imported: the description is exactly what it was before this
+    /// existed. Inventing three marks per horseshoe would silently move the nearest mark for
+    /// every Ventum reticle imported since 0.32.0.
+    #[test]
+    fn an_arc_is_reported_but_never_becomes_a_mark() {
+        let spec = |arc: &str| {
+            format!(
+                r#"{{"name":"A","unit":"mil","spec":[{{"type":"tick","x":0,"y":5}}{arc}]}}"#
+            )
+        };
+        let without = import_ventum_reticle(&spec("")).unwrap();
+        let with = import_ventum_reticle(&spec(
+            r#",{"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            without, with,
+            "adding an arc must not change a single imported mark"
+        );
+    }
+
+    /// A full ring is decoration under any reading and gets no arc entry — but it is still
+    /// counted, under its own tag, so "circle x1" and "arc x1" mean different things.
+    #[test]
+    fn a_ring_is_counted_as_a_circle_and_an_arc_as_an_arc() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"R","unit":"mil","spec":[
+                {"type":"dot","x":0,"y":1},
+                {"type":"circle","x":0,"y":0,"r":2},
+                {"type":"circle","x":0,"y":0,"r":3,"start":0,"end":360},
+                {"type":"circle","x":0,"y":0,"r":4,"start":200,"end":340}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            report.dropped_element_types,
+            vec![("arc".to_string(), 1), ("circle".to_string(), 2)],
+            "a whole-revolution sweep is a ring, not an arc"
+        );
+        assert_eq!(report.arcs.len(), 1);
+        assert_eq!(report.dropped_elements, 3);
+    }
+
+    /// The tally names every type the document drew that produced no hold, and unbound text
+    /// is in it: a label that bound to nothing is a lost label, not a lost shape.
+    #[test]
+    fn the_report_tallies_every_dropped_type_including_unbound_text() {
+        let (desc, report) = import_ventum_reticle_with_report(
+            r#"{"name":"D","unit":"mil","spec":[
+                {"type":"dot","x":0,"y":2},
+                {"type":"text","x":0.2,"y":2,"text":"near"},
+                {"type":"text","x":9,"y":9,"text":"far"},
+                {"type":"line","x1":-5,"y1":0,"x2":5,"y2":0},
+                {"type":"line","x1":0,"y1":-5,"x2":0,"y2":5},
+                {"type":"rect","x":-1,"y":-1,"w":2,"h":2},
+                {"type":"grid","x0":-5,"y0":-5,"x1":5,"y1":5,"step":1},
+                {"type":"future_shape","x":0,"y":0}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(desc.marks.len(), 1);
+        assert_eq!(desc.marks[0].label.as_deref(), Some("near"));
+        assert_eq!(
+            report.dropped_element_types,
+            vec![
+                ("grid".to_string(), 1),
+                ("line".to_string(), 2),
+                ("rect".to_string(), 1),
+                ("text".to_string(), 1),
+                ("unknown".to_string(), 1),
+            ]
+        );
+        assert_eq!(report.dropped_elements, 6);
+        assert_eq!(report.tally(), "grid x1, line x2, rect x1, text x1, unknown x1");
+        assert!(!report.is_empty());
+    }
+
+    /// A document that imports whole says so: an empty report is the signal that nothing was
+    /// lost, and it is what the MBR dot tree produces.
+    #[test]
+    fn a_fully_representable_reticle_reports_nothing_dropped() {
+        let json = format!(r#"{{"name":"MBR","plane":"ffp","unit":"mil","spec":{MBR_SPEC}}}"#);
+        let (_, report) = import_ventum_reticle_with_report(&json).unwrap();
+        assert!(report.is_empty(), "MBR is all dots: {report:?}");
+        assert_eq!(report, VentumImportReport::default());
+        assert_eq!(report.tally(), "");
+    }
+
+    /// A mirrored pair of horseshoes is two arcs, and the twin's ANGLES are reflected along
+    /// with its center. Without that, a mirrored horseshoe would report an apex on the wrong
+    /// side of its own arc.
+    #[test]
+    fn a_mirrored_arc_reflects_its_angles_not_just_its_center() {
+        // A horseshoe centered 3 right, opening toward the center line (apex at 0 deg, i.e.
+        // to the RIGHT of its own center), mirrored across the vertical axis.
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"M","unit":"mil","spec":[
+                {"type":"circle","x":3,"y":0,"r":1,"start":290,"end":70,
+                 "repeat":{"axis":"x","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.arcs.len(), 2, "mirror emits both horseshoes");
+        let right = report.arcs.iter().find(|a| a.center.right_mil > 0.0).unwrap();
+        let left = report.arcs.iter().find(|a| a.center.right_mil < 0.0).unwrap();
+
+        // The original's apex is at 0 deg: 1 mil right of its own center, so 4 mil right.
+        assert!((right.apex.right_mil - 4.0).abs() < 1e-9, "{:?}", right.apex);
+        // The twin must be the mirror image: 1 mil LEFT of its center at -3, so -4 — not -2,
+        // which is what an unreflected sweep would give.
+        assert!(
+            (left.apex.right_mil + 4.0).abs() < 1e-9,
+            "mirrored apex must reflect too (got {:?}, an unreflected sweep gives -2)",
+            left.apex
+        );
+        // Reflection preserves the sweep's extent and keeps both apexes on the same row.
+        assert!((left.sweep_degrees - right.sweep_degrees).abs() < 1e-9);
+        assert!((left.apex.down_mil - right.apex.down_mil).abs() < 1e-9);
+    }
+
+    /// An arc the module cannot resolve (no radius) is still counted, and the discrepancy
+    /// between the tally and `arcs.len()` is stated rather than left to be noticed.
+    #[test]
+    fn an_arc_without_a_radius_is_counted_as_unresolved() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"U","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":0,"start":200,"end":340},
+                {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.dropped_element_types, vec![("arc".to_string(), 2)]);
+        assert_eq!(report.arcs.len(), 1);
+        assert_eq!(report.arcs_unresolved, 1);
+        assert_eq!(
+            report.arcs.len() + report.arcs_unresolved,
+            report.dropped_elements,
+            "every counted arc is either resolved or explicitly unresolved"
+        );
+    }
+
+    /// An MOA arc's center and radius scale to milliradians; its angles do not. Scaling the
+    /// angles would rotate the horseshoe by a factor of 3.44.
+    #[test]
+    fn moa_scales_an_arcs_lengths_but_never_its_angles() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"M","unit":"moa","spec":[
+                {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340}
+            ]}"#,
+        )
+        .unwrap();
+        let arc = report.arcs[0];
+        assert!((arc.radius_mil - 2.0 * MOA_TO_MIL).abs() < 1e-9);
+        assert_eq!(arc.start_degrees, 200.0);
+        assert_eq!(arc.end_degrees, 340.0);
+        assert!((arc.sweep_degrees - 140.0).abs() < 1e-9);
+        // Apex still at 270 deg (straight up), now 2 MOA above center.
+        assert!((arc.apex.down_mil + 2.0 * MOA_TO_MIL).abs() < 1e-9);
+    }
+
+    /// `cx`/`cy` is the schema's other spelling of a circle's center, and a circle naming
+    /// neither is centered on the reticle — both must still parse, because they always did.
+    #[test]
+    fn a_circle_accepts_cx_cy_and_defaults_to_the_center() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"C","unit":"mil","spec":[
+                {"type":"circle","cx":1,"cy":2,"r":1,"start":0,"end":180},
+                {"type":"circle","r":1,"start":0,"end":180}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.arcs.len(), 2);
+        assert_eq!(report.arcs[0].center.right_mil, 1.0);
+        assert_eq!(report.arcs[0].center.down_mil, 2.0);
+        assert_eq!(report.arcs[1].center, VentumArcPoint::default());
     }
 
     #[test]

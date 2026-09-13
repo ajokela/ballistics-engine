@@ -682,3 +682,57 @@ fn import_rejects_bad_inputs() {
     let (_, stderr, ok) = run(&["reticle", "import", bad.to_str().unwrap()]);
     assert!(!ok, "malformed import should fail: {stderr}");
 }
+
+/// MBA-1441: an import that could not represent part of the document SAYS so. The failure
+/// this guards is the one the ticket is named for — a Ventum reticle whose horseshoe vanished,
+/// coming back sparse and looking correct.
+#[test]
+fn import_reports_what_it_could_not_represent() {
+    let dir = tempfile_dir("import-report");
+    let path = dir.join("horseshoe.ventum.json");
+    std::fs::write(
+        &path,
+        r#"{"name":"HS","plane":"ffp","unit":"mil","spec":[
+            {"type":"dot","x":0,"y":4},
+            {"type":"line","x1":-5,"y1":0,"x2":5,"y2":0},
+            {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340}
+        ]}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, ok) = run(&["reticle", "import", path.to_str().unwrap(), "-o", "json"]);
+    assert!(ok, "import failed: {stderr}");
+    // The tally names both dropped types and their count.
+    assert!(
+        stderr.contains("2 element(s) carry no hold point"),
+        "missing drop tally: {stderr}"
+    );
+    assert!(stderr.contains("arc x1"), "arc not named in the tally: {stderr}");
+    assert!(stderr.contains("line x1"), "line not named in the tally: {stderr}");
+    // The horseshoe's apex is printed in shooter terms: 2 mil UP (270 degrees is the top).
+    assert!(
+        stderr.contains("apex 0.00 / 2.00 up mil"),
+        "arc apex not reported, or reported on the wrong side: {stderr}"
+    );
+
+    // stdout is still the formatter verbatim — the notice must never contaminate a piped
+    // document (the same contract `import_output_is_the_shared_formatter_verbatim` pins).
+    let parsed: ReticleDescription = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed.marks.len(), 1, "the arc must not have become marks");
+}
+
+/// The other half of the contract: a document that imports whole stays quiet. A notice on
+/// every import would train the user to ignore it.
+#[test]
+fn import_is_silent_when_nothing_was_dropped() {
+    let dir = tempfile_dir("import-quiet");
+    let path = dir.join("mbr.ventum.json");
+    std::fs::write(&path, VENTUM_MBR).unwrap();
+
+    let (_, stderr, ok) = run(&["reticle", "import", path.to_str().unwrap()]);
+    assert!(ok, "import failed: {stderr}");
+    assert!(
+        !stderr.contains("carry no hold point"),
+        "a fully imported reticle must not warn: {stderr}"
+    );
+}

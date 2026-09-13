@@ -5,6 +5,46 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`reticle import` now says what it could not represent (MBA-1441).** The Ventum importer
+  treats `circle` as decoration, and in that format an ARC is a `circle` carrying `start`/`end`
+  angles — so a horseshoe, a real and often hold-bearing reticle feature, imported as nothing
+  at all and nothing told the caller. A mostly-decorative reticle came back sparse and looked
+  correct.
+
+  New `reticle_import::import_ventum_reticle_with_report` returns a `VentumImportReport`
+  alongside the description: a per-type tally of every element that produced no hold point
+  (`arc`, `circle`, `line`, `rect`, `grid`, unknown types, and text that bound to no mark), and
+  each dropped arc resolved into the three points a shooter could index on — its two tips and
+  its apex — in the engine's own `right_mil`/`down_mil`. `reticle import` prints that on
+  stderr; its stdout stays the shared formatter's output verbatim, so piping `-o json` is
+  unaffected.
+
+  Arcs still contribute no marks, deliberately. The format cannot declare whether a horseshoe's
+  apex is an aiming point, and a ranging horseshoe is spelled identically to a decorative ring
+  segment; inventing three marks per arc would fabricate holds and would silently change what
+  `hold_point_in_reticle` answers for every Ventum reticle imported since 0.32.0. The report
+  hands a caller who knows their own reticle the exact coordinates instead. An imported
+  description is byte-identical to earlier engines.
+
+- **A summary form for the browser terminal's CSV (MBA-1433).** Native's trajectory CSV is two
+  documents and selects between them with `--full`: absent, a `metric,value,unit` summary;
+  present, the per-point table. The WASM terminal's `--full` sets sampling density instead, so
+  it only ever emitted the point table — and every field that lives solely in the summary was
+  structurally unreachable from a browser build. That is how `zero_angle_degrees` came to be
+  reported missing from the browser: the JSON half was fixed in 0.30.0, the CSV half had
+  nowhere to go.
+
+  The summary now has its own spelling, `trajectory -o csv --csv-summary`, rather than
+  repointing `--full` at the document shape: a terminal CSV without the new flag is
+  byte-identical to earlier builds, which is what existing terminal-CSV parsers depend on. The
+  rows are native's — same names, order, precision and unit conversions — with two documented
+  exceptions: the terminal emits no `stability_coefficient` and no `spin_drift` row, because it
+  derives neither quantity on any of its output formats. `--csv-summary` is rejected with
+  `-o table` and `-o json` rather than accepted and ignored.
+
 ## [0.38.0] - 2026-09-13
 
 ### Breaking
