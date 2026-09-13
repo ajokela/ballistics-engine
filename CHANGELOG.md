@@ -5,6 +5,25 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A summary form for the browser terminal's CSV (MBA-1433).** Native's trajectory CSV is two
+  documents and selects between them with `--full`: absent, a `metric,value,unit` summary;
+  present, the per-point table. The WASM terminal's `--full` sets sampling density instead, so
+  it only ever emitted the point table — and every field that lives solely in the summary was
+  structurally unreachable from a browser build. That is how `zero_angle_degrees` came to be
+  reported missing from the browser: the JSON half was fixed in 0.30.0, the CSV half had
+  nowhere to go.
+
+  The summary now has its own spelling, `trajectory -o csv --csv-summary`, rather than
+  repointing `--full` at the document shape: a terminal CSV without the new flag is
+  byte-identical to earlier builds, which is what existing terminal-CSV parsers depend on. The
+  rows are native's — same names, order, precision and unit conversions — with two documented
+  exceptions: the terminal emits no `stability_coefficient` and no `spin_drift` row, because it
+  derives neither quantity on any of its output formats. `--csv-summary` is rejected with
+  `-o table` and `-o json` rather than accepted and ignored.
+
 ## [0.38.0] - 2026-09-13
 
 ### Breaking

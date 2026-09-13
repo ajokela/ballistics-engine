@@ -4092,6 +4092,29 @@ two do **not** share a reference despite both being "vertical".
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o csv > trajectory.csv
 ```
 
+**Two documents, not one.** `-o csv` emits either of two shapes, and which one you get is
+part of the contract:
+
+- **Summary** (the default, no `--full`): a `metric,value,unit` header
+  followed by one row per summary quantity — `max_range`, `max_height`, `time_of_flight`,
+  `impact_velocity`, `impact_energy`, plus `stability_coefficient`, `spin_drift` and
+  `zero_angle_degrees` when the run produced them. Distances are `yd`/`m` throughout this
+  document, including `max_height` (the point table uses inches/centimeters for drop).
+- **Point table** (`--full`): one row per trajectory point, under a column header.
+  `--sample-trajectory` does not select this document — it changes which points the table
+  holds once `--full` has asked for it. There is no summary row here; adding one would break
+  every parser reading this as a uniform table.
+
+**WASM (MBA-1433):** the browser terminal's `--full` sets sampling density rather than the
+document shape, so it selects the summary form with its own flag: `trajectory -o csv
+--csv-summary`. Without that flag the terminal's CSV is the point table exactly as before —
+existing invocations are byte-identical. `--csv-summary` is rejected with `-o table` and `-o
+json` (both already carry their summary) rather than accepted and ignored. Its rows are
+native's, byte for byte, with two documented exceptions: the terminal emits no
+`stability_coefficient` and no `spin_drift` row, because it computes neither quantity on any
+of its output formats — native derives them from the station conditions it resolved for the
+solve, which this surface hands to the solver rather than resolving itself.
+
 ### PDF Dope Card Format
 Generate a printable dope card with two-column layout, color-coded values, and alternating row stripes for field readability:
 

@@ -1165,6 +1165,14 @@ impl WasmBallistics {
         let mut temperature_supplied = false;
         let mut output_format = OutputFormat::Table;
         let mut full = false;
+        // MBA-1433: select the CSV *document shape*. Native picks between its two CSV forms
+        // with --full (absent = the `metric,value,unit` summary, present = the point table);
+        // here --full only sets sampling density, so without a separate flag the summary form
+        // — and therefore every summary field, zero_angle_degrees included — is unreachable
+        // from the browser. A new flag rather than a re-use of --full: repointing --full at
+        // the document shape would change what an existing `trajectory -o csv` invocation
+        // emits, and the contract is that those stay byte-identical.
+        let mut csv_summary = false;
         // MBA-1427: per-point effective drag coefficient in -o json (the WASM half of
         // MBA-1423, which shipped native-only — and whose requester runs this build).
         let mut with_drag_coefficient = false;
@@ -1500,6 +1508,7 @@ impl WasmBallistics {
                     }
                 }
                 "--full" => full = true,
+                "--csv-summary" => csv_summary = true,
                 "--with-drag-coefficient" => with_drag_coefficient = true,
                 "--auto-zero" | "-z" => {
                     if i + 1 < args.len() {
@@ -1828,6 +1837,17 @@ impl WasmBallistics {
                 _ => {}
             }
             i += 1;
+        }
+
+        // MBA-1433: --csv-summary changes the shape of a CSV document and has no meaning for
+        // the other two formats. Refuse it rather than accept-and-ignore, which is how the
+        // caller who reported the missing zero angle came to believe the field was absent
+        // from the build rather than from the format they asked for.
+        if csv_summary && !matches!(output_format, OutputFormat::Csv) {
+            return Err(JsValue::from_str(
+                "--csv-summary applies only to -o csv (the table and JSON forms already \
+                 carry their summary)",
+            ));
         }
 
         // MBA-1411: validate the per-call DSF table (if any) before doing any solve work —
@@ -2632,6 +2652,11 @@ impl WasmBallistics {
                         target_drops_cos,
                         windage_cf,
                     ),
+                    // MBA-1433: two CSV forms, as native has — the point table by default
+                    // (unchanged), the `metric,value,unit` summary under --csv-summary.
+                    OutputFormat::Csv if csv_summary => {
+                        Self::format_trajectory_csv_summary(&result, units, solved_zero_angle_deg)
+                    }
                     OutputFormat::Csv => self.format_trajectory_csv(
                         &result,
                         units,
@@ -6902,6 +6927,90 @@ impl WasmBallistics {
             .unwrap_or_else(|_| "Error formatting JSON".to_string())
     }
 
+    /// MBA-1433: the terminal's second CSV form — native's `metric,value,unit` summary
+    /// document, reachable with `--csv-summary`.
+    ///
+    /// Native's trajectory CSV has always had two shapes and picks between them with
+    /// `--full`; the browser's `--full` sets sampling density instead, so until this flag
+    /// existed the summary shape had no spelling here at all and every field that lives only
+    /// in it — `zero_angle_degrees` above all, which is what an external consumer reported
+    /// missing — was structurally unreachable from a browser build. Injecting those rows into
+    /// the point table instead would have corrupted it for everyone parsing it, so this is a
+    /// separate document, not a header.
+    ///
+    /// The rows are native's, byte for byte: same names, same order, same precision, and
+    /// deliberately native's own conversion factors (`/0.3048` for velocity, `*0.737562` for
+    /// energy) rather than the slightly different ones the point-table rows above use —
+    /// `UnitConverter::*_from_metric` is what produces native's bytes, and a summary that
+    /// disagreed with native in the last digit would be a worse answer than no summary.
+    /// `max_height` is in yards/meters here and inches/centimeters in the point table for
+    /// the same reason: that is native's contract for this document.
+    ///
+    /// Two of native's conditional rows are NOT emitted: `stability_coefficient` and
+    /// `spin_drift`. Native derives both from the station temperature/pressure it resolved
+    /// for the solve, and this surface hands the unresolved atmosphere to the solver's own
+    /// constructor and never sees those resolved values; re-deriving them here would print a
+    /// number that disagrees with native's. The browser surface reports neither quantity in
+    /// its table or JSON forms either, so this document is not alone in omitting them — it is
+    /// a parity gap of its own, not something this flag silently dropped.
+    fn format_trajectory_csv_summary(
+        result: &crate::cli_api::TrajectoryResult,
+        units: UnitSystem,
+        zero_angle_degrees: Option<f64>,
+    ) -> String {
+        let (dist_unit, vel_unit, energy_unit) = match units {
+            UnitSystem::Metric => ("m", "m/s", "J"),
+            UnitSystem::Imperial => ("yd", "fps", "ft-lb"),
+        };
+        // Native `UnitConverter::{distance,velocity,energy}_from_metric`, inlined because
+        // that type is native-only (main.rs). Metric passes straight through. Written as
+        // native writes them — two divisions and one multiplication — because `x / 0.9144`
+        // and `x * (1.0 / 0.9144)` are not the same f64, and this document's whole point is
+        // matching native's bytes.
+        let distance = |v: f64| match units {
+            UnitSystem::Metric => v,
+            UnitSystem::Imperial => v / 0.9144,
+        };
+        let velocity = |v: f64| match units {
+            UnitSystem::Metric => v,
+            UnitSystem::Imperial => v / 0.3048,
+        };
+        let energy = |v: f64| match units {
+            UnitSystem::Metric => v,
+            UnitSystem::Imperial => v * 0.737562,
+        };
+
+        let mut output = String::new();
+        output.push_str("metric,value,unit\n");
+        output.push_str(&format!(
+            "max_range,{:.2},{}\n",
+            distance(result.max_range),
+            dist_unit
+        ));
+        output.push_str(&format!(
+            "max_height,{:.2},{}\n",
+            distance(result.max_height),
+            dist_unit
+        ));
+        output.push_str(&format!("time_of_flight,{:.4},s\n", result.time_of_flight));
+        output.push_str(&format!(
+            "impact_velocity,{:.2},{}\n",
+            velocity(result.impact_velocity),
+            vel_unit
+        ));
+        output.push_str(&format!(
+            "impact_energy,{:.2},{}\n",
+            energy(result.impact_energy),
+            energy_unit
+        ));
+        // Present only when --auto-zero actually solved an angle, exactly as native's row is
+        // (and as the JSON form's top-level field is, MBA-1402).
+        if let Some(degrees) = zero_angle_degrees {
+            output.push_str(&format!("zero_angle_degrees,{:.4},degrees\n", degrees));
+        }
+        output
+    }
+
     fn format_trajectory_csv(
         &self,
         result: &crate::cli_api::TrajectoryResult,
@@ -8030,6 +8139,12 @@ Trajectory Command:
                                  by it. Same bounds as --elevation-cf
     -o, --output <FORMAT>        Output format (table/json/csv)
     --full                       Show all trajectory points
+    --csv-summary                With -o csv, emit the metric,value,unit SUMMARY
+                                 document (max_range, max_height, time_of_flight,
+                                 impact_velocity, impact_energy, and
+                                 zero_angle_degrees when --auto-zero solved one)
+                                 instead of the per-point table. Native's second
+                                 CSV form; without it the CSV is unchanged
     --with-drag-coefficient      Add each point's effective drag coefficient to
                                  -o json (the projectile's OWN Cd, form-factor
                                  scaled — a segmented BC shows its band steps).

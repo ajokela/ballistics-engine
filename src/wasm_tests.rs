@@ -2329,6 +2329,159 @@ Impact Velocity: 2510 fps\n";
         );
     }
 
+    /// MBA-1433: `--csv-summary` selects the `metric,value,unit` document — the shape that
+    /// carries every summary field, and that this surface previously had no spelling for.
+    #[wasm_bindgen_test]
+    fn csv_summary_emits_the_metric_value_unit_document() {
+        let wasm = WasmBallistics::new();
+        let csv = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o csv --csv-summary")
+            .unwrap();
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next(),
+            Some("metric,value,unit"),
+            "summary document must open with native's header: {csv}"
+        );
+        // Native's row names, in native's order. Every row is `name,value,unit`.
+        let names: Vec<&str> = lines
+            .filter(|l| !l.is_empty())
+            .map(|l| l.split(',').next().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "max_range",
+                "max_height",
+                "time_of_flight",
+                "impact_velocity",
+                "impact_energy",
+            ],
+            "summary rows diverged from native's set/order: {csv}"
+        );
+        for line in csv.lines().skip(1).filter(|l| !l.is_empty()) {
+            assert_eq!(
+                line.split(',').count(),
+                3,
+                "every summary row is metric,value,unit: {line}"
+            );
+        }
+        // The point-table header must not appear: these are two documents, not one.
+        assert!(
+            !csv.contains("Range(yards)") && !csv.contains("Range(meters)"),
+            "summary document must not carry the point table's header: {csv}"
+        );
+    }
+
+    /// MBA-1433: the field whose absence started the ticket. `zero_angle_degrees` lives only
+    /// in the summary document, and appears there only when --auto-zero actually solved one.
+    #[wasm_bindgen_test]
+    fn csv_summary_carries_zero_angle_only_when_auto_zero_ran() {
+        let wasm = WasmBallistics::new();
+        let zeroed = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 200 -o csv --csv-summary",
+            )
+            .unwrap();
+        assert!(
+            zeroed
+                .lines()
+                .any(|l| l.starts_with("zero_angle_degrees,") && l.ends_with(",degrees")),
+            "auto-zero run must report its solved angle: {zeroed}"
+        );
+        let bare = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o csv --csv-summary")
+            .unwrap();
+        assert!(
+            !bare.contains("zero_angle_degrees"),
+            "a run that never solved a zero must omit the row, not report a placeholder: {bare}"
+        );
+    }
+
+    /// MBA-1433: both unit systems, spelled out — the recoil-header lesson (MBA-1418) was
+    /// that a CSV header can be right in one system and wrong in the other.
+    #[wasm_bindgen_test]
+    fn csv_summary_units_column_follows_the_unit_system() {
+        let imperial = WasmBallistics::new()
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o csv --csv-summary")
+            .unwrap();
+        for expected in ["max_range,", "max_height,"] {
+            let row = imperial
+                .lines()
+                .find(|l| l.starts_with(expected))
+                .unwrap_or_else(|| panic!("missing {expected} row: {imperial}"));
+            assert!(row.ends_with(",yd"), "imperial distance unit is yd: {row}");
+        }
+        assert!(
+            imperial.lines().any(|l| l.starts_with("impact_velocity,") && l.ends_with(",fps")),
+            "imperial velocity unit is fps: {imperial}"
+        );
+        assert!(
+            imperial.lines().any(|l| l.starts_with("impact_energy,") && l.ends_with(",ft-lb")),
+            "imperial energy unit is ft-lb: {imperial}"
+        );
+
+        let metric = WasmBallistics::new()
+            .run_command(
+                "trajectory -u metric -v 800 -b 0.475 -m 11 -d 7.82 -o csv --csv-summary",
+            )
+            .unwrap();
+        for expected in ["max_range,", "max_height,"] {
+            let row = metric
+                .lines()
+                .find(|l| l.starts_with(expected))
+                .unwrap_or_else(|| panic!("missing {expected} row: {metric}"));
+            assert!(row.ends_with(",m"), "metric distance unit is m: {row}");
+        }
+        assert!(
+            metric.lines().any(|l| l.starts_with("impact_velocity,") && l.ends_with(",m/s")),
+            "metric velocity unit is m/s: {metric}"
+        );
+        assert!(
+            metric.lines().any(|l| l.starts_with("impact_energy,") && l.ends_with(",J")),
+            "metric energy unit is J: {metric}"
+        );
+    }
+
+    /// MBA-1433: the default CSV is untouched — the new flag adds a document, it does not
+    /// re-shape the existing one. This is the contract every current terminal-CSV parser
+    /// depends on.
+    #[wasm_bindgen_test]
+    fn csv_without_the_flag_is_still_the_point_table() {
+        let wasm = WasmBallistics::new();
+        let csv = wasm
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o csv")
+            .unwrap();
+        assert!(
+            csv.starts_with("Range(yards),Drop(inches),"),
+            "default CSV must still open with the point-table header: {csv}"
+        );
+        assert!(
+            !csv.contains("metric,value,unit"),
+            "the summary document must not leak into the default CSV: {csv}"
+        );
+    }
+
+    /// MBA-1433: `--csv-summary` is refused on the formats it cannot shape, rather than
+    /// accepted and ignored — silent acceptance is how the reporter concluded the summary
+    /// fields were missing from the build.
+    #[wasm_bindgen_test]
+    fn csv_summary_is_rejected_on_table_and_json() {
+        let wasm = WasmBallistics::new();
+        for format in ["table", "json"] {
+            let err = wasm
+                .run_command(&format!(
+                    "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o {format} --csv-summary"
+                ))
+                .expect_err("--csv-summary must be refused outside -o csv");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("--csv-summary"),
+                "the rejection must name the flag: {message}"
+            );
+        }
+    }
+
     /// MBA-1294(c): --print-bc-segments appends the BC ladder in TABLE view only; it must
     /// never contaminate a JSON payload.
     #[wasm_bindgen_test]
