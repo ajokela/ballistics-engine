@@ -78,6 +78,34 @@ pub const WARNING_BC5D_DRAG_MODEL_COERCED: &str = "bc5d_drag_model_coerced";
 /// and it moved the numbers" from "applied and it could not".
 pub const WARNING_WIND_SHEAR_MODEL_NOT_MODELED: &str = "wind_shear_model_not_modeled";
 
+/// `effects.aerodynamic_jump` was enabled while the request left the geometry the estimator
+/// reads to a default (MBA-959).
+///
+/// The jump scales with gyroscopic stability and bullet length, so it reads
+/// `rifle.twist_rate_m_per_turn` and `projectile.length_m`. Omitting either does NOT disable
+/// the correction and does not zero it — the solve proceeds against the assumed 1:12 barrel
+/// and the mass/diameter length estimate, and produces a confident number computed for a
+/// rifle the caller does not own. Measured on a .308 175 gr at 800 m in a 10 mph full-value
+/// crosswind, an omitted twist moves the jump from 10.79 cm to 9.08 cm — a 16% error that is
+/// invisible in the response, because the jump is folded into every drop rather than reported
+/// as its own column.
+///
+/// The two assumption notices for the defaults themselves are still emitted; this one exists
+/// because those say "a default was applied" without saying that anything now depends on it.
+pub const WARNING_AERODYNAMIC_JUMP_ASSUMED_GEOMETRY: &str = "aerodynamic_jump_assumed_geometry";
+
+/// Whether the raw request supplied the two geometry fields the aerodynamic-jump estimator
+/// reads, as opposed to letting `resolve_rifle`/`resolve_projectile` substitute a default.
+///
+/// Carried rather than re-derived because `resolve_effects` only sees `EffectsV1`, and the
+/// distinction is about the RAW request: by the time the rifle and projectile are resolved,
+/// an assumed 1:12 twist is indistinguishable from a stated one.
+#[derive(Debug, Clone, Copy)]
+struct JumpGeometrySupplied {
+    twist_rate: bool,
+    projectile_length: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct PreparedSolveV1 {
     pub(crate) resolved_request: ResolvedSolveRequestV1,
@@ -205,6 +233,16 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         _ => None,
     };
 
+    // MBA-959: the jump the solver actually applied, read off its own components rather than
+    // recomputed here -- a second spelling of the Litz regression is a second answer. `None`
+    // when the flag is off or the solver declined the effect; `Some(0.0)` when it ran against
+    // no muzzle crosswind, which is a different fact and worth being able to tell apart.
+    let aerodynamic_jump_moa = result
+        .aerodynamic_jump
+        .as_ref()
+        .map(|components| components.vertical_jump_moa)
+        .filter(|moa| moa.is_finite());
+
     let summary = SolveSummaryV1 {
         actual_range_m: terminal.distance_m,
         maximum_height_m,
@@ -214,6 +252,7 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
         stability_factor,
         spin_drift_m,
         equivalent_horizontal_range_m,
+        aerodynamic_jump_moa,
         termination: termination_to_wire(result.termination),
     };
 
@@ -346,6 +385,10 @@ pub(crate) fn prepare_request(
     let effects = resolve_effects(
         &request.effects,
         atmosphere.latitude_rad,
+        JumpGeometrySupplied {
+            twist_rate: request.rifle.twist_rate_m_per_turn.is_some(),
+            projectile_length: request.projectile.length_m.is_some(),
+        },
         &mut assumptions,
         &mut warnings,
     )?;
@@ -547,7 +590,9 @@ pub(crate) fn prepare_request(
         },
         enable_pitch_damping: false,
         enable_precession_nutation: false,
-        enable_aerodynamic_jump: false,
+        // MBA-959 / Alfredo Mendiola Loyola's change request: the JSON bridge's own switch,
+        // where this used to be hardcoded false with no way for a caller to reach it.
+        enable_aerodynamic_jump: resolved_request.effects.aerodynamic_jump.unwrap_or(false),
         use_cluster_bc: false,
         custom_drag_table: None,
         // MBA-1356: solve-json v1 has no custom-drag-table field (see the module doc — the
@@ -1340,6 +1385,7 @@ fn resolve_solver(
 fn resolve_effects(
     effects: &EffectsV1,
     latitude_rad: Option<f64>,
+    jump_geometry: JumpGeometrySupplied,
     assumptions: &mut Vec<SolveNoticeV1>,
     warnings: &mut Vec<SolveNoticeV1>,
 ) -> Result<ResolvedEffectsV1, SolveErrorEnvelopeV1> {
@@ -1375,12 +1421,26 @@ fn resolve_effects(
         ));
     }
 
+    // Aerodynamic jump (MBA-959). Like `wind_shear_model` and unlike the three booleans
+    // above, this is NOT run through `bool_default`: an omitted field pushes no assumption
+    // notice and leaves the echo absent, so every request written before the field existed
+    // still serializes byte-identically. `enabled_aerodynamic_jump` is what the solver acts
+    // on; `aerodynamic_jump` is what the echo carries, and they differ precisely when the
+    // caller said `false` out loud.
+    let aerodynamic_jump = effects.aerodynamic_jump;
+    let enabled_aerodynamic_jump = aerodynamic_jump.unwrap_or(false);
+
     for (enabled, path, name) in [
         (magnus, "$.effects.magnus", "Magnus"),
         (
             enhanced_spin_drift,
             "$.effects.enhanced_spin_drift",
             "enhanced spin drift",
+        ),
+        (
+            enabled_aerodynamic_jump,
+            "$.effects.aerodynamic_jump",
+            "aerodynamic jump",
         ),
     ] {
         if enabled {
@@ -1417,11 +1477,35 @@ fn resolve_effects(
         ));
     }
 
+    // The jump is a function of stability and bullet length, so a defaulted barrel does not
+    // leave it alone -- it computes a different answer with the same confidence. Say so at the
+    // flag that made the geometry load-bearing, naming whichever field is missing.
+    if enabled_aerodynamic_jump && !(jump_geometry.twist_rate && jump_geometry.projectile_length)
+    {
+        let missing = match (jump_geometry.twist_rate, jump_geometry.projectile_length) {
+            (false, false) => "rifle.twist_rate_m_per_turn and projectile.length_m were",
+            (false, true) => "rifle.twist_rate_m_per_turn was",
+            (true, false) => "projectile.length_m was",
+            (true, true) => unreachable!("guarded by the condition above"),
+        };
+        warnings.push(notice(
+            WARNING_AERODYNAMIC_JUMP_ASSUMED_GEOMETRY,
+            format!(
+                "Aerodynamic jump scales with gyroscopic stability and bullet length, but \
+                 {missing} not supplied. The correction is still applied, computed from the \
+                 assumed geometry rather than disabled, so the jump reported in \
+                 summary.aerodynamic_jump_moa is for a barrel this request did not specify."
+            ),
+            "$.effects.aerodynamic_jump",
+        ));
+    }
+
     Ok(ResolvedEffectsV1 {
         magnus,
         coriolis,
         enhanced_spin_drift,
         wind_shear_model,
+        aerodynamic_jump,
     })
 }
 

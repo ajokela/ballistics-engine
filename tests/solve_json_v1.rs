@@ -134,6 +134,7 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
             coriolis: request.effects.coriolis.unwrap_or(false),
             enhanced_spin_drift: request.effects.enhanced_spin_drift.unwrap_or(false),
             wind_shear_model: request.effects.wind_shear_model,
+            aerodynamic_jump: request.effects.aerodynamic_jump,
         },
         sampling: ResolvedSamplingV1 {
             interval_m: request.sampling.interval_m.unwrap_or(10.0),
@@ -169,6 +170,7 @@ fn success_for_resolved(resolved_request: ResolvedSolveRequestV1) -> SolveSucces
             stability_factor: Some(1.5),
             spin_drift_m: Some(0.12),
             equivalent_horizontal_range_m: None,
+            aerodynamic_jump_moa: None,
             termination: TerminationReasonV1::MaxRange,
         },
         samples: vec![TrajectorySampleV1 {

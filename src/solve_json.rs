@@ -622,6 +622,28 @@ pub struct EffectsV1 {
         deserialize_with = "deserialize_present"
     )]
     pub wind_shear_model: Option<WindShearModelV1>,
+    /// Crosswind aerodynamic (gyroscopic) jump, as a muzzle launch-angle perturbation
+    /// (MBA-959). `None` — the omitted-field default, and every request from before this
+    /// field existed — means no jump, byte-identical to earlier behavior.
+    ///
+    /// EXPERIMENTAL, and the bridge says so: enabling it raises an `experimental_effect`
+    /// warning, the same as `magnus` and `enhanced_spin_drift`. The model is Bryan Litz's
+    /// regression `Y = 0.01*Sg - 0.0024*L + 0.032` MOA per mph of crosswind, a fit that is
+    /// best near Sg ~ 1.75 rather than a first-principles derivation.
+    ///
+    /// Two consequences a caller has to know, because neither is visible in the numbers:
+    /// the jump is VERTICAL and is computed from the crosswind AT THE MUZZLE, so a shot with
+    /// no crosswind there is unaffected however much wind it meets downrange; and its
+    /// magnitude is a function of stability, so it reads `rifle.twist_rate_m_per_turn` and
+    /// `projectile.length_m`. Omitting either does not disable the correction — it computes
+    /// one from an assumed barrel, which is why enabling this flag without them raises
+    /// `aerodynamic_jump_assumed_geometry`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub aerodynamic_jump: Option<bool>,
 }
 
 /// Wire values for [`EffectsV1::wind_shear_model`] (0.36.0).
@@ -866,6 +888,17 @@ pub struct ResolvedEffectsV1 {
     /// this absent, so responses to pre-0.36.0 requests serialize byte-identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wind_shear_model: Option<WindShearModelV1>,
+    /// Echo of the aerodynamic-jump switch (MBA-959). Present only when the raw request
+    /// supplied one, so a response to a request written before this field existed serializes
+    /// byte-identically.
+    ///
+    /// `Option<bool>` rather than the bare `bool` its three older siblings use, and
+    /// deliberately: those are always echoed, so a `false` on them is indistinguishable from
+    /// a default, whereas this field keeps supplied-`false` and omitted apart. That is the
+    /// same additive-echo shape `wind_shear_model` above it uses, and it is the one that lets
+    /// an echo round-trip back into an identical request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aerodynamic_jump: Option<bool>,
 }
 
 /// Resolved result-sampling configuration.
@@ -983,6 +1016,19 @@ pub struct SolveSummaryV1 {
     /// — responses that predate the field, and every flat solve, are byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equivalent_horizontal_range_m: Option<f64>,
+    /// Vertical crosswind aerodynamic jump actually applied at the muzzle, in MOA, positive
+    /// up (MBA-959). Present only when `effects.aerodynamic_jump` was enabled AND the solver
+    /// produced components; absent otherwise, so every response that predates the field is
+    /// byte-identical.
+    ///
+    /// This exists because the jump is otherwise unobservable from the response. It is a
+    /// fixed launch-angle offset, so it does not appear as its own column anywhere — it is
+    /// folded into every drop in the table, and a caller comparing two solves cannot tell a
+    /// jump that applied from one that silently came out at zero. A present `0.0` says the
+    /// flag took effect and the muzzle crosswind was nil; an absent field says the effect
+    /// never ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aerodynamic_jump_moa: Option<f64>,
     pub termination: TerminationReasonV1,
 }
 
@@ -1685,16 +1731,36 @@ fn validate_solver(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     Ok(())
 }
 
+/// Every member name `effects` accepts on the v1 wire, in declaration order.
+///
+/// One list, because there are two readers: [`validate_effects`] rejects anything outside it,
+/// and the MCP `solve` tool publishes an `inputSchema` with `additionalProperties: false` over
+/// the same vocabulary. Those drifted apart once already — `wind_shear_model` reached the JSON
+/// wire in 0.36.0 and never reached the MCP schema, so an MCP caller could not ask for shear
+/// that the bridge underneath was perfectly willing to apply. `mcp_effect_schema_matches_the_wire`
+/// in `src/mcp_command.rs` pins them together.
+pub const SOLVE_JSON_EFFECT_NAMES_V1: &[&str] = &[
+    "magnus",
+    "coriolis",
+    "enhanced_spin_drift",
+    "wind_shear_model",
+    "aerodynamic_jump",
+];
+
 fn validate_effects(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     let path = "$.effects";
     let object = require_object(value, path)?;
-    validate_members(
+    validate_members(object, path, SOLVE_JSON_EFFECT_NAMES_V1, &[])?;
+    validate_optional_booleans(
         object,
         path,
-        &["magnus", "coriolis", "enhanced_spin_drift", "wind_shear_model"],
-        &[],
+        &[
+            "magnus",
+            "coriolis",
+            "enhanced_spin_drift",
+            "aerodynamic_jump",
+        ],
     )?;
-    validate_optional_booleans(object, path, &["magnus", "coriolis", "enhanced_spin_drift"])?;
 
     // An unknown shear model is rejected here, with the exact path and the accepted spellings,
     // rather than deserializing to the `none` default. Silently unsheared numbers are

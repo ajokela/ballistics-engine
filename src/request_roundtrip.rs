@@ -97,6 +97,11 @@ impl From<&ResolvedSolveRequestV1> for SolveRequestV1 {
                 // compounding a transform. `None` stays `None`, so a rebuilt request that
                 // never asked for shear still does not.
                 wind_shear_model: r.effects.wind_shear_model,
+                // Carried straight across, including a supplied `false`: re-submitting the
+                // round-tripped request has to reproduce the same correction, and an echo that
+                // collapsed `Some(false)` to `None` would be a request that says something
+                // slightly different from the one that produced it.
+                aerodynamic_jump: r.effects.aerodynamic_jump,
             },
             sampling: SamplingV1 {
                 interval_m: Some(r.sampling.interval_m),

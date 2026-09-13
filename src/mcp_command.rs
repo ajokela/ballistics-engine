@@ -534,7 +534,8 @@ fn solve_input_schema() -> Value {
                         "enum": [
                             "none", "logarithmic", "power_law", "ekman_spiral", "ekman"
                         ]
-                    }
+                    },
+                    "aerodynamic_jump": {"type": "boolean"}
                 }
             },
             "sampling": {
@@ -681,6 +682,37 @@ fn call_engine_info_tool() -> Value {
         "content": [{"type": "text", "text": text}],
         "isError": false
     })
+}
+
+#[cfg(test)]
+mod effect_schema_parity {
+    use super::*;
+
+    /// The MCP `solve` tool's `effects` schema must accept exactly what the wire accepts.
+    ///
+    /// These are two hand-written lists over one vocabulary, and they have drifted before:
+    /// `wind_shear_model` reached the JSON wire in 0.36.0 and never reached this schema, so an
+    /// MCP caller was refused shear that the bridge underneath would happily have applied.
+    /// `additionalProperties: false` means any omission here is a rejection, not a passthrough.
+    #[test]
+    fn mcp_effect_schema_matches_the_wire() {
+        let schema = solve_input_schema();
+        let properties = schema["properties"]["effects"]["properties"]
+            .as_object()
+            .expect("the solve tool must publish an effects property map");
+
+        let mut published: Vec<&str> = properties.keys().map(String::as_str).collect();
+        published.sort_unstable();
+
+        let mut accepted: Vec<&str> =
+            ballistics_engine::solve_json::SOLVE_JSON_EFFECT_NAMES_V1.to_vec();
+        accepted.sort_unstable();
+
+        assert_eq!(
+            published, accepted,
+            "the MCP effects schema and the solve-json effects allowlist have diverged"
+        );
+    }
 }
 
 #[cfg(test)]
