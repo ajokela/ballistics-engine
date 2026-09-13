@@ -2797,6 +2797,39 @@ All three accept `--name`, `--focal-plane`, `--reference-mag` and `-o table|json
 `-o json` emits exactly what `reticle hold --reticle-json` and
 `profile save --reticle-json` consume.
 
+#### Importing a Ventum spec (`reticle import`) — MBA-1440, MBA-1441
+
+```bash
+ballistics reticle import myscope.ventum.json -o json > myscope.json
+```
+
+`reticle import` converts a Ventum reticle spec into the same description the rest of this
+surface consumes. `dot` and `tick` become marks; a `text` binds to the nearest mark within
+1 mil and becomes its label; `line`, `circle`, `rect`, `grid` and any unknown element type
+carry no hold and are dropped.
+
+**Whatever is dropped is named on stderr.** In the Ventum format an *arc* is a `circle`
+carrying `start`/`end` angles, so a horseshoe — a real, often hold-bearing feature — falls
+under that decoration rule, and a reticle that lost one comes back sparse and looks correct.
+So an import that could not represent part of the document says so:
+
+```
+note: myscope.ventum.json: 2 element(s) carry no hold point and were not imported (arc x1, line x1)
+note: an arc's aiming points cannot be declared in this format, so none were imported as marks.
+      Add them yourself if your reticle holds on them:
+        arc 200-340 deg: apex 0.00 / 2.00 up mil, tips 1.88 left / 0.68 up mil and 1.88 right / 0.68 up mil
+```
+
+The notice goes to **stderr**; stdout stays the reticle formatter's output verbatim, so
+piping `-o json` is unaffected. A document that imports whole prints nothing.
+
+Arcs deliberately contribute **no marks**. The format cannot declare whether a horseshoe's
+apex is an aiming point, and a ranging horseshoe is spelled exactly like a decorative ring
+segment — so the importer resolves each arc's apex and tips and hands them to you rather than
+inventing holds that would also shift what `reticle hold` reports for every Ventum reticle
+imported since 0.32.0. Library callers get the same information structurally from
+`reticle_import::import_ventum_reticle_with_report`.
+
 #### Intellectual-property exclusions
 
 Horus grid reticles and Time-of-Flight Wind Dots are actively patented, and Horus

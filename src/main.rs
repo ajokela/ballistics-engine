@@ -23831,6 +23831,93 @@ fn reticle_format(output: OutputFormat) -> Result<ReticleFormat, Box<dyn Error>>
     }
 }
 
+/// Most arcs a notice spells out individually before it summarizes the rest. A document with
+/// a horseshoe or two wants their coordinates; one with fifty rings wants a count.
+const MAX_REPORTED_ARCS: usize = 8;
+
+/// MBA-1441: tell the user, on stderr, what `reticle import` could not represent.
+///
+/// The complaint the ticket is named for is that a Ventum document with a horseshoe imported
+/// as a reticle quietly missing hold points, and nothing said so — a mostly-decorative reticle
+/// comes back sparse and looks correct. This is the saying-so. It goes to stderr because this
+/// command's stdout is the shared reticle formatter's output verbatim (there is a test that
+/// pins that), so a note in it would break `-o json` for anyone piping it.
+///
+/// Arcs get their resolved apex and tips printed because that is the actionable part: the
+/// format cannot declare whether a horseshoe's apex is an aiming point, so the import will not
+/// invent a mark there, but a shooter who knows their own reticle can read the coordinates off
+/// this notice and add them.
+fn print_reticle_import_report(
+    file: &std::path::Path,
+    report: &ballistics_engine::reticle_import::VentumImportReport,
+) {
+    if report.is_empty() {
+        return;
+    }
+    eprintln!(
+        "note: {}: {} element(s) carry no hold point and were not imported ({})",
+        file.display(),
+        report.dropped_elements,
+        report.tally()
+    );
+    if report.arcs.is_empty() && report.arcs_unresolved == 0 {
+        return;
+    }
+    eprintln!(
+        "note: an arc's aiming points cannot be declared in this format, so none were \
+         imported as marks. Add them yourself if your reticle holds on them:"
+    );
+    for arc in report.arcs.iter().take(MAX_REPORTED_ARCS) {
+        eprintln!(
+            "        arc {:.0}-{:.0} deg: apex {}, tips {} and {}",
+            arc.start_degrees,
+            arc.end_degrees,
+            format_reticle_arc_point(arc.apex),
+            format_reticle_arc_point(arc.start_tip),
+            format_reticle_arc_point(arc.end_tip),
+        );
+    }
+    if report.arcs.len() > MAX_REPORTED_ARCS {
+        eprintln!(
+            "        ... and {} more arc(s)",
+            report.arcs.len() - MAX_REPORTED_ARCS
+        );
+    }
+    if report.arcs_unresolved > 0 {
+        eprintln!(
+            "        {} further arc(s) declared no usable radius, so their points could not \
+             be computed at all",
+            report.arcs_unresolved
+        );
+    }
+}
+
+/// One arc point as `1.20 right / 2.00 up mil` — signed milliradians spelled as directions,
+/// because "down_mil: -2.0" is exactly the sign the user should not have to reason about.
+fn format_reticle_arc_point(
+    point: ballistics_engine::reticle_import::VentumArcPoint,
+) -> String {
+    format!(
+        "{} / {} mil",
+        format_reticle_arc_axis(point.right_mil, "left", "right"),
+        format_reticle_arc_axis(point.down_mil, "up", "down")
+    )
+}
+
+/// One axis of an arc point, named by its sign.
+///
+/// Rounds BEFORE naming the direction: an apex dead on the vertical axis comes out of
+/// `cos(270 deg)` as a tiny NEGATIVE float, and printing "0.00 left" for it is noise the
+/// reader has to work out is not real. A value that rounds to zero gets no direction word.
+fn format_reticle_arc_axis(value: f64, negative: &str, positive: &str) -> String {
+    let rounded = (value * 100.0).round() / 100.0;
+    if rounded == 0.0 {
+        return "0.00".to_string();
+    }
+    let direction = if rounded < 0.0 { negative } else { positive };
+    format!("{:.2} {}", rounded.abs(), direction)
+}
+
 /// Parse one `reticle generate bdc --drop RANGE:DROP_MIL` token into
 /// `(range_display, range_m, drop_mil)`.
 ///
@@ -23933,12 +24020,18 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
         ReticleAction::Import { file, output } => {
             let json = std::fs::read_to_string(&file)
                 .map_err(|e| format!("reading reticle file '{}': {e}", file.display()))?;
-            let description = ballistics_engine::reticle_import::import_ventum_reticle(&json)
-                .map_err(|e| e.to_string())?;
+            let (description, report) =
+                ballistics_engine::reticle_import::import_ventum_reticle_with_report(&json)
+                    .map_err(|e| e.to_string())?;
             // The converter builds but does not validate (matching `mil_grid`/`tree`/
             // `bdc_from_drops`); validating here surfaces a decoration-only import as a clean
             // `NoMarks` error rather than an empty reticle that silently fails downstream.
             description.validate().map_err(|e| e.to_string())?;
+            // MBA-1441: say what the document drew that this import could not represent.
+            // stderr, not stdout: `reticle import`'s stdout is the shared formatter's string
+            // verbatim, and folding a note into it would break `-o json`/`-o csv` for anyone
+            // piping them.
+            print_reticle_import_report(&file, &report);
             print!(
                 "{}",
                 format_reticle_description(&description, reticle_format(output)?)
