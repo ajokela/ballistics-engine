@@ -260,9 +260,20 @@ jobs:
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          # The publish command exiting 0 is not the same as the registry serving the version;
-          # allow a little propagation before calling it done.
-          for _ in 1 2 3 4 5 6; do
+          # `npm publish` exiting 0 is not the same as the registry SERVING the version, and
+          # npm says so itself in the line right above this step: "Your package is being
+          # processed and may take a few minutes to become available." This step used to
+          # budget 6 x 10s against that, and on v0.39.0 it lost the race -- publish printed
+          # `+ ballistics-engine@0.39.0` at 20:44:12 having already signed provenance into the
+          # Sigstore log, this step started 13 ms later and gave up at 20:45:14. The package
+          # was live and attested; the release carried a red badge for a minute of latency.
+          #
+          # So: budget past npm's own stated latency, and distinguish NOT-YET-PROPAGATED from
+          # NOT-PUBLISHED, because only the second deserves a red. The tarball is the
+          # discriminator -- it is addressable before the version document is consistently
+          # served, so if it fetches, the publish landed and only metadata is lagging.
+          TARBALL="https://registry.npmjs.org/ballistics-engine/-/ballistics-engine-$VERSION.tgz"
+          for attempt in $(seq 1 30); do
             BODY=$(curl -sS "https://registry.npmjs.org/ballistics-engine/$VERSION" || true)
             if printf '%s' "$BODY" | grep -q '"version"'; then
               printf '%s' "$BODY" | node -e '
@@ -277,9 +288,17 @@ jobs:
                     : "provenance: not visible on the registry yet");
                 });
               '
+              echo "served after $(( attempt * 10 ))s"
               exit 0
             fi
             sleep 10
           done
-          echo "::error::npm published but the registry is not serving ballistics-engine@$VERSION"
+
+          # Five minutes without a version document. Did it publish at all?
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -I "$TARBALL" || echo 000)
+          if [ "$CODE" = "200" ]; then
+            echo "::warning::ballistics-engine@$VERSION published -- the tarball is served at $TARBALL -- but the version document has not propagated after 300s. Nothing to re-run; the publish step above already gated provenance."
+            exit 0
+          fi
+          echo "::error::ballistics-engine@$VERSION is not on the registry after 300s and its tarball returns HTTP $CODE. The publish step reported success, so this is a real discrepancy, not propagation lag."
           exit 1
