@@ -2,9 +2,12 @@
 # linux-riscv64.
 #
 # TWO MODES. Default is `cross` while the real board is unavailable.
-#   RISCV_MODE=native  - build ON root@10.1.1.26 (real hardware, ~35 min). The
-#                        original path; use it whenever that host is up, because
-#                        it is the only one that exercises real RISC-V silicon.
+#   RISCV_MODE=native  - build ON real hardware (~35 min). The original path; use
+#                        it whenever a board is up, because it is the only one
+#                        that exercises real RISC-V silicon. Set RISCV_HOST to
+#                        the board: user@10.1.1.25 (Milk-V, Debian, 4 cores) as
+#                        of 2026-09-14; root@10.1.1.26 has been down since the
+#                        2026-08-30 outage.
 #   RISCV_MODE=cross   - cross-compile in Docker on a fast x86_64 host and gate
 #                        the binary under qemu-user. Added 2026-08-30 when the
 #                        board was down after a power outage.
@@ -20,8 +23,19 @@ TARGET=riscv64gc-unknown-linux-gnu
 BIN="target/$TARGET/release/ballistics"
 
 if [ "$MODE" = native ]; then
-  H="${RISCV_HOST:-root@10.1.1.26}"
-  ssh "$H" "set -e; cd ~/ballistics-engine || git clone https://github.com/ajokela/ballistics-engine ~/ballistics-engine && cd ~/ballistics-engine; git fetch --tags && git checkout v$V && cargo build --release --locked"
+  H="${RISCV_HOST:-user@10.1.1.25}"
+  # Do not rely on the board's PATH. A non-interactive ssh runs no login shell,
+  # and Debian's stock ~/.bashrc returns before any rustup line it might carry,
+  # so `cargo` is simply absent unless we put it there ourselves. Measured on
+  # user@10.1.1.25: `ssh <host> cargo --version` -> "command not found" while an
+  # interactive login finds 1.98.1.
+  ssh "$H" "set -e
+    export PATH=\"\$HOME/.cargo/bin:\$PATH\"
+    [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\" || true
+    command -v cargo >/dev/null || { echo 'no cargo on $H' >&2; exit 1; }
+    cd ~/ballistics-engine 2>/dev/null || git clone https://github.com/ajokela/ballistics-engine ~/ballistics-engine
+    cd ~/ballistics-engine
+    git fetch --tags --force && git checkout -q 'v$V' && cargo build --release --locked"
   GOT=$(ssh "$H" "~/ballistics-engine/target/release/ballistics --version")
   SRC="$H:~/ballistics-engine/target/release/ballistics"
 else

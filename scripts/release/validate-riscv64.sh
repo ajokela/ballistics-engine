@@ -15,6 +15,14 @@
 #                          its own ~/vms/<os>-riscv64/ssh.sh wrapper, which carries
 #                          the host-guest key and known_hosts
 #   netbsd                 real silicon, a Milk-V Mars (StarFive JH7110)
+#
+# RISCV64_LINUX_HOST promotes the linux gate from the QEMU guest to real silicon.
+# The guest runs a real riscv64 KERNEL under system emulation, which is already
+# far stronger than qemu-user -- but the CPU is still emulated, so an erratum, a
+# missing extension or a timing-dependent fault on a real chip cannot show up
+# there. Set it to a user@host with the board's rootfs, e.g. user@10.1.1.25
+# (Milk-V, Debian, riscv64gc), and the most-downloaded riscv64 asset is gated on
+# hardware instead. Unset, the guest is used exactly as before.
 set -euo pipefail
 V="${1:?usage: validate-riscv64.sh VERSION [OUTDIR] [os...]}"
 OUT="${2:-$HOME/release-$V}"
@@ -44,7 +52,13 @@ remote() {
   local os="$1" snip="$2"
   case "$os" in
     netbsd)  "${NETBSD_SSH[@]}" "$NETBSD" "$snip" ;;
-    linux)   "${VM_SSH[@]}" "$VMHOST" "/home/alex/vms/linux-riscv64/ssh.sh   '$snip'" ;;
+    linux)
+      if [ -n "${RISCV64_LINUX_HOST:-}" ]; then
+        "${VM_SSH[@]}" "$RISCV64_LINUX_HOST" "$snip"
+      else
+        "${VM_SSH[@]}" "$VMHOST" "/home/alex/vms/linux-riscv64/ssh.sh   '$snip'"
+      fi
+      ;;
     freebsd) "${VM_SSH[@]}" "$VMHOST" "/home/alex/vms/freebsd-riscv64/ssh.sh '$snip'" ;;
     openbsd) "${VM_SSH[@]}" "$VMHOST" "/home/alex/vms/openbsd-riscv64/ssh.sh '$snip'" ;;
     *) return 2 ;;
