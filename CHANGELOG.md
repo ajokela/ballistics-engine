@@ -34,24 +34,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the whole document, not the one element. A Ventum tool is free to write `"r": "2mil"` or
   `"r": {"v": 2, "unit": "mil"}`, and a reticle whose dots are perfectly good must not be
   refused over a decoration's units. So a `circle`'s keys are read by hand rather than typed,
-  and no key of one refuses a document over how it is written: not for its value's type, not
-  for using both of the schema's spellings of a center (`x` beside `cx`, which a derived reader
-  calls a duplicate field), and not for being written twice. A value this importer cannot read
-  is ignored exactly as an absent one is, and the element is still counted in the report.
+  and none of the geometry keys one carries — `x`/`cx`, `y`/`cy`, `r`, `start`, `end`,
+  `repeat` — refuses a document over how it is written: not for its value's type, not for
+  using both of the schema's spellings of a center (`x` beside `cx`, which a derived reader
+  calls a duplicate field), and not for being written twice. (The `type` tag is not one of
+  them: an element naming its own type twice is refused by serde's tag reader before any
+  variant exists.) A value this importer cannot read does not resolve, exactly as an absent
+  one does not — but the two are not folded together: the element is still counted, and where
+  the difference costs the report something it is declared rather than dropped.
 
   Among the drawing elements, strict covers what a hold is built from — a `dot`'s or
   `tick`'s `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies
   of any of those — and the `type` tag before any of it, since leniency is per-variant and
   an element that does not say what it is has no variant yet. There is no sane fallback for
   a mark whose position cannot be read, and a mark's `repeat` degrading to one copy would
-  drop hold points in silence. (Reticle-level
-  metadata — `name`, `plane`, `unit`, `ref_magnification` — stays strict too, exactly as in
-  0.32.0.) A `circle`'s `repeat` stamps nothing holdable, so it degrades instead of refusing the
+  drop hold points in silence. (The reticle-level fields — `name`, `plane`, `unit`,
+  `ref_magnification`, and `spec` itself — stay strict too, exactly as in 0.32.0.) A `circle`'s `repeat` stamps nothing holdable, so it degrades instead of refusing the
   document — and the report declares the cost in a new `circle_repeats_unreadable`, since that
   element's tally is then low by an unknown amount. That boundary is not left to this
   paragraph: `strictness_is_exactly_what_a_hold_is_built_from` states it as code and drives
-  every element type the model can produce against every key the importer reads, so a field
-  that starts refusing a document, or stops, fails a test.
+  every element type the model can produce against every key the importer reads ON AN
+  ELEMENT, and pins the `type` tag separately, since a key sweep must choose a variant before
+  it can write a key. One of those element keys that starts refusing a document, or stops,
+  fails a test.
 
   Leniency never becomes silence: an arc resolves only from a center, a radius that is a
   positive length, and a sweep, and anything that leaves one of those unavailable — an omitted

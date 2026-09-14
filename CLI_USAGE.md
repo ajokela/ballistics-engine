@@ -2832,27 +2832,32 @@ inventing holds that would also shift what `reticle hold` reports for every Vent
 imported since 0.32.0. Library callers get the same information structurally from
 `reticle_import::import_ventum_reticle_with_report`.
 
-**No key of a `circle` refuses the document over how it is written.** Not for its value's
-type (`"r": "2mil"`, an object, an array, `true`, `null`, a `repeat` whose `axis` is
-`"diagonal"`), not for using both of the schema's spellings of a center at once (`x` beside
-`cx`), and not for being written twice — a `circle`'s keys are read by hand rather than typed,
-and a repeated or double-spelled one takes its last value in document order. A value this
-importer cannot read is ignored exactly as an absent one is, and the element is still counted
-in the notice above.
+**No geometry key of a `circle` refuses the document over how it is written.** That is
+`x`/`cx`, `y`/`cy`, `r`, `start`, `end` and `repeat`. Not for its value's type (`"r": "2mil"`,
+an object, an array, `true`, `null`, a `repeat` whose `axis` is `"diagonal"`), not for using
+both of the schema's spellings of a center at once (`x` beside `cx`), and not for being
+written twice — a `circle`'s keys are read by hand rather than typed, and a repeated or
+double-spelled one takes its last value in document order. The `type` tag is not a geometry
+key: an element naming its own type twice is refused by serde's tag reader before any variant
+exists. A value this importer cannot read does not resolve, exactly as an absent one does not,
+but the two are not folded together — the element is still counted in the notice above, and
+where the difference costs the report something it is declared.
 
 Among the drawing elements, strict covers what a hold is built from — a `dot`'s or `tick`'s
 `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of any of those
 must be the type the schema says — and the `type` tag before any of it, since leniency is
 per-variant and an element that does not say what it is has no variant yet. There is no sane
 fallback for a mark whose position cannot be read, and a mark's `repeat` quietly degrading to a
-single copy would drop hold points without saying so. (The reticle-level `name`, `plane`, `unit` and `ref_magnification` are strict as well,
-unchanged from 0.32.0 — including that a present `null` is not an absent key there.) A
+single copy would drop hold points without saying so. (The reticle-level `name`, `plane`, `unit`, `ref_magnification` and `spec` are strict as
+well, unchanged from 0.32.0 — including that a present `null` is not an absent key there.) A
 `circle`'s `repeat` stamps nothing holdable, so it degrades; the notice then says *"N circle
 element(s) declared a `repeat` this importer could not read, so each was counted once; the
 document may draw more."* That boundary is swept in both directions by the engine's own
 `strictness_is_exactly_what_a_hold_is_built_from`, which drives every element type the
-importer models against every key it reads, so a field that starts refusing a document or
-stops fails a test rather than leaving this paragraph wrong.
+importer models against every key it reads ON AN ELEMENT and pins the `type` tag separately,
+since a key sweep must choose a variant before it can write a key. One of those element keys
+that starts refusing a document, or stops, fails a test rather than leaving this paragraph
+wrong.
 
 Leniency is not silence. An arc's points are built from a center, a radius that is a positive
 length, and a sweep; anything that leaves one of those unavailable — an omitted key, a value

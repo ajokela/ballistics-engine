@@ -836,9 +836,12 @@ fn format_label_number(value: f64) -> String {
 // cosmetic keys (color, width, size, len, orient, max_extent, tube_diameter, notes,
 // manufacturer, ...) are ignored rather than rejected. A `circle` goes further, because it
 // is the one decoration this module reads geometry from and reading it must not cost a
-// document its dots: no key of a `circle` refuses the document over how it is written — not
-// for its type (`"r": "2mil"`), not for which of the schema's two spellings of a center it
-// uses (`x` beside `cx`), and not for being written twice. See `CircleFields`.
+// document its dots: none of the geometry keys a `circle` carries — `x`/`cx`, `y`/`cy`, `r`,
+// `start`, `end`, `repeat` — refuses the document over how it is written, not for its type
+// (`"r": "2mil"`), not for which of the schema's two spellings of a center it uses (`x`
+// beside `cx`), and not for being written twice. The `type` tag is not one of them: an
+// element that names its own type twice is refused by serde's tag reader before any variant,
+// and before this module sees it. See `CircleFields`.
 //
 // Among the drawing ELEMENTS, strict covers what a hold is built from -- a `dot`'s or
 // `tick`'s `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of
@@ -849,17 +852,19 @@ fn format_label_number(value: f64) -> String {
 // so. That
 // boundary is stated as code and swept in both directions by
 // `tests::strictness_is_exactly_what_a_hold_is_built_from`, which drives every element type
-// this model can produce against every KEY this importer reads (plus two it ignores), and
-// pins the `type` tag separately, since a key sweep has to choose a variant before it can
-// write a key. A field that starts refusing a document, or stops, turns it red rather than
-// leaving this paragraph wrong.
+// this model can produce against every key this importer reads ON AN ELEMENT (plus two it
+// ignores), and pins the `type` tag separately, since a key sweep has to choose a variant
+// before it can write a key. One of those element keys that starts refusing a document, or
+// stops, turns it red rather than leaving this paragraph wrong. The reticle-level fields
+// below are NOT in that sweep; their nulls are pinned by
+// `tests::null_is_read_as_absence_not_as_a_bad_value` and their wrong types by nothing.
 //
-// Reticle-level metadata (`name`, `plane`, `unit`, `ref_magnification`) is strict as well,
-// `name` included even though no hold depends on it. That is unchanged since 0.32.0 and is
+// Reticle-level fields (`name`, `plane`, `unit`, `ref_magnification`, and `spec` itself) are
+// strict as well, `name` included even though no hold depends on it. That is unchanged since 0.32.0 and is
 // not what this leniency is about: nothing there is per-element, so a bad value is the
 // document saying something wrong about itself rather than one decoration spoiling the rest.
 //
-// What a `circle` can still cost a document, neither of them a key it carries:
+// What a `circle` can still cost a document:
 //
 //   * The mark cap. `circle` instances now go through repeat expansion, which enforces
 //     MAX_RETICLE_MARKS over everything it materializes, so a document at the cap is refused
@@ -2202,11 +2207,12 @@ mod tests {
     /// [`null_is_read_as_absence_not_as_a_bad_value`] rather than described here.
     const WRONG_TYPED: [&str; 4] = [r#""a string""#, r#"{"nested":1}"#, "[1]", "true"];
 
-    /// [`WRONG_TYPED`] minus anything that is in fact the right type for `key`. Of the keys
-    /// this importer READS, `text` is the one that takes a string, so a string is a perfectly
-    /// good value there and is not evidence of anything; the rest take a number or the
-    /// `repeat` object. (The format's ignored cosmetic keys include string-valued ones such
-    /// as `color` and `notes`; the sweep does not turn on their types either way.) (An
+    /// [`WRONG_TYPED`] minus anything that is in fact the right type for `key`. Among the
+    /// ELEMENT keys this sweep drives, `text` is the one that takes a string, so a string is
+    /// a perfectly good value there and is not evidence of anything; the rest take a number
+    /// or the `repeat` object. (Keys outside this sweep do take strings — the `type` tag,
+    /// `name`, `plane`, `unit`, a `repeat`'s `axis`, and the format's ignored cosmetic keys
+    /// such as `color` and `notes`. The sweep does not turn on any of their types.) (An
     /// object IS the right shape for a `repeat`, but `{"nested":1}` is missing every field
     /// one needs, so it is still a value a strict `repeat` refuses.)
     fn wrong_typed_for(key: &str) -> Vec<&'static str> {
@@ -2299,9 +2305,11 @@ mod tests {
     /// that refuse a whole document over a value of the wrong type. Every other pair absorbs
     /// one.
     ///
-    /// This is what the module's serde section says in words — strict is what a hold is
-    /// built from: a `dot`/`tick` position, a `text`'s own position and string, and the
-    /// `repeat` that stamps copies of any of those.
+    /// This is the ELEMENT-KEY half of what the module's serde section says in words —
+    /// strict is what a hold is built from: a `dot`/`tick` position, a `text`'s own position
+    /// and string, and the `repeat` that stamps copies of any of those. The section also
+    /// names the `type` tag, which is not an (element type, key) pair and is pinned at the
+    /// end of the sweep instead.
     fn is_strict(element_type: &str, key: &str) -> bool {
         matches!(
             (element_type, key),
@@ -2385,8 +2393,11 @@ mod tests {
         ] {
             assert!(
                 import_ventum_reticle(document).is_err(),
-                "an element whose `type` is missing or not a variant name must refuse the \
-                 document — leniency is per-variant, and there is no variant yet\n  {document}"
+                "an element whose `type` is missing or is not a STRING must refuse the \
+                 document — leniency is per-variant, and there is no variant yet. A type \
+                 that IS a string but names no variant is a different case: `#[serde(other)]` \
+                 reads it as `Element::Unknown` and it is dropped as decoration, which \
+                 `every_element_type` drives deliberately.\n  {document}"
             );
         }
     }
@@ -2586,6 +2597,49 @@ mod tests {
             "a null inside a mark's repeat is not an absent key either"
         );
     }
+
+    /// A mark's own position refuses a present `null`, like any other value it cannot read.
+    ///
+    /// This is the one axis [`strictness_is_exactly_what_a_hold_is_built_from`] delegates
+    /// rather than drives: [`WRONG_TYPED`] deliberately omits `null` and hands the whole null
+    /// boundary to [`null_is_read_as_absence_not_as_a_bad_value`], which pins a `circle`'s
+    /// keys, a mark's `repeat`, the reticle-level fields and `repeat.mirror` — and, until
+    /// this test, never a `dot`/`tick` `x`/`y` or a `text`'s string.
+    ///
+    /// What that gap allowed, measured rather than imagined: give `Element::Dot`'s `x` a
+    /// `deserialize_with` that reads a present `null` as `0.0` while still refusing every
+    /// other wrong type, and `{"type":"dot","x":null,"y":4}` imports a mark at
+    /// `right_mil: 0.0` — a hold point at a coordinate nobody wrote — with the whole suite
+    /// green. That is the failure this module forbids everywhere else, and nothing caught it.
+    #[test]
+    fn a_marks_own_position_refuses_a_null_like_any_other_wrong_value() {
+        for (what, document) in [
+            ("dot x", r#"{"name":"N","unit":"mil","spec":[{"type":"dot","x":null,"y":4}]}"#),
+            ("dot y", r#"{"name":"N","unit":"mil","spec":[{"type":"dot","x":4,"y":null}]}"#),
+            ("tick x", r#"{"name":"N","unit":"mil","spec":[{"type":"tick","x":null,"y":4}]}"#),
+            ("tick y", r#"{"name":"N","unit":"mil","spec":[{"type":"tick","x":4,"y":null}]}"#),
+            (
+                "text x",
+                r#"{"name":"N","unit":"mil","spec":[{"type":"text","x":null,"y":4,"text":"2"}]}"#,
+            ),
+            (
+                "text y",
+                r#"{"name":"N","unit":"mil","spec":[{"type":"text","x":4,"y":null,"text":"2"}]}"#,
+            ),
+            (
+                "text string",
+                r#"{"name":"N","unit":"mil","spec":[{"type":"text","x":4,"y":4,"text":null}]}"#,
+            ),
+        ] {
+            assert!(
+                import_ventum_reticle(document).is_err(),
+                "{what}: a null where a hold's own coordinate belongs must refuse the \
+                 document. Reading it as a default would place a mark at a coordinate the \
+                 document never wrote.\n  {document}"
+            );
+        }
+    }
+
 
     /// What a `repeat` does to the tally, which is not one answer for every type.
     ///
