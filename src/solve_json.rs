@@ -355,6 +355,23 @@ pub struct ShotV1 {
         deserialize_with = "deserialize_present"
     )]
     pub cant_angle_rad: Option<f64>,
+    /// World-vertical height above the local ground datum that the elevation search converges
+    /// the bullet to at `zero_distance_m`.
+    ///
+    /// Omitting it while the search runs (`zero_distance_m` present, `muzzle_angle_rad` absent)
+    /// defaults it to the LINE OF SIGHT of a level rifle — [`RifleV1::muzzle_height_m`] plus
+    /// [`RifleV1::sight_height_m`] — so a level shot's solved trajectory crosses the line of
+    /// sight at the zero distance, which is what a stated zero means and what the CLI and C ABI
+    /// zero surfaces already did (MBA-1537). A supplied value always wins, `0.0` included: that
+    /// is how a caller asks for a zero against the ground datum instead. The default raises a
+    /// `default_applied` assumption naming the height it used.
+    ///
+    /// The default is a LEVEL line of sight in a world-vertical field, so an inclined zero
+    /// still needs this stated — see `docs/SOLVE_JSON_V1.md` for the projection to supply.
+    ///
+    /// With no elevation search this still defaults to `0`, where it feeds only the
+    /// `drops_reference: "target"` sampler datum — which references `max_range_m`, not
+    /// `zero_distance_m`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- **A solve-json v1 zero with no `shot.target_height_m` now zeroes to the line of sight
+  (MBA-1537).** `target_height_m` is a world-vertical height above the local ground datum and
+  defaulted to a flat `0` even when the elevation search ran, so the search aimed at the GROUND:
+  a caller who supplied `zero_distance_m` and nothing else got a solve sitting a full
+  line-of-sight height LOW at the stated zero, which never crossed the line of sight at all. The
+  sharpest form of it was that `rifle.sight_height_m` had no effect on the solved elevation
+  whatever — 0.00072326660 rad at a 100 yd zero whether the scope sat 0 in or 2.6 in over the
+  bore. Omitting the field while the search runs now defaults it to
+  `rifle.muzzle_height_m + rifle.sight_height_m`, and the response carries a `default_applied`
+  assumption at `$.shot.target_height_m` naming the height it used.
+
+  This is the height the engine's other two zero surfaces already used: `cli_api`'s
+  `calculate_zero_angle_with_conditions` and the C ABI's `ballistics_calculate_zero_angle` both
+  solve `ZeroTargetFrame::SightLine` against the sight height. A caller moving between the CLI,
+  the C FFI and the JSON bridge was silently changing rifles. They now agree:
+  `tests/zero_sight_line_default.rs` drives solve-json, `calculate_zero_angle_with_resolved_conditions`
+  and (behind the `ffi` feature) `ballistics_calculate_zero_angle` with the same level rifle at
+  the same sea-level station reading, and asserts their angles are equal bit for bit.
+
+  **Who is affected: solves that supply `zero_distance_m` and omit `target_height_m`.** Anyone
+  supplying `target_height_m` is unaffected, an explicit `0.0` included — that is still how a
+  caller asks for a zero against the ground datum, and it still produces exactly the old
+  numbers. Anyone supplying `muzzle_angle_rad` is unaffected: no elevation search runs, so the
+  default does not apply and the response is unchanged down to the assumption text, with or
+  without a `zero_distance_m` beside it.
+
+  **Magnitude.** The change in solved elevation is
+  `+(muzzle_height_m + sight_height_m) / zero_distance_m` radians. `sight_height_m` cannot be
+  negative and `muzzle_height_m` defaults to `0`, so for any rifle whose line of sight sits
+  above the ground datum the old behaviour shot LOW and this raises the solution; a caller who
+  states a muzzle BELOW the datum gets the same expression with its sign, and one who states a
+  `muzzle_height_m` that exactly cancels the sight height sees no change at all. Measured on a
+  .308 175 gr G7 at 807.72 m/s, RK45, in calm sea-level ICAO air, with `muzzle_height_m` at its
+  `0` default: 5.73 MOA at a 25 yd zero and 0.72 MOA at 200 yd for a 1.5 in sight height;
+  9.92 MOA at 25 yd and 0.83 MOA at 300 yd for 2.6 in.
+
+  **What moves, measured.** On the same rifle at 1000 m in a 10 mph full crosswind, between a
+  `target_height_m: 0.0` solve and an omitted one: drop moves 0.415 m, while windage moves
+  0.087 mm, terminal speed 3.5e-4 m/s, terminal energy 1.3e-3 J, and time of flight 19.0 us.
+  The elevation change is the whole of it; the rest is what a 19 us shorter flight does to
+  columns that depend on it. Integrators re-baselining against this release should expect their
+  elevation column to move and their windage, velocity and time columns not to.
+
+  A case that used to be an outright failure now solves. `rifle.muzzle_height_m` used to move
+  the solved elevation, which it physically should not -- heights above the ground cancel once
+  the target tracks the line of sight -- and once the muzzle cleared the bullet's own drop over
+  the zero distance (about 0.1 m for the rifle measured here) the search stopped converging at
+  all and returned "Zero angle did not converge", because the ground datum it was aiming at then
+  sat below the muzzle. Such a request now solves, to the line of sight at the muzzle's own
+  height, and the solved elevation is invariant to muzzle height as it is on the native zero.
+
+  What this does NOT fix: an inclined zero. The default is a LEVEL line of sight in a
+  world-vertical field, so a request pairing `zero_distance_m` with a nonzero
+  `shooting_angle_rad` and omitting `target_height_m` still does not zero to its own sight line
+  — uphill it fails to converge and downhill it converges on the world height the default names,
+  exactly as before this change. `docs/SOLVE_JSON_V1.md` now states that and gives the
+  projection to supply instead.
+
+  Found by Alfredo Mendiola Loyola building an Android POC against the JSON bridge, who
+  diagnosed it correctly and worked around it by always sending
+  `target_height_m = sight_height_m`. That workaround stays correct: an explicitly supplied
+  height still wins.
+
 ### Added
 - **`reticle import` now says what it could not represent (MBA-1441).** The Ventum importer
   treats `circle` as decoration, and in that format an ARC is a `circle` carrying `start`/`end`

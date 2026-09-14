@@ -403,17 +403,14 @@ mod eval_tests {
     /// it against the wrong distance.
     ///
     /// Independent physical check: the zero search converges the bullet's absolute
-    /// world-vertical height at `zero_distance_m` to `shot.target_height_m` (default `0`; see
-    /// `docs/SOLVE_JSON_V1.md`'s `target_height_m` row -- it is a height above the ground
-    /// datum, NOT automatically the sight line). `drop_m` is `line_of_sight_height_m -
-    /// vertical_m`, and `line_of_sight_height_m` is `muzzle_height_m + sight_height_m`. This
-    /// fixture sets `sight_height_m: 0.0` (no bore/sight offset) specifically so
-    /// `line_of_sight_height_m == 0 == target_height_m`: with the offset eliminated, a
-    /// converged zero and a near-zero `drop_m` at that range are the same fact, so this
-    /// isolates "did the elevation search run and converge at the right distance" without
-    /// dragging in the separate sight-height-vs-target-height relationship (a nonzero
-    /// `sight_height_m` alone, with `target_height_m` still `0`, leaves a `drop_m` residual of
-    /// approximately `sight_height_m` at the zero range by design -- that is not this test).
+    /// world-vertical height at `zero_distance_m` to `shot.target_height_m`, which an omitted
+    /// field resolves to the line of sight, `muzzle_height_m + sight_height_m` (MBA-1537; see
+    /// `docs/SOLVE_JSON_V1.md`'s `target_height_m` row). `drop_m` is `line_of_sight_height_m -
+    /// vertical_m`, over the same `line_of_sight_height_m`. This fixture sets
+    /// `sight_height_m: 0.0` (no bore/sight offset) specifically so that sum is `0`: with the
+    /// offset eliminated, a converged zero and a near-zero `drop_m` at that range are the same
+    /// fact whichever frame the zero is solved in, so this isolates "did the elevation search
+    /// run and converge at the right distance" from the frame question that MBA-1537 settled.
     /// `find_zero_angle` (`src/cli_api.rs`) converges once the height error is under 1e-4 m.
     #[test]
     fn evaluate_actually_zeroes_drop_is_near_zero_at_the_zero_distance() {
