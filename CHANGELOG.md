@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derives neither quantity on any of its output formats. `--csv-summary` is rejected with
   `-o table` and `-o json` rather than accepted and ignored.
 
+  Scope, so it is not read as more than it is: this is native's TRAJECTORY CSV summary. The
+  ticket also named `max_ordinate` and `primary_crossing`, and those are rows of native's ZERO
+  CSV — the terminal's `zero` command parses no `-o` at all, having one output form, so both
+  stay unreachable from a browser build and this flag does not change that. `zero_angle_degrees`,
+  the field actually reported missing, is a trajectory-summary row and is now reachable.
+
 ## [0.38.0] - 2026-09-13
 
 ### Breaking

@@ -2815,10 +2815,12 @@ So an import that could not represent part of the document says so:
 
 ```
 note: myscope.ventum.json: 2 element(s) carry no hold point and were not imported (arc x1, line x1)
-note: an arc's aiming points cannot be declared in this format, so none were imported as marks.
-      Add them yourself if your reticle holds on them:
+note: an arc's aiming points cannot be declared in this format, so none were imported as marks. Add them yourself if your reticle holds on them:
         arc 200-340 deg: apex 0.00 / 2.00 up mil, tips 1.88 left / 0.68 up mil and 1.88 right / 0.68 up mil
 ```
+
+(The second `note:` is one unwrapped line; it is shown here as the terminal emits it, not
+re-wrapped, so a test or script matching on it matches the real output.)
 
 The notice goes to **stderr**; stdout stays the reticle formatter's output verbatim, so
 piping `-o json` is unaffected. A document that imports whole prints nothing.
@@ -4163,6 +4165,14 @@ native's, byte for byte, with two documented exceptions: the terminal emits no
 `stability_coefficient` and no `spin_drift` row, because it computes neither quantity on any
 of its output formats — native derives them from the station conditions it resolved for the
 solve, which this surface hands to the solver rather than resolving itself.
+
+Scope, stated rather than implied: this flag gives the terminal native's **trajectory** CSV
+summary, and that is all of it. `max_ordinate` and `primary_crossing` are rows of native's
+**zero** CSV, not its trajectory CSV, and the terminal's `zero` command parses no `-o` at all
+— it has one output form, its banner. So those two fields remain unreachable from a browser
+build, and `--csv-summary` does not change that. `zero_angle_degrees`, the field the missing-
+data report was actually about, *is* reachable: it is a trajectory-summary row, present
+whenever `--auto-zero` solved an angle.
 
 ### PDF Dope Card Format
 Generate a printable dope card with two-column layout, color-coded values, and alternating row stripes for field readability:
