@@ -92,6 +92,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is credited with two. Marks are unaffected: a `dot`, `tick` or `text` on the mirror line is
   still emitted once.
 
+  A twin's angles are reported as degrees clockwise from 3 o'clock, like every other arc's
+  (MBA-1536). The reflection itself runs negative — `start: 290, end: 70` across `x` gives
+  `(110, -110)`, which `reticle import` printed as `arc 110--110 deg`, a double dash where the
+  reader expects a range — so angles this importer COMPUTED are reduced into `[0, 360)` before
+  they are reported, and that twin now reads `110-250`. The arc is unchanged: reduction is the
+  identity on its sweep, tips and apex, which are sines, cosines and a difference taken modulo
+  a revolution, and on the mirror dedupe above, which is a congruence on `start + end`. The
+  four-way table of `200/340` and `290/70` across both axes is a test, and it answers the same
+  with the reduction and without it. An arc the document drew is still reported with the
+  document's own numbers; a Ventum tool may write a bearing outside `[0, 360)` and this is not
+  the place that rewrites it.
+
 - **A summary form for the browser terminal's CSV (MBA-1433).** Native's trajectory CSV is two
   documents and selects between them with `--full`: absent, a `metric,value,unit` summary;
   present, the per-point table. The WASM terminal's `--full` sets sampling density instead, so

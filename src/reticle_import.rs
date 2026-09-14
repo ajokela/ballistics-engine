@@ -148,10 +148,16 @@ pub struct VentumArc {
     pub center: VentumArcPoint,
     /// Arc radius in milliradians.
     pub radius_mil: f64,
-    /// The document's `start` angle, degrees, measured from 3 o'clock and sweeping clockwise
-    /// (so 270° is the TOP of the reticle — see the module documentation).
+    /// The arc's `start` angle, degrees, measured from 3 o'clock and sweeping clockwise (so
+    /// 270° is the TOP of the reticle — see the module documentation).
+    ///
+    /// For an arc the document drew, this is the document's own number, reported as written —
+    /// a Ventum tool is free to write a bearing outside `[0, 360)` and this is not the place
+    /// that rewrites it. For the twin of a mirrored `repeat`, whose angles this module
+    /// computed by reflection, it is reduced into `[0, 360)` (MBA-1536).
     pub start_degrees: f64,
-    /// The document's `end` angle, same convention.
+    /// The arc's `end` angle, same convention and same provenance as
+    /// [`Self::start_degrees`].
     pub end_degrees: f64,
     /// How far the arc sweeps clockwise from `start` to `end`, in `(0, 360)` degrees. A
     /// `circle` whose angles describe a whole revolution is a ring, not an arc, and never
@@ -474,6 +480,23 @@ struct CircleShape {
     center_unreadable: bool,
 }
 
+/// Reduce an angle in degrees into `[0, 360)`, the range a [`VentumArc`]'s reported angles
+/// are measured in. A non-finite input is returned unchanged: it is not an angle, and
+/// `rem_euclid` would turn it into a different non-finite value rather than a usable one.
+fn normalize_degrees(degrees: f64) -> f64 {
+    if !degrees.is_finite() {
+        return degrees;
+    }
+    let reduced = degrees.rem_euclid(360.0);
+    // `rem_euclid` rounds, so an input a hair below zero can come back as exactly 360.0 —
+    // the one value this half-open range excludes. Pinned by `normalize_degrees_lands_in_range`.
+    if reduced >= 360.0 {
+        0.0
+    } else {
+        reduced
+    }
+}
+
 impl CircleShape {
     /// Whether this element is an ARC — a `circle` the document gave a sweep — rather than a
     /// plain ring. True both for a sweep this module read and for one it could not, because
@@ -537,10 +560,23 @@ impl CircleShape {
 
     /// This shape reflected for a mirrored [`Repeat`] twin. See [`Role::mirrored`] for the
     /// derivation; note the swap, which is the direction reversal.
+    ///
+    /// MBA-1536: the reflected angles are reduced into `[0, 360)` before they are stored,
+    /// because they are reported. `180 - theta` and `-theta` both run negative — the twin of a
+    /// `start: 290, end: 70` horseshoe reflects to `(110, -110)`, which the CLI printed as
+    /// `arc 110--110 deg` — and a [`VentumArc`] angle is documented as degrees CLOCKWISE from
+    /// 3 o'clock, a direction a negative number does not describe. Reduction is the identity
+    /// on everything computed from these angles: every use is either a sine/cosine or a
+    /// difference taken `rem_euclid(360)` ([`Self::sweep_degrees`], [`Self::resolve`]), and
+    /// [`Self::is_reflection_of_itself`] is a `rem_euclid(360)` congruence on `start + end`.
+    /// The reported numbers are the only thing that moves, which is the point.
     fn mirrored(&self, axis: Axis) -> CircleShape {
         let angles = self.angles.map(|(start, end)| match axis {
-            Axis::X => (180.0 - end, 180.0 - start),
-            Axis::Y => (-end, -start),
+            Axis::X => (
+                normalize_degrees(180.0 - end),
+                normalize_degrees(180.0 - start),
+            ),
+            Axis::Y => (normalize_degrees(-end), normalize_degrees(-start)),
         });
         CircleShape {
             radius_mil: self.radius_mil,
@@ -2188,6 +2224,153 @@ mod tests {
         assert_eq!(flipped.dropped_element_types, vec![("arc".to_string(), 2)]);
         assert!((flipped.arcs[0].apex.down_mil + 2.0).abs() < 1e-9, "apex up");
         assert!((flipped.arcs[1].apex.down_mil - 2.0).abs() < 1e-9, "twin apex down");
+    }
+
+    /// The centered-arc dedupe decision, stated as a table, for the two horseshoes this
+    /// module's documentation argues from across both mirror axes.
+    ///
+    /// [`CircleShape::is_reflection_of_itself`] is a congruence on `start + end`, so it does
+    /// not care how the angles are spelled — but MBA-1536 changes how a twin's angles ARE
+    /// spelled, and "the dedupe is unaffected" is the kind of claim that should be driven
+    /// rather than reasoned. This table is what would fail if the two ever coupled.
+    #[test]
+    fn the_centered_mirror_dedupe_table() {
+        // (start, end, axis, how many shapes the document drew).
+        //
+        // 200 + 340 = 540 ≡ 180: symmetric about the VERTICAL axis (`x`), not the horizontal.
+        // 290 + 70  = 360 ≡ 0:   symmetric about the HORIZONTAL axis (`y`), not the vertical.
+        // So each horseshoe dedupes on exactly one axis, and they disagree about which.
+        let table = [
+            (200, 340, "x", 1),
+            (200, 340, "y", 2),
+            (290, 70, "x", 2),
+            (290, 70, "y", 1),
+        ];
+        for (start, end, axis, expected) in table {
+            let (_, report) = import_ventum_reticle_with_report(&format!(
+                r#"{{"name":"T","unit":"mil","spec":[
+                    {{"type":"circle","x":0,"y":0,"r":2,"start":{start},"end":{end},
+                     "repeat":{{"axis":"{axis}","step":1,"n":1,"mirror":true}}}}
+                ]}}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                report.arcs.len(),
+                expected,
+                "start {start}, end {end}, mirrored across {axis}"
+            );
+            assert_eq!(
+                report.dropped_element_types,
+                vec![("arc".to_string(), expected)],
+                "the tally must agree with the arcs for start {start}, end {end} across {axis}"
+            );
+        }
+    }
+
+    /// MBA-1536: a mirrored twin's REPORTED angles are degrees clockwise from 3 o'clock, like
+    /// every other arc's, rather than the raw output of `180 - theta` or `-theta`.
+    ///
+    /// The twin of a `start: 290, end: 70` horseshoe reflects across the vertical axis to
+    /// `(110, -110)`, which the CLI printed as `arc 110--110 deg` — two dashes, and a negative
+    /// number in a field documented as a clockwise bearing. Reflection is unchanged; only the
+    /// spelling of what comes out of it is.
+    #[test]
+    fn a_mirrored_arcs_reported_angles_are_clockwise_bearings() {
+        // Across the vertical axis: (290, 70) -> (180-70, 180-290) = (110, -110) -> (110, 250).
+        let (_, across_x) = import_ventum_reticle_with_report(
+            r#"{"name":"N","unit":"mil","spec":[
+                {"type":"circle","x":3,"y":0,"r":2,"start":290,"end":70,
+                 "repeat":{"axis":"x","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        let twin = across_x
+            .arcs
+            .iter()
+            .find(|a| a.center.right_mil < 0.0)
+            .expect("the mirrored twin");
+        assert!((twin.start_degrees - 110.0).abs() < 1e-9, "{twin:?}");
+        assert!((twin.end_degrees - 250.0).abs() < 1e-9, "{twin:?}");
+        // Same arc as before the reduction: same extent, and the apex still on the far side.
+        assert!((twin.sweep_degrees - 140.0).abs() < 1e-9, "{twin:?}");
+        assert!((twin.apex.right_mil + 5.0).abs() < 1e-9, "{:?}", twin.apex);
+
+        // Across the horizontal axis: (200, 340) -> (-340, -200) -> (20, 160).
+        let (_, across_y) = import_ventum_reticle_with_report(
+            r#"{"name":"N","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":3,"r":2,"start":200,"end":340,
+                 "repeat":{"axis":"y","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        let twin = across_y
+            .arcs
+            .iter()
+            .find(|a| a.center.down_mil < 0.0)
+            .expect("the mirrored twin");
+        assert!((twin.start_degrees - 20.0).abs() < 1e-9, "{twin:?}");
+        assert!((twin.end_degrees - 160.0).abs() < 1e-9, "{twin:?}");
+        assert!((twin.sweep_degrees - 140.0).abs() < 1e-9, "{twin:?}");
+
+        // Every arc either import reported is a clockwise bearing, twin or original.
+        for arc in across_x.arcs.iter().chain(across_y.arcs.iter()) {
+            for angle in [arc.start_degrees, arc.end_degrees] {
+                assert!(
+                    (0.0..360.0).contains(&angle),
+                    "{angle} is not a clockwise bearing ({arc:?})"
+                );
+            }
+        }
+    }
+
+    /// An arc the document wrote itself is reported AS WRITTEN. The reduction above is about
+    /// angles this module computed, not about rewriting the document's own numbers.
+    #[test]
+    fn an_unmirrored_arcs_angles_are_the_documents_own() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"D","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":0,"r":2,"start":-110,"end":110}
+            ]}"#,
+        )
+        .unwrap();
+        let arc = report.arcs[0];
+        assert_eq!(arc.start_degrees, -110.0);
+        assert_eq!(arc.end_degrees, 110.0);
+        assert!((arc.sweep_degrees - 220.0).abs() < 1e-9);
+    }
+
+    /// [`normalize_degrees`] lands in `[0, 360)` — including the rounding case its own comment
+    /// claims, where `rem_euclid` returns exactly 360.0 for an input just below zero.
+    #[test]
+    fn normalize_degrees_lands_in_range() {
+        let cases = [
+            0.0,
+            -0.0,
+            360.0,
+            -360.0,
+            110.0,
+            -110.0,
+            -1e-16,
+            -1e-300,
+            f64::MIN_POSITIVE,
+            1e12,
+            -1e12,
+        ];
+        for input in cases {
+            let out = normalize_degrees(input);
+            assert!(
+                (0.0..360.0).contains(&out),
+                "normalize_degrees({input}) = {out}, outside [0, 360)"
+            );
+        }
+        assert_eq!(normalize_degrees(-110.0), 250.0);
+        assert_eq!(normalize_degrees(360.0), 0.0);
+        // The guard earns its place: raw `rem_euclid` does round this one up to 360.0.
+        assert_eq!((-1e-16f64).rem_euclid(360.0), 360.0);
+        assert_eq!(normalize_degrees(-1e-16), 0.0);
+        // Not an angle, and not turned into one.
+        assert!(normalize_degrees(f64::NAN).is_nan());
+        assert_eq!(normalize_degrees(f64::INFINITY), f64::INFINITY);
     }
 
     // -----------------------------------------------------------------------------------
