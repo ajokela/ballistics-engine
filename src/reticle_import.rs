@@ -76,13 +76,17 @@
 //! reports would start snapping to invented geometry. Inventing holds out of decoration is the
 //! same sin as dropping holds without saying so.
 //!
-//! So an arc is still not a mark — but it is no longer a silence either. Each one is resolved
-//! (using exactly the convention above, which is why the convention was recorded) into the
-//! three points a shooter could actually index on, and handed back on the report as a
-//! [`VentumArc`]: its two tips and its apex, in the engine's own `right_mil` / `down_mil`. A
-//! caller who knows their horseshoe is hold-bearing turns them into marks with three
-//! [`ReticleMark::new`] calls and never re-derives the clockwise/`+y`-down trap; a caller who
-//! does not, at least learns the document drew something they cannot aim with.
+//! So an arc is still not a mark — but it is no longer a silence either. Each one whose
+//! geometry this module can read is resolved (using exactly the convention above, which is why
+//! the convention was recorded) into the three points a shooter could actually index on, and
+//! handed back on the report as a [`VentumArc`]: its two tips and its apex, in the engine's own
+//! `right_mil` / `down_mil`. One whose radius, sweep or center the document wrote in a form
+//! this module cannot read is counted in [`VentumImportReport::arcs_unresolved`] instead —
+//! reporting points computed from a fallback value nobody wrote would be inventing the very
+//! holds the paragraph above refuses to invent. A caller who knows their horseshoe is
+//! hold-bearing turns the resolved ones into marks with three [`ReticleMark::new`] calls and
+//! never re-derives the clockwise/`+y`-down trap; a caller who does not, at least learns the
+//! document drew something they cannot aim with.
 //!
 //! # Safety
 //!
@@ -168,7 +172,10 @@ pub struct VentumArc {
 /// # How the counts are taken
 ///
 /// `arc` and `circle` entries count *expanded* instances, because this report resolves each
-/// instance's own geometry and a mirrored pair of horseshoes is genuinely two of them.
+/// instance's own geometry and a mirrored pair of horseshoes is genuinely two of them. The one
+/// exception is a `circle` whose `repeat` this module could not read: it is expanded as though
+/// it had none and so counts once, and [`Self::circle_repeats_unreadable`] says how many
+/// elements that happened to, so the shortfall is declared rather than hidden.
 /// `line`, `rect`, `grid`, `text` and unknown types count elements *as the document writes
 /// them* — a `repeat` on one of those counts once, since the report carries no geometry to
 /// distinguish a dropped shape's copies from the shape itself.
@@ -184,11 +191,27 @@ pub struct VentumImportReport {
     pub dropped_element_types: Vec<(String, usize)>,
     /// Every dropped arc, resolved. See [`VentumArc`] and the module documentation.
     pub arcs: Vec<VentumArc>,
-    /// Arcs that could not be resolved into points because the element omitted `r` or gave a
-    /// non-finite coordinate. They are counted in [`Self::dropped_element_types`] under
-    /// [`ARC_TAG`] like any other, so `arcs.len()` plus this equals that tally — the
-    /// discrepancy is stated rather than left to be noticed.
+    /// Arcs the document declared but this module could not resolve into points, because some
+    /// part of the geometry an arc is built from was missing or unreadable: no `r` at all, an
+    /// `r` that is not a number, a `start`/`end` pair with a member that is not a number, or a
+    /// center (`x`/`y`/`cx`/`cy`) that is not a number.
+    ///
+    /// Every one of those is the SAME loss and lands here for the same reason: an arc is
+    /// reported so a shooter can copy its apex and tips onto their reticle, and a coordinate
+    /// derived from a value nobody wrote is worse than no coordinate at all. They are counted
+    /// in [`Self::dropped_element_types`] under [`ARC_TAG`] like any other arc, so
+    /// `arcs.len()` plus this equals that tally — the discrepancy is stated rather than left
+    /// to be noticed.
     pub arcs_unresolved: usize,
+    /// How many `circle` elements declared a `repeat` this module could not read, so each was
+    /// expanded as though it had none and counted ONCE where the document may draw many.
+    ///
+    /// A circle's repeat is read leniently (see the serde section below) because a circle is
+    /// never a hold point and must not be able to fail an import. That leniency costs the
+    /// tally its accuracy for those elements, and this is the accounting for it: the count is
+    /// low by an unknown amount, and the caller is told so instead of being handed a total
+    /// that quietly is not one.
+    pub circle_repeats_unreadable: usize,
 }
 
 impl VentumImportReport {
@@ -258,7 +281,13 @@ pub fn import_ventum_reticle_with_report(
     // Expand every element's `repeat` into concrete, unit-scaled instances first, with the
     // mark cap enforced during expansion.
     let mut dropped: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let instances = expand_elements(&reticle.spec.0, scale, &mut dropped)?;
+    let mut circle_repeats_unreadable = 0usize;
+    let instances = expand_elements(
+        &reticle.spec.0,
+        scale,
+        &mut dropped,
+        &mut circle_repeats_unreadable,
+    )?;
 
     // Classify: dot/tick become marks; text is collected for nearest-mark binding; a circle
     // is decoration that gets counted, and an arc is decoration that gets counted AND
@@ -279,11 +308,7 @@ pub fn import_ventum_reticle_with_report(
                 label,
             }),
             Role::Circle(circle) => {
-                let tag = if circle.sweep_degrees().is_some() {
-                    ARC_TAG
-                } else {
-                    "circle"
-                };
+                let tag = if circle.is_arc() { ARC_TAG } else { "circle" };
                 *dropped.entry(tag).or_insert(0) += 1;
                 if tag == ARC_TAG {
                     match circle.resolve(instance.down, instance.right) {
@@ -317,6 +342,7 @@ pub fn import_ventum_reticle_with_report(
             .collect(),
         arcs,
         arcs_unresolved,
+        circle_repeats_unreadable,
     };
 
     Ok((
@@ -408,12 +434,35 @@ struct CircleShape {
     /// Radius in milliradians, or `None` when the element omitted `r` (or gave a value that
     /// is not a usable length). Such an element is still counted; it just cannot be resolved.
     radius_mil: Option<f64>,
-    /// The document's `start`/`end` angles in degrees, when it declared both. `None` is a
-    /// plain ring, which is decoration under any reading and gets no [`VentumArc`].
+    /// The document's `start`/`end` angles in degrees, when it declared both AS NUMBERS.
+    /// `None` is a plain ring, which is decoration under any reading and gets no [`VentumArc`]
+    /// — unless [`Self::sweep_unreadable`] says the document declared a sweep this module
+    /// could not read, in which case it is an arc whose angles are lost, not a ring.
+    /// Both members are finite by construction ([`Cosmetic::Value`]).
     angles: Option<(f64, f64)>,
+    /// The document wrote BOTH `start` and `end`, and at least one of them is not a number.
+    ///
+    /// This is the difference between "no sweep was declared" and "a sweep was declared and I
+    /// cannot read it", and collapsing the two is how a horseshoe turns into a ring in
+    /// silence. One angle alone still describes no sweep — the format needs both — so a
+    /// circle that declares only `start` is a ring whatever type that `start` has.
+    sweep_unreadable: bool,
+    /// The document wrote `x`/`cx` or `y`/`cy` as something that is not a number, so the
+    /// center this shape is resolved about is the fallback origin rather than the one the
+    /// document meant. Harmless on a ring, which is never resolved; on an arc it would put
+    /// the reported apex and tips somewhere nobody wrote, so it makes the arc unresolved.
+    center_unreadable: bool,
 }
 
 impl CircleShape {
+    /// Whether this element is an ARC — a `circle` the document gave a sweep — rather than a
+    /// plain ring. True both for a sweep this module read and for one it could not, because
+    /// the tag a document earns must not depend on whether its angles happened to be spelled
+    /// in a type this module understands.
+    fn is_arc(&self) -> bool {
+        self.sweep_degrees().is_some() || self.sweep_unreadable
+    }
+
     /// How far this circle sweeps clockwise, in `(0, 360)` degrees, or `None` when it is a
     /// full ring — either because it declared no angles, or because the angles it declared
     /// describe a whole revolution (`start == end`, or a multiple of 360 apart).
@@ -440,6 +489,15 @@ impl CircleShape {
     /// the vertical axis (`start: 200, end: 340`, sum 540 ≡ 180) is symmetric about it and is
     /// deduped; the same horseshoe mirrored vertically opens the other way and is not.
     fn is_reflection_of_itself(&self, axis: Axis) -> bool {
+        // Geometry the document wrote and this module could not read answers NOTHING here.
+        // The dedupe drops a twin only when it can prove the twin is a duplicate, and with
+        // the angles or the center unreadable there is no proof either way — so the twin is
+        // kept, and both copies land in `arcs_unresolved` where the caller is told the
+        // geometry was lost. Guessing "duplicate" here would undercount in silence, which is
+        // the failure this whole report exists to end.
+        if self.sweep_unreadable || self.center_unreadable {
+            return false;
+        }
         // A ring — no angles, or angles spanning a whole revolution — is its own reflection.
         let Some((start, end)) = self.angles.filter(|_| self.sweep_degrees().is_some()) else {
             return true;
@@ -463,14 +521,29 @@ impl CircleShape {
         CircleShape {
             radius_mil: self.radius_mil,
             angles,
+            sweep_unreadable: self.sweep_unreadable,
+            center_unreadable: self.center_unreadable,
         }
     }
 
     /// Resolve this circle, centered at `(down, right)` milliradians, into the arc points a
-    /// caller could adopt as holds. `None` when it is a ring, or when the element gave no
-    /// usable radius or center — the caller counts those separately rather than reporting a
-    /// zero-radius arc whose apex and tips all sit on the center.
+    /// caller could adopt as holds. `None` when it is a ring, or when the element declared
+    /// geometry this module could not read — the caller counts those separately rather than
+    /// reporting points derived from a fallback the document never wrote.
     fn resolve(&self, down: f64, right: f64) -> Option<VentumArc> {
+        // A center the document declared and this module could not read is exactly as fatal
+        // to the answer as a missing radius: both feed the same `point()` below, and a
+        // coordinate computed from a value nobody wrote is a hold this report would be
+        // inventing. That half of this guard is the one that does the work.
+        //
+        // The `sweep_unreadable` half decides nothing on its own — an unreadable angle leaves
+        // `angles` empty, so `sweep_degrees()?` on the next line would bail regardless
+        // (removing it fails no test; that was checked). It is stated anyway because the two
+        // flags mean the same thing to a reader, and because `is_arc` above genuinely depends
+        // on the distinction.
+        if self.sweep_unreadable || self.center_unreadable {
+            return None;
+        }
         let sweep = self.sweep_degrees()?;
         let radius = self.radius_mil?;
         if !radius.is_finite() || radius <= 0.0 || !down.is_finite() || !right.is_finite() {
@@ -557,10 +630,15 @@ impl PointRole<'_> {
 /// no geometry this module reads, so each is counted once into `dropped` and skipped;
 /// `circle` goes through the expander like a point element, because an arc's resolved apex
 /// and tips are per-instance and a mirrored pair of horseshoes is two distinct arcs.
+///
+/// `circle_repeats_unreadable` counts the circles whose `repeat` this module could not read
+/// and therefore expanded as though absent, so the caller learns the tally is low rather than
+/// being handed a total that quietly is not one.
 fn expand_elements(
     elements: &[Element],
     scale: f64,
     dropped: &mut BTreeMap<&'static str, usize>,
+    circle_repeats_unreadable: &mut usize,
 ) -> Result<Vec<ExpandedInstance>, ReticleError> {
     let mut out: Vec<ExpandedInstance> = Vec::new();
     for element in elements {
@@ -577,17 +655,29 @@ fn expand_elements(
                 start,
                 end,
                 repeat,
-            } => (
-                x.unwrap_or(0.0),
-                y.unwrap_or(0.0),
-                repeat.as_ref(),
-                PointRole::Circle(CircleShape {
-                    // The radius is a length in the reticle's unit, so it scales with the
-                    // coordinates; the angles are angles and do not.
-                    radius_mil: r.map(|r| r * scale),
-                    angles: start.zip(*end),
-                }),
-            ),
+            } => {
+                if repeat.is_unreadable() {
+                    *circle_repeats_unreadable += 1;
+                }
+                (
+                    x.value().unwrap_or(0.0),
+                    y.value().unwrap_or(0.0),
+                    repeat.as_repeat(),
+                    PointRole::Circle(CircleShape {
+                        // The radius is a length in the reticle's unit, so it scales with the
+                        // coordinates; the angles are angles and do not.
+                        radius_mil: r.value().map(|r| r * scale),
+                        angles: start.value().zip(end.value()),
+                        // The format needs BOTH angles for a sweep, so "the document declared
+                        // an arc" means both keys are there; it is unreadable when either of
+                        // them is something this module cannot read as a number.
+                        sweep_unreadable: start.is_declared()
+                            && end.is_declared()
+                            && (start.is_unreadable() || end.is_unreadable()),
+                        center_unreadable: x.is_unreadable() || y.is_unreadable(),
+                    }),
+                )
+            }
             // Decoration this module reads no geometry from, and element types it has never
             // heard of. Counted, then skipped.
             Element::Line {} => {
@@ -721,11 +811,31 @@ fn format_label_number(value: f64) -> String {
 // Ventum input model (serde). Deliberately permissive: no `deny_unknown_fields`, so
 // cosmetic keys (color, width, cx/cy, size, len, orient, r, max_extent, tube_diameter,
 // notes, manufacturer, ...) are ignored rather than rejected. "Ignored" includes the
-// cosmetic keys this module DOES read: a `circle`'s x/y/r/start/end go through
-// [`lenient_f64`], so a value of the wrong JSON type degrades that one field to `None`
-// instead of failing the whole document. Only a hold-bearing coordinate — a `dot`/`tick`
-// `x`/`y`, or a `text`'s string — is strict, because there is no sane fallback for a mark
-// whose position cannot be read.
+// cosmetic keys this module DOES read: EVERY field of a `circle` — x/cx, y/cy, r, start,
+// end and repeat — degrades to "absent" when the document spells it in a type this module
+// cannot read, instead of failing the whole document over a decoration.
+//
+// Among the drawing ELEMENTS, strict is what a hold is built from and nothing else: a
+// `dot`/`tick` `x`/`y`, a `text`'s string, and the `repeat` that stamps copies of any of
+// those. There is no sane fallback for a mark whose position cannot be read, and a mark's
+// `repeat` quietly degrading to a single copy would drop hold points without saying so. A
+// `circle` is never a hold under any reading, so no field of one — its `repeat` included —
+// is rejected for its type.
+//
+// Reticle-level metadata (`name`, `plane`, `unit`, `ref_magnification`) is strict as well,
+// `name` included even though no hold depends on it. That is unchanged since 0.32.0 and is
+// not what this leniency is about: nothing there is per-element, so a bad value is the
+// document saying something wrong about itself rather than one decoration spoiling the rest.
+//
+// Type is the whole of that promise, and no more: a numeric literal outside `f64`'s range
+// (`"r": 1e400`) is refused by serde_json's PARSER before any of this runs, exactly as it
+// always has been on `line` and `rect`, and a `circle` consumes mark-cap budget during
+// expansion that 0.32.0 never charged it. Both are recorded in CHANGELOG and CLI_USAGE.
+//
+// Leniency is never silence. A circle that loses geometry this way is still counted in the
+// report, and an ARC that loses any of it lands in `arcs_unresolved` rather than being
+// resolved from a fallback; a circle that loses its `repeat` is counted in
+// `circle_repeats_unreadable`, because the tally for that element is then low.
 // ---------------------------------------------------------------------------------------
 
 /// A whole Ventum reticle: metadata plus its drawing `spec`.
@@ -802,22 +912,134 @@ impl<'de> Deserialize<'de> for Spec {
     }
 }
 
-/// Read a number the module treats as cosmetic geometry, never failing on one it cannot use.
+/// A number this module treats as cosmetic geometry, exactly as the document wrote it.
+///
+/// The three cases are kept apart because leniency degrades a field to its DEFAULT, and a
+/// default is only an honest answer when the document did not state one. A `circle` with no
+/// `x` really is centered; a `circle` whose `x` is `"left"` is centered only because this
+/// module gave up reading it, and an arc resolved about that center would hand the caller an
+/// apex nobody wrote. So [`Self::Unreadable`] is remembered rather than folded into
+/// [`Self::Absent`], and the report says a shape was lost instead of inventing one.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum Cosmetic {
+    /// The document did not write this key — or wrote `null`, which is how JSON spells the
+    /// absence of a value and is what every other optional field in this model already
+    /// treats as absent.
+    #[default]
+    Absent,
+    /// The key is there, holding something this module cannot read as a number.
+    Unreadable,
+    /// A usable number. Finite by construction — see [`lenient_cosmetic`].
+    Value(f64),
+}
+
+impl Cosmetic {
+    /// The number, when there is a usable one.
+    fn value(self) -> Option<f64> {
+        match self {
+            Cosmetic::Value(number) => Some(number),
+            Cosmetic::Absent | Cosmetic::Unreadable => None,
+        }
+    }
+
+    /// Whether the document wrote this key at all, readable or not.
+    fn is_declared(self) -> bool {
+        !matches!(self, Cosmetic::Absent)
+    }
+
+    /// Whether the document wrote this key and this module could not read it.
+    fn is_unreadable(self) -> bool {
+        matches!(self, Cosmetic::Unreadable)
+    }
+}
+
+/// Read a cosmetic number, never failing the document over one this module cannot use.
 ///
 /// `Option<f64>` alone absorbs an ABSENT or `null` field but still *rejects* a present field
 /// of the wrong type — and one rejected field fails the entire document, not the element that
 /// carried it. That is the wrong trade for a key this module only ever reads as a nicety: a
 /// Ventum tool is free to write `"r": "2mil"`, `"r": {"v": 2, "unit": "mil"}` or anything else
 /// its UI finds convenient, and none of that is a reason to refuse a reticle whose dots are
-/// perfectly good. So the value is read as arbitrary JSON and kept only if it is a finite
-/// number; everything else becomes `None`, i.e. a counted-but-unresolved decoration, which is
-/// the same answer the field being absent has always given.
-fn lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+/// perfectly good. So the value is read as arbitrary JSON and classified, never rejected.
+///
+/// What the classification can and cannot see: `Value::as_f64` answers `None` for every JSON
+/// value that is not a number, which is the case this exists for. The `is_finite` guard behind
+/// it cannot fire on JSON at all — `NaN` and `Infinity` are not JSON literals, and a numeric
+/// literal outside `f64`'s range (`1e400`) is refused by serde_json's PARSER, which fails the
+/// whole document before any [`serde_json::Value`] exists for this function to see. The guard
+/// is kept only so a non-JSON deserializer could not slip a non-finite number past; it catches
+/// nothing a Ventum file can contain.
+fn lenient_cosmetic<'de, D>(deserializer: D) -> Result<Cosmetic, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_f64().filter(|v| v.is_finite()))
+    if value.is_null() {
+        return Ok(Cosmetic::Absent);
+    }
+    Ok(match value.as_f64().filter(|v| v.is_finite()) {
+        Some(number) => Cosmetic::Value(number),
+        None => Cosmetic::Unreadable,
+    })
+}
+
+/// A `circle`'s `repeat`, exactly as the document wrote it. See [`lenient_repeat`].
+#[derive(Debug, Default)]
+enum CosmeticRepeat {
+    /// The document did not write a `repeat` (or wrote `null`).
+    #[default]
+    Absent,
+    /// It wrote one this module cannot read: an unknown `axis`, a `step` or `n` of the wrong
+    /// type, a `repeat` that is not even an object.
+    Unreadable,
+    /// A usable repeat.
+    Present(Repeat),
+}
+
+impl CosmeticRepeat {
+    /// The repeat to expand with, `None` when there is none to use.
+    fn as_repeat(&self) -> Option<&Repeat> {
+        match self {
+            CosmeticRepeat::Present(repeat) => Some(repeat),
+            CosmeticRepeat::Absent | CosmeticRepeat::Unreadable => None,
+        }
+    }
+
+    /// Whether the document declared a repeat this module could not read.
+    fn is_unreadable(&self) -> bool {
+        matches!(self, CosmeticRepeat::Unreadable)
+    }
+}
+
+/// Read a `circle`'s `repeat`, degrading an unusable one to "no repeat" instead of failing the
+/// document over it.
+///
+/// This leniency belongs to the CIRCLE, not to [`Repeat`], and the two must not be confused.
+/// On a `dot`, `tick` or `text` a repeat is not decoration: it stamps the hold points the
+/// shooter aims with, so a malformed one that quietly collapsed to a single copy would drop
+/// marks without saying so — the exact silence MBA-1441 exists to end, and loud is the only
+/// safe answer there. On a `circle` it stamps copies of something that is never a mark under
+/// any reading, so an unreadable repeat costs the report a count (declared in
+/// [`VentumImportReport::circle_repeats_unreadable`]) and costs the reticle nothing. `Repeat`
+/// itself therefore stays strict; only this one field reads it leniently.
+///
+/// The degradation is all-or-nothing on purpose. `axis`, `step` and `n` have no defensible
+/// defaults — `x` is not more plausible than `y`, and no copy count is more plausible than
+/// another — so a repeat with any of them unusable is not a repeat. "No repeat", one instance
+/// at `(x, y)`, is what an absent `repeat` gives, and is what 0.32.0 gave every `circle` in
+/// every document, since the variant read no fields at all.
+fn lenient_repeat<'de, D>(deserializer: D) -> Result<CosmeticRepeat, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(CosmeticRepeat::Absent);
+    }
+    Ok(match serde_json::from_value::<Repeat>(value) {
+        Ok(repeat) => CosmeticRepeat::Present(repeat),
+        Err(_) => CosmeticRepeat::Unreadable,
+    })
 }
 
 /// One drawing element, internally tagged on `"type"`. Unknown cosmetic fields on each
@@ -852,29 +1074,32 @@ enum Element {
     /// serde skips every field).
     Line {},
     /// A ring, or — when it carries `start`/`end` — an arc such as a horseshoe. Decoration
-    /// either way: still dropped, but no longer in silence (MBA-1441). Every field is
-    /// optional AND leniently typed ([`lenient_f64`]), so a cosmetic ring that names none of
-    /// them — or spells one as `"2mil"`, an object, or `null` — still parses, exactly as it
-    /// did when this variant read nothing at all.
+    /// either way: still dropped, but no longer in silence (MBA-1441). EVERY field is optional
+    /// AND leniently typed — the five numbers through [`lenient_cosmetic`] and `repeat`
+    /// through [`lenient_repeat`] — so a cosmetic ring that names none of them, or spells one
+    /// as `"2mil"`, an object, `null`, or a `repeat` with an `axis` this module has never
+    /// heard of, still parses exactly as it did when this variant read nothing at all.
     Circle {
         /// Center, `+x` right. `cx` is the schema's other spelling of the same field.
-        #[serde(default, alias = "cx", deserialize_with = "lenient_f64")]
-        x: Option<f64>,
+        #[serde(default, alias = "cx", deserialize_with = "lenient_cosmetic")]
+        x: Cosmetic,
         /// Center, `+y` down.
-        #[serde(default, alias = "cy", deserialize_with = "lenient_f64")]
-        y: Option<f64>,
+        #[serde(default, alias = "cy", deserialize_with = "lenient_cosmetic")]
+        y: Cosmetic,
         /// Radius, in the reticle's own unit.
-        #[serde(default, deserialize_with = "lenient_f64")]
-        r: Option<f64>,
+        #[serde(default, deserialize_with = "lenient_cosmetic")]
+        r: Cosmetic,
         /// Sweep start in degrees from 3 o'clock, clockwise (see the module documentation —
         /// 270 is the TOP of the reticle). Present only on an arc.
-        #[serde(default, deserialize_with = "lenient_f64")]
-        start: Option<f64>,
+        #[serde(default, deserialize_with = "lenient_cosmetic")]
+        start: Cosmetic,
         /// Sweep end, same convention. An arc needs BOTH: one angle alone describes no sweep.
-        #[serde(default, deserialize_with = "lenient_f64")]
-        end: Option<f64>,
-        #[serde(default)]
-        repeat: Option<Repeat>,
+        #[serde(default, deserialize_with = "lenient_cosmetic")]
+        end: Cosmetic,
+        /// Copies of the ring or arc. Read leniently because a circle is never a hold — see
+        /// [`lenient_repeat`] for why a mark's `repeat` is not.
+        #[serde(default, deserialize_with = "lenient_repeat")]
+        repeat: CosmeticRepeat,
     },
     /// Decoration — dropped.
     Rect {},
@@ -887,6 +1112,11 @@ enum Element {
 
 /// The `repeat` operator: stamp `n` copies of an element along one axis, optionally
 /// mirrored, optionally auto-numbering a text ladder's labels.
+///
+/// Strictly typed, and deliberately so: on a `dot`, `tick` or `text` this is what stamps the
+/// hold points, and a malformed repeat that degraded to one copy would drop marks in silence.
+/// A `circle`'s repeat stamps nothing holdable, so that one field — and only that one — reads
+/// this type leniently through [`lenient_repeat`].
 #[derive(Debug, Deserialize)]
 struct Repeat {
     /// Which axis to step along.
@@ -1106,8 +1336,11 @@ mod tests {
             }),
         }];
         let mut dropped = BTreeMap::new();
-        let instances = expand_elements(&elements, 1.0, &mut dropped).unwrap();
+        let mut circle_repeats_unreadable = 0usize;
+        let instances =
+            expand_elements(&elements, 1.0, &mut dropped, &mut circle_repeats_unreadable).unwrap();
         assert!(dropped.is_empty(), "a text ladder drops nothing");
+        assert_eq!(circle_repeats_unreadable, 0);
         assert_eq!(
             instances,
             vec![
@@ -1417,25 +1650,66 @@ mod tests {
         }
     }
 
-    /// The same leniency on the angles. An arc whose `start`/`end` are not numbers describes
-    /// no sweep, so it degrades to a plain ring — counted as `circle`, never an error.
+    /// The same leniency on the angles — with the same SAYING SO. An arc whose `start`/`end`
+    /// are not numbers has lost its sweep, and that is the same kind of loss as an unreadable
+    /// radius: the document declared an arc this module cannot resolve. Calling it a plain
+    /// ring would drop the declaration and report nothing, which is exactly the silence
+    /// MBA-1441 is named for.
     #[test]
-    fn non_numeric_angles_degrade_the_arc_to_a_ring_rather_than_failing() {
-        let (desc, report) = import_ventum_reticle_with_report(
-            r#"{"name":"A","unit":"mil","spec":[
-                {"type":"dot","x":0,"y":1},
-                {"type":"circle","x":0,"y":0,"r":2,"start":"200deg","end":{"deg":340}}
-            ]}"#,
-        )
-        .unwrap();
-        assert_eq!(desc.marks.len(), 1, "the dot must survive");
-        assert_eq!(
-            report.dropped_element_types,
-            vec![("circle".to_string(), 1)],
-            "no usable sweep -> a ring, not an arc"
-        );
-        assert!(report.arcs.is_empty());
-        assert_eq!(report.arcs_unresolved, 0);
+    fn a_declared_sweep_that_cannot_be_read_is_reported_not_quietly_a_ring() {
+        for (start, end) in [
+            (r#""200deg""#, r#"{"deg":340}"#),
+            ("200", r#""340deg""#),
+            (r#""200deg""#, "340"),
+        ] {
+            let json = format!(
+                r#"{{"name":"A","unit":"mil","spec":[
+                    {{"type":"dot","x":0,"y":1}},
+                    {{"type":"circle","x":0,"y":0,"r":2,"start":{start},"end":{end}}}
+                ]}}"#
+            );
+            let (desc, report) = import_ventum_reticle_with_report(&json)
+                .unwrap_or_else(|e| panic!("{start}/{end} must not fail the import, got {e:?}"));
+            assert_eq!(desc.marks.len(), 1, "{start}/{end} — the dot must survive");
+            assert_eq!(
+                report.dropped_element_types,
+                vec![("arc".to_string(), 1)],
+                "{start}/{end} — a declared sweep keeps the arc tag even when unreadable"
+            );
+            assert!(report.arcs.is_empty(), "{start}/{end} — nothing to resolve");
+            assert_eq!(
+                report.arcs_unresolved, 1,
+                "{start}/{end} — an unreadable sweep is reported exactly like an unreadable \
+                 radius, not swallowed"
+            );
+            assert_eq!(
+                report.arcs.len() + report.arcs_unresolved,
+                report.dropped_elements,
+                "{start}/{end} — the stated arcs-vs-tally invariant still holds"
+            );
+        }
+    }
+
+    /// One angle alone still describes no sweep, whatever type it is, so a `circle` carrying
+    /// only `start` is a ring — and remains one when that lone angle is unreadable. This is
+    /// the boundary of the rule above: an arc needs BOTH angles declared before there is a
+    /// declaration to lose.
+    #[test]
+    fn a_lone_angle_is_a_ring_whether_or_not_it_can_be_read() {
+        for spec in [
+            r#"{"type":"circle","x":0,"y":0,"r":2,"start":200}"#,
+            r#"{"type":"circle","x":0,"y":0,"r":2,"start":"200deg"}"#,
+            r#"{"type":"circle","x":0,"y":0,"r":2,"end":340}"#,
+        ] {
+            let json = format!(r#"{{"name":"R","unit":"mil","spec":[{spec}]}}"#);
+            let (_, report) = import_ventum_reticle_with_report(&json).unwrap();
+            assert_eq!(
+                report.dropped_element_types,
+                vec![("circle".to_string(), 1)],
+                "{spec} — one angle is no sweep"
+            );
+            assert_eq!(report.arcs_unresolved, 0, "{spec}");
+        }
     }
 
     /// An arc with real angles but an unreadable radius keeps its `arc` tag and lands in the
@@ -1454,18 +1728,67 @@ mod tests {
         assert_eq!(report.arcs.len() + report.arcs_unresolved, report.dropped_elements);
     }
 
-    /// A non-numeric center falls back to the reticle center, the same answer an absent
-    /// `x`/`y` has always given, and the arc still resolves around it.
+    /// An ABSENT center — omitted, or `null`, which is how JSON spells absent — is the
+    /// reticle center, and the arc resolves around it. That is the format's own default, not
+    /// a guess.
     #[test]
-    fn a_non_numeric_center_falls_back_to_the_reticle_center() {
+    fn an_absent_or_null_center_is_the_reticle_center() {
         let (_, report) = import_ventum_reticle_with_report(
             r#"{"name":"C","unit":"mil","spec":[
-                {"type":"circle","x":"left","y":null,"r":2,"start":200,"end":340}
+                {"type":"circle","r":2,"start":200,"end":340},
+                {"type":"circle","x":null,"y":null,"r":2,"start":200,"end":340}
             ]}"#,
         )
         .unwrap();
-        assert_eq!(report.arcs.len(), 1);
+        assert_eq!(report.arcs.len(), 2);
+        assert_eq!(report.arcs_unresolved, 0);
         assert_eq!(report.arcs[0].center, VentumArcPoint::default());
+        assert_eq!(report.arcs[1].center, VentumArcPoint::default());
+    }
+
+    /// A center the document WROTE and this module cannot read is a different thing entirely.
+    /// Resolving the arc about the origin anyway would print an apex and two tips at
+    /// coordinates nobody wrote, under a notice that invites the reader to add them as marks
+    /// — inventing a hold, which is the other half of MBA-1441's complaint. So it is
+    /// unresolved, reported beside an unreadable radius and an unreadable sweep.
+    #[test]
+    fn a_center_that_cannot_be_read_leaves_the_arc_unresolved() {
+        for (x, y) in [
+            (r#""left""#, "0"),
+            ("0", r#""up""#),
+            (r#"{"v":1}"#, r#"{"v":1}"#),
+        ] {
+            let json = format!(
+                r#"{{"name":"C","unit":"mil","spec":[
+                    {{"type":"circle","x":{x},"y":{y},"r":2,"start":200,"end":340}}
+                ]}}"#
+            );
+            let (_, report) = import_ventum_reticle_with_report(&json)
+                .unwrap_or_else(|e| panic!("x:{x} y:{y} must not fail the import, got {e:?}"));
+            assert_eq!(
+                report.dropped_element_types,
+                vec![("arc".to_string(), 1)],
+                "x:{x} y:{y} — still an arc"
+            );
+            assert!(
+                report.arcs.is_empty(),
+                "x:{x} y:{y} — no points may be reported from a center nobody wrote"
+            );
+            assert_eq!(report.arcs_unresolved, 1, "x:{x} y:{y}");
+        }
+    }
+
+    /// A ring is never resolved, so an unreadable center costs it nothing: it is counted as
+    /// the plain `circle` it is, and no arc bucket moves.
+    #[test]
+    fn an_unreadable_center_on_a_plain_ring_is_just_a_counted_ring() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"C","unit":"mil","spec":[{"type":"circle","x":"left","r":2}]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.dropped_element_types, vec![("circle".to_string(), 1)]);
+        assert_eq!(report.arcs_unresolved, 0);
+        assert!(report.arcs.is_empty());
     }
 
     /// Leniency must not cost a real arc its geometry: a genuine numeric circle in the SAME
@@ -1498,6 +1821,168 @@ mod tests {
             (arc.apex.down_mil + 2.0).abs() < 1e-9 && arc.apex.right_mil.abs() < 1e-9,
             "apex at 270 deg is 2 mil straight above center, got {:?}",
             arc.apex
+        );
+    }
+
+    /// A `circle`'s `repeat` is the sixth cosmetic field and is read like the other five: a
+    /// repeat this module cannot use is the same answer as no repeat, which is what 0.32.0
+    /// gave every circle in every document. Each of these spellings imported under 0.32.0 —
+    /// `Circle {}` read no fields at all — so each must import now.
+    #[test]
+    fn an_unusable_repeat_on_a_circle_is_ignored_rather_than_rejected() {
+        for repeat in [
+            r#"{"axis":"x","step":"1mil","n":1}"#,
+            r#"{"axis":"x","step":1,"n":"two"}"#,
+            r#"{"axis":"diagonal","step":1,"n":1}"#,
+            r#"{"step":1,"n":1}"#,
+            r#"{"axis":"x","step":1,"n":1,"mirror":"yes"}"#,
+            r#""every 1 mil""#,
+            "[1]",
+            "7",
+        ] {
+            let json = format!(
+                r#"{{"name":"L","unit":"mil","spec":[
+                    {{"type":"dot","x":0,"y":1}},
+                    {{"type":"circle","x":0,"y":0,"r":2,"repeat":{repeat}}}
+                ]}}"#
+            );
+            let (desc, report) = import_ventum_reticle_with_report(&json).unwrap_or_else(|e| {
+                panic!("repeat {repeat} must not fail the import, got {e:?}")
+            });
+
+            // The document imported: the sibling dot is still a hold point...
+            assert_eq!(desc.marks.len(), 1, "repeat {repeat} — the dot must survive");
+            assert_eq!(desc.marks[0].down_mil, 1.0);
+            // ...the ring is counted once, as an unrepeated circle...
+            assert_eq!(
+                report.dropped_element_types,
+                vec![("circle".to_string(), 1)],
+                "repeat {repeat} — expanded as though it had no repeat"
+            );
+            // ...and the tally says it may be low, rather than passing itself off as exact.
+            assert_eq!(
+                report.circle_repeats_unreadable, 1,
+                "repeat {repeat} — an unreadable repeat must be declared, not swallowed"
+            );
+        }
+    }
+
+    /// A `repeat` a mark carries stays STRICT, because it stamps hold points: degrading it to
+    /// one copy would drop marks in silence. Leniency is the circle's, not [`Repeat`]'s.
+    #[test]
+    fn an_unusable_repeat_on_a_hold_bearing_mark_still_fails_loudly() {
+        for kind in [
+            r#"{"type":"dot","x":0,"y":1"#,
+            r#"{"type":"tick","x":0,"y":1"#,
+            r#"{"type":"text","x":0,"y":1,"text":"5""#,
+        ] {
+            let json = format!(
+                r#"{{"name":"S","unit":"mil","spec":[
+                    {kind},"repeat":{{"axis":"x","step":"1mil","n":3}}}}
+                ]}}"#
+            );
+            let error = import_ventum_reticle(&json)
+                .expect_err("a mark's malformed repeat must not be swallowed");
+            assert!(
+                matches!(error, ReticleError::InvalidSpec(_)),
+                "{kind} — expected InvalidSpec, got {error:?}"
+            );
+        }
+    }
+
+    /// A readable `repeat` on a circle is untouched by that leniency: it still stamps its
+    /// copies, and the report still counts every one of them.
+    #[test]
+    fn a_readable_repeat_on_a_circle_still_stamps_its_copies() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"L","unit":"mil","spec":[
+                {"type":"circle","x":1,"y":0,"r":0.5,"repeat":{"axis":"x","step":1,"n":4}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.dropped_element_types, vec![("circle".to_string(), 4)]);
+        assert_eq!(report.circle_repeats_unreadable, 0);
+    }
+
+    /// The mirror dedupe drops a twin only when it can PROVE the twin is a duplicate, and
+    /// geometry the document wrote but this module cannot read proves nothing. A centered arc
+    /// whose sweep or center is unreadable therefore keeps its twin: both are counted, both
+    /// are unresolved, and the caller is told two shapes were lost. Guessing "duplicate" would
+    /// undercount in exactly the way this report exists to prevent.
+    #[test]
+    fn an_unreadable_centered_arc_keeps_its_mirrored_twin() {
+        // start + end = 540 = 180 (mod 360) reads as symmetric about the vertical axis and
+        // would be deduped to one — but only when the angles can be read at all.
+        for spec in [
+            r#""start":"200deg","end":340"#,
+            r#""start":200,"end":"340deg""#,
+        ] {
+            let json = format!(
+                r#"{{"name":"U","unit":"mil","spec":[
+                    {{"type":"circle","x":0,"y":0,"r":2,{spec},
+                     "repeat":{{"axis":"x","step":1,"n":1,"mirror":true}}}}
+                ]}}"#
+            );
+            let (_, report) = import_ventum_reticle_with_report(&json).unwrap();
+            assert_eq!(
+                report.dropped_element_types,
+                vec![("arc".to_string(), 2)],
+                "{spec} — an unprovable dedupe keeps the twin"
+            );
+            assert_eq!(report.arcs_unresolved, 2, "{spec}");
+            assert!(report.arcs.is_empty(), "{spec}");
+        }
+
+        // Same for a center that cannot be read: the stepped coordinate this dedupe tests is
+        // itself the fallback, so it proves nothing either.
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"U","unit":"mil","spec":[
+                {"type":"circle","x":"left","y":0,"r":2,"start":200,"end":340,
+                 "repeat":{"axis":"x","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.dropped_element_types, vec![("arc".to_string(), 2)]);
+        assert_eq!(report.arcs_unresolved, 2);
+    }
+
+    /// KNOWN DIVERGENCE from 0.32.0, recorded so it is a fact rather than a surprise.
+    ///
+    /// Resolving arcs put `circle` instances through repeat expansion, and expansion enforces
+    /// [`MAX_RETICLE_MARKS`] over everything it materializes. A `circle` therefore consumes
+    /// mark budget it never consumed before — under 0.32.0 it was skipped before expansion
+    /// began — so a document already at the cap, or one whose circle carries a huge
+    /// `repeat.n`, is refused where 0.32.0 imported it. Leniency cannot reach this: the
+    /// document is well-formed, it is the cap that refuses it. Both CHANGELOG and CLI_USAGE
+    /// state the exception; this pins it.
+    #[test]
+    fn a_circle_counts_against_the_mark_cap_unlike_0_32_0() {
+        // One dot short of the cap, plus one ring: fine, because the ring is the last slot.
+        let at_cap = format!(
+            r#"{{"name":"C","unit":"mil","spec":[
+                {{"type":"dot","x":1,"y":1,"repeat":{{"axis":"x","step":0.001,"n":{}}}}},
+                {{"type":"circle","x":0,"y":0,"r":1}}
+            ]}}"#,
+            MAX_RETICLE_MARKS - 1
+        );
+        let (desc, report) = import_ventum_reticle_with_report(&at_cap).unwrap();
+        assert_eq!(desc.marks.len(), MAX_RETICLE_MARKS - 1);
+        assert_eq!(report.dropped_element_types, vec![("circle".to_string(), 1)]);
+
+        // A full cap of marks plus one ring: refused, where 0.32.0 imported the marks and
+        // dropped the ring unexamined.
+        let over_cap = format!(
+            r#"{{"name":"C","unit":"mil","spec":[
+                {{"type":"dot","x":1,"y":1,"repeat":{{"axis":"x","step":0.001,"n":{MAX_RETICLE_MARKS}}}}},
+                {{"type":"circle","x":0,"y":0,"r":1}}
+            ]}}"#
+        );
+        assert!(
+            matches!(
+                import_ventum_reticle(&over_cap),
+                Err(ReticleError::TooManyMarks { .. })
+            ),
+            "a circle past the cap is refused — the documented 0.32.0 divergence"
         );
     }
 

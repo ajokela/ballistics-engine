@@ -2832,13 +2832,31 @@ inventing holds that would also shift what `reticle hold` reports for every Vent
 imported since 0.32.0. Library callers get the same information structurally from
 `reticle_import::import_ventum_reticle_with_report`.
 
-**A cosmetic field never fails the import.** A `circle`'s `x`/`y`/`cx`/`cy`/`r`/`start`/`end`
-are read leniently: a value that is not a number — `"r": "2mil"`, an object, `null` — is
-ignored exactly as an absent one is, and the element is still counted in the notice above.
-Only what a hold depends on is strict: a `dot`/`tick` `x`/`y`, or a `text` string, must be the
-type the schema says, because there is no sane fallback for a mark whose position cannot be
-read. An unreadable radius leaves an arc unresolved, which the notice reports as *"N further
-arc(s) declared no usable radius"* rather than dropping it from the tally.
+**No `circle` field is rejected for its type.** *Every* field of a `circle` — `x`, `y`, `cx`,
+`cy`, `r`, `start`, `end` and `repeat` — is read leniently: a value whose type this importer
+cannot read (`"r": "2mil"`, an object, an array, `true`, `null`, a `repeat` whose `axis` is
+`"diagonal"`) is ignored exactly as an absent one is, and the element is still counted in the
+notice above. Among the drawing elements, strict is what a hold is built from and nothing else:
+a `dot`/`tick` `x`/`y`, a `text` string, and the `repeat` that stamps copies of those must be
+the type the schema says — there is no sane fallback for a mark whose position cannot be read,
+and a mark's `repeat` quietly degrading to a single copy would drop hold points without saying
+so. (The reticle-level `name`, `plane`, `unit` and `ref_magnification` are strict as well,
+unchanged from 0.32.0.) A `circle`'s `repeat` stamps nothing holdable, so it degrades; the
+notice then says *"N circle element(s) declared a `repeat` this importer could not read, so
+each was counted once; the document may draw more."*
+
+Leniency is not silence. An arc that loses any part of its geometry — no `r`, an unreadable
+`r`, a `start`/`end` pair with an unreadable member, or an unreadable center — keeps its `arc`
+tag and is reported as *"N further arc(s) declared geometry this importer could not read
+(radius, sweep or center), so their points could not be computed at all"* rather than being
+dropped from the tally or resolved about a center nobody wrote.
+
+Two things a `circle` can still refuse a document over, stated rather than left to be found:
+a numeric literal outside `f64`'s range (`"r": 1e400`) is rejected by the JSON *parser* before
+any of this leniency applies, exactly as it always has been on `line` and `rect`; and `circle`
+instances count against the `MAX_RETICLE_MARKS` cap during repeat expansion, so a document
+already at the cap, or one whose `circle` carries a `repeat.n` in the thousands, is refused
+with a too-many-marks error where 0.32.0 dropped the circle unexamined.
 
 **A mirrored arc on the mirror line is two arcs when the reflection changes it.** `repeat`'s
 `mirror` skips a twin that would land on top of its original, but for an arc that test is

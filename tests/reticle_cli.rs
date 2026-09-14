@@ -736,3 +736,52 @@ fn import_is_silent_when_nothing_was_dropped() {
         "a fully imported reticle must not warn: {stderr}"
     );
 }
+
+/// MBA-1441, the other silence: a `circle` the importer cannot fully read must neither take
+/// the document down nor vanish from the notice.
+///
+/// Both halves are pinned here because both were wrong at different times. A `circle` whose
+/// `repeat` is unusable used to fail the whole import (the dot went with the ring); a `circle`
+/// whose declared sweep is unusable used to be retagged a plain ring and reported nothing at
+/// all, while the same loss on its radius WAS reported. The library tests pin the report
+/// fields; this pins the sentences the user actually reads.
+#[test]
+fn import_reports_a_circle_it_could_only_partly_read() {
+    let dir = tempfile_dir("import-lenient");
+    let path = dir.join("lenient.ventum.json");
+    std::fs::write(
+        &path,
+        r#"{"name":"L","plane":"ffp","unit":"mil","spec":[
+            {"type":"dot","x":0,"y":4},
+            {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":"340deg"},
+            {"type":"circle","x":0,"y":0,"r":1,"repeat":{"axis":"diagonal","step":1,"n":4}}
+        ]}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, ok) = run(&["reticle", "import", path.to_str().unwrap(), "-o", "json"]);
+    // It imports at all: neither circle may refuse the document its dot belongs to.
+    assert!(ok, "a partly-readable circle must not fail the import: {stderr}");
+    let parsed: ReticleDescription = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed.marks.len(), 1, "the dot survives both circles");
+
+    // The unreadable sweep keeps the ARC tag -- it is not quietly demoted to `circle` -- and
+    // is reported under the same line an unreadable radius is.
+    assert!(stderr.contains("arc x1"), "the declared arc lost its tag: {stderr}");
+    assert!(
+        stderr.contains("1 further arc(s) declared geometry this importer could not read"),
+        "an unreadable sweep must be reported like an unreadable radius: {stderr}"
+    );
+    // And no arc points are printed, because none could be computed honestly.
+    assert!(
+        !stderr.contains("apex"),
+        "no apex may be reported for an arc whose geometry could not be read: {stderr}"
+    );
+
+    // The unreadable repeat is counted once AND declared as a count that may be low.
+    assert!(stderr.contains("circle x1"), "the repeated ring is not counted: {stderr}");
+    assert!(
+        stderr.contains("1 circle element(s) declared a `repeat` this importer could not read"),
+        "an unreadable repeat must be declared, not swallowed: {stderr}"
+    );
+}

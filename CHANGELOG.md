@@ -30,16 +30,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description is byte-identical to earlier engines.
 
   Reading an arc's geometry meant giving `circle` typed fields, where before serde ignored
-  every one of them, and a typed `Option<f64>` still REJECTS a present value of the wrong type
-  — which fails the whole document, not the one element. A Ventum tool is free to write
-  `"r": "2mil"` or `"r": {"v": 2, "unit": "mil"}`, and a reticle whose dots are perfectly good
-  must not be refused over a decoration's units. So a `circle`'s `x`/`y`/`cx`/`cy`/`r`/`start`/
-  `end` are read leniently: anything that is not a finite number is ignored exactly as an
-  absent field is, and the element is still counted in the report (an arc with an unreadable
-  radius lands in `arcs_unresolved`, the same bucket as one that omitted `r`). Only what a hold
-  depends on stays strict — a `dot`/`tick` `x`/`y` and a `text` string — because there is no
-  sane fallback for a mark whose position cannot be read. Every document that imported under
-  0.32.0 still imports.
+  every one of them, and a typed field still REJECTS a present value of the wrong type — which
+  fails the whole document, not the one element. A Ventum tool is free to write `"r": "2mil"`
+  or `"r": {"v": 2, "unit": "mil"}`, and a reticle whose dots are perfectly good must not be
+  refused over a decoration's units. So EVERY field of a `circle` — `x`/`cx`, `y`/`cy`, `r`,
+  `start`, `end` and `repeat` — is read leniently: a value whose type this importer cannot read
+  is ignored exactly as an absent one is, and the element is still counted in the report. No
+  `circle` field is rejected for its type. Among the drawing elements, strict is what a hold is
+  built from and nothing else: a `dot`/`tick` `x`/`y`, a `text` string, and the `repeat` that
+  stamps copies of those, because there is no sane fallback for a mark whose position cannot be
+  read and a mark's `repeat` degrading to one copy would drop hold points in silence. (Reticle-
+  level metadata — `name`, `plane`, `unit`, `ref_magnification` — stays strict too, exactly as
+  in 0.32.0.) A `circle`'s `repeat` stamps nothing holdable, so it degrades instead of refusing
+  the document — and the report declares the cost in a new `circle_repeats_unreadable`, since
+  that element's tally is then low by an unknown amount.
+
+  Leniency never becomes silence: an ARC that loses any part of its geometry — no `r`, an
+  unreadable `r`, a declared `start`/`end` pair with an unreadable member, or an unreadable
+  center — keeps its `arc` tag and lands in `arcs_unresolved` rather than being reported from a
+  fallback nobody wrote. (Earlier in this cycle an unreadable angle quietly retagged the arc as
+  a plain ring and reported nothing, while an unreadable radius was reported; they are the same
+  loss and are now reported the same way.)
+
+  Two ways a `circle` can still refuse a document 0.32.0 accepted, both stated rather than
+  left to be discovered — they are why the earlier absolute "every document that imported under
+  0.32.0 still imports" has been replaced with this:
+  - A numeric literal outside `f64`'s range, such as `"r": 1e400`, is refused by serde_json's
+    *parser* before any of this leniency can see it, so it still fails the whole document.
+    `line` and `rect` have always behaved this way, so nothing regressed — but "anything that
+    is not a finite number is ignored" would have been too strong a sentence.
+  - `circle` instances now go through repeat expansion, and expansion enforces
+    `MAX_RETICLE_MARKS` over everything it materializes. A `circle` therefore consumes mark
+    budget that 0.32.0 never charged it (it was skipped before expansion began), so a document
+    already at the cap — or one whose `circle` carries a `repeat.n` in the thousands — is
+    refused with `TooManyMarks` where 0.32.0 imported it. This is a cap decision, not a parsing
+    one; it is pinned by a test and still owed a fix.
 
   `repeat`'s `mirror` also stops undercounting centered arcs. It has always skipped a twin that
   would land on top of its original, and for a mark that test is just "is it on the mirror
