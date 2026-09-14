@@ -16,6 +16,11 @@
  *   { "ok": false, "api_version": 1, "engine_version": "...",
  *     "error": { "code": "...", "message": "...", "details": { ... } } }
  *
+ * Branch on "ok" and "error"."code" rather than on which fields are present:
+ * a request refused before it reaches the bridge — one whose bytes are not
+ * UTF-8, or a NULL pointer — is answered by this ABI layer with the minimal
+ * shape, "ok"/"api_version"/"error", and carries no "engine_version".
+ *
  * Contract:
  *   - The calls NEVER return NULL and NEVER throw/abort; check "ok" in the JSON.
  *   - The caller owns the input buffer; the engine does not retain it.
@@ -25,6 +30,14 @@
  *   - Requests larger than 1 MiB are rejected with code "resource_limit".
  *   - Feature-detect with the "meta.capabilities" command instead of assuming a
  *     command list; builds differ (e.g. "pdf", "profile-import").
+ *
+ * ANDROID / JNI: call ballistics_bridge_call_n with the bytes of a Kotlin
+ * String.toByteArray(Charsets.UTF_8), and return the response as a jbyteArray.
+ * JNI's own string conversions — GetStringUTFChars AND GetStringUTFRegion —
+ * produce MODIFIED UTF-8, which this ABI refuses as invalid UTF-8 the first
+ * time a user types a character above U+FFFF, and NewStringUTF expects modified
+ * UTF-8 on the way back. Worked Kotlin + C example, and why:
+ * docs/ANDROID_JNI_BRIDGE.md.
  */
 
 #ifndef BALLISTICS_BRIDGE_H

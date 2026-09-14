@@ -127,6 +127,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not change that. `zero_angle_degrees`, the field actually reported missing, is a
   trajectory-summary row and is now reachable.
 
+- **`docs/ANDROID_JNI_BRIDGE.md` (MBA-1543).** The bridge's C ABI has a length-explicit entry
+  point, `ballistics_bridge_call_n`, and on Android it is the one to use — but that was
+  recorded only in a sentence of `include/ballistics_bridge.h` describing it as being for
+  "buffers that are not NUL-terminated", which is not the reason an Android integrator needs.
+
+  JNI's string conversions produce MODIFIED UTF-8: `GetStringUTFChars` and `GetStringUTFRegion`
+  alike, since the difference between them is buffer ownership, not encoding. The engine
+  decodes requests as strict UTF-8 and refuses anything else, so an integrator on the obvious
+  `jstring` path ships a defect that hides completely until a user types a character above
+  U+FFFF — the two encodings agree over the whole BMP, so accented text and CJK go through
+  untouched and an emoji in a profile name does not. `NewStringUTF` is the same trap on the way
+  back. The new page states that, shows the Kotlin `toByteArray(Charsets.UTF_8)` /
+  `jbyteArray` shape end to end in Kotlin and C, and covers loading and CMake-linking the
+  library. `include/ballistics_bridge.h` and `src/bridge/ffi.rs` point at it.
+
+  Two tests now pin what the page argues from, so it cannot quietly go stale:
+  `a_request_in_jni_modified_utf8_is_refused` drives a modified-UTF-8 request and a standard
+  one through `ballistics_bridge_call_n` and separates them by error code, and
+  `modified_utf8_and_utf8_agree_below_the_supplementary_planes` pins the scope of the
+  divergence rather than leaving "non-ASCII" to be read as the trigger.
+
+  One correction fell out of writing it: the header said every failure envelope carries
+  `engine_version`, and the envelope for a request refused before it reaches the bridge — bytes
+  that are not UTF-8, or a NULL pointer — carries `ok`, `api_version` and `error` only. The
+  header now says to branch on `ok` and `error.code` rather than on which fields are present.
+
 ### Fixed
 - **The Android `.so` now carries a `DT_SONAME` (MBA-1541).** `scripts/build-mobile-android.sh`
   produced `libballistics_engine.so` with no soname at all, on both shipped ABIs. Without one,
