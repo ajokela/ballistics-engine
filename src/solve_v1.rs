@@ -363,12 +363,7 @@ pub(crate) fn prepare_request(
 
     let (projectile, bullet_length_m) = resolve_projectile(&request.projectile, &mut assumptions)?;
     let rifle = resolve_rifle(&request.rifle, &mut assumptions)?;
-    let shot = resolve_shot(
-        &request.shot,
-        rifle.muzzle_height_m,
-        &mut assumptions,
-        &mut warnings,
-    )?;
+    let shot = resolve_shot(&request.shot, &rifle, &mut assumptions, &mut warnings)?;
     let atmosphere = resolve_atmosphere(&request.atmosphere, &mut assumptions)?;
     let wind_coverage_distance_m = shot.zero_distance_m.unwrap_or(0.0).max(shot.max_range_m);
     let (resolved_wind, wind, wind_segments) = resolve_wind(
@@ -853,10 +848,11 @@ fn resolve_rifle(
 
 fn resolve_shot(
     shot: &ShotV1,
-    muzzle_height_m: f64,
+    rifle: &ResolvedRifleV1,
     assumptions: &mut Vec<SolveNoticeV1>,
     warnings: &mut Vec<SolveNoticeV1>,
 ) -> Result<ResolvedShotV1, SolveErrorEnvelopeV1> {
+    let muzzle_height_m = rifle.muzzle_height_m;
     require_positive("$.shot.max_range_m", shot.max_range_m)?;
     if let Some(value) = shot.zero_distance_m {
         require_positive("$.shot.zero_distance_m", value)?;
@@ -920,6 +916,11 @@ fn resolve_shot(
         }
     }
 
+    // MBA-1537: exactly the condition under which `build_zeroed_solver` runs the elevation
+    // search, named once so the zero-frame default below cannot drift out of step with the
+    // match that decides it.
+    let elevation_search_runs = shot.zero_distance_m.is_some() && shot.muzzle_angle_rad.is_none();
+
     let muzzle_angle_rad = match (shot.zero_distance_m, shot.muzzle_angle_rad) {
         // An explicit angle always wins over zero_distance_m for elevation (0.33.0
         // decision-support Task 2). When both are supplied, note that the elevation search
@@ -978,13 +979,72 @@ fn resolve_shot(
         "Cant angle defaulted to 0 rad.",
         assumptions,
     );
-    let target_height_m = literal_default(
-        shot.target_height_m,
-        0.0,
-        "$.shot.target_height_m",
-        "Target height defaulted to 0 m above the local ground datum.",
-        assumptions,
-    );
+    // MBA-1537: when the elevation search runs and no target height was supplied, the height
+    // the search converges on is the LINE OF SIGHT, not the ground datum.
+    //
+    // `target_height_m` is a world-vertical height above the local ground datum, and the line
+    // of sight of a level rifle sits `muzzle_height_m + sight_height_m` above that datum -- the
+    // same sum `TrajectoryResult::line_of_sight_height_m` reports and the same sum the sampler
+    // uses as its LOS datum. Defaulting to a flat `0` aimed the search at the ground instead,
+    // which put the bullet a full line-of-sight height LOW at the caller's stated zero: it
+    // never crossed the line of sight at all. It also made `sight_height_m` inert -- the solved
+    // angle was identical for every sight height -- and made the answer a function of
+    // `muzzle_height_m`, which it physically is not: heights above the ground cancel once the
+    // target tracks the line of sight. A raised muzzle stopped converging altogether once it
+    // cleared the bullet's own drop over the zero distance (measured for a .308 at 100 yd:
+    // 0.07 m still converges, 0.08 m does not; the drop over 91.44 m is 0.0661 m),
+    // because the ground datum it was aiming at then sits below the muzzle.
+    //
+    // This is the height the `ZeroTargetFrame::SightLine` surfaces already use. `cli_api`'s
+    // `calculate_zero_angle_with_conditions` solves against whatever target height its caller
+    // hands it; the CLI hands it bore + sight (main.rs:8263), which is this sum. `ffi.rs`'s
+    // `ballistics_calculate_zero_angle`
+    // both solve against the sight height (the same sum, for their `muzzle_height` of 0).
+    // Moving the default here is what makes them agree.
+    //
+    // Gated on the search actually running rather than on `zero_distance_m` alone: a request
+    // that supplies `muzzle_angle_rad` uses that angle directly, so there is no zero to frame,
+    // and such a request stays byte-identical -- assumption text, resolved echo and all.
+    // Without a zero search `target_height_m` feeds only the `drops_reference: "target"`
+    // sampler datum, which has its own distance reference (the target sits at `max_range_m`,
+    // not at `zero_distance_m`); keeping the historical `0` there leaves that mode untouched.
+    //
+    // This is the LEVEL line of sight, and deliberately not projected by `shooting_angle_rad`
+    // into the inclined sight line. Two reasons: the same field is the target-drops sampler's
+    // LOS datum, where it is referenced to `max_range_m` rather than to `zero_distance_m`, so a
+    // default computed at the zero distance would silently slope that datum over the wrong
+    // span; and at `shooting_angle_rad == 0` the level form equals `sight_position_m` bit for
+    // bit, which is what keeps that mode untouched here. An inclined zero therefore still has
+    // to state its own target height -- `docs/SOLVE_JSON_V1.md` gives the projection, and
+    // `tests/zero_sight_line_default.rs` pins both halves of that.
+    let target_height_m = if elevation_search_runs {
+        match shot.target_height_m {
+            Some(value) => value,
+            None => {
+                let line_of_sight_m = muzzle_height_m + rifle.sight_height_m;
+                assumptions.push(notice(
+                    ASSUMPTION_DEFAULT_APPLIED,
+                    format!(
+                        "Target height defaulted to the line of sight, {line_of_sight_m} m above \
+                         the local ground datum (muzzle_height_m + sight_height_m), so the solved \
+                         elevation crosses the line of sight at zero_distance_m. Supply \
+                         target_height_m explicitly -- 0 included -- to zero against the ground \
+                         datum instead."
+                    ),
+                    "$.shot.target_height_m",
+                ));
+                line_of_sight_m
+            }
+        }
+    } else {
+        literal_default(
+            shot.target_height_m,
+            0.0,
+            "$.shot.target_height_m",
+            "Target height defaulted to 0 m above the local ground datum.",
+            assumptions,
+        )
+    };
     let ground_threshold_m = literal_default(
         shot.ground_threshold_m,
         DEFAULT_GROUND_THRESHOLD_M,

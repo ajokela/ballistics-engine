@@ -156,7 +156,7 @@ A representative request is:
     "shot_azimuth_rad": 0.0,
     "shooting_angle_rad": 0.0,
     "cant_angle_rad": 0.0,
-    "target_height_m": 0.0,
+    "target_height_m": 0.0381,
     "ground_threshold_m": -100.0
   },
   "atmosphere": {
@@ -222,7 +222,7 @@ this wire format; see [Deliberate v1 exclusions](#deliberate-v1-exclusions).
 | `shot_azimuth_rad` | no | `0` | Compass bearing used for Earth-rotation effects; `0` is north. |
 | `shooting_angle_rad` | no | `0` | Uphill/downhill line-of-sight angle. |
 | `cant_angle_rad` | no | `0` | Clockwise rifle cant is positive from the shooter's view. |
-| `target_height_m` | no | `0` | Target height above the ground reference for zeroing. |
+| `target_height_m` | no | the line of sight when a zero is solved, else `0` | World-vertical target height above the ground reference, used as the height the elevation search converges on. When the search runs (`zero_distance_m` present, `muzzle_angle_rad` absent) and this field is omitted, it defaults to the LINE OF SIGHT — `rifle.muzzle_height_m + rifle.sight_height_m` — so the solved trajectory crosses the line of sight at the zero distance. Otherwise it defaults to `0`. See the zeroing notes below. |
 | `ground_threshold_m` | no | `-100` | Stop after the projectile falls below this height. |
 | `zero_poi_up_m` | no | `0` | Deliberate vertical POI offset AT the zero range (MBA-1359, Kestrel "zero height"): positive = deliberately zeroed to impact HIGH by this much at `zero_distance_m`. Must be finite and smaller than 1 m in magnitude. |
 | `zero_poi_right_m` | no | `0` | Deliberate horizontal POI offset AT the zero range (MBA-1359, Kestrel "zero offset"): positive = impacts RIGHT. Same bounds as `zero_poi_up_m`. |
@@ -258,10 +258,42 @@ the bias fields themselves were supplied. Omitting both fields is byte-identical
 predate them, and no assumption notice is emitted for their absence.
 
 The zero search uses the request's resolved projectile, atmosphere, wind (including downrange
-segments), effects, and integration method. It follows the engine's level-rifle convention by
-solving with zero cant; the requested `cant_angle_rad` is applied only to the subsequent trajectory.
-`target_height_m` remains an absolute world-vertical height above the local ground datum, as named
-above; inclined zeroing projects the shot-frame trajectory back into that world frame.
+segments), and integration method, and the request's effects apart from the one carve-out named
+below. It follows the engine's level-rifle convention by solving with zero cant; the requested
+`cant_angle_rad` is applied only to the subsequent trajectory. `target_height_m` remains an
+absolute world-vertical height above the local ground datum, as named above; inclined zeroing
+projects the shot-frame trajectory back into that world frame.
+
+**What the search converges on.** `target_height_m` is the height the search drives the bullet to
+at `zero_distance_m`. Omitting it while the search runs defaults it to the line of sight of a
+level rifle — `rifle.muzzle_height_m + rifle.sight_height_m` — so for a level shot "zero at 100 m"
+means what a shooter means by it: the trajectory crosses the line of sight there. A supplied value
+always wins, `0.0` included, which is how a caller asks for a zero against the ground datum
+instead. The service emits a `default_applied` assumption at `$.shot.target_height_m` naming the
+height it used whenever it applies this default, because the defaulted value normally moves every
+elevation number in the response. It need not: a request whose `sight_height_m` and
+`muzzle_height_m` are both `0` resolves the default to `0`, and then only the notice differs. The default is gated on the search actually running: with
+`muzzle_angle_rad` supplied there is no zero to frame, and `target_height_m` then still defaults
+to `0` (where it feeds only the `drops_reference: "target"` sampler datum, which references
+`max_range_m` rather than `zero_distance_m`).
+
+That default is a LEVEL line of sight, and this field is a world-vertical height, so it does not
+describe the sight line of an inclined shot. A request that pairs `zero_distance_m` with a nonzero
+`shooting_angle_rad` and omits `target_height_m` is not zeroing to its own line of sight: uphill
+it fails to converge, and downhill it converges on the world height the default names rather than
+on the sight line. Supply the height explicitly for an inclined zero — the sight line at the zero
+distance, projected into the world frame, is
+`zero_distance_m * sin(shooting_angle_rad) + (muzzle_height_m + sight_height_m) * cos(shooting_angle_rad)`.
+
+**`effects.aerodynamic_jump` is excluded from the search**, deliberately. A rifle is zeroed in
+calm air; letting a crosswind-driven jump term into the zero trials would bake the wind of the
+zeroing session into the stored elevation and into every solve made from it. The search therefore
+runs its trials with the jump off (`zero_trial_height_at`, MBA-959) and the jump stays what it is
+meant to be — an additive fire-time launch-angle perturbation. The visible consequence, which is
+physics and not a defect: with `aerodynamic_jump` enabled and a crosswind, the solved elevation is
+unchanged, so the trajectory sits off its own stated zero AT the zero distance by the jump. That
+offset is reported as `summary.aerodynamic_jump_moa`. Wind and Coriolis are not carved out; both
+reach the search and move the solved elevation.
 
 `drops_reference` is an output-mode toggle only: it rescales each sample's `drop_m` and changes
 nothing else — not the solved trajectory, not `windage_m`, not the `summary` block, and not

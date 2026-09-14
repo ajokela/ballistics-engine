@@ -783,10 +783,17 @@ unsafe fn calculate_zero_angle_impl(
 /// the target height is sight geometry and the rifle zeroes LEVEL. `inputs.shooting_angle`
 /// applies to the subsequent shot, not to the zero.
 ///
-/// # This is NOT the same solve as solve-json's `zero_distance_m`
+/// # How this relates to solve-json's `zero_distance_m`
 ///
-/// Two deliberate differences, neither of which is a defect — see the module documentation
-/// for the reasoning and for the numbers:
+/// Both surfaces aim the search at the same place. This export passes the caller's
+/// `sight_height` as the target height; solve-json, handed a `zero_distance_m` with no
+/// `target_height_m`, defaults to the line of sight, `muzzle_height_m + sight_height_m`
+/// (MBA-1537 — before that it defaulted to a flat `0` and the two disagreed by a full sight
+/// height at the zero). For a level rifle at the same station conditions the two now return the
+/// same angle; `tests/zero_sight_line_default.rs` pins that.
+///
+/// Two deliberate differences remain, neither of which is a defect — see the module
+/// documentation for the reasoning and for the numbers:
 ///
 /// * Atmosphere. This export goes through
 ///   [`crate::calculate_zero_angle_with_conditions`], which applies the legacy
@@ -796,7 +803,9 @@ unsafe fn calculate_zero_angle_impl(
 ///   1013.25 hPa at 2000 m is about a 0.29 MOA disagreement on a 300 m zero.
 /// * Target frame. solve-json's documented contract (`docs/SOLVE_JSON_V1.md`) is
 ///   `WorldVertical` — an absolute height above the ground datum, with inclined zeroing
-///   projected into the world frame — not this export's `SightLine`.
+///   projected into the world frame — not this export's `SightLine`, which zeroes level and
+///   treats `inputs.shooting_angle` as a shot-time condition. The frames coincide for a level
+///   rifle and diverge once `shooting_angle` is nonzero.
 ///
 /// A caller that needs solve-json's semantics over a C ABI should use the JSON bridge
 /// (`crate::bridge`, `src/bridge/ffi.rs`) rather than this export.
