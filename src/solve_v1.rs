@@ -991,11 +991,14 @@ fn resolve_shot(
     // angle was identical for every sight height -- and made the answer a function of
     // `muzzle_height_m`, which it physically is not: heights above the ground cancel once the
     // target tracks the line of sight. A raised muzzle stopped converging altogether once it
-    // cleared the bullet's own drop over the zero distance (about 0.1 m for a .308 at 100 yd),
+    // cleared the bullet's own drop over the zero distance (measured for a .308 at 100 yd:
+    // 0.07 m still converges, 0.08 m does not; the drop over 91.44 m is 0.0661 m),
     // because the ground datum it was aiming at then sits below the muzzle.
     //
-    // This is the height the `ZeroTargetFrame::SightLine` surfaces already use: `cli_api`'s
-    // `calculate_zero_angle_with_conditions` and `ffi.rs`'s `ballistics_calculate_zero_angle`
+    // This is the height the `ZeroTargetFrame::SightLine` surfaces already use. `cli_api`'s
+    // `calculate_zero_angle_with_conditions` solves against whatever target height its caller
+    // hands it; the CLI hands it bore + sight (main.rs:8263), which is this sum. `ffi.rs`'s
+    // `ballistics_calculate_zero_angle`
     // both solve against the sight height (the same sum, for their `muzzle_height` of 0).
     // Moving the default here is what makes them agree.
     //

@@ -472,8 +472,16 @@ fn the_c_abi_zero_agrees_with_solve_json() {
 
 /// MBA-1542, the other half of the doc claim: wind and Coriolis are NOT carved out of the zero
 /// search. Checked at 1000 m, where a headwind's drag change and the Coriolis vertical term are
-/// both larger than the search's 1e-4 m convergence window -- at a 100 m zero neither moves the
-/// solved angle off its bisection lattice point, so a short fixture would pass vacuously.
+/// both larger than the search's 1e-4 m convergence window.
+///
+/// The two halves need different things from the fixture, and only one of them needs the
+/// distance. The WIND half does: measured at a 91 m zero a 30 mph headwind leaves the solved
+/// angle on its bisection lattice point unchanged, so a short fixture would pass vacuously
+/// there. The CORIOLIS half needs the AZIMUTH, which is why this fixture shoots east
+/// (`shot_azimuth_rad` pi/2): the Eotvos vertical term goes to zero due north and due south, so
+/// at the default azimuth Coriolis leaves the angle bit-identical at 91 m AND at 1000 m. Shot
+/// east it moves at both -- measured -4.578e-06 rad at 91 m and -6.161e-05 rad at 1000 m, with
+/// due west giving +3.052e-06 rad at 91 m, the opposite sign as it should.
 #[test]
 fn wind_and_coriolis_do_reach_the_zero_search() {
     let long_zero = r#", "zero_distance_m": 1000.0"#;

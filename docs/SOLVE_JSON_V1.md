@@ -270,8 +270,9 @@ level rifle — `rifle.muzzle_height_m + rifle.sight_height_m` — so for a leve
 means what a shooter means by it: the trajectory crosses the line of sight there. A supplied value
 always wins, `0.0` included, which is how a caller asks for a zero against the ground datum
 instead. The service emits a `default_applied` assumption at `$.shot.target_height_m` naming the
-height it used whenever it applies this default, because the defaulted value moves every elevation
-number in the response. The default is gated on the search actually running: with
+height it used whenever it applies this default, because the defaulted value normally moves every
+elevation number in the response. It need not: a request whose `sight_height_m` and
+`muzzle_height_m` are both `0` resolves the default to `0`, and then only the notice differs. The default is gated on the search actually running: with
 `muzzle_angle_rad` supplied there is no zero to frame, and `target_height_m` then still defaults
 to `0` (where it feeds only the `drops_reference: "target"` sampler datum, which references
 `max_range_m` rather than `zero_distance_m`).
