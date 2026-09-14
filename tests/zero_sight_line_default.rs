@@ -1,4 +1,5 @@
-//! The solve-json v1 zero frame (MBA-1537).
+//! The solve-json v1 zero frame (MBA-1537) and the zero search's aerodynamic-jump carve-out
+//! (MBA-1542).
 //!
 //! `shot.target_height_m` is a world-vertical height above the local ground datum. It used to
 //! default to a flat `0` even when the elevation search ran, which aimed the search at the
@@ -466,5 +467,104 @@ fn the_c_abi_zero_agrees_with_solve_json() {
     assert_eq!(
         c_abi, bridge,
         "the C ABI and solve-json must resolve the same zero for the same rifle"
+    );
+}
+
+/// MBA-1542, the other half of the doc claim: wind and Coriolis are NOT carved out of the zero
+/// search. Checked at 1000 m, where a headwind's drag change and the Coriolis vertical term are
+/// both larger than the search's 1e-4 m convergence window -- at a 100 m zero neither moves the
+/// solved angle off its bisection lattice point, so a short fixture would pass vacuously.
+#[test]
+fn wind_and_coriolis_do_reach_the_zero_search() {
+    let long_zero = r#", "zero_distance_m": 1000.0"#;
+    let rifle = sight(SIGHT_HEIGHT_M);
+    let far = |shot_extra: &str, replacements: &[(&str, &str)]| {
+        let mut json = request_json(&rifle, shot_extra)
+            .replace(r#""max_range_m": 300.0"#, r#""max_range_m": 1000.0"#);
+        for (from, to) in replacements {
+            assert!(json.contains(from), "fixture no longer contains {from}");
+            json = json.replace(from, to);
+        }
+        solve(&json).resolved_request.shot.muzzle_angle_rad
+    };
+
+    let calm = far(long_zero, &[]);
+    let headwind = far(
+        long_zero,
+        &[(
+            r#""wind": {"speed_mps": 0.0, "direction_from_rad": 0.0}"#,
+            r#""wind": {"speed_mps": 13.4112, "direction_from_rad": 0.0}"#,
+        )],
+    );
+    let coriolis = far(
+        &format!("{long_zero}, \"shot_azimuth_rad\": 1.5707963267948966"),
+        &[
+            (r#""effects": {}"#, r#""effects": {"coriolis": true}"#),
+            (
+                r#""relative_humidity": 0.5"#,
+                r#""relative_humidity": 0.5, "latitude_rad": 1.0472"#,
+            ),
+        ],
+    );
+
+    assert!(
+        headwind != calm,
+        "a 30 mph headwind must change the solved elevation; both came out {calm}"
+    );
+    assert!(
+        coriolis != calm,
+        "Coriolis at 60 N shooting east must change the solved elevation; both came out {calm}"
+    );
+}
+
+/// MBA-1542. The zero search forces `enable_aerodynamic_jump = false` in its trials
+/// (`zero_trial_height_at`, MBA-959): a rifle is zeroed in calm air, so a crosswind-driven jump
+/// term must not be baked into the stored elevation. The observable consequence is that the jump
+/// is a pure fire-time offset -- the solved angle does not move at all -- which leaves a solve
+/// with the jump enabled sitting off its own stated zero by the jump. That is the thing
+/// `docs/SOLVE_JSON_V1.md` now states, rather than claiming the search honours every effect.
+#[test]
+fn the_zero_search_excludes_aerodynamic_jump_and_leaves_it_at_the_zero() {
+    let rifle_extra = format!(
+        r#"{}, "twist_rate_m_per_turn": 0.254, "twist_direction": "right""#,
+        sight(0.0508)
+    );
+    let crosswind_json = |effects: &str| {
+        request_json(&rifle_extra, &zero_only()).replace(
+            r#""wind": {"speed_mps": 0.0, "direction_from_rad": 0.0}"#,
+            r#""wind": {"speed_mps": 4.4704, "direction_from_rad": 1.5707963267948966}"#,
+        ).replace(r#""effects": {}"#, effects)
+    };
+
+    let without = solve(&crosswind_json(r#""effects": {}"#));
+    let with = solve(&crosswind_json(r#""effects": {"aerodynamic_jump": true}"#));
+
+    assert_eq!(
+        with.resolved_request.shot.muzzle_angle_rad, without.resolved_request.shot.muzzle_angle_rad,
+        "the zero search must not see the jump, so the solved elevation cannot move"
+    );
+
+    let jump_moa = with
+        .summary
+        .aerodynamic_jump_moa
+        .expect("an enabled jump reports its magnitude");
+    assert!(
+        jump_moa.abs() > 0.1,
+        "fixture no longer produces a jump worth measuring ({jump_moa} MOA)"
+    );
+
+    let residual_m = drop_at_zero(&with) - drop_at_zero(&without);
+    assert!(
+        residual_m.abs() > CROSSES_TOLERANCE_M,
+        "the excluded jump has to show up AT the stated zero; got {residual_m} m"
+    );
+    // The jump is a launch-angle perturbation, so its displacement at the zero distance is the
+    // angle times the distance. Loose enough to survive ordinary physics work, tight enough to
+    // fail if the residual ever stops being the jump.
+    let expected_m = -(jump_moa / 3437.7467707849) * ZERO_DISTANCE_M;
+    assert!(
+        (residual_m - expected_m).abs() < 0.2 * expected_m.abs(),
+        "the residual at the zero ({residual_m} m) should be the reported jump \
+         ({jump_moa} MOA = {expected_m} m of drop) and nothing else"
     );
 }

@@ -71,6 +71,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `target_height_m = sight_height_m`. That workaround stays correct: an explicitly supplied
   height still wins.
 
+### Fixed
+- **The solve-json reference no longer claims the zero search honours every effect (MBA-1542).**
+  `docs/SOLVE_JSON_V1.md` said the search uses the request's resolved projectile, atmosphere,
+  wind and effects. Wind and Coriolis it does honour — both measurably move the solved elevation
+  at a 1000 m zero, now pinned. `effects.aerodynamic_jump` it does not: `zero_trial_height_at`
+  forces `enable_aerodynamic_jump = false` in every trial (MBA-959), deliberately, because a
+  rifle is zeroed in calm air and letting a crosswind-driven jump term into the zero would bake
+  the wind of the zeroing session into the stored elevation and into every solve made from it.
+
+  The doc now states the carve-out and the reason where the effects claim is made, including
+  what it looks like from outside: because the search never sees the jump, the solved elevation
+  does not move when it is enabled, so a jump-enabled trajectory sits off its own stated zero AT
+  the zero distance by the jump. Measured at 0.46 MOA of that residual on a .308 at a 100 yd
+  zero in a 10 mph crosswind, against 0.0001 MOA with the jump off; the offset is reported as
+  `summary.aerodynamic_jump_moa`. No behaviour changed — the carve-out was already what the code
+  did and is now what the document says. Reported by Alfredo Mendiola Loyola, who documented the
+  carve-out correctly from our source while our own schema doc said the opposite.
+
 ### Added
 - **`reticle import` now says what it could not represent (MBA-1441).** The Ventum importer
   treats `circle` as decoration, and in that format an ARC is a `circle` carrying `start`/`end`

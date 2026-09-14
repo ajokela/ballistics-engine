@@ -258,8 +258,8 @@ the bias fields themselves were supplied. Omitting both fields is byte-identical
 predate them, and no assumption notice is emitted for their absence.
 
 The zero search uses the request's resolved projectile, atmosphere, wind (including downrange
-segments), effects, and integration method. It follows the engine's level-rifle convention by
-solving with zero cant; the requested
+segments), and integration method, and the request's effects apart from the one carve-out named
+below. It follows the engine's level-rifle convention by solving with zero cant; the requested
 `cant_angle_rad` is applied only to the subsequent trajectory. `target_height_m` remains an
 absolute world-vertical height above the local ground datum, as named above; inclined zeroing
 projects the shot-frame trajectory back into that world frame.
@@ -283,6 +283,16 @@ it fails to converge, and downhill it converges on the world height the default 
 on the sight line. Supply the height explicitly for an inclined zero — the sight line at the zero
 distance, projected into the world frame, is
 `zero_distance_m * sin(shooting_angle_rad) + (muzzle_height_m + sight_height_m) * cos(shooting_angle_rad)`.
+
+**`effects.aerodynamic_jump` is excluded from the search**, deliberately. A rifle is zeroed in
+calm air; letting a crosswind-driven jump term into the zero trials would bake the wind of the
+zeroing session into the stored elevation and into every solve made from it. The search therefore
+runs its trials with the jump off (`zero_trial_height_at`, MBA-959) and the jump stays what it is
+meant to be — an additive fire-time launch-angle perturbation. The visible consequence, which is
+physics and not a defect: with `aerodynamic_jump` enabled and a crosswind, the solved elevation is
+unchanged, so the trajectory sits off its own stated zero AT the zero distance by the jump. That
+offset is reported as `summary.aerodynamic_jump_moa`. Wind and Coriolis are not carved out; both
+reach the search and move the solved elevation.
 
 `drops_reference` is an output-mode toggle only: it rescales each sample's `drop_m` and changes
 nothing else — not the solved trajectory, not `windage_m`, not the `summary` block, and not
