@@ -41,8 +41,9 @@ failure envelope:
 envelope is the minimal shape: `ok`, `api_version`, `error`. Envelopes the bridge produces also
 carry `engine_version`. Branch on `ok` and `error.code`, not on which fields are present.)
 
-That refusal is correct and is not going to change — an encoder that quietly accepted CESU-8
-would also accept overlong encodings and lone surrogates. The fix belongs on the calling side.
+That refusal is deliberate. Accepting modified UTF-8 means accepting an overlong sequence
+(`C0 80`) and an encoded surrogate, which is exactly what UTF-8 validation is for. The fix
+belongs on the calling side.
 
 **`GetStringUTFRegion` is not the fix.** The JNI specification has it write modified UTF-8 as
 well; it differs from `GetStringUTFChars` in who owns the buffer, not in the encoding. Encoding
@@ -50,10 +51,11 @@ the string in Kotlin with `toByteArray(Charsets.UTF_8)` and passing the bytes is
 round. (`GetStringChars` plus your own UTF-16 → UTF-8 conversion in C is the long way round, and
 gets you to the same place.)
 
-This behaviour is driven by `a_request_in_jni_modified_utf8_is_refused` and
+What the engine does with each encoding, and where the two diverge, is driven by
+`a_request_in_jni_modified_utf8_is_refused` and
 `modified_utf8_and_utf8_agree_below_the_supplementary_planes` in
-[`src/bridge/ffi.rs`](../src/bridge/ffi.rs), so this page's claims about it fail a test if they
-stop being true.
+[`src/bridge/ffi.rs`](../src/bridge/ffi.rs) — so those two claims above fail a test if they stop
+being true. What JNI does is the JNI specification's, not ours.
 
 ## The response has the same trap in reverse
 
@@ -130,8 +132,8 @@ would rather not spell out the mangled name, register the method with `RegisterN
 
 ### Things the example is relying on
 
-- **`strlen` is safe on the response.** The bridge returns a NUL-terminated C string, and a
-  JSON document cannot contain an interior NUL: `serde_json` escapes control characters.
+- **`strlen` is safe on the response.** It is a NUL-terminated C string, and the engine builds
+  it so that it has no interior NUL.
 - **Free exactly once.** `ballistics_bridge_free` releases a pointer from either call; freeing
   NULL is a no-op. Nothing else may free it.
 - **Calls are independent and thread-safe.** There is no shared mutable state, so a request may
