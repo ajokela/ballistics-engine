@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sane fallback for a mark whose position cannot be read. Every document that imported under
   0.32.0 still imports.
 
+  `repeat`'s `mirror` also stops undercounting centered arcs. It has always skipped a twin that
+  would land on top of its original, and for a mark that test is just "is it on the mirror
+  line". An arc is also a set of angles, and reflection reworks those, so a centered asymmetric
+  arc's twin is a different shape: `start: 290, end: 70` mirrored across `x` has its apex on the
+  other side of the same center. That twin is now counted and resolved, while a genuinely
+  self-reflecting arc (a `start: 200, end: 340` horseshoe centered on the vertical axis, or any
+  ring) is still deduped to one. Marks are unaffected: a `dot`, `tick` or `text` on the mirror
+  line is still emitted once.
+
 - **A summary form for the browser terminal's CSV (MBA-1433).** Native's trajectory CSV is two
   documents and selects between them with `--full`: absent, a `metric,value,unit` summary;
   present, the per-point table. The WASM terminal's `--full` sets sampling density instead, so

@@ -115,6 +115,12 @@ pub const DEFAULT_TEXT_BIND_MIL: f64 = 1.0;
 /// two are worth telling apart in a report, because only one of them might have been a hold.
 pub const ARC_TAG: &str = "arc";
 
+/// How near a mirrored arc's angles must land to the original's for the reflection to count
+/// as having mapped the arc onto itself (degrees). The comparison is of sums of the
+/// document's own angle literals, so the only error to absorb is the last bit or two of the
+/// subtraction — this is a float-equality guard, not a modelling tolerance.
+const ARC_SYMMETRY_EPSILON_DEGREES: f64 = 1e-9;
+
 /// A point on an imported arc, in the engine's own mark coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VentumArcPoint {
@@ -421,6 +427,32 @@ impl CircleShape {
         (sweep > 0.0).then_some(sweep)
     }
 
+    /// Whether reflecting this shape about `axis` maps it onto ITSELF, so a mirrored twin
+    /// sharing its center would be a duplicate rather than a second shape.
+    ///
+    /// This is the arc's half of [`expand_point`]'s center dedupe. For a mark, "the mirror
+    /// landed on me" is the whole test; for an arc it is only half of it, because reflection
+    /// also reworks the angles ([`Role::mirrored`]). A ring maps onto itself under any
+    /// reflection through its own center. A swept arc does so exactly when its two endpoints
+    /// swap into each other: reflection about the vertical axis sends `theta -> 180 - theta`,
+    /// so it needs `start + end == 180`; about the horizontal axis it sends `theta -> -theta`,
+    /// so it needs `start + end == 0` — both modulo a full revolution. A horseshoe centered on
+    /// the vertical axis (`start: 200, end: 340`, sum 540 ≡ 180) is symmetric about it and is
+    /// deduped; the same horseshoe mirrored vertically opens the other way and is not.
+    fn is_reflection_of_itself(&self, axis: Axis) -> bool {
+        // A ring — no angles, or angles spanning a whole revolution — is its own reflection.
+        let Some((start, end)) = self.angles.filter(|_| self.sweep_degrees().is_some()) else {
+            return true;
+        };
+        let target = match axis {
+            Axis::X => 180.0,
+            Axis::Y => 0.0,
+        };
+        let offset = (start + end - target).rem_euclid(360.0);
+        // Distance to the nearest multiple of 360, so 0 and 360 are both "no rotation".
+        offset.min(360.0 - offset) <= ARC_SYMMETRY_EPSILON_DEGREES
+    }
+
     /// This shape reflected for a mirrored [`Repeat`] twin. See [`Role::mirrored`] for the
     /// derivation; note the swap, which is the direction reversal.
     fn mirrored(&self, axis: Axis) -> CircleShape {
@@ -616,7 +648,21 @@ fn expand_point(
         let right = cx * scale;
         let role = base.role_with_label(base.ladder_label(repeat, i));
 
-        if repeat.mirror && stepped != 0.0 {
+        // MBA-1441: a mirrored twin is skipped only when it would be a DUPLICATE, and being
+        // on the mirror line is not by itself enough to make it one. It is for a mark, whose
+        // whole identity is its position — but an arc is also a set of angles, and reflection
+        // reworks those, so a centered ASYMMETRIC arc's twin is a genuinely different shape
+        // (`start: 290, end: 70` reflects to an apex on the other side of the same center).
+        // Counting one where the document drew two is the same undercount this ticket is
+        // named for. The old test is exactly the position half of this one, so nothing about
+        // dot/tick/text expansion changes.
+        let mirror_is_distinct = stepped != 0.0
+            || match &role {
+                Role::Circle(circle) => !circle.is_reflection_of_itself(repeat.axis),
+                Role::Dot | Role::Tick | Role::Text(_) => false,
+            };
+
+        if repeat.mirror && mirror_is_distinct {
             // Emit the axis-negated twin as well, but never a duplicate at the center. Only
             // the stepped axis is negated. A mirrored labeled-text copy keeps the SAME label
             // as its positive twin (magnitude convention: the "5" on the right and the "5"
@@ -849,8 +895,10 @@ struct Repeat {
     step: f64,
     /// Number of copies.
     n: u32,
-    /// When true, also emit the axis-negated copy (a `±` symmetric ladder), except at the
-    /// center.
+    /// When true, also emit the axis-negated copy (a `±` symmetric ladder) — except where
+    /// that copy would be a duplicate of the original, which for a mark means landing on the
+    /// mirror line and for an arc additionally means the reflection leaving its angles
+    /// unchanged (see [`CircleShape::is_reflection_of_itself`]).
     #[serde(default)]
     mirror: bool,
     /// (text only) When true, rewrite each copy's label to `label_start + i*label_step`.
@@ -1451,6 +1499,71 @@ mod tests {
             "apex at 270 deg is 2 mil straight above center, got {:?}",
             arc.apex
         );
+    }
+
+    /// A CENTERED asymmetric arc with `mirror:true` draws two different shapes, because
+    /// reflection reworks the angles as well as the center. Both must be counted, and their
+    /// apexes must land on opposite sides — reporting one would be the undercount MBA-1441
+    /// exists to prevent.
+    #[test]
+    fn a_centered_asymmetric_arc_still_gets_its_mirrored_twin() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"A","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":0,"r":2,"start":290,"end":70,
+                 "repeat":{"axis":"x","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.dropped_element_types, vec![("arc".to_string(), 2)]);
+        assert_eq!(report.arcs.len(), 2, "the centered twin is a second shape");
+
+        // Original apex is at 290 + 140/2 = 0 deg, i.e. 2 mil RIGHT of center; the twin's is
+        // at 180 deg, 2 mil LEFT. Same center, same sweep, opposite sides.
+        let (first, second) = (report.arcs[0], report.arcs[1]);
+        assert!((first.apex.right_mil - 2.0).abs() < 1e-9, "{:?}", first.apex);
+        assert!((second.apex.right_mil + 2.0).abs() < 1e-9, "{:?}", second.apex);
+        assert!((first.sweep_degrees - second.sweep_degrees).abs() < 1e-9);
+        assert_eq!(first.center, second.center);
+    }
+
+    /// The dedupe is not abandoned, only narrowed to what it was always for. An arc that the
+    /// reflection maps onto ITSELF — a horseshoe centered on the axis it is mirrored across,
+    /// or any ring — is still one shape and is still counted once.
+    #[test]
+    fn a_centered_symmetric_arc_is_still_deduped() {
+        // start 200 + end 340 = 540 = 180 (mod 360): symmetric about the vertical axis.
+        let (_, horseshoe) = import_ventum_reticle_with_report(
+            r#"{"name":"S","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340,
+                 "repeat":{"axis":"x","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(horseshoe.dropped_element_types, vec![("arc".to_string(), 1)]);
+        assert_eq!(horseshoe.arcs.len(), 1);
+
+        // ...and a plain ring maps onto itself under any reflection through its own center.
+        let (_, ring) = import_ventum_reticle_with_report(
+            r#"{"name":"R","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":0,"r":2,
+                 "repeat":{"axis":"y","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(ring.dropped_element_types, vec![("circle".to_string(), 1)]);
+
+        // The SAME horseshoe mirrored across the HORIZONTAL axis is not symmetric about it —
+        // it opens the other way — so that one is two shapes.
+        let (_, flipped) = import_ventum_reticle_with_report(
+            r#"{"name":"F","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340,
+                 "repeat":{"axis":"y","step":1,"n":1,"mirror":true}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(flipped.dropped_element_types, vec![("arc".to_string(), 2)]);
+        assert!((flipped.arcs[0].apex.down_mil + 2.0).abs() < 1e-9, "apex up");
+        assert!((flipped.arcs[1].apex.down_mil - 2.0).abs() < 1e-9, "twin apex down");
     }
 
     #[test]

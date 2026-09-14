@@ -2838,6 +2838,14 @@ type the schema says, because there is no sane fallback for a mark whose positio
 read. An unreadable radius leaves an arc unresolved, which the notice reports as *"N further
 arc(s) declared no usable radius"* rather than dropping it from the tally.
 
+**A mirrored arc on the mirror line is two arcs when the reflection changes it.** `repeat`'s
+`mirror` skips a twin that would land on top of its original, but for an arc that test is
+about the angles too, not just the center: a horseshoe centered on the axis it is mirrored
+across (`start: 200, end: 340` across `axis: "x"`) reflects onto itself and is counted once,
+while an asymmetric one (`start: 290, end: 70`) reflects to an apex on the other side and is
+counted — and resolved — twice. Marks are unaffected; a `dot`, `tick` or `text` on the mirror
+line is still emitted once.
+
 #### Intellectual-property exclusions
 
 Horus grid reticles and Time-of-Flight Wind Dots are actively patented, and Horus
