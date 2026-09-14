@@ -115,6 +115,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not change that. `zero_angle_degrees`, the field actually reported missing, is a
   trajectory-summary row and is now reachable.
 
+### Fixed
+- **The Android `.so` now carries a `DT_SONAME` (MBA-1541).** `scripts/build-mobile-android.sh`
+  produced `libballistics_engine.so` with no soname at all, on both shipped ABIs. Without one,
+  a consumer linking the library records whatever path it linked against, so the ordinary CMake
+  pattern — `add_library(ballistics_engine SHARED IMPORTED)` with an absolute
+  `IMPORTED_LOCATION` — bakes that absolute HOST path into the consumer's own `DT_NEEDED`, and
+  the app then fails to `dlopen` it on device. An external integrator hit exactly this and
+  worked around it with plain `-L`/`-l`. The build now passes
+  `-C link-arg=-Wl,-soname,libballistics_engine.so`, and a check after the build reads the
+  dynamic section of what it produced and fails if the soname is missing.
+
+  The soname is set on `cargo rustc`'s trailing arguments rather than in `RUSTFLAGS` beside the
+  existing `-Wl,-z,max-page-size=16384`. `RUSTFLAGS` reaches every crate in the graph, and a
+  dependency here (printpdf) also declares a `cdylib` that cargo-ndk copies into the same
+  `jniLibs` directory — putting the soname there stamps `libballistics_engine.so` onto that
+  file too, leaving two different libraries in one directory answering to one name. The
+  post-build check fails on that as well. `max-page-size` stays in `RUSTFLAGS`, since Play's
+  16 KB requirement is about every `.so` in the APK.
+
+  Nothing about the library's contents, exported symbols or ABI changes. The iOS script is
+  unaffected: it packages a static `libballistics_engine.a` into the xcframework, and a static
+  archive carries no soname or install name to get wrong.
+
 ## [0.38.0] - 2026-09-13
 
 ### Breaking
