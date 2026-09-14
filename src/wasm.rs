@@ -7021,8 +7021,9 @@ impl WasmBallistics {
         // MBA-1403: None = LOS reference (byte-identical); Some(cos) = target plane —
         // drop values divided by it, Drop column header relabeled Drop_target. This
         // function stays rows-only on purpose: the summary form is a SEPARATE document
-        // ([`format_trajectory_csv_summary`], `--csv-summary`), because mixing summary
-        // rows into the point table would break every consumer parsing it (MBA-1433).
+        // ([`format_trajectory_csv_summary`], `--csv-summary`), because summary rows mixed
+        // into the point table would break a consumer reading it as one uniform table —
+        // which is how native keeps them apart too (MBA-1433).
         target_drops_cos: Option<f64>,
         // MBA-1358: windage tracking CF for the ring_mil column (divided by the CF);
         // /1.0 is bit-exact.
