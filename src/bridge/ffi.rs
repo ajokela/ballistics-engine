@@ -10,6 +10,12 @@
 //!   unknown command, command failure, internal panic — is an in-band
 //!   `{"ok":false,...}` envelope.
 //! - Calls are independent and thread-safe; there is no shared mutable state.
+//!
+//! Android callers want `ballistics_bridge_call_n` over a `ByteArray`, not
+//! `ballistics_bridge_call` over a `jstring`: JNI's string conversions speak modified UTF-8,
+//! which `call_with_bytes` below refuses. `docs/ANDROID_JNI_BRIDGE.md` has the worked example
+//! and the reasoning; `tests::a_request_in_jni_modified_utf8_is_refused` pins the behaviour it
+//! argues from.
 
 use std::ffi::{c_char, CStr, CString};
 
@@ -152,5 +158,84 @@ mod tests {
     #[test]
     fn free_null_is_a_no_op() {
         unsafe { ballistics_bridge_free(std::ptr::null_mut()) };
+    }
+
+    /// Encode `text` the way JNI's `GetStringUTFChars` and `GetStringUTFRegion` do: MODIFIED
+    /// UTF-8, which is UTF-8 applied to UTF-16 code units rather than to scalar values. A
+    /// supplementary character therefore comes out as its two surrogates, each in the 3-byte
+    /// form (six bytes, where UTF-8 uses four), and U+0000 comes out as `C0 80`.
+    fn modified_utf8(text: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for unit in text.encode_utf16() {
+            match unit {
+                0 => out.extend_from_slice(&[0xC0, 0x80]),
+                0x0001..=0x007F => out.push(unit as u8),
+                0x0080..=0x07FF => {
+                    out.push(0xC0 | (unit >> 6) as u8);
+                    out.push(0x80 | (unit & 0x3F) as u8);
+                }
+                _ => {
+                    out.push(0xE0 | (unit >> 12) as u8);
+                    out.push(0x80 | ((unit >> 6) & 0x3F) as u8);
+                    out.push(0x80 | (unit & 0x3F) as u8);
+                }
+            }
+        }
+        out
+    }
+
+    /// MBA-1543: the bridge refuses JNI's modified UTF-8, which is what makes
+    /// `ballistics_bridge_call_n` over a `ByteArray` the Android entry point rather than a
+    /// stylistic preference. `docs/ANDROID_JNI_BRIDGE.md` argues from exactly this behaviour,
+    /// so it is driven here rather than asserted there.
+    ///
+    /// The discriminator is the error CODE, not the fact of an error: the command in this
+    /// request does not exist either way, so getting as far as `unknown_command` proves the
+    /// bytes were decoded, and `invalid_json` proves they were not.
+    #[test]
+    fn a_request_in_jni_modified_utf8_is_refused() {
+        // U+1F3AF is supplementary, which is where the two encodings diverge.
+        let request = r#"{"api_version":1,"command":"no.such.command.🎯"}"#;
+        let standard = request.as_bytes();
+        let modified = modified_utf8(request);
+        assert_ne!(
+            modified.as_slice(),
+            standard,
+            "the fixture must actually exercise the divergence"
+        );
+
+        let decoded = |bytes: &[u8]| {
+            let raw = unsafe { ballistics_bridge_call_n(bytes.as_ptr(), bytes.len()) };
+            let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+            unsafe { ballistics_bridge_free(raw) };
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()
+        };
+
+        let out = decoded(standard);
+        assert_eq!(out["error"]["code"], "unknown_command", "{out}");
+
+        let out = decoded(&modified);
+        assert_eq!(out["error"]["code"], "invalid_json", "{out}");
+        assert_eq!(out["error"]["message"], "request is not valid UTF-8", "{out}");
+    }
+
+    /// The scope of that refusal, so the docs do not overstate it: the two encodings agree on
+    /// everything from U+0001 to U+FFFF, so ordinary accented text goes through JNI's own
+    /// conversion unharmed and the defect hides until someone types outside the BMP.
+    #[test]
+    fn modified_utf8_and_utf8_agree_below_the_supplementary_planes() {
+        for text in ["ascii", "München", "Ω", "中文", "\u{FFFF}"] {
+            assert_eq!(
+                modified_utf8(text),
+                text.as_bytes(),
+                "{text} must encode identically in both"
+            );
+        }
+        for text in ["🎯", "\u{10000}", "\u{10FFFF}"] {
+            assert_ne!(modified_utf8(text), text.as_bytes(), "{text} must diverge");
+        }
+        // And the other member of the divergence: an interior NUL, which modified UTF-8 exists
+        // to keep out of the byte stream in the first place.
+        assert_eq!(modified_utf8("\0"), vec![0xC0, 0x80]);
     }
 }

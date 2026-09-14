@@ -2887,6 +2887,12 @@ shape whose angles or center this importer could not read keeps its twin and is 
 ring included. Marks are unaffected; a `dot`, `tick` or `text` on the mirror line is still
 emitted once.
 
+A twin's angles are printed as degrees clockwise from 3 o'clock, the same reading as every
+other arc line: the twin of `start: 290, end: 70` across `axis: "x"` prints `arc 110-250 deg`.
+The reflection itself produces `(110, -110)`, so this is a reduction into `[0, 360)` of angles
+the importer computed. An arc the document drew is still printed with the document's own
+numbers, which a Ventum tool may write outside that range.
+
 #### Intellectual-property exclusions
 
 Horus grid reticles and Time-of-Flight Wind Dots are actively patented, and Horus

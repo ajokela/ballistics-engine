@@ -785,3 +785,47 @@ fn import_reports_a_circle_it_could_only_partly_read() {
         "an unreadable repeat must be declared, not swallowed: {stderr}"
     );
 }
+
+/// MBA-1536: the arc line a user reads is a pair of clockwise bearings, for a mirrored twin as
+/// much as for the arc the document drew.
+///
+/// A centered `start: 290, end: 70` horseshoe with `mirror: true` draws two shapes, and the
+/// twin's angles are computed by reflection rather than read. Reflected raw they came out
+/// `(110, -110)` and this line printed `arc 110--110 deg` — a double dash where the reader
+/// expects a range, and a negative number in a field the API documents as degrees clockwise
+/// from 3 o'clock. The library test pins the reported values; this pins the printed sentence,
+/// which is where it was noticed.
+#[test]
+fn a_mirrored_arcs_printed_angles_read_as_a_range() {
+    let dir = tempfile_dir("import-mirror-arc");
+    let path = dir.join("mirror.ventum.json");
+    std::fs::write(
+        &path,
+        r#"{"name":"M","plane":"ffp","unit":"mil","spec":[
+            {"type":"dot","x":0,"y":4},
+            {"type":"circle","x":0,"y":0,"r":2,"start":290,"end":70,
+             "repeat":{"axis":"x","step":1,"n":1,"mirror":true}}
+        ]}"#,
+    )
+    .unwrap();
+
+    let (_, stderr, ok) = run(&["reticle", "import", path.to_str().unwrap(), "-o", "json"]);
+    assert!(ok, "import failed: {stderr}");
+    // Both shapes are still reported: the original as the document wrote it, the twin reduced.
+    assert!(
+        stderr.contains("arc 290-70 deg"),
+        "the original arc's own angles must be printed as written: {stderr}"
+    );
+    assert!(
+        stderr.contains("arc 110-250 deg"),
+        "the twin's reflected angles must print as clockwise bearings: {stderr}"
+    );
+    // The shape of the defect, independent of the numbers above: no arc line may contain a
+    // double dash, which is what a negative second bearing produced.
+    for line in stderr.lines().filter(|l| l.trim_start().starts_with("arc ")) {
+        assert!(
+            !line.contains("--"),
+            "an arc line must read as a range, not a double dash: {line}"
+        );
+    }
+}
