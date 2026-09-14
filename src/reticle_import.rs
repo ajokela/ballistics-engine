@@ -674,7 +674,12 @@ fn format_label_number(value: f64) -> String {
 // ---------------------------------------------------------------------------------------
 // Ventum input model (serde). Deliberately permissive: no `deny_unknown_fields`, so
 // cosmetic keys (color, width, cx/cy, size, len, orient, r, max_extent, tube_diameter,
-// notes, manufacturer, ...) are ignored rather than rejected.
+// notes, manufacturer, ...) are ignored rather than rejected. "Ignored" includes the
+// cosmetic keys this module DOES read: a `circle`'s x/y/r/start/end go through
+// [`lenient_f64`], so a value of the wrong JSON type degrades that one field to `None`
+// instead of failing the whole document. Only a hold-bearing coordinate — a `dot`/`tick`
+// `x`/`y`, or a `text`'s string — is strict, because there is no sane fallback for a mark
+// whose position cannot be read.
 // ---------------------------------------------------------------------------------------
 
 /// A whole Ventum reticle: metadata plus its drawing `spec`.
@@ -751,6 +756,24 @@ impl<'de> Deserialize<'de> for Spec {
     }
 }
 
+/// Read a number the module treats as cosmetic geometry, never failing on one it cannot use.
+///
+/// `Option<f64>` alone absorbs an ABSENT or `null` field but still *rejects* a present field
+/// of the wrong type — and one rejected field fails the entire document, not the element that
+/// carried it. That is the wrong trade for a key this module only ever reads as a nicety: a
+/// Ventum tool is free to write `"r": "2mil"`, `"r": {"v": 2, "unit": "mil"}` or anything else
+/// its UI finds convenient, and none of that is a reason to refuse a reticle whose dots are
+/// perfectly good. So the value is read as arbitrary JSON and kept only if it is a finite
+/// number; everything else becomes `None`, i.e. a counted-but-unresolved decoration, which is
+/// the same answer the field being absent has always given.
+fn lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_f64().filter(|v| v.is_finite()))
+}
+
 /// One drawing element, internally tagged on `"type"`. Unknown cosmetic fields on each
 /// variant are ignored; unknown element *types* map to [`Element::Unknown`].
 #[derive(Debug, Deserialize)]
@@ -784,24 +807,25 @@ enum Element {
     Line {},
     /// A ring, or — when it carries `start`/`end` — an arc such as a horseshoe. Decoration
     /// either way: still dropped, but no longer in silence (MBA-1441). Every field is
-    /// optional so a cosmetic ring that names none of them still parses, exactly as it did
-    /// when this variant read nothing at all.
+    /// optional AND leniently typed ([`lenient_f64`]), so a cosmetic ring that names none of
+    /// them — or spells one as `"2mil"`, an object, or `null` — still parses, exactly as it
+    /// did when this variant read nothing at all.
     Circle {
         /// Center, `+x` right. `cx` is the schema's other spelling of the same field.
-        #[serde(default, alias = "cx")]
+        #[serde(default, alias = "cx", deserialize_with = "lenient_f64")]
         x: Option<f64>,
         /// Center, `+y` down.
-        #[serde(default, alias = "cy")]
+        #[serde(default, alias = "cy", deserialize_with = "lenient_f64")]
         y: Option<f64>,
         /// Radius, in the reticle's own unit.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "lenient_f64")]
         r: Option<f64>,
         /// Sweep start in degrees from 3 o'clock, clockwise (see the module documentation —
         /// 270 is the TOP of the reticle). Present only on an arc.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "lenient_f64")]
         start: Option<f64>,
         /// Sweep end, same convention. An arc needs BOTH: one angle alone describes no sweep.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "lenient_f64")]
         end: Option<f64>,
         #[serde(default)]
         repeat: Option<Repeat>,
@@ -1314,6 +1338,119 @@ mod tests {
         assert_eq!(report.arcs[0].center.right_mil, 1.0);
         assert_eq!(report.arcs[0].center.down_mil, 2.0);
         assert_eq!(report.arcs[1].center, VentumArcPoint::default());
+    }
+
+    /// A cosmetic key must never fail the import, whatever type the authoring tool wrote it
+    /// as. `r` carrying a unit suffix (`"2mil"`) or a richer object is the realistic case, and
+    /// giving `circle` typed fields made it reject the WHOLE document — the dots that have
+    /// imported since 0.32.0 would have gone with the ring.
+    #[test]
+    fn a_non_numeric_radius_is_ignored_rather_than_rejected() {
+        for radius in [r#""2mil""#, r#"{"v":2,"unit":"mil"}"#, "[2]", "true", "null"] {
+            let json = format!(
+                r#"{{"name":"L","unit":"mil","spec":[
+                    {{"type":"dot","x":0,"y":1}},
+                    {{"type":"circle","x":0,"y":0,"r":{radius}}}
+                ]}}"#
+            );
+            let (desc, report) = import_ventum_reticle_with_report(&json)
+                .unwrap_or_else(|e| panic!("r: {radius} must not fail the import, got {e:?}"));
+
+            // The document imported: the sibling dot is still a hold point...
+            assert_eq!(desc.marks.len(), 1, "r: {radius} — the dot must survive");
+            assert_eq!(desc.marks[0].down_mil, 1.0);
+            // ...and the ring is COUNTED as a decoration, not quietly absent.
+            assert_eq!(
+                report.dropped_element_types,
+                vec![("circle".to_string(), 1)],
+                "r: {radius} — the ring is counted under its own tag"
+            );
+            assert_eq!(report.dropped_elements, 1);
+        }
+    }
+
+    /// The same leniency on the angles. An arc whose `start`/`end` are not numbers describes
+    /// no sweep, so it degrades to a plain ring — counted as `circle`, never an error.
+    #[test]
+    fn non_numeric_angles_degrade_the_arc_to_a_ring_rather_than_failing() {
+        let (desc, report) = import_ventum_reticle_with_report(
+            r#"{"name":"A","unit":"mil","spec":[
+                {"type":"dot","x":0,"y":1},
+                {"type":"circle","x":0,"y":0,"r":2,"start":"200deg","end":{"deg":340}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(desc.marks.len(), 1, "the dot must survive");
+        assert_eq!(
+            report.dropped_element_types,
+            vec![("circle".to_string(), 1)],
+            "no usable sweep -> a ring, not an arc"
+        );
+        assert!(report.arcs.is_empty());
+        assert_eq!(report.arcs_unresolved, 0);
+    }
+
+    /// An arc with real angles but an unreadable radius keeps its `arc` tag and lands in the
+    /// stated-discrepancy bucket, exactly like one that omitted `r` altogether.
+    #[test]
+    fn an_arc_with_an_unreadable_radius_is_counted_as_unresolved() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"U","unit":"mil","spec":[
+                {"type":"circle","x":0,"y":0,"r":"2mil","start":200,"end":340}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.dropped_element_types, vec![("arc".to_string(), 1)]);
+        assert_eq!(report.arcs_unresolved, 1);
+        assert!(report.arcs.is_empty());
+        assert_eq!(report.arcs.len() + report.arcs_unresolved, report.dropped_elements);
+    }
+
+    /// A non-numeric center falls back to the reticle center, the same answer an absent
+    /// `x`/`y` has always given, and the arc still resolves around it.
+    #[test]
+    fn a_non_numeric_center_falls_back_to_the_reticle_center() {
+        let (_, report) = import_ventum_reticle_with_report(
+            r#"{"name":"C","unit":"mil","spec":[
+                {"type":"circle","x":"left","y":null,"r":2,"start":200,"end":340}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(report.arcs.len(), 1);
+        assert_eq!(report.arcs[0].center, VentumArcPoint::default());
+    }
+
+    /// Leniency must not cost a real arc its geometry: a genuine numeric circle in the SAME
+    /// document as a cosmetic one still resolves to a drawn arc, apex and tips included.
+    #[test]
+    fn a_numeric_arc_still_resolves_beside_a_cosmetic_one() {
+        let (desc, report) = import_ventum_reticle_with_report(
+            r#"{"name":"H","unit":"mil","spec":[
+                {"type":"dot","x":0,"y":1},
+                {"type":"circle","x":0,"y":0,"r":"2mil"},
+                {"type":"circle","x":0,"y":0,"r":2,"start":200,"end":340}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(desc.marks.len(), 1, "the dot is unaffected by either circle");
+        assert_eq!(
+            report.dropped_element_types,
+            vec![("arc".to_string(), 1), ("circle".to_string(), 1)],
+            "the cosmetic ring and the real horseshoe are counted apart"
+        );
+        assert_eq!(report.dropped_elements, 2);
+
+        // The real horseshoe is fully resolved: radius, sweep, and an apex straight up.
+        assert_eq!(report.arcs.len(), 1);
+        assert_eq!(report.arcs_unresolved, 0);
+        let arc = report.arcs[0];
+        assert_eq!(arc.radius_mil, 2.0);
+        assert!((arc.sweep_degrees - 140.0).abs() < 1e-9);
+        assert!(
+            (arc.apex.down_mil + 2.0).abs() < 1e-9 && arc.apex.right_mil.abs() < 1e-9,
+            "apex at 270 deg is 2 mil straight above center, got {:?}",
+            arc.apex
+        );
     }
 
     #[test]

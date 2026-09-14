@@ -2830,6 +2830,14 @@ inventing holds that would also shift what `reticle hold` reports for every Vent
 imported since 0.32.0. Library callers get the same information structurally from
 `reticle_import::import_ventum_reticle_with_report`.
 
+**A cosmetic field never fails the import.** A `circle`'s `x`/`y`/`cx`/`cy`/`r`/`start`/`end`
+are read leniently: a value that is not a number — `"r": "2mil"`, an object, `null` — is
+ignored exactly as an absent one is, and the element is still counted in the notice above.
+Only what a hold depends on is strict: a `dot`/`tick` `x`/`y`, or a `text` string, must be the
+type the schema says, because there is no sane fallback for a mark whose position cannot be
+read. An unreadable radius leaves an arc unresolved, which the notice reports as *"N further
+arc(s) declared no usable radius"* rather than dropping it from the tally.
+
 #### Intellectual-property exclusions
 
 Horus grid reticles and Time-of-Flight Wind Dots are actively patented, and Horus

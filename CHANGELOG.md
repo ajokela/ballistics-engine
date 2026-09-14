@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hands a caller who knows their own reticle the exact coordinates instead. An imported
   description is byte-identical to earlier engines.
 
+  Reading an arc's geometry meant giving `circle` typed fields, where before serde ignored
+  every one of them, and a typed `Option<f64>` still REJECTS a present value of the wrong type
+  — which fails the whole document, not the one element. A Ventum tool is free to write
+  `"r": "2mil"` or `"r": {"v": 2, "unit": "mil"}`, and a reticle whose dots are perfectly good
+  must not be refused over a decoration's units. So a `circle`'s `x`/`y`/`cx`/`cy`/`r`/`start`/
+  `end` are read leniently: anything that is not a finite number is ignored exactly as an
+  absent field is, and the element is still counted in the report (an arc with an unreadable
+  radius lands in `arcs_unresolved`, the same bucket as one that omitted `r`). Only what a hold
+  depends on stays strict — a `dot`/`tick` `x`/`y` and a `text` string — because there is no
+  sane fallback for a mark whose position cannot be read. Every document that imported under
+  0.32.0 still imports.
+
 - **A summary form for the browser terminal's CSV (MBA-1433).** Native's trajectory CSV is two
   documents and selects between them with `--full`: absent, a `metric,value,unit` summary;
   present, the per-point table. The WASM terminal's `--full` sets sampling density instead, so
