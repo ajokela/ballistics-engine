@@ -2475,9 +2475,19 @@ Impact Velocity: 2510 fps\n";
                 ))
                 .expect_err("--csv-summary must be refused outside -o csv");
             let message = format!("{err:?}");
+            // Assert the GUARD's own wording, not merely that the flag is named. The generic
+            // "Unknown flag: --csv-summary" arm also names it, so a test that looked only for
+            // the flag would still pass with the whole feature ripped out — it could not fail
+            // on the regression it exists to catch.
             assert!(
-                message.contains("--csv-summary"),
-                "the rejection must name the flag: {message}"
+                message.contains("applies only to -o csv"),
+                "the rejection must be the --csv-summary guard, not the unknown-flag arm: \
+                 {message}"
+            );
+            assert!(
+                !message.contains("Unknown flag"),
+                "--csv-summary must be a recognized flag that is refused here, not an \
+                 unparsed one: {message}"
             );
         }
     }

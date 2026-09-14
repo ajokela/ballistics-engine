@@ -23860,6 +23860,13 @@ fn print_reticle_import_report(
         report.dropped_elements,
         report.tally()
     );
+    if report.circle_repeats_unreadable > 0 {
+        eprintln!(
+            "note: {} circle element(s) declared a `repeat` this importer could not read, so \
+             each was counted once; the document may draw more.",
+            report.circle_repeats_unreadable
+        );
+    }
     if report.arcs.is_empty() && report.arcs_unresolved == 0 {
         return;
     }
@@ -23885,8 +23892,8 @@ fn print_reticle_import_report(
     }
     if report.arcs_unresolved > 0 {
         eprintln!(
-            "        {} further arc(s) declared no usable radius, so their points could not \
-             be computed at all",
+            "        {} further arc(s) declared geometry this importer could not read \
+             (radius, sweep or center), so their points could not be computed at all",
             report.arcs_unresolved
         );
     }

@@ -29,6 +29,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hands a caller who knows their own reticle the exact coordinates instead. An imported
   description is byte-identical to earlier engines.
 
+  Reading an arc's geometry meant giving `circle` typed fields, where before serde ignored
+  every one of them, and a typed field REJECTS a present value of the wrong type — which fails
+  the whole document, not the one element. A Ventum tool is free to write `"r": "2mil"` or
+  `"r": {"v": 2, "unit": "mil"}`, and a reticle whose dots are perfectly good must not be
+  refused over a decoration's units. So a `circle`'s keys are read by hand rather than typed,
+  and none of the geometry keys one carries — `x`/`cx`, `y`/`cy`, `r`, `start`, `end`,
+  `repeat` — refuses a document over how it is written: not for its value's type, not for
+  using both of the schema's spellings of a center (`x` beside `cx`, which a derived reader
+  calls a duplicate field), and not for being written twice. (The `type` tag is not one of
+  them: an element naming its own type twice is refused by serde's tag reader before any
+  variant exists.) A value this importer cannot read does not resolve, exactly as an absent
+  one does not — but the two are not folded together: the element is still counted, and where
+  the difference costs the report something it is declared rather than dropped.
+
+  Among the drawing elements, strict covers what a hold is built from — a `dot`'s or
+  `tick`'s `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies
+  of any of those — and the `type` tag before any of it, since leniency is per-variant and
+  an element that does not say what it is has no variant yet. There is no sane fallback for
+  a mark whose position cannot be read, and a mark's `repeat` degrading to one copy would
+  drop hold points in silence. (The reticle-level fields — `name`, `plane`, `unit`,
+  `ref_magnification`, and `spec` itself — stay strict too, exactly as in 0.32.0.) A `circle`'s `repeat` stamps nothing holdable, so it degrades instead of refusing the
+  document — and the report declares the cost in a new `circle_repeats_unreadable`, since that
+  element's tally is then low by an unknown amount. That boundary is not left to this
+  paragraph: `strictness_is_exactly_what_a_hold_is_built_from` states it as code and drives
+  every element type the model can produce against every key the importer reads ON AN
+  ELEMENT, and pins the `type` tag separately, since a key sweep must choose a variant before
+  it can write a key. One of those element keys that starts refusing a document, or stops,
+  fails a test.
+
+  Leniency never becomes silence: an arc resolves only from a center, a radius that is a
+  positive length, and a sweep, and anything that leaves one of those unavailable — an omitted
+  key, a value in a type this importer cannot read, a radius of `0` or less — keeps the element's
+  `arc` tag and lands it in `arcs_unresolved` rather than reporting points from a fallback
+  nobody wrote. (Earlier in this cycle an unreadable angle quietly retagged the arc as a plain
+  ring and reported nothing, while an unreadable radius was reported; they are the same loss and
+  are now reported the same way.) `null` is absence, not an unreadable value, so a `circle` with
+  `"start": null` beside an unreadable `end` is a ring: it supplied one angle, and one angle is
+  no sweep however it is spelled.
+
+  A `circle` can still cost a document, in one way this branch found and pins with a test.
+  `circle` instances now go through repeat expansion, and expansion enforces
+  `MAX_RETICLE_MARKS` over everything it materializes, so a `circle` consumes mark budget that
+  0.32.0 never charged it (it was skipped before expansion began): a document already at the
+  cap — or one whose `circle` carries a `repeat.n` in the thousands — is refused with
+  `TooManyMarks` where 0.32.0 imported it. That is a cap decision rather than a parsing one, and
+  it is still owed a fix. Refusals that land before the element model is consulted at all — the
+  JSON *parser* on a numeric literal outside `f64`'s range such as `"r": 1e400` or on JSON
+  nested past the recursion limit, serde's tag reader on an element that writes `type` twice —
+  are not about the `circle` and are not new: they fall on `line` and `rect` identically, and
+  0.32.0 refused them too.
+
+  `repeat`'s `mirror` also stops undercounting centered arcs. It has always skipped a twin that
+  would land on top of its original, and for a mark that test is just "is it on the mirror
+  line". An arc is also a set of angles, and reflection reworks those, so a centered asymmetric
+  arc's twin is a different shape: `start: 290, end: 70` mirrored across `x` has its apex on the
+  other side of the same center. That twin is now counted and resolved. A twin is still skipped
+  when the reflection can be shown to map the shape onto itself — a `start: 200, end: 340`
+  horseshoe centered on the vertical axis, or a ring about a center this importer could read.
+  Where it cannot be shown, because the angles or the center were written in a form this
+  importer cannot read, nothing is proved and the twin is kept: the document drew two shapes and
+  is credited with two. Marks are unaffected: a `dot`, `tick` or `text` on the mirror line is
+  still emitted once.
+
 - **A summary form for the browser terminal's CSV (MBA-1433).** Native's trajectory CSV is two
   documents and selects between them with `--full`: absent, a `metric,value,unit` summary;
   present, the per-point table. The WASM terminal's `--full` sets sampling density instead, so
@@ -44,6 +107,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exceptions: the terminal emits no `stability_coefficient` and no `spin_drift` row, because it
   derives neither quantity on any of its output formats. `--csv-summary` is rejected with
   `-o table` and `-o json` rather than accepted and ignored.
+
+  Scope, so it is not read as more than it is: this is native's TRAJECTORY CSV summary. The
+  ticket also named `max_ordinate` and `primary_crossing`, and those are rows of native's ZERO
+  CSV — the terminal's `zero` command has no `-o` at all (it rejects the flag as unknown and
+  prints one form, its banner), so both stay unreachable from a browser build and this flag
+  does not change that. `zero_angle_degrees`, the field actually reported missing, is a
+  trajectory-summary row and is now reachable.
 
 ## [0.38.0] - 2026-09-13
 

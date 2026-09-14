@@ -2815,10 +2815,12 @@ So an import that could not represent part of the document says so:
 
 ```
 note: myscope.ventum.json: 2 element(s) carry no hold point and were not imported (arc x1, line x1)
-note: an arc's aiming points cannot be declared in this format, so none were imported as marks.
-      Add them yourself if your reticle holds on them:
+note: an arc's aiming points cannot be declared in this format, so none were imported as marks. Add them yourself if your reticle holds on them:
         arc 200-340 deg: apex 0.00 / 2.00 up mil, tips 1.88 left / 0.68 up mil and 1.88 right / 0.68 up mil
 ```
+
+(The second `note:` is one unwrapped line; it is shown here as the terminal emits it, not
+re-wrapped, so a test or script matching on it matches the real output.)
 
 The notice goes to **stderr**; stdout stays the reticle formatter's output verbatim, so
 piping `-o json` is unaffected. A document that imports whole prints nothing.
@@ -2829,6 +2831,61 @@ segment — so the importer resolves each arc's apex and tips and hands them to 
 inventing holds that would also shift what `reticle hold` reports for every Ventum reticle
 imported since 0.32.0. Library callers get the same information structurally from
 `reticle_import::import_ventum_reticle_with_report`.
+
+**No geometry key of a `circle` refuses the document over how it is written.** That is
+`x`/`cx`, `y`/`cy`, `r`, `start`, `end` and `repeat`. Not for its value's type (`"r": "2mil"`,
+an object, an array, `true`, `null`, a `repeat` whose `axis` is `"diagonal"`), not for using
+both of the schema's spellings of a center at once (`x` beside `cx`), and not for being
+written twice — a `circle`'s keys are read by hand rather than typed, and a repeated or
+double-spelled one takes its last value in document order. The `type` tag is not a geometry
+key: an element naming its own type twice is refused by serde's tag reader before any variant
+exists. A value this importer cannot read does not resolve, exactly as an absent one does not,
+but the two are not folded together — the element is still counted in the notice above, and
+where the difference costs the report something it is declared.
+
+Among the drawing elements, strict covers what a hold is built from — a `dot`'s or `tick`'s
+`x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of any of those
+must be the type the schema says — and the `type` tag before any of it, since leniency is
+per-variant and an element that does not say what it is has no variant yet. There is no sane
+fallback for a mark whose position cannot be read, and a mark's `repeat` quietly degrading to a
+single copy would drop hold points without saying so. (The reticle-level `name`, `plane`, `unit`, `ref_magnification` and `spec` are strict as
+well, unchanged from 0.32.0 — including that a present `null` is not an absent key there.) A
+`circle`'s `repeat` stamps nothing holdable, so it degrades; the notice then says *"N circle
+element(s) declared a `repeat` this importer could not read, so each was counted once; the
+document may draw more."* That boundary is swept in both directions by the engine's own
+`strictness_is_exactly_what_a_hold_is_built_from`, which drives every element type the
+importer models against every key it reads ON AN ELEMENT and pins the `type` tag separately,
+since a key sweep must choose a variant before it can write a key. One of those element keys
+that starts refusing a document, or stops, fails a test rather than leaving this paragraph
+wrong.
+
+Leniency is not silence. An arc's points are built from a center, a radius that is a positive
+length, and a sweep; anything that leaves one of those unavailable — an omitted key, a value
+this importer cannot read, a radius of `0` or less — keeps the element's `arc` tag and is
+reported as *"N further arc(s) declared geometry this importer could not read (radius, sweep or
+center), so their points could not be computed at all"* rather than being dropped from the
+tally or resolved about a center nobody wrote. `null` is absence rather than an unreadable
+value, so a `circle` with `"start": null` beside an unreadable `end` is a ring: it supplied one
+angle, and one angle describes no sweep however it is spelled.
+
+A `circle` can still cost a document, in one way this release found and pins with a test:
+`circle` instances count against the `MAX_RETICLE_MARKS` cap during repeat expansion, so a
+document already at the cap, or one whose `circle` carries a `repeat.n` in the thousands, is
+refused with a too-many-marks error where 0.32.0 dropped the circle unexamined. A refusal that
+lands before the element is looked at — the JSON *parser* on a numeric literal outside `f64`'s
+range (`"r": 1e400`) or on JSON nested past the recursion limit, serde's tag reader on an
+element that writes `type` twice — is not about the `circle` and is not new: it falls on `line`
+and `rect` identically, and refused 0.32.0 too.
+
+**A mirrored arc on the mirror line is two arcs when the reflection changes it.** `repeat`'s
+`mirror` skips a twin that would land on top of its original, but for an arc that test is
+about the angles too, not just the center: a horseshoe centered on the axis it is mirrored
+across (`start: 200, end: 340` across `axis: "x"`) reflects onto itself and is counted once,
+while an asymmetric one (`start: 290, end: 70`) reflects to an apex on the other side and is
+counted — and resolved — twice. A twin is skipped only where the duplicate can be shown, so a
+shape whose angles or center this importer could not read keeps its twin and is counted twice,
+ring included. Marks are unaffected; a `dot`, `tick` or `text` on the mirror line is still
+emitted once.
 
 #### Intellectual-property exclusions
 
@@ -4147,6 +4204,14 @@ native's, byte for byte, with two documented exceptions: the terminal emits no
 `stability_coefficient` and no `spin_drift` row, because it computes neither quantity on any
 of its output formats — native derives them from the station conditions it resolved for the
 solve, which this surface hands to the solver rather than resolving itself.
+
+Scope, stated rather than implied: this flag gives the terminal native's **trajectory** CSV
+summary, and that is all of it. `max_ordinate` and `primary_crossing` are rows of native's
+**zero** CSV, not its trajectory CSV, and the terminal's `zero` command has no `-o` at all —
+it rejects the flag as unknown and prints one form, its banner. So those two fields remain
+unreachable from a browser build, and `--csv-summary` does not change that.
+`zero_angle_degrees`, the field the missing-data report was actually about, *is* reachable: it
+is a trajectory-summary row, present whenever `--auto-zero` solved an angle.
 
 ### PDF Dope Card Format
 Generate a printable dope card with two-column layout, color-coded values, and alternating row stripes for field readability:
