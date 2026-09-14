@@ -39,10 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calls a duplicate field), and not for being written twice. A value this importer cannot read
   is ignored exactly as an absent one is, and the element is still counted in the report.
 
-  Among the drawing elements, strict is what a hold is built from: a `dot`'s or `tick`'s
-  `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of any of
-  those — because there is no sane fallback for a mark whose position cannot be read, and a
-  mark's `repeat` degrading to one copy would drop hold points in silence. (Reticle-level
+  Among the drawing elements, strict covers what a hold is built from — a `dot`'s or
+  `tick`'s `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies
+  of any of those — and the `type` tag before any of it, since leniency is per-variant and
+  an element that does not say what it is has no variant yet. There is no sane fallback for
+  a mark whose position cannot be read, and a mark's `repeat` degrading to one copy would
+  drop hold points in silence. (Reticle-level
   metadata — `name`, `plane`, `unit`, `ref_magnification` — stays strict too, exactly as in
   0.32.0.) A `circle`'s `repeat` stamps nothing holdable, so it degrades instead of refusing the
   document — and the report declares the cost in a new `circle_repeats_unreadable`, since that

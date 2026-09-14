@@ -840,15 +840,19 @@ fn format_label_number(value: f64) -> String {
 // for its type (`"r": "2mil"`), not for which of the schema's two spellings of a center it
 // uses (`x` beside `cx`), and not for being written twice. See `CircleFields`.
 //
-// Among the drawing ELEMENTS, strict is what a hold is built from: a `dot`'s or `tick`'s
-// `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of any of
-// those. There is no sane fallback for a mark whose position cannot be read, and a mark's
-// `repeat` quietly degrading to a single copy would drop hold points without saying so. That
+// Among the drawing ELEMENTS, strict covers what a hold is built from -- a `dot`'s or
+// `tick`'s `x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of
+// any of those -- and, before any of that, the `type` tag itself: an element that does not
+// say what it is cannot be read leniently, because leniency is per-variant and there is no
+// variant yet. There is no sane fallback for a mark whose position cannot be read, and a
+// mark's `repeat` quietly degrading to a single copy would drop hold points without saying
+// so. That
 // boundary is stated as code and swept in both directions by
 // `tests::strictness_is_exactly_what_a_hold_is_built_from`, which drives every element type
-// this model can produce against every key this importer reads (plus two it ignores). A
-// field that starts refusing a document, or stops, turns it red rather than leaving this
-// paragraph wrong.
+// this model can produce against every KEY this importer reads (plus two it ignores), and
+// pins the `type` tag separately, since a key sweep has to choose a variant before it can
+// write a key. A field that starts refusing a document, or stops, turns it red rather than
+// leaving this paragraph wrong.
 //
 // Reticle-level metadata (`name`, `plane`, `unit`, `ref_magnification`) is strict as well,
 // `name` included even though no hold depends on it. That is unchanged since 0.32.0 and is
@@ -966,8 +970,8 @@ enum Cosmetic {
     /// The document did not write this key — or wrote `null`, which is how JSON spells the
     /// absence of a value.
     ///
-    /// The other place this model accepts a `null` is a mark's optional `repeat`, where
-    /// serde's `Option` reads it the same way. It is NOT how the reticle-level fields behave:
+    /// A mark's optional `repeat` reads a `null` the same way, through serde's `Option`. It
+    /// is NOT how the reticle-level fields behave:
     /// `#[serde(default)]` fills in a key the document omitted and still refuses a present
     /// `null`, which is 0.32.0's behaviour and is deliberately left alone. Both halves are
     /// pinned by `tests::null_is_read_as_absence_not_as_a_bad_value`.
@@ -2193,14 +2197,16 @@ mod tests {
     // contradicts the prose turns a test red instead of leaving a lie in a document.
     // -----------------------------------------------------------------------------------
 
-    /// Values the Ventum schema declares no field as. `null` is deliberately absent: it is
-    /// how JSON spells "no value", every optional field in this model reads it that way, and
-    /// it has its own sweep in [`null_is_read_as_absence_not_as_a_bad_value`].
+    /// Values the Ventum schema declares no field as. `null` is deliberately absent: where it
+    /// is read as absence rather than as a bad value, and where it is not, is pinned by
+    /// [`null_is_read_as_absence_not_as_a_bad_value`] rather than described here.
     const WRONG_TYPED: [&str; 4] = [r#""a string""#, r#"{"nested":1}"#, "[1]", "true"];
 
-    /// [`WRONG_TYPED`] minus anything that is in fact the right type for `key`. `text` is the
-    /// schema's only string-valued key, so a string is a perfectly good value there and is
-    /// not evidence of anything; every other key is a number or the `repeat` object. (An
+    /// [`WRONG_TYPED`] minus anything that is in fact the right type for `key`. Of the keys
+    /// this importer READS, `text` is the one that takes a string, so a string is a perfectly
+    /// good value there and is not evidence of anything; the rest take a number or the
+    /// `repeat` object. (The format's ignored cosmetic keys include string-valued ones such
+    /// as `color` and `notes`; the sweep does not turn on their types either way.) (An
     /// object IS the right shape for a `repeat`, but `{"nested":1}` is missing every field
     /// one needs, so it is still a value a strict `repeat` refuses.)
     fn wrong_typed_for(key: &str) -> Vec<&'static str> {
@@ -2367,6 +2373,22 @@ mod tests {
                 );
             }
         }
+
+        // The `type` tag cannot be swept the way the keys above are, because the sweep builds
+        // its documents FROM a type — there is no element to put a wrong-typed key on until
+        // one has been chosen. It is strict all the same, and the boundary paragraph names it
+        // as such, so it is pinned here rather than left as a claim about nothing.
+        for document in [
+            r#"{"name":"N","unit":"mil","spec":[{"x":0,"y":1}]}"#,
+            r#"{"name":"N","unit":"mil","spec":[{"type":null,"x":0,"y":1}]}"#,
+            r#"{"name":"N","unit":"mil","spec":[{"type":7,"x":0,"y":1}]}"#,
+        ] {
+            assert!(
+                import_ventum_reticle(document).is_err(),
+                "an element whose `type` is missing or not a variant name must refuse the \
+                 document — leniency is per-variant, and there is no variant yet\n  {document}"
+            );
+        }
     }
 
     /// The other direction, at the one element the leniency is about, with the two shapes a
@@ -2528,8 +2550,8 @@ mod tests {
             assert_eq!(report.arcs_unresolved, 0, "{what}: a ring loses no sweep");
         }
 
-        // The one other field in this model that takes a `null`: a mark's optional `repeat`,
-        // where serde's `Option` reads it as absence too. One dot is emitted.
+        // A mark's optional `repeat` takes a `null` too, where serde's `Option` reads it as
+        // absence. One dot is emitted.
         let desc = import_ventum_reticle(
             r#"{"name":"N","unit":"mil","spec":[{"type":"dot","x":0,"y":1,"repeat":null}]}"#,
         )
@@ -2602,11 +2624,12 @@ mod tests {
 
     /// A refusal that is not about the `circle` at all, pinned as such.
     ///
-    /// Three of these exist and none of them is this module's to give away. A numeric literal
-    /// outside `f64`'s range and JSON nested past serde_json's recursion limit are refused by
-    /// the PARSER before any element model is consulted; an element that writes its own
-    /// `type` twice is refused by serde's tag reader before a variant is even chosen. Nothing
-    /// in this module's leniency can see any of them, and 0.32.0 refused all three.
+    /// None of these is this module's to give away, and the three swept here are examples
+    /// rather than the whole set. A numeric literal outside `f64`'s range and JSON nested
+    /// past serde_json's recursion limit are refused by the PARSER before any element model
+    /// is consulted; an element that writes its own `type` twice is refused by serde's tag
+    /// reader before a variant is even chosen. Nothing in this module's leniency can see any
+    /// of them, and 0.32.0 refused these three the same way.
     ///
     /// The evidence is that they fall identically on element types that read no fields
     /// whatsoever: if one of these documents ever imports as a `line` but not as a `circle`,

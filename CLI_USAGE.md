@@ -2840,11 +2840,12 @@ and a repeated or double-spelled one takes its last value in document order. A v
 importer cannot read is ignored exactly as an absent one is, and the element is still counted
 in the notice above.
 
-Among the drawing elements, strict is what a hold is built from: a `dot`'s or `tick`'s `x`/`y`,
-a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of any of those must be
-the type the schema says — there is no sane fallback for a mark whose position cannot be read,
-and a mark's `repeat` quietly degrading to a single copy would drop hold points without saying
-so. (The reticle-level `name`, `plane`, `unit` and `ref_magnification` are strict as well,
+Among the drawing elements, strict covers what a hold is built from — a `dot`'s or `tick`'s
+`x`/`y`, a `text`'s `x`/`y` and its string, and the `repeat` that stamps copies of any of those
+must be the type the schema says — and the `type` tag before any of it, since leniency is
+per-variant and an element that does not say what it is has no variant yet. There is no sane
+fallback for a mark whose position cannot be read, and a mark's `repeat` quietly degrading to a
+single copy would drop hold points without saying so. (The reticle-level `name`, `plane`, `unit` and `ref_magnification` are strict as well,
 unchanged from 0.32.0 — including that a present `null` is not an absent key there.) A
 `circle`'s `repeat` stamps nothing holdable, so it degrades; the notice then says *"N circle
 element(s) declared a `repeat` this importer could not read, so each was counted once; the
