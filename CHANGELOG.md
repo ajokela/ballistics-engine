@@ -8,6 +8,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Card requests are denominated per dimension, with `units` as the preset that fills in the
+  rest (MBA-1519).** `CardRequestV1` (bridge `card.come_ups`, `card.range_table`, `card.wind`,
+  `card.pdf`) took a single `units: imperial|metric` scalar that drove eleven conversions at
+  once. Nobody shoots in one system: a Finnish shooter ranges in metres, dials MIL, and buys
+  bullets labelled in grains, and European makers dual-print `g / gr` rather than replacing one
+  with the other. Eleven optional per-dimension fields now sit alongside the scalar:
+
+  `distance_unit` (yards/meters), `velocity_unit` (fps/mps), `mass_unit` (grains/grams),
+  `diameter_unit`, `sight_height_unit` and `drop_unit` (inches/cm/mm), `wind_speed_unit`
+  (mph/mps/kph/knots), `temperature_unit` (fahrenheit/celsius), `pressure_unit` (inhg/hpa),
+  `energy_unit` (ftlb/joules) and `altitude_unit` (feet/meters).
+
+  `units` stays, and stays the default for almost everything: an explicit per-dimension field
+  wins, an absent one falls back to what the preset implies. **Additive**: every field is
+  optional, and a request that states none of them produces the byte-identical response it
+  always did — the six documents the old imperial and metric shapes emit are pinned as goldens
+  captured from the previous build (`tests/card_units_per_dimension.rs`). Spelling out every
+  dimension a preset implies produces that same document, which is what makes the preset a
+  bulk action rather than a second code path.
+
+  Four values are reachable for the first time, none of them by any preset: `cm` for the linear
+  drop column (a metric card prints 250 cm, not 2500 mm), `kph` and `knots` for wind, and
+  `feet` for altitude.
+
+  `altitude_unit` is the one dimension whose fallback is NOT the preset's: `altitude` has been
+  metres in both systems since this module was written (it reaches `AtmosphericConditions`
+  unconverted, and the PDF header divides by 0.3048 regardless of `units`), so letting the
+  imperial preset start filling it with feet would silently turn every stored `altitude: 1000`
+  into a card shot at 304.8 m. It defaults to metres on an imperial card too, and a caller that
+  wants feet says so.
+
+  Nothing was added for the dimensions that did not need it. Scope adjustment was already
+  per-dimension and was the precedent — `adjustment_unit` and `windage_unit` are separate
+  fields with separate click graduations, and SMOA (spelled `smoa` or `iphy`) is already one of
+  their values. Clicks are still a graduation rather than a unit, and are still refused without
+  one. The linear-at-distance spellings are NOT units and are rejected: `inches@100yd` IS SMOA,
+  the same 1/3600 rad and the same printed number, and `cm/100m` is 0.1 mrad, i.e. MIL with a
+  factor-of-ten display. Twist rate is a dimension of the design but not of this request.
+
+  The response needed no change at all: `CardUnitsBlockV1` has always carried seven independent
+  label fields, and every label it prints is now an accepted spelling in a request, so a caller
+  can echo a card's own units block straight back.
+
+  No number moved. The same request produces the same physics; only its denomination is now
+  separable.
 - **A solve-json v1 request that leaves `rifle.twist_rate_m_per_turn` out now says which results
   were computed from the assumed barrel (MBA-1484).** The field is optional, which reads like
   "leave the twist out of it". It is not: `resolve_rifle` substitutes
