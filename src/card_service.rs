@@ -8,12 +8,84 @@
 //!
 //! ## Unit convention
 //!
-//! Unlike solve-json (explicit SI), card requests are denominated in the declared
-//! `units` system, exactly like the CLI flags they mirror: imperial = fps, grains,
-//! inches, yards, °F, inHg, mph; metric = m/s, grams, mm, meters, °C, hPa, m/s.
-//! A DOPE card is a display artifact; its inputs and outputs share the shooter's
-//! unit world, and this keeps the request shape identical to the documented CLI
-//! surface.
+//! Unlike solve-json (explicit SI), card requests are denominated in the shooter's own
+//! units, exactly like the CLI flags they mirror: imperial = fps, grains, inches, yards,
+//! °F, inHg, mph; metric = m/s, grams, mm, meters, °C, hPa, m/s. A DOPE card is a display
+//! artifact; its inputs and outputs share the shooter's unit world, and this keeps the
+//! request shape identical to the documented CLI surface.
+//!
+//! ### Per-dimension units (MBA-1519)
+//!
+//! Nobody shoots in one system. A Finnish shooter ranges in metres, dials MIL, and buys
+//! bullets labelled in grains, because that is how the industry sells them; European makers
+//! dual-print `grams / grains` rather than replacing one with the other, and mix within a
+//! single table. So the denominating state on this request is a unit PER DIMENSION, and
+//! [`CardUnits`] is a one-shot preset that fills in every dimension the request does not
+//! state for itself — not a mode the card is "in".
+//!
+//! Concretely: an explicit per-dimension field wins; an absent one falls back to what
+//! `units` implies. A request written before those fields existed states none of them, so
+//! every dimension falls back and the card is byte-for-byte the card it always was
+//! (`tests/card_units_per_dimension.rs` pins that against a stored document).
+//!
+//! The response needed no new FIELD for any of this: [`CardUnitsBlockV1`] has always carried
+//! seven independent label fields, so a card whose distance is metres and whose velocity is
+//! fps already had somewhere to say so. It did need the two angular labels to become
+//! requestable: `elevation_adjustment`/`windage_adjustment` print `"MIL"`/`"MOA"`/`"SMOA"`/
+//! `"IPHY"`/`"CLICKS"` and [`AdjustmentUnit`] deserialized lowercase only, so those two were
+//! the only fields of the block a caller could not echo back. They take the uppercase
+//! spellings as aliases now, which makes "echo the units block into the next request" true
+//! of all seven fields rather than five of them.
+//!
+//! Three candidates do NOT get a new field, and each for its own reason:
+//!
+//! * **Scope adjustment** is already per-dimension, and was first: `adjustment_unit` and
+//!   `windage_unit` are separate fields with separate click graduations, because a shooter
+//!   with a MIL rifle and an MOA rifle has two scopes rather than a preference. SMOA (and
+//!   its `iphy` spelling) is already one of the values they take.
+//! * **Clicks** is not a units dimension. A click is meaningless without a graduation, and
+//!   this module already enforces that: `adjustment_unit == Clicks` without an
+//!   `elevation_click_value` is a refusal. The graduation belongs beside the turret's
+//!   MIL/MOA/SMOA marking, not in a units picker.
+//! * **Twist rate** is a dimension of the design but not of this request — a card request
+//!   carries no twist, so there is nothing here for a twist unit to denominate.
+//!
+//! And the linear-at-distance spellings are NOT units: "inches@100yd" IS SMOA — the same
+//! 1/3600 rad, the same printed number, no conversion — and "cm/100m" is 0.1 mrad, i.e. MIL
+//! with a factor-of-ten display. They are alternate HEADER TEXT for units this request
+//! already has, and adding them as values would give a caller two spellings that produce
+//! identical numbers.
+//!
+//! ### What the response does NOT tell a caller
+//!
+//! Like every other default on this request — `sight_height`, `temperature`, `pressure`,
+//! `humidity`, `windage_unit` — a per-dimension unit taken from the preset is applied
+//! silently, and this surface has no notice channel at all (there is no `assumptions` array
+//! on [`CardResponseV1`], unlike solve-json's `SolveSuccessV1`).
+//!
+//! Be precise about what that costs, because a paragraph of prose can argue it away. The `units`
+//! block names the unit of the SEVEN OUTPUT COLUMNS and nothing else. It says nothing about
+//! the six dimensions that are input-only — `mass`, `diameter`, `sight_height`,
+//! `temperature`, `pressure`, `altitude` — so for those a caller cannot read back off the
+//! card which unit the engine settled on.
+//!
+//! `altitude` is the sharp one, because it is the dimension whose fallback is deliberately
+//! NOT the preset's: an imperial `card.range_table` carrying `altitude: 5000` and no
+//! `altitude_unit` — which a US caller writing an imperial card means as feet — is solved at
+//! 5000 METRES, and no field of the response says so. On a .308 175 gr that is ~1.9 MIL of
+//! elevation at 1000 yd against the same card with `altitude_unit: "feet"`. The BEHAVIOUR
+//! predates the per-dimension fields (`altitude` has always reached
+//! [`AtmosphericConditions`] unconverted); what is new is that the request can now name the
+//! dimension, so the gap is describable instead of merely present.
+//!
+//! No notice was added here, and the reason is narrow rather than principled: any notice —
+//! an `assumptions` array, or extra label fields on the units block — is a change to the
+//! RESPONSE bytes of every card, including the stored documents the reprint path compares
+//! label-for-label and the six goldens that are the whole evidence for this change being
+//! additive on the wire. A response-schema change belongs to a ticket that can move those
+//! goldens honestly. Until then the remedy is on the request: a caller that cares which
+//! altitude it got states `altitude_unit`, and a card built by an app should state every
+//! dimension rather than lean on a preset.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +104,12 @@ pub const CARD_SCHEMA_VERSION_V1: u32 = 1;
 
 const GRAINS_TO_KG: f64 = crate::constants::GRAINS_TO_KG;
 
+/// The unit PRESET for a card request: a one-shot bulk action that fills in every
+/// per-dimension unit the request does not state for itself, not a mode the card is in.
+///
+/// It stays because it is the whole of the pre-MBA-1519 contract and because "give me an
+/// imperial card" remains the overwhelmingly common request. What changed is its standing:
+/// it is now the FALLBACK for each dimension rather than the denominator of all of them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardUnits {
@@ -40,60 +118,328 @@ pub enum CardUnits {
     Metric,
 }
 
+// --- Per-dimension units (MBA-1519) ------------------------------------------------------
+//
+// One enum per dimension the card request actually denominates. Each is a plain value list;
+// the mapping from a value to a conversion factor and to a printed label lives in exactly
+// one place, `Units` below, so a dimension cannot convert one way and be labelled another.
+//
+// Every enum carries serde aliases for the spelling the RESPONSE prints for that unit
+// (`"m/s"`, `"ft-lb"`, `"in"`, `"yd"`, ...), and so does [`AdjustmentUnit`] over in
+// `adjustment.rs` for the two uppercase dial labels. A caller that reads a card's `units`
+// block and writes those strings straight back into the next request is doing the obvious
+// thing, and it now works — for all seven fields of the block — instead of failing on a
+// request that denies unknown values.
+
+/// Range axis: what `zero_distance`, `start`/`end`/`step` and every row's `range` are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardDistanceUnit {
+    #[serde(alias = "yd", alias = "yard")]
+    Yards,
+    #[serde(alias = "m", alias = "metres", alias = "meter", alias = "metre")]
+    Meters,
+}
+
+/// Speed of the bullet: `muzzle_velocity`, `bc_segments` band edges, the `velocity` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardVelocityUnit {
+    #[serde(alias = "ft/s")]
+    Fps,
+    #[serde(alias = "m/s")]
+    Mps,
+}
+
+/// Bullet weight. Grains and grams differ by 15.43x, and on the BC path mass never enters
+/// the drag denominator — it touches energy and stability only — so a grams-for-grains slip
+/// yields a trajectory that looks entirely normal. Which is exactly why the unit has to be
+/// stated per-dimension rather than inferred: the dual-printed `g / gr` box a European
+/// shooter is holding is the normal case, not an edge one.
+///
+/// The one-character wire tokens `"g"` and `"gr"` are deliberately NOT accepted, though
+/// `"gram"`/`"grams"` and `"grain"`/`"grains"` are. Those two tokens are the slip this
+/// dimension exists to prevent: a 175-grain load sent as `"g"` solves to bit-identical
+/// dials, drift, velocity and time — only the energy column moves, 1009 ft-lb to 15575 — and
+/// the response has no mass label for a reader to catch it on. Nor can a plausibility guard
+/// catch it: bullets run roughly 5–800 grains and roughly 0.3–52 grams, so the two ranges
+/// OVERLAP across 5–52, where 48 grains (a .22 varmint bullet) and 48 grams (a .50 BMG) are
+/// both ordinary. There is no threshold to put a guard at, so the defence has to be the
+/// spelling, and the spelled-out name is the one thing a caller cannot typo into the other
+/// unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardMassUnit {
+    #[serde(alias = "grain")]
+    Grains,
+    #[serde(alias = "gram")]
+    Grams,
+}
+
+/// A small linear length. Shared by the request's two TARGET-SIDE linear dimensions
+/// (sight-to-bore geometry and the linear drop column) because they take the same values,
+/// never because they are the same setting: they are separate fields and resolve
+/// independently.
+///
+/// Bullet diameter is NOT one of them — it has [`CardDiameterUnit`], a narrower vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardLinearUnit {
+    #[serde(alias = "in", alias = "inch")]
+    Inches,
+    #[serde(alias = "centimeters", alias = "centimetres")]
+    Cm,
+    #[serde(alias = "millimeters", alias = "millimetres")]
+    Mm,
+}
+
+/// Bullet diameter: inches or millimetres, the two units a calibre is ever quoted in.
+///
+/// Its own enum rather than a third user of [`CardLinearUnit`], which would also accept
+/// `cm`. The design's dimension table lists inches and mm for this dimension and no third
+/// value, and a wire vocabulary on a `deny_unknown_fields` paid contract is far cheaper to
+/// widen later than to narrow: nobody quotes a calibre in centimetres, so `0.782` cm is
+/// likelier to be a slipped `7.82` mm than a request anyone meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardDiameterUnit {
+    #[serde(alias = "in", alias = "inch")]
+    Inches,
+    #[serde(alias = "millimeters", alias = "millimetres")]
+    Mm,
+}
+
+/// Wind and crossing-target speed. Four values, not two: a European card reads km/h and a
+/// coastal one reads knots, and neither is expressible by picking a system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardWindSpeedUnit {
+    Mph,
+    #[serde(alias = "m/s")]
+    Mps,
+    #[serde(alias = "km/h", alias = "kmh")]
+    Kph,
+    #[serde(alias = "kn", alias = "kt", alias = "knot")]
+    Knots,
+}
+
+/// Air temperature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardTemperatureUnit {
+    #[serde(alias = "f", alias = "degf")]
+    Fahrenheit,
+    #[serde(alias = "c", alias = "degc")]
+    Celsius,
+}
+
+/// Station pressure. `hpa` and `mbar` are the same number, which is why mbar is an alias
+/// rather than a value of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardPressureUnit {
+    #[serde(alias = "in-hg", alias = "inchesofmercury")]
+    InHg,
+    #[serde(alias = "mbar", alias = "millibar")]
+    HPa,
+}
+
+/// Terminal energy column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardEnergyUnit {
+    #[serde(alias = "ft-lb", alias = "ftlbs", alias = "footpounds")]
+    FtLb,
+    // "J" as well as "j": the response's energy label is the capitalized SI symbol, and the
+    // aliases exist precisely so a caller can echo a card's own labels back at it.
+    #[serde(alias = "j", alias = "J", alias = "joule")]
+    Joules,
+}
+
+/// Site elevation. See [`CardRequestV1::altitude_unit`] for why this one dimension's
+/// default does not come from the preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardAltitudeUnit {
+    #[serde(alias = "ft", alias = "foot")]
+    Feet,
+    #[serde(alias = "m", alias = "metres", alias = "meter", alias = "metre")]
+    Meters,
+}
+
 /// Everything the three card surfaces share: load, zero, atmosphere, display axes.
-/// Field values are in the `units` system (see module docs).
+///
+/// Field values are in this request's PER-DIMENSION units: each dimensional field names the
+/// `*_unit` field that denominates it, and each of those falls back to what `units` implies
+/// when it is absent (see the module docs). Stating none of them is the pre-MBA-1519 shape
+/// and reproduces the pre-MBA-1519 card exactly.
+///
+/// ## Adding a field here is additive on the WIRE and breaking in RUST
+///
+/// This is a deserialization target: the supported way to build one is
+/// `serde_json::from_str`/`from_value` on a JSON document, which is what the bridge and every
+/// binding do, and an optional new field costs such a caller nothing. A downstream Rust crate
+/// that constructs it with a struct literal has no such luck — every added field is an
+/// `E0063: missing fields` against code that compiled before, which is exactly what MBA-1519's
+/// eleven fields do to a crate written against 0.39.x. The remedy is one line per field
+/// (`altitude_unit: None`, and so on for the rest); the intended path is to deserialize.
+///
+/// `#[non_exhaustive]` was considered and NOT applied. It would break the same callers in the
+/// same release, and — with no `Default` and no builder on this type — it would leave a
+/// downstream crate no way to construct the request at all, trading one fixable compile error
+/// for a permanent one. So the breakage is stated in the CHANGELOG for the release that causes
+/// it rather than encoded in the type, and a future field will be stated the same way.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CardRequestV1 {
+    /// The preset that fills in every `*_unit` field below that this request leaves absent.
     #[serde(default)]
     pub units: CardUnits,
 
     // Load
+    /// Muzzle speed, in `velocity_unit`.
     pub muzzle_velocity: f64,
     pub ballistic_coefficient: f64,
-    /// grains (imperial) / grams (metric)
+    /// Bullet weight, in `mass_unit`.
     pub mass: f64,
-    /// inches (imperial) / mm (metric)
+    /// Bullet diameter, in `diameter_unit`.
     pub diameter: f64,
     #[serde(default)]
     pub drag_model: DragModelV1,
-    /// inches (imperial) / mm (metric); CLI default 1.5 in
-    #[serde(default = "default_sight_height")]
+    /// Sight height over bore, in `sight_height_unit`; CLI default 1.5 in.
+    #[serde(default = "sight_height_unset")]
     pub sight_height: f64,
 
     // Zero
+    /// Zero range, in `distance_unit`.
     pub zero_distance: f64,
-    /// Deliberate POI offset at the zero range, in the units system's LINEAR drop
-    /// unit (inches / mm); 0 = zeroed dead-on.
+    /// Deliberate POI offset at the zero range, in `drop_unit` — it is a displacement on
+    /// the target, which is the dimension the drop column reports; 0 = zeroed dead-on.
     #[serde(default)]
     pub zero_poi_vertical: f64,
+    /// Deliberate lateral POI offset at the zero range, in `drop_unit`.
     #[serde(default)]
     pub zero_poi_horizontal: f64,
-    /// Lateral sight-to-bore mount offset (inches / mm).
+    /// Lateral sight-to-bore mount offset, in `sight_height_unit` — it is rifle geometry
+    /// measured beside the sight height, not a figure read off a target.
     #[serde(default)]
     pub sight_offset_lateral: f64,
 
     // Atmosphere (CLI defaults: 59 °F / 15 °C, 29.92 inHg / 1013.25 hPa, 50 %, 0 alt)
+    /// Station temperature, in `temperature_unit`.
     #[serde(default)]
     pub temperature: Option<f64>,
+    /// Station pressure, in `pressure_unit`.
     #[serde(default)]
     pub pressure: Option<f64>,
+    /// Relative humidity, percent. Dimensionless, so no unit field governs it.
     #[serde(default = "default_humidity")]
     pub humidity: f64,
+    /// Site elevation, in `altitude_unit` — which defaults to METRES whatever `units` says.
     #[serde(default)]
     pub altitude: f64,
 
-    // Wind for the flight (mph / m/s; wind-FROM degrees). The wind card ignores
+    // Wind for the flight (in `wind_speed_unit`; wind-FROM degrees). The wind card ignores
     // these and sweeps its own speed list.
     #[serde(default)]
     pub wind_speed: f64,
     #[serde(default)]
     pub wind_direction_deg: f64,
 
-    // Card domain (yards / meters)
+    // Card domain, in `distance_unit`
     pub start: f64,
     pub end: f64,
     pub step: f64,
+
+    // --- Per-dimension units (MBA-1519) --------------------------------------------------
+    //
+    // Every one of these is `Option`al and `#[serde(default)]`: `CardRequestV1` denies
+    // unknown fields and backs paid surfaces (the Pro DOPE card, the saved-card reprint, the
+    // PDF export), so a stored request written before they existed has to keep parsing and
+    // keep producing the identical document. `None` means "take it from `units`", which is
+    // what every such request says about every dimension.
+    //
+    // What is deliberately NOT here: a scope-adjustment unit (`adjustment_unit` /
+    // `windage_unit` below already are that dimension, SMOA included), a clicks unit (a
+    // click needs a graduation, which is `elevation_click_value`), a twist-rate unit (this
+    // request carries no twist), and the linear-at-distance spellings (header text for SMOA
+    // and MIL, not units). The module docs give the full reasoning.
+    /// Unit of `zero_distance`, `start`, `end`, `step` and every row's `range`.
+    /// Default: yards (imperial) / metres (metric).
+    ///
+    /// Distance is the dimension where reinterpreting the number does the most damage the
+    /// most quietly: "300" yards and "300" metres are targets 9.36% apart, and a stored zero,
+    /// a DOPE row and a target-size hold are all attached to a PHYSICAL distance rather than
+    /// to a unit-free label. So a card's distance unit is stated, never inferred from a
+    /// neighbouring dimension.
+    #[serde(default)]
+    pub distance_unit: Option<CardDistanceUnit>,
+    /// Unit of `muzzle_velocity`, the `bc_segments` band edges and the `velocity` column.
+    /// Default: fps (imperial) / m/s (metric).
+    #[serde(default)]
+    pub velocity_unit: Option<CardVelocityUnit>,
+    /// Unit of `mass`. Default: grains (imperial) / grams (metric).
+    #[serde(default)]
+    pub mass_unit: Option<CardMassUnit>,
+    /// Unit of `diameter`. Default: inches (imperial) / mm (metric). Those two values and no
+    /// others — see [`CardDiameterUnit`].
+    #[serde(default)]
+    pub diameter_unit: Option<CardDiameterUnit>,
+    /// Unit of `sight_height` and `sight_offset_lateral` — the sight-to-bore geometry.
+    /// Default: inches (imperial) / mm (metric).
+    ///
+    /// This is a dimension the design's table does not contain, added deliberately rather
+    /// than by oversight: without it, the only home for the sight height would be
+    /// `drop_unit`, and then asking for a drop column in centimetres would silently reread a
+    /// 1.5-inch sight height as 1.5 cm. It is a twelfth field on a `deny_unknown_fields`
+    /// contract that cannot be withdrawn without a breaking change, which is the cost being
+    /// accepted here.
+    ///
+    /// Separate from `drop_unit` on purpose. They are the same unit today only because both
+    /// presets happen to give them the same value; they are different measurements (one is
+    /// taken on the rifle with calipers, the other is read off a target downrange), and
+    /// folding them together would mean a caller who asks for a drop column in centimetres
+    /// silently reinterprets a 1.5-inch sight height as 1.5 cm.
+    #[serde(default)]
+    pub sight_height_unit: Option<CardLinearUnit>,
+    /// Unit of the `drop_linear` / `wind_linear` columns and of `zero_poi_vertical` /
+    /// `zero_poi_horizontal`. Default: inches (imperial) / mm (metric).
+    ///
+    /// The ANGULAR half of the design's drop dimension is `adjustment_unit` /
+    /// `windage_unit`, which have always been separate fields; this is the linear half, and
+    /// `cm` is available here because a metric card prints 250 cm of drop, not 2500 mm.
+    #[serde(default)]
+    pub drop_unit: Option<CardLinearUnit>,
+    /// Unit of `wind_speed`, of every entry in `wind_speeds`, and of `pdf.target_speed`.
+    /// Default: mph (imperial) / m/s (metric).
+    #[serde(default)]
+    pub wind_speed_unit: Option<CardWindSpeedUnit>,
+    /// Unit of `temperature` and of the temperature default. Default: °F (imperial) / °C
+    /// (metric).
+    #[serde(default)]
+    pub temperature_unit: Option<CardTemperatureUnit>,
+    /// Unit of `pressure` and of the pressure default. Default: inHg (imperial) / hPa
+    /// (metric).
+    #[serde(default)]
+    pub pressure_unit: Option<CardPressureUnit>,
+    /// Unit of the `energy` column. Default: ft-lb (imperial) / J (metric).
+    #[serde(default)]
+    pub energy_unit: Option<CardEnergyUnit>,
+    /// Unit of `altitude`. Default: **metres, whatever `units` says** — this is the one
+    /// dimension whose fallback is not the preset's.
+    ///
+    /// `altitude` has ignored the `units` scalar since this module was written: it is passed
+    /// to [`AtmosphericConditions`] unconverted, and that field is documented metres, so an
+    /// imperial card's altitude has always been metres too (the PDF header divides it by
+    /// 0.3048 regardless of `units` for exactly that reason). Letting the imperial preset
+    /// start filling this with `feet` would therefore not be additive: every stored imperial
+    /// card carrying `altitude: 1000` would silently become a card shot at 304.8 m instead
+    /// of 1000 m, which is a different density altitude and a different trajectory.
+    ///
+    /// So the preset does not reach this field. A caller that wants feet says `"feet"`, and
+    /// gets the first way this request has ever had to express one.
+    #[serde(default)]
+    pub altitude_unit: Option<CardAltitudeUnit>,
 
     // Display axes
     #[serde(default)]
@@ -118,7 +464,8 @@ pub struct CardRequestV1 {
     #[serde(default)]
     pub zero_set_windage_bias_mil: f64,
 
-    /// Wind card only: the sweep of wind speeds (mph / m/s), one output column each.
+    /// Wind card only: the sweep of wind speeds, each in `wind_speed_unit` (so km/h and
+    /// knots are available here too), one output column each.
     #[serde(default)]
     pub wind_speeds: Vec<f64>,
     /// Wind card only: wind-FROM angles in degrees; default `[90]` (full-value from
@@ -127,8 +474,8 @@ pub struct CardRequestV1 {
     pub wind_angles_deg: Vec<f64>,
 
     /// Explicit velocity-banded BC schedule, mirroring the CLI's repeatable
-    /// `--bc-segment VMIN:VMAX:BC`. Velocities are in the request's `units` velocity
-    /// unit (fps imperial / m/s metric), exactly like the CLI flag. When supplied it
+    /// `--bc-segment VMIN:VMAX:BC`. Velocities are in the request's `velocity_unit`,
+    /// exactly like the CLI flag. When supplied it
     /// wins over `bc5d_table_path`, and — CLI parity — the scalar
     /// `ballistic_coefficient` remains the interior-gap fallback unchanged. The
     /// schedule feeds BOTH the zero solve and every sampled trajectory.
@@ -185,8 +532,8 @@ pub struct PdfCardOptionsV1 {
     /// Footer `Bullet:` label. Default empty.
     #[serde(default)]
     pub bullet: Option<String>,
-    /// Crossing-target speed for the Lead column, in the request's `units` speed unit
-    /// (mph imperial / m/s metric) — the same convention as the CLI's `--target-speed`
+    /// Crossing-target speed for the Lead column, in the request's `wind_speed_unit` — the
+    /// same convention as the CLI's `--target-speed`
     /// (MBA-1325). The lead is `speed * time-of-flight` for a full-value 90° crossing,
     /// held on the windage axis, exactly as `trajectory -o pdf` computes it.
     ///
@@ -216,7 +563,7 @@ pub struct PdfCardOptionsV1 {
 
 /// One velocity band of an explicit velocity-keyed BC schedule
 /// (`CardRequestV1::bc_segments`). `velocity_min`/`velocity_max` are in the
-/// request's `units` velocity unit and must satisfy `velocity_min < velocity_max`;
+/// request's `velocity_unit` and must satisfy `velocity_min < velocity_max`;
 /// `bc` is the BC (for the request's `drag_model`) that applies inside the band.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -226,8 +573,12 @@ pub struct CardBcSegmentV1 {
     pub bc: f64,
 }
 
-fn default_sight_height() -> f64 {
-    // The service can't know units at field-default time; resolved in `resolve()`.
+/// The `sight_height` sentinel for "not supplied".
+///
+/// A serde field default is a nullary function: it cannot see the request, so it cannot know
+/// which `sight_height_unit` the figure would have to be in. NaN stands in until `resolve()`
+/// swaps it for `Units::default_sight_height`, which does know.
+fn sight_height_unset() -> f64 {
     f64::NAN
 }
 fn default_humidity() -> f64 {
@@ -271,7 +622,7 @@ impl From<DragModelV1> for DragModel {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CardRowV1 {
-    /// Range in the request's distance unit (yd / m).
+    /// Range in the request's `distance_unit`; `CardUnitsBlockV1::distance` names it.
     pub range: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drop_linear: Option<f64>,
@@ -399,48 +750,345 @@ pub enum CardServiceError {
 }
 
 // --- Unit conversions: byte-identical constants to the CLI's UnitConverter ---
+//
+// One resolved unit per dimension, and one place where a unit becomes a factor. Every
+// imperial arm and every metric arm below is the SAME EXPRESSION the single-scalar version
+// of this module used for that dimension — the imperial arm for the dimensions the imperial
+// preset fills, the metric arm for the metric preset's — so a request that states no
+// per-dimension unit performs exactly the multiplications it always performed, in the same
+// order, and lands on the same bits. The only genuinely new arms are the values neither
+// preset produces (cm, km/h, knots, and feet of altitude), which no pre-existing request can
+// select.
+//
+// The reverse conversions are deliberately NOT expressed as `to_metric` composed with a
+// division. `Mph -> v` and `Mph -> (v * 0.44704) / 0.44704` are not the same f64, and the
+// pre-existing behaviour is the former.
+
+/// m/s per km/h.
+const KPH_TO_MPS: f64 = 1.0 / 3.6;
+/// m/s per knot: one nautical mile (1852 m) per hour, exactly.
+const KNOTS_TO_MPS: f64 = 1852.0 / 3600.0;
 
 struct Units {
-    imperial: bool,
+    distance: CardDistanceUnit,
+    velocity: CardVelocityUnit,
+    mass: CardMassUnit,
+    diameter: CardDiameterUnit,
+    sight_height: CardLinearUnit,
+    drop: CardLinearUnit,
+    wind_speed: CardWindSpeedUnit,
+    temperature: CardTemperatureUnit,
+    pressure: CardPressureUnit,
+    energy: CardEnergyUnit,
+    altitude: CardAltitudeUnit,
 }
 
 impl Units {
+    /// Settle every dimension: the request's own field where it states one, otherwise what
+    /// the [`CardUnits`] preset implies.
+    ///
+    /// Pure, cheap, and free of validation, so the PDF path can settle the axes it prints in
+    /// the header without repeating the request checks `resolve_inner` performs.
+    fn resolve(req: &CardRequestV1) -> Self {
+        let imperial = req.units == CardUnits::Imperial;
+        let linear = if imperial { CardLinearUnit::Inches } else { CardLinearUnit::Mm };
+        Self {
+            distance: req.distance_unit.unwrap_or(if imperial {
+                CardDistanceUnit::Yards
+            } else {
+                CardDistanceUnit::Meters
+            }),
+            velocity: req.velocity_unit.unwrap_or(if imperial {
+                CardVelocityUnit::Fps
+            } else {
+                CardVelocityUnit::Mps
+            }),
+            mass: req.mass_unit.unwrap_or(if imperial {
+                CardMassUnit::Grains
+            } else {
+                CardMassUnit::Grams
+            }),
+            diameter: req.diameter_unit.unwrap_or(if imperial {
+                CardDiameterUnit::Inches
+            } else {
+                CardDiameterUnit::Mm
+            }),
+            sight_height: req.sight_height_unit.unwrap_or(linear),
+            drop: req.drop_unit.unwrap_or(linear),
+            wind_speed: req.wind_speed_unit.unwrap_or(if imperial {
+                CardWindSpeedUnit::Mph
+            } else {
+                CardWindSpeedUnit::Mps
+            }),
+            temperature: req.temperature_unit.unwrap_or(if imperial {
+                CardTemperatureUnit::Fahrenheit
+            } else {
+                CardTemperatureUnit::Celsius
+            }),
+            pressure: req.pressure_unit.unwrap_or(if imperial {
+                CardPressureUnit::InHg
+            } else {
+                CardPressureUnit::HPa
+            }),
+            energy: req.energy_unit.unwrap_or(if imperial {
+                CardEnergyUnit::FtLb
+            } else {
+                CardEnergyUnit::Joules
+            }),
+            // NOT `imperial`-dependent: `altitude` has always been metres in both systems.
+            // See CardRequestV1::altitude_unit for why the preset must never reach it.
+            altitude: req.altitude_unit.unwrap_or(CardAltitudeUnit::Meters),
+        }
+    }
+
+    // --- into SI, for the solver ---
+
     fn velocity_to_metric(&self, v: f64) -> f64 {
-        if self.imperial { v * 0.3048 } else { v }
+        match self.velocity {
+            CardVelocityUnit::Fps => v * 0.3048,
+            CardVelocityUnit::Mps => v,
+        }
     }
     fn mass_to_kg(&self, v: f64) -> f64 {
-        if self.imperial { v * GRAINS_TO_KG } else { v * 0.001 }
+        match self.mass {
+            CardMassUnit::Grains => v * GRAINS_TO_KG,
+            CardMassUnit::Grams => v * 0.001,
+        }
     }
     fn distance_to_metric(&self, v: f64) -> f64 {
-        if self.imperial { v * 0.9144 } else { v }
+        match self.distance {
+            CardDistanceUnit::Yards => v * 0.9144,
+            CardDistanceUnit::Meters => v,
+        }
     }
-    fn small_len_to_metric(&self, v: f64) -> f64 {
-        if self.imperial { v * 0.0254 } else { v * 0.001 }
+    fn linear_to_metric(unit: CardLinearUnit, v: f64) -> f64 {
+        match unit {
+            CardLinearUnit::Inches => v * 0.0254,
+            CardLinearUnit::Cm => v * 0.01,
+            CardLinearUnit::Mm => v * 0.001,
+        }
+    }
+    fn diameter_to_metric(&self, v: f64) -> f64 {
+        match self.diameter {
+            CardDiameterUnit::Inches => v * 0.0254,
+            CardDiameterUnit::Mm => v * 0.001,
+        }
+    }
+    fn sight_height_to_metric(&self, v: f64) -> f64 {
+        Self::linear_to_metric(self.sight_height, v)
+    }
+    fn drop_to_metric(&self, v: f64) -> f64 {
+        Self::linear_to_metric(self.drop, v)
     }
     fn wind_to_metric(&self, v: f64) -> f64 {
-        if self.imperial { v * 0.44704 } else { v }
+        match self.wind_speed {
+            CardWindSpeedUnit::Mph => v * 0.44704,
+            CardWindSpeedUnit::Mps => v,
+            CardWindSpeedUnit::Kph => v * KPH_TO_MPS,
+            CardWindSpeedUnit::Knots => v * KNOTS_TO_MPS,
+        }
     }
     fn temperature_to_metric(&self, v: f64) -> f64 {
-        if self.imperial { (v - 32.0) * 5.0 / 9.0 } else { v }
+        match self.temperature {
+            CardTemperatureUnit::Fahrenheit => (v - 32.0) * 5.0 / 9.0,
+            CardTemperatureUnit::Celsius => v,
+        }
     }
     fn pressure_to_metric(&self, v: f64) -> f64 {
-        if self.imperial { v * 33.8639 } else { v }
+        match self.pressure {
+            CardPressureUnit::InHg => v * 33.8639,
+            CardPressureUnit::HPa => v,
+        }
     }
+    /// `altitude` in metres, which is what [`AtmosphericConditions::altitude`] wants and
+    /// what every request that predates `altitude_unit` already supplied.
+    fn altitude_to_metric(&self, v: f64) -> f64 {
+        match self.altitude {
+            CardAltitudeUnit::Feet => v * 0.3048,
+            CardAltitudeUnit::Meters => v,
+        }
+    }
+
+    // --- back out, for the printed row ---
+
     fn velocity_from_metric(&self, v: f64) -> f64 {
-        if self.imperial { v / 0.3048 } else { v }
+        match self.velocity {
+            CardVelocityUnit::Fps => v / 0.3048,
+            CardVelocityUnit::Mps => v,
+        }
     }
     fn distance_from_metric(&self, v: f64) -> f64 {
-        if self.imperial { v / 0.9144 } else { v }
+        match self.distance {
+            CardDistanceUnit::Yards => v / 0.9144,
+            CardDistanceUnit::Meters => v,
+        }
     }
     fn energy_from_metric(&self, v: f64) -> f64 {
-        if self.imperial { v * 0.737562 } else { v }
+        match self.energy {
+            CardEnergyUnit::FtLb => v * 0.737562,
+            CardEnergyUnit::Joules => v,
+        }
     }
     fn drop_linear_from_metric(&self, v: f64) -> f64 {
-        if self.imperial { v / 0.0254 } else { v * 1000.0 }
+        match self.drop {
+            CardLinearUnit::Inches => v / 0.0254,
+            CardLinearUnit::Cm => v * 100.0,
+            CardLinearUnit::Mm => v * 1000.0,
+        }
     }
+
+    // --- column labels; the response's `units` block IS this, field for field ---
+
     /// Label for the distance axis, for error messages that must name a range.
     fn distance_label(&self) -> &'static str {
-        if self.imperial { "yd" } else { "m" }
+        match self.distance {
+            CardDistanceUnit::Yards => "yd",
+            CardDistanceUnit::Meters => "m",
+        }
+    }
+    fn velocity_label(&self) -> &'static str {
+        match self.velocity {
+            CardVelocityUnit::Fps => "fps",
+            CardVelocityUnit::Mps => "m/s",
+        }
+    }
+    fn energy_label(&self) -> &'static str {
+        match self.energy {
+            CardEnergyUnit::FtLb => "ft-lb",
+            CardEnergyUnit::Joules => "J",
+        }
+    }
+    fn drop_label(&self) -> &'static str {
+        match self.drop {
+            CardLinearUnit::Inches => "in",
+            CardLinearUnit::Cm => "cm",
+            CardLinearUnit::Mm => "mm",
+        }
+    }
+    fn wind_speed_label(&self) -> &'static str {
+        match self.wind_speed {
+            CardWindSpeedUnit::Mph => "mph",
+            CardWindSpeedUnit::Mps => "m/s",
+            CardWindSpeedUnit::Kph => "km/h",
+            CardWindSpeedUnit::Knots => "kn",
+        }
+    }
+
+    // --- the CLI's own axes, for the call sites that are pinned to CLI constants ---
+    //
+    // These do NOT reuse the conversions above. The BC5D path and the PDF header each
+    // hardcode a factor that `main.rs` hardcodes at the same call site (3.280_839_895 vs
+    // 1/0.3048; 15.4324 vs the exact grains-per-gram), and the golden tests pin the CLI's
+    // digits. Sharing one factor between them would change numbers this work must not.
+    //
+    // Each of these helpers is compiled exactly where its call site is, rather than being
+    // blanket-allowed as dead code, so that a helper which stops being called anywhere is
+    // still a warning. For most of them that means a cfg attribute; `velocity_to_fps_bc5d`
+    // carries none because its call site is the always-compiled `bc_segments` arm of
+    // `resolve_bc_schedule`, so it is reached in every build.
+
+    /// Display velocity -> fps using `parse_bc_segment`'s factor.
+    fn velocity_to_fps_bc5d(&self, v: f64) -> f64 {
+        match self.velocity {
+            CardVelocityUnit::Fps => v,
+            CardVelocityUnit::Mps => v * 3.280_839_895,
+        }
+    }
+    /// Bullet weight -> grains using the CLI's BC5D/PDF factor.
+    #[cfg(any(feature = "pdf", not(target_arch = "wasm32")))]
+    fn mass_to_grains_cli(&self, v: f64) -> f64 {
+        match self.mass {
+            CardMassUnit::Grains => v,
+            CardMassUnit::Grams => v * 15.4324,
+        }
+    }
+    /// Bullet diameter -> inches, the BC5D table's caliber axis (which no wasm32 build has,
+    /// there being no filesystem to read a table from).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn diameter_to_inches(&self, v: f64) -> f64 {
+        match self.diameter {
+            CardDiameterUnit::Inches => v,
+            CardDiameterUnit::Mm => v / 25.4,
+        }
+    }
+    /// Muzzle velocity -> fps for the PDF header (`main.rs` divides by 0.3048 here).
+    #[cfg(feature = "pdf")]
+    fn velocity_to_fps_pdf(&self, v: f64) -> f64 {
+        match self.velocity {
+            CardVelocityUnit::Fps => v,
+            CardVelocityUnit::Mps => v / 0.3048,
+        }
+    }
+    /// Pressure -> inHg for the PDF header (`main.rs` uses 33.8639 on both PDF call sites,
+    /// NOT `pdf_dope_card::INHG_TO_HPA`).
+    #[cfg(feature = "pdf")]
+    fn pressure_to_inhg(&self, v: f64) -> f64 {
+        match self.pressure {
+            CardPressureUnit::InHg => v,
+            CardPressureUnit::HPa => v / 33.8639,
+        }
+    }
+    /// Pressure -> hPa for the PDF header, same factor.
+    #[cfg(feature = "pdf")]
+    fn pressure_to_hpa(&self, v: f64) -> f64 {
+        match self.pressure {
+            CardPressureUnit::InHg => v * 33.8639,
+            CardPressureUnit::HPa => v,
+        }
+    }
+    /// Temperature -> °F for the PDF header.
+    #[cfg(feature = "pdf")]
+    fn temperature_to_fahrenheit(&self, v: f64) -> f64 {
+        match self.temperature {
+            CardTemperatureUnit::Fahrenheit => v,
+            CardTemperatureUnit::Celsius => v * 9.0 / 5.0 + 32.0,
+        }
+    }
+    /// Wind or crossing speed -> mph for the PDF header.
+    #[cfg(feature = "pdf")]
+    fn wind_to_mph(&self, v: f64) -> f64 {
+        match self.wind_speed {
+            CardWindSpeedUnit::Mph => v,
+            CardWindSpeedUnit::Mps => v / 0.44704,
+            CardWindSpeedUnit::Kph => v * KPH_TO_MPS / 0.44704,
+            CardWindSpeedUnit::Knots => v * KNOTS_TO_MPS / 0.44704,
+        }
+    }
+    /// Altitude -> feet for the PDF header, which reports the altitude the SOLVE used.
+    #[cfg(feature = "pdf")]
+    fn altitude_to_feet(&self, v: f64) -> f64 {
+        match self.altitude {
+            CardAltitudeUnit::Feet => v,
+            CardAltitudeUnit::Meters => v / 0.3048,
+        }
+    }
+
+    // --- defaults that are themselves denominated ---
+
+    /// The CLI's 1.5-inch sight height, restated in this request's `sight_height_unit`.
+    /// The millimetre figure is the module's long-standing 38.0 (a rounded 1.5 in, not a
+    /// conversion of it), and the centimetre figure is that same length, exactly.
+    fn default_sight_height(&self) -> f64 {
+        match self.sight_height {
+            CardLinearUnit::Inches => 1.5,
+            CardLinearUnit::Cm => 3.8,
+            CardLinearUnit::Mm => 38.0,
+        }
+    }
+    /// The CLI's 59 °F / 15 °C standard temperature, in this request's `temperature_unit`.
+    fn default_temperature(&self) -> f64 {
+        match self.temperature {
+            CardTemperatureUnit::Fahrenheit => 59.0,
+            CardTemperatureUnit::Celsius => 15.0,
+        }
+    }
+    /// The CLI's 29.92 inHg / 1013.25 hPa standard pressure, in this request's
+    /// `pressure_unit`.
+    fn default_pressure(&self) -> f64 {
+        match self.pressure {
+            CardPressureUnit::InHg => 29.92,
+            CardPressureUnit::HPa => 1013.25,
+        }
     }
 }
 
@@ -456,6 +1104,9 @@ struct Resolved {
     sight_offset_lateral_m: f64,
     temperature_c: f64,
     pressure_hpa: f64,
+    /// Site elevation in metres — which is what `altitude` already was for every request
+    /// that states no `altitude_unit`, so this is a rename of an identity, not a conversion.
+    altitude_m: f64,
     end_m: f64,
     elevation_click: Option<ClickValue>,
     windage_click: Option<ClickValue>,
@@ -489,8 +1140,7 @@ fn resolve_axes_only(req: &CardRequestV1) -> Result<Resolved, CardServiceError> 
 }
 
 fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved, CardServiceError> {
-    let imperial = req.units == CardUnits::Imperial;
-    let u = Units { imperial };
+    let u = Units::resolve(req);
 
     for (name, v) in [
         ("muzzle_velocity", req.muzzle_velocity),
@@ -519,17 +1169,17 @@ fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved
         ));
     }
 
+    // Each of these three defaults is itself denominated, so it is taken from the dimension
+    // that governs the field rather than from the preset (`Units` restates the CLI's own
+    // figures per unit). `sight_height`'s sentinel is NaN because a serde field default
+    // cannot see the request it belongs to.
     let sight_height = if req.sight_height.is_nan() {
-        if imperial {
-            1.5
-        } else {
-            38.0
-        }
+        u.default_sight_height()
     } else {
         req.sight_height
     };
-    let temperature = req.temperature.unwrap_or(if imperial { 59.0 } else { 15.0 });
-    let pressure = req.pressure.unwrap_or(if imperial { 29.92 } else { 1013.25 });
+    let temperature = req.temperature.unwrap_or_else(|| u.default_temperature());
+    let pressure = req.pressure.unwrap_or_else(|| u.default_pressure());
 
     let parse_click = |label: &str, s: &Option<String>| -> Result<Option<ClickValue>, CardServiceError> {
         s.as_deref()
@@ -557,7 +1207,7 @@ fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved
     }
 
     let (bc_for_solve, bc_segments_fps) = if load_bc_schedule {
-        resolve_bc_schedule(req, imperial)?
+        resolve_bc_schedule(req, &u)?
     } else {
         (req.ballistic_coefficient, None)
     };
@@ -567,14 +1217,15 @@ fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved
         bc_segments_fps,
         velocity_m: u.velocity_to_metric(req.muzzle_velocity),
         mass_kg: u.mass_to_kg(req.mass),
-        diameter_m: u.small_len_to_metric(req.diameter),
-        sight_height_m: u.small_len_to_metric(sight_height),
+        diameter_m: u.diameter_to_metric(req.diameter),
+        sight_height_m: u.sight_height_to_metric(sight_height),
         zero_distance_m: u.distance_to_metric(req.zero_distance),
-        zero_poi_vertical_m: u.small_len_to_metric(req.zero_poi_vertical),
-        zero_poi_horizontal_m: u.small_len_to_metric(req.zero_poi_horizontal),
-        sight_offset_lateral_m: u.small_len_to_metric(req.sight_offset_lateral),
+        zero_poi_vertical_m: u.drop_to_metric(req.zero_poi_vertical),
+        zero_poi_horizontal_m: u.drop_to_metric(req.zero_poi_horizontal),
+        sight_offset_lateral_m: u.sight_height_to_metric(req.sight_offset_lateral),
         temperature_c: u.temperature_to_metric(temperature),
         pressure_hpa: u.pressure_to_metric(pressure),
+        altitude_m: u.altitude_to_metric(req.altitude),
         end_m: u.distance_to_metric(req.end),
         elevation_click,
         windage_click,
@@ -593,11 +1244,9 @@ fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved
 /// Returns `(scalar BC for the solve, optional fps-keyed schedule)`.
 fn resolve_bc_schedule(
     req: &CardRequestV1,
-    imperial: bool,
+    u: &Units,
 ) -> Result<(f64, Option<Vec<BCSegmentData>>), CardServiceError> {
     if let Some(segments) = req.bc_segments.as_ref().filter(|s| !s.is_empty()) {
-        // Display velocity -> fps: the exact factor the CLI's parse_bc_segment uses.
-        let to_fps = if imperial { 1.0 } else { 3.280_839_895 };
         let mut converted = Vec::with_capacity(segments.len());
         for (index, segment) in segments.iter().enumerate() {
             if !segment.velocity_min.is_finite()
@@ -619,8 +1268,10 @@ fn resolve_bc_schedule(
                 )));
             }
             converted.push(BCSegmentData {
-                velocity_min: segment.velocity_min * to_fps,
-                velocity_max: segment.velocity_max * to_fps,
+                // Display velocity -> fps with the exact factor the CLI's parse_bc_segment
+                // uses; the band edges are in `velocity_unit`, like `muzzle_velocity`.
+                velocity_min: u.velocity_to_fps_bc5d(segment.velocity_min),
+                velocity_max: u.velocity_to_fps_bc5d(segment.velocity_max),
                 bc_value: segment.bc,
             });
         }
@@ -633,7 +1284,7 @@ fn resolve_bc_schedule(
 
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = path;
+        let _ = (path, u);
         Err(CardServiceError::InvalidRequest(
             "bc5d_table_path is not supported on this target (no filesystem); supply \
              bc_segments instead"
@@ -647,7 +1298,7 @@ fn resolve_bc_schedule(
         // Bc5dTable::ensure_caliber_matches), so a mismatch is refused here rather than
         // applied — and rather than quietly falling back to an uncorrected card, which
         // the caller could not distinguish from a corrected one.
-        let diameter_in = if imperial { req.diameter } else { req.diameter / 25.4 };
+        let diameter_in = u.diameter_to_inches(req.diameter);
         let table = crate::bc_table_5d::path_cache::load_verified_for_caliber(
             std::path::Path::new(path),
             diameter_in,
@@ -657,12 +1308,8 @@ fn resolve_bc_schedule(
         // The BC5D axes are grains + fps; convert from the request's units the same
         // way the CLI does. The v2 tables carry only G1/G7 planes — anything else is
         // typed as G1, matching the CLI/WASM coercion.
-        let weight_grains = if imperial { req.mass } else { req.mass * 15.4324 };
-        let muzzle_fps = if imperial {
-            req.muzzle_velocity
-        } else {
-            req.muzzle_velocity * 3.280_839_895
-        };
+        let weight_grains = u.mass_to_grains_cli(req.mass);
+        let muzzle_fps = u.velocity_to_fps_bc5d(req.muzzle_velocity);
         let drag_type = if req.drag_model == DragModelV1::G7 { "G7" } else { "G1" };
         let base_bc = req.ballistic_coefficient;
 
@@ -705,7 +1352,7 @@ fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError
         temperature: r.temperature_c,
         pressure: r.pressure_hpa,
         humidity: req.humidity,
-        altitude: req.altitude,
+        altitude: r.altitude_m,
     };
     crate::calculate_zero_angle_with_conditions(
         zero_inputs,
@@ -735,7 +1382,7 @@ fn sampled(
         r.temperature_c,
         r.pressure_hpa,
         req.humidity,
-        req.altitude,
+        r.altitude_m,
         wind_speed_m,
         wind_direction_deg,
         // MBA-1476: at least one whole grid cell past the last row asked for — see
@@ -797,14 +1444,16 @@ fn truncation_of(
     }))
 }
 
-fn units_block(req: &CardRequestV1, windage_unit: AdjustmentUnit) -> CardUnitsBlockV1 {
-    let imperial = req.units == CardUnits::Imperial;
+/// The response's per-dimension label block: one label per dimension, read off the same
+/// resolved [`Units`] the rows were converted with, so a column cannot be computed in one
+/// unit and headed with another.
+fn units_block(req: &CardRequestV1, u: &Units, windage_unit: AdjustmentUnit) -> CardUnitsBlockV1 {
     CardUnitsBlockV1 {
-        distance: if imperial { "yd" } else { "m" },
-        velocity: if imperial { "fps" } else { "m/s" },
-        energy: if imperial { "ft-lb" } else { "J" },
-        drop: if imperial { "in" } else { "mm" },
-        wind_speed: if imperial { "mph" } else { "m/s" },
+        distance: u.distance_label(),
+        velocity: u.velocity_label(),
+        energy: u.energy_label(),
+        drop: u.drop_label(),
+        wind_speed: u.wind_speed_label(),
         elevation_adjustment: adjustment_unit_label(req.adjustment_unit),
         windage_adjustment: adjustment_unit_label(windage_unit),
     }
@@ -869,7 +1518,7 @@ pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceErr
         kind: "come_ups",
         zero_distance: req.zero_distance,
         bc_for_solve: r.bc_for_solve,
-        units: units_block(req, req.adjustment_unit),
+        units: units_block(req, &r.u, req.adjustment_unit),
         wind_speeds: Vec::new(),
         wind_angles_deg: Vec::new(),
         rows,
@@ -896,7 +1545,7 @@ pub fn range_table_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardService
 ///   They are taken from here rather than recomputed because recomputing them is the one
 ///   way the printed card could ever disagree with the rows the shooter already read.
 /// * The Lead column parallels `card.rows` one-to-one. `lead_target_speed` is in the
-///   request's `units` speed unit; `None` (no lead requested) yields all `None`, which the
+///   request's `wind_speed_unit`; `None` (no lead requested) yields all `None`, which the
 ///   PDF renders as em-dashes rather than fake zeroes.
 /// * The BC is `Resolved::bc_for_solve` — the published BC unless a BC5D table applied its
 ///   muzzle correction — which the PDF footer prints. The footer must state the BC the
@@ -1000,7 +1649,7 @@ fn range_table_rows(
             kind: "range_table",
             zero_distance: req.zero_distance,
             bc_for_solve: r.bc_for_solve,
-            units: units_block(req, r.windage_unit),
+            units: units_block(req, &r.u, r.windage_unit),
             wind_speeds: Vec::new(),
             wind_angles_deg: Vec::new(),
             rows,
@@ -1112,7 +1761,7 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
         kind: "wind_card",
         zero_distance: req.zero_distance,
         bc_for_solve: r.bc_for_solve,
-        units: units_block(req, req.adjustment_unit),
+        units: units_block(req, &r.u, req.adjustment_unit),
         wind_speeds: req.wind_speeds.clone(),
         wind_angles_deg: angles,
         rows: first,
@@ -1534,7 +2183,7 @@ fn validate_stored_card(
     // exists to prevent.
     let elevation = adjustment_unit_label(req.adjustment_unit);
     let windage = adjustment_unit_label(r.windage_unit);
-    let distance = if req.units == CardUnits::Imperial { "yd" } else { "m" };
+    let distance = r.u.distance_label();
     for (field, stored_label, request_label) in [
         ("units.distance", card.units.distance.as_str(), distance),
         (
@@ -1607,14 +2256,14 @@ fn validate_stored_card(
 /// wind card's `wind_speeds`/`wind_angles_deg`, or a stored card of another kind, is refused.
 /// Both paths map their rows onto the CLI's Range/Drop/Wind/Lead dope card, plus the Lead
 /// column that `CardRequestV1::pdf`'s `target_speed` asks for. The Range column is
-/// denominated in the stored/requested distance unit (yards imperial / metres metric),
-/// unlike `trajectory -o pdf`, whose dope card is always yards.
+/// denominated in the stored/requested `distance_unit`, unlike `trajectory -o pdf`, whose
+/// dope card is always yards.
 ///
-/// The header/footer block is always imperial, matching both CLI PDF call sites: a metric
-/// request's velocity/temperature/pressure/altitude/wind/weight are converted for display
-/// only. The `Solver:` label reports this build (`online` with the `online` feature,
-/// otherwise `offline`) and the timestamp is generation time, so neither is caller-settable
-/// — and neither is a number a shooter dials.
+/// The header/footer block is always imperial, matching both CLI PDF call sites: whatever the
+/// request's velocity/temperature/pressure/altitude/wind/weight dimensions are denominated in,
+/// they are converted for display only. The `Solver:` label reports this build (`online` with
+/// the `online` feature, otherwise `offline`) and the timestamp is generation time, so neither
+/// is caller-settable — and neither is a number a shooter dials.
 #[cfg(feature = "pdf")]
 pub fn pdf_card_v1(
     req: &CardRequestV1,
@@ -1733,21 +2382,26 @@ pub fn pdf_card_v1(
         )));
     }
 
-    let imperial = req.units == CardUnits::Imperial;
+    // The request's own axes, for the header. Resolved here rather than taken from above
+    // because neither branch hands a `Resolved` back — the reprint's is scoped to its arm and
+    // the solve's lives inside `range_table_rows`. Resolving twice is safe precisely because
+    // `Units::resolve` is a pure function of the request: the header cannot land on axes the
+    // rows were not computed in.
+    let u = Units::resolve(req);
     // The atmosphere defaults `resolve()` applies, restated for the header so the printed
     // conditions are the ones the solve used rather than blanks.
-    let temperature = req.temperature.unwrap_or(if imperial { 59.0 } else { 15.0 });
-    let pressure = req.pressure.unwrap_or(if imperial { 29.92 } else { 1013.25 });
+    let temperature = req.temperature.unwrap_or_else(|| u.default_temperature());
+    let pressure = req.pressure.unwrap_or_else(|| u.default_pressure());
     // inHg <-> hPa via the CLI dope card's own factor (main.rs uses 33.8639 on both PDF
     // call sites), NOT pdf_dope_card::INHG_TO_HPA — matching the shipped header exactly.
-    let pressure_inhg = if imperial { pressure } else { pressure / 33.8639 };
-    let pressure_hpa = if imperial { pressure * 33.8639 } else { pressure };
-    let temperature_f = if imperial { temperature } else { temperature * 9.0 / 5.0 + 32.0 };
-    // NOTE: `CardRequestV1::altitude` is fed to the solve unconverted (see `solve_zero` /
-    // `sampled`), i.e. it is METRES in both unit systems — the one field in this request
-    // that does not follow the module's units convention. The header reports the altitude
-    // the solve actually used, so it converts from metres regardless of `units`.
-    let altitude_ft = req.altitude / 0.3048;
+    let pressure_inhg = u.pressure_to_inhg(pressure);
+    let pressure_hpa = u.pressure_to_hpa(pressure);
+    let temperature_f = u.temperature_to_fahrenheit(temperature);
+    // NOTE: `CardRequestV1::altitude` defaults to METRES whatever the `units` preset says —
+    // the one dimension whose fallback is not the preset's, because it never was (see
+    // `CardRequestV1::altitude_unit`). The header reports the altitude the solve actually
+    // used, so it converts out of whatever `altitude_unit` settled on.
+    let altitude_ft = u.altitude_to_feet(req.altitude);
 
     let config = DopeCardConfig {
         rifle_name: opts.title.clone().unwrap_or_else(|| "Dope Card".to_string()),
@@ -1757,23 +2411,22 @@ pub fn pdf_card_v1(
         pressure_hpa,
         temperature_f,
         altitude_ft,
-        wind_speed_mph: if imperial { req.wind_speed } else { req.wind_speed / 0.44704 },
+        wind_speed_mph: u.wind_to_mph(req.wind_speed),
         // Absent target speed prints 0 here (there is no lead to state) while the Lead
         // column itself stays em-dashed; an explicit 0.0 prints the same 0 and zeroes.
         target_speed_mph: match opts.target_speed {
-            Some(speed) if imperial => speed,
-            Some(speed) => speed / 0.44704,
+            Some(speed) => u.wind_to_mph(speed),
             None => 0.0,
         },
         solver_mode: if cfg!(feature = "online") { "online".to_string() } else { "offline".to_string() },
         powder: opts.powder.clone().unwrap_or_default(),
         bullet: opts.bullet.clone().unwrap_or_default(),
-        weight_gr: if imperial { req.mass } else { req.mass * 15.4324 },
+        weight_gr: u.mass_to_grains_cli(req.mass),
         // The BC these rows came from: the stored card's own, or this solve's (which is the
         // muzzle-corrected value when a BC5D table applied one).
         bc: to_print.bc,
         drag_model: DragModel::from(req.drag_model).to_string(),
-        velocity_fps: if imperial { req.muzzle_velocity } else { req.muzzle_velocity / 0.3048 },
+        velocity_fps: u.velocity_to_fps_pdf(req.muzzle_velocity),
         font_scale,
         bold_data: opts.bold_data,
         // The card's own axes: Drop in the elevation unit, Wind AND Lead in the (possibly
@@ -1788,11 +2441,14 @@ pub fn pdf_card_v1(
         // `validate_stored_card` has already forced to agree with the request's).
         truncation_note: to_print
             .truncation
-            .map(|t| CardTruncation::from(t).printed_note(if imperial { "yd" } else { "m" }))
+            .map(|t| CardTruncation::from(t).printed_note(u.distance_label()))
             .unwrap_or_default(),
     };
 
-    let range_unit = if imperial { RangeUnit::Yards } else { RangeUnit::Meters };
+    let range_unit = match u.distance {
+        CardDistanceUnit::Yards => RangeUnit::Yards,
+        CardDistanceUnit::Meters => RangeUnit::Meters,
+    };
     // Read BEFORE the document is built, off the same string the header will draw, so the
     // report describes this card's own title rather than a truncation of it.
     let unprintable_title_chars = crate::pdf_dope_card::unprintable_chars(&config.rifle_name);
