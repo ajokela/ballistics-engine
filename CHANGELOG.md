@@ -5,6 +5,54 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A solve-json v1 request that leaves `rifle.twist_rate_m_per_turn` out now says which results
+  were computed from the assumed barrel (MBA-1484).** The field is optional, which reads like
+  "leave the twist out of it". It is not: `resolve_rifle` substitutes
+  `DEFAULT_TWIST_RATE_M_PER_TURN` — 0.3048 m, exactly 1:12 inches — and the solve runs against
+  that barrel. Two new warning codes, alongside the `default_applied` assumption that was
+  previously the only trace of it:
+
+  - `spin_effect_assumed_twist_rate`, at the enabled flag's path, when `effects.magnus` or
+    `effects.enhanced_spin_drift` is on without the field.
+  - `stability_factor_assumed_twist_rate`, at `$.rifle.twist_rate_m_per_turn`, on **any** solve
+    that omits the field and still reports `summary.stability_factor`. Sg is not opt-in — it is
+    a direct function of the twist and is computed on every solve — so this fires on most
+    twist-omitting requests, including ones written before the warning existed. It is a new
+    entry in `warnings` for those requests; the numbers they get back are unchanged.
+
+  The assumption notice says a default was applied without saying that anything now depends on
+  it, and nothing downstream can tell an assumed barrel from a stated one. Measured on a .308
+  175 gr at 800 m, `summary.spin_drift_m` is 0.18323686847128232 m with the twist omitted and
+  bit-identically 0.18323686847128232 m with 1:12 stated, against 0.31634793704212505 m with a
+  stated 1:8 — 73% more drift from the barrel alone, with no numeric residue of the omission for
+  a caller to notice. Magnus is smaller in absolute terms on a flat-fire shot (0.19 mm of drop at
+  800 m for the assumed 1:12) and no less twist-bound: at a stated 1:6 the same contribution is
+  0.75 mm, four times as large. The early return in `TrajectorySolver::apply_spin_drift` for a
+  non-positive twist is real but unreachable from this path, because the default is applied long
+  before the solver sees the field.
+
+  Sg is the largest of these effects and was the one with no warning at all. With no effect
+  enabled, `summary.stability_factor` is 1.6650154161603787 with the twist omitted,
+  bit-identically 1.6650154161603787 with 1:12 stated, and 3.7462846863608514 with 1:8 stated —
+  2.25x, across the line a shooter reads Sg to decide — while `drop_m` and `windage_m` stay
+  bit-identical. Warning on Magnus, whose whole contribution is 0.19 mm of drop at 800 m, while
+  staying silent about that is not a line that can be defended, so the breadth of the new code
+  was accepted rather than used as a reason to suppress it.
+
+  `effects.aerodynamic_jump` keeps its own `aerodynamic_jump_assumed_geometry` code, which also
+  covers `projectile.length_m`. **The three codes are keyed to the consumer, not to the missing
+  field, and are not mutually exclusive:** a request enabling both `aerodynamic_jump` and
+  `magnus` without a stated twist now returns all three warnings, each naming the same single
+  omitted field at its own path. Callers must match on the code they care about rather than
+  assume at most one is present.
+
+  Nothing else moves: the default is unchanged, the request is still solved rather than
+  rejected, the 1:12 value is still materialized in `resolved_request`, and no trajectory or
+  summary number changes — the warnings are the whole fix.
+
 ## [0.39.0] - 2026-09-14
 
 ### Breaking

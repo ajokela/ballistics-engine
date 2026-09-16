@@ -278,12 +278,34 @@ pub struct RifleV1 {
         deserialize_with = "deserialize_present"
     )]
     pub muzzle_height_m: Option<f64>,
+    /// Rifling travel per full turn, meters.
+    ///
+    /// Optional, which reads like "leave the twist out of it" — it is not. `None` defaults to
+    /// 0.3048 m, exactly 1:12 inches, raises a `default_applied` assumption, and materializes
+    /// that value at [`ResolvedRifleV1::twist_rate_m_per_turn`], after which nothing
+    /// downstream can tell an assumed barrel from a stated one.
+    ///
+    /// Omitting it is never free. `summary.stability_factor` is a function of the twist and is
+    /// computed on EVERY solve, so an omitted field reports the Sg of a 1:12 barrel — 1.665 on
+    /// a .308 175 gr against 3.746 at a stated 1:8, with no effect enabled — and raises
+    /// `stability_factor_assumed_twist_rate`. What the omission does not move, absent a
+    /// spin-driven effect, is the trajectory: `drop_m` and `windage_m` are bit-identical for
+    /// every twist rate.
+    ///
+    /// `effects.magnus`, `effects.enhanced_spin_drift` and `effects.aerodynamic_jump` each
+    /// read it as well, and each raises its own assumed-barrel warning when it is absent
+    /// (MBA-1484). The codes are distinct so that each names its own consumer; they are not
+    /// mutually exclusive, and one omitted twist can raise three of them at once.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
     pub twist_rate_m_per_turn: Option<f64>,
+    /// Rifling hand, viewed from the breech toward the muzzle. `None` defaults to `Right`
+    /// with a `default_applied` assumption. It flips the SIGN of the gyroscopic spin drift
+    /// rather than its magnitude, so an assumed hand on a left-twist barrel puts the drift on
+    /// the wrong side of the target.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -619,18 +641,44 @@ pub enum SolverMethodV1 {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectsV1 {
+    /// Magnus side force and the yaw of repose it drives. EXPERIMENTAL: enabling it raises an
+    /// `experimental_effect` warning.
+    ///
+    /// Driven by the spin the rifling imparts, so it reads `rifle.twist_rate_m_per_turn`.
+    /// Omitting that field does not disable it — the 1:12 default is substituted and the force
+    /// is computed for that barrel — so enabling this without a stated twist raises
+    /// `spin_effect_assumed_twist_rate` (MBA-1484).
+    ///
+    /// Mutually exclusive with [`EffectsV1::enhanced_spin_drift`]: the legacy solver silently
+    /// suppresses Magnus in that combination, and the decoder reports `conflicting_fields`
+    /// rather than let the resolved request misstate which physics ran.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
     pub magnus: Option<bool>,
+    /// Earth-rotation (Coriolis and Eötvös) accelerations. Requires
+    /// `atmosphere.latitude_rad`, which is an `invalid_value` error when absent rather than a
+    /// default. Reads no barrel geometry.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
     pub coriolis: Option<bool>,
+    /// Gyroscopic spin drift via the empirical Litz model. EXPERIMENTAL: enabling it raises an
+    /// `experimental_effect` warning.
+    ///
+    /// The drift scales with the muzzle gyroscopic stability factor, which is a function of the
+    /// twist, so it reads `rifle.twist_rate_m_per_turn` (and `rifle.twist_direction`, which
+    /// sets its sign). Omitting the rate does not disable the effect and does not zero it: the
+    /// 1:12 default is substituted and the drift is computed for that barrel, which is why
+    /// enabling this without a stated twist raises `spin_effect_assumed_twist_rate`
+    /// (MBA-1484). Measured on a .308 175 gr at 800 m, `summary.spin_drift_m` is 0.183 m with
+    /// the twist omitted — bit-identical to a stated 1:12 — against 0.316 m at a stated 1:8.
+    ///
+    /// Mutually exclusive with [`EffectsV1::magnus`]; see that field.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
