@@ -324,21 +324,36 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 /// Printed adjustment unit for dial columns (MIL/MOA/SMOA/IPHY or whole clicks).
+///
+/// Every variant also deserializes from the UPPERCASE spelling [`adjustment_unit_label`]
+/// prints for it (MBA-1519). A card response's `units.elevation_adjustment` and
+/// `units.windage_adjustment` read `"MIL"`/`"MOA"`/`"SMOA"`/`"IPHY"`/`"CLICKS"`, and a caller
+/// that writes a card's own units block back into the next request is doing the obvious
+/// thing; before these aliases those two fields were the only ones in that block that came
+/// back as ``unknown variant `MIL` ``. Accepting a second spelling is additive on every
+/// surface that deserializes this enum (the card request's `adjustment_unit`/`windage_unit`
+/// and truing's `unit`), and what the enum PRINTS is unchanged — `Serialize` still emits the
+/// lowercase name, so no stored document or response byte moves.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum AdjustmentUnit {
     /// Milliradians (1 MIL = 3.6 inches at 100 yards)
     #[default]
+    #[serde(alias = "MIL")]
     Mil,
     /// Minutes of Angle, true MOA (1 MOA = 1.047 inches at 100 yards)
+    #[serde(alias = "MOA")]
     Moa,
     /// Shooter's MOA (exactly 1 inch per 100 yards)
+    #[serde(alias = "SMOA")]
     Smoa,
     /// Inches per hundred yards (numerically identical to SMOA)
+    #[serde(alias = "IPHY")]
     Iphy,
     /// Whole turret clicks; requires an elevation click graduation
     /// (--elevation-click-value or the profile's elevation_click)
+    #[serde(alias = "CLICKS")]
     Clicks,
 }
 

@@ -28,9 +28,14 @@
 //! every dimension falls back and the card is byte-for-byte the card it always was
 //! (`tests/card_units_per_dimension.rs` pins that against a stored document).
 //!
-//! The response needed no change for any of this: [`CardUnitsBlockV1`] has always carried
+//! The response needed no new FIELD for any of this: [`CardUnitsBlockV1`] has always carried
 //! seven independent label fields, so a card whose distance is metres and whose velocity is
-//! fps already had somewhere to say so.
+//! fps already had somewhere to say so. It did need the two angular labels to become
+//! requestable: `elevation_adjustment`/`windage_adjustment` print `"MIL"`/`"MOA"`/`"SMOA"`/
+//! `"IPHY"`/`"CLICKS"` and [`AdjustmentUnit`] deserialized lowercase only, so those two were
+//! the only fields of the block a caller could not echo back. They take the uppercase
+//! spellings as aliases now, which makes "echo the units block into the next request" true
+//! of all seven fields rather than five of them.
 //!
 //! Three candidates do NOT get a new field, and each for its own reason:
 //!
@@ -51,13 +56,36 @@
 //! already has, and adding them as values would give a caller two spellings that produce
 //! identical numbers.
 //!
+//! ### What the response does NOT tell a caller
+//!
 //! Like every other default on this request — `sight_height`, `temperature`, `pressure`,
 //! `humidity`, `windage_unit` — a per-dimension unit taken from the preset is applied
-//! silently. This surface has no notice channel at all (there is no `assumptions` array on
-//! [`CardResponseV1`], unlike solve-json's `SolveSuccessV1`), and inventing one for units
-//! alone would say less than the response already says: the `units` block reports the unit
-//! every column was actually computed in, which is the fact a caller needs and is strictly
-//! more than a "a default was applied" notice would carry.
+//! silently, and this surface has no notice channel at all (there is no `assumptions` array
+//! on [`CardResponseV1`], unlike solve-json's `SolveSuccessV1`).
+//!
+//! Be precise about what that costs, because a paragraph of prose can argue it away. The `units`
+//! block names the unit of the SEVEN OUTPUT COLUMNS and nothing else. It says nothing about
+//! the six dimensions that are input-only — `mass`, `diameter`, `sight_height`,
+//! `temperature`, `pressure`, `altitude` — so for those a caller cannot read back off the
+//! card which unit the engine settled on.
+//!
+//! `altitude` is the sharp one, because it is the dimension whose fallback is deliberately
+//! NOT the preset's: an imperial `card.range_table` carrying `altitude: 5000` and no
+//! `altitude_unit` — which a US caller writing an imperial card means as feet — is solved at
+//! 5000 METRES, and no field of the response says so. On a .308 175 gr that is ~1.9 MIL of
+//! elevation at 1000 yd against the same card with `altitude_unit: "feet"`. The BEHAVIOUR
+//! predates the per-dimension fields (`altitude` has always reached
+//! [`AtmosphericConditions`] unconverted); what is new is that the request can now name the
+//! dimension, so the gap is describable instead of merely present.
+//!
+//! No notice was added here, and the reason is narrow rather than principled: any notice —
+//! an `assumptions` array, or extra label fields on the units block — is a change to the
+//! RESPONSE bytes of every card, including the stored documents the reprint path compares
+//! label-for-label and the six goldens that are the whole evidence for this change being
+//! additive on the wire. A response-schema change belongs to a ticket that can move those
+//! goldens honestly. Until then the remedy is on the request: a caller that cares which
+//! altitude it got states `altitude_unit`, and a card built by an app should state every
+//! dimension rather than lean on a preset.
 
 use serde::{Deserialize, Serialize};
 
@@ -97,9 +125,11 @@ pub enum CardUnits {
 // one place, `Units` below, so a dimension cannot convert one way and be labelled another.
 //
 // Every enum carries serde aliases for the spelling the RESPONSE prints for that unit
-// (`"m/s"`, `"ft-lb"`, `"in"`, `"yd"`, ...). A caller that reads a card's `units` block and
-// writes those strings straight back into the next request is doing the obvious thing, and
-// it now works instead of failing on a request that denies unknown values.
+// (`"m/s"`, `"ft-lb"`, `"in"`, `"yd"`, ...), and so does [`AdjustmentUnit`] over in
+// `adjustment.rs` for the two uppercase dial labels. A caller that reads a card's `units`
+// block and writes those strings straight back into the next request is doing the obvious
+// thing, and it now works — for all seven fields of the block — instead of failing on a
+// request that denies unknown values.
 
 /// Range axis: what `zero_distance`, `start`/`end`/`step` and every row's `range` are in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,19 +156,32 @@ pub enum CardVelocityUnit {
 /// yields a trajectory that looks entirely normal. Which is exactly why the unit has to be
 /// stated per-dimension rather than inferred: the dual-printed `g / gr` box a European
 /// shooter is holding is the normal case, not an edge one.
+///
+/// The one-character wire tokens `"g"` and `"gr"` are deliberately NOT accepted, though
+/// `"gram"`/`"grams"` and `"grain"`/`"grains"` are. Those two tokens are the slip this
+/// dimension exists to prevent: a 175-grain load sent as `"g"` solves to bit-identical
+/// dials, drift, velocity and time — only the energy column moves, 1009 ft-lb to 15575 — and
+/// the response has no mass label for a reader to catch it on. Nor can a plausibility guard
+/// catch it: bullets run roughly 5–800 grains and roughly 0.3–52 grams, so the two ranges
+/// OVERLAP across 5–52, where 48 grains (a .22 varmint bullet) and 48 grams (a .50 BMG) are
+/// both ordinary. There is no threshold to put a guard at, so the defence has to be the
+/// spelling, and the spelled-out name is the one thing a caller cannot typo into the other
+/// unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardMassUnit {
-    #[serde(alias = "gr", alias = "grain")]
+    #[serde(alias = "grain")]
     Grains,
-    #[serde(alias = "g", alias = "gram")]
+    #[serde(alias = "gram")]
     Grams,
 }
 
-/// A small linear length. Shared by the request's three linear dimensions (bullet diameter,
-/// sight-to-bore geometry, the linear drop column) because they take the same values, never
-/// because they are the same setting: they are three separate fields and resolve
+/// A small linear length. Shared by the request's two TARGET-SIDE linear dimensions
+/// (sight-to-bore geometry and the linear drop column) because they take the same values,
+/// never because they are the same setting: they are separate fields and resolve
 /// independently.
+///
+/// Bullet diameter is NOT one of them — it has [`CardDiameterUnit`], a narrower vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardLinearUnit {
@@ -146,6 +189,22 @@ pub enum CardLinearUnit {
     Inches,
     #[serde(alias = "centimeters", alias = "centimetres")]
     Cm,
+    #[serde(alias = "millimeters", alias = "millimetres")]
+    Mm,
+}
+
+/// Bullet diameter: inches or millimetres, the two units a calibre is ever quoted in.
+///
+/// Its own enum rather than a third user of [`CardLinearUnit`], which would also accept
+/// `cm`. The design's dimension table lists inches and mm for this dimension and no third
+/// value, and a wire vocabulary on a `deny_unknown_fields` paid contract is far cheaper to
+/// widen later than to narrow: nobody quotes a calibre in centimetres, so `0.782` cm is
+/// likelier to be a slipped `7.82` mm than a request anyone meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardDiameterUnit {
+    #[serde(alias = "in", alias = "inch")]
+    Inches,
     #[serde(alias = "millimeters", alias = "millimetres")]
     Mm,
 }
@@ -214,6 +273,22 @@ pub enum CardAltitudeUnit {
 /// `*_unit` field that denominates it, and each of those falls back to what `units` implies
 /// when it is absent (see the module docs). Stating none of them is the pre-MBA-1519 shape
 /// and reproduces the pre-MBA-1519 card exactly.
+///
+/// ## Adding a field here is additive on the WIRE and breaking in RUST
+///
+/// This is a deserialization target: the supported way to build one is
+/// `serde_json::from_str`/`from_value` on a JSON document, which is what the bridge and every
+/// binding do, and an optional new field costs such a caller nothing. A downstream Rust crate
+/// that constructs it with a struct literal has no such luck — every added field is an
+/// `E0063: missing fields` against code that compiled before, which is exactly what MBA-1519's
+/// eleven fields do to a crate written against 0.39.x. The remedy is one line per field
+/// (`altitude_unit: None`, and so on for the rest); the intended path is to deserialize.
+///
+/// `#[non_exhaustive]` was considered and NOT applied. It would break the same callers in the
+/// same release, and — with no `Default` and no builder on this type — it would leave a
+/// downstream crate no way to construct the request at all, trading one fixable compile error
+/// for a permanent one. So the breakage is stated in the CHANGELOG for the release that causes
+/// it rather than encoded in the type, and a future field will be stated the same way.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CardRequestV1 {
@@ -306,11 +381,19 @@ pub struct CardRequestV1 {
     /// Unit of `mass`. Default: grains (imperial) / grams (metric).
     #[serde(default)]
     pub mass_unit: Option<CardMassUnit>,
-    /// Unit of `diameter`. Default: inches (imperial) / mm (metric).
+    /// Unit of `diameter`. Default: inches (imperial) / mm (metric). Those two values and no
+    /// others — see [`CardDiameterUnit`].
     #[serde(default)]
-    pub diameter_unit: Option<CardLinearUnit>,
+    pub diameter_unit: Option<CardDiameterUnit>,
     /// Unit of `sight_height` and `sight_offset_lateral` — the sight-to-bore geometry.
     /// Default: inches (imperial) / mm (metric).
+    ///
+    /// This is a dimension the design's table does not contain, added deliberately rather
+    /// than by oversight: without it, the only home for the sight height would be
+    /// `drop_unit`, and then asking for a drop column in centimetres would silently reread a
+    /// 1.5-inch sight height as 1.5 cm. It is a twelfth field on a `deny_unknown_fields`
+    /// contract that cannot be withdrawn without a breaking change, which is the cost being
+    /// accepted here.
     ///
     /// Separate from `drop_unit` on purpose. They are the same unit today only because both
     /// presets happen to give them the same value; they are different measurements (one is
@@ -381,7 +464,8 @@ pub struct CardRequestV1 {
     #[serde(default)]
     pub zero_set_windage_bias_mil: f64,
 
-    /// Wind card only: the sweep of wind speeds (mph / m/s), one output column each.
+    /// Wind card only: the sweep of wind speeds, each in `wind_speed_unit` (so km/h and
+    /// knots are available here too), one output column each.
     #[serde(default)]
     pub wind_speeds: Vec<f64>,
     /// Wind card only: wind-FROM angles in degrees; default `[90]` (full-value from
@@ -689,7 +773,7 @@ struct Units {
     distance: CardDistanceUnit,
     velocity: CardVelocityUnit,
     mass: CardMassUnit,
-    diameter: CardLinearUnit,
+    diameter: CardDiameterUnit,
     sight_height: CardLinearUnit,
     drop: CardLinearUnit,
     wind_speed: CardWindSpeedUnit,
@@ -724,7 +808,11 @@ impl Units {
             } else {
                 CardMassUnit::Grams
             }),
-            diameter: req.diameter_unit.unwrap_or(linear),
+            diameter: req.diameter_unit.unwrap_or(if imperial {
+                CardDiameterUnit::Inches
+            } else {
+                CardDiameterUnit::Mm
+            }),
             sight_height: req.sight_height_unit.unwrap_or(linear),
             drop: req.drop_unit.unwrap_or(linear),
             wind_speed: req.wind_speed_unit.unwrap_or(if imperial {
@@ -781,7 +869,10 @@ impl Units {
         }
     }
     fn diameter_to_metric(&self, v: f64) -> f64 {
-        Self::linear_to_metric(self.diameter, v)
+        match self.diameter {
+            CardDiameterUnit::Inches => v * 0.0254,
+            CardDiameterUnit::Mm => v * 0.001,
+        }
     }
     fn sight_height_to_metric(&self, v: f64) -> f64 {
         Self::linear_to_metric(self.sight_height, v)
@@ -883,15 +974,18 @@ impl Units {
         }
     }
 
-    // --- the CLI's own axes, for the two call sites that are pinned to CLI constants ---
+    // --- the CLI's own axes, for the call sites that are pinned to CLI constants ---
     //
     // These do NOT reuse the conversions above. The BC5D path and the PDF header each
     // hardcode a factor that `main.rs` hardcodes at the same call site (3.280_839_895 vs
     // 1/0.3048; 15.4324 vs the exact grains-per-gram), and the golden tests pin the CLI's
     // digits. Sharing one factor between them would change numbers this work must not.
     //
-    // Each is cfg-gated to the build that has its call site, rather than blanket-allowed as
-    // dead code, so that a helper which stops being called anywhere is still a warning.
+    // Each of these helpers is compiled exactly where its call site is, rather than being
+    // blanket-allowed as dead code, so that a helper which stops being called anywhere is
+    // still a warning. For most of them that means a cfg attribute; `velocity_to_fps_bc5d`
+    // carries none because its call site is the always-compiled `bc_segments` arm of
+    // `resolve_bc_schedule`, so it is reached in every build.
 
     /// Display velocity -> fps using `parse_bc_segment`'s factor.
     fn velocity_to_fps_bc5d(&self, v: f64) -> f64 {
@@ -913,9 +1007,8 @@ impl Units {
     #[cfg(not(target_arch = "wasm32"))]
     fn diameter_to_inches(&self, v: f64) -> f64 {
         match self.diameter {
-            CardLinearUnit::Inches => v,
-            CardLinearUnit::Cm => v / 2.54,
-            CardLinearUnit::Mm => v / 25.4,
+            CardDiameterUnit::Inches => v,
+            CardDiameterUnit::Mm => v / 25.4,
         }
     }
     /// Muzzle velocity -> fps for the PDF header (`main.rs` divides by 0.3048 here).

@@ -384,14 +384,34 @@ fn the_angular_axis_is_unchanged_and_the_pseudo_units_are_still_refused() {
 
     // The linear-at-distance spellings are NOT values of the linear drop dimension. Accepting
     // them would give a caller two ways to ask for a column that prints identical numbers.
+    //
+    // Each refusal is checked to be a refusal of the VALUE (`unknown variant`), not of the
+    // FIELD (`unknown field`): `deny_unknown_fields` would reject every one of these on a
+    // build where `drop_unit` does not exist at all, so an `is_err()` assertion here proves
+    // nothing about the prohibition and would survive the field being renamed.
     for spelling in ["smoa", "moa", "mil", "inches@100yd", "cm/100m"] {
         let mut bogus = pre_1519_imperial();
         bogus["drop_unit"] = json!(spelling);
+        let err = serde_json::from_value::<CardRequestV1>(bogus)
+            .expect_err(&format!(
+                "drop_unit must not accept the angular/at-distance spelling {spelling:?}"
+            ))
+            .to_string();
         assert!(
-            serde_json::from_value::<CardRequestV1>(bogus).is_err(),
-            "drop_unit must not accept the angular/at-distance spelling {spelling:?}"
+            err.contains("unknown variant"),
+            "drop_unit must refuse {spelling:?} as a value, not as an unknown field: {err}"
         );
     }
+
+    // The positive counterpart, which is what makes the loop above mean something: the field
+    // is real, and the linear value the design DOES give it parses and prints.
+    let mut cm = pre_1519_imperial();
+    cm["drop_unit"] = json!("cm");
+    assert_eq!(
+        units_block(&range_table_json(&cm))["drop"],
+        json!("cm"),
+        "drop_unit must accept the linear value it exists to carry"
+    );
 
     // Clicks remain a graduation, not a unit: the refusal is unchanged.
     let mut clicks = pre_1519_imperial();
@@ -403,38 +423,128 @@ fn the_angular_axis_is_unchanged_and_the_pseudo_units_are_still_refused() {
         "clicks without a graduation must still be refused: {err}"
     );
 
-    // And there is no clicks unit on any of the new dimensions.
+    // And there is no clicks unit on any of the new dimensions — again as a refusal of the
+    // value rather than of the field.
     for field in ["distance_unit", "velocity_unit", "drop_unit", "wind_speed_unit"] {
         let mut bogus = pre_1519_imperial();
         bogus[field] = json!("clicks");
+        let err = serde_json::from_value::<CardRequestV1>(bogus)
+            .expect_err(&format!("{field} must not accept 'clicks'"))
+            .to_string();
         assert!(
-            serde_json::from_value::<CardRequestV1>(bogus).is_err(),
-            "{field} must not accept 'clicks'"
+            err.contains("unknown variant"),
+            "{field} must refuse 'clicks' as a value, not as an unknown field: {err}"
         );
     }
 }
 
 /// A caller that reads a card's `units` block and writes those strings back into the next
 /// request is doing the obvious thing. Every label the response prints is therefore an
-/// accepted spelling of the unit it names.
+/// accepted spelling of the unit it names — ALL SEVEN fields of the block, including the two
+/// dial labels, which print uppercase (`MIL`/`MOA`/`SMOA`/`IPHY`/`CLICKS`) while
+/// `AdjustmentUnit` used to deserialize lowercase only. A test that echoed five of seven
+/// would pass while the property it is named for did not hold, so the coverage is the point
+/// of the test rather than an incidental detail of it.
 #[test]
 fn every_label_the_response_prints_is_a_spelling_the_request_accepts() {
-    let card = range_table_json(&pre_1519_metric());
-    let labels = units_block(&card);
-    let mut echoed = pre_1519_metric();
-    for (field, label) in [
+    /// The block's seven fields, paired with the request field that denominates each.
+    const BLOCK: [(&str, &str); 7] = [
         ("distance_unit", "distance"),
         ("velocity_unit", "velocity"),
         ("drop_unit", "drop"),
         ("wind_speed_unit", "wind_speed"),
         ("energy_unit", "energy"),
-    ] {
-        echoed[field] = labels[label].clone();
+        ("adjustment_unit", "elevation_adjustment"),
+        ("windage_unit", "windage_adjustment"),
+    ];
+
+    // Every dial spelling the response can print, not only the default one: each card is
+    // echoed back into a request and must come out as the same document.
+    for dial in ["mil", "moa", "smoa", "iphy"] {
+        let mut base = pre_1519_metric();
+        base["adjustment_unit"] = json!(dial);
+        base["windage_unit"] = json!(dial);
+        let card = range_table_json(&base);
+        let labels = units_block(&card);
+
+        let mut echoed = base.clone();
+        for (field, label) in BLOCK {
+            let printed = labels[label].clone();
+            assert!(printed.is_string(), "{label} must be a printed label");
+            echoed[field] = printed;
+        }
+        // The dial labels really are the uppercase spellings, so this is not a test that
+        // would still pass if the response started printing lowercase.
+        assert_eq!(echoed["adjustment_unit"], json!(dial.to_uppercase()));
+        assert_eq!(echoed["windage_unit"], json!(dial.to_uppercase()));
+
+        assert_eq!(
+            range_table_json(&echoed),
+            card,
+            "echoing a card's own labels back must reproduce that card ({dial})"
+        );
     }
+
+    // Clicks is the seventh label and needs its graduation, so it is echoed with one.
+    let mut clicks = pre_1519_metric();
+    clicks["adjustment_unit"] = json!("clicks");
+    clicks["windage_unit"] = json!("clicks");
+    clicks["elevation_click_value"] = json!("0.1mil");
+    clicks["windage_click_value"] = json!("0.1mil");
+    let card = range_table_json(&clicks);
+    assert_eq!(units_block(&card)["elevation_adjustment"], json!("CLICKS"));
+    let mut echoed = clicks.clone();
+    echoed["adjustment_unit"] = units_block(&card)["elevation_adjustment"].clone();
+    echoed["windage_unit"] = units_block(&card)["windage_adjustment"].clone();
     assert_eq!(
         range_table_json(&echoed),
         card,
-        "echoing a card's own labels back must reproduce that card"
+        "echoing CLICKS back must reproduce the clicks card"
+    );
+}
+
+/// The vocabularies that are deliberately NARROWER than the units they could have taken, both
+/// of them because a wrong value here is invisible in the numbers a shooter reads.
+///
+/// `mass_unit` refuses the one-character tokens: `"g"` for `"grains"` is a 15.43x mass error
+/// that leaves dial, drift, velocity and time bit-identical and moves only the energy column,
+/// and no plausibility guard can catch it because the grain and gram ranges overlap. And
+/// `diameter_unit` refuses `cm`, which the other linear dimensions do accept.
+#[test]
+fn the_ambiguous_short_spellings_are_refused_and_the_spelled_out_ones_are_not() {
+    for (field, refused) in [
+        ("mass_unit", "g"),
+        ("mass_unit", "gr"),
+        ("diameter_unit", "cm"),
+        ("diameter_unit", "centimetres"),
+    ] {
+        let mut bogus = pre_1519_imperial();
+        bogus[field] = json!(refused);
+        let err = serde_json::from_value::<CardRequestV1>(bogus)
+            .expect_err(&format!("{field} must not accept {refused:?}"))
+            .to_string();
+        assert!(
+            err.contains("unknown variant"),
+            "{field}: {refused:?} must be refused as a VALUE, not as an unknown field: {err}"
+        );
+    }
+
+    // The counterpart, in the same test: the spellings that replace them do parse, and a
+    // grains card and the same load in grams are two different cards.
+    let mut grains = pre_1519_imperial();
+    grains["mass_unit"] = json!("grains");
+    grains["diameter_unit"] = json!("inches");
+    let mut grams = grains.clone();
+    grams["mass_unit"] = json!("grams");
+    assert_eq!(
+        range_table_json(&grains),
+        PRE_1519_IMPERIAL_RANGE_TABLE,
+        "spelling out the imperial mass and diameter must be the imperial card"
+    );
+    assert_ne!(
+        range_table_json(&grams),
+        range_table_json(&grains),
+        "175 grams is not 175 grains and must not print the same card"
     );
 }
 

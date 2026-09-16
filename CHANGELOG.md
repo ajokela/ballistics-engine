@@ -16,17 +16,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the other. Eleven optional per-dimension fields now sit alongside the scalar:
 
   `distance_unit` (yards/meters), `velocity_unit` (fps/mps), `mass_unit` (grains/grams),
-  `diameter_unit`, `sight_height_unit` and `drop_unit` (inches/cm/mm), `wind_speed_unit`
-  (mph/mps/kph/knots), `temperature_unit` (fahrenheit/celsius), `pressure_unit` (inhg/hpa),
-  `energy_unit` (ftlb/joules) and `altitude_unit` (feet/meters).
+  `diameter_unit` (inches/mm), `sight_height_unit` and `drop_unit` (inches/cm/mm),
+  `wind_speed_unit` (mph/mps/kph/knots), `temperature_unit` (fahrenheit/celsius),
+  `pressure_unit` (inhg/hpa), `energy_unit` (ftlb/joules) and `altitude_unit` (feet/meters).
 
   `units` stays, and stays the default for almost everything: an explicit per-dimension field
-  wins, an absent one falls back to what the preset implies. **Additive**: every field is
-  optional, and a request that states none of them produces the byte-identical response it
-  always did — the six documents the old imperial and metric shapes emit are pinned as goldens
-  captured from the previous build (`tests/card_units_per_dimension.rs`). Spelling out every
-  dimension a preset implies produces that same document, which is what makes the preset a
-  bulk action rather than a second code path.
+  wins, an absent one falls back to what the preset implies.
+
+  **Additive on the JSON wire; source-breaking for Rust callers that build the struct
+  literally.** Every field is optional, so a JSON request that states none of them produces the
+  byte-identical response it always did — the six documents the old imperial and metric shapes
+  emit are pinned as goldens captured from the previous build
+  (`tests/card_units_per_dimension.rs`), and spelling out every dimension a preset implies
+  produces that same document, which is what makes the preset a bulk action rather than a
+  second code path. But `CardRequestV1` is a public struct with public fields, so a downstream
+  Rust crate that constructs it with a struct literal — rather than deserializing a document,
+  which is the intended path and what the bridge and the bindings do — fails to compile against
+  this release with `error[E0063]: missing fields`. The remedy is one line per field
+  (`altitude_unit: None`, and so on). This is a 0.x minor bump, which Cargo already treats as
+  incompatible, so the break is permitted; it is called out here because "additive" is true of
+  the wire and not of the Rust API. `#[non_exhaustive]` was considered and rejected: it would
+  break the same callers in the same release and, with no `Default` and no builder on the type,
+  would leave downstream Rust no way to construct a request at all.
 
   Four values are reachable for the first time, none of them by any preset: `cm` for the linear
   drop column (a metric card prints 250 cm, not 2500 mm), `kph` and `knots` for wind, and
@@ -39,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into a card shot at 304.8 m. It defaults to metres on an imperial card too, and a caller that
   wants feet says so.
 
+  Two vocabularies are deliberately narrow. `diameter_unit` takes inches and mm only — a
+  calibre is never quoted in centimetres, and a wire vocabulary on a `deny_unknown_fields` paid
+  contract is far cheaper to widen later than to narrow. `mass_unit` takes `grains`/`grain` and
+  `grams`/`gram` but NOT the one-character tokens `g` and `gr`: a 175-grain load sent as `"g"`
+  returns bit-identical dials, drift, velocity and time and moves only the energy column, and
+  no plausibility guard can catch it either, because bullets run ~5–800 grains and ~0.3–52
+  grams and those ranges overlap. The spelled-out name is the defence.
+
+  `sight_height_unit` is a dimension the original design table did not have. It is here on
+  purpose: without it the sight height would have to ride on `drop_unit`, and asking for a drop
+  column in centimetres would silently reread a 1.5-inch sight height as 1.5 cm.
+
   Nothing was added for the dimensions that did not need it. Scope adjustment was already
   per-dimension and was the precedent — `adjustment_unit` and `windage_unit` are separate
   fields with separate click graduations, and SMOA (spelled `smoa` or `iphy`) is already one of
@@ -47,9 +70,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same 1/3600 rad and the same printed number, and `cm/100m` is 0.1 mrad, i.e. MIL with a
   factor-of-ten display. Twist rate is a dimension of the design but not of this request.
 
-  The response needed no change at all: `CardUnitsBlockV1` has always carried seven independent
-  label fields, and every label it prints is now an accepted spelling in a request, so a caller
-  can echo a card's own units block straight back.
+  The response gains no field: `CardUnitsBlockV1` has always carried seven independent label
+  fields. Two of them could not be echoed back, though — `elevation_adjustment` and
+  `windage_adjustment` print `MIL`/`MOA`/`SMOA`/`IPHY`/`CLICKS` while `AdjustmentUnit`
+  deserialized lowercase only — so those uppercase spellings are now accepted as aliases,
+  wherever that enum is deserialized (the card request and truing's `unit`). What it SERIALIZES
+  is unchanged. Echoing a card's own units block back into the next request now holds for all
+  seven fields rather than five.
+
+  **What the units block still does not say**: it names the unit of the seven OUTPUT columns
+  and of nothing else, so the six input-only dimensions (`mass`, `diameter`, `sight_height`,
+  `temperature`, `pressure`, `altitude`) cannot be read back off a card. `altitude` is the
+  sharp case, since its fallback is metres whatever the preset says: an imperial
+  `card.range_table` with `altitude: 5000` and no `altitude_unit` is solved at 5000 metres —
+  roughly 1.9 MIL of elevation at 1000 yd away from the same card in feet, on a .308 175 gr —
+  and no field of the response distinguishes the two. The behaviour predates this change; being
+  able to name the dimension is what is new. No notice channel was added, because any notice
+  changes the response bytes of every card, including the stored documents the reprint path
+  compares label-for-label; that belongs to a response-schema change rather than to this one.
 
   No number moved. The same request produces the same physics; only its denomination is now
   separable.
