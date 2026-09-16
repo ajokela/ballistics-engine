@@ -207,9 +207,43 @@ this wire format; see [Deliberate v1 exclusions](#deliberate-v1-exclusions).
 | `muzzle_velocity_mps` | yes | — | Projectile speed at the muzzle. |
 | `sight_height_m` | no | `0.05` | Sight height above the bore. |
 | `muzzle_height_m` | no | `0` | Bore height above the ground reference. |
-| `twist_rate_m_per_turn` | no | `0.3048` | Rifling travel per full turn. |
+| `twist_rate_m_per_turn` | no | `0.3048` | Rifling travel per full turn. Omitting it does **not** mean "no twist" and does not disable anything that reads it: the service substitutes `0.3048` m — exactly 1:12 inches — raises a `default_applied` assumption notice, and solves against that barrel. See [Omitting the twist rate](#omitting-the-twist-rate). |
 | `twist_direction` | no | `right` | `left` or `right`. |
 | `sight_offset_lateral_m` | no | `0` | Lateral sight-to-bore mount offset (MBA-1396): positive = sight RIGHT of bore. The trajectory starts that far left of the sight line; with `zero_distance_m` the windage zero converges it onto the sight line at the zero range. Must be finite and smaller than 0.5 m in magnitude. Echoed in `resolved_request.rifle.sight_offset_lateral_m` when supplied; omitting it is byte-identical to requests that predate it, with no assumption notice for its absence. |
+
+#### Omitting the twist rate
+
+`twist_rate_m_per_turn` defaults like any other optional field, which makes it easy to read the
+absence as "do not model spin". It is not. The resolved request carries `0.3048` m either way, and
+nothing downstream can tell an assumed barrel from a stated one, so every model that reads the
+twist runs — against 1:12.
+
+With no twist-reading effect enabled, the omission is harmless: the trajectory is identical for
+every twist rate, because nothing consumes it. It becomes load-bearing as soon as one of these is
+in the request:
+
+- `effects.enhanced_spin_drift` — the Litz drift scales with the muzzle Sg, which is a function of
+  the twist. On a .308 175 gr at 800 m, `summary.spin_drift_m` is 0.183 m with the twist omitted,
+  the identical 0.183 m with 1:12 stated, and 0.316 m with 1:8 stated: 73% more drift from the
+  barrel alone, and the omitted request is indistinguishable from the 1:12 one.
+- `effects.magnus` — the side force and yaw of repose are driven by the spin rate. Its absolute
+  contribution is small on a flat-fire shot (0.19 mm of drop at 800 m for the assumed 1:12) but it
+  is entirely twist-bound: a stated 1:6 makes the same contribution 0.75 mm, four times as large.
+- `effects.aerodynamic_jump` — covered in [`effects.aerodynamic_jump`](#effectsaerodynamic_jump)
+  below, which also reads `projectile.length_m`.
+
+Enabling `magnus` or `enhanced_spin_drift` without stating the twist therefore raises
+`spin_effect_assumed_twist_rate` at the enabled flag's path, in addition to the `default_applied`
+assumption notice for the default itself; `aerodynamic_jump` raises
+`aerodynamic_jump_assumed_geometry` instead. The assumption notice alone says a default was
+applied without saying that anything now depends on it, which is the whole point of the warnings.
+
+`summary.stability_factor` is the one twist-dependent output with no warning attached, because it
+is computed on every solve rather than opted into: an omitted twist means the reported Sg is the Sg
+of a 1:12 barrel. The `default_applied` notice at `$.rifle.twist_rate_m_per_turn` is what marks it.
+
+Twist *direction* defaults separately, to `right`, and flips the sign of the spin drift rather than
+its magnitude. It carries its own `default_applied` notice.
 
 ### `shot`
 
@@ -441,6 +475,10 @@ them produces an `experimental_effect` warning at the corresponding request path
 solver silently suppresses Magnus in that combination; the request decoder instead reports
 `conflicting_fields` so the resolved request never misstates which physics ran.
 
+Both of them read `rifle.twist_rate_m_per_turn`, and omitting it does not disable them — it solves
+them against the assumed 1:12 barrel and raises `spin_effect_assumed_twist_rate`. See
+[Omitting the twist rate](#omitting-the-twist-rate).
+
 ### `effects.aerodynamic_jump`
 
 Crosswind aerodynamic jump: the fixed angular departure a spinning projectile takes as it leaves
@@ -470,7 +508,10 @@ Three properties a caller has to know, because none of them is visible in the tr
   full-value crosswind moves 10.79 cm with a stated 1:10 twist and 9.08 cm with the twist omitted.
   Enabling the flag without either field therefore raises `aerodynamic_jump_assumed_geometry` at
   `$.effects.aerodynamic_jump`, in addition to the ordinary assumption notices for the defaults
-  themselves.
+  themselves. Jump is not the only effect that reads the barrel — `effects.magnus` and
+  `effects.enhanced_spin_drift` do too, under the separate `spin_effect_assumed_twist_rate` code —
+  so the two codes stay distinct and a caller can tell which model was computed against an assumed
+  barrel. See [Omitting the twist rate](#omitting-the-twist-rate).
 
 The applied jump is reported as `summary.aerodynamic_jump_moa`, in MOA, positive up. It is present
 only when the effect ran, because a launch-angle offset is folded into every drop in the table and
@@ -573,10 +614,13 @@ not run — see `shot.muzzle_angle_rad` above), `bc5d_drag_model_coerced` (a
 `corrections.bc5d_table_path` request whose drag model is outside the table's G1/G7 planes — see
 the optional `corrections` block above), `wind_shear_model_not_modeled` (an accepted
 `effects.wind_shear_model` this solve path has no profile for, so the wind is left unchanged — see
-`effects.wind_shear_model` above), and `aerodynamic_jump_assumed_geometry` (`effects.aerodynamic_jump`
+`effects.wind_shear_model` above), `aerodynamic_jump_assumed_geometry` (`effects.aerodynamic_jump`
 enabled without `rifle.twist_rate_m_per_turn` or `projectile.length_m`, so the jump was computed
-from an assumed barrel rather than disabled — see `effects.aerodynamic_jump` above). Messages are descriptive text rather than
-a compatibility surface.
+from an assumed barrel rather than disabled — see `effects.aerodynamic_jump` above), and
+`spin_effect_assumed_twist_rate` (`effects.magnus` or `effects.enhanced_spin_drift` enabled without
+`rifle.twist_rate_m_per_turn`, so the spin-driven model was computed from the assumed 1:12 twist
+rather than disabled — see [Omitting the twist rate](#omitting-the-twist-rate) above). Messages
+are descriptive text rather than a compatibility surface.
 
 ```json
 {
@@ -618,7 +662,9 @@ Summary fields have fixed evaluation frames:
   coordinate and is not height above the line of sight.
 - `stability_factor` is the dimensionless muzzle gyroscopic stability factor Sg, evaluated after
   resolving projectile geometry, muzzle velocity, twist, and the station atmosphere. It is absent
-  only when the service cannot calculate Sg from the resolved inputs.
+  only when the service cannot calculate Sg from the resolved inputs. The twist it uses is the
+  *resolved* one, so a request that omitted `rifle.twist_rate_m_per_turn` reports the Sg of a 1:12
+  barrel with no warning attached — see [Omitting the twist rate](#omitting-the-twist-rate).
 - `spin_drift_m` is the signed gyroscopic spin-drift contribution at the terminal sample, positive
   to the shooter's right. It excludes wind drift and is absent when enhanced spin drift is disabled
   or cannot be calculated.

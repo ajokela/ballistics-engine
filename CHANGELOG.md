@@ -5,6 +5,39 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A solve-json v1 request that enables a spin-driven effect without stating the twist now says
+  so (MBA-1484).** `rifle.twist_rate_m_per_turn` is optional, which reads like "leave the twist
+  out of it". It is not: `resolve_rifle` substitutes `DEFAULT_TWIST_RATE_M_PER_TURN` — 0.3048 m,
+  exactly 1:12 inches — and the solve runs against that barrel. Enabling `effects.magnus` or
+  `effects.enhanced_spin_drift` without the field now raises the new
+  `spin_effect_assumed_twist_rate` warning at the enabled flag's path, alongside the
+  `default_applied` assumption that was previously the only trace of it.
+
+  The assumption notice says a default was applied without saying that anything now depends on
+  it, and nothing downstream can tell an assumed barrel from a stated one. Measured on a .308
+  175 gr at 800 m, `summary.spin_drift_m` is 0.18323686847128232 m with the twist omitted and
+  bit-identically 0.18323686847128232 m with 1:12 stated, against 0.31634793704212505 m with a
+  stated 1:8 — 73% more drift from the barrel alone, with no numeric residue of the omission for
+  a caller to notice. Magnus is smaller in absolute terms on a flat-fire shot (0.19 mm of drop at
+  800 m for the assumed 1:12) and no less twist-bound: at a stated 1:6 the same contribution is
+  0.75 mm, four times as large. The early return in `TrajectorySolver::apply_spin_drift` for a
+  non-positive twist is real but unreachable from this path, because the default is applied long
+  before the solver sees the field.
+
+  `effects.aerodynamic_jump` keeps its own `aerodynamic_jump_assumed_geometry` code, which also
+  covers `projectile.length_m`; the two codes stay distinct and never both fire for one omitted
+  field, so the code identifies which model was computed against the assumed barrel. Nothing else
+  moves: the default is unchanged, the request is still solved rather than rejected, the 1:12
+  value is still materialized in `resolved_request`, and a request that omits the twist with no
+  twist-reading effect keeps its warning list — with no such effect the trajectory is identical
+  for every twist rate. `summary.stability_factor` is deliberately not covered: it reads the
+  twist on every solve, so warning on it would fire for every request that predates the field
+  while describing no change to the trajectory; `docs/SOLVE_JSON_V1.md` documents that case in
+  prose instead.
+
 ## [0.39.0] - 2026-09-14
 
 ### Breaking

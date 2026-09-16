@@ -92,16 +92,51 @@ pub const WARNING_WIND_SHEAR_MODEL_NOT_MODELED: &str = "wind_shear_model_not_mod
 ///
 /// The two assumption notices for the defaults themselves are still emitted; this one exists
 /// because those say "a default was applied" without saying that anything now depends on it.
+///
+/// Aerodynamic jump is not the only effect that reads the barrel: `effects.magnus` and
+/// `effects.enhanced_spin_drift` do too, and an omitted twist under either of those raises
+/// [`WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE`] instead. The two warnings are deliberately
+/// distinct codes and never both fire for the same field, so a caller can tell which model
+/// was computed against the assumed barrel.
 pub const WARNING_AERODYNAMIC_JUMP_ASSUMED_GEOMETRY: &str = "aerodynamic_jump_assumed_geometry";
 
-/// Whether the raw request supplied the two geometry fields the aerodynamic-jump estimator
-/// reads, as opposed to letting `resolve_rifle`/`resolve_projectile` substitute a default.
+/// A spin-driven effect (`effects.magnus` or `effects.enhanced_spin_drift`) was enabled while
+/// the request left `rifle.twist_rate_m_per_turn` to its default (MBA-1484).
 ///
-/// Carried rather than re-derived because `resolve_effects` only sees `EffectsV1`, and the
-/// distinction is about the RAW request: by the time the rifle and projectile are resolved,
-/// an assumed 1:12 twist is indistinguishable from a stated one.
+/// Both models are functions of the spin the rifling imparts, so both read the twist rate —
+/// enhanced spin drift through the muzzle gyroscopic stability factor that scales the Litz
+/// drift, Magnus through the spin rate that sets its side force and yaw of repose. Omitting
+/// the field does NOT disable either one and does not zero it: `resolve_rifle` substitutes
+/// `DEFAULT_TWIST_RATE_M_PER_TURN` (0.3048 m, exactly 1:12 inches) and the solve runs against
+/// that barrel, producing a confident number for a rifle the caller does not own. The early
+/// return in `TrajectorySolver::apply_spin_drift` for a non-positive twist is real but is
+/// unreachable from here, because the default is applied long before the solver sees the
+/// field.
+///
+/// Measured on a .308 175 gr at 800 m: `enhanced_spin_drift` reports
+/// `summary.spin_drift_m` = 0.1832 m with the twist omitted and the identical 0.1832 m with
+/// 1:12 stated — the omission is not a distinguishable request — while a stated 1:8 gives
+/// 0.3163 m, 73% more. Magnus's contribution is far smaller in absolute terms (it moved the
+/// 800 m drop by 0.19 mm at the assumed 1:12) but is no less twist-bound: at a stated 1:6 the
+/// same contribution is 0.75 mm, four times as large. In neither case is the dependence
+/// visible in the response, because both models are folded into the trajectory columns rather
+/// than reported separately — `summary.spin_drift_m` is the one exception, and it reports the
+/// number, not the barrel it came from.
+///
+/// The assumption notice for the default itself is still emitted; this one exists because it
+/// says "a default was applied" without saying that anything now depends on it.
+pub const WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE: &str = "spin_effect_assumed_twist_rate";
+
+/// Whether the raw request supplied the geometry fields the twist-reading effects need, as
+/// opposed to letting `resolve_rifle`/`resolve_projectile` substitute a default.
+///
+/// `twist_rate` is read by aerodynamic jump, Magnus and enhanced spin drift;
+/// `projectile_length` by aerodynamic jump. Carried rather than re-derived because
+/// `resolve_effects` only sees `EffectsV1`, and the distinction is about the RAW request: by
+/// the time the rifle and projectile are resolved, an assumed 1:12 twist is
+/// indistinguishable from a stated one.
 #[derive(Debug, Clone, Copy)]
-struct JumpGeometrySupplied {
+struct SuppliedGeometry {
     twist_rate: bool,
     projectile_length: bool,
 }
@@ -380,7 +415,7 @@ pub(crate) fn prepare_request(
     let effects = resolve_effects(
         &request.effects,
         atmosphere.latitude_rad,
-        JumpGeometrySupplied {
+        SuppliedGeometry {
             twist_rate: request.rifle.twist_rate_m_per_turn.is_some(),
             projectile_length: request.projectile.length_m.is_some(),
         },
@@ -1445,7 +1480,7 @@ fn resolve_solver(
 fn resolve_effects(
     effects: &EffectsV1,
     latitude_rad: Option<f64>,
-    jump_geometry: JumpGeometrySupplied,
+    geometry: SuppliedGeometry,
     assumptions: &mut Vec<SolveNoticeV1>,
     warnings: &mut Vec<SolveNoticeV1>,
 ) -> Result<ResolvedEffectsV1, SolveErrorEnvelopeV1> {
@@ -1512,6 +1547,41 @@ fn resolve_effects(
         }
     }
 
+    // MBA-1484. Magnus and enhanced spin drift are both functions of the spin the rifling
+    // imparts, so an omitted twist does not leave either of them alone -- it solves them
+    // against the assumed 1:12 barrel with the same confidence as a stated one. Emitted at the
+    // flag that made the twist load-bearing, the way the aerodynamic-jump warning below is.
+    //
+    // The two flags are mutually exclusive here (the `conflicting_fields` check above returns
+    // before this point), so the loop pushes at most one notice; it is written as a loop
+    // anyway so that a future third spin-driven flag cannot quietly go unwarned.
+    //
+    // Deliberately NOT extended to `summary.stability_factor`, which reads the twist on every
+    // solve: warning unconditionally would fire on every request that predates the field and
+    // would say nothing about the trajectory, which an omitted twist leaves untouched unless
+    // one of these flags is set. The spec documents the Sg case in prose instead.
+    for (enabled, path, name) in [
+        (magnus, "$.effects.magnus", "Magnus"),
+        (
+            enhanced_spin_drift,
+            "$.effects.enhanced_spin_drift",
+            "Enhanced spin drift",
+        ),
+    ] {
+        if enabled && !geometry.twist_rate {
+            warnings.push(notice(
+                WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE,
+                format!(
+                    "{name} is computed from the spin the rifling imparts, but \
+                     rifle.twist_rate_m_per_turn was not supplied. The effect is still \
+                     applied, computed from the assumed 1:12 twist rather than disabled, so \
+                     the result is for a barrel this request did not specify."
+                ),
+                path,
+            ));
+        }
+    }
+
     // Wind shear (0.36.0). Deliberately NOT run through `bool_default`/`literal_default`: an
     // omitted field pushes no assumption notice and leaves the echo absent, so every request
     // written before this field existed still serializes byte-identically -- the same
@@ -1540,9 +1610,8 @@ fn resolve_effects(
     // The jump is a function of stability and bullet length, so a defaulted barrel does not
     // leave it alone -- it computes a different answer with the same confidence. Say so at the
     // flag that made the geometry load-bearing, naming whichever field is missing.
-    if enabled_aerodynamic_jump && !(jump_geometry.twist_rate && jump_geometry.projectile_length)
-    {
-        let missing = match (jump_geometry.twist_rate, jump_geometry.projectile_length) {
+    if enabled_aerodynamic_jump && !(geometry.twist_rate && geometry.projectile_length) {
+        let missing = match (geometry.twist_rate, geometry.projectile_length) {
             (false, false) => "rifle.twist_rate_m_per_turn and projectile.length_m were",
             (false, true) => "rifle.twist_rate_m_per_turn was",
             (true, false) => "projectile.length_m was",
