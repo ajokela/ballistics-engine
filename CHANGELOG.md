@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Import `.reticle` XML drawings into the engine's own reticle description (MBA-1544).**
+  `import_reticle_document` / `import_reticle_document_with_report` are a cleanroom one-way
+  transform from the third-party `.reticle` authoring format into `ReticleDescription`, so a
+  reticle drawn in that format can be hold-solved by the existing `hold_point_in_reticle`
+  without the CLI, FFI or WASM surfaces learning a second schema. A converter, not new physics:
+  every coordinate is carried straight through, unit-normalized to milliradians and
+  sign-corrected for the engine's axis convention.
+
+  The hold-versus-decoration split is the format's own rather than a heuristic. A `<bdc>` entry
+  is a declared aiming point and becomes a `ReticleMark`; everything under `<elements>` is the
+  picture and is dropped, its geometry never read as an angle at all — so a shape this importer
+  drops cannot fail an import. That is the mirror image of the Ventum JSON importer, which is an
+  aiming-mark format that happens to contain decoration, where this is a picture that happens to
+  contain aiming marks.
+
+  Derived from a sample document and the SVG it renders to — the observable file structure and
+  the observable output that pins down what its coordinates mean. No third-party implementation
+  was consulted and none is vendored; a file format is not itself copyrightable and this crate
+  stays MIT OR Apache-2.0. Every fixture is invented content.
+
+  **Library-only**, deliberately: it is not wired into the CLI, solve-json, WASM or FFI, so no
+  existing surface changes shape. Like the Ventum importer it is fs-free, carries no feature
+  gate, and compiles for `wasm32-unknown-unknown`.
+
 - **Card requests are denominated per dimension, with `units` as the preset that fills in the
   rest (MBA-1519).** `CardRequestV1` (bridge `card.come_ups`, `card.range_table`, `card.wind`,
   `card.pdf`) took a single `units: imperial|metric` scalar that drove eleven conversions at
