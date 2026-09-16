@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Invented fixture for the .reticle importer. Not any product's reticle: a plain
+     duplex with three holdover ticks, drawn under <elements> and then declared as
+     aiming points under <bdc>, which is the shape a real document takes. -->
+<reticle name="Fixture Duplex BDC MOA" size-x="60moa" size-y="60moa" zero-x="30moa" zero-y="30moa">
+  <elements>
+    <reticle-rectangle position-x="-30moa" position-y="30moa" size-x="60moa" size-y="60moa" fill="true" color="black" />
+    <reticle-circle center-x="0moa" center-y="0moa" radius="29moa" fill="true" line-width="0moa" color="white" />
+
+    <!-- crosshair arms -->
+    <reticle-line start-x="0moa" start-y="0moa" end-x="0moa" end-y="10moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="0moa" start-y="0moa" end-x="0moa" end-y="-12moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="0moa" start-y="0moa" end-x="-10moa" end-y="0moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="0moa" start-y="0moa" end-x="10moa" end-y="0moa" line-width="0.25moa" line-color="black" />
+
+    <!-- windage hashes: drawn, but NOT declared under <bdc>, so the import drops them -->
+    <reticle-line start-x="3moa" start-y="-0.5moa" end-x="3moa" end-y="0.5moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="-3moa" start-y="-0.5moa" end-x="-3moa" end-y="0.5moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="6moa" start-y="-0.5moa" end-x="6moa" end-y="0.5moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="-6moa" start-y="-0.5moa" end-x="-6moa" end-y="0.5moa" line-width="0.25moa" line-color="black" />
+
+    <!-- the same three coordinates the <bdc> section names below -->
+    <reticle-line start-x="-0.6moa" start-y="-2moa" end-x="0.6moa" end-y="-2moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="-0.6moa" start-y="-5moa" end-x="0.6moa" end-y="-5moa" line-width="0.25moa" line-color="black" />
+    <reticle-line start-x="-0.6moa" start-y="-9moa" end-x="0.6moa" end-y="-9moa" line-width="0.25moa" line-color="black" />
+
+    <!-- bottom post -->
+    <reticle-path fill="true" color="black">
+      <elements>
+        <reticle-path-move-to position-x="-0.5moa" position-y="-12moa" />
+        <reticle-path-line-to position-x="0.5moa" position-y="-12moa" />
+        <reticle-path-line-to position-x="0.5moa" position-y="-29moa" />
+        <reticle-path-line-to position-x="-0.5moa" position-y="-29moa" />
+      </elements>
+    </reticle-path>
+  </elements>
+  <bdc>
+    <bdc position-x="0moa" position-y="-2moa" text-offset="1.2moa" text-height="0.9moa" />
+    <bdc position-x="0moa" position-y="-5moa" text-offset="1.2moa" text-height="0.9moa" />
+    <bdc position-x="0moa" position-y="-9moa" text-offset="1.2moa" text-height="0.9moa" />
+  </bdc>
+</reticle>

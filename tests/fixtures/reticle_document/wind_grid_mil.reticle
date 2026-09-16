@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Invented fixture. Exercises what the sample documents happen not to: <bdc> entries
+     OFF the vertical stadia, mixed mil/mrad suffixes in one document, an entry that names
+     only one axis, and single-quoted attribute values. A three-row wind grid: each
+     holdover row carries a left and a right wind hold. -->
+<reticle name='Fixture Wind Grid MIL' size-x='20mil' size-y='20mrad' zero-x='10mil' zero-y='10mrad'>
+	<elements>
+		<reticle-circle center-x="0mil" center-y="0mil" radius="9mil" fill="false" line-width="0.05mil" color="black" />
+		<reticle-line start-x="-6mil" start-y="0mil" end-x="6mil" end-y="0mil" line-width="0.05mil" line-color="black" />
+		<reticle-line start-x="0mil" start-y="-6mil" end-x="0mil" end-y="6mil" line-width="0.05mil" line-color="black" />
+	</elements>
+	<bdc>
+		<!-- the centre holdover of each row names only its elevation; x defaults to 0 -->
+		<bdc position-y="-2mil" text-offset="0.4mil" text-height="0.3mil" />
+		<bdc position-x="-1mil" position-y="-2mil" />
+		<bdc position-x="1mil" position-y="-2mil" />
+
+		<bdc position-y="-4mrad" text-offset="0.4mil" text-height="0.3mil" />
+		<bdc position-x="-1.5mrad" position-y="-4mrad" />
+		<bdc position-x="1.5mrad" position-y="-4mrad" />
+
+		<bdc position-y="-6mil" text-offset="0.4mil" text-height="0.3mil" />
+		<bdc position-x="-2mil" position-y="-6mil" />
+		<bdc position-x="2mil" position-y="-6mil" />
+	</bdc>
+</reticle>

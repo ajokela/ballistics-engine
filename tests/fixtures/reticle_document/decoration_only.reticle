@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Invented fixture. A picture with no <bdc> section at all: a fine crosshair inside a
+     circle, plus a tag this importer has never heard of. Every element here is drawing,
+     so the import succeeds and carries no marks. -->
+<reticle name="Fixture Decoration Only" size-x="24moa" size-y="24moa" zero-x="12moa" zero-y="12moa">
+  <elements>
+    <reticle-rectangle position-x="-12moa" position-y="12moa" size-x="24moa" size-y="24moa" fill="true" color="white" />
+    <reticle-circle center-x="0moa" center-y="0moa" radius="4moa" fill="false" line-width="0.2moa" color="black" />
+    <reticle-line start-x="-11moa" start-y="0moa" end-x="11moa" end-y="0moa" line-width="0.15moa" line-color="black" />
+    <reticle-line start-x="0moa" start-y="-11moa" end-x="0moa" end-y="11moa" line-width="0.15moa" line-color="black" />
+    <reticle-path fill="true" color="black">
+      <elements>
+        <reticle-path-move-to position-x="-0.4moa" position-y="11moa" />
+        <reticle-path-line-to position-x="0.4moa" position-y="11moa" />
+        <reticle-path-line-to position-x="0moa" position-y="9moa" />
+      </elements>
+    </reticle-path>
+    <reticle-illumination-dot center-x="0moa" center-y="0moa" radius="0.3moa" color="red" />
+  </elements>
+</reticle>
