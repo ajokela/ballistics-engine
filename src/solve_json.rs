@@ -283,12 +283,19 @@ pub struct RifleV1 {
     /// Optional, which reads like "leave the twist out of it" — it is not. `None` defaults to
     /// 0.3048 m, exactly 1:12 inches, raises a `default_applied` assumption, and materializes
     /// that value at [`ResolvedRifleV1::twist_rate_m_per_turn`], after which nothing
-    /// downstream can tell an assumed barrel from a stated one. With no twist-reading effect
-    /// enabled the omission costs nothing, because the trajectory is then identical for every
-    /// twist rate; `effects.magnus`, `effects.enhanced_spin_drift` and
-    /// `effects.aerodynamic_jump` all read it, and each of those raises its own assumed-barrel
-    /// warning when it is absent (MBA-1484). `summary.stability_factor` reads the resolved
-    /// value on every solve and carries no warning.
+    /// downstream can tell an assumed barrel from a stated one.
+    ///
+    /// Omitting it is never free. `summary.stability_factor` is a function of the twist and is
+    /// computed on EVERY solve, so an omitted field reports the Sg of a 1:12 barrel — 1.665 on
+    /// a .308 175 gr against 3.746 at a stated 1:8, with no effect enabled — and raises
+    /// `stability_factor_assumed_twist_rate`. What the omission does not move, absent a
+    /// spin-driven effect, is the trajectory: `drop_m` and `windage_m` are bit-identical for
+    /// every twist rate.
+    ///
+    /// `effects.magnus`, `effects.enhanced_spin_drift` and `effects.aerodynamic_jump` each
+    /// read it as well, and each raises its own assumed-barrel warning when it is absent
+    /// (MBA-1484). The codes are distinct so that each names its own consumer; they are not
+    /// mutually exclusive, and one omitted twist can raise three of them at once.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

@@ -94,10 +94,14 @@ pub const WARNING_WIND_SHEAR_MODEL_NOT_MODELED: &str = "wind_shear_model_not_mod
 /// because those say "a default was applied" without saying that anything now depends on it.
 ///
 /// Aerodynamic jump is not the only effect that reads the barrel: `effects.magnus` and
-/// `effects.enhanced_spin_drift` do too, and an omitted twist under either of those raises
-/// [`WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE`] instead. The two warnings are deliberately
-/// distinct codes and never both fire for the same field, so a caller can tell which model
-/// was computed against the assumed barrel.
+/// `effects.enhanced_spin_drift` do too, under the separate
+/// [`WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE`], and `summary.stability_factor` on every solve,
+/// under [`WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE`]. The codes are distinct so that each
+/// one names the model it belongs to — they are NOT mutually exclusive, and a single omitted
+/// `rifle.twist_rate_m_per_turn` routinely raises several of them at once. A request enabling
+/// both `aerodynamic_jump` and `magnus` without a stated twist gets all three: one per
+/// consumer, each at its own path. Callers must match on the code they care about rather than
+/// assume at most one assumed-barrel warning is present.
 pub const WARNING_AERODYNAMIC_JUMP_ASSUMED_GEOMETRY: &str = "aerodynamic_jump_assumed_geometry";
 
 /// A spin-driven effect (`effects.magnus` or `effects.enhanced_spin_drift`) was enabled while
@@ -125,7 +129,39 @@ pub const WARNING_AERODYNAMIC_JUMP_ASSUMED_GEOMETRY: &str = "aerodynamic_jump_as
 ///
 /// The assumption notice for the default itself is still emitted; this one exists because it
 /// says "a default was applied" without saying that anything now depends on it.
+///
+/// This code covers the two opt-in models only. The twist is read on EVERY solve by
+/// `summary.stability_factor`, which has its own
+/// [`WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE`]; both fire together when a spin effect is
+/// enabled without a stated twist.
 pub const WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE: &str = "spin_effect_assumed_twist_rate";
+
+/// `summary.stability_factor` was computed from the default twist because the request left
+/// `rifle.twist_rate_m_per_turn` out (MBA-1484).
+///
+/// Unlike every other assumed-barrel warning this module emits, this one is not gated on an
+/// opt-in flag, because Sg is not opt-in: `effective_sg_from_inputs` runs on every solve and
+/// the muzzle gyroscopic stability factor is a direct function of the twist. An omitted field
+/// therefore does not leave Sg alone — it reports the Sg of a 1:12 barrel, under a field name
+/// that says nothing about which barrel it describes.
+///
+/// Measured on a .308 175 gr with NO effects enabled at all: `summary.stability_factor` is
+/// 1.6650154161603787 with the twist omitted, bit-identically 1.6650154161603787 with 1:12
+/// stated, and 3.7462846863608514 with 1:8 stated — 2.25x, across the marginal/comfortable
+/// line a shooter reads Sg to decide. `drop_m` and `windage_m` are bit-identical in all three,
+/// so the trajectory really is twist-independent when no spin effect is enabled; the summary
+/// is not, and that distinction is the whole reason this code exists separately from
+/// [`WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE`].
+///
+/// Emitted at `$.rifle.twist_rate_m_per_turn` — the omitted field itself — because there is no
+/// flag to hang it on, and only when Sg is actually reported: when
+/// `summary.stability_factor` is absent nothing misleading was published and there is nothing
+/// to warn about. It fires on any request that omits the twist and gets an Sg, which is most
+/// of them; that breadth is the finding, not a reason to suppress it. The `default_applied`
+/// assumption at the same path stays, and says a default was applied without saying that a
+/// reported number now depends on it.
+pub const WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE: &str =
+    "stability_factor_assumed_twist_rate";
 
 /// Whether the raw request supplied the geometry fields the twist-reading effects need, as
 /// opposed to letting `resolve_rifle`/`resolve_projectile` substitute a default.
@@ -235,6 +271,30 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
     } else {
         None
     };
+
+    // MBA-1484. Sg is a direct function of the twist and is computed on every solve, so an
+    // omitted `rifle.twist_rate_m_per_turn` does not leave it alone: it publishes the Sg of the
+    // assumed 1:12 barrel (1.665 on the .308 175 gr fixture, against 3.746 at a stated 1:8)
+    // under a field name that says nothing about which barrel it describes. Warned here rather
+    // than in `resolve_effects` because this is the one assumed-barrel consumer that is not
+    // gated on a flag -- there is nothing in `EffectsV1` to key off, and the gate is whether Sg
+    // was reported at all, which is not known until it has been computed.
+    //
+    // This does fire on nearly every twist-omitting request, including ones written before the
+    // warning existed. That breadth is the finding rather than an argument against it: those
+    // requests were always being handed a barrel-dependent Sg they never described. Warning on
+    // Magnus, whose whole contribution is 0.19 mm of drop at 800 m, while staying silent about
+    // a 2.25x swing in a reported stability number is not a line that can be defended.
+    if request.rifle.twist_rate_m_per_turn.is_none() && stability_factor.is_some() {
+        prepared.warnings.push(notice(
+            WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE,
+            "summary.stability_factor is computed from the twist on every solve, but \
+             rifle.twist_rate_m_per_turn was not supplied. The reported Sg is the Sg of the \
+             assumed 1:12 barrel, not of a barrel this request specified. The trajectory \
+             itself is unaffected unless a spin-driven effect is also enabled.",
+            "$.rifle.twist_rate_m_per_turn",
+        ));
+    }
     let spin_drift_m = if enhanced_spin_drift {
         stability_factor
             .map(|sg| {
@@ -1556,10 +1616,11 @@ fn resolve_effects(
     // before this point), so the loop pushes at most one notice; it is written as a loop
     // anyway so that a future third spin-driven flag cannot quietly go unwarned.
     //
-    // Deliberately NOT extended to `summary.stability_factor`, which reads the twist on every
-    // solve: warning unconditionally would fire on every request that predates the field and
-    // would say nothing about the trajectory, which an omitted twist leaves untouched unless
-    // one of these flags is set. The spec documents the Sg case in prose instead.
+    // `summary.stability_factor` also reads the twist, on every solve rather than on a flag,
+    // so it cannot be covered from here -- it is warned separately in `solve_v1` under
+    // WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE, gated on Sg having actually been reported.
+    // The two codes both fire when a spin effect is enabled without a stated twist; they are
+    // distinct so each names its own consumer, not because they are mutually exclusive.
     for (enabled, path, name) in [
         (magnus, "$.effects.magnus", "Magnus"),
         (

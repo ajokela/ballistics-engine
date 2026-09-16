@@ -6,10 +6,18 @@
 //! `TrajectorySolver::apply_spin_drift` for a non-positive twist never fires on this path,
 //! because the default is applied long before the solver sees the field.
 //!
-//! Before this warning existed the only trace of that was a `default_applied` assumption
+//! Before these warnings existed the only trace of that was a `default_applied` assumption
 //! notice, which says a default was applied without saying that anything now depends on it.
 //! A caller enabling `enhanced_spin_drift` on a 1:8 barrel they never described got a
-//! confident drift number for a 1:12 one. This pins the fix:
+//! confident drift number for a 1:12 one.
+//!
+//! MBA-1484 adds two codes. `spin_effect_assumed_twist_rate` covers the two opt-in spin
+//! effects. `stability_factor_assumed_twist_rate` covers `summary.stability_factor`, which is
+//! not opt-in at all — Sg is a function of the twist and is computed on EVERY solve, so an
+//! omitted field publishes the Sg of a 1:12 barrel no matter what `effects` says. Together
+//! with the pre-existing `aerodynamic_jump_assumed_geometry` that makes three assumed-barrel
+//! codes, all keyed to the CONSUMER rather than to the missing field, so more than one can
+//! fire from a single omission. This pins the fix:
 //!
 //!   (a) the hazard itself — an omitted twist is BIT-IDENTICAL to a stated 1:12 and is not
 //!       the same answer as a stated 1:8, so the response cannot be told apart from a
@@ -18,14 +26,15 @@
 //!       `$.effects.enhanced_spin_drift`;
 //!   (c) `magnus` without a twist raises it at `$.effects.magnus` — smaller in absolute
 //!       terms on a flat-fire shot, equally twist-bound;
-//!   (d) stating the twist raises nothing, for either flag;
-//!   (e) omitting the twist with no twist-reading effect raises nothing either: the
-//!       trajectory is identical for every twist rate when nothing consumes it, and every
-//!       request written before this warning existed must keep its warning list;
-//!   (f) `aerodynamic_jump` keeps its own distinct code and does not also raise this one, so
-//!       the code identifies which model was computed against the assumed barrel;
-//!   (g) the warning is the whole fix — the request is still solved, and the 1:12 default is
-//!       still materialized in `resolved_request`, byte-for-byte as before.
+//!   (d) stating the twist raises neither code, for either flag;
+//!   (e) omitting the twist with NO effect at all raises no spin-effect warning, because the
+//!       trajectory really is identical for every twist rate — but it does raise the Sg
+//!       warning, because Sg is not, and that is the case this file originally got wrong;
+//!   (f) the codes are distinct but NOT mutually exclusive: `aerodynamic_jump` keeps its own
+//!       `aerodynamic_jump_assumed_geometry`, and a request enabling jump and `magnus`
+//!       together with the twist omitted gets all three at once, each at its own path;
+//!   (g) the warnings are the whole fix — the request is still solved, and the 1:12 default
+//!       is still materialized in `resolved_request`, byte-for-byte as before.
 
 use ballistics_engine::solve_json::{decode_solve_request_v1, SolveSuccessV1};
 use ballistics_engine::solve_v1;
@@ -59,6 +68,8 @@ const STATED_1_IN_12: &str = r#", "twist_rate_m_per_turn": 0.3048"#;
 const STATED_1_IN_8: &str = r#", "twist_rate_m_per_turn": 0.2032"#;
 
 const CODE: &str = "spin_effect_assumed_twist_rate";
+const SG_CODE: &str = "stability_factor_assumed_twist_rate";
+const JUMP_CODE: &str = "aerodynamic_jump_assumed_geometry";
 
 fn solve(json: &str) -> SolveSuccessV1 {
     let request = decode_solve_request_v1(json).expect("request must decode");
@@ -156,8 +167,8 @@ fn magnus_without_a_twist_warns_that_the_barrel_was_assumed() {
     assert_eq!(
         assumed.len(),
         1,
-        "Magnus is driven by the spin the rifling imparts, so it depends on the twist just as \
-         the drift does, got {:?}",
+        "Magnus is driven by the spin the rifling imparts, so it depends on the twist as much \
+         as the drift does, got {:?}",
         response.warnings
     );
     assert_eq!(assumed[0].path.as_deref(), Some("$.effects.magnus"));
@@ -165,25 +176,30 @@ fn magnus_without_a_twist_warns_that_the_barrel_was_assumed() {
 
 // (d)
 #[test]
-fn a_stated_twist_raises_nothing_for_either_flag() {
+fn a_stated_twist_raises_no_assumed_barrel_code_for_either_flag() {
     for effects in [r#""enhanced_spin_drift": true"#, r#""magnus": true"#] {
         for twist in [STATED_1_IN_12, STATED_1_IN_8] {
             let response = solve(&request_json(effects, twist));
-            assert!(
-                warnings_with_code(&response, CODE).is_empty(),
-                "the twist was stated ({effects}, {twist}): {:?}",
-                response.warnings
-            );
+            // Both codes, including the always-on Sg one: stating the twist is precisely what
+            // makes every assumed-barrel warning inapplicable. Stating the DEFAULT value must
+            // silence them too -- the warning is about what the caller said, not about which
+            // number came out.
+            for code in [CODE, SG_CODE] {
+                assert!(
+                    warnings_with_code(&response, code).is_empty(),
+                    "the twist was stated ({effects}, {twist}), so {code} must not fire: {:?}",
+                    response.warnings
+                );
+            }
         }
     }
 }
 
 // (e)
 #[test]
-fn an_omitted_twist_alone_raises_nothing() {
-    // Not an oversight: with no twist-reading effect enabled the twist reaches nothing, and
-    // the trajectory is identical for every value of it. Warning here would fire on every
-    // request written before this code existed and would describe no hazard.
+fn an_omitted_twist_alone_spares_the_trajectory_but_not_the_reported_sg() {
+    // With no spin effect enabled the TRAJECTORY is genuinely twist-independent, so the
+    // spin-effect code would be describing a hazard that is not there.
     for effects in [
         "",
         r#""magnus": false, "enhanced_spin_drift": false"#,
@@ -192,13 +208,11 @@ fn an_omitted_twist_alone_raises_nothing() {
         let response = solve(&request_json(effects, ""));
         assert!(
             warnings_with_code(&response, CODE).is_empty(),
-            "nothing in this request reads the twist ({effects}): {:?}",
+            "no spin effect ran in this request ({effects}): {:?}",
             response.warnings
         );
     }
 
-    // And the claim behind that: with no spin effect, the twist genuinely does not move the
-    // numbers, so its absence is not information the caller is missing.
     let omitted = solve(&request_json("", ""));
     let fast = solve(&request_json("", STATED_1_IN_8));
     let (omitted_last, fast_last) = (
@@ -207,25 +221,143 @@ fn an_omitted_twist_alone_raises_nothing() {
     );
     assert_eq!(omitted_last.drop_m, fast_last.drop_m);
     assert_eq!(omitted_last.windage_m, fast_last.windage_m);
+
+    // But the SUMMARY is not twist-independent, which is the claim this file used to make and
+    // which was false. Sg is computed on every solve from the resolved twist, so an omitted
+    // field publishes the Sg of a barrel the caller never described -- and it is a far bigger
+    // discrepancy than the Magnus case that does get a warning.
+    let (omitted_sg, fast_sg) = (
+        omitted.summary.stability_factor.expect("Sg is reported"),
+        fast.summary.stability_factor.expect("Sg is reported"),
+    );
+    assert_ne!(
+        omitted_sg, fast_sg,
+        "if these ever match, Sg has stopped reading the twist and this warning is obsolete"
+    );
+    assert!(
+        fast_sg > omitted_sg * 2.0,
+        "the barrel alone moves the reported Sg across the marginal/comfortable line: \
+         omitted {omitted_sg} vs 1:8 {fast_sg}"
+    );
+
+    // So it must be warned, on exactly the requests that publish such an Sg -- including this
+    // one, which enables no effect at all.
+    let sg_warnings = warnings_with_code(&omitted, SG_CODE);
+    assert_eq!(
+        sg_warnings.len(),
+        1,
+        "a solve that reports an Sg for an assumed barrel must say so even with no effects \
+         enabled: {:?}",
+        omitted.warnings
+    );
+    assert_eq!(
+        sg_warnings[0].path.as_deref(),
+        Some("$.rifle.twist_rate_m_per_turn"),
+        "there is no flag to hang it on, so it names the omitted field itself"
+    );
+
+    // And it must NOT fire once the caller states the twist, or it is noise rather than a
+    // warning.
+    assert!(
+        warnings_with_code(&fast, SG_CODE).is_empty(),
+        "the twist was stated: {:?}",
+        fast.warnings
+    );
+}
+
+// (e), continued: the Sg code is independent of the effects flags, not a side effect of them.
+#[test]
+fn the_stability_factor_warning_tracks_the_twist_not_the_effects() {
+    for effects in [
+        "",
+        r#""coriolis": false"#,
+        r#""magnus": true"#,
+        r#""enhanced_spin_drift": true"#,
+        r#""aerodynamic_jump": true"#,
+    ] {
+        let omitted = solve(&request_json(effects, ""));
+        assert_eq!(
+            warnings_with_code(&omitted, SG_CODE).len(),
+            1,
+            "Sg was reported from the assumed barrel ({effects}): {:?}",
+            omitted.warnings
+        );
+
+        let stated = solve(&request_json(effects, STATED_1_IN_8));
+        assert!(
+            warnings_with_code(&stated, SG_CODE).is_empty(),
+            "the twist was stated ({effects}): {:?}",
+            stated.warnings
+        );
+    }
 }
 
 // (f)
 #[test]
-fn aerodynamic_jump_keeps_its_own_code_and_does_not_also_raise_this_one() {
+fn aerodynamic_jump_alone_raises_its_own_code_and_not_the_spin_effect_one() {
     let response = solve(&request_json(r#""aerodynamic_jump": true"#, ""));
 
     assert_eq!(
-        warnings_with_code(&response, "aerodynamic_jump_assumed_geometry").len(),
+        warnings_with_code(&response, JUMP_CODE).len(),
         1,
         "the jump's own warning still covers it: {:?}",
         response.warnings
     );
+    // Not a claim that the codes are mutually exclusive -- see the test below, which shows
+    // they are not. Neither spin effect is enabled in THIS request, so the spin-effect code
+    // has no consumer to describe and would be reporting a model that did not run.
     assert!(
         warnings_with_code(&response, CODE).is_empty(),
-        "one omitted field must not produce two warnings saying the same thing -- the codes \
-         are distinct so a caller can tell WHICH model used the assumed barrel: {:?}",
+        "no spin effect ran, so nothing should claim one was computed from an assumed \
+         barrel: {:?}",
         response.warnings
     );
+}
+
+// (f), continued: the property the codes actually have. This is the case the previous
+// revision of this file asserted was impossible, in a failure message, while the binary
+// produced it.
+#[test]
+fn one_omitted_twist_raises_every_consumers_code_at_once() {
+    let response = solve(&request_json(
+        r#""magnus": true, "aerodynamic_jump": true"#,
+        "",
+    ));
+
+    // Three consumers of one missing field -- Magnus, the jump, and the always-on Sg -- so
+    // three warnings, each naming the consumer it belongs to rather than the field.
+    for (code, path) in [
+        (CODE, "$.effects.magnus"),
+        (JUMP_CODE, "$.effects.aerodynamic_jump"),
+        (SG_CODE, "$.rifle.twist_rate_m_per_turn"),
+    ] {
+        let found = warnings_with_code(&response, code);
+        assert_eq!(
+            found.len(),
+            1,
+            "{code} must be present exactly once -- the codes are keyed to the consumer, not \
+             to the missing field, so they are NOT mutually exclusive and a caller must match \
+             on the one it cares about: {:?}",
+            response.warnings
+        );
+        assert_eq!(
+            found[0].path.as_deref(),
+            Some(path),
+            "{code} belongs at {path}, so the caller can tell the consumers apart"
+        );
+    }
+
+    // Every one of them names the same single omitted field, which is exactly why the codes
+    // rather than the messages have to carry the distinction.
+    for code in [CODE, JUMP_CODE, SG_CODE] {
+        assert!(
+            warnings_with_code(&response, code)[0]
+                .message
+                .contains("rifle.twist_rate_m_per_turn"),
+            "{code} should name the field that was left out: {:?}",
+            response.warnings
+        );
+    }
 }
 
 // (g)
