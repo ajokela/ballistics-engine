@@ -5,6 +5,42 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`reticle.*` on the JSON bridge, so an app can reach the reticle stack at all (MBA-1558).**
+  `reticle.describe`, `reticle.hold` and `reticle.import` are additive within
+  `api_version` 1 and listed by `meta.capabilities`. Before this the bridge named no
+  reticle command — the string did not appear in `src/bridge/mod.rs` — and since the
+  mobile apps vendor only `ballistics_bridge_call` and its siblings, everything built by
+  MBA-1361, MBA-1440 and MBA-1544 was unreachable from iOS and Android however complete
+  it was in the crate. CLI and WASM users already had it; this closes the surface gap
+  rather than adding capability.
+
+  `reticle.hold` is the one the family exists for: given a firing solution ALREADY
+  reduced to angles and the optic's current magnification, it reports which mark to hold
+  on, plus that mark's position both as authored and as it subtends at this
+  magnification — not the same number on an SFP optic, which is why both are returned.
+  It runs no physics; the angles are inputs, so `reticle` keeps its no-physics property.
+
+  `reticle.describe` resolves a reticle supplied inline or built from `mil_grid`, `tree`
+  or `bdc_from_drops`, and optionally scales every mark to a magnification. Because every
+  generator returns FFP and the library's answer is "set those two fields afterwards" —
+  and on a bridge there is no afterwards — `focal_plane` and `reference_magnification`
+  may travel with a generator request; beside a full `reticle` they are refused, since
+  that description already carries its own. Naming a reticle both ways is refused rather
+  than resolved by precedence.
+
+  `reticle.import` reads Ventum JSON and `.reticle` XML, each with its report. Both are
+  text and travel inline, so unlike `profile.import_a7p` there is no base64 step; a
+  document cap refuses an oversize one before the parse rather than during it. The
+  reports carry what each importer dropped, including the two shortfalls the Ventum
+  report declares about its own counts.
+
+  Errors follow the `true.dsf` convention: `error.code` stays `command_failed` and a
+  stable `reason` — one per `ReticleError` variant — rides in `error.details` with the
+  offending numbers beside it.
+
 ## [0.40.0] - 2026-09-16
 
 ### Added

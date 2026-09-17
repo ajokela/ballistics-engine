@@ -33,6 +33,38 @@
 //! would break an existing well-formed caller bumps `BRIDGE_API_VERSION`. Callers
 //! feature-detect with `meta.capabilities` instead of sniffing versions.
 //!
+//! ## The `reticle.*` family
+//!
+//! `reticle.describe`, `reticle.hold` and `reticle.import` put the engine's reticle stack
+//! (MBA-1361, MBA-1440, MBA-1544) in reach of an app. Before MBA-1558 none of it was: the
+//! bridge named no reticle command, and since the apps vendor only `ballistics_bridge_call`
+//! and friends, a capability the bridge does not name does not exist for them.
+//!
+//! - `reticle.hold` is the one the family exists for — given a firing solution ALREADY
+//!   reduced to angles and the optic's current magnification, it reports which mark to hold
+//!   on. It runs no physics: the angles are inputs, and `crate::reticle` keeps its
+//!   no-physics property precisely because nothing here re-derives them.
+//! - `reticle.describe` resolves a reticle, supplied inline or built from a generator, and
+//!   optionally reports every mark's TRUE angular position at a magnification. This is what
+//!   a picker and a drawing are built on. It carries `focal_plane` and
+//!   `magnification_dependent` so a UI knows whether a magnification control changes
+//!   anything.
+//! - `reticle.import` reads the two third-party formats the crate already parses (Ventum
+//!   JSON, `.reticle` XML), each with its report. Both are TEXT and travel inline, so
+//!   unlike `profile.import_a7p` there is no base64 step.
+//!
+//! Two shapes are shared across the family and are worth stating once. A reticle is named
+//! EITHER by `reticle` (a full description) or by `generator`, never both — a request
+//! carrying both is refused rather than resolved by precedence, because supplying both is
+//! a caller bug and picking a winner hides it. And because every generator returns FFP,
+//! `focal_plane` / `reference_magnification` may be supplied ALONGSIDE a generator to make
+//! an SFP reticle; the same keys beside a full `reticle` are refused, since that
+//! description already carries its own.
+//!
+//! Errors follow `true.dsf`'s convention: `error.code` stays `command_failed` and a stable
+//! `reason` rides in `error.details` (one per `ReticleError` variant) with the offending
+//! numbers beside it. Additive within api_version 1, and listed by `meta.capabilities`.
+//!
 //! ## The `true.*` truing family
 //!
 //! `true.fit`, `true.wind`, `true.tall_target`, `true.dsf`, `true.plan`, and `true.dial_plan`
@@ -107,6 +139,9 @@ fn command_names() -> Vec<&'static str> {
     names.extend(["profile.validate", "profile.normalize"]);
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
+    // Unconditional: the reticle stack is pure geometry with no filesystem access, so all
+    // three are present on wasm32 like the `true.*` family.
+    names.extend(["reticle.describe", "reticle.hold", "reticle.import"]);
     names.extend([
         "true.fit",
         "true.wind",
@@ -268,6 +303,9 @@ fn dispatch(request_json: &str) -> String {
         "profile.normalize" => run_profile_normalize(&request.request),
         #[cfg(feature = "profile-import")]
         "profile.import_a7p" => run_profile_import_a7p(&request.request),
+        "reticle.describe" => run_reticle_describe(&request.request),
+        "reticle.hold" => run_reticle_hold(&request.request),
+        "reticle.import" => run_reticle_import(&request.request),
         "true.fit" => run_service(
             &request.request,
             "true.fit",
@@ -1017,6 +1055,559 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// reticle.* — MBA-1558
+// ---------------------------------------------------------------------------
+
+/// How a request names the reticle it is asking about: either the full
+/// [`crate::reticle::ReticleDescription`] inline, or a generator to build one from.
+///
+/// Exactly one, and the requests below check that rather than silently preferring one —
+/// a caller that sends both has a bug, and picking a winner for them hides it.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ReticleGenerator {
+    /// [`crate::reticle::ReticleDescription::mil_grid`].
+    MilGrid { spacing_mil: f64, extent_mil: f64 },
+    /// [`crate::reticle::ReticleDescription::tree`].
+    Tree {
+        rows: usize,
+        row_spacing_mil: f64,
+        spread_step_mil: f64,
+    },
+    /// [`crate::reticle::ReticleDescription::bdc_from_drops`]. Pairs are
+    /// `[range_metres, drop_mil]`, and the generator labels each mark `"<range> m"` —
+    /// the range unit is the wire's, not the shooter's, and an app showing those labels
+    /// converts them itself.
+    Bdc { drops: Vec<(f64, f64)> },
+}
+
+/// Optional focal-plane overrides for a GENERATED reticle.
+///
+/// Every generator returns FFP with `reference_magnification` 1.0, and the generator docs
+/// say callers wanting SFP "set those two fields afterwards". On the bridge there is no
+/// afterwards — the caller never holds the struct — so the overrides have to travel with
+/// the request or the generator path could only ever produce FFP reticles, which is half
+/// the optics on the market.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReticlePlaneOverride {
+    #[serde(default)]
+    focal_plane: Option<crate::reticle::FocalPlane>,
+    #[serde(default)]
+    reference_magnification: Option<f64>,
+}
+
+/// Build the description a request is about, from whichever source it supplied.
+///
+/// `Err` is a finished error envelope, matching how the other commands' helpers report.
+fn resolve_reticle(
+    command: &'static str,
+    reticle: Option<crate::reticle::ReticleDescription>,
+    generator: Option<ReticleGenerator>,
+    plane: &ReticlePlaneOverride,
+) -> Result<crate::reticle::ReticleDescription, String> {
+    use crate::reticle::ReticleDescription;
+
+    let mut described = match (reticle, generator) {
+        (Some(_), Some(_)) => {
+            return Err(error(
+                BridgeErrorCode::InvalidRequest,
+                format!(
+                    "{command} takes either 'reticle' or 'generator', not both — \
+                     supplying both is a caller bug rather than a preference"
+                ),
+                None,
+            ))
+        }
+        (None, None) => {
+            return Err(error(
+                BridgeErrorCode::InvalidRequest,
+                format!("{command} requires either 'reticle' (a full description) or 'generator'"),
+                None,
+            ))
+        }
+        (Some(reticle), None) => {
+            if plane.focal_plane.is_some() || plane.reference_magnification.is_some() {
+                return Err(error(
+                    BridgeErrorCode::InvalidRequest,
+                    format!(
+                        "{command}: 'focal_plane' and 'reference_magnification' override a \
+                         GENERATED reticle; a supplied 'reticle' already carries its own"
+                    ),
+                    None,
+                ));
+            }
+            reticle
+        }
+        (None, Some(generator)) => {
+            let built = match generator {
+                ReticleGenerator::MilGrid {
+                    spacing_mil,
+                    extent_mil,
+                } => ReticleDescription::mil_grid(spacing_mil, extent_mil),
+                ReticleGenerator::Tree {
+                    rows,
+                    row_spacing_mil,
+                    spread_step_mil,
+                } => ReticleDescription::tree(rows, row_spacing_mil, spread_step_mil),
+                ReticleGenerator::Bdc { drops } => ReticleDescription::bdc_from_drops(&drops),
+            };
+            match built {
+                Ok(built) => built,
+                Err(err) => return Err(reticle_error_envelope(command, &err)),
+            }
+        }
+    };
+
+    if let Some(focal_plane) = plane.focal_plane {
+        described.focal_plane = focal_plane;
+    }
+    if let Some(reference_magnification) = plane.reference_magnification {
+        described.reference_magnification = reference_magnification;
+    }
+    Ok(described)
+}
+
+/// A [`crate::reticle::ReticleError`] as this family's structured error envelope.
+///
+/// Follows the `true.*` convention established by `true.dsf`: `error.code` stays
+/// `command_failed`, and a stable machine-readable `reason` rides in `error.details`
+/// alongside the human message, so a front end can render its own wording without
+/// parsing prose. The reasons are the error's own variants, which is what makes them
+/// stable — a new variant is a new reason, never a re-spelling of an old one.
+fn reticle_error_envelope(command: &'static str, err: &crate::reticle::ReticleError) -> String {
+    use crate::reticle::ReticleError;
+
+    let mut details = json!({ "reason": match err {
+        ReticleError::NonPositiveMagnification { .. } => "non_positive_magnification",
+        ReticleError::NonPositiveReferenceMagnification { .. } => {
+            "non_positive_reference_magnification"
+        }
+        ReticleError::NoMarks => "no_marks",
+        ReticleError::TooManyMarks { .. } => "too_many_marks",
+        ReticleError::NonFiniteMark { .. } => "non_finite_mark",
+        ReticleError::NonFiniteHold { .. } => "non_finite_hold",
+        ReticleError::InvalidGeneratorParameter { .. } => "invalid_generator_parameter",
+        ReticleError::InvalidSpec(_) => "invalid_spec",
+    }});
+
+    // The numbers the variant carries, so a caller can point at the offending input
+    // without re-parsing the sentence.
+    match err {
+        ReticleError::NonPositiveMagnification { magnification } => {
+            details["magnification"] = json!(magnification);
+        }
+        ReticleError::NonPositiveReferenceMagnification {
+            reference_magnification,
+        } => {
+            details["reference_magnification"] = json!(reference_magnification);
+        }
+        ReticleError::TooManyMarks { count, max } => {
+            details["count"] = json!(count);
+            details["max"] = json!(max);
+        }
+        ReticleError::NonFiniteMark { index } => {
+            details["index"] = json!(index);
+        }
+        ReticleError::InvalidGeneratorParameter {
+            parameter,
+            value,
+            rule,
+        } => {
+            details["parameter"] = json!(parameter);
+            details["value"] = json!(value);
+            details["rule"] = json!(rule);
+        }
+        ReticleError::NoMarks
+        | ReticleError::NonFiniteHold { .. }
+        | ReticleError::InvalidSpec(_) => {}
+    }
+    details["command"] = json!(command);
+
+    error(
+        BridgeErrorCode::CommandFailed,
+        err.to_string(),
+        Some(details),
+    )
+}
+
+/// The nearest mark a hold landed by, reported so a caller does not index back into the
+/// description and re-apply the scale itself.
+///
+/// BOTH positions are given because they answer different questions and are not the same
+/// number on an SFP optic: `nominal` is the mark as authored (what a reticle diagram
+/// prints), `true_angular` is where it actually sits at this magnification (what the hold
+/// is measured against).
+fn nearest_mark_value(
+    reticle: &crate::reticle::ReticleDescription,
+    hold: &crate::reticle::ReticleHold,
+) -> Value {
+    match hold
+        .nearest_mark
+        .and_then(|index| reticle.marks.get(index).map(|mark| (index, mark)))
+    {
+        Some((index, mark)) => json!({
+            "index": index,
+            "kind": mark.kind.as_str(),
+            "label": mark.label,
+            "nominal": { "down_mil": mark.down_mil, "right_mil": mark.right_mil },
+            "true_angular": {
+                "down_mil": mark.down_mil * hold.mark_scale,
+                "right_mil": mark.right_mil * hold.mark_scale,
+            },
+        }),
+        None => Value::Null,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReticleDescribeRequest {
+    #[serde(default)]
+    reticle: Option<crate::reticle::ReticleDescription>,
+    #[serde(default)]
+    generator: Option<ReticleGenerator>,
+    #[serde(default)]
+    focal_plane: Option<crate::reticle::FocalPlane>,
+    #[serde(default)]
+    reference_magnification: Option<f64>,
+    /// When present, the result also carries every mark's TRUE angular position at this
+    /// magnification. Absent means "just the description".
+    #[serde(default)]
+    magnification: Option<f64>,
+}
+
+/// `reticle.describe`: resolve a reticle — supplied or generated — and report it.
+///
+/// Result: `{ "reticle": <ReticleDescription>, "focal_plane": "FFP"|"SFP",
+/// "magnification_dependent": bool, "mark_count": n, "scaled": {...}|null }`.
+///
+/// This is the command a picker and a drawing are built on. `scaled` is present only when
+/// the request supplied a magnification, and carries `mark_scale` plus the marks in true
+/// angular space — for an FFP reticle that is the nominal marks and a scale of exactly
+/// 1.0, which is worth returning anyway so a caller has one code path.
+fn run_reticle_describe(inner: &Value) -> String {
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'reticle.describe' requires a request payload ({\"reticle\": ...} or {\"generator\": ...})",
+            None,
+        );
+    }
+    let request: ReticleDescribeRequest = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("reticle.describe request rejected: {err}"),
+                None,
+            )
+        }
+    };
+
+    let plane = ReticlePlaneOverride {
+        focal_plane: request.focal_plane,
+        reference_magnification: request.reference_magnification,
+    };
+    let reticle = match resolve_reticle(
+        "reticle.describe",
+        request.reticle,
+        request.generator,
+        &plane,
+    ) {
+        Ok(reticle) => reticle,
+        Err(envelope) => return envelope,
+    };
+
+    // Validate even when no magnification was asked for: a description that cannot be
+    // held on is not a description worth handing back as if it were usable.
+    if let Err(err) = reticle.validate() {
+        return reticle_error_envelope("reticle.describe", &err);
+    }
+
+    let scaled = match request.magnification {
+        Some(magnification) => match reticle.scaled_marks(magnification) {
+            Ok(marks) => json!({
+                "magnification": magnification,
+                "mark_scale": reticle.mark_scale(magnification),
+                "marks": marks
+                    .iter()
+                    .map(|mark| json!({
+                        "down_mil": mark.down_mil,
+                        "right_mil": mark.right_mil,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+            Err(err) => return reticle_error_envelope("reticle.describe", &err),
+        },
+        None => Value::Null,
+    };
+
+    match serde_json::to_value(&reticle) {
+        Ok(described) => success(
+            "reticle.describe",
+            json!({
+                "reticle": described,
+                "focal_plane": reticle.focal_plane.label(),
+                "magnification_dependent": reticle.focal_plane.is_magnification_dependent(),
+                "mark_count": reticle.marks.len(),
+                "scaled": scaled,
+            }),
+        ),
+        Err(err) => error(
+            BridgeErrorCode::InternalError,
+            format!("failed to serialize reticle description: {err}"),
+            None,
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReticleHoldRequest {
+    #[serde(default)]
+    reticle: Option<crate::reticle::ReticleDescription>,
+    #[serde(default)]
+    generator: Option<ReticleGenerator>,
+    #[serde(default)]
+    focal_plane: Option<crate::reticle::FocalPlane>,
+    #[serde(default)]
+    reference_magnification: Option<f64>,
+    /// Angular drop below the line of sight, positive = below: the come-up the shooter
+    /// would otherwise dial.
+    drop_mil: f64,
+    /// Angular wind deflection, positive = the bullet goes RIGHT.
+    #[serde(default)]
+    wind_mil: f64,
+    /// The optic's CURRENT magnification. Required on every focal plane — an FFP hold does
+    /// not depend on it, but zero magnification is not a physical optic and
+    /// `hold_point_in_reticle` rejects it on both planes rather than masking a caller bug.
+    magnification: f64,
+}
+
+/// `reticle.hold`: which mark to hold on.
+///
+/// The command this family exists for. Given a firing solution already reduced to angles
+/// (`drop_mil` / `wind_mil`) and the optic's current magnification, place it in the
+/// reticle and report the nearest mark.
+///
+/// ⚠️ THE ANGLES ARE INPUTS, NOT A SOLVE. This command runs no physics — it is the mark
+/// search around [`crate::reticle::hold_point_in_reticle`], which is why the module can
+/// keep its no-physics property. A caller gets `drop_mil` and `wind_mil` from `solve` (or
+/// a card row) and passes them in; nothing here re-derives them, and a stale angle in
+/// produces a confident hold out.
+///
+/// Result: `{ "hold": <ReticleHold>, "nearest_mark": {...}|null }`. `hold.off_reticle`
+/// is the field a UI must not ignore: true means the solution has run off the marked part
+/// of the reticle and there is nothing honest to hold on.
+fn run_reticle_hold(inner: &Value) -> String {
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'reticle.hold' requires a request payload ({reticle|generator, drop_mil, magnification})",
+            None,
+        );
+    }
+    let request: ReticleHoldRequest = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("reticle.hold request rejected: {err}"),
+                None,
+            )
+        }
+    };
+
+    let plane = ReticlePlaneOverride {
+        focal_plane: request.focal_plane,
+        reference_magnification: request.reference_magnification,
+    };
+    let reticle = match resolve_reticle("reticle.hold", request.reticle, request.generator, &plane)
+    {
+        Ok(reticle) => reticle,
+        Err(envelope) => return envelope,
+    };
+
+    let hold = match crate::reticle::hold_point_in_reticle(
+        request.drop_mil,
+        request.wind_mil,
+        request.magnification,
+        &reticle,
+    ) {
+        Ok(hold) => hold,
+        Err(err) => return reticle_error_envelope("reticle.hold", &err),
+    };
+
+    let nearest = nearest_mark_value(&reticle, &hold);
+    match serde_json::to_value(&hold) {
+        Ok(hold_value) => success(
+            "reticle.hold",
+            json!({
+                "hold": hold_value,
+                "nearest_mark": nearest,
+            }),
+        ),
+        Err(err) => error(
+            BridgeErrorCode::InternalError,
+            format!("failed to serialize reticle hold: {err}"),
+            None,
+        ),
+    }
+}
+
+/// Largest reticle document `reticle.import` will parse.
+///
+/// The envelope cap ([`MAX_REQUEST_BYTES`]) already bounds the whole request, but a
+/// document-specific cap gives a caller a message naming the document rather than the
+/// envelope, and bounds the parse before it starts. Both formats are TEXT and travel
+/// inline — unlike `.a7p`, which is binary and needs base64 — so there is no inflation
+/// factor to leave headroom for.
+pub const MAX_RETICLE_DOCUMENT_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReticleDocumentFormat {
+    /// The Ventum JSON reticle spec (MBA-1440).
+    Ventum,
+    /// The third-party `.reticle` XML drawing format (MBA-1544).
+    ReticleXml,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReticleImportRequest {
+    format: ReticleDocumentFormat,
+    /// The document itself, as text.
+    document: String,
+}
+
+/// `reticle.import`: turn a third-party reticle document into a
+/// [`crate::reticle::ReticleDescription`].
+///
+/// Result: `{ "reticle": <ReticleDescription>, "format": "ventum"|"reticle_xml",
+/// "report": {...} }`. The report is format-specific and is NOT decoration: both importers
+/// drop elements they cannot turn into hold points, and a caller that ignores the report
+/// shows a shooter a reticle missing marks their drawing had. The same obligation
+/// `profile.import_a7p` discharges with its `unmapped` list.
+fn run_reticle_import(inner: &Value) -> String {
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'reticle.import' requires a request payload ({\"format\": ..., \"document\": ...})",
+            None,
+        );
+    }
+    let request: ReticleImportRequest = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("reticle.import request rejected: {err}"),
+                None,
+            )
+        }
+    };
+
+    if request.document.len() > MAX_RETICLE_DOCUMENT_BYTES {
+        return error(
+            BridgeErrorCode::ResourceLimit,
+            format!(
+                "reticle document is {} bytes; the limit is {MAX_RETICLE_DOCUMENT_BYTES}",
+                request.document.len()
+            ),
+            None,
+        );
+    }
+
+    let (reticle, report, format) = match request.format {
+        ReticleDocumentFormat::Ventum => {
+            match crate::reticle_import::import_ventum_reticle_with_report(&request.document) {
+                Ok((reticle, report)) => (
+                    reticle,
+                    json!({
+                        "dropped_elements": report.dropped_elements,
+                        "dropped_element_types": report
+                            .dropped_element_types
+                            .iter()
+                            .map(|(tag, count)| json!({ "tag": tag, "count": count }))
+                            .collect::<Vec<_>>(),
+                        // Arcs are REPORTED, never imported as marks: a horseshoe is a
+                        // shape a shooter indexes on, and which of its points counts as an
+                        // aiming point is the caller's decision, not this bridge's. Apex
+                        // and the two tips are the points the importer resolves.
+                        "arcs": report
+                            .arcs
+                            .iter()
+                            .map(|arc| json!({
+                                "center": { "down_mil": arc.center.down_mil, "right_mil": arc.center.right_mil },
+                                "radius_mil": arc.radius_mil,
+                                "start_degrees": arc.start_degrees,
+                                "end_degrees": arc.end_degrees,
+                                "sweep_degrees": arc.sweep_degrees,
+                                "start_tip": { "down_mil": arc.start_tip.down_mil, "right_mil": arc.start_tip.right_mil },
+                                "apex": { "down_mil": arc.apex.down_mil, "right_mil": arc.apex.right_mil },
+                                "end_tip": { "down_mil": arc.end_tip.down_mil, "right_mil": arc.end_tip.right_mil },
+                            }))
+                            .collect::<Vec<_>>(),
+                        // Both shortfalls the report declares about itself, carried rather
+                        // than dropped: `arcs.len() + arcs_unresolved` is the arc tally, and
+                        // `circle_repeats_unreadable` says the element count is low by an
+                        // unknown amount.
+                        "arcs_unresolved": report.arcs_unresolved,
+                        "circle_repeats_unreadable": report.circle_repeats_unreadable,
+                    }),
+                    "ventum",
+                ),
+                Err(err) => return reticle_error_envelope("reticle.import", &err),
+            }
+        }
+        ReticleDocumentFormat::ReticleXml => {
+            match crate::reticle_document_import::import_reticle_document_with_report(
+                &request.document,
+            ) {
+                Ok((reticle, report)) => (
+                    reticle,
+                    json!({
+                        "drawing_elements_dropped": report.drawing_elements_dropped,
+                        "dropped_element_tags": report
+                            .dropped_element_tags
+                            .iter()
+                            .map(|(tag, count)| json!({ "tag": tag, "count": count }))
+                            .collect::<Vec<_>>(),
+                        "canvas_mil": report
+                            .canvas_mil
+                            .map(|(x, y)| json!({ "size_x_mil": x, "size_y_mil": y })),
+                        "zero_in_canvas_mil": report
+                            .zero_in_canvas_mil
+                            .map(|(x, y)| json!({ "zero_x_mil": x, "zero_y_mil": y })),
+                    }),
+                    "reticle_xml",
+                ),
+                Err(err) => return reticle_error_envelope("reticle.import", &err),
+            }
+        }
+    };
+
+    match serde_json::to_value(&reticle) {
+        Ok(imported) => success(
+            "reticle.import",
+            json!({
+                "reticle": imported,
+                "format": format,
+                "mark_count": reticle.marks.len(),
+                "report": report,
+            }),
+        ),
+        Err(err) => error(
+            BridgeErrorCode::InternalError,
+            format!("failed to serialize imported reticle: {err}"),
+            None,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1298,5 +1889,370 @@ mod tests {
         assert_eq!(out["error"]["code"], "command_failed");
         // The solve-json envelope rides along losslessly.
         assert_eq!(out["error"]["details"]["status"], "error");
+    }
+
+    // -----------------------------------------------------------------------
+    // reticle.* — MBA-1558
+    // -----------------------------------------------------------------------
+
+    /// A 0.5 mil grid out to 5 mil, as a full description rather than a generator, so a
+    /// test can assert against marks it wrote itself.
+    fn hash_reticle() -> Value {
+        json!({
+            "name": "test cross",
+            "focal_plane": "ffp",
+            "reference_magnification": 1.0,
+            "marks": [
+                {"down_mil": 0.0, "right_mil": 0.0, "kind": "center"},
+                {"down_mil": 2.0, "right_mil": 0.0, "kind": "hash", "label": "2 mil"},
+                {"down_mil": 4.0, "right_mil": 0.0, "kind": "hash"},
+                {"down_mil": 0.0, "right_mil": 2.0, "kind": "hash"},
+            ],
+        })
+    }
+
+    #[test]
+    fn capabilities_lists_the_reticle_family() {
+        // The whole point of MBA-1558: an app feature-detects through this list, so a
+        // command that dispatches but is not listed is a command no app will call.
+        let out = call(json!({"api_version": 1, "command": "meta.capabilities"}));
+        let commands: Vec<String> =
+            serde_json::from_value(out["result"]["commands"].clone()).unwrap();
+        for command in ["reticle.describe", "reticle.hold", "reticle.import"] {
+            assert!(
+                commands.contains(&command.to_string()),
+                "{command} dispatches but meta.capabilities does not list it"
+            );
+        }
+    }
+
+    #[test]
+    fn hold_reports_the_nearest_mark_and_its_label() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "reticle.hold",
+            "request": {
+                "reticle": hash_reticle(),
+                "drop_mil": 2.1,
+                "wind_mil": 0.0,
+                "magnification": 10.0,
+            },
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        // The hold coordinates are the inputs: this command places a solution, it does
+        // not compute one.
+        assert_eq!(out["result"]["hold"]["down_mil"], 2.1);
+        assert_eq!(out["result"]["hold"]["right_mil"], 0.0);
+        assert_eq!(out["result"]["hold"]["off_reticle"], false);
+        assert_eq!(out["result"]["nearest_mark"]["index"], 1);
+        assert_eq!(out["result"]["nearest_mark"]["label"], "2 mil");
+        assert_eq!(out["result"]["nearest_mark"]["kind"], "hash");
+    }
+
+    #[test]
+    fn an_sfp_reticle_moves_its_marks_and_the_hold_follows() {
+        // The reason `magnification` is required on every plane. The same solution finds a
+        // DIFFERENT mark on an SFP optic depending on the zoom ring, and an app that
+        // ignored this would draw a confident hold on the wrong hash.
+        let mut sfp = hash_reticle();
+        sfp["focal_plane"] = json!("sfp");
+        sfp["reference_magnification"] = json!(10.0);
+
+        let at_reference = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"reticle": sfp, "drop_mil": 2.0, "magnification": 10.0},
+        }));
+        assert_eq!(at_reference["result"]["hold"]["mark_scale"], 1.0);
+        assert_eq!(at_reference["result"]["nearest_mark"]["index"], 1);
+        assert_eq!(
+            at_reference["result"]["nearest_mark"]["true_angular"]["down_mil"],
+            2.0
+        );
+
+        // Halve the magnification and every subtension doubles, so the 2 mil hash now
+        // sits at 4 mil true and the 4 mil hash at 8.
+        let zoomed_out = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"reticle": sfp, "drop_mil": 2.0, "magnification": 5.0},
+        }));
+        assert_eq!(zoomed_out["result"]["hold"]["mark_scale"], 2.0);
+        assert_eq!(
+            zoomed_out["result"]["nearest_mark"]["true_angular"]["down_mil"], 0.0,
+            "at 5x the nearest mark to a 2 mil hold is now CENTER, not the 2 mil hash"
+        );
+        assert_eq!(zoomed_out["result"]["nearest_mark"]["index"], 0);
+        // And the nominal position is unchanged, which is why both are reported.
+        assert_eq!(
+            zoomed_out["result"]["nearest_mark"]["nominal"]["down_mil"],
+            0.0
+        );
+
+        // A mark whose coordinates are NOT zero, because the assertions above cannot tell
+        // a scaled position from an unscaled one: 0.0 * 2.0 is 0.0. Proved by mutation --
+        // dropping the scale from `true_angular` left every case above green.
+        //
+        // At 5x on a 10x-reference SFP reticle the 2 mil hash sits at 4 mil true, so a
+        // 4 mil hold lands exactly on it. The two positions differ by the scale, which is
+        // the whole reason both are reported.
+        let on_the_scaled_hash = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"reticle": sfp, "drop_mil": 4.0, "magnification": 5.0},
+        }));
+        assert_eq!(
+            on_the_scaled_hash["result"]["nearest_mark"]["nominal"]["down_mil"], 2.0,
+            "as authored, the mark is at 2 mil"
+        );
+        assert_eq!(
+            on_the_scaled_hash["result"]["nearest_mark"]["true_angular"]["down_mil"], 4.0,
+            "at 5x it subtends 4 mil, which is what the hold is measured against"
+        );
+        assert_eq!(
+            on_the_scaled_hash["result"]["hold"]["nearest_mark_distance_mil"], 0.0,
+            "the hold lands exactly on it"
+        );
+    }
+
+    #[test]
+    fn a_hold_off_the_marked_part_says_so() {
+        // The field a UI must not ignore. 40 mil is far outside a reticle whose lowest
+        // mark is at 4.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"reticle": hash_reticle(), "drop_mil": 40.0, "magnification": 10.0},
+        }));
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["result"]["hold"]["off_reticle"], true);
+    }
+
+    #[test]
+    fn describe_builds_from_a_generator_and_reports_the_plane() {
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.describe",
+            "request": {"generator": {"kind": "mil_grid", "spacing_mil": 1.0, "extent_mil": 5.0}},
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["focal_plane"], "FFP");
+        assert_eq!(out["result"]["magnification_dependent"], false);
+        assert!(out["result"]["mark_count"].as_u64().unwrap() > 1);
+        // No magnification asked for, so no scaled block — not an empty one.
+        assert!(out["result"]["scaled"].is_null());
+    }
+
+    #[test]
+    fn a_generated_reticle_can_be_made_sfp() {
+        // Every generator returns FFP and the library's answer is "set those two fields
+        // afterwards". On the bridge there is no afterwards, so the overrides travel with
+        // the request — without them the generator path could only ever make FFP.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.describe",
+            "request": {
+                "generator": {"kind": "mil_grid", "spacing_mil": 1.0, "extent_mil": 5.0},
+                "focal_plane": "sfp",
+                "reference_magnification": 12.0,
+                "magnification": 6.0,
+            },
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["focal_plane"], "SFP");
+        assert_eq!(out["result"]["magnification_dependent"], true);
+        assert_eq!(out["result"]["scaled"]["mark_scale"], 2.0);
+    }
+
+    #[test]
+    fn a_bdc_ladder_carries_its_range_labels() {
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.describe",
+            "request": {"generator": {"kind": "bdc", "drops": [[300.0, 1.2], [400.0, 2.4]]}},
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        let marks = out["result"]["reticle"]["marks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let labels: Vec<&str> = marks.iter().filter_map(|m| m["label"].as_str()).collect();
+        // The generator labels in METRES, which is the wire's unit and not the shooter's.
+        assert_eq!(labels, vec!["300 m", "400 m"]);
+    }
+
+    #[test]
+    fn naming_a_reticle_twice_is_refused_rather_than_resolved() {
+        // Supplying both is a caller bug. Picking a winner would hide it.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {
+                "reticle": hash_reticle(),
+                "generator": {"kind": "mil_grid", "spacing_mil": 1.0, "extent_mil": 5.0},
+                "drop_mil": 1.0,
+                "magnification": 10.0,
+            },
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "invalid_request");
+        assert!(out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not both"));
+    }
+
+    #[test]
+    fn naming_no_reticle_at_all_is_refused() {
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"drop_mil": 1.0, "magnification": 10.0},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn plane_overrides_beside_a_full_reticle_are_refused() {
+        // A supplied description already carries its own plane; silently overriding it
+        // would let a request contradict the document it sent.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.describe",
+            "request": {"reticle": hash_reticle(), "focal_plane": "sfp"},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn a_reticle_error_carries_a_stable_reason_and_its_numbers() {
+        // The `true.dsf` convention: code stays command_failed, the machine-readable
+        // reason is in details, and the offending value rides along so a caller can point
+        // at the input without re-parsing the sentence.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"reticle": hash_reticle(), "drop_mil": 1.0, "magnification": 0.0},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "command_failed");
+        assert_eq!(
+            out["error"]["details"]["reason"],
+            "non_positive_magnification"
+        );
+        assert_eq!(out["error"]["details"]["magnification"], 0.0);
+        assert_eq!(out["error"]["details"]["command"], "reticle.hold");
+    }
+
+    #[test]
+    fn a_reticle_with_no_marks_is_refused_by_describe_too() {
+        // Validation is not deferred to the hold: handing back an unusable description as
+        // though it were usable is the failure this guards.
+        let mut empty = hash_reticle();
+        empty["marks"] = json!([]);
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.describe",
+            "request": {"reticle": empty},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["details"]["reason"], "no_marks");
+    }
+
+    #[test]
+    fn an_unreadable_generator_parameter_names_the_parameter() {
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.describe",
+            "request": {"generator": {"kind": "mil_grid", "spacing_mil": 0.0, "extent_mil": 5.0}},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(
+            out["error"]["details"]["reason"],
+            "invalid_generator_parameter"
+        );
+        assert_eq!(out["error"]["details"]["parameter"], "spacing");
+    }
+
+    #[test]
+    fn importing_a_ventum_document_returns_the_reticle_and_its_report() {
+        // Bero's own MBR dot-tree spec, the reticle that produced MBA-1440 — three rows
+        // each stamped by a mirrored repeat, expanding to 78 holdable marks. Using the
+        // real thing rather than a toy is deliberate: an earlier version of this test sent
+        // a document with an invented key, and because it accepted either outcome it
+        // passed while reaching nothing.
+        let document = r#"{"name":"MBR","plane":"ffp","unit":"mil","spec":[
+            {"type":"dot","y":4,"x":1,"r":0.12,"repeat":{"axis":"x","step":1,"n":9,"mirror":true}},
+            {"type":"dot","y":8,"x":1,"r":0.12,"repeat":{"axis":"x","step":1,"n":13,"mirror":true}},
+            {"type":"dot","y":12,"x":1,"r":0.12,"repeat":{"axis":"x","step":1,"n":17,"mirror":true}}]}"#;
+
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.import",
+            "request": {"format": "ventum", "document": document},
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["format"], "ventum");
+        assert_eq!(out["result"]["mark_count"], 78);
+        assert_eq!(out["result"]["reticle"]["name"], "MBR");
+        assert_eq!(out["result"]["reticle"]["focal_plane"], "ffp");
+        // Nothing was dropped, and the report says so rather than being absent.
+        assert_eq!(out["result"]["report"]["dropped_elements"], 0);
+        assert_eq!(out["result"]["report"]["arcs_unresolved"], 0);
+
+        // And the imported reticle is immediately usable by the command it exists for.
+        let held = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {
+                "reticle": out["result"]["reticle"],
+                "drop_mil": 8.0,
+                "wind_mil": 2.0,
+                "magnification": 10.0,
+            },
+        }));
+        assert_eq!(held["ok"], true, "{held}");
+        assert_eq!(held["result"]["hold"]["off_reticle"], false);
+        assert_eq!(held["result"]["nearest_mark"]["nominal"]["down_mil"], 8.0);
+        assert_eq!(held["result"]["nearest_mark"]["nominal"]["right_mil"], 2.0);
+        assert_eq!(held["result"]["hold"]["nearest_mark_distance_mil"], 0.0);
+    }
+
+    #[test]
+    fn a_document_that_is_not_the_named_format_fails_as_a_command_failure() {
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.import",
+            "request": {"format": "reticle_xml", "document": "{\"this\": \"is json\"}"},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "command_failed");
+    }
+
+    #[test]
+    fn an_oversize_reticle_document_is_a_resource_limit_not_a_parse_failure() {
+        // Named as the document's limit rather than the envelope's, and refused before
+        // the parse rather than during it.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.import",
+            "request": {
+                "format": "ventum",
+                "document": "x".repeat(MAX_RETICLE_DOCUMENT_BYTES + 1),
+            },
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "resource_limit");
+        assert!(out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reticle document"));
+    }
+
+    #[test]
+    fn every_reticle_command_rejects_an_unknown_request_field() {
+        for command in ["reticle.describe", "reticle.hold", "reticle.import"] {
+            let out = call(json!({
+                "api_version": 1,
+                "command": command,
+                "request": {"nonsense": 1},
+            }));
+            assert_eq!(out["ok"], false, "{command} accepted an unknown field");
+            assert_eq!(out["error"]["code"], "invalid_request", "{command}");
+        }
+    }
+
+    #[test]
+    fn every_reticle_command_rejects_a_missing_payload() {
+        for command in ["reticle.describe", "reticle.hold", "reticle.import"] {
+            let out = call(json!({"api_version": 1, "command": command}));
+            assert_eq!(out["ok"], false, "{command} accepted a null payload");
+            assert_eq!(out["error"]["code"], "invalid_request", "{command}");
+        }
     }
 }
